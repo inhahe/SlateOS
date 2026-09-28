@@ -179,6 +179,50 @@ pub fn most_recent(accounts: &[Account]) -> Option<usize> {
     Some(best)
 }
 
+/// The account this machine signs in as by itself, as an index into
+/// `accounts`: the one account marked `auto_login: true`, provided it is not
+/// locked. `None` when no account is marked, when the marked one is locked, and
+/// when more than one is marked.
+///
+/// `design-decisions.md` §1427 is what acts on it: the desktop signs this
+/// account in as it starts, with no pause and no password, unless the key that
+/// asks for the account chooser is held or the machine was started for repair.
+///
+/// # Why a locked account does not sign in
+///
+/// Signing in by itself checks no password, so the lock is the only thing
+/// between a locked account and its desktop. An administrator's lock has to
+/// mean the account does not open whichever way it is asked; one that signed
+/// itself in while `usermod -L` said it could not would make the lock a
+/// suggestion.
+///
+/// # Why two marked accounts are none
+///
+/// The flag is kept per account, so a database can mark two -- a hand edit, or
+/// two programs that each set one. Which of them was meant is written down
+/// nowhere, and choosing by the order of the file would be a guess that could
+/// open one person's desktop for another. So neither signs in, and the login
+/// screen offers both, which is the screen the chooser key would have shown.
+///
+/// # Why it is here and not in the desktop
+///
+/// The screens *before* the desktop are to say that the chooser key exists
+/// exactly when an account is about to sign in by itself (§1427's other
+/// half, lane A's). Two copies of this rule would be a hint promising an
+/// automatic sign-in that then does not happen, or the reverse.
+#[must_use]
+pub fn automatic_account(accounts: &[Account]) -> Option<usize> {
+    let mut marked = accounts
+        .iter()
+        .enumerate()
+        .filter(|(_, account)| account.auto_login);
+    let (index, account) = marked.next()?;
+    if account.is_locked || marked.next().is_some() {
+        return None;
+    }
+    Some(index)
+}
+
 #[cfg(test)]
 mod tests {
     // A test module's job is to fail loudly the instant the code under test is
@@ -309,5 +353,85 @@ mod tests {
     #[test]
     fn an_empty_list_selects_nothing() {
         assert_eq!(most_recent(&[]), None);
+    }
+
+    // ---- signing in by itself ----
+
+    /// The account marked, wherever it is in the file.
+    #[test]
+    fn the_one_marked_account_signs_in_by_itself() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   password_hash: x\n\
+             - username: bob\n   uid: 1001\n   password_hash: x\n   auto_login: true\n",
+        );
+        let accounts = offered(&path);
+        assert_eq!(automatic_account(&accounts), Some(1));
+    }
+
+    #[test]
+    fn with_no_account_marked_nobody_signs_in_by_itself() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   password_hash: x\n   auto_login: false\n",
+        );
+        assert_eq!(automatic_account(&offered(&path)), None);
+    }
+
+    /// Which of two was meant is written down nowhere.
+    #[test]
+    fn two_marked_accounts_are_none() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   auto_login: true\n\
+             - username: bob\n   uid: 1001\n   auto_login: true\n",
+        );
+        assert_eq!(automatic_account(&offered(&path)), None);
+    }
+
+    /// Both spellings of a lock: the flag, and a `!` on the stored entry --
+    /// `usermod -L` writes the second, and a check of only the first would
+    /// sign a locked account in.
+    #[test]
+    fn a_locked_account_does_not_sign_in_by_itself() {
+        for lock in [
+            "   locked: true\n   password_hash: x\n",
+            "   password_hash: '!x'\n",
+        ] {
+            let (_dir, path) = db_with(&format!(
+                "users:\n- username: alice\n   uid: 1000\n   auto_login: true\n{lock}"
+            ));
+            let accounts = offered(&path);
+            assert!(accounts[0].auto_login, "the fixture must mark the account");
+            assert_eq!(automatic_account(&accounts), None, "{lock:?}");
+        }
+    }
+
+    /// Of two marked accounts, a lock on one does not hand the sign-in to the
+    /// other: which of the two was meant is still written down nowhere. And an
+    /// unmarked account is never the one, lock or no lock.
+    #[test]
+    fn a_lock_on_one_marked_account_does_not_hand_the_sign_in_to_another() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   auto_login: true\n   locked: true\n\
+             - username: bob\n   uid: 1001\n   auto_login: true\n",
+        );
+        assert_eq!(automatic_account(&offered(&path)), None);
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   auto_login: true\n   locked: true\n\
+             - username: bob\n   uid: 1001\n",
+        );
+        assert_eq!(automatic_account(&offered(&path)), None);
+    }
+
+    /// A marked account with no password signs in as readily as one with a
+    /// password: signing in by itself asks for neither.
+    #[test]
+    fn a_marked_account_with_no_password_signs_in_by_itself() {
+        let (_dir, path) =
+            db_with("users:\n- username: alice\n   uid: 1000\n   auto_login: true\n");
+        assert_eq!(automatic_account(&offered(&path)), Some(0));
     }
 }

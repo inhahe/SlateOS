@@ -33,10 +33,47 @@ use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 use guitk::wheel;
-use std::path::PathBuf;
 
 fn shell() -> DesktopShell {
     DesktopShell::new(1000, 800)
+}
+
+/// A shell with the chords that were on by default until §1416 bound --
+/// Super+Z, Super+D and the rest, which a user now binds on the shortcut card
+/// -- for the tests that press them to see what they *do*.
+fn bound_shell() -> DesktopShell {
+    let mut shell = shell();
+    crate::hotkeys::optional_chords::bind(&mut shell.hotkeys);
+    shell
+}
+
+/// A shell whose start menu lists more programs than it can show, so that
+/// scrolling has somewhere to go.
+///
+/// Made by adding programs rather than by counting on how many the built-in
+/// database holds. The scrolling tests used to take "more than the menu can
+/// show" from the database's size, and on 2026-09-25 the database lost three
+/// entries that had never started anything -- and two of those tests lost
+/// their scroll with them, while two more went on passing because a list that
+/// cannot scroll does not move either way.
+fn shell_with_a_long_menu() -> DesktopShell {
+    let mut shell = shell();
+    for n in 0..12 {
+        shell.apps.push(launcher::AppEntry {
+            name: format!("Program {n:02}"),
+            description: String::new(),
+            executable_path: format!("/opt/fixture/program-{n:02}"),
+            keywords: Vec::new(),
+            category: Category::Application,
+            launch_count: 0,
+            ..Default::default()
+        });
+    }
+    assert!(
+        shell.start_menu_max_scroll() >= 6,
+        "the fixture must list more programs than the menu can show"
+    );
+    shell
 }
 
 /// A window list on the desktop the user is looking at.
@@ -57,6 +94,23 @@ fn centre(rect: Rect) -> (f32, f32) {
 fn click_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
     let (x, y) = centre(rect);
     shell.handle_mouse(&click(x, y))
+}
+
+/// Press and let go in the middle of `rect`, answering what the *release*
+/// asked for -- for what acts on the release: a start-menu row, which does
+/// not know it was a click rather than the start of a drag until then.
+fn choose_at(shell: &mut DesktopShell, rect: Rect) -> ShellAction {
+    let (x, y) = centre(rect);
+    assert_eq!(
+        shell.handle_mouse(&click(x, y)),
+        ShellAction::Consumed,
+        "the press acted before the release could say whether it was a drag"
+    );
+    shell.handle_mouse(&MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Release(MouseButton::Left),
+    })
 }
 
 /// An ordinary application window as the compositor would describe it. Nothing
@@ -142,9 +196,11 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     shell.toggle_start_menu();
 
     let row = shell
-        .start_menu_entries()
+        .start_menu_rows()
         .iter()
-        .position(|entry| entry.name == "Settings")
+        .position(
+            |row| matches!(row, crate::StartRow::Program { entry, .. } if entry.name == "Settings"),
+        )
         .expect("the start menu must offer Settings");
     assert!(
         row < shell.start_menu_visible_rows(),
@@ -152,10 +208,10 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     );
 
     let rect = shell.start_menu_row_rect(row);
-    let action = click_at(&mut shell, rect);
+    let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,
-        ShellAction::Launch(std::path::PathBuf::from("/usr/bin/settings"))
+        ShellAction::Launch(crate::hotkeys::Launch::program("/usr/bin/settings"))
     );
     // Picking something dismisses the menu; a menu still open over the program
     // it just started is nobody's idea of a launcher.
@@ -187,34 +243,75 @@ fn the_start_menu_offers_only_programs_the_launcher_knows() {
     }
 }
 
-/// Every drawn row must launch the program whose name is on it — the one
+/// Every drawn row must do what it shows -- a program's row launch the program
+/// whose name is on it, a folder's row open or close that folder -- the one
 /// property a shared geometry exists to guarantee.
 #[test]
 fn every_visible_row_launches_the_program_named_on_it() {
-    let mut shell = shell();
+    // More programs than rows, so that every visible row has something on it.
+    let mut shell = shell_with_a_long_menu();
+    let mut programs = 0;
+    let mut folders = 0;
     for row in 0..shell.start_menu_visible_rows() {
-        shell.toggle_start_menu();
-        let expected = shell.start_menu_entries()[row].executable_path.clone();
+        if !shell.start_menu_open {
+            shell.toggle_start_menu();
+        }
         let rect = shell.start_menu_row_rect(row);
-        let action = click_at(&mut shell, rect);
-        assert_eq!(
-            action,
-            ShellAction::Launch(std::path::PathBuf::from(&expected)),
-            "row {row}"
-        );
+        // Owned out of the rows, which borrow the shell the press needs.
+        let shown = match shell.start_menu_rows().get(row).copied() {
+            Some(crate::StartRow::Program { entry, .. }) => Ok(entry.executable_path.clone()),
+            Some(crate::StartRow::Folder { folder, open }) => Err((folder, open)),
+            // A heading: a press on it does nothing at all.
+            Some(crate::StartRow::Section(_)) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Consumed,
+                    "row {row}: a heading"
+                );
+                continue;
+            }
+            None => panic!("row {row} is empty in a menu longer than the screen"),
+        };
+        match shown {
+            Ok(expected) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Launch(crate::hotkeys::Launch::program(&expected)),
+                    "row {row}"
+                );
+                programs += 1;
+            }
+            Err((folder, open)) => {
+                assert_eq!(
+                    choose_at(&mut shell, rect),
+                    ShellAction::Consumed,
+                    "row {row}"
+                );
+                assert!(
+                    matches!(
+                        shell.start_menu_rows().get(row),
+                        Some(crate::StartRow::Folder { folder: f, open: o }) if *f == folder && *o != open
+                    ),
+                    "row {row}: the folder's row did not open or close it"
+                );
+                // As it was, so the rows below are where they were.
+                choose_at(&mut shell, rect);
+                folders += 1;
+            }
+        }
     }
+    assert!(
+        programs > 0 && folders > 0,
+        "{programs} programs, {folders} folders"
+    );
 }
 
 /// And must go on doing so once the list has been scrolled, which is where a
 /// renderer and a hit test that each tracked the offset would part company.
 #[test]
 fn a_scrolled_row_launches_the_program_named_on_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
-    assert!(
-        shell.start_menu_max_scroll() >= 3,
-        "the fixture needs more programs than the menu can show"
-    );
 
     let (x, y) = centre(shell.start_menu_row_rect(0));
     // One detent, which is three rows. This used to read
@@ -223,18 +320,22 @@ fn a_scrolled_row_launches_the_program_named_on_it() {
     shell.handle_mouse(&scroll(x, y, -1.0));
     assert_eq!(shell.start_menu_scroll, 3);
 
-    let expected = shell.start_menu_entries()[3].executable_path.clone();
+    let expected = shell
+        .start_program_at(3)
+        .expect("the fourth row is a program")
+        .executable_path
+        .clone();
     let rect = shell.start_menu_row_rect(0);
-    let action = click_at(&mut shell, rect);
+    let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,
-        ShellAction::Launch(std::path::PathBuf::from(&expected))
+        ShellAction::Launch(crate::hotkeys::Launch::program(&expected))
     );
 }
 
 #[test]
 fn the_list_cannot_scroll_past_either_end() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
 
     shell.scroll_start_menu(1_000);
@@ -244,7 +345,7 @@ fn the_list_cannot_scroll_past_either_end() {
     let last_row = shell.start_menu_visible_rows() - 1;
     assert_eq!(
         shell.start_menu_entry_at(last_row),
-        Some(shell.start_menu_entries().len() - 1)
+        Some(shell.start_menu_rows().len() - 1)
     );
 
     shell.scroll_start_menu(-1_000);
@@ -286,7 +387,7 @@ fn a_trackpads_fractions_add_up_instead_of_being_discarded() {
 /// with a pixel-shaped number.
 #[test]
 fn a_wheel_notch_over_the_menu_scrolls_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     let rect = shell.start_menu_row_rect(0);
     let (x, y) = centre(rect);
@@ -300,10 +401,211 @@ fn a_wheel_notch_over_the_menu_scrolls_it() {
     );
 }
 
+/// The wheel scrolls the list from the power button too, both its parts --
+/// the caret as much as "Shut down" -- as it does from anywhere else on the
+/// menu, rather than being spent on a part that happens not to scroll.
+#[test]
+fn a_wheel_over_either_part_of_the_power_button_scrolls_the_list() {
+    for part in ["Shut down", "the caret"] {
+        let mut shell = shell_with_a_long_menu();
+        shell.toggle_start_menu();
+        let rect = if part == "Shut down" {
+            shell.power_button_rect()
+        } else {
+            shell.power_caret_rect()
+        };
+        let (x, y) = centre(rect);
+        assert_eq!(
+            shell.handle_mouse(&scroll(x, y, -1.0)),
+            ShellAction::Consumed,
+            "{part}"
+        );
+        assert_eq!(
+            shell.start_menu_scroll, 3,
+            "the wheel over {part} did not scroll the list"
+        );
+    }
+}
+
+/// **The start menu is the reference's glass**: a glow in the accent round
+/// it when shadows are on -- none when they are off, a glow being a shadow in
+/// light -- and a line of light just inside its edge, which keeps the window
+/// frame's outline.
+#[test]
+fn the_start_menu_glows_and_has_a_light_inside_its_edge() {
+    use appearance::config::testing::with_scratch_config;
+    with_scratch_config("start-menu-glow", |_root| {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let menu = shell.start_menu_rect();
+        let glow = guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_GLOW_ALPHA);
+        let glows = |shell: &DesktopShell| {
+            shell
+                .render_start_menu()
+                .expect("open")
+                .commands
+                .iter()
+                .filter(|c| {
+                    matches!(c, RenderCommand::BoxShadow { x, y, width, height, color, spread, .. }
+                        if (*x, *y, *width, *height) == (menu.x, menu.y, menu.w, menu.h)
+                            && *color == glow && *spread > 0.0)
+                })
+                .count()
+        };
+        assert!(
+            shell.appearance.drop_shadows,
+            "the fixture expects shadows on"
+        );
+        assert_eq!(glows(&shell), 1, "no glow round the menu");
+
+        let tree = shell.render_start_menu().expect("open");
+        let light =
+            guitk::theme::with_alpha(guitk::color::Color::WHITE, crate::START_MENU_INNER_LIGHT);
+        let lines: Vec<Rect> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == light => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let inner = lines[0];
+        assert!(
+            inner.x > menu.x
+                && inner.y > menu.y
+                && inner.x + inner.w < menu.x + menu.w
+                && inner.y + inner.h < menu.y + menu.h,
+            "the light is not inside the edge: {inner:?} in {menu:?}"
+        );
+        assert!(
+            tree.commands.iter().any(|c| matches!(c,
+                RenderCommand::StrokeRect { x, y, width, height, color, .. }
+                    if (*x, *y, *width, *height) == (menu.x, menu.y, menu.w, menu.h)
+                        && *color == shell.theme.panel_border_color)),
+            "the menu lost the window frame's outline"
+        );
+
+        let mut settings = shell.appearance.clone();
+        settings.drop_shadows = false;
+        shell.set_appearance(settings);
+        assert_eq!(glows(&shell), 0, "glowing with shadows off");
+    });
+}
+
+/// **The search field is the reference's `aero-sm-search`**: a well with a
+/// quiet line round it -- not the accent's ring -- and a magnifier at its
+/// start, before the hint and before anything typed.
+#[test]
+fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let field = shell.start_search_rect();
+    let same =
+        |x: f32, y: f32, w: f32, h: f32| (x, y, w, h) == (field.x, field.y, field.w, field.h);
+    let tree = shell.render_start_menu().expect("open");
+    assert!(
+        tree.commands.iter().any(|c| matches!(c,
+            RenderCommand::FillRect { x, y, width, height, color, .. }
+                if same(*x, *y, *width, *height) && *color == shell.theme.start_menu_field_bg)),
+        "the field is not a well"
+    );
+    let rings: Vec<guitk::color::Color> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if same(*x, *y, *width, *height) => Some(*color),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        rings,
+        [shell.theme.start_menu_field_border],
+        "the field's line is not the quiet border alone"
+    );
+
+    // The magnifier, inside the field at its start.
+    let magnifier = |shell: &DesktopShell, tree: &RenderTree| -> (f32, f32) {
+        let found: Vec<(f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if field.contains(*x + 1.0, *y + 1.0) => Some((*x, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        let (x, width, id) = found[0];
+        let request = shell.icon_request(id).expect("an icon");
+        assert_eq!(request.name, "system-search");
+        (x, width)
+    };
+    let (icon_x, icon_w) = magnifier(&shell, &tree);
+    assert!(
+        icon_x < field.x + field.w / 4.0,
+        "the magnifier is not at the field's start"
+    );
+    let text_at = |tree: &RenderTree, wanted: &str| -> f32 {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                // The hint is a `Text`; what is typed is the field's own
+                // `RichText`, which carries the caret and selection.
+                RenderCommand::Text { x, text, .. } | RenderCommand::RichText { x, text, .. }
+                    if text == wanted =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{wanted:?} is not drawn"))
+    };
+    assert!(
+        text_at(&tree, "Search programs") >= icon_x + icon_w,
+        "the hint runs over the magnifier"
+    );
+
+    // And what is typed starts after it too.
+    for c in "calc".chars() {
+        drop(shell.handle_hotkey(&KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: c.to_string(),
+        }));
+    }
+    let typed = shell.render_start_menu().expect("open");
+    let (icon_x, icon_w) = magnifier(&shell, &typed);
+    assert!(
+        text_at(&typed, "calc") >= icon_x + icon_w,
+        "the typing runs over the magnifier"
+    );
+}
+
 /// A fraction left over from one visit to the menu must not move the next one.
 #[test]
 fn reopening_the_menu_forgets_the_leftover_fraction() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     let rect = shell.start_menu_row_rect(0);
     let (x, y) = centre(rect);
@@ -321,7 +623,7 @@ fn reopening_the_menu_forgets_the_leftover_fraction() {
 
 #[test]
 fn reopening_the_menu_rewinds_the_list() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     shell.scroll_start_menu(2);
     assert_eq!(shell.start_menu_scroll, 2);
@@ -353,84 +655,434 @@ fn a_click_on_the_menu_but_not_on_a_row_does_nothing_but_stay_open() {
     let mut shell = shell();
     shell.toggle_start_menu();
     let menu = shell.start_menu_rect();
-    // The heading strip, above the first row.
-    let action = shell.handle_mouse(&click(menu.x + menu.w / 2.0, menu.y + 8.0));
+    // The places column's top, where the user is: the menu, and not a row
+    // or a place.
+    let user = shell.start_user_rect();
+    assert!(menu.contains(user.x + user.w / 2.0, user.y + user.h / 2.0));
+    let action = shell.handle_mouse(&click(user.x + user.w / 2.0, user.y + user.h / 2.0));
     assert_eq!(action, ShellAction::Consumed);
     assert!(shell.start_menu_open);
 }
 
 // ---- the power menu -------------------------------------------------------
 
-/// The whole point: the machine can be shut down from the desktop. Before this
-/// the foot of the start menu drew the word "Power" in grey and did nothing,
-/// and the five system actions were in no menu at all.
+/// The whole point: the machine can be shut down from the desktop. Before the
+/// power menu the foot of the start menu drew the word "Power" in grey and did
+/// nothing; before 2026-09-25 the menu launched `/sbin/shutdown` and its
+/// neighbours, which SlateOS has never had.
 #[test]
-fn the_power_menu_offers_every_system_action_and_launches_them() {
-    let names: Vec<String> = {
-        let shell = shell();
-        shell
-            .power_menu_entries()
-            .iter()
-            .map(|entry| entry.name.clone())
-            .collect()
-    };
-    assert!(
-        names.iter().any(|name| name == "Shutdown"),
-        "no way to shut the machine down: {names:?}"
+fn the_power_menu_offers_every_power_action_and_carries_each_out() {
+    let labels: Vec<&str> = shell()
+        .power_menu_choices()
+        .iter()
+        .map(|choice| choice.label())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Log out",
+            "Lock",
+            "Sleep",
+            "Hibernate",
+            "Restart",
+            "Shut down"
+        ]
     );
 
-    for row in 0..names.len() {
+    for (row, choice) in crate::power::PowerChoice::ALL.iter().enumerate() {
         let mut shell = shell();
         shell.toggle_start_menu();
-        let button = shell.power_button_rect();
-        assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
+        let caret = shell.power_caret_rect();
+        assert_eq!(click_at(&mut shell, caret), ShellAction::Consumed);
         assert!(shell.power_menu_open);
 
-        let expected = shell.power_menu_entries()[row].executable_path.clone();
         let rect = shell.power_menu_row_rect(row);
-        let action = click_at(&mut shell, rect);
-        assert_eq!(
-            action,
-            ShellAction::Launch(std::path::PathBuf::from(&expected)),
-            "row {row}"
-        );
-        // Both menus go: the machine is about to shut down behind them.
+        let expected = choice
+            .command()
+            .map_or(ShellAction::LogOut, ShellAction::Launch);
+        assert_eq!(click_at(&mut shell, rect), expected, "{choice:?}");
+        // Both menus go: the machine is about to change state behind them.
         assert!(!shell.power_menu_open);
         assert!(!shell.start_menu_open);
     }
 }
 
-/// The two menus divide the one database between them. An entry in neither list
-/// is an unreachable program; an entry in both puts "Shutdown" one mis-click
-/// below "Screenshot", which is why the split exists.
+/// **The choices rise above the caret that opens them**, their right edge on
+/// the button's -- the reference's `right: 0; bottom: calc(100% + 6px)` --
+/// and stay on the screen at every scale.
 #[test]
-fn the_two_menus_between_them_offer_every_program_exactly_once() {
+fn the_power_choices_rise_above_the_caret_with_their_right_edge_on_the_buttons() {
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let button = shell.power_button_rect();
+        let caret = shell.power_caret_rect();
+        let menu = shell.power_menu_rect();
+        assert!(menu.x >= 0.0, "off the left of the screen at {percent}%");
+        assert!(
+            (menu.x + menu.w - (button.x + button.w)).abs() < 0.01,
+            "the right edges differ at {percent}%: {menu:?} against {button:?}"
+        );
+        assert!(
+            menu.x <= caret.x && menu.y + menu.h <= button.y,
+            "not above the caret at {percent}%: {menu:?} against {caret:?}"
+        );
+        // Every row inside the panel's padding, so a lit row is a wash in
+        // the panel rather than a band across it.
+        for row in 0..shell.power_menu_visible_rows() {
+            let rect = shell.power_menu_row_rect(row);
+            assert!(
+                rect.x > menu.x && rect.x + rect.w < menu.x + menu.w,
+                "row {row} touches the panel's sides at {percent}%: {rect:?} in {menu:?}"
+            );
+        }
+    }
+}
+
+/// **Every power choice draws its picture before its words**, as the
+/// reference's `aero-sm-power-item-ico` -- the freedesktop names, so a theme
+/// draws them -- in the choices' own text colour.
+#[test]
+fn every_power_choice_draws_its_picture_before_its_words() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let tree = shell.render_start_menu().expect("open");
+    let expected = [
+        ("Log out", "system-log-out"),
+        ("Lock", "system-lock-screen"),
+        ("Sleep", "system-suspend"),
+        ("Hibernate", "system-suspend-hibernate"),
+        ("Restart", "system-reboot"),
+        ("Shut down", "system-shutdown"),
+    ];
+    assert_eq!(shell.power_menu_visible_rows(), expected.len());
+    for (row, (label, icon)) in expected.iter().enumerate() {
+        let rect = shell.power_menu_row_rect(row);
+        let images: Vec<(f32, f32, u64)> = tree
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    image_id,
+                    ..
+                } if rect.contains(*x + 1.0, *y + 1.0) => Some((*x, *width, *image_id)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1, "{label}: {images:?}");
+        let (x, width, id) = images[0];
+        let request = shell.icon_request(id).expect("an icon");
+        assert_eq!(request.name, *icon, "{label}");
+        assert_eq!(request.color, shell.theme.start_menu_fg, "{label}");
+        let text_x = tree
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                RenderCommand::Text { x, y, text, .. }
+                    if text == label && rect.contains(*x, *y) =>
+                {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn on row {row}"));
+        assert!(text_x >= x + width, "{label}'s words overlap its picture");
+    }
+}
+
+/// The machine is turned off, restarted, put to sleep and hibernated by
+/// `powerctl`, a program SlateOS has, each with its own subcommand; the lock
+/// is the lock screen's; log out is the shell's own.
+#[test]
+fn the_power_actions_are_carried_out_by_programs_that_exist() {
+    use crate::power::{POWERCTL, PowerChoice};
+    for (choice, subcommand) in [
+        (PowerChoice::ShutDown, "shutdown"),
+        (PowerChoice::Restart, "reboot"),
+        (PowerChoice::Sleep, "suspend"),
+        (PowerChoice::Hibernate, "hibernate"),
+    ] {
+        let launch = choice.command().expect("a program carries it out");
+        assert_eq!(
+            launch.program,
+            std::path::PathBuf::from(POWERCTL),
+            "{choice:?}"
+        );
+        assert_eq!(
+            launch.args,
+            [std::ffi::OsString::from(subcommand)],
+            "{choice:?}"
+        );
+    }
+    assert_eq!(
+        PowerChoice::Lock.command(),
+        Some(crate::hotkeys::Launch::program(
+            crate::hotkeys::LOCK_COMMAND
+        ))
+    );
+    assert_eq!(PowerChoice::LogOut.command(), None);
+}
+
+/// The login screen's power buttons do exactly what the start menu's do.
+#[test]
+fn the_login_screens_power_buttons_do_what_the_start_menus_do() {
+    use crate::login_screen::LoginPowerAction as Login;
+    use crate::power::PowerChoice as Menu;
+    for (button, row) in [
+        (Login::Shutdown, Menu::ShutDown),
+        (Login::Reboot, Menu::Restart),
+        (Login::Sleep, Menu::Sleep),
+        (Login::Hibernate, Menu::Hibernate),
+    ] {
+        assert_eq!(Some(button.command()), row.command(), "{button:?}");
+    }
+}
+
+/// The start menu lists every program in the database, once -- and the
+/// database holds no power actions, which are the power menu's own list and
+/// not programs at all. They were database entries until 2026-09-25, which is
+/// how three of them came to name programs that do not exist.
+#[test]
+fn the_start_menu_offers_every_program_once_and_no_power_action() {
     let shell = shell();
     let database = launcher::builtin_app_database();
     let mut offered: Vec<&str> = shell
         .start_menu_entries()
         .iter()
-        .chain(shell.power_menu_entries().iter())
         .map(|entry| entry.executable_path.as_str())
         .collect();
     offered.sort_unstable();
     let before = offered.len();
     offered.dedup();
-    assert_eq!(before, offered.len(), "a program is in both menus");
-    assert_eq!(offered.len(), database.len(), "a program is in neither");
-
-    for entry in shell.power_menu_entries() {
-        assert_eq!(entry.category, Category::System, "{}", entry.name);
+    assert_eq!(before, offered.len(), "a program is listed twice");
+    assert_eq!(offered.len(), database.len(), "a program is missing");
+    for entry in &database {
+        assert_ne!(
+            entry.category,
+            Category::System,
+            "{} is back in the database",
+            entry.name
+        );
     }
 }
 
+/// **The power button is the reference's: "Shut down" in one click**, with the
+/// other choices behind the caret at its right end. One click is safe because
+/// shutting down asks every window to close first (design-decisions §1405) --
+/// so with a window open, the click asks it rather than switching off.
 #[test]
-fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
+fn the_power_button_shuts_down_in_one_click_and_its_caret_holds_the_rest() {
     let mut shell = shell();
     shell.toggle_start_menu();
     let button = shell.power_button_rect();
+    let caret = shell.power_caret_rect();
+    // The caret is the button's right end, and only that.
+    assert!(
+        caret.w > 0.0 && caret.w < button.w / 2.0,
+        "the caret is not a small end of the button: {caret:?} of {button:?}"
+    );
+    assert_eq!(caret.x + caret.w, button.x + button.w);
+    assert_eq!((caret.y, caret.h), (button.y, button.h));
+    let (x, y) = centre(button);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerButton);
+    let (x, y) = centre(caret);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerCaret);
 
-    assert_eq!(shell.hit_test(button.x, button.y), Hit::PowerButton);
+    // With nothing open, the machine shuts down at once, and the menus go.
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::Launch(
+            crate::power::PowerChoice::ShutDown
+                .command()
+                .expect("a program")
+        )
+    );
+    assert!(
+        !shell.start_menu_open,
+        "the menu stayed up over a shut down"
+    );
+    assert!(!shell.power_menu_open, "the other choices opened as well");
+
+    // With a window open, the click asks it to close.
+    let mut shell = self::shell();
+    shell.apply_window_list(&here(&[WindowInfo::new(7, 7, "unsaved".to_string())]));
+    shell.toggle_start_menu();
+    let button = shell.power_button_rect();
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::ControlAll(vec![ShellRequest::window(
+            WindowId(7),
+            ShellControlAction::Close
+        )]),
+        "the button switched off under an open window"
+    );
+    assert!(!shell.start_menu_open);
+}
+
+/// **The caret is drawn where it is clicked**: its chevron inside it, "Shut
+/// down" wholly outside it, and the caret alone lit with the accent while the
+/// choices it opened are showing -- the popup's visible origin.
+#[test]
+fn the_power_caret_is_drawn_where_it_is_clicked_and_lit_while_its_menu_shows() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let button = shell.power_button_rect();
+    let caret = shell.power_caret_rect();
+    let accent = shell.theme.accent_color;
+    let within = |x: f32, y: f32, w: f32, h: f32, r: Rect| {
+        x >= r.x - 0.01 && y >= r.y - 0.01 && x + w <= r.x + r.w + 0.01 && y + h <= r.y + r.h + 0.01
+    };
+    // The accent fills drawn on the button, and the icons drawn in the caret.
+    let lit = |tree: &RenderTree| -> Vec<Rect> {
+        tree.commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == accent && within(*x, *y, *width, *height, button) => {
+                    Some(Rect::new(*x, *y, *width, *height))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let chevrons =
+        |shell: &DesktopShell, tree: &RenderTree| -> Vec<(String, guitk::color::Color)> {
+            tree.commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        image_id,
+                        ..
+                    } if within(*x, *y, *width, *height, caret) => {
+                        let request = shell.icon_request(*image_id).expect("an icon");
+                        Some((request.name.into_owned(), request.color))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+    let closed = shell.render_start_menu().expect("open");
+    assert_eq!(lit(&closed), Vec::<Rect>::new(), "lit with nothing showing");
+
+    // Two parts of glass, as the reference's `aero-sm-power-main` and
+    // `aero-sm-power-caret`: a wash with a line round each, the caret one of
+    // them, and a gap between the two -- not one slab with a chevron on it.
+    let glass =
+        guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_GLASS_ALPHA);
+    let edge = guitk::theme::with_alpha(shell.theme.start_menu_fg, crate::POWER_BUTTON_EDGE_ALPHA);
+    let parts: Vec<Rect> = closed
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *color == glass && within(*x, *y, *width, *height, button) => {
+                Some(Rect::new(*x, *y, *width, *height))
+            }
+            _ => None,
+        })
+        .collect();
+    let lines: Vec<Rect> = closed
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::StrokeRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if *color == edge && within(*x, *y, *width, *height, button) => {
+                Some(Rect::new(*x, *y, *width, *height))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(parts.len(), 2, "not two parts of glass: {parts:?}");
+    assert_eq!(
+        parts, lines,
+        "a part without its line, or a line round nothing"
+    );
+    let (main, glass_caret) = (parts[0], parts[1]);
+    assert_eq!(glass_caret, caret, "the second part is not the caret");
+    assert_eq!((main.x, main.y, main.h), (button.x, button.y, button.h));
+    assert!(
+        main.x + main.w < caret.x,
+        "no gap between \"Shut down\" and the caret: {main:?} against {caret:?}"
+    );
+    // The chevron points up, the way the choices behind it open -- the
+    // reference's `crumb` turned by `rotate(-90deg)`.
+    let choices = shell.power_menu_rect();
+    assert!(
+        choices.y + choices.h <= caret.y,
+        "the choices do not open above the caret, so an upward chevron misleads: \
+         {choices:?} against {caret:?}"
+    );
+    assert_eq!(
+        chevrons(&shell, &closed),
+        [("pan-up".to_string(), shell.theme.start_menu_fg)]
+    );
+    let (label_x, label_w) = closed
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } if text == "Shut down" => {
+                Some((*x, guitk::text::measure(text, *font_size, *font_weight)))
+            }
+            _ => None,
+        })
+        .expect("\"Shut down\" is not drawn");
+    assert!(
+        label_x >= button.x && label_x + label_w <= caret.x,
+        "\"Shut down\" runs into the caret: {label_x} + {label_w} against {caret:?}"
+    );
+
+    shell.toggle_power_menu();
+    let open = shell.render_start_menu().expect("open");
+    assert_eq!(lit(&open), [caret], "the caret is not what is lit");
+    assert_eq!(
+        chevrons(&shell, &open),
+        [("pan-up".to_string(), shell.theme.start_menu_bg)],
+        "the chevron is not readable on the accent"
+    );
+}
+
+#[test]
+fn the_power_caret_toggles_its_menu_and_leaves_the_start_menu_open() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    // The caret, which is what opens the menu now that the button itself
+    // shuts down.
+    let button = shell.power_caret_rect();
+
+    assert_eq!(shell.hit_test(button.x, button.y), Hit::PowerCaret);
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
     assert!(shell.power_menu_open);
     assert!(shell.start_menu_open);
@@ -443,19 +1095,354 @@ fn the_power_button_toggles_its_menu_and_leaves_the_start_menu_open() {
     );
 }
 
-/// A submenu is allowed to cover the list it opened from — but then a click in
-/// the overlap has to reach the popup, not the row buried under it.
+// ---- what the pointer is over in the start menu, lit ------------------------
+
+/// The rectangles the open start menu fills in `color`, in drawing order.
+fn filled_in(shell: &DesktopShell, color: guitk::color::Color) -> Vec<Rect> {
+    shell
+        .render_start_menu()
+        .expect("the menu is open")
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color: c,
+                ..
+            } if *c == color => Some(Rect::new(*x, *y, *width, *height)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `inner` lies within `outer`.
+fn lies_in(inner: Rect, outer: Rect) -> bool {
+    inner.x >= outer.x - 0.01
+        && inner.y >= outer.y - 0.01
+        && inner.x + inner.w <= outer.x + outer.w + 0.01
+        && inner.y + inner.h <= outer.y + outer.h + 0.01
+}
+
+/// The wash a program row under the pointer is lit with.
+fn row_light(shell: &DesktopShell) -> guitk::color::Color {
+    guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_LIT_ALPHA)
+}
+
+/// **The row under the pointer lights**, as the reference's
+/// `aero-sm-app:hover` does, and goes out when the pointer leaves -- each
+/// change reported, so the session repaints for it, and a move within the
+/// row not, so it does not repaint for nothing.
 #[test]
-fn the_power_menu_takes_the_clicks_on_the_rows_it_covers() {
+fn the_start_menu_row_under_the_pointer_lights_and_goes_out_when_it_leaves() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let wash = row_light(&shell);
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "lit before the pointer came"
+    );
+    shell.take_hover_changed();
+
+    let row = shell
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let rect = shell.start_menu_row_rect(row);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    assert!(
+        shell.take_hover_changed(),
+        "the row lit and nobody was told"
+    );
+    let lit = filled_in(&shell, wash);
+    assert_eq!(lit.len(), 1, "{lit:?}");
+    assert!(
+        lies_in(lit[0], rect),
+        "the light {:?} is not on the row {rect:?}",
+        lit[0]
+    );
+    // Lit with a line round it too, as the reference's edge.
+    let edge = guitk::theme::with_alpha(shell.theme.accent_color, crate::START_MENU_LIT_EDGE_ALPHA);
+    let tree = shell.render_start_menu().expect("open");
+    assert!(
+        tree.commands.iter().any(|cmd| matches!(cmd,
+            RenderCommand::StrokeRect { x, y, width, height, color, .. }
+                if *color == edge && (*x, *y, *width, *height) == (lit[0].x, lit[0].y, lit[0].w, lit[0].h))),
+        "the lit row has no edge"
+    );
+
+    move_to(&mut shell, (x + 5.0, y));
+    assert!(
+        !shell.take_hover_changed(),
+        "a move within the row asked for a repaint"
+    );
+
+    move_to(&mut shell, (900.0, 300.0));
+    assert!(
+        shell.take_hover_changed(),
+        "the light went out and nobody was told"
+    );
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "the row stayed lit after the pointer left"
+    );
+}
+
+/// **A heading does not light**: it is not something to click. The program
+/// under it does.
+#[test]
+fn a_start_menu_heading_does_not_light() {
+    let mut shell = shell();
+    shell.note_started(&crate::hotkeys::Launch::program(crate::launcher::TERMINAL));
+    shell.toggle_start_menu();
+    assert!(
+        matches!(
+            shell.start_menu_rows().first(),
+            Some(crate::StartRow::Section(_))
+        ),
+        "the fixture must start the list with a heading"
+    );
+    let wash = row_light(&shell);
+    let (x, y) = centre(shell.start_menu_row_rect(0));
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "the heading lit"
+    );
+
+    let rect = shell.start_menu_row_rect(1);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    let lit = filled_in(&shell, wash);
+    assert!(
+        lit.len() == 1 && lies_in(lit[0], rect),
+        "the program under the heading did not light: {lit:?}"
+    );
+}
+
+/// **The light stays under a resting pointer while the list scrolls**: what
+/// is lit is the row a click there would reach, which is the row now under
+/// the pointer -- not the program that scrolled away from it.
+#[test]
+fn the_light_stays_under_the_pointer_when_the_list_scrolls_under_it() {
+    let mut shell = shell_with_a_long_menu();
+    shell.toggle_start_menu();
+    let wash = row_light(&shell);
+    let rect = shell.start_menu_row_rect(4);
+    let (x, y) = centre(rect);
+    move_to(&mut shell, (x, y));
+    let before = filled_in(&shell, wash);
+    assert_eq!(before.len(), 1, "{before:?}");
+
+    shell.handle_mouse(&scroll(x, y, -1.0));
+    assert_eq!(shell.start_menu_scroll, 3, "the fixture did not scroll");
+    assert_eq!(
+        filled_in(&shell, wash),
+        before,
+        "the light left the pointer when the list moved under it"
+    );
+
+    // And a move in the scrolled list lights the row under the pointer --
+    // not the row that the program under it would have with the list at
+    // its top.
+    move_to(&mut shell, (x + 5.0, y));
+    assert_eq!(
+        filled_in(&shell, wash),
+        before,
+        "a move in the scrolled list lit a row other than the one under the pointer"
+    );
+}
+
+/// **A place, and each part of the power button, lights under the pointer**,
+/// as the reference's `aero-sm-link:hover` and `aero-sm-power-main:hover` /
+/// `aero-sm-power-caret:hover` -- one part at a time, since they are two
+/// buttons.
+#[test]
+fn a_place_and_each_part_of_the_power_button_light_under_the_pointer() {
+    use guitk::theme::with_alpha;
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let fg = shell.theme.start_menu_fg;
+
+    let place = shell.start_shortcut_rect(crate::StartShortcut::Documents);
+    let place_light = with_alpha(fg, crate::START_LINK_LIT_ALPHA);
+    assert_eq!(
+        filled_in(&shell, place_light),
+        Vec::<Rect>::new(),
+        "a place lit before the pointer came"
+    );
+    let (x, y) = centre(place);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        filled_in(&shell, place_light),
+        [place],
+        "the place under the pointer is not lit"
+    );
+
+    let glass = with_alpha(fg, crate::POWER_BUTTON_GLASS_ALPHA);
+    let lit = with_alpha(fg, crate::POWER_BUTTON_LIT_ALPHA);
+    let button = shell.power_button_rect();
+    let main = shell.power_main_rect();
+    let caret = shell.power_caret_rect();
+    let lit_parts = |shell: &DesktopShell| -> Vec<Rect> {
+        filled_in(shell, lit)
+            .into_iter()
+            .filter(|r| lies_in(*r, button))
+            .collect()
+    };
+    assert_eq!(filled_in(&shell, glass), [main, caret]);
+    assert_eq!(
+        lit_parts(&shell),
+        Vec::<Rect>::new(),
+        "the power button lit with the pointer on a place"
+    );
+
+    let (x, y) = centre(main);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        lit_parts(&shell),
+        [main],
+        "\"Shut down\" is not lit under the pointer"
+    );
+    assert_eq!(filled_in(&shell, glass), [caret], "the caret lit with it");
+    assert_eq!(
+        filled_in(&shell, place_light),
+        Vec::<Rect>::new(),
+        "the place stayed lit"
+    );
+
+    let (x, y) = centre(caret);
+    move_to(&mut shell, (x, y));
+    assert_eq!(
+        lit_parts(&shell),
+        [caret],
+        "the caret is not lit under the pointer"
+    );
+    assert_eq!(filled_in(&shell, glass), [main], "\"Shut down\" stayed lit");
+}
+
+/// **The power choice under the pointer lights**, as the reference's
+/// `aero-sm-power-item:hover` -- over the list, which is behind it.
+#[test]
+fn the_power_choice_under_the_pointer_lights() {
     let mut shell = shell();
     shell.toggle_start_menu();
     shell.toggle_power_menu();
+    let wash = guitk::theme::with_alpha(shell.theme.accent_color, crate::POWER_MENU_LIT_ALPHA);
+    assert_eq!(
+        filled_in(&shell, wash),
+        Vec::<Rect>::new(),
+        "a choice lit before the pointer came"
+    );
+    for row in [0, 2] {
+        let rect = shell.power_menu_row_rect(row);
+        let (x, y) = centre(rect);
+        move_to(&mut shell, (x, y));
+        assert_eq!(
+            filled_in(&shell, wash),
+            [rect],
+            "choice {row} is not lit under the pointer"
+        );
+        assert_eq!(
+            filled_in(&shell, row_light(&shell)),
+            Vec::<Rect>::new(),
+            "a row behind the choices lit"
+        );
+    }
+}
 
-    let (x, y) = centre(shell.power_menu_row_rect(0));
-    let covered = (0..shell.start_menu_visible_rows())
-        .any(|row| shell.start_menu_row_rect(row).contains(x, y));
-    assert!(covered, "the fixture must actually overlap a row");
-    assert_eq!(shell.hit_test(x, y), Hit::PowerMenuEntry(0));
+/// **A menu opened again lights nothing** until the pointer moves over it:
+/// what was lit when it closed is not where the pointer is now.
+#[test]
+fn a_start_menu_opened_again_lights_nothing_until_the_pointer_moves() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let row = shell
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let (x, y) = centre(shell.start_menu_row_rect(row));
+    move_to(&mut shell, (x, y));
+    assert_eq!(filled_in(&shell, row_light(&shell)).len(), 1);
+
+    shell.toggle_start_menu();
+    shell.toggle_start_menu();
+    assert_eq!(
+        filled_in(&shell, row_light(&shell)),
+        Vec::<Rect>::new(),
+        "lit from the last time it was open"
+    );
+}
+
+/// **The caret names itself**, as the reference's `title="Power options"`:
+/// it is a chevron alone. "Shut down" says what it does on its face.
+#[test]
+fn the_power_caret_names_itself() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let (x, y) = centre(shell.power_caret_rect());
+    move_to(&mut shell, (x, y));
+    assert!(
+        shell.tooltip_due_in().is_some(),
+        "nothing waits to name the caret"
+    );
+    shell.advance_osd(5_000);
+    let drawn = format!(
+        "{:?}",
+        shell.render_tooltip().expect("the caret has no name")
+    );
+    assert!(drawn.contains("Power options"), "{drawn}");
+
+    let (x, y) = centre(shell.power_main_rect());
+    move_to(&mut shell, (x, y));
+    shell.advance_osd(5_000);
+    assert!(
+        shell.render_tooltip().is_none(),
+        "\"Shut down\" grew a tooltip"
+    );
+}
+
+/// A submenu is allowed to cover the menu it opened from -- but then a click
+/// anywhere in it has to reach the popup, not the place or the row buried
+/// under it. Swept over the popup at three scales rather than tried at one
+/// point: where the popup lands on the places column depends on the scale,
+/// and at 100% it covers nothing at all.
+#[test]
+fn the_power_menu_takes_every_click_inside_it() {
+    let mut covered_something = false;
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        shell.toggle_power_menu();
+        let popup = shell.power_menu_rect();
+        for i in 0..=8 {
+            for j in 0..=8 {
+                let x = popup.x + popup.w * (0.02 + 0.96 * i as f32 / 8.0);
+                let y = popup.y + popup.h * (0.02 + 0.96 * j as f32 / 8.0);
+                covered_something |= crate::StartShortcut::ALL
+                    .iter()
+                    .any(|w| shell.start_shortcut_rect(*w).contains(x, y))
+                    || (0..shell.start_menu_visible_rows())
+                        .any(|row| shell.start_menu_row_rect(row).contains(x, y));
+                assert!(
+                    matches!(
+                        shell.hit_test(x, y),
+                        Hit::PowerMenuEntry(_) | Hit::PowerMenuPanel
+                    ),
+                    "({x}, {y}) inside the popup at {percent}% went to {:?}",
+                    shell.hit_test(x, y)
+                );
+            }
+        }
+    }
+    assert!(
+        covered_something,
+        "the popup never covered anything, so this proves nothing"
+    );
 }
 
 /// Clicking the list behind an open submenu dismisses the submenu and is spent
@@ -507,11 +1494,14 @@ fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
 
     let mut by_launching = shell();
     open(&mut by_launching);
-    let row = by_launching.start_menu_row_rect(0);
+    let first = by_launching
+        .start_row_of_program(0)
+        .expect("a program in the menu");
+    let row = by_launching.start_menu_row_rect(first);
     // The first click dismisses the popup; the second launches.
     click_at(&mut by_launching, row);
     assert!(matches!(
-        click_at(&mut by_launching, row),
+        choose_at(&mut by_launching, row),
         ShellAction::Launch(_)
     ));
     assert!(!by_launching.power_menu_open, "launching a program");
@@ -520,7 +1510,7 @@ fn closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it() {
 
 #[test]
 fn a_wheel_over_the_power_menu_does_not_scroll_the_list_behind_it() {
-    let mut shell = shell();
+    let mut shell = shell_with_a_long_menu();
     shell.toggle_start_menu();
     shell.toggle_power_menu();
 
@@ -532,7 +1522,7 @@ fn a_wheel_over_the_power_menu_does_not_scroll_the_list_behind_it() {
     assert_eq!(shell.start_menu_scroll, 0, "the hidden rows moved");
 }
 
-/// Scaling must not put a system action off the screen or out from under the
+/// Scaling must not put a power action off the screen or out from under the
 /// pointer: unlike the application list the power menu has no scroll to rescue
 /// a row it fails to fit.
 #[test]
@@ -558,8 +1548,8 @@ fn every_power_action_is_clickable_where_it_is_drawn_at_every_scale() {
 
         assert_eq!(
             shell.power_menu_visible_rows(),
-            shell.power_menu_entries().len(),
-            "a system action was dropped at {percent}%"
+            shell.power_menu_choices().len(),
+            "a power action was dropped at {percent}%"
         );
         for row in 0..shell.power_menu_visible_rows() {
             let (x, y) = centre(shell.power_menu_row_rect(row));
@@ -598,7 +1588,7 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
     assert_eq!(panel.0, shell.theme.start_menu_bg);
     assert_eq!(panel.1, CornerRadii::all(16.0));
 
-    // Every system action is on screen, spelled as the database spells it.
+    // Every power action is on screen, under its own label.
     let drawn: Vec<String> = tree
         .commands
         .iter()
@@ -607,8 +1597,11 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
             _ => None,
         })
         .collect();
-    for entry in shell.power_menu_entries() {
-        assert!(drawn.contains(&entry.name), "{} was not drawn", entry.name);
+    for choice in shell.power_menu_choices() {
+        assert!(
+            drawn.iter().any(|text| text == choice.label()),
+            "{choice:?} was not drawn"
+        );
     }
 }
 
@@ -678,11 +1671,10 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
 
-    // A is at index 0: `taskbar_windows` is in the compositor's order, and B
-    // arrived above it.
+    // A is at index 0: the buttons stand in the order the windows opened.
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
-        click_at(&mut shell, first),
+        choose_at(&mut shell, first),
         ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "the button of an unfocused window must summon it"
     );
@@ -703,7 +1695,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
         .unwrap();
     let button = shell.taskbar_button_rect(index);
     assert_eq!(
-        click_at(&mut shell, button),
+        choose_at(&mut shell, button),
         ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize)),
         "the button of the focused window must put it away"
     );
@@ -856,7 +1848,7 @@ fn a_minimized_window_can_be_got_back_from_its_taskbar_button() {
     );
     let button = shell.taskbar_button_rect(0);
     assert_eq!(
-        click_at(&mut shell, button),
+        choose_at(&mut shell, button),
         ShellAction::Control(ShellRequest::window(id, ShellControlAction::Activate)),
         "the click must ask for the window back, not minimize it again"
     );
@@ -902,7 +1894,7 @@ fn show_desktop_does_not_ask_an_already_minimized_window_to_minimize() {
     // green, because the test was no longer reading the code it was named for.
     // A test that re-derives the answer is worse than no test, because it looks
     // like coverage. So it presses the chord and reads what the shell asked for.
-    let mut shell = shell();
+    let mut shell = bound_shell();
     let away = open(&mut shell, "Editor");
     let still_here = open(&mut shell, "Terminal");
     minimize(&mut shell, away);
@@ -993,7 +1985,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     shell.apply_window_list(&here(&[focused]));
 
     let button = shell.taskbar_button_rect(0);
-    let action = click_at(&mut shell, button);
+    let action = choose_at(&mut shell, button);
     assert_eq!(
         action,
         ShellAction::Control(ShellRequest::window(
@@ -1092,43 +2084,55 @@ fn the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling() {
     for percent in [100, 125, 150, 200] {
         let shell = scaled(percent);
         let target = shell.clock_rect();
-        // The clock is the rightmost thing on the taskbar, so the rightmost
-        // text command is it — the desktop indicator sits at the tray's left
-        // edge.
-        let (x, y, size) = shell
+        // The clock is the rightmost text on the taskbar -- one line, or the
+        // reference's two, time over date -- and the desktop indicator sits at
+        // the tray's left edge. Every text command that starts inside the
+        // clock's slot is a line of it.
+        let lines: Vec<(f32, f32, f32, f32)> = shell
             .render_taskbar()
             .commands
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
-                    x, y, font_size, ..
-                } => Some((*x, *y, *font_size)),
+                    x,
+                    y,
+                    font_size,
+                    text,
+                    font_weight,
+                    ..
+                } if *x >= target.x - 0.5 => Some((
+                    *x,
+                    *y,
+                    *font_size,
+                    guitk::text::measure(text, *font_size, *font_weight),
+                )),
                 _ => None,
             })
-            .max_by(|a, b| a.0.total_cmp(&b.0))
-            .expect("the taskbar draws a clock");
-
-        // The slot is sized for the *widest* reading the switches allow, so
-        // check that one rather than the current second.
-        let widest = shell.clock_width();
+            .collect();
         assert!(
-            x >= target.x,
-            "at {percent}% the reading starts left of its target"
+            !lines.is_empty(),
+            "at {percent}% the taskbar draws no clock"
         );
-        assert!(
-            x + widest <= target.x + target.w + 0.5,
-            "at {percent}% the reading runs past its target"
-        );
-        assert!(
-            y >= target.y && y + size <= target.y + target.h,
-            "at {percent}% the reading is drawn outside its target vertically"
-        );
-        // And the pixel it is drawn on is the pixel that opens the calendar.
-        assert_eq!(
-            shell.hit_test(x, y + size / 2.0),
-            Hit::Clock,
-            "at {percent}% the clock is drawn somewhere it cannot be clicked"
-        );
+        for (x, y, size, width) in lines {
+            assert!(
+                x >= target.x,
+                "at {percent}% a line starts left of its target"
+            );
+            assert!(
+                x + width <= target.x + target.w + 0.5,
+                "at {percent}% a line runs past its target"
+            );
+            assert!(
+                y >= target.y && y + size <= target.y + target.h,
+                "at {percent}% a line is drawn outside its target vertically"
+            );
+            // And the pixel it is drawn on is the pixel that opens the calendar.
+            assert_eq!(
+                shell.hit_test(x, y + size / 2.0),
+                Hit::Clock,
+                "at {percent}% the clock is drawn somewhere it cannot be clicked"
+            );
+        }
     }
 }
 
@@ -1462,8 +2466,16 @@ fn a_double_click_is_the_same_event_to_this_shell_as_a_single_one() {
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
     let (x, y) = centre(shell.taskbar_button_rect(0));
+    // Taken hold of, like a press -- and the release asks, as it does after a
+    // single click. A `DoubleClick` arm that did nothing would leave the
+    // release nothing to finish.
+    assert_eq!(shell.handle_mouse(&doubled(x, y)), ShellAction::Consumed);
     assert_eq!(
-        shell.handle_mouse(&doubled(x, y)),
+        shell.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }),
         ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate)),
         "double-click on a taskbar button asked for nothing"
     );
@@ -1533,34 +2545,33 @@ fn pressing_an_icon_selects_it() {
     });
 }
 
-/// **A double-click on an icon asks for the thing it names.**
+/// **A double-click on a folder icon opens the folder in the file manager.**
+///
+/// Until 2026-09-25 it asked for the folder to be *run*: the action named the
+/// icon's path as the program, and `Command::new` on a directory fails. The
+/// test that stood here asserted exactly that request, against a path that did
+/// not exist, so it passed while the thing it described could never happen.
 #[test]
-fn double_clicking_an_icon_launches_what_it_points_at() {
-    settingsfile::testing::with_scratch_config("icons-double-click", |_root| {
+fn double_clicking_a_folder_icon_opens_it_in_the_file_manager() {
+    settingsfile::testing::with_scratch_config("icons-double-click", |root| {
         let mut shell = shell_with_icons();
-        // An icon whose action is a path, since those are the ones the shell
-        // can act on: `LaunchSystem` names nothing runnable yet.
-        //
-        // Added here rather than found among the defaults. Since 2026-09-15
-        // the Home and Documents icons appear only when `HOME` is set -- they
-        // used to point at the literal `/home/user`, which is correct for a
-        // user named "user" and wrong for everyone else. A test that needs an
-        // OpenPath icon should make one rather than depend on the environment
-        // the runner happens to have.
+        // A folder that exists, since opening one is a question about the
+        // filesystem. Added here rather than found among the defaults: since
+        // 2026-09-15 Home and Documents appear only when `HOME` is set, and a
+        // test should not depend on the environment the runner has.
+        let folder = root.join("Somewhere");
+        std::fs::create_dir(&folder).expect("the scratch root is writable");
         let id = shell.icons.add_icon(
             "Somewhere",
             icons::IconType::Folder,
-            icons::IconAction::OpenPath(std::path::PathBuf::from("/somewhere")),
+            icons::IconAction::OpenPath(folder.clone()),
             40,
             40,
         );
-        let (x, y, want) = {
-            let icon = shell.icons.get_icon(id).expect("just found");
-            let icons::IconAction::OpenPath(path) = &icon.action else {
-                unreachable!("filtered above")
-            };
+        let (x, y) = {
+            let icon = shell.icons.get_icon(id).expect("just added");
             #[allow(clippy::cast_precision_loss)]
-            (icon.x as f32 + 8.0, icon.y as f32 + 8.0, path.clone())
+            (icon.x as f32 + 8.0, icon.y as f32 + 8.0)
         };
 
         let event = MouseEvent {
@@ -1570,13 +2581,204 @@ fn double_clicking_an_icon_launches_what_it_points_at() {
         };
         assert_eq!(
             shell.handle_mouse(&event),
-            ShellAction::Launch(PathBuf::from(&want)),
-            "a double-click on an icon did not ask for its path"
+            ShellAction::Launch(crate::hotkeys::Launch::opening(
+                crate::launcher::FILE_MANAGER,
+                &folder
+            )),
+            "a double-click on a folder did not open it in the file manager"
         );
     });
 }
 
-/// **Dragging an icon moves it, and a release writes where it landed.**
+/// Double-click the icon `id`, through the route a real pointer takes.
+fn double_click_icon(shell: &mut DesktopShell, id: icons::IconId) -> ShellAction {
+    let (x, y) = {
+        let icon = shell.icons.get_icon(id).expect("the icon exists");
+        #[allow(clippy::cast_precision_loss)]
+        (icon.x as f32 + 8.0, icon.y as f32 + 8.0)
+    };
+    shell.handle_mouse(&MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::DoubleClick(MouseButton::Left),
+    })
+}
+
+/// The "cannot open" notices posted so far, as `(title, body)`.
+fn cannot_open_notices(shell: &DesktopShell) -> Vec<(String, String)> {
+    shell
+        .notifications
+        .notifications()
+        .iter()
+        .filter(|n| n.title.starts_with("Cannot open"))
+        .map(|n| (n.title.clone(), n.body.clone()))
+        .collect()
+}
+
+/// An icon on the desktop for `path`.
+fn icon_for(shell: &mut DesktopShell, label: &str, path: &std::path::Path) -> icons::IconId {
+    shell.icons.add_icon(
+        label,
+        icons::IconType::File,
+        icons::IconAction::OpenPath(path.to_path_buf()),
+        600,
+        400,
+    )
+}
+
+/// **A document opens in the program File Associations chose for its kind**
+/// -- the lookup the file manager makes, so the desktop and the file manager
+/// cannot disagree about what a file opens in.
+#[test]
+fn double_clicking_a_document_opens_it_in_its_chosen_program() {
+    settingsfile::testing::with_scratch_config("icons-open-document", |root| {
+        let mut doc = yamldoc::Document::new();
+        doc.set_str(&[associations::ASSOCIATIONS, "txt"], "/usr/bin/editor");
+        appearance::config::store(associations::CONFIG_NAME, &doc)
+            .expect("the scratch config directory is writable");
+        let file = root.join("notes.TXT");
+        std::fs::write(&file, b"hello").expect("the scratch root is writable");
+
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "notes", &file);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening("/usr/bin/editor", &file)),
+            "an upper-case extension is the same kind of file"
+        );
+        assert!(cannot_open_notices(&shell).is_empty());
+    });
+}
+
+/// **A document nothing is set to open says so**, and points at where to
+/// choose something, rather than doing nothing the user can see.
+#[test]
+fn a_document_nothing_opens_says_so() {
+    settingsfile::testing::with_scratch_config("icons-open-nothing", |root| {
+        let file = root.join("mystery.xyz");
+        std::fs::write(&file, b"?").expect("the scratch root is writable");
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "mystery", &file);
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].0, "Cannot open mystery");
+        assert!(notices[0].1.contains("File Associations"), "{notices:?}");
+    });
+}
+
+/// **An icon whose file has gone says so**, naming the path.
+#[test]
+fn an_icon_whose_file_is_gone_says_so() {
+    settingsfile::testing::with_scratch_config("icons-open-missing", |root| {
+        let gone = root.join("gone.txt");
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "gone", &gone);
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].1.contains("is not there any more"),
+            "{notices:?}"
+        );
+        assert!(notices[0].1.contains("gone.txt"), "{notices:?}");
+    });
+}
+
+/// **"This PC" opens the machine's files, from the top, in the file manager.**
+/// It used to do nothing: nothing said what its destination was.
+#[test]
+fn this_pc_opens_the_root_in_the_file_manager() {
+    settingsfile::testing::with_scratch_config("icons-open-this-pc", |_root| {
+        let mut shell = shell_with_icons();
+        let id = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell
+                    .icons
+                    .get_icon(*id)
+                    .is_some_and(|i| i.label == "This PC")
+            })
+            .expect("This PC is a default icon");
+
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening(
+                launcher::FILE_MANAGER,
+                std::path::Path::new("/")
+            ))
+        );
+    });
+}
+
+/// **The Recycle Bin says it cannot show its contents yet**, rather than
+/// opening its storage -- internal folders named by ids -- or nothing at all.
+#[test]
+fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
+    settingsfile::testing::with_scratch_config("icons-open-bin", |_root| {
+        let mut shell = shell_with_icons();
+        let id = shell
+            .icons
+            .icon_ids()
+            .into_iter()
+            .find(|id| {
+                shell
+                    .icons
+                    .get_icon(*id)
+                    .is_some_and(|i| i.label == "Recycle Bin")
+            })
+            .expect("the Recycle Bin is a default icon");
+
+        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
+        let notices = cannot_open_notices(&shell);
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].0, "Cannot open Recycle Bin");
+    });
+}
+
+/// **A program on the desktop runs** -- what a program shortcut is. And a
+/// program whose kind *has* a chosen opener is opened by it, not run: a disk
+/// that marks every file executable must not turn every document into a
+/// program.
+#[cfg(unix)]
+#[test]
+fn a_program_on_the_desktop_runs_and_a_document_marked_executable_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    settingsfile::testing::with_scratch_config("icons-open-program", |root| {
+        let tool = root.join("tool");
+        std::fs::write(&tool, b"#!/bin/sh\n").expect("the scratch root is writable");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut doc = yamldoc::Document::new();
+        doc.set_str(&[associations::ASSOCIATIONS, "txt"], "/usr/bin/editor");
+        appearance::config::store(associations::CONFIG_NAME, &doc).expect("store");
+        let text = root.join("readme.txt");
+        std::fs::write(&text, b"hi").expect("write");
+        std::fs::set_permissions(&text, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+
+        let mut shell = shell_with_icons();
+        let id = icon_for(&mut shell, "tool", &tool);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::program(&tool))
+        );
+        let id = icon_for(&mut shell, "readme", &text);
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch::opening("/usr/bin/editor", &text))
+        );
+    });
+}
+
+/// **Dragging an icon moves it, and the release marks the layout for saving.**
+///
+/// The session does the write, at the end of the pump -- see
+/// `an_icon_dragged_in_a_session_is_where_it_was_left_after_a_restart` in the
+/// session's tests for that half. This one holds the shell to its part: a
+/// move that is only on screen, and not marked, is lost at the next restart.
 #[test]
 fn dragging_an_icon_moves_it_and_the_move_is_kept() {
     settingsfile::testing::with_scratch_config("icons-drag", |_root| {
@@ -1612,8 +2814,14 @@ fn dragging_an_icon_moves_it_and_the_move_is_kept() {
             "the release did not end the gesture, so the layer is stranded"
         );
 
-        // And it reached the file, which is the half a release is responsible
-        // for: a move that is only on screen is lost at the next restart.
+        // And it is marked, and what is written is what was dropped.
+        assert!(
+            shell.take_icons_dirty(),
+            "the move was not marked, so nothing will save it"
+        );
+        shell
+            .save_icon_layout()
+            .expect("the scratch config directory should be writable");
         let mut restarted = shell_with_icons();
         assert_eq!(
             restarted.icons.get_icon(id).map(|i| (i.x, i.y)),
@@ -1776,7 +2984,10 @@ fn a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry() {
         shell.screen_height as f32,
         "the taskbar must sit on the bottom edge on a small screen too"
     );
-    assert!(shell.taskbar_button_width() >= 0.0);
+    assert!(
+        shell.taskbar_tile_band().1 >= 0.0,
+        "a tile with a negative height"
+    );
     assert_eq!(shell.work_area().3, 0);
     assert!(!Rect::new(0.0, 0.0, 0.0, 0.0).contains(0.0, 0.0));
 
@@ -1864,7 +3075,7 @@ fn a_scaled_start_menu_still_reaches_every_program() {
         let row = shell.start_menu_row_rect(0);
         assert!((row.h - shell.scale(START_MENU_ROW_HEIGHT)).abs() < 0.01);
 
-        let total = shell.start_menu_entries().len();
+        let total = shell.start_menu_rows().len();
         let mut seen = std::collections::BTreeSet::new();
         // Scroll to the far end a row at a time, collecting what is on screen.
         for _ in 0..=total {
@@ -1877,7 +3088,7 @@ fn a_scaled_start_menu_still_reaches_every_program() {
             }
             shell.scroll_start_menu(1);
         }
-        assert_eq!(seen.len(), total, "unreachable programs at {percent}%");
+        assert_eq!(seen.len(), total, "unreachable rows at {percent}%");
     }
 }
 
@@ -1953,13 +3164,14 @@ fn the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons() {
     assert_eq!(fill_radii(&menu)[0], CornerRadii::all(16.0));
 
     // The taskbar panel itself is square — it has no free edge to round — but
-    // the buttons on it follow the setting.
+    // the tiles on it follow the setting, at half the windows' radius: the
+    // Aero reference's 4 at the default 8 (`TASKBAR_TILE_CORNER_SHARE`).
     let taskbar = shell.render_taskbar();
     let radii = fill_radii(&taskbar);
     assert_eq!(radii[0], CornerRadii::ZERO, "the panel spans the screen");
     assert!(
-        radii.iter().any(|r| *r == CornerRadii::all(16.0)),
-        "the window buttons must follow the corner setting"
+        radii.iter().any(|r| *r == CornerRadii::all(8.0)),
+        "the window tiles must follow the corner setting: {radii:?}"
     );
 }
 
@@ -1975,7 +3187,10 @@ fn the_corner_radius_grows_with_the_display_scaling() {
 
 #[test]
 fn drop_shadows_are_drawn_only_when_the_user_asks_for_them() {
-    for (wanted, expected) in [(true, 1), (false, 0)] {
+    // Two with shadows on: the shadow every floating panel casts, and the
+    // start menu's glow in the accent -- a shadow in light, which goes with
+    // them, as the reference's `aero-start-menu` casts both.
+    for (wanted, expected) in [(true, 2), (false, 0)] {
         let mut shell = shell();
         let mut appearance = AppearanceSettings::default();
         appearance.drop_shadows = wanted;
@@ -2043,11 +3258,15 @@ fn every_drawn_string_follows_the_users_font_size() {
         sizes
     };
 
+    // A bar tall enough for the clock's two lines at either size, so both
+    // renders lay the clock out alike and the lists pair up.
     let mut base = shell();
+    base.taskbar_height = 80;
     let plain = render(&mut base);
     assert!(!plain.is_empty());
 
     let mut bigger = shell();
+    bigger.taskbar_height = 80;
     let mut appearance = AppearanceSettings::default();
     appearance.fonts.ui_size *= 2.0;
     bigger.set_appearance(appearance);
@@ -2080,7 +3299,7 @@ fn zone_key() -> KeyEvent {
 /// A 1000x800 shell with one focused window, the chooser open over it, and
 /// `preset` selected.
 fn chooser(preset: snap::SnapLayoutPreset) -> (DesktopShell, WindowId) {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     let id = open(&mut shell, "Editor");
     assert!(shell.handle_hotkey(&zone_key()).consumed);
     assert!(shell.snap.is_overlay_visible(), "Super+Z did not open it");
@@ -2177,7 +3396,7 @@ fn the_tiled_window_is_whichever_one_is_focused_now() {
 /// sometimes does nothing.
 #[test]
 fn the_chooser_does_not_open_over_an_empty_desktop() {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     assert_eq!(shell.focused_window, None);
     assert!(shell.handle_hotkey(&zone_key()).consumed);
     assert!(!shell.snap.is_overlay_visible());
@@ -2216,7 +3435,7 @@ fn the_chooser_closes_the_ways_a_popup_closes() {
 /// layout the picker has selected.
 #[test]
 fn the_chooser_draws_the_layout_it_will_place_into() {
-    let mut shell = shell();
+    let mut shell = bound_shell();
     open(&mut shell, "Editor");
     assert!(shell.render_zone_overlay().is_none(), "drawn while closed");
 
@@ -2346,4 +3565,839 @@ fn the_chooser_tiles_the_work_area_and_not_the_screen() {
     for zone in &shell.snap.layout().zones {
         assert!(zone.y + zone.height <= taller.y);
     }
+}
+
+// ---- the order of the running programs' buttons ----------------------------------
+
+/// The window `id` is raised and focused: moved to the top of the next list,
+/// the others unfocused -- what a click on it, or Alt+Tab to it, produces.
+fn raise(shell: &mut DesktopShell, id: WindowId) {
+    let mut list = as_list(shell);
+    let at = list
+        .iter()
+        .position(|info| info.id == id.0)
+        .expect("raising a window the shell does not hold");
+    let mut raised = list.remove(at);
+    for other in &mut list {
+        other.focused = false;
+    }
+    raised.focused = true;
+    list.push(raised);
+    shell.apply_window_list(&here(&list));
+}
+
+/// The windows the taskbar's buttons stand for, left to right.
+fn buttons(shell: &DesktopShell) -> Vec<WindowId> {
+    shell
+        .taskbar_slots()
+        .into_iter()
+        .filter_map(|slot| match slot {
+            crate::TaskbarSlot::Window(id) => Some(id),
+            crate::TaskbarSlot::Pinned(_) => None,
+        })
+        .collect()
+}
+
+/// The middle of the button standing for `id`.
+fn button_of(shell: &DesktopShell, id: WindowId) -> (f32, f32) {
+    let slot = shell
+        .taskbar_slots()
+        .iter()
+        .position(|slot| *slot == crate::TaskbarSlot::Window(id))
+        .expect("the window has no button");
+    centre(shell.taskbar_button_rect(slot))
+}
+
+fn release(shell: &mut DesktopShell, at: (f32, f32)) -> ShellAction {
+    shell.handle_mouse(&MouseEvent {
+        x: at.0,
+        y: at.1,
+        kind: MouseEventKind::Release(MouseButton::Left),
+    })
+}
+
+fn move_to(shell: &mut DesktopShell, at: (f32, f32)) {
+    shell.handle_mouse(&MouseEvent {
+        x: at.0,
+        y: at.1,
+        kind: MouseEventKind::Move,
+    });
+}
+
+/// **A button stays where it is when its window is raised.** The bar used to
+/// be drawn in stacking order, so every click moved the clicked button to the
+/// end -- no button was ever where the user had last seen it.
+#[test]
+fn a_raised_window_keeps_its_button_where_it_was() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+    assert_eq!(buttons(&shell), [a, b, c]);
+
+    raise(&mut shell, a);
+    assert_eq!(buttons(&shell), [a, b, c], "raising A moved its button");
+    // The stacking order did change, and Alt+Tab still follows it.
+    let stacked: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+    assert_eq!(stacked, [b, c, a]);
+}
+
+/// A window that goes takes its button; one that arrives joins the end.
+#[test]
+fn a_closed_window_leaves_the_row_and_a_new_one_joins_its_end() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+    raise(&mut shell, a);
+
+    let without_b: Vec<WindowInfo> = as_list(&shell)
+        .into_iter()
+        .filter(|info| info.id != b.0)
+        .collect();
+    shell.apply_window_list(&here(&without_b));
+    assert_eq!(buttons(&shell), [a, c]);
+
+    let d = open(&mut shell, "D");
+    assert_eq!(buttons(&shell), [a, c, d]);
+}
+
+/// A click acts on the release now -- so that a press can become a drag --
+/// and is the same toggle it was: summon the window behind, put away the one
+/// in front.
+#[test]
+fn a_window_button_acts_on_the_release() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+
+    let at = button_of(&shell, a);
+    assert_eq!(
+        shell.handle_mouse(&click(at.0, at.1)),
+        ShellAction::Consumed
+    );
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(a, ShellControlAction::Activate))
+    );
+
+    let at = button_of(&shell, b);
+    shell.handle_mouse(&click(at.0, at.1));
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize))
+    );
+}
+
+/// Pressing the bar can move the focus before the release arrives. The toggle
+/// is decided by what was in front at the press, so a click on the front
+/// window's button still puts it away.
+#[test]
+fn what_was_in_front_at_the_press_decides_the_toggle() {
+    let mut shell = shell();
+    open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let at = button_of(&shell, b);
+    shell.handle_mouse(&click(at.0, at.1));
+
+    // The panel took the focus: no application window holds it now.
+    let mut list = as_list(&shell);
+    for info in &mut list {
+        info.focused = false;
+    }
+    shell.apply_window_list(&here(&list));
+    assert_eq!(shell.focused_window, None);
+
+    assert_eq!(
+        release(&mut shell, at),
+        ShellAction::Control(ShellRequest::window(b, ShellControlAction::Minimize))
+    );
+}
+
+/// A window that closes while its button is held asks for nothing.
+#[test]
+fn a_window_closed_while_its_button_is_held_asks_for_nothing() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let at = button_of(&shell, a);
+    shell.handle_mouse(&click(at.0, at.1));
+    shell.apply_window_list(&here(&[]));
+    assert_eq!(release(&mut shell, at), ShellAction::Consumed);
+}
+
+/// **Dragging a window's button moves it along the row**, and the release
+/// that ends the drag summons nothing.
+#[test]
+fn dragging_a_window_button_moves_it_along_the_row() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+
+    let from = button_of(&shell, a);
+    let last = shell.taskbar_button_rect(2);
+    let to = (last.x + last.w * 0.75, from.1);
+    shell.handle_mouse(&click(from.0, from.1));
+    // Past its own middle, short of its neighbour's: nothing moves yet.
+    move_to(&mut shell, (from.0 + 20.0, from.1));
+    assert_eq!(
+        buttons(&shell),
+        [a, b, c],
+        "a nudge swapped it with its neighbour"
+    );
+    move_to(&mut shell, to);
+    assert_eq!(
+        buttons(&shell),
+        [b, c, a],
+        "the row did not follow the drag"
+    );
+    assert_eq!(release(&mut shell, to), ShellAction::Consumed);
+    assert_eq!(buttons(&shell), [b, c, a]);
+
+    // And the new order holds when the stacking changes.
+    raise(&mut shell, b);
+    assert_eq!(buttons(&shell), [b, c, a]);
+}
+
+/// Carried up off the bar, a window's button stays where it last was: the
+/// row rearranges only under a pointer that is on it.
+#[test]
+fn a_window_button_carried_off_the_bar_stays_put() {
+    let mut shell = shell();
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
+
+    let from = button_of(&shell, a);
+    let last = shell.taskbar_button_rect(2);
+    let above_the_last = (last.x + last.w * 0.75, 500.0);
+    shell.handle_mouse(&click(from.0, from.1));
+    move_to(&mut shell, (from.0, 500.0));
+    move_to(&mut shell, above_the_last);
+    assert_eq!(
+        buttons(&shell),
+        [a, b, c],
+        "the row followed a pointer off the bar"
+    );
+    assert_eq!(release(&mut shell, above_the_last), ShellAction::Consumed);
+    assert_eq!(buttons(&shell), [a, b, c]);
+}
+
+/// A window's button stays among the window buttons: dragged over the pins
+/// it goes to the front of its own row, and the pins do not move.
+#[test]
+fn a_window_button_cannot_be_dragged_among_the_pins() {
+    appearance::config::testing::with_scratch_config("window-button-not-among-pins", |_root| {
+        let mut shell = shell();
+        let entry = shell.start_menu_entries()[0];
+        let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+        shell.pin_app(&exec, &name);
+        let a = open(&mut shell, "A");
+        let b = open(&mut shell, "B");
+
+        let from = button_of(&shell, b);
+        let pin = shell.taskbar_button_rect(0);
+        let to = (pin.x + 2.0, from.1);
+        shell.handle_mouse(&click(from.0, from.1));
+        move_to(&mut shell, to);
+        release(&mut shell, to);
+
+        assert_eq!(buttons(&shell), [b, a]);
+        assert_eq!(shell.pinned_apps().len(), 1);
+        assert_eq!(shell.taskbar_slots()[0], crate::TaskbarSlot::Pinned(0));
+    });
+}
+
+/// A window on another desktop keeps its place in the order while the user
+/// rearranges this desktop's buttons around it.
+#[test]
+fn a_window_on_another_desktop_keeps_its_place() {
+    let mut shell = shell();
+    shell.num_desktops = 2;
+    let mut away = app(2, "X");
+    away.workspace = 1;
+    shell.apply_window_list(&here(&[app(1, "A"), away, app(3, "B")]));
+    let (a, x, b) = (WindowId(1), WindowId(2), WindowId(3));
+    assert_eq!(buttons(&shell), [a, b]);
+
+    // B dragged in front of A on this desktop.
+    let from = button_of(&shell, b);
+    let first = shell.taskbar_button_rect(0);
+    let to = (first.x + 2.0, from.1);
+    shell.handle_mouse(&click(from.0, from.1));
+    move_to(&mut shell, to);
+    release(&mut shell, to);
+    assert_eq!(buttons(&shell), [b, a]);
+
+    // X comes to this desktop, and stands where it stood: between them.
+    let mut here_now = app(2, "X");
+    here_now.workspace = 0;
+    shell.apply_window_list(&here(&[app(1, "A"), here_now, app(3, "B")]));
+    assert_eq!(buttons(&shell), [b, x, a]);
+}
+
+/// A pin nudged past its own middle stays where it is: a button moves only
+/// when the pointer crosses a *neighbour's* middle. The rule used to count the
+/// dragged button's own middle, so a drag to the right swapped it with its
+/// neighbour a few pixels in -- and a drag to the left did not, which is how
+/// it went unnoticed.
+#[test]
+fn a_pin_nudged_past_its_own_middle_stays_put() {
+    appearance::config::testing::with_scratch_config("pin-nudge", |_root| {
+        let mut shell = shell();
+        let apps: Vec<String> = shell
+            .start_menu_entries()
+            .iter()
+            .take(3)
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        for exec in &apps {
+            shell.pin_app(exec, exec);
+        }
+        let order = |shell: &DesktopShell| -> Vec<String> {
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|app| app.exec_path.clone())
+                .collect()
+        };
+
+        let first = shell.taskbar_button_rect(0);
+        let y = first.y + first.h / 2.0;
+        let (pressed, nudged) = (first.x + first.w * 0.25, first.x + first.w * 0.75);
+        shell.handle_mouse(&click(pressed, y));
+        move_to(&mut shell, (nudged, y));
+        assert_eq!(order(&shell), apps, "a nudge swapped it with its neighbour");
+        release(&mut shell, (nudged, y));
+        assert_eq!(order(&shell), apps);
+
+        // Past the neighbour's middle, it does move.
+        let second = shell.taskbar_button_rect(1);
+        let past = second.x + second.w * 0.75;
+        shell.handle_mouse(&click(pressed, y));
+        move_to(&mut shell, (past, y));
+        release(&mut shell, (past, y));
+        assert_eq!(
+            order(&shell),
+            [apps[1].clone(), apps[0].clone(), apps[2].clone()]
+        );
+    });
+}
+
+// ---- the space and the divider between the two sections --------------------------
+
+/// A shell with one pinned program and `windows` windows open.
+fn pinned_and_open(windows: usize) -> DesktopShell {
+    let mut shell = shell();
+    let entry = shell.start_menu_entries()[0];
+    let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
+    shell.pin_app(&exec, &name);
+    for n in 0..windows {
+        open(&mut shell, &format!("window {n}"));
+    }
+    shell
+}
+
+/// `design.txt`: pinned programs on the left, running ones to their right,
+/// "with a small space and a divider between the two sections". The gap
+/// between the sections is wider than the gap between two buttons, and the
+/// divider stands in its middle, drawn.
+#[test]
+fn a_space_and_a_divider_set_the_pins_apart_from_the_windows() {
+    appearance::config::testing::with_scratch_config("taskbar-divider", |_root| {
+        let shell = pinned_and_open(2);
+        let (pin, first, second) = (
+            shell.taskbar_button_rect(0),
+            shell.taskbar_button_rect(1),
+            shell.taskbar_button_rect(2),
+        );
+        let between_sections = first.x - (pin.x + pin.w);
+        let between_buttons = second.x - (first.x + first.w);
+        assert!(
+            between_sections > between_buttons,
+            "the sections are {between_sections}px apart, the buttons {between_buttons}px"
+        );
+
+        let divider = shell.taskbar_divider_rect().expect("no divider");
+        assert!(divider.x >= pin.x + pin.w && divider.x + divider.w <= first.x);
+        let (dx, dy) = centre(divider);
+        assert_eq!(
+            shell.hit_test(dx, dy),
+            Hit::TaskbarPanel,
+            "the divider is not a button"
+        );
+        let drawn = shell.render_taskbar().commands.iter().any(|cmd| {
+            matches!(cmd, RenderCommand::FillRect { x, y, width, height, .. }
+                if (*x, *y, *width, *height) == (divider.x, divider.y, divider.w, divider.h))
+        });
+        assert!(drawn, "the divider is not drawn");
+    });
+}
+
+/// A divider with nothing on one side divides nothing: no pins, or no
+/// windows, and the buttons are evenly spaced with no line.
+#[test]
+fn one_section_alone_has_no_divider() {
+    appearance::config::testing::with_scratch_config("taskbar-no-divider", |_root| {
+        let only_pinned = pinned_and_open(0);
+        assert_eq!(only_pinned.taskbar_divider_rect(), None);
+
+        let mut only_windows = shell();
+        open(&mut only_windows, "A");
+        open(&mut only_windows, "B");
+        assert_eq!(only_windows.taskbar_divider_rect(), None);
+        let (a, b) = (
+            only_windows.taskbar_button_rect(0),
+            only_windows.taskbar_button_rect(1),
+        );
+        assert!((b.x - (a.x + a.w) - only_windows.scale(crate::TASKBAR_BUTTON_GAP)).abs() < 0.01);
+    });
+}
+
+/// The extra space comes out of the buttons' share, not the tray's: a full
+/// bar still stops short of the tray.
+#[test]
+fn a_full_bar_with_a_divider_still_stops_short_of_the_tray() {
+    appearance::config::testing::with_scratch_config("taskbar-divider-full", |_root| {
+        let shell = pinned_and_open(30);
+        let last = shell.taskbar_button_rect(shell.taskbar_slots().len() - 1);
+        assert!(
+            last.x + last.w <= shell.tray_x(),
+            "the last button ends at {}, past the tray at {}",
+            last.x + last.w,
+            shell.tray_x()
+        );
+    });
+}
+
+// ---- the start menu's places column ------------------------------------------------
+
+/// `design.txt` line 721: the start menu contains a "settings icon" and a
+/// "terminal"; the Aero reference's places column lists the user's folders
+/// above them. Each place starts what it names and closes the menu: the
+/// file manager on a folder, or the program -- or, for Keyboard Shortcuts,
+/// the shell's own card of shortcuts, which no chord opens by default (§1416).
+#[test]
+fn the_start_menus_places_open_folders_and_start_settings_and_the_terminal() {
+    for which in crate::StartShortcut::ALL {
+        let mut shell = shell();
+        shell.toggle_start_menu();
+        let rect = shell.start_shortcut_rect(*which);
+        let (x, y) = centre(rect);
+        assert_eq!(shell.hit_test(x, y), Hit::StartMenuShortcut(*which));
+        let action = click_at(&mut shell, rect);
+        assert!(!shell.start_menu_open, "{which:?} left the menu open");
+        let Some(program) = which.program() else {
+            assert_eq!(*which, crate::StartShortcut::KeyboardShortcuts);
+            assert!(
+                matches!(action, ShellAction::Consumed),
+                "{which:?} did something besides open the card: {action:?}"
+            );
+            assert!(shell.shortcut_card_open, "{which:?} did not open the card");
+            assert!(
+                shell.render_shortcut_card().is_some(),
+                "the card is open and draws nothing"
+            );
+            continue;
+        };
+        assert!(
+            !shell.shortcut_card_open,
+            "{which:?} opened the card of shortcuts"
+        );
+        let ShellAction::Launch(launch) = action else {
+            panic!("{which:?} started nothing");
+        };
+        assert_eq!(
+            launch.program,
+            std::path::PathBuf::from(program),
+            "{which:?}"
+        );
+        // Whatever the home is here -- the variable is the process's -- a
+        // folder opens *its* folder, and a program is started with nothing.
+        match which.folder() {
+            Some("") | None => assert!(launch.args.len() <= 1, "{which:?}: {launch:?}"),
+            Some(sub) => assert!(
+                launch.args.is_empty() || std::path::Path::new(&launch.args[0]).ends_with(sub),
+                "{which:?} opened {launch:?}"
+            ),
+        }
+    }
+    assert_eq!(
+        crate::StartShortcut::Settings.program(),
+        Some("/usr/bin/settings")
+    );
+    assert_eq!(
+        crate::StartShortcut::Terminal.program(),
+        Some("/usr/bin/terminal")
+    );
+}
+
+/// Choosing Keyboard Shortcuts while the card is somehow already open leaves
+/// it open: the place asks for the card, it does not toggle it. (Opening the
+/// menu closes the card, so this is reached only by a state the shell is not
+/// meant to get into -- which is exactly when "toggle" would do the opposite
+/// of what the user clicked.)
+#[test]
+fn the_keyboard_shortcuts_place_opens_the_card_and_never_closes_it() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let rect = shell.start_shortcut_rect(crate::StartShortcut::KeyboardShortcuts);
+    assert!(rect.w > 0.0, "the place has no room on a 1000x800 display");
+    shell.shortcut_card_open = true;
+    assert!(matches!(click_at(&mut shell, rect), ShellAction::Consumed));
+    assert!(
+        shell.shortcut_card_open,
+        "the click shut the card it asked for"
+    );
+    assert!(!shell.start_menu_open);
+}
+
+/// A folder is found under the home it is given; with no home, the file
+/// manager opens where it opens by itself.
+#[test]
+fn a_place_opens_its_folder_under_the_home() {
+    use crate::StartShortcut as Place;
+    use std::ffi::OsString;
+    let home = std::path::Path::new("/home/ann");
+    let arg = |place: Place| {
+        place
+            .launch(Some(home))
+            .unwrap_or_else(|| panic!("{place:?} starts nothing"))
+            .args
+    };
+    assert_eq!(arg(Place::Home), [OsString::from("/home/ann")]);
+    assert_eq!(
+        arg(Place::Documents),
+        [home.join("Documents").into_os_string()]
+    );
+    assert_eq!(
+        arg(Place::Downloads),
+        [home.join("Downloads").into_os_string()]
+    );
+    assert!(arg(Place::Settings).is_empty());
+    let homeless = Place::Pictures
+        .launch(None)
+        .expect("a folder starts the file manager");
+    assert!(homeless.args.is_empty());
+    assert_eq!(
+        homeless.program,
+        std::path::PathBuf::from(crate::launcher::FILE_MANAGER)
+    );
+    // The card of shortcuts is the shell's own: no program, home or not.
+    assert!(Place::KeyboardShortcuts.launch(Some(home)).is_none());
+    assert!(Place::KeyboardShortcuts.launch(None).is_none());
+}
+
+/// Every place fits the places column at every scale -- below the user,
+/// above the power button, one under another -- and is drawn where it is hit.
+#[test]
+fn the_places_fit_their_column_at_every_scale() {
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let column = shell.start_menu_right_rect();
+        let user = shell.start_user_rect();
+        let power = shell.power_button_rect();
+        let mut below = user.y + user.h;
+        for which in crate::StartShortcut::ALL {
+            let rect = shell.start_shortcut_rect(*which);
+            assert!(
+                rect.w > 0.0 && rect.h > 0.0,
+                "{which:?} is empty at {percent}%"
+            );
+            assert!(
+                rect.x >= column.x && rect.x + rect.w <= column.x + column.w,
+                "{which:?} runs out of its column at {percent}%"
+            );
+            assert!(
+                rect.y >= below,
+                "{which:?} overlaps the one above at {percent}%"
+            );
+            assert!(
+                rect.y + rect.h <= power.y,
+                "{which:?} reaches the power button at {percent}%"
+            );
+            below = rect.y + rect.h;
+        }
+        let drawn = format!("{:?}", shell.render_start_menu().expect("the menu is open"));
+        for which in crate::StartShortcut::ALL {
+            assert!(
+                drawn.contains(&format!("\"{}\"", which.label())),
+                "{which:?} is not drawn at {percent}%"
+            );
+        }
+    }
+}
+
+/// The two columns keep to themselves at every scale: the rows and the
+/// search field in the programs column, the user, the places and the power
+/// button in the places column, and the two columns side by side filling the
+/// menu. A row as wide as the menu would highlight across the places, and a
+/// power button in the programs column would sit on the search field.
+#[test]
+fn the_programs_and_the_places_keep_to_their_columns() {
+    let inside = |outer: Rect, inner: Rect| {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.w <= outer.x + outer.w + 0.01
+            && inner.y + inner.h <= outer.y + outer.h + 0.01
+    };
+    for percent in [100, 150, 200] {
+        let mut shell = scaled(percent);
+        shell.toggle_start_menu();
+        let menu = shell.start_menu_rect();
+        let left = shell.start_menu_left_rect();
+        let right = shell.start_menu_right_rect();
+        assert_eq!(left.x, menu.x);
+        assert!(
+            (left.w + right.w - menu.w).abs() < 0.01,
+            "the columns do not fill the menu"
+        );
+        assert!(
+            (right.x - (left.x + left.w)).abs() < 0.01,
+            "a gap between the columns"
+        );
+        for row in 0..shell.start_menu_visible_rows() {
+            let rect = shell.start_menu_row_rect(row);
+            assert!(
+                inside(left, rect),
+                "row {row} leaves the programs at {percent}%"
+            );
+        }
+        let search = shell.start_search_rect();
+        assert!(
+            inside(left, search),
+            "the search field leaves the programs at {percent}%"
+        );
+        let last = shell.start_menu_row_rect(shell.start_menu_visible_rows().saturating_sub(1));
+        assert!(
+            last.y + last.h <= search.y + 0.01,
+            "a row covers the search at {percent}%"
+        );
+        assert!(
+            inside(right, shell.start_user_rect()),
+            "the user at {percent}%"
+        );
+        assert!(
+            inside(right, shell.power_button_rect()),
+            "the power button at {percent}%"
+        );
+    }
+}
+
+/// A menu clamped too short for every place leaves the lower ones out rather
+/// than drawing them over the power button, where they would take its press.
+#[test]
+fn a_menu_too_short_for_every_place_leaves_the_lower_ones_out() {
+    let mut shell = DesktopShell::new(1000, 360);
+    shell.toggle_start_menu();
+    let power = shell.power_button_rect();
+    assert!(power.h > 0.0);
+    let shown: Vec<_> = crate::StartShortcut::ALL
+        .iter()
+        .filter(|w| shell.start_shortcut_rect(**w).w > 0.0)
+        .collect();
+    assert!(
+        shown.len() < crate::StartShortcut::ALL.len(),
+        "the fixture is not short enough"
+    );
+    for which in crate::StartShortcut::ALL {
+        let rect = shell.start_shortcut_rect(*which);
+        assert!(rect.w == 0.0 || rect.y + rect.h <= power.y, "{which:?}");
+    }
+    let (x, y) = centre(power);
+    assert_eq!(shell.hit_test(x, y), Hit::PowerButton);
+}
+
+/// Every place, and the power button, draws its icon to the left of its
+/// words; the id each is drawn under names that icon, at that size, in the
+/// colour of the words -- the same id every frame, and forgotten when the
+/// appearance changes, when every icon is drawn again in new colours.
+#[test]
+fn every_place_and_the_power_button_draws_its_icon() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let tree = shell.render_start_menu().expect("open");
+    let images: Vec<(f32, f32, f32, u64)> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                image_id,
+                ..
+            } => Some((*x, *y, *width, *image_id)),
+            _ => None,
+        })
+        .collect();
+    let text_x = |label: &str| {
+        tree.commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { x, text, .. } if text == label => Some(*x),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"))
+    };
+    let mut targets: Vec<(Rect, &str, &str)> = crate::StartShortcut::ALL
+        .iter()
+        .map(|w| (shell.start_shortcut_rect(*w), w.icon_name(), w.label()))
+        .collect();
+    targets.push((shell.power_button_rect(), "system-shutdown", "Shut down"));
+    for (rect, name, label) in targets {
+        let &(x, _, width, id) = images
+            .iter()
+            .find(|(x, y, ..)| rect.contains(*x + 1.0, *y + 1.0))
+            .unwrap_or_else(|| panic!("{label} has no icon"));
+        assert_ne!(
+            id & crate::ICON_ID_TAG,
+            0,
+            "{label}'s icon is outside the icons' ids"
+        );
+        let request = shell.icon_request(id).expect("the request was not kept");
+        assert_eq!(request.name, name, "{label}");
+        assert_eq!(request.color, shell.theme.start_menu_fg, "{label}");
+        assert_eq!(request.px as f32, width, "{label}");
+        assert!(
+            text_x(label) >= x + width,
+            "{label}'s words overlap its icon"
+        );
+    }
+
+    let again: Vec<u64> = shell
+        .render_start_menu()
+        .expect("open")
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        again,
+        images.iter().map(|i| i.3).collect::<Vec<_>>(),
+        "ids change between frames"
+    );
+
+    shell.set_appearance(AppearanceSettings::default());
+    assert!(
+        shell.icon_request(images[0].3).is_none(),
+        "a request outlived the appearance it was drawn in"
+    );
+}
+
+/// **The shell answers for the desktop's icons as for its menus'**, which is
+/// what the session asks before it uploads one -- and forgets them when the
+/// appearance changes, since they are drawn again in the new colours.
+#[test]
+fn the_shell_answers_for_the_desktops_icons_and_forgets_them_on_a_change() {
+    let mut shell = shell();
+    let (x, y) = shell.icons.grid().from_cell(0, 0);
+    shell.icons.add_icon(
+        "notes.txt",
+        icons::IconType::File,
+        icons::IconAction::Custom("notes".into()),
+        x,
+        y,
+    );
+    let ids: Vec<u64> = shell
+        .render_icons()
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids.len(), 1, "one icon, one image: {ids:?}");
+    let request = shell
+        .icon_request(ids[0])
+        .expect("the shell does not know the desktop's icon");
+    assert_eq!(request.name, icons::IconType::File.icon_name());
+
+    // And an overlay's, which the overlay manager keeps.
+    shell.show_osd(crate::osd::OsdKind::BatteryLow { percent: 7 });
+    let overlay: Vec<u64> = shell
+        .render_osd()
+        .expect("the overlay is up")
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(overlay.len(), 1, "the overlay's icon: {overlay:?}");
+    assert!(
+        shell.icon_request(overlay[0]).is_some(),
+        "the shell does not know the overlay's icon"
+    );
+
+    // And a widget's, which the widget layer keeps.
+    shell.activate_desktop_menu_item(DesktopShell::MENU_ADD_CLOCK);
+    let widget: Vec<u64> = shell
+        .render_widgets()
+        .iter()
+        .filter_map(|c| match c {
+            RenderCommand::Image { image_id, .. } => Some(*image_id),
+            _ => None,
+        })
+        .collect();
+    assert!(!widget.is_empty(), "the clock widget drew no icon");
+    assert!(
+        shell.icon_request(widget[0]).is_some(),
+        "the shell does not know the widget's icon"
+    );
+
+    shell.set_appearance(AppearanceSettings::default());
+    assert!(
+        shell.icon_request(widget[0]).is_none(),
+        "a widget's icon request outlived the appearance it was drawn in"
+    );
+    assert!(
+        shell.icon_request(ids[0]).is_none(),
+        "a desktop icon's request outlived the appearance it was drawn in"
+    );
+    assert!(
+        shell.icon_request(overlay[0]).is_none(),
+        "an overlay's icon request outlived the appearance it was drawn in"
+    );
+}
+
+/// The places column says who is using the desktop, once somebody is known:
+/// their name, and its first letter as their picture.
+#[test]
+fn the_places_column_names_the_user_once_known() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    let drawn = format!("{:?}", shell.render_start_menu().expect("open"));
+    assert!(!drawn.contains("\"ann\""));
+    shell.set_user_name("ann");
+    let drawn = format!("{:?}", shell.render_start_menu().expect("open"));
+    assert!(drawn.contains("\"ann\""), "the name is not drawn");
+    assert!(drawn.contains("\"A\""), "the initial is not drawn");
+    let user = shell.start_user_rect();
+    let (x, y) = centre(user);
+    assert_eq!(shell.hit_test(x, y), Hit::StartMenuPanel);
+}
+
+/// With the power menu open, a press on a place closes the power menu and
+/// nothing else -- the same as a press anywhere else in the start menu.
+#[test]
+fn a_press_on_a_place_first_closes_the_power_menu() {
+    let mut shell = shell();
+    shell.toggle_start_menu();
+    shell.toggle_power_menu();
+    let rect = shell.start_shortcut_rect(crate::StartShortcut::Home);
+    // Not under the power menu, which rises from the foot of the column.
+    let (x, y) = centre(rect);
+    assert!(
+        !shell.power_menu_rect().contains(x, y),
+        "the fixture is covered"
+    );
+    assert_eq!(click_at(&mut shell, rect), ShellAction::Consumed);
+    assert!(!shell.power_menu_open);
+    assert!(shell.start_menu_open, "the start menu closed as well");
 }

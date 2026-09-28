@@ -154,6 +154,13 @@ pub fn load(name: &str) -> Document {
 ///
 /// If there is no configuration directory to write to, if it cannot be
 /// created, or if the write or the rename fails.
+///
+/// # Panics
+///
+/// Only with the `testing` feature -- which only a `[dev-dependencies]` entry
+/// turns on, so no shipped program has it -- and only when the file would be
+/// written outside the system's temporary directory: a test writing the
+/// developer's own configuration. See `testing::refuse_a_real_configuration`.
 pub fn store(name: &str, doc: &Document) -> io::Result<()> {
     let path = path_for(name).ok_or_else(|| {
         io::Error::new(
@@ -161,6 +168,8 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
             "no configuration directory: neither XDG_CONFIG_HOME nor HOME is set",
         )
     })?;
+    #[cfg(feature = "testing")]
+    testing::refuse_a_real_configuration(name, &path);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -239,6 +248,22 @@ pub struct Watcher {
     name: String,
     /// What the file held when it was last looked at.
     seen: Seen,
+    /// What the settings depend on besides their own file, if anything; see
+    /// [`with_dependencies`](Self::with_dependencies).
+    depends: Option<Depends>,
+}
+
+/// A [`Watcher`]'s view of what the settings depend on besides their file.
+#[derive(Debug, Clone)]
+struct Depends {
+    /// Computes the fingerprint of everything else the settings are read
+    /// with, from the document.
+    of: fn(&Document) -> Vec<u8>,
+    /// The document last read, which the fingerprint is recomputed from when
+    /// the file itself has not changed.
+    doc: Document,
+    /// The fingerprint at the last look; `None` before the first.
+    seen: Option<Vec<u8>>,
 }
 
 /// What a [`Watcher`] found the last time it looked.
@@ -276,6 +301,37 @@ impl Watcher {
         Self {
             name: String::from(name),
             seen: Seen::Unread,
+            depends: None,
+        }
+    }
+
+    /// Watch a settings group whose meaning depends on more than its own
+    /// file.
+    ///
+    /// `depends` computes, from the document, a fingerprint of everything else
+    /// the settings are read with -- the bytes of a file the document names,
+    /// say. A look that finds the file itself unchanged recomputes the
+    /// fingerprint from the document last read, and reports that document
+    /// again if it differs: the settings a caller derives from it would now
+    /// come out differently, and "the settings changed" is the only thing a
+    /// caller of [`poll`](Self::poll) wants to learn.
+    ///
+    /// The appearance settings are the case this exists for: `theme.colors`
+    /// names a theme, and editing that theme's own file changes the colours
+    /// without changing a byte of `appearance.yaml` -- which a watcher of the
+    /// file alone reported as nothing at all. See `appearance::watcher`.
+    ///
+    /// A plain function rather than a closure, so the watcher stays `Clone`
+    /// and `Debug` and cannot capture state that goes stale.
+    #[must_use]
+    pub fn with_dependencies(name: &str, depends: fn(&Document) -> Vec<u8>) -> Self {
+        Self {
+            depends: Some(Depends {
+                of: depends,
+                doc: Document::new(),
+                seen: None,
+            }),
+            ..Self::new(name)
         }
     }
 
@@ -303,13 +359,24 @@ impl Watcher {
             None | Some(Err(_)) => Seen::Absent,
         };
         if found == self.seen {
-            return None;
+            // The file is as it was; what it depends on may not be.
+            let depends = self.depends.as_mut()?;
+            let now = (depends.of)(&depends.doc);
+            if depends.seen.as_ref() == Some(&now) {
+                return None;
+            }
+            depends.seen = Some(now);
+            return Some(depends.doc.clone());
         }
         let doc = match &found {
             Seen::Contents(text) => Document::parse(text),
             Seen::Unread | Seen::Absent => Document::new(),
         };
         self.seen = found;
+        if let Some(depends) = self.depends.as_mut() {
+            depends.seen = Some((depends.of)(&doc));
+            depends.doc = doc.clone();
+        }
         Some(doc)
     }
 }
@@ -415,8 +482,8 @@ pub mod testing {
         }
     }
 
-    /// Restores `XDG_CONFIG_HOME` and `HOME` to what the process had, on every
-    /// exit path.
+    /// Restores `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and `HOME` to what the
+    /// process had, on every exit path.
     ///
     /// This used to be straight-line code after the call to `body`, which meant
     /// a body that panicked — i.e. any failing assertion, which is the normal
@@ -427,6 +494,7 @@ pub mod testing {
     /// comment says it exists to prevent, so the restore has to be a `Drop`.
     struct EnvRestore {
         xdg: Option<OsString>,
+        data: Option<OsString>,
         home: Option<OsString>,
     }
 
@@ -440,6 +508,10 @@ pub mod testing {
                     Some(v) => env::set_var("XDG_CONFIG_HOME", v),
                     None => env::remove_var("XDG_CONFIG_HOME"),
                 }
+                match self.data.take() {
+                    Some(v) => env::set_var("XDG_DATA_HOME", v),
+                    None => env::remove_var("XDG_DATA_HOME"),
+                }
                 match self.home.take() {
                     Some(v) => env::set_var("HOME", v),
                     None => env::remove_var("HOME"),
@@ -451,6 +523,12 @@ pub mod testing {
     /// Run `body` with the configuration directory pointed at a fresh empty
     /// directory, which is removed afterwards. The directory is passed in so
     /// the body can inspect what was written.
+    ///
+    /// The user's *data* directory (`XDG_DATA_HOME`) is pointed inside it as
+    /// well, at [`scratch_data_dir`]. Installed themes live there, and a
+    /// scratch user whose settings are private but whose themes are the
+    /// developer's own would make a test that names a theme pass or fail by
+    /// what happens to be installed on the machine running it.
     ///
     /// # Panics
     ///
@@ -473,12 +551,14 @@ pub mod testing {
 
         let restore = EnvRestore {
             xdg: env::var_os("XDG_CONFIG_HOME"),
+            data: env::var_os("XDG_DATA_HOME"),
             home: env::var_os("HOME"),
         };
         // SAFETY: the lock above makes this the only thread touching the
         // environment for the duration, which is what `set_var` requires.
         unsafe {
             env::set_var("XDG_CONFIG_HOME", root.dir());
+            env::set_var("XDG_DATA_HOME", scratch_data_dir(root.dir()));
             // Removed as well as overridden: `config_dir` prefers XDG, but a
             // test that clears XDG itself should not fall through to the
             // developer's real home.
@@ -496,6 +576,46 @@ pub mod testing {
         out
     }
 
+    /// Refuse -- by panicking -- a [`store`](super::store) of `name` at `path`
+    /// when `path` is not inside the system's temporary directory.
+    ///
+    /// Compiled only with this feature, which only a test build has, so a
+    /// write anywhere else is a test writing the developer's own
+    /// `~/.config/slateos` -- which has happened, and left files behind that
+    /// nobody could account for (`known-issues.md`, "[E] A test that forgets
+    /// its scratch settings writes the developer's own"). Until this, the only
+    /// guard was each test's author remembering [`with_scratch_config`].
+    ///
+    /// **Decided by where the file would go, not by who is asking.** The
+    /// alternative -- a flag set by [`with_scratch_config`] on the calling
+    /// thread -- also catches a forgetful test that happens to run while
+    /// another holds a scratch turn, which this lets through into *that*
+    /// test's scratch directory. But it refuses writes that harm nothing: a
+    /// test that makes its own [`ScratchDir`] and points `XDG_CONFIG_HOME` at
+    /// it, as this crate's own tests do, and a thread a test starts inside
+    /// its turn. The harm is the developer's configuration being written, so
+    /// that is what is tested for, and a forgetful test still fails -- on
+    /// every run but the rare one that overlaps another's turn.
+    ///
+    /// A panic rather than an error: most saves are `keep()` calls that show a
+    /// failure on screen rather than return it, and a `Result` a test may
+    /// ignore is the failure this exists to end.
+    ///
+    /// # Panics
+    ///
+    /// When `path` is outside `std::env::temp_dir()`.
+    pub(crate) fn refuse_a_real_configuration(name: &str, path: &Path) {
+        let temp = env::temp_dir();
+        assert!(
+            path.starts_with(&temp),
+            "settingsfile::store(\"{name}\") would write {} -- outside {}, so the developer's own \
+             configuration rather than a scratch one. This test forgot to borrow one: wrap it in \
+             settingsfile::testing::with_scratch_config.",
+            path.display(),
+            temp.display()
+        );
+    }
+
     /// The file a settings group would be written to inside the scratch
     /// directory `root`.
     #[must_use]
@@ -503,6 +623,15 @@ pub mod testing {
         let mut path = root.join("slateos").join(name);
         path.set_extension("yaml");
         path
+    }
+
+    /// What `XDG_DATA_HOME` names inside the scratch directory `root` -- the
+    /// user's data directory, as against their configuration. Beside the
+    /// configuration rather than equal to it, so a test cannot pass by
+    /// looking for a file in the wrong one of the two.
+    #[must_use]
+    pub fn scratch_data_dir(root: &Path) -> PathBuf {
+        root.join("data")
     }
 }
 
@@ -556,6 +685,53 @@ mod tests {
         out
     }
 
+    /// **A test build refuses to write outside a scratch configuration**:
+    /// with the `testing` feature, which only a test build has, a store that
+    /// would land outside the temporary directory panics before touching the
+    /// disk, naming the file and the fix -- and one inside a scratch directory
+    /// is written as ever. Compiled only with the feature: `cargo test -p
+    /// settingsfile --features testing`, and every workspace run, where a
+    /// dependent's `[dev-dependencies]` turns it on.
+    #[cfg(feature = "testing")]
+    #[test]
+    fn a_test_build_refuses_to_write_outside_a_scratch_configuration() {
+        // Not temporary -- and not writable either: a path under a file. If
+        // the refusal ever went, the store would fail here rather than leave a
+        // settings file in the source tree, which a first version of this test
+        // did under a mutant that removed the refusal.
+        let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml")
+            .join("under-a-file");
+        let real_str = real.to_str().expect("a UTF-8 path").to_string();
+        let doc = Document::parse("key: value\n");
+        let refused = with_env(Some(&real_str), None, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store("guard", &doc)))
+        });
+        let payload = refused.expect_err("a store outside the temporary directory went ahead");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains("with_scratch_config"),
+            "no word of the fix: {message}"
+        );
+        assert!(
+            message.contains("\"guard\""),
+            "no word of which file: {message}"
+        );
+        assert!(
+            !real.exists(),
+            "the refusal came after something was written"
+        );
+
+        let scratch = ScratchDir::new("store-guard");
+        let root = scratch.path("cfg");
+        let root_str = root.to_str().expect("a UTF-8 path").to_string();
+        with_env(Some(&root_str), None, || store("guard", &doc))
+            .expect("a store inside a scratch directory was refused");
+    }
+
     // -- Watcher --
 
     /// Run `body` against a private configuration directory, with a `write`
@@ -578,6 +754,87 @@ mod tests {
             fs::write(&path, text).expect("write settings file");
         };
         with_env(Some(&root_str), None, || body(&write))
+    }
+
+    /// The fingerprint the dependent watchers below are built with: the bytes
+    /// of the file the document's `depends_on` key names.
+    fn named_file(doc: &Document) -> Vec<u8> {
+        doc.get_str(&["depends_on"])
+            .and_then(|path| fs::read(path).ok())
+            .unwrap_or_default()
+    }
+
+    /// A change in what the settings depend on is a change in the settings,
+    /// though the file is untouched -- reported once, with the document.
+    #[test]
+    fn a_change_in_what_the_settings_depend_on_is_a_change() {
+        with_config_dir("watch-depends", |write| {
+            // Through `write`, which makes the directory; the path is asked of
+            // `path_for` afterwards, for the document to name.
+            write("dependency", "one");
+            let dependency = path_for("dependency").expect("a config path");
+            let named = format!(
+                "depends_on: '{}'\n",
+                dependency.to_str().expect("a test path is text")
+            );
+            write("appearance", &named);
+            let mut w = Watcher::with_dependencies("appearance", named_file);
+            assert!(w.poll().is_some(), "the first look reports");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            write("dependency", "two");
+            let doc = w.poll().expect("the dependency changed");
+            assert!(
+                doc.to_text().contains("depends_on"),
+                "the document comes with it"
+            );
+            assert!(w.poll().is_none(), "reported once");
+
+            // The file's own changes are still seen, and re-anchor the
+            // fingerprint on the new document: once it names another
+            // dependency, that one is watched and the old one is not.
+            write("other", "a");
+            let other = path_for("other").expect("a config path");
+            write(
+                "appearance",
+                &format!(
+                    "depends_on: '{}'\n",
+                    other.to_str().expect("a test path is text")
+                ),
+            );
+            assert!(w.poll().is_some(), "the file's own change");
+            assert!(w.poll().is_none());
+            write("dependency", "three");
+            assert!(
+                w.poll().is_none(),
+                "the old dependency is no longer watched"
+            );
+            write("other", "b");
+            assert!(w.poll().is_some(), "the new one is");
+        });
+    }
+
+    /// A plain watcher looks at its file and nothing else -- which is why the
+    /// dependent one exists.
+    #[test]
+    fn a_plain_watcher_does_not_look_past_its_file() {
+        with_config_dir("watch-plain", |write| {
+            // Through `write`, which makes the directory; the path is asked of
+            // `path_for` afterwards, for the document to name.
+            write("dependency", "one");
+            let dependency = path_for("dependency").expect("a config path");
+            write(
+                "appearance",
+                &format!(
+                    "depends_on: '{}'\n",
+                    dependency.to_str().expect("a test path is text")
+                ),
+            );
+            let mut w = Watcher::new("appearance");
+            assert!(w.poll().is_some());
+            write("dependency", "two");
+            assert!(w.poll().is_none());
+        });
     }
 
     #[test]

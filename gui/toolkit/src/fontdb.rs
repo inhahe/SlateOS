@@ -605,6 +605,82 @@ mod tests {
         assert_eq!(db_mono(entries).families(), vec!["consolas"]);
     }
 
+    // ---- the fallback faces (`crate::text::DEFAULT_FALLBACK_FAMILIES`) ----
+
+    /// A regular face of each of `families`, and nothing else.
+    fn installed(families: &[&str]) -> FontDb {
+        let entries: Vec<(String, Vec<&str>)> = families
+            .iter()
+            .map(|family| (format!("{family}.ttf"), vec![*family]))
+            .collect();
+        let rows: Vec<(&str, &[&str], u16, bool, u8)> = entries
+            .iter()
+            .map(|(path, names)| (path.as_str(), names.as_slice(), 400, false, 5))
+            .collect();
+        db(&rows)
+    }
+
+    /// **Each group gives the first of its members that is installed, and
+    /// the groups keep their order** -- broad coverage, then emoji, then
+    /// symbols, then scripts -- whatever order the faces were found in.
+    #[test]
+    fn the_fallbacks_are_the_first_installed_member_of_each_group_in_order() {
+        let db = installed(&[
+            "Noto Sans Hebrew",
+            "Segoe UI Emoji",
+            "Symbola",
+            "DejaVu Sans",
+            "Noto Sans",
+        ]);
+        assert_eq!(
+            crate::text::resolve_fallback_families(&db),
+            ["Noto Sans", "Segoe UI Emoji", "Symbola", "Noto Sans Hebrew"]
+        );
+    }
+
+    /// The OS's own emoji face is preferred to a host's, and one face per
+    /// group is used even when more are installed: two emoji faces would be
+    /// two faces parsed in every process for characters the first draws.
+    #[test]
+    fn one_face_answers_for_each_group() {
+        let db = installed(&["Segoe UI Emoji", "Noto Color Emoji", "Twemoji"]);
+        assert_eq!(
+            crate::text::resolve_fallback_families(&db),
+            ["Noto Color Emoji"]
+        );
+    }
+
+    /// One CJK face serves all four regional forms -- each is tens of
+    /// megabytes -- and the first listed of those installed is the one.
+    #[test]
+    fn one_cjk_face_serves_all_four() {
+        let db = installed(&["Noto Sans CJK KR", "Noto Sans CJK JP"]);
+        assert_eq!(
+            crate::text::resolve_fallback_families(&db),
+            ["Noto Sans CJK JP"]
+        );
+    }
+
+    /// Nothing installed is no fallbacks -- characters the UI face lacks stay
+    /// boxes, as they were -- and a family not on the list is never used.
+    #[test]
+    fn only_listed_installed_families_are_fallbacks() {
+        assert!(crate::text::resolve_fallback_families(&FontDb::new()).is_empty());
+        let db = installed(&["Comic Sans MS", "Wingdings"]);
+        assert!(crate::text::resolve_fallback_families(&db).is_empty());
+    }
+
+    /// Names are matched as the rest of the index matches them, whatever
+    /// capitals the font file uses.
+    #[test]
+    fn a_fallback_is_found_whatever_its_capitals() {
+        let db = installed(&["noto color emoji", "NOTO SANS"]);
+        assert_eq!(
+            crate::text::resolve_fallback_families(&db),
+            ["Noto Sans", "Noto Color Emoji"]
+        );
+    }
+
     #[test]
     fn an_empty_index_reports_itself_empty() {
         let db = FontDb::new();

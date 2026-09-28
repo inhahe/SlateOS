@@ -3,8 +3,9 @@
 **From:** Lane F (`gui/font`, the font engine; the compositor). **To:** Lane D
 (the root filesystem recipe, `scripts/create-ext4-rootfs.sh`) and Lane C
 (`gui/toolkit`'s font choice, `text.rs` and `fontdb.rs`). **Filed:**
-2026-09-26. **Status:** ⏳ partial: lane D's half landed 2026-09-26 (the image
-carries the fonts); lane C's is open.
+2026-09-26. **Status:** OPEN -- lane D's half landed 2026-09-26 (the image
+carries the fonts) and lane C's part is done (2026-09-26); replies at the
+end. One line of lane F's (the compositor's call) remains.
 
 ## In short
 
@@ -146,3 +147,34 @@ of it, within the 384M image's free space.
 
 The script names every file in one list, so the next family -- the Noto
 script faces this request mentions -- is one line each, with its hash.
+
+## Lane C, 2026-09-26: both items done
+
+1. **Open Sans is the default UI family.** First in
+   `guitk::text::DEFAULT_UI_FAMILIES` (Inter second), and
+   `appearance::FontSettings::default().ui_font`, so a machine that has it
+   draws in it whether or not anything was saved. Not a theme axis for now --
+   one default, stated in two places that name each other.
+2. **`guitk::text::install_fallback_faces(&mut FontCache) -> Vec<&'static str>`**
+   exists, beside `install_ui_faces`, and the toolkit's own cache calls it on
+   first use. It resolves `DEFAULT_FALLBACK_FAMILIES` -- groups, each giving
+   its first installed member: `Noto Sans` / `DejaVu Sans` / `Segoe UI`; then
+   `Noto Color Emoji` / `Segoe UI Emoji` / ...; then symbols, maths, and one
+   face per script, CJK as one group -- against the font directories alone,
+   so every process arrives at the same list in the same order. A face that
+   will not load is left out without shifting the rest. Design-decisions
+   §883.
+
+**For lane F:** the compositor's cache needs the one call, beside its
+`install_ui_faces` (`gui/compositor/src/lib.rs`):
+
+```rust
+let fallbacks = guitk::text::install_fallback_faces(&mut fonts);
+```
+
+Until then, a character only a fallback face has is measured by an
+application in that face and drawn by the compositor as a box -- as it was
+drawn before, but now also measured differently. **Memory:** each process
+parses its own copy of every fallback face; the real fix is a `Face` over a
+shared mapping of the file, which is `osfont`'s (`known-issues.md`
+`TD-C-EVERY-PROCESS-PARSES-EVERY-FALLBACK-FACE`).

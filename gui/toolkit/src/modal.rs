@@ -57,9 +57,7 @@ const DIALOG_CORNER_RADIUS: f32 = 12.0;
 const TITLE_BAR_HEIGHT: f32 = 44.0;
 const BUTTON_HEIGHT: f32 = 34.0;
 const BUTTON_MIN_WIDTH: f32 = 80.0;
-const BUTTON_PADDING_H: f32 = 16.0;
 const BUTTON_SPACING: f32 = 8.0;
-const BUTTON_CORNER_RADIUS: f32 = 6.0;
 const CONTENT_PADDING: f32 = 24.0;
 const ICON_SIZE: f32 = 40.0;
 const ICON_PADDING: f32 = 16.0;
@@ -90,12 +88,6 @@ const SHADOW_BLUR: f32 = 24.0;
 const SHADOW_OFFSET_Y: f32 = 8.0;
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 100);
 const CLOSE_BUTTON_SIZE: f32 = 28.0;
-/// How far a hovered button is moved towards white, as a fraction.
-///
-/// Applied to whichever colour the button's role already gives it, rather than
-/// swapping in one shared highlight, so a hovered destructive button stays
-/// visibly red.
-const HOVER_LIGHTEN: f32 = 0.15;
 
 // --- DialogResult ---
 
@@ -237,8 +229,9 @@ impl DialogButton {
     /// of the constant, which was harmless only while every button was exactly
     /// as wide as every other.
     fn width(&self) -> f32 {
-        let text = crate::text::measure(&self.label, FONT_SIZE, FontWeightHint::Bold);
-        BUTTON_MIN_WIDTH.max(text + BUTTON_PADDING_H * 2.0)
+        // The toolkit button's own measure, so the rectangle laid out is the
+        // one the label was measured for when it is drawn.
+        crate::button::width(&self.label).max(BUTTON_MIN_WIDTH)
     }
 }
 
@@ -1058,65 +1051,31 @@ impl AlertDialog {
             let is_focused = i == self.focused_button;
             let is_hovered = self.hovered_button == Some(i);
 
-            // Button background. Hover lightens whatever the role's colour is,
-            // rather than substituting one shared highlight colour, so a hovered
-            // destructive button is still visibly the destructive one.
-            let (base_bg, text_color) = match btn.role() {
-                ButtonRole::Primary => (palette.blue, palette.crust),
-                ButtonRole::Secondary => (palette.surface1, palette.text),
-                ButtonRole::Destructive => (palette.red, palette.crust),
+            // The toolkit's button (`crate::button`): the reference's face,
+            // tinted with the accent for the dialog's own action and with red
+            // for one that destroys something, so a hovered "Erase Disk" is
+            // still visibly the destructive one.
+            let kind = match btn.role() {
+                ButtonRole::Primary => crate::button::Kind::Primary,
+                ButtonRole::Secondary => crate::button::Kind::Plain,
+                ButtonRole::Destructive => crate::button::Kind::Destructive,
             };
-            let bg_color = if is_hovered {
-                base_bg.lerp(Color::WHITE, HOVER_LIGHTEN)
-            } else {
-                base_bg
-            };
-            tree.push(RenderCommand::FillRect {
-                x: btn_x,
-                y,
-                width: btn_w,
-                height: btn_h,
-                color: bg_color,
-                corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
-            });
-
-            // Focus ring.
-            //
-            // The width arrives already multiplied out, so this is not the
-            // caller that forgets to scale. The *offset* grows with it and the
-            // corner radius follows, so a thicker ring stays a ring around the
-            // button rather than creeping over it -- at the old fixed 2.0 the
-            // three numbers were 2, 4 and +2, which is this arithmetic with
-            // the width substituted.
-            if is_focused {
-                let ring = self.focus_ring_width;
-                tree.push(RenderCommand::StrokeRect {
-                    x: btn_x - ring,
-                    y: y - ring,
-                    width: btn_w + ring * 2.0,
-                    height: btn_h + ring * 2.0,
-                    color: palette.lavender,
-                    line_width: ring,
-                    corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + ring),
-                });
-            }
-
-            // Button label.
-            let label = btn.label();
-            tree.push(RenderCommand::Text {
-                // Centred on the label's measured width. The flat 7px-per-byte
-                // guess this replaces drifted further off-centre the longer the
-                // label was, and mis-centred non-ASCII labels badly.
-                x: btn_x
-                    + (btn_w - crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold)) / 2.0,
-                y: y + (btn_h - FONT_SIZE) / 2.0,
-                text: label.to_string(),
-                color: text_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            // The focus ring's width arrives already multiplied out for
+            // accessibility, so this is not the caller that forgets to scale.
+            crate::button::draw(
+                tree,
+                palette,
+                (btn_x, y, btn_w, btn_h),
+                btn.label(),
+                kind,
+                crate::button::State {
+                    hovered: is_hovered,
+                    focused: is_focused,
+                    ..crate::button::State::default()
+                },
+                palette.base,
+                self.focus_ring_width,
+            );
         }
     }
 
@@ -2129,70 +2088,38 @@ impl InputDialog {
         let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
         let btn_start_x = x + width - CONTENT_PADDING - BUTTON_MIN_WIDTH * 2.0 - BUTTON_SPACING;
 
-        // OK button.
-        let ok_focused = self.focused_element == InputFocus::OkButton;
-        tree.push(RenderCommand::FillRect {
-            x: btn_start_x,
-            y: buttons_y,
-            width: BUTTON_MIN_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: palette.blue,
-            corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
-        });
-        if ok_focused {
-            tree.push(RenderCommand::StrokeRect {
-                x: btn_start_x - 2.0,
-                y: buttons_y - 2.0,
-                width: BUTTON_MIN_WIDTH + 4.0,
-                height: BUTTON_HEIGHT + 4.0,
-                color: palette.lavender,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
-            });
-        }
-        tree.push(RenderCommand::Text {
-            x: btn_start_x + (BUTTON_MIN_WIDTH - 18.0) / 2.0,
-            y: buttons_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
-            text: String::from("OK"),
-            color: palette.crust,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Cancel button.
+        // OK and Cancel, as the toolkit draws a button: OK the dialog's own
+        // action. Their labels used to be placed by a guessed width -- 18 for
+        // "OK", 42 for "Cancel" -- and are centred on their measured one now.
         let cancel_x = btn_start_x + BUTTON_MIN_WIDTH + BUTTON_SPACING;
-        let cancel_focused = self.focused_element == InputFocus::CancelButton;
-        tree.push(RenderCommand::FillRect {
-            x: cancel_x,
-            y: buttons_y,
-            width: BUTTON_MIN_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
-        });
-        if cancel_focused {
-            tree.push(RenderCommand::StrokeRect {
-                x: cancel_x - 2.0,
-                y: buttons_y - 2.0,
-                width: BUTTON_MIN_WIDTH + 4.0,
-                height: BUTTON_HEIGHT + 4.0,
-                color: palette.lavender,
-                line_width: 2.0,
-                corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
-            });
+        for (x, label, kind, focused) in [
+            (
+                btn_start_x,
+                "OK",
+                crate::button::Kind::Primary,
+                self.focused_element == InputFocus::OkButton,
+            ),
+            (
+                cancel_x,
+                "Cancel",
+                crate::button::Kind::Plain,
+                self.focused_element == InputFocus::CancelButton,
+            ),
+        ] {
+            crate::button::draw(
+                tree,
+                palette,
+                (x, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+                label,
+                kind,
+                crate::button::State {
+                    focused,
+                    ..crate::button::State::default()
+                },
+                palette.base,
+                crate::style::FOCUS_RING_WIDTH,
+            );
         }
-        tree.push(RenderCommand::Text {
-            x: cancel_x + (BUTTON_MIN_WIDTH - 42.0) / 2.0,
-            y: buttons_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
-            text: String::from("Cancel"),
-            color: palette.text,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
 
         // Assembled from the same locals the drawing above used, so the hit
         // areas are the drawn areas by construction rather than by a second
@@ -2601,24 +2528,16 @@ impl ProgressDialog {
             let btn_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
             let btn_x = x + width - CONTENT_PADDING - BUTTON_MIN_WIDTH;
             self.cancel_rect = Some((btn_x, btn_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT));
-            tree.push(RenderCommand::FillRect {
-                x: btn_x,
-                y: btn_y,
-                width: BUTTON_MIN_WIDTH,
-                height: BUTTON_HEIGHT,
-                color: palette.surface1,
-                corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
-            });
-            tree.push(RenderCommand::Text {
-                x: btn_x + (BUTTON_MIN_WIDTH - 42.0) / 2.0,
-                y: btn_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
-                text: String::from("Cancel"),
-                color: palette.ink(palette.red),
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            crate::button::draw(
+                tree,
+                palette,
+                (btn_x, btn_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT),
+                "Cancel",
+                crate::button::Kind::Plain,
+                crate::button::State::default(),
+                palette.base,
+                0.0,
+            );
         }
     }
 }
@@ -3263,10 +3182,15 @@ mod tests {
             "a long label must widen its button, got {}",
             long.width()
         );
+        // Measured as the toolkit's button draws it (`crate::button`), which
+        // is what the rectangle is laid out for.
         assert!(
             long.width()
-                >= crate::text::measure(long.label(), FONT_SIZE, FontWeightHint::Bold)
-                    + BUTTON_PADDING_H * 2.0
+                >= crate::text::measure(
+                    long.label(),
+                    crate::button::FONT_SIZE,
+                    FontWeightHint::Bold
+                ) + crate::button::PADDING_H * 2.0
         );
     }
 
@@ -5281,6 +5205,8 @@ mod tests {
             let palette = Palette::for_mode(false);
             let mut tree = RenderTree::new();
             dialog.render(&palette, 800.0, 600.0, &mut tree);
+            // The ring is the stroke in the accent: every button also wears
+            // its own edge now, in a tint of its face.
             let strokes: Vec<_> = tree
                 .commands
                 .iter()
@@ -5289,8 +5215,9 @@ mod tests {
                         x,
                         width: w,
                         line_width,
+                        color,
                         ..
-                    } => Some((*x, *w, *line_width)),
+                    } if *color == palette.accent => Some((*x, *w, *line_width)),
                     _ => None,
                 })
                 .collect();

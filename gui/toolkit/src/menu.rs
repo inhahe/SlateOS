@@ -7,6 +7,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
+use crate::listview::ListKey;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
@@ -464,6 +465,15 @@ impl ContextMenu {
             Key::Left => {
                 // Close submenu (handled by parent delegation above).
                 Some(MenuAction::Closed)
+            }
+            // A windowful of rows, or the ends -- `design-decisions.md` §1416.
+            // Ctrl+Page Up/Down read as nothing here, and are swallowed like
+            // any other key while the menu is up.
+            Key::Home | Key::End | Key::PageUp | Key::PageDown => {
+                if let Some(nav) = ListKey::of(key) {
+                    self.hover_to(nav);
+                }
+                Some(MenuAction::None)
             }
             _ => Some(MenuAction::None),
         }
@@ -926,6 +936,36 @@ impl ContextMenu {
     /// opened menu is nowhere. That is the only outcome that does not lie: there
     /// is no row for the arrow key to land on, so pretending one is highlighted
     /// would make Enter act on a disabled item.
+    /// How many rows the panel shows whole at its current scroll: a menu's
+    /// windowful, for Page Up and Page Down.
+    fn rows_in_view(&self) -> usize {
+        let strip = self.strip();
+        let (top, bottom) = (self.viewport_top(), self.viewport_bottom());
+        (0..self.items.len())
+            .filter(|&i| {
+                matches!((strip.top(i), strip.height(i)), (Some(t), Some(h)) if t >= top && t + h <= bottom)
+            })
+            .count()
+    }
+
+    /// Page Up, Page Down, Home and End: a windowful of rows, or the first or
+    /// last -- landing, as the arrows do, only on a row that can be chosen,
+    /// and scrolled into view.
+    fn hover_to(&mut self, nav: ListKey) {
+        let page = self.rows_in_view();
+        let landed = nav.target_where(self.hover_index, self.items.len(), page, |i| {
+            matches!(
+                self.items.get(i),
+                Some(MenuItem::Action { enabled: true, .. })
+                    | Some(MenuItem::Submenu { enabled: true, .. })
+            )
+        });
+        if let Some(idx) = landed {
+            self.hover_index = Some(idx);
+            self.scroll_index_into_view(idx);
+        }
+    }
+
     fn move_hover(&mut self, forward: bool) {
         let len = self.items.len();
         // The current row is not a candidate for its own successor, so the walk
@@ -1061,6 +1101,23 @@ impl Tooltip {
     /// Whether the tooltip is currently visible.
     pub fn is_visible(&self) -> bool {
         self.visible
+    }
+
+    /// How long until this tooltip appears, in milliseconds from
+    /// `timestamp_ms` -- `None` when it is not waiting to: the pointer is not
+    /// resting on its trigger, or it is showing already.
+    ///
+    /// For a caller that sleeps while nothing moves. The delay is a deadline,
+    /// and a deadline with no wake-up behind it never comes: the desktop's
+    /// tray tooltips appeared only when something else happened to draw.
+    #[must_use]
+    pub fn due_in(&self, timestamp_ms: u64) -> Option<u64> {
+        let start = self.hover_start.filter(|_| !self.visible)?;
+        Some(
+            start
+                .saturating_add(u64::from(self.delay_ms))
+                .saturating_sub(timestamp_ms),
+        )
     }
 
     /// Produce render commands for the tooltip.
@@ -1377,6 +1434,96 @@ mod tests {
             }
         }
         Some((track?, thumb?))
+    }
+
+    /// Home and End reach the first and last rows that can be chosen -- past
+    /// the greyed-out Paste and the separator -- with or without Ctrl.
+    #[test]
+    fn home_and_end_reach_the_first_and_last_rows_that_can_be_chosen() {
+        let mut menu = ContextMenu::new(sample_items());
+        menu.show(10.0, 10.0, SCREEN);
+        menu.handle_key(&make_key(Key::End));
+        assert_eq!(menu.hover_index, Some(4), "Select All");
+        menu.handle_key(&make_key(Key::Home));
+        assert_eq!(menu.hover_index, Some(0), "Cut");
+        let ctrl = |key| KeyEvent {
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+            ..make_key(key)
+        };
+        menu.handle_key(&ctrl(Key::End));
+        assert_eq!(menu.hover_index, Some(4));
+        menu.handle_key(&ctrl(Key::Home));
+        assert_eq!(menu.hover_index, Some(0));
+        assert_eq!(
+            menu.handle_key(&make_key(Key::Enter)),
+            Some(MenuAction::Selected(1))
+        );
+
+        // A greyed-out last row: End stops on the last row that can be chosen.
+        let mut items = sample_items();
+        items.push(MenuItem::Action {
+            id: 9,
+            label: "Delete".to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: false,
+            checked: None,
+        });
+        let mut menu = ContextMenu::new(items);
+        menu.show(10.0, 10.0, SCREEN);
+        menu.handle_key(&make_key(Key::End));
+        assert_eq!(menu.hover_index, Some(4), "End lit the greyed Delete");
+    }
+
+    /// In a menu taller than the screen, Page Down moves a windowful and
+    /// brings the row it lands on into view; Page Up comes back.
+    #[test]
+    fn page_keys_move_a_windowful_through_a_tall_menu() {
+        let mut menu = tall_menu(200);
+        menu.show(10.0, 10.0, (400.0, 300.0));
+        let page = menu.rows_in_view();
+        assert!(
+            page > 1 && page < 200,
+            "precondition: a page of {page} rows"
+        );
+        menu.handle_key(&make_key(Key::Home));
+        menu.handle_key(&make_key(Key::PageDown));
+        assert_eq!(menu.hover_index, Some(page));
+        let (top, height) = hover_highlight(&menu).expect("the lit row is drawn");
+        assert!(
+            top >= menu.viewport_top() && top + height <= menu.viewport_bottom(),
+            "row {page} is lit but not on the screen"
+        );
+        menu.handle_key(&make_key(Key::PageUp));
+        assert_eq!(menu.hover_index, Some(0));
+        menu.handle_key(&make_key(Key::End));
+        assert_eq!(menu.hover_index, Some(199));
+    }
+
+    /// A page that lands on a row that cannot be chosen takes the next one on.
+    #[test]
+    fn a_page_landing_on_a_greyed_row_takes_the_next_one() {
+        let mut probe = tall_menu(100);
+        probe.show(10.0, 10.0, (400.0, 300.0));
+        let page = probe.rows_in_view();
+        let items: Vec<MenuItem> = (0..100)
+            .map(|i| MenuItem::Action {
+                id: i as MenuItemId,
+                label: format!("Item {i}"),
+                shortcut: None,
+                icon: None,
+                enabled: i != page,
+                checked: None,
+            })
+            .collect();
+        let mut menu = ContextMenu::new(items);
+        menu.show(10.0, 10.0, (400.0, 300.0));
+        menu.handle_key(&make_key(Key::Home));
+        menu.handle_key(&make_key(Key::PageDown));
+        assert_eq!(menu.hover_index, Some(page + 1));
     }
 
     /// A menu of `count` plain enabled rows — no separators, so every index is
@@ -2201,6 +2348,31 @@ mod tests {
 
         tooltip.tick(1200); // 200ms elapsed — should appear
         assert!(tooltip.is_visible());
+    }
+
+    /// **A waiting tooltip says when it is due**, and one that is showing, or
+    /// not waiting at all, says it is not -- the deadline a caller that sleeps
+    /// has to wake for.
+    #[test]
+    fn tooltip_says_when_it_is_due() {
+        let mut tooltip = Tooltip::new("Tip").with_delay(200);
+        assert_eq!(tooltip.due_in(0), None, "nothing is resting on it");
+
+        tooltip.start_hover(10.0, 10.0, 1000, SCREEN);
+        assert_eq!(tooltip.due_in(1000), Some(200));
+        assert_eq!(tooltip.due_in(1150), Some(50));
+        assert_eq!(tooltip.due_in(5000), Some(0), "overdue is due now");
+
+        tooltip.tick(1200);
+        assert!(tooltip.is_visible());
+        assert_eq!(
+            tooltip.due_in(1200),
+            None,
+            "a tooltip on screen is not waiting"
+        );
+
+        tooltip.end_hover();
+        assert_eq!(tooltip.due_in(1300), None);
     }
 
     #[test]

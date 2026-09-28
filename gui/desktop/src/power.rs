@@ -8,13 +8,15 @@
 //! - Power profiles (Balanced, Performance, Power Saver, Custom)
 //! - Lid close / power button actions
 //! - Wake-on-LAN configuration
-//! - The power menu the start menu opens (shutdown, restart, sleep, lock,
-//!   log out)
+//! - The power menu the start menu opens ([`PowerChoice`]: shut down,
+//!   restart, sleep, hibernate, lock, log out), and the commands that carry
+//!   each out
 //!
 //! Designed to integrate with the taskbar's power/battery indicator
 //! and the settings app's power management page.
 
 use crate::Rect;
+use crate::hotkeys::{LOCK_COMMAND, Launch};
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -106,6 +108,135 @@ pub enum PowerAction {
     Shutdown,
     /// Lock the screen.
     Lock,
+}
+
+/// The power utility: `userspace/powerctl`, which asks the service manager for
+/// an orderly shutdown -- services stopped, filesystems synced -- and falls
+/// back to the power syscalls itself if nothing answers.
+///
+/// Every power action the desktop offers goes through it, from the start
+/// menu and from the login screen alike. Until 2026-09-25 the start menu's
+/// entries named `/sbin/shutdown`, `/sbin/reboot` and `/sbin/suspend`, which
+/// SlateOS has never had: the menu drew, the press launched, and the machine
+/// stayed on. And the login screen's buttons made the desktop exit, "no power
+/// service to ask" -- with this one in the tree.
+pub const POWERCTL: &str = "/bin/powerctl";
+
+/// `powerctl <subcommand>`.
+pub(crate) fn powerctl(subcommand: &str) -> Launch {
+    Launch {
+        program: POWERCTL.into(),
+        args: vec![subcommand.into()],
+    }
+}
+
+/// One entry in the start menu's power menu, top to bottom.
+///
+/// The shell's own list, not a slice of the application database: these are
+/// not programs a user starts but things the machine does, two of them with
+/// arguments and one (log out) with no program at all. They were database
+/// entries until 2026-09-25, which is how three of them came to name programs
+/// that do not exist -- a database entry is a path, and a path was all there
+/// was room to be wrong about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerChoice {
+    /// Power off, after an orderly shutdown.
+    ShutDown,
+    /// Restart the machine.
+    Restart,
+    /// Suspend to memory.
+    Sleep,
+    /// Save the session to disk and power off.
+    Hibernate,
+    /// Lock the screen; the session carries on behind it.
+    Lock,
+    /// End the session and return to the login screen.
+    LogOut,
+}
+
+impl PowerChoice {
+    /// Every choice, in the order the menu lists them, top to bottom: the
+    /// session's choices first, then the machine's from the lightest to
+    /// switching it off -- so "Shut down" is last, nearest the button the
+    /// menu rises from. The Aero reference's order (`SM_POWER`), with lock
+    /// where it has "sleep the display".
+    pub const ALL: [Self; 6] = [
+        Self::LogOut,
+        Self::Lock,
+        Self::Sleep,
+        Self::Hibernate,
+        Self::Restart,
+        Self::ShutDown,
+    ];
+
+    /// The words on the row. Verbs, since each is something the button does
+    /// ("Shut down", not the noun "Shutdown").
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ShutDown => "Shut down",
+            Self::Restart => "Restart",
+            Self::Sleep => "Sleep",
+            Self::Hibernate => "Hibernate",
+            Self::Lock => "Lock",
+            Self::LogOut => "Log out",
+        }
+    }
+
+    /// The picture beside the row's words: the freedesktop icon names, so a
+    /// theme that draws them draws these.
+    #[must_use]
+    pub const fn icon_name(self) -> &'static str {
+        match self {
+            Self::ShutDown => "system-shutdown",
+            Self::Restart => "system-reboot",
+            Self::Sleep => "system-suspend",
+            Self::Hibernate => "system-suspend-hibernate",
+            Self::Lock => "system-lock-screen",
+            Self::LogOut => "system-log-out",
+        }
+    }
+
+    /// Whether the programs are asked to close before this is carried out:
+    /// the three that end the session. Sleep, hibernate and lock leave the
+    /// session as it was, so there is nothing to ask.
+    #[must_use]
+    pub const fn ends_the_session(self) -> bool {
+        matches!(self, Self::ShutDown | Self::Restart | Self::LogOut)
+    }
+
+    /// The verb for what it does, in lower case, for a sentence: "Closing
+    /// programs to shut down", "Restart anyway".
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::ShutDown => "shut down",
+            Self::Restart => "restart",
+            Self::Sleep => "sleep",
+            Self::Hibernate => "hibernate",
+            Self::Lock => "lock",
+            Self::LogOut => "log out",
+        }
+    }
+
+    /// The program that carries this out, or `None` for [`LogOut`], which
+    /// the shell does itself: it owns the login screen the user returns to.
+    ///
+    /// [`LogOut`]: Self::LogOut
+    #[must_use]
+    pub fn command(self) -> Option<Launch> {
+        match self {
+            Self::ShutDown => Some(powerctl("shutdown")),
+            Self::Restart => Some(powerctl("reboot")),
+            Self::Sleep => Some(powerctl("suspend")),
+            Self::Hibernate => Some(powerctl("hibernate")),
+            // The lock screen, as the shortcut starts it -- and through the
+            // same launch, so `design-decisions.md` 818 (a session with no
+            // password is never locked) applies to both.
+            Self::Lock => Some(Launch::program(LOCK_COMMAND)),
+            Self::LogOut => None,
+        }
+    }
 }
 
 /// Power profile presets.
@@ -1438,6 +1569,11 @@ pub struct PowerMenuRow<'a> {
     pub label: &'a str,
     /// Where the row is drawn, and where a click on it is accepted.
     pub rect: Rect,
+    /// Whether the pointer is over it, which lights it.
+    pub lit: bool,
+    /// The picture drawn before the words: an image id from the shell's
+    /// icons, drawn at [`PowerMenuStyle::icon_size`].
+    pub icon: u64,
 }
 
 /// The colours and sizes a power menu is drawn with.
@@ -1458,11 +1594,20 @@ pub struct PowerMenuStyle {
     pub radii: CornerRadii,
     /// Label size in physical pixels — already scaled by the caller.
     pub font_size: f32,
-    /// Distance from a row's left edge to the start of its label.
+    /// Distance from a row's left edge to its picture, and from its words'
+    /// end to its right edge.
     pub text_inset: f32,
+    /// The side of a row's picture, in physical pixels.
+    pub icon_size: f32,
+    /// From a row's picture to its words.
+    pub icon_gap: f32,
+    /// The wash under the row the pointer is over.
+    pub lit: Color,
+    /// The rounding of that wash.
+    pub lit_radii: CornerRadii,
 }
 
-/// Draw a power menu: a panel, and one label per row.
+/// Draw a power menu: a panel, and one picture and label per row.
 ///
 /// The drop shadow is not drawn here. Every floating surface in the shell casts
 /// the same one, and only when the user has shadows switched on — that is one
@@ -1495,8 +1640,27 @@ pub fn render_power_menu(
     });
 
     for row in rows {
+        if row.lit {
+            cmds.push(RenderCommand::FillRect {
+                x: row.rect.x,
+                y: row.rect.y,
+                width: row.rect.w,
+                height: row.rect.h,
+                color: style.lit,
+                corner_radii: style.lit_radii,
+            });
+        }
+        let icon_x = row.rect.x + style.text_inset;
+        cmds.push(RenderCommand::Image {
+            x: icon_x,
+            y: row.rect.y + (row.rect.h - style.icon_size).max(0.0) / 2.0,
+            width: style.icon_size,
+            height: style.icon_size,
+            image_id: row.icon,
+        });
+        let text_x = icon_x + style.icon_size + style.icon_gap;
         cmds.push(RenderCommand::Text {
-            x: row.rect.x + style.text_inset,
+            x: text_x,
             // Centred in the row rather than offset by a constant, so a larger
             // font size does not drift the label towards the row's bottom edge.
             y: row.rect.y + (row.rect.h - style.font_size).max(0.0) / 2.0,
@@ -1504,7 +1668,7 @@ pub fn render_power_menu(
             color: style.foreground,
             font_size: style.font_size,
             font_weight: FontWeightHint::Regular,
-            max_width: Some((row.rect.w - style.text_inset * 2.0).max(0.0)),
+            max_width: Some((row.rect.x + row.rect.w - style.text_inset - text_x).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
@@ -1634,6 +1798,21 @@ mod tests {
     #![allow(clippy::float_cmp)]
 
     use super::*;
+
+    /// **Every power choice's picture is one the built-in theme draws**, so
+    /// the menu is never a column of blanks on a machine with no icon theme
+    /// installed.
+    #[test]
+    fn every_power_choice_has_a_picture_the_built_in_theme_draws() {
+        let drawn = appearance::icons::built_in_names();
+        for choice in super::PowerChoice::ALL {
+            assert!(
+                drawn.contains(&choice.icon_name()),
+                "{choice:?}'s {} is not in the built-in set",
+                choice.icon_name()
+            );
+        }
+    }
 
     #[test]
     fn test_default_config() {

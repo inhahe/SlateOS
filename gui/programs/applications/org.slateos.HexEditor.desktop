@@ -1,0 +1,16 @@
+# SlateOS's own Hex Editor, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.HexEditor.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=Hex Editor
+GenericName=Hex Editor
+Comment=View and edit the bytes of any file
+Exec=/usr/bin/hexeditor %F
+TryExec=/usr/bin/hexeditor
+Icon=accessories-text-editor
+Categories=Development;
+Keywords=hex;binary;bytes;
+MimeType=application/octet-stream;

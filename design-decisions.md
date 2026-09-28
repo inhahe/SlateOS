@@ -51,12 +51,13 @@ than silently believing there are no bands.
 | §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | closed early at §679 — 20 numbers unused | interleaved with C's §500s |
 | §700–§799 | **lane B** | closed early at §779 — 20 numbers unused | interleaved before C's §800s |
-| §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
+| §800–§899 | **lane C** | closed early at §885 — 14 numbers unused | immediately after §579; C's own run ascends |
 | §900–§999 | **lane A** | **open** | immediately after §679; A's own run ascends |
 | §1000–§1099 | **lane B** | **open** | the tail — B alone still appends at EOF |
 | §1100–§1199 | **lane D** | **open** | immediately after §360, the end of lane B's first band; D's own run ascends from there |
 | §1200–§1299 | **lane E** | **open** | immediately after §498, the end of lane C's first band; E's own run ascends from there |
 | §1300–§1399 | **lane F** | **open** | immediately after §127, the end of the single-agent history; F's own run ascends from there |
+| §1400–§1499 | **lane C** | **open** | immediately after §885; C's own run ascends |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -248,6 +249,19 @@ adding these: the gate reads the status words anywhere in the row, so a region
 column that mentions a "closed" band beside an "**open**" status makes the row
 contradict itself and fails the gate; and an anchor must carry the section
 sign, so prose such as "after C's 500s" is deliberately not read as one.
+
+**Lane C closed §800–§899 early, at §885, and opened §1400–§1499 (2026-09-26),**
+on the gate's 80% warning, as each lane before it did; 14 numbers go unspent.
+§1400 sits immediately after §885, so lane C's region of this file does not move,
+and no other lane's insertion point moves either. Nobody had claimed §1400–§1499
+-- checked on every lane's branch, pushed or not, before taking it -- so this
+needs no request, only the notice in
+`requests/c-abdef-lane-c-closed-800-899-at-885-and-opened-1400-1499.md`.
+Grandfathering is what closing a band means, so the same commit adds lane C's
+§800–§885 to the baseline -- by hand, not with `--update-baseline`, which would
+also grandfather the other five lanes' live entries and exempt them from the
+`**Lane:**` check. Every one of the 86 declares `**Lane:** C`, verified before
+baselining.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -82737,6 +82751,1770 @@ free of them is a property of this command, not a reprieve.
 The surface family is still open, and it is now clear that it is blocked on
 more than a policy. See `known-issues.md`
 `C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR`.
+
+## 868. A checkbox tree records a tick as a rule on the node clicked, and a click that leaves every child alike folds into the parent
+
+**Date:** 2026-09-24 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** When you choose files in a tree of folders — what to back up,
+what to index — you tick boxes. We had to decide what a tick on a *folder*
+means and how the choice is stored. It is stored as a short list of rules: the
+folders you ticked, plus the exceptions you made inside them ("`/home`, except
+`/home/u/.cache`"). So a tick on a folder also covers the files inside it that
+nobody has opened yet, and the ones created next week. One consequence is worth
+knowing before it surprises anyone: **if you tick every folder inside a folder
+one by one, the outer folder becomes ticked** — and from then on it covers new
+folders created there, exactly as if you had ticked it directly. The widget is
+`gui/toolkit/src/treeview.rs` (`CheckRules`); `design.txt` asked for it as the
+"tristate checkbox treeview — good for selecting files and directories".
+
+### The three candidates
+
+| | stores | a folder nobody opened | a file created tomorrow | what a box shows |
+|---|---|---|---|---|
+| **A. A state per file** (the classic tristate tree) | a tick on every file | must be read in full before it can be ticked | not in the set | always what is under it |
+| **B. Rules, and nothing more** | the clicks | covered by its folder's rule | covered | "partly" in one case with nothing visible ticked (below) |
+| **C. Rules, folded** — chosen | the clicks, tidied | covered | covered | always what is under it |
+
+**A is ruled out by the filesystem.** Ticking `/home` would mean reading every
+directory under it before the box could show a tick, and a home directory can
+hold hundreds of thousands of files. It also saves a list of the files that
+existed on the day, which is the wrong answer for a backup set.
+
+**B disagrees with its own display in one case.** Tick `/home`, then untick
+each of its three folders in turn. The rule on `/home` is still there with three
+exceptions, so the box says *partly* — the rule still covers whatever is
+created in `/home` later — while every box a user can see under it is empty.
+The brute-force test that compares the rules against model A caught exactly
+this, which is how the case was found rather than argued.
+
+**C folds.** When a click leaves every child of a node in one state, the node
+takes that state and the children's rules are absorbed into it, and the check
+repeats one level up. Untick the last of the three: `/home` becomes unticked,
+exceptions and all. The invariant this buys is stated and tested
+(`the_rules_agree_with_a_brute_force_model_under_random_clicks`): in a tree
+whose folders are all loaded, a box is partly ticked exactly when what is under
+it is mixed. A node whose children have not been read is never folded, because
+"every child agrees" cannot be established.
+
+### The consequence, stated plainly
+
+Folding is symmetric. Ticking every child ticks the parent, and a ticked parent
+means everything in it, including what does not exist yet. The alternative —
+fold only towards *unticked*, so a folder is ticked only when the user ticks it
+— was considered and rejected: its box would then read "partly" over a folder
+whose every visible child is ticked (the excluded part being tomorrow's files),
+which is B's mismatch in the other direction. The rule adopted is that **the box
+and the meaning never disagree**, and what "ticked" means is written in the
+module documentation where a caller reads it.
+
+### Two smaller calls made with it
+
+- **"Partly" costs nothing to compute.** Rules are kept normalised — none repeats
+  what its node would inherit — and under that invariant a node is partly
+  ticked exactly when some rule sits strictly below it, which is one probe of an
+  ordered map. The argument is in `CheckRules`' documentation; two mutations of
+  the code (the probe, and the normalisation) each fail the suite.
+- **A folder is re-read every time it is opened** (`gui/toolkit/src/dirtree.rs`),
+  not only the first. Nothing watches the disk for changes, so a cached listing
+  is a listing of the past, and closing and reopening a folder is how a user asks
+  for the present.
+
+### How to reverse
+
+Folding is one function, `CheckRules::fold_upwards`, called from one place,
+`toggle_in`. Making it one-directional is a condition on the state it folds
+towards. Dropping it entirely returns to B. Neither changes the saved form,
+which is the list of `(path, included)` pairs either way — so a selection saved
+under one rule loads under another, and only what the boxes display differs.
+
+## 869. Auto-arrange keeps the order the user drags icons into; sorting by name is a one-off
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** Right-clicking the desktop now offers a View submenu, as other
+desktops do: the icon size, "Auto arrange icons" and "Align icons to grid" —
+the "snap to grid, or place freely" choice `design.txt` asks for — and a
+separate "Sort by name". We had to decide what *auto-arrange* means. It now
+means "keep the icons packed together from the top-left, in whatever order
+you drag them into", which is how Windows does it. It used to mean "keep them
+sorted by name", which is how the Mac's "Sort by Name" works — and under
+which dragging an icon does nothing, because it jumps straight back to its
+alphabetical place. Sorting is now its own menu item, and it sorts once.
+The code is `gui/desktop/src/icons.rs` (`ArrangementMode`, `drop_plan`) and
+the menu is in `gui/desktop/src/lib.rs` (`desktop_menu_items`).
+
+### The two candidates
+
+| | the order of the icons | dragging an icon | sorting |
+|---|---|---|---|
+| **A. Always sorted** (the Mac's "Sort by Name"; what the code did) | by name, always | the icon jumps back: the order is not the user's to change | *is* the mode |
+| **B. Packed, in the user's order** (Windows' "Auto arrange") — chosen | whatever the user made it | moves the icon to a new place in the order; the others close up around it | "Sort by name", once |
+
+**Why B.**
+
+- **The menu's words are Windows', because the shell is.** The taskbar, the
+  Start menu, the tray and Ctrl+R are all specified in `design.txt` "like on
+  Windows", and "Auto arrange icons" beside "Align icons to grid" is Windows'
+  own pair. A user reading those words expects B.
+- **A makes the one gesture a desktop icon exists for do nothing, silently.**
+  The code's version of A re-sorted after every drop, so in one mode of three a
+  drag looked like it worked until the mouse was let go.
+- **B loses nothing A had.** "Sort by name" produces A's order in one click,
+  and under auto-arrange the icons then stay in it until the user drags one
+  somewhere else.
+
+**What B costs:** the order is now state the user made, so it has to survive a
+restart. It does without a new format: the layout file already stores every
+icon's position, and under auto-arrange the order is read back from the
+positions — down each column, then the next. An icon the file does not mention
+(a default icon added since) goes last.
+
+### Smaller calls made with it
+
+- **On the grid, an icon dropped onto another takes the free cell nearest the
+  one it was aimed at.** Not a swap — that moves an icon the user did not touch;
+  not a refusal — the drop would look broken; and not an overlap, which is what
+  the code did, so that the second icon hid the first. "Nearest" is measured in
+  pixels between cells: a cell is taller than it is wide, so the cell beside
+  beats the cell below.
+- **An icon snaps to the cell its centre is over, not the cell its corner is
+  in.** By the corner, an icon had to be dragged a whole cell before it moved
+  one. The outline drawn during a drag comes from the same function as the drop
+  (`drop_plan`), so it cannot promise a cell the drop then does not use.
+- **Placing freely, a dropped icon is drawn on top** of anything it overlaps:
+  the last thing put down is the one the user expects to see and to click.
+- **The arrangement is saved with the icon positions (`deskicons.yaml`); the
+  icon size stays with the appearance settings (`appearance.yaml`).** The size
+  is an appearance setting the Settings application edits too, and the file is
+  where both read it. The arrangement means nothing without the positions it
+  governs, and nothing else edits it. The layout file also records the grid its
+  positions were laid out on, since a position is only meaningful at the pitch
+  it was saved at and the icon size changes the pitch.
+- **Two switches, three states.** "Auto arrange" and "Align to grid" are both
+  shown, but arranged-and-not-aligned means nothing, so the model is one
+  three-state `ArrangementMode` and the switches map onto it as Windows' do:
+  auto-arrange on aligns, auto-arrange off leaves the icons aligned, and
+  alignment off stops arranging too.
+
+### How to reverse
+
+A is two lines: `set_arrangement(AutoArrange)` sorts by name instead of into
+reading order, and `apply_drop` re-sorts after a reorder. Nothing in the file
+format changes either way — the positions are what is saved, in both.
+
+## 870. The Run box opens a whole-line path first, then splits the line the way a POSIX shell does
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The Run box (Super+R) used to take whatever was typed as the
+name of one program. So `editor notes.txt` asked the system for a program
+literally called "editor notes.txt", and typing a folder asked for the folder
+to be run; both failed. `design.txt` asks for a Run box "like on windows", and
+Windows' takes arguments and opens folders and documents too. It now does the
+same: if the whole line is a path that exists, it is opened -- a folder in the
+file manager, a document in its program, a program run -- and otherwise the
+first word is run with the rest as its arguments. Words are split the way a
+POSIX shell splits them: quotes keep spaces together, a backslash escapes.
+The code is `run_dialog::split_words` and `DesktopShell::run_request`.
+
+### The question a previous session left open
+
+The code carried a comment declining to split: "inventing [a quoting rule]
+silently would make `my program` two words to the shell and one to the
+filesystem". That is the real risk, and the two decisions below answer it
+rather than avoid it.
+
+| | `/home/u/My Stuff` (a folder) | `editor "a b.txt"` | `editor a b.txt` |
+|---|---|---|---|
+| **A. Never split** (what it did) | tries to *run* the folder | a program named `editor "a b.txt"` | a program named `editor a b.txt` |
+| **B. Always split** | runs `/home/u/My`, argument `Stuff` | `editor`, argument `a b.txt` | `editor`, arguments `a`, `b.txt` |
+| **C. Whole line as a path first, then split** -- chosen | opens the folder | `editor`, argument `a b.txt` | `editor`, arguments `a`, `b.txt` |
+
+**Why C.** It is what Windows' Run box does, and it is the only one of the
+three under which both a bare path with a space in it and a program with
+arguments work. Its one ambiguity -- a line that is both an existing path and
+a valid command -- resolves toward the path, and only for an *absolute* path:
+`terminal` typed on its own is never taken to mean a file called `terminal` in
+whatever directory the shell happens to be in.
+
+### The quoting rule, and why POSIX's
+
+Double quotes group and take `\"` and `\\` as escapes; single quotes group
+literally; outside quotes a backslash makes the next character ordinary. The
+alternative was Windows' rule (double quotes only, backslash a path
+separator). POSIX's is chosen because on this system the backslash is not a
+path separator and every other command line -- the shell, `oils`, scripts --
+follows POSIX, so a line copied from a terminal means the same thing here. An
+unclosed quote is refused with a message rather than guessed at.
+
+### Smaller calls made with it
+
+- **A path chosen with Browse is one word, never split** -- it is a name, not
+  a command line.
+- **Opening uses the desktop's rules** (`DesktopShell::open_path`, the same
+  as a double-click on a desktop icon), so the Run box, the desktop and the
+  file manager cannot disagree about what a file opens in.
+
+### How to reverse
+
+A is `run_request` ignoring `words` and launching `whole`; B is it skipping
+the path check. The event carries both halves (`RunRequest`), so either
+reversal is one function.
+
+## 871. A program carried between the start menu, the taskbar and the desktop is copied, not moved; over a window it goes nowhere
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** `design.txt` asks that icons can be dragged "anywhere between
+pinned apps, desktop, and start menu entries". They can now: drag a
+start-menu row, a pinned taskbar button or a program's desktop icon, and let
+go on the taskbar (it is pinned there, at the gap you let go in), on the
+desktop (a shortcut appears where you let go), on the start button or among
+the start menu's pinned rows (it is pinned to the top of the start menu). A
+label follows the pointer naming the program and what letting go will do.
+Three choices had real alternatives: a drag *copies* rather than moves; a
+drop over another program's window does nothing; and the start menu gained a
+pinned section of its own, above the launcher's list, as the place a drop on
+it goes. The code is `DesktopShell::carry_target`, `drop_program`,
+`finish_start_press` and `render_carry` in `gui/desktop/src/lib.rs`.
+
+### Copy or move
+
+| | A pinned button dragged to the desktop | A desktop program icon dragged to the taskbar |
+|---|---|---|
+| **Copy** -- chosen | a shortcut appears; the pin stays | the program is pinned; the icon stays |
+| **Move** | a shortcut appears; the pin is gone | the program is pinned; the icon is gone |
+
+**Why copy.** It is what Windows does between these three places, and it is
+the one of the two under which no drag can lose anything: each place has its
+own "remove" (Unpin from taskbar, Remove from desktop, Unpin from Start menu)
+that says so in words. Under *move*, rearranging the taskbar with a slightly
+high drag would delete a pin. The start menu's launcher list is the source of
+every program and cannot be moved out of in any case, so copying is also the
+only rule that is the same from all three sources.
+
+### A drop over a window
+
+The shell does not know whether a program under the pointer would accept a
+dropped program -- there is no drag-and-drop between programs yet -- so there
+are two honest answers and one dishonest one:
+
+- **Nothing happens** -- chosen. The label shows the program's name with no
+  "Add to desktop" beneath it, so the user sees beforehand that letting go
+  there does nothing.
+- **A shortcut on the desktop, behind the window.** Rejected: it appears
+  somewhere the user was not pointing, hidden, to be found later.
+- **Hand it to the program.** Not yet possible; when programs can accept
+  drops this is the case to revisit, and `carry_target`'s `None` for a window
+  is where it goes.
+
+Knowing where a window is needed the window list's rectangles, which the shell
+received and threw away: `ManagedWindow::frame` keeps them now, and
+`DesktopShell::window_at` is its only reader.
+
+### The start menu's pinned section
+
+A drop *on* the start menu has to put the program somewhere the user can see
+and undo. The start menu listed only the launcher's programs, in the
+launcher's order, so there was no such place. It now has pinned rows above
+that list, set apart by a line, written to `startmenu.yaml` and read back at
+login; a pinned program is still listed in its own place below, as on every
+start menu with pins. Only the pinned rows take a drop and can be rearranged
+by dragging: the launcher's list is sorted by the launcher, and a drop onto
+it does nothing rather than invent an order the next list rebuild would
+discard. The start button is a drop target too -- the only one a desktop icon
+or a taskbar button can reach, since the menu is closed while they are being
+dragged -- and appends.
+
+### Smaller calls made with it
+
+- **A start-menu row starts its program on the release, not the press** --
+  the press cannot yet know whether it is a click or the start of a drag.
+  The pinned taskbar buttons and the tray already worked that way.
+- **Several program icons dropped together keep their order**, rather than
+  each landing in the same gap and so stacking up reversed.
+- **A folder or document dropped on the taskbar or the start button is
+  refused by staying put**: a taskbar button and a start-menu row each start a
+  program, and nothing else.
+- **While a desktop icon is over the taskbar, its drop outline is not
+  drawn**: letting go there does not move it, and the outline would say it
+  does.
+
+### How to reverse
+
+*Move* is one line in each of the three release paths (`finish_start_press`,
+`finish_pinned_press`, the icon-release branch of `handle_mouse_inner`):
+remove the source after `drop_program`. *Shortcut behind the window* is
+deleting `window_at` from `carry_target`.
+
+## 872. One pointer-size setting: `appearance`'s, with two larger steps for low vision
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C &middot; asked by lane F
+
+**In short:** The mouse pointer's size was stored in three places -- the
+appearance settings (four sizes), the input settings (any size from 16 to 128
+pixels) and the Settings application (its own list, never saved) -- and
+nothing read any of them, because until lane F's compositor work nothing drew
+a pointer. Now something does, and it needs one answer. The appearance
+setting is kept (`appearance.yaml`, `cursors.size` and `cursors.scheme`), the
+input settings' copy is removed, and the kept one gains two larger sizes, 64
+and 96 pixels, so the collapse does not take away the large pointers the
+removed copy allowed. The Settings application's control is lane E's to point
+at it.
+
+### Which one survives
+
+| | For | Against |
+|---|---|---|
+| **`appearance`** -- chosen | the compositor already reads `appearance.yaml` for every other visual setting and reloads it live (`ReloadAppearance`), so a change reaches the pointer with no new plumbing; it already has the scheme beside it | four fixed sizes, the largest 48 px |
+| `inputsettings` | 16-128 px in any step | no scheme; `input.yaml` is the *behaviour* of the mouse (speed, buttons, scrolling), and a pointer's look is appearance; the compositor would need a second live reload for one field |
+| the Settings app's own | -- | never saved anywhere |
+
+Lane F proposed `appearance`; this agrees, for the reasons in the first row.
+
+### Why add sizes rather than keep four
+
+The removed copy allowed up to 128 px; the kept one stopped at 48. A pointer
+twice the normal size is not enough for everyone with low vision, which is
+the one reason a system offers large pointers at all. Two steps are added --
+**Huge (64 px)** and **Giant (96 px)**, four times normal -- rather than a
+continuous pixel value, because every front end that offers the setting
+draws it as a short list (the Settings dropdown, a future accessibility
+panel), and a list of named steps is what a person can choose from without a
+preview. 96 px is the largest step common desktops offer; with display
+scaling it is 192 px at 200%.
+
+### Smaller calls made with it
+
+- **The old key is removed, not left.** `inputsettings` wrote `cursor.size`
+  into every `input.yaml` it saved (as `24`, since no control ever set it);
+  its next save now deletes the key, so nobody edits it expecting an effect.
+- **`CursorSize::ALL` and `CursorScheme::ALL`** list the choices in order,
+  for the Settings application to offer rather than listing them itself.
+
+### How to reverse
+
+Adding sizes is additive; removing Huge and Giant would need a file that
+names one to fall back to the default, which `from_yaml_name` already does
+for an unknown spelling. Restoring `inputsettings`' field is the diff of this
+commit, but would bring back two settings for one thing.
+
+## 873. A file name that is not text is drawn with octal escapes, as the terminal draws it, not with U+FFFD
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C &middot; proposed by lane E
+
+**In short:** A file on SlateOS may have a name that is not text -- any byte
+but `/` and NUL is legal. Wherever the desktop draws such a name (the file
+dialog, the path bar, the folder tree, the Run box), each byte that is not
+text used to show as `�`, so `caf\351.txt` and `caf\350.txt` looked identical
+and neither looked like what the file is called. It now shows each such byte
+as a three-digit octal escape, `caf\351.txt` -- exactly as the command-line
+tools already print it (§369). Nothing is ever *derived* from the drawing:
+opening, navigating and renaming still use the exact bytes kept beside it.
+
+### The choice
+
+| | `caf\351.txt` beside `caf\350.txt` | Cost |
+|---|---|---|
+| **U+FFFD** (what it was) | `caf�.txt` and `caf�.txt` -- identical | a name the user cannot tell from another, and that is not its name |
+| **Octal escape** -- chosen | `caf\351.txt` and `caf\350.txt` | four characters where there was one, so a long name elides sooner |
+
+The length cost falls where it is worth paying: names that are not text are
+rare on a SlateOS disk and common only on media from other systems, which is
+exactly where telling two files apart matters.
+
+**Why the terminal's rule and not a new one.** A name drawn one way in the file
+manager and another in `ls` would be two answers to "what is this file
+called". `pathcodec::display_os` is `quoting::escape_unprintable` over the
+name's bytes, and a test holds the two to the same spelling.
+
+**The ambiguity accepted.** A name that really contains a backslash and three
+digits reads the same as one with that byte, as §369 accepted for the
+terminal. The rendering is for a person to read, not for a program to parse
+back -- which is why nothing parses it back.
+
+### Smaller calls made with it
+
+- **Editable fields show the escape too** (the path bar in edit mode, the file
+  dialog's name field, the Run box). Confirming an unedited field still uses the
+  exact bytes, because "did the user edit it?" compares the field with the
+  rendering of the kept bytes, and any fixed rendering answers that the same
+  way. A field the user *does* edit means what was typed -- a backslash
+  followed by digits is four characters, not a byte; typed escapes are not
+  interpreted, the same rule as the terminal's.
+- **Text nobody can see is escaped as well** -- a newline, a line separator --
+  since `escape_unprintable` does, and a one-line label with a line break in
+  it is not one line.
+
+### How to reverse
+
+`display_os` is the one place: make it `to_string_lossy` and every label goes
+back to U+FFFD.
+
+## 874. Colour themes: a file per theme, named by its folder, setting the palette's own colour names -- never the accent, never unreadable text
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A user can now choose a colour theme: a small YAML file in a
+folder named for the theme, setting some or all of the desktop's colours for
+dark mode, light mode or both. What it leaves out stays as built in. The choice
+is one line of `appearance.yaml` -- `theme.colors: nord` -- and every program
+picks the colours up the next time it reads the settings. Getting there took
+several smaller calls, each easy to reverse and listed below so any of them
+can be overruled.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What does a theme call its colours? | the palette's own role names -- `base`, `surface0`, `text`, `red` ... (`guitk::palette::THEME_ROLES`) | the roadmap's example names -- `background`, `surface`, `error`, `text-dim` | applications already read their colours by the palette's names, so a theme redefines exactly what they draw with; a second vocabulary is a translation table that has to be kept in step. The roadmap's list ends in "etc.": an example, not a spec. The cost is that Catppuccin's names (`crust`, `mantle`) explain themselves less, so the shipped template comments each group. |
+| Can a theme set the accent? | no -- reported, and ignored | yes | the accent is the user's choice in Settings (§816 keeps it configurable even under high contrast); a theme that set it would quietly undo that choice. |
+| Can a theme make text unreadable? | no -- the four text colours are held to the same contrast floor as the built-in ones, `text` included | trust the theme | a theme is data from strangers, and unreadable text is the one failure a user cannot get out of: the Settings page that would undo it is drawn in it. The built-in `text` is still left exactly as stated -- it already passes. |
+| A theme with only dark colours, in light mode? | shown in its dark colours, and the palette says it is dark | the built-in light colours | the user has just chosen this theme; showing the built-in colours would make choosing it look broken. Laying its dark text over the light pages would be neither. |
+| Where are themes installed? | `/usr/share/slateos/themes/<name>/theme.yaml`, and the user's own under `$XDG_DATA_HOME` (else `~/.local/share`) `/slateos/themes/`, the user's copy winning | `~/.config/slateos/themes` | a theme is a thing the user has, like a font -- fonts live in `~/.local/share/fonts` -- not a preference they set. The preference is `theme.colors`. |
+| How is the choice written in `appearance.yaml`? | the folder's name, percent-encoded as filenames are (§426) | text only | a folder's name need not be text. The key is new, so there are no files from before the encoding and no version marker is needed. |
+| When is the theme read? | when `appearance.yaml` is (`AppearanceSettings::read_from`), and never per frame | by each program that wants it | every reader of the settings -- the shell, the compositor, every application through `oswindow` -- gets the colours with them, with no second step to forget (§856: stored, and nothing obeyed it). |
+| What is the built-in theme called? | `aero`, after the roadmap's "Default Theme -- Aero" and the demo §815 follows | `default`, `slate` | a theme needs a name it can be chosen back by. Its colours are compiled in, so it reads no file and cannot fail to load. |
+| Is there a file for it? | yes -- `gui/appearance/themes/aero/theme.yaml`, every role, held equal to the compiled palette by a test | no | the roadmap asks for the default theme to be "a normal YAML theme file", and a theme's author needs a complete template to copy. |
+| A theme that cannot be used? | the built-in colours, the choice kept, and one notice from the shell per loss | refuse the setting, or forget it | a theme uninstalled since it was chosen would otherwise look like a setting that quietly stopped working; keeping the name means saving some unrelated setting does not throw the choice away. |
+
+### Changed along the way
+
+- A high-contrast palette's text colours are now what its contrast floor
+  starts from (`Palette::high_contrast`), so a style change keeps them instead
+  of putting the ordinary mode's back -- the trap `Palette::from_settings`'s
+  comment described, closed rather than documented.
+- `settingsfile::testing::with_scratch_config` points `XDG_DATA_HOME` into the
+  scratch directory as well, so a test that names a theme cannot find the
+  developer's own.
+- The desktop's three kinds of news about itself (a wallpaper not shown, a
+  layout not saved, a theme not usable) are posted by one
+  `ShellSession::post_desktop_notice` instead of three copies.
+
+### Not done here
+
+- A theme picker in Settings is lane E's (`requests/c-e-a-colour-theme-picker.md`);
+  installing the template with the system is lane D's
+  (`requests/c-d-install-the-built-in-colour-theme.md`).
+- A theme file edited while it is the chosen theme is not noticed:
+  `known-issues.md` `TD-C-AN-EDITED-THEME-FILE-IS-NOT-NOTICED-UNTIL-THE-SETTINGS-CHANGE`.
+- The other axes -- window decorations, icons, cursors, sounds, terminal
+  colours -- are not read yet. `meta.supports` is kept for a theme browser to
+  show and is not trusted over what a file actually sets.
+
+## 875. The desktop's clock settings get a file, and its zone is the machine's unless the user chooses one
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The desktop clock's time zone, what the taskbar clock shows, and
+the world clocks in the calendar were settings with nowhere to live: the model
+sat inside the shell with no file behind it, and the only panel that could
+change it was never on screen. So every desktop showed New York time -- a
+default someone typed in -- and nothing could change it. They now have a file,
+`datetime.yaml`, and a model shared by the shell (which obeys it) and the
+Settings app (which will edit it). With nothing chosen, the clock shows the
+machine's own zone, read exactly as `date` reads it.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where does the model live? | a crate of its own, `gui/datetimesettings`, like `notifsettings` and `inputsettings` | stay in `gui/desktop` | two processes use it; the Settings app must not link the shell to save a time zone. |
+| The default zone? | the machine's (`TZ`, else `/etc/localtime`, else UTC) | New York, as before; UTC | New York was right for one zone and silently wrong for every other. The machine's zone is what `date` and every C program show, so the taskbar agrees with the terminal. On a machine with no `/etc/localtime` -- every SlateOS install today, since no tzdata ships and the installer does not write one -- that is UTC, which is at least the time the clock says it is showing. |
+| How is "the machine's zone" read? | `tzrules::tz_source`, a new, additive function stating glibc's order once; the libc and `osh` are asked to use it too | a fourth private copy of the order | the order is subtle (empty `TZ` is UTC, unset is `/etc/localtime`, a rule is tried before a file, `..` is refused), and a copy that drifts is a clock that disagrees with `date`. |
+| A zone the user chooses? | one of a built-in table of 21, each with its POSIX rule | any IANA name | the table's zones need no tzdata; a name the table does not know would need a file that is not installed. A hand-edited unknown name is kept, and read as the machine's zone -- not an invented offset. |
+| How are world clocks stored? | a map keyed by label, in display order | a list | `yamldoc` reads sequences of scalars only, and a label is what a person edits; two clocks with one label could not be told apart on screen, so the model refuses the second. A reorder rewrites the block, since a map can only be put in order by writing it in order; otherwise each entry is updated in place and keeps its comments. |
+| The NTP settings and "set the zone automatically"? | not in the file; they stay in the unreachable panel's own state | persist them | nothing obeys them: `userspace/ntpd` chooses its own polling, as the protocol requires, and nothing can detect a zone. A stored setting nothing obeys is the §856 failure. |
+| When is the file read? | when the shell starts | also on change | a change reaching a running shell needs a fifth relayed settings group, and adding one breaks `gui/remote`'s exhaustive `match` -- lane F's file. The relay is requested (`requests/c-f-a-settings-group-for-the-date-and-time.md`); nothing edits the file in a session until lane E's page exists anyway. |
+
+### Found and fixed along the way
+
+The `desktop` binary started its session with `ShellSession::start`, which by
+its own documentation does not read the appearance settings -- and nothing
+else did. So from the day the binary was written (2026-09-13) a real desktop
+started in the default theme, with no wallpaper and no widgets, and took up
+the user's settings only when something happened to send `ReloadAppearance`.
+`ShellSession::start_for_user` is `start` plus that read and a repaint; the
+binary calls it, and a session test walks through it. Clock settings load
+through the same call. `known-issues.md`
+`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE` has the details.
+
+### Not done here
+
+- The Settings page: `requests/c-e-a-date-and-time-page.md`.
+- The relay: `requests/c-f-a-settings-group-for-the-date-and-time.md`.
+- The libc and `osh` reading `TZ` through `tz_source`: `requests/c-bd-read-tz-through-tzrules-tz-source.md`.
+- Writing `/etc/localtime` at install time, which is what would make the
+  default more than UTC, stands where §311 left it: tzdata is not shipped yet.
+
+## 876. "System (Auto)" follows fixed light hours, 07:00 to 19:00 by default, and every program learns of the edge through the settings watcher
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The appearance settings have offered "System (Auto)" beside
+Light and Dark since they were written, and it has always meant "dark": nothing
+decided when it should be light. It now follows a daily schedule -- light from
+07:00 until 19:00 unless the user sets other hours -- in the clock's time zone
+(the user's choice in `datetime.yaml`, or the machine's). The desktop, the
+window frames and every application switch together at the edge, without the
+settings file changing.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What decides light or dark? | fixed hours the user can set, `theme.auto.light_from` / `dark_from` | sunrise and sunset | the machine has no location to compute a sunset from, and asking for one to switch a colour scheme is a privacy cost with no other use yet. Fixed hours are also what a user who works nights can set. Sunset remains an option to add beside them. |
+| The default hours? | 07:00 to 19:00 | follow the day's actual length | roughly the working day and the hours a room is most often daylit; a default is a starting point, and the hours are one setting away. |
+| Where is "light now?" decided? | when the settings are read (`read_from`), into `auto_is_light` | per frame | the answer needs the clock and a zone file; per frame is where no file may be read. Every reader resolves it for itself, so no program needs another to tell it the phase -- only to look. |
+| How does a program learn to look at the edge? | the appearance watcher's fingerprint includes the phase, and the shell, which sleeps until the edge, sends `ReloadAppearance` | write the phase into `appearance.yaml` | the file is the user's preferences; a phase written into it by the shell would be clobbered by the Settings app's next save of its older copy, and would put runtime state where only choices belong. |
+| Which clock? | `datetimesettings::clock`, one wall clock for the desktop, with a seam a test can fix | `SystemTime::now()` at each site | a test of anything scheduled by the time of day otherwise passes by day and fails by night; and the shell had two copies of the same function. |
+| And "is it light?" | one answer, `AppearanceSettings::is_light`, which the palette and the accent follow | `ThemeMode::is_light` | the setting alone cannot say: the schedule decides `System`, and a one-mode colour theme decides for itself (§874). Asking the mode put a light-background accent on a dark-only theme -- fixed first, in its own commit. |
+
+### What is not done here
+
+- Applications switch at the edge once lane F's `ThemeWatch` watches through
+  `appearance::watcher()` (`requests/c-f-watch-appearance-through-appearance-watcher.md`);
+  until then they switch at the next announcement that finds the settings
+  changed. The shell and the window frames switch at the edge now.
+- The Settings page for the hours is lane E's (`requests/c-e-the-automatic-modes-hours.md`).
+- A system-wide quick toggle between light and dark -- the roadmap's "or
+  system toggle" -- is not built; the mode is chosen in Settings.
+
+## 877. The power menu is the shell's own list, carried out by `powerctl`; logging out returns to the shell's own login screen
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The start menu's power menu used to list five entries from the
+application database, and pressing them started `/sbin/shutdown`,
+`/sbin/reboot`, `/sbin/suspend` and `/usr/bin/logout` -- programs SlateOS has
+never had, so nothing happened. The login screen's power buttons made the
+desktop quit instead. Now both run SlateOS's real power utility, `powerctl`
+(shut down, restart, sleep, and the new hibernate); lock starts the lock screen
+as its shortcut does; and log out brings back the login screen the desktop
+started with.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where does the power menu's list live? | the shell's own enum, `power::PowerChoice` | entries in the application database, as before | a database entry is a program path and nothing more. Two power actions need arguments (`powerctl reboot`), and log out has no program at all, so the database could not say what they do -- only name a path, which was all there was room to get wrong. |
+| What carries out shut down, restart, sleep and hibernate? | `/bin/powerctl <subcommand>`, started like any program | a power request sent by the shell itself | `powerctl` already asks the service manager for an orderly shutdown and falls back to the power syscalls. A second route from the window manager would duplicate that policy. Starting a program is also the one thing the shell already hands out (`take_launches`). |
+| The login screen's power buttons? | the same commands, through the same launch queue | have the desktop exit and let whatever started it act | the exit was a placeholder ("no power service to ask") written when `powerctl` was already in the tree. With one queue, the same button does the same thing on either side of a login, and a test holds it so. |
+| What does log out do? | brings back the shell's own login screen, built as at start from the same account list | exit the desktop and let a session manager start a greeter | the shell owns the login screen; there is no session manager yet to start another. The cost is real and recorded: the user's programs stay running behind the returning screen (`known-issues.md` `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`), which the session manager will own when there is one. |
+| On a machine nobody can sign in to? | log out does nothing | show a login screen anyway | a screen no account can unlock is a machine that cannot be used (§824), and one function (`ShellSession::greeter`) now applies that rule both at start and at log out. |
+
+### What is not done here
+
+- `powerctl` is not yet in the image's `/bin` (`requests/c-d-ship-powerctl-in-the-image.md`).
+- `apps/launcher` carries its own copy of the old five entries (`requests/c-e-the-launchers-power-entries-name-programs-that-do-not-exist.md`).
+- "Reboot in safe mode", in the roadmap's list, needs a safe mode to reboot into.
+
+## 878. The multi-line text field: a wrap boundary is the cursor's affinity, the vertical scroll is state, undo goes by the word
+
+**Date:** 2026-09-25 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The toolkit had a text field for one line and nothing for more,
+so every program that needed a box of text -- a note, a message -- wrote its
+own or did without: the notes app can only add to the end of a note. There is
+now one, `guitk::textarea`, and the desktop's notes are written with it. Five
+choices in it are worth recording, because each has a reasonable alternative.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| A wrapped line ends at the offset the next one starts at. Which line is a caret there on? | the cursor's own `Affinity`: `Upstream` the line above (where End puts it), `Downstream` the line below | a separate "at end of line" flag, or no end-of-line stop | the cursor already carries one bit for "one offset, two places on the screen" -- the two sides of a change of direction -- and this is the same question. Every visual line gets its own start and end stops, which is predictable and needs no special case in Left and Right. |
+| Is the view's position state? | the vertical offset is stored, and clamped on every read; the horizontal one is worked out from the caret each time | derive both from the caret, as §546 does for one line | a box of several lines is read as well as written: the wheel moves the view without moving the caret, which a derived offset cannot express. Sideways there is nothing to read that the caret cannot reach, so §546's rule stands there. |
+| How much does one undo take back? | a word of typing, or a run of Backspaces or Deletes; a newline, a paste or a replaced selection is a step of its own; moving the caret ends a step | one step per keystroke, or whole seconds of typing | per keystroke is an undo nobody uses twice; by time, a slow typist and a fast one get different undo. The word is what a reader thinks in. The history keeps edits, not copies of the text, and reaches back 500 steps. |
+| Which keys does the field not take? | Tab, and Ctrl+Enter | Tab indents | a notes box that ate Tab would trap a keyboard user in it; Ctrl+Enter is the usual "send" in a message body. Both come back unhandled for the owner. |
+| When is a note saved? | at every change | when it is closed | a note is the thing on a desktop most worth not losing, and the desktop can end with a note open. A keystroke is a change the user made, not a step of a gesture -- the widget layout's rule against a write per drag step does not apply -- and the file is small. |
+
+### What is not done here
+
+- The apps that edit text are lane E's to move onto it
+  (`requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md`).
+- `WidgetKind::TextArea` in the toolkit's widget tree still holds only a
+  value; putting this field behind it is the next step for a program that
+  builds its window from that tree.
+- A triple click selects the paragraph in the field, but the desktop's event
+  loop reports only single and double clicks.
+
+## 879. The start menu in two columns: the programs on the left, the places and the power on the right
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous), within the operator's direction that the Aero reference is the default look (§815, §816) &middot; **Lane:** C
+
+**In short:** The start menu was one list, 300 by 400 pixels, with the search
+field at the top and Power, Settings and Terminal squeezed into a footer. It is
+now the reference's two columns (`Aero Desktop (offline).html`,
+`.aero-start-menu`): the programs on the left with the search field at their
+foot, and on the right who is signed in, their folders, Settings, a terminal
+and the power button.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Size | 524 by 566, scaled, and clamped to the room above the taskbar | keep 300 by 400 | the reference's; a second column needs the width, and the list keeps its row height, so more programs show at once. |
+| Where is the search field? | at the foot of the programs, as in the reference | at the top, where it was | the reference's, and where a hand coming from the taskbar already is. Typing with the menu open searches, as before; the field's place changes nothing about that. |
+| What is in the places column? | the user; Home, Documents, Pictures, Music, Downloads; Settings; a terminal; the power button at the foot | the reference's full list (Games, Control Panel, Devices, Help and Support) | only places this system has: a folder opens in the file manager, and Settings and the terminal are `design.txt` line 721's. A place that opened nothing would be the defect the power menu had. |
+| Which folders? | `$HOME/<Name>`, the names the desktop's Documents icon uses | XDG user-dirs (`user-dirs.dirs`) | nothing on SlateOS writes a user-dirs file, and the icon and the place should open the same folder. When there is one, both should read it -- one change. |
+| The user's picture | the first letter of their name on the accent, as the login screen draws a user without a picture | an account picture | none is saved yet (`TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED`). The name is the account's display name, set when they sign in, or the process's user when there is no login screen. |
+| A menu too short for every place | the lower places are left out | shrink them, or let them run over the power button | a place drawn over the power button would take its press; a shrunken one could not be read. Scrolling the places is not worth it for seven. |
+| The two columns' colours | the programs `base`, the places `mantle`, both at the panel's transparency | a second accent-tinted colour | two palette roles, so a light theme and a dark theme each get a pair that belongs together, and a colour theme can set both. |
+
+### What is not done here
+
+The pinned programs as a three-wide grid of tiles, jump lists from them, a
+"Shut down" button with the other power actions behind a caret -- the
+reference's -- and icons, which need an icon theme to draw from.
+
+The Shut down button is held back on purpose, not for time. It shuts the
+machine down on one press, and `powerctl` does not yet ask programs to close
+first -- an application can now decline a close to ask about unsaved work,
+but nothing asks it at shutdown -- so a stray press would lose whatever was
+not saved. The power button opens the list, and Shut down is a second,
+deliberate press, until shutting down asks first.
+
+The tiles are held back for their icons: a tile is an icon above a name, and
+without an icon theme a grid of names in boxes is a worse list.
+
+## 880. Icon themes: freedesktop names in the theme's folder, a built-in set compiled in, and the shell uploads each icon once before the frame that names it
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The desktop drew no icons -- its desktop icons are emoji
+glyphs, which a font without emoji shows as boxes, and everything else was
+words. There is now an icon theme: SVG files a theme can carry, found by
+standard names, tinted to the colours around them, with a built-in set drawn
+for this desktop. The start menu's places and its power button are the first
+to use them.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| How is an icon named? | the freedesktop Icon Naming Specification (`folder-documents`, `utilities-terminal`), with its fallback of dropping the last `-part` | names of our own | every icon set in the world is drawn to these names, so a set made for another desktop drops in, and a program asking for an icon uses a name its author already knows. |
+| Where does a theme keep its icons? | `<theme>/icons/<name>.svg`, beside `theme.yaml`; a folder of icons alone is an icon pack | a separate icon-theme directory tree (`/usr/share/icons`) | one place for everything a theme is, found through the colour themes' two roots with the user's first; `theme.icons` chooses the icons apart from `theme.colors`, which is the mix-and-match the roadmap asks for. |
+| Sizes | one scalable SVG per name, drawn at the size asked | per-size PNG directories | the renderer draws SVG at any size with supersampling; per-size bitmaps would multiply the files a theme author has to make by the number of scales. |
+| Colour | `currentColor` becomes the colour the icon is drawn in; other colours are kept | fixed-colour icons only | a monochrome set then follows the theme, the accent, and light or dark mode with no file per colour. |
+| A theme without an icon | its shorter name, then the built-in icon, compiled in | draw nothing | a theme that draws a few icons, or no theme installed at all, still has every icon. |
+| Untrusted files | over 256 KiB, not text, not an SVG this renderer reads, or drawing nothing: passed over for the next place to look; at most 512 px square | read what is there | a theme is data from strangers, and an icon is a few hundred bytes. |
+| How the shell gets an icon to the compositor | the shell names an icon by a deterministic image id -- the request's hash under a reserved tag -- and the session, before submitting a tree, renders and uploads each id that surface has not been sent | rasterise in the shell and ship pixels in the tree | a tree is commands, not pixels, and the compositor already stores uploaded images per window; an icon goes up once and is drawn every frame by id. A change of appearance drops them all, and the next frames send the new ones. |
+
+### What is not done here
+
+- The taskbar and the tray still draw words; they move onto the icons next.
+  (The desktop's icons did the same day: each type is its own picture in its
+  own hue, and a dragged icon's ghost is the same picture faded -- an icon
+  drawn in a translucent colour is drawn translucent.)
+- Programs have no icon of their own: which icon is a program's is the
+  application registry's to say (`open-questions.md`).
+- A change to an icon file while its theme stays chosen is not noticed until
+  the settings change, as with colour themes.
+- What of SVG an icon may use is the toolkit renderer's subset: shapes and
+  paths, fill and stroke with their joins, caps and fill rules, presentation
+  attributes and (since later the same day) the `style` attribute, which is
+  how Inkscape and Breeze write them. A `<style>` sheet's rules, `<use>`,
+  gradients and clip paths are not drawn -- an icon relying on them draws
+  without them.
+
+## 881. The shell's pictograms are icons from the icon theme, not emoji
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The desktop drew its small pictures -- the notification bell,
+the volume and brightness pop-ups, the login screen's power buttons, the
+battery widget -- as emoji characters. No font the desktop looks for draws
+them: the built-in one covers Basic Latin, box drawing and block elements, and
+Inter and DejaVu Sans, the UI faces it prefers, have no emoji either. So every
+one of them was a box. They are now icons from the icon theme (§880), with the
+built-in set drawing all of them, so they appear whatever fonts are installed
+and change with the theme.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What names? | the Icon Naming Specification's where it has one (`audio-volume-high`, `media-eject`, `battery-caution`, `network-offline`, `system-reboot`, `start-here`, ...), otherwise the name the large icon sets share (`display-brightness`, `notifications-disabled`, `view-reveal`, `system-suspend`, `avatar-default`, `pan-start`) | names of our own for the rest | a theme made for another desktop then draws these too; ours are the fallback, not the vocabulary. |
+| A more specific state than a set draws | name the specific icon (`display-brightness-high`, `audio-input-microphone-muted`, `system-suspend-hibernate`) and let the lookup drop the last part | only the general names | a set that draws the state shows it; one that does not still shows the general picture, never a gap. |
+| Where the request is kept | each part that draws keeps its own registry (the shell's menus, the desktop's icons, the overlays, the login screen), and the session's one upload path asks them all | one registry shared by reference | each part stays constructible alone, as every unit test builds it; a surface whose part the session does not ask is caught by the session test that checks every frame's icons went up first. |
+| Every surface | the taskbar, the menus, the overlays, the background and the login screen all upload the icons a frame names before sending it, through one function | per-surface code | a surface that sends a frame naming an icon it never uploaded draws nothing there, silently. One door is one place to get it right. |
+
+### What is not done here
+
+- Icons a *program* puts in the tray are still characters it sends
+  (`guiremote::tray::TrayIcon::glyph`): naming a theme icon there is a wire
+  change, lane F's.
+- Typographic marks -- the `✓` beside a chosen row, the `…` that marks a cut
+  -- stay text. Every TrueType face the toolkit looks for draws them; only the
+  built-in bitmap face does not, and it draws no accented letter either, which
+  is a font question rather than an icon one.
+
+## 882. The shell decodes its pictures on a thread of its own, and keeps the one on screen until the next is ready
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The desktop read and decoded its wallpaper, and the login
+screen's picture, on the same thread that draws the desktop and answers its
+clicks. A photograph takes about a second to decode, so at login, whenever a
+wallpaper was chosen and at every step of a slideshow, the whole desktop froze
+for that second. A thread of the shell's own now does the decoding and wakes
+the desktop when a picture is ready. The picture already on screen stays there
+until its replacement is ready, rather than the desktop going blank between
+the two.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where the decode runs | one worker thread per session (`gui/desktop/src/pictures.rs`); the session collects what is ready at the start of each pump, and the worker wakes a parked loop through `EventLoop::waker` | a thread per picture; or decoding in pieces on the loop's thread | two pictures that change at the speed of a person need one thread; the decoders decode a whole picture in one call, so a piece-at-a-time decode is not on offer, and it would still stall. |
+| Where the upload runs | on the loop's thread, as before | uploading from the worker | the connection is the loop's, and a picture has to be up before the frame that names it (§557, §861) -- an order only the loop can keep. |
+| What is drawn while the next picture decodes | the picture already up, at its own size (`WallpaperManager::shown_picture`); the greeter likewise keeps its picture | the plain colour until the new one is ready; or the new id at once | a slideshow would flash the plain colour between every two slides; naming the new id before its pixels exist draws nothing, silently. |
+| Several requests before the first is done | only the newest for each slot is decoded; the others are answered "superseded" at once, and the session drops any answer for a picture it no longer wants | decoding each in turn | trying five wallpapers in a row would cost five decodes and flash each one. Every request still gets exactly one answer, which is what lets a test wait for all it is owed. |
+| An answer that arrives after the wallpaper or the greeter's style has moved on, with no repaint since | what is wanted is asked again first; the stale answer is dropped and the new request sent at once | upload it, and let the next paint replace it | putting it up would flash a picture the user has already replaced -- and on the greeter, one from a style they have left. Only the repaint path puts a picture on the greeter, so there is one place that decides what it shows. |
+| A new picture that will not decode | the old picture is given back and the plain colour drawn, with the reason posted | keeping the old picture up | the setting names a picture that cannot be shown, and keeping the old one would say the change had worked. The same as before this change. |
+| The greeter showing the desktop's picture | one decode shared between the two when they ask one after the other for an unchanged file (same path, length and modification time) | a decode per slot; or a cache kept by path | at login both ask for the same photograph at once, so this halves the work there. The shared copy is let go whenever the queue runs dry, so an idle desktop holds no extra picture, and a file edited in place is decoded again. |
+| A thread that will not start, or no waker | the plain background (no thread), or collection on the loop's next pass (no waker) | failing the session | a desktop without its wallpaper is still a desktop. |
+
+### What is not done here
+
+- The two applications with the same stall (`apps/photomanager`,
+  `apps/imageviewer`) are lane E's; `known-issues.md`
+  `TD-C-DECODING-A-PHOTOGRAPH-BLOCKS-THE-FRAME-THAT-ASKED-FOR-IT` stays open
+  for them.
+- The upload is still on the loop's thread. For a 4K picture that is a copy of
+  about 33 MB into the socket: milliseconds, not the second the decode was.
+
+## 883. Text falls back to a chosen list of faces, one per job, resolved from the font directories alone
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A character the UI font has no drawing for used to come out as
+a box. Lane F's font engine can now draw it from another font instead
+("fallback"); which fonts those are is decided here. The toolkit tries, in
+order: a font with wide coverage (Noto Sans), an emoji font, symbol and maths
+fonts, then one font per writing system -- each only if installed, and only
+one per job. The UI font itself is now Open Sans, the typeface of the Aero
+design the operator made the default look.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| The default UI family | Open Sans first, Inter second (`DEFAULT_UI_FAMILIES`, `FontSettings::default`) | Inter, as §400 had it | §815 made the Aero reference the default theme, and its `font-family` is Open Sans; the image will carry Open Sans and not Inter (`requests/f-cd-...`). |
+| The shape of the fallback list | groups of interchangeable families -- "the emoji face", "the CJK face" -- each giving its first installed member (`DEFAULT_FALLBACK_FAMILIES`) | one flat list; or every installed face | every fallback face is parsed in every process that draws text. A flat list with Noto Color Emoji *and* Segoe UI Emoji loads both where both exist, and four regional CJK faces are four times tens of megabytes for one set of characters. Every installed face is the same problem without a ceiling. |
+| What the list depends on | the font directories alone (`resolve_fallback_families(&FontDb)`) | leaving out the process's own UI family, or anything else the process chose | the toolkit's cache measures and the compositor's draws; the two must fall back to the same faces in the same order or a line is measured in one face and drawn in another. Anything per-process can differ between the two. The cost: where the UI family is itself on the list (a host whose UI face resolved to Noto Sans) that face is parsed twice and tried once for nothing. |
+| A fallback face that will not load | left out; the rest keep their places | the group's next member takes its place | a file that loads in one process and not in another (a descriptor limit, a file replaced between the two scans) should change one face, not shift every face after it. |
+| Weights | regular faces only | a bold face per family as well | `osfont` takes a variable fallback face to weight 700 for bold text itself; a static family's bold is a second parsed face for text that is by definition rare. |
+
+### What is not done here
+
+- The compositor's cache is lane F's: `guitk::text::install_fallback_faces`
+  is to be called there beside `install_ui_faces`. Until it is, the
+  compositor's measuring and drawing of a character only a fallback face has
+  can disagree -- which was true of every such character before, as a box.
+- Each process parses its own copy of each fallback face (`known-issues.md`
+  `TD-C-EVERY-PROCESS-PARSES-EVERY-FALLBACK-FACE`).
+
+## 884. The start menu is a tree of the installed programs, read from their desktop entries
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The start menu listed ten programs typed into the shell's own
+source. It now lists the programs installed on the machine, as each one's
+*desktop entry* -- a small standard text file saying the program's name,
+picture, kind and command -- describes it, grouped into folders by kind
+(Accessories, Graphics, Internet...): the "applications tree" `design.txt`
+asks for. The folders start open and close with a click. No program ships an
+entry yet, so the menu still shows the shell's own ten, now in folders.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| How a program says what it is | the freedesktop Desktop Entry Specification's `.desktop` files, read by a crate of our own (`gui/desktopentry`) | a SlateOS manifest format | every Linux desktop reads these, so a ported program brings its entry and one written here is read elsewhere. |
+| Where they are looked for | the XDG data directories, the user's first; the first file per desktop file ID wins | `/usr/share/applications` only | a user's own copy then overrides a system entry, and a copy saying `Hidden=true` removes it -- the specification's way, with no second mechanism. |
+| When they are read | at login, and when the start menu opens if any entry file was added, removed or rewritten (size and time per file) | a directory watch; or the directories' own times | there is no watch here yet; a directory's time moves on some filesystems when a file is added and on none when one is edited in place. A stat per entry is cheap beside the read and parse it saves. |
+| Which folder a program is in | the first *main* category its entry names | every main category it names | `Audio;Video;AudioVideo` would list a player three times. The author's first answer is the one that counts. |
+| Folders open or closed at first | open, closed by a click for the session | closed | closed, everything is two clicks away, and with a handful of programs the menu is a list of folders. Open, it reads as a grouped list, and a folder the user never uses can be closed. |
+| The shell's own list | kept, each program replaced by an installed entry for the same file name | dropped when entries exist | until programs ship entries it is the only menu there is; once one does, its entry wins, with its own name and picture. |
+| Starting a program | its entry's `Exec` expanded into an argument vector; `Terminal=true` as `terminal -e ...` | the program with no arguments | the entry's arguments are part of how the program is meant to start. Never a shell string: a file name stays one argument, as bytes. |
+
+### What is not done here
+
+- **Programs ship no entries yet** (`requests/c-e-ship-a-desktop-entry-with-each-program.md`),
+  and the image installs none (`requests/c-d-install-desktop-entries-into-the-image.md`).
+  The terminal ignores `-e`, so a `Terminal=true` program opens a shell (lane E).
+- ~~Icons come from the icon theme only.~~ Done the same day: an entry naming
+  an icon file by path, or an icon installed in `hicolor` or `pixmaps`, is
+  drawn -- SVG, or PNG scaled by area -- after the chosen theme and, name by
+  name, beside the built-in set (`appearance::icons::IconTheme::render`).
+- ~~Jump lists (an entry's `Actions`) are read and not yet offered.~~ Offered
+  the same day: a program's right-click menu -- its start menu row, its pinned
+  taskbar button -- starts with its actions, above a separator; an action with
+  no command line (D-Bus only) is left out.
+- **Which folders are closed** is not saved across logins.
+
+## 885. A window is known as its program's by the name it declares; a pinned button stays a launcher
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The taskbar can now tell which program a window belongs to: a
+window says what it is (its `app_id`), and the desktop matches that against
+the installed programs' desktop entries. It uses the answer to draw the
+program's picture on the window's button. It deliberately does *not* fold the
+window into its program's pinned button, as most desktops do, because this
+one's design says the opposite: pinned programs on the left, "all launched
+applications go to the right of those" (`design.txt`), and the Aero
+reference's taskbar says it again -- "Clicking a pinned app launches a new
+running instance on the right".
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Who says which program a window is | the window, by the `app_id` it declares, matched against the entries: the entry's file name (`org.example.Sketch` for `org.example.Sketch.desktop`, the Wayland convention), its `StartupWMClass`, or the program's file name | the compositor attributing each surface to the process it spawned -- `known-issues.md`'s recommendation | the compositor route is a protocol change (lane F's) and the only one that needs no cooperation; the declared name needs none of anyone else's work, SlateOS's own programs already declare their crate's name (`terminal`), and every freedesktop program declares its entry's. The compositor route remains open for programs that declare nothing. |
+| Case | not significant | exact | window classes are conventionally capitalised (`Firefox`) and file names are not. |
+| A pinned program's open window | its own button, right of the divider; a click on the pin starts another copy | on the pin, which then brings the window forward -- Windows 7 onwards, every dock, `taskbar.rs`'s never-run grouping model, and the known-issues entry that asked for this identity | `design.txt` (the window-manager list: "can pin apps to taskbar on the left, all launched applications go to the right of those") and the reference's taskbar component (`aero-taskbar.jsx`: a pinned "Files" beside an open "workspace" window in the running group, and a pinned "Nushell" beside a running one) both specify it, and `design.txt` is the authority. |
+
+### A merged version was written and withdrawn
+
+The merge was built first, on the known-issues entry's word that it is "the
+ordinary behaviour of every desktop", tested, and withdrawn before it was
+committed, on reading the reference's component. Whoever reaches for it next
+-- it is still what most desktops do -- should read the row above first: the
+design would have to change, and that is the operator's call, not a lane's.
+
+## 1400. The taskbar's tiles are the Aero reference's, and a tooltip's delay wakes the desktop
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The taskbar's buttons were boxes of one width, each with a
+picture and a name. They are now drawn as the default theme's reference draws
+them: a pinned program is its picture alone, on a small square, and a window
+is its picture and its title on a tile as wide as the title needs, up to 160
+pixels, in faint glass with an edge. A pinned program no longer shows its name,
+so resting the pointer on any tile names it -- and making that work showed that
+tooltips never had on a desktop nobody was otherwise touching: nothing woke the
+desktop when a tooltip's half-second delay ran out, so a tray icon's name
+appeared only if something else happened to redraw, and stayed up after the
+pointer left until something did again.
+
+### The calls
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| A pinned tile | its program's picture, 30 pixels on a 36-pixel square, flat | its picture and name, as before | the reference's `aero-task`; and `design.txt` makes the name the option ("option to show app name along with app icon"), so the picture is the default |
+| A window's tile width | as wide as its picture and title need, up to 160 (`width: auto; max-width: 160px`) | one width for all, as before | the reference's `is-labeled` tile; a short title no longer holds a long title's room. The price: a tile's width follows its title, so the tiles right of it move when it changes |
+| When they do not fit | the widest windows give way first, all to one width, each down to a square; past that, every tile shares alike (`fit_tiles`) | shrinking every tile by the same fraction, as the reference's flexbox would | a short title is the last to be cut, which is the order a reader would give them up in |
+| Tile corners | half the windows' radius | the windows' radius, as before; or the reference's fixed 4 | the reference's 4 at the default 8, and the setting still moves them at every step -- where 16 on a 36-pixel tile is a pill, and a fixed 4 ignores the setting |
+| The glass | two fills, the upper half brighter, an edge in the bar's text colour and a highlight along the top | the reference's gradients | the renderer draws no gradients; two steps are the same glass |
+| A pin's tooltip | "Terminal — pinned (click to open)" | the name alone | the reference's; it says what a click does, which is not what most taskbars' pins do (§885) |
+
+### The tooltip's deadline
+
+The session sleeps while nothing on screen moves (§812), and wakes for known
+moments -- a clock's next minute, a slideshow's next picture. A tooltip's delay
+was not one of them, and a tooltip becoming visible, or going, did not mark
+anything to be redrawn. The unit tests never saw it, because they call the
+clock by hand. Now the shell reports when a tooltip is due
+(`DesktopShell::tooltip_due_in`, from the toolkit's `Tooltip::due_in`) and
+whether one came, went or began waiting (`take_tooltip_changed`), and the
+session wakes and repaints for both. A session test drives it through the real
+input path.
+
+### What is not done here
+
+- ~~**Hover and pressed states**~~ -- the hover done the same day: the tile under
+  the pointer lights in the accent's glass with a glow of it, over whatever
+  state it was in, as the reference's stylesheet orders it; the bar is redrawn
+  when the light moves. The reference gives its tiles no `:active` state (only
+  the start orb has one), so there is no pressed one to add.
+- ~~**The option to hide windows' titles**~~ -- done the same day, §1401.
+- **A window asking for attention** -- the reference's amber `is-alert`: a window
+  cannot yet say it wants attention; that is a field in the window list, lane
+  F's protocol, asked for in `requests/c-f-a-window-cannot-ask-for-attention.md`.
+- **The start orb** -- the reference's round, 64-pixel start button filled with a
+  picture.
+
+## 1401. Windows' titles on the taskbar are an option, on by default, switched from the bar itself
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** `design.txt` asks for an "option to show app name along with app
+icon in taskbar". There is one now: with it on -- the default -- a window's
+tile is its picture and its title, as the Aero reference draws it; with it
+off, a window's tile is its picture alone, on a square like a pinned
+program's. A right-click on the bar between its tiles and its tray offers
+"Show window titles", ticked while they are shown.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| The default | titles on | off, as Windows 7 shipped | the reference labels every running window, and the reference is the default theme (§815) |
+| Where it is kept | `appearance.yaml`, `taskbar.labels`, beside `taskbar.autohide` | `taskbar.yaml`, with the pins | the Settings app already edits the bar's one other option there, and a person hand-editing the file looks for it beside that one |
+| Where it is switched | the bar's own right-click menu, and (asked of lane E) the Settings app beside auto-hide | the Settings app alone | §815 moves *screens* to the Settings app; a switch on the thing it changes is the desktop's View menu's precedent (icon sizes) |
+| Pinned programs | their picture alone either way | titles on pins too, when on | the reference's pins are pictures; a pin's name is its tooltip |
+
+## 1402. The start menu is in the reference's sections, and "Recently used" is what the desktop started
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The start menu's list was the pinned programs and then every
+installed program in folders, with a line between. It is now in the Aero
+reference's three sections, each under a heading: "Pinned", "Recently used"
+-- the last eight programs started, newest first -- and "All apps", the
+folders. A program counts as used whichever part of the desktop started it:
+its pin, a desktop shortcut, a jump list, the Run box or the menu.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What counts as used | every launch the session carries out (`queue_launches` calls `note_started`) | only starts from the start menu | a program the user opens from its pin every day is the one they use; the menu is not the only door |
+| A program started in a terminal | credited to itself (`launcher::program_started`) | to the terminal it runs in | otherwise "Terminal" would be the only program ever used |
+| What is listed | installed programs only, eight, newest first, each once | a Run-box command too; more rows | the section is a list of programs to start again; the reference lists eight |
+| A pinned program that was used | listed in both sections | left out of "Recently used" | the reference lists Thunderbird in both; the section says what was used, not what is missing from the pins |
+| Headings | only above a section with something in it; "All apps" only below another | always all three | an empty heading is a promise with nothing under it; "All apps" alone heads nothing |
+| Kept | `startmenu.yaml`, `recent:`, beside `pinned:` | in memory for the session | the reference's menu remembers across logins, as every desktop's does |
+
+### What is not done here
+
+- **Sticky headings** -- the reference's stay at the top of the list while
+  their section scrolls under them. The list scrolls by rows, and a heading
+  drawn over the first row would hide it; it is worth doing with the scroll
+  made smooth.
+- **The pins as a grid of tiles** -- the reference's stylesheet has one
+  (`aero-sm-pinned`), though its markup lists them as rows.
+
+## 1403. "Show desktop" is a strip at the bar's end that puts windows away and brings the same ones back
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The taskbar ends, right of the clock, in the Aero reference's
+narrow "Show desktop" strip. A press puts away every window on the desktop
+being shown; the next press brings back exactly those windows, the one that was
+in front in front again -- unless a window has been shown in between, in which
+case the desktop is no longer what was shown and the press puts windows away
+again. The Show Desktop shortcut is the same switch.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where | the very end of the bar, 14 pixels, right of the clock | a tray icon | the reference's `aero-showdesktop`; a pointer thrown into the corner lands on it |
+| The second press | brings back what the first put away, bottom of the stack first | puts away again (a one-way action) | every taskbar's corner toggles; the order puts the window that was in front back in front |
+| Bringing back | `Activate` each | `Restore` | `Restore` also un-maximises; a maximised window put away should come back maximised |
+| When the toggle forgets | the moment any window is shown again on this desktop, by any means | never; or after a timeout | a window shown in between means the desktop is no longer what was shown, and bringing back the rest over it would undo the user's choice |
+
+### Not done here
+
+- **Aero Peek** -- the reference's hover preview of the desktop through
+  transparent windows needs the compositor to draw windows see-through on
+  request, which it cannot yet.
+
+## 1404. The taskbar clock is the time over the date, in two lines
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The clock in the taskbar's corner was one line --
+"Tue Aug 18 16:30". It is now two, as the Aero reference draws it: the time,
+bold, and under it the weekday and date, smaller and a little dimmer, each
+centred. It takes the width of its wider line rather than of both side by
+side, which is room the window tiles get back. With the weekday and date both
+switched off, or in a bar too short for two lines, it is one line as before.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Layout | two lines, the time bold over the date at the caption size and 0.85 of the text colour | one line | the reference's `aero-clock`; the slot narrows by the date's width |
+| A bar too short for two lines | one line, the date before the time, as before | two lines squeezed | a clock cut through the middle of its digits is worse than one set out in a line |
+| What the date line says | the switches' weekday and date, "Tue Aug 18" | the reference's "2026/05/06" | the Date & Time panel's switches already say which parts to show; the year is the field nobody reads at a glance (§492) |
+
+## 1405. Shut down, restart and log out ask the programs to close first
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** "Shut down" in the start menu used to switch the machine off at
+once: a document with unsaved changes was simply gone, and the program holding
+it was never asked. Now shut down, restart and log out first ask every open
+window to close -- the same request its own close button makes, so a program
+with unsaved work can ask whether to keep it -- and happen once they have. If
+some are still open after five seconds, a screen lists them, with "Shut down
+anyway" and "Cancel". Sleep, hibernate and lock leave the session as it was,
+and happen at once, as before.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Which choices wait | shut down, restart, log out (`PowerChoice::ends_the_session`) | every power choice | sleep, hibernate and lock keep the session; there is nothing to close |
+| How the windows are asked | `ShellControlAction::Close`, each window open when the choice was made | destroy them | the close button's request: the program is told and can object; a window opened after -- a program's "save changes?" dialog -- is not asked, or the dialog would be dismissed |
+| While waiting | a notice on the overlay surface, "Closing programs to shut down..." | a full-screen "shutting down" screen at once | the overlay takes no input, so the dialog a program puts up is reachable; a screen over it would hide the question the wait is for |
+| How long before listing | 5 seconds | wait for ever; or none | Windows' figure: long enough for programs to close on their own, short enough that a walked-away user is not left with a machine that stayed on |
+| The list | over a dimmed screen, the programs still open (picture and title), "... anyway" and "Cancel"; Escape is Cancel | go ahead silently after a timeout | a program that has not closed may be the one asking about unsaved work; the user decides |
+| Cancel | the programs that did close stay closed | reopen them | nothing can reopen them as they were; cancelling stops what has not happened yet |
+| The login screen's power buttons | unchanged, at once | the same wait | nobody is signed in to be asked |
+
+### What this does not do
+
+- **Programs without a window are not asked** -- a background service, a
+  program that closed its window and kept running. Ending those is the session
+  manager's (`known-issues.md` `TD-C-LOGGING-OUT-LEAVES-THE-USERS-PROGRAMS-RUNNING`).
+- **The one-click "Shut down" button** the reference draws, with the other
+  choices behind a caret, was waiting on exactly this (`todo.txt`); it is the
+  next change. *Done the same day:* the start menu's power button reads "Shut
+  down" and does it in one click -- through `choose_power`, so every window is
+  asked first -- and the caret at its right end (`power_caret_rect`, the
+  reference's 30-pixel `aero-sm-power-caret`, its chevron pointing up the way
+  the choices open) opens the other choices, lit with the accent while they
+  show. The two are drawn as the reference's: two parts of glass, a line round
+  each and a pixel between them.
+
+## 1406. The start menu lights what the pointer is over, apart from the keyboard's row
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** Moving the pointer over the start menu used to change nothing on
+screen until a click, so a user could not see which row a click would reach --
+the reference lights each thing under the pointer (its `:hover` rules). Now
+the start menu does too: a program's row, a place, "Shut down", the caret and
+a power choice each light while the pointer is over them. The row the
+keyboard has chosen keeps its own, stronger mark, and the two can be on
+different rows at once.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Does the pointer move the keyboard's row? | No: the light is separate, and quieter | the pointer *selects* (Windows 7's start menu) | the reference's lights are pure `:hover`; and a search's first result stays what Enter starts, however the pointer drifts while typing |
+| What a row's light is keyed to | its place on screen (`StartLit::Row`) | the program in it | the list scrolls under a resting pointer; the light must stay on the row a click there would reach |
+| Headings | never lit | lit like a row | a heading is not something to click |
+| When the menu closes | the light is forgotten | kept for next time | a menu opened again lights nothing until the pointer is over it, rather than what the pointer left |
+| Colours | the accent for the list and the power choices, the column's text colour for the places and the power button | the reference's fixed blues and whites | the reference's are its blue theme's; taken as the accent and the text colour they follow the user's theme, as every other colour here does |
+
+The caret, a chevron alone, also names itself -- "Power options", the
+reference's `title` -- with the tooltip the taskbar's pins and tray icons use.
+
+## 1407. The power choices are the reference's flyout: pictures, the lightest first, above the caret
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The start menu's power choices were a list of words, "Shut down"
+at the top, hanging off the left end of the power button. They are drawn now as
+the Aero reference draws them: each with its picture, the session's choices
+first and then the machine's from the lightest to switching it off -- log out,
+lock, sleep, hibernate, restart, shut down -- rising above the caret that opens
+them, with their right edge on the button's. "Shut down" is last, so it sits
+nearest the button, whose main part already does it in one click (§1405).
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Order | log out, lock, sleep, hibernate, restart, shut down | shut down first, as it was | the reference's `SM_POWER`: the session's choices, then the machine's, lightest first |
+| Lock | second, after log out | left out, as the reference has no lock | every desktop's power menu has it, and it is the one choice that leaves everything as it was; it takes the place of the reference's "Sleep the display", the nearest thing to it |
+| "Sleep the display", "Restart OS -- keep the computer on" | not offered | offered | nothing carries them out: no program turns the screen off alone, and a restart that keeps the computer on needs the kernel (`requests/c-ab-a-restart-that-keeps-the-computer-on.md`) |
+| Pictures | the freedesktop names (`system-log-out` new in the built-in set) | words alone | a theme that draws those names draws these, and the built-in set draws all six |
+| Where it opens | right edge on the button's, over the caret, 236 wide | left edge on the button's, 170 wide | the caret opens it, and the reference's `right: 0` and `width: 236px` |
+| The rows | inside the popup's padding on every side | the full width | a lit row (§1406) is then a wash within the panel, as the reference's items are |
+
+The login screen's power menu is its own list and is not changed.
+
+## 1408. The start button is the reference's orb, kept inside the bar
+
+**Date:** 2026-09-26 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The start button was a square with a small picture on it. It is
+the Aero reference's orb now: a round, glossy button in the accent with the
+start picture on it, a ring of light round it and a shadow under it, glowing
+while the pointer is on it -- with three differences from the reference, each
+forced or chosen for a reason below.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Size | 36 across on the default 40-high bar: the reference's 42, but kept 2 clear of the bar's edges | 42, rising 5 above the bar as the reference's does | the taskbar's surface ends at the bar's edge, so anything above it is cut off; making the surface taller would put a band of it over the windows' bottom edge, where it would take their clicks |
+| What is on it | the icon theme's `start-here`, in whichever of black or white reads on the accent | the reference's logo | there is no logo in the repository (`open-questions.md` C-Q28); it goes in the orb's place when there is |
+| While the menu is open | the orb glows, as under the pointer | no mark, as the reference | the bar has always shown that its menu is open (the button was drawn pressed), and a menu opened from the keyboard has no pointer over the orb to say where it came from |
+| The gloss | a bright cap over a softer skirt, and a shade at the foot: translucent white and black pills inside the circle | the reference's radial gradients | the renderer draws no gradients; the tiles' glass (§1400) is the same two-step light |
+| The button's width | 64, the reference's | 48, as it was | the orb needs the room, and the rest of the bar follows it |
+
+A press anywhere on the button still opens the menu: the orb is drawn in it,
+and the target stays the button, which is larger.
+
+## 1409. A test build refuses to write settings outside a temporary directory, judged by where, not who
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C &middot; asked for by lane E
+
+**In short:** A test that saved a setting without first borrowing a scratch
+configuration folder wrote into the real `~/.config/slateos` of whoever ran the
+tests -- it has happened, and left files nobody could account for. Now, in a
+test build only, `settingsfile::store` refuses -- by panicking, with the fix in
+the message -- to write a settings file anywhere outside the system's temporary
+directory. A shipped program cannot see this: it exists only under the
+`testing` feature, which only a `[dev-dependencies]` entry turns on.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What decides a refusal | where the file would go: outside `std::env::temp_dir()` | who asks: a flag `with_scratch_config` sets on the calling thread (lane E's proposal) | the harm is the developer's configuration being written, so that is what is tested for. The flag also refuses writes that harm nothing -- a test that makes its own scratch directory and points `XDG_CONFIG_HOME` at it, as `settingsfile`'s own tests do, and a thread a test starts inside its turn |
+| What that costs | a forgetful test that happens to run while another holds a scratch turn writes into *that* one's directory, unrefused | the flag catches it | it fails on every other run, which is found at once; and nothing of the developer's is touched either way |
+| Refusal or error | a panic | an `io::Error` | most saves are `keep()` calls that show a failure on screen rather than return it; a `Result` a test may ignore is the failure this exists to end |
+| Where it applies | in every crate's tests whenever the feature is on -- including, in a workspace run, crates that do not turn it on themselves, since Cargo unifies features | only crates that ask | a forgetful test is as harmful in a crate that did not ask |
+
+Proved before landing by running the tests of every crate that reaches
+`settingsfile` -- effectively every application -- together, with the feature
+unified as a workspace run has it.
+
+## 1410. A theme dresses the terminal too: sixteen colours in a `terminal` section, following the theme's hues
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A theme set the desktop's colours and stopped at the terminal,
+which drew in fixed colours of its own. Now the palette every program is handed
+carries a terminal's colours as well (`Palette::terminal`): its background,
+foreground and cursor, and the sixteen colours programs name by number. By
+default they are the theme's own hues in the slots every terminal gives them --
+red for red -- so a theme that retints its hues retints its terminal; a
+`terminal` section in the theme file can set any of them outright. The terminal
+application moves onto them next (`requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md`).
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Whether a theme sets the sixteen at all | yes, as every terminal's themes do | no: "colour 1 is red because the escape sequence says so; retinting would corrupt what programs print" (the terminal application's comment) | a theme chooses the *shade* of red, not whether slot 1 is red; the defaults put each hue in its own slot, and a theme author who puts green in red's slot has made a theme nobody will use |
+| The defaults | the palette's hues in their slots, as Catppuccin's terminal themes place them: pink as magenta, teal as cyan | fixed xterm colours | a theme that changes `red` changes the terminal's red with it, which is the point of one theme for the whole desktop |
+| The four greys in light mode | the text as black, the raised surfaces as white and bright white, and the faintest mark made legible as bright black | Latte's mapping, the subtexts | this palette's light subtexts are a deepened blue ink (`#00688b`), not greys; mapped as Latte maps them, "black" would have been blue |
+| Contrast | the foreground held to the text floor on the background; the sixteen not | all nineteen held | a program may mean black on black; the foreground is what everything unmarked is written in |
+| One-mode themes | the terminal goes with the colours' mode (`ThemeColors::variant`) | read the asked mode's section regardless | a theme's terminal was chosen against its own grounds |
+| High contrast | the scheme's ink on its page, the hues kept | the ordinary palette's terminal | the scheme exists for exactly the text a terminal writes |
+
+The shipped theme file writes both sections out in full, as a template, and a
+test holds them equal to what the palette derives.
+
+## 1411. The address bar is the reference's crumbs: plain names in an input's well, the current folder bold
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The toolkit's address bar (`guitk::pathbar` -- the explorer's,
+and the file-types program's) drew each folder of a path as a rounded box with
+a ">" between them. It is the Aero reference's now: the folder names as plain
+text in a text field, small drawn chevrons between them, the folder you are in
+set bold -- and the same field whether it shows the path as crumbs or as text
+to edit. Two bugs came out with it. Clicking a folder after the "..." of a
+long path went to the wrong folder -- the first one after it went to the root
+-- because the crumbs on screen were numbered from the first one drawn rather
+than from the path's start. And a click in the typed path put the caret half a
+character right of where it was aimed, the text being drawn four pixels
+further right than the click was measured from.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| The field | the palette's `crust`, where every text input sinks, with a `surface1` edge; the same in both modes | the reference's white field, lighter than its bar | the palette has no "lighter than its bar" role in light mode, and a field that keeps the input convention reads as an input under every theme; changing colour on entering edit mode would read as a second control appearing over the first |
+| Between two crumbs | a chevron drawn as two strokes, in `overlay0` | a `>` glyph | the reference draws one, and a glyph's shape depends on the font installed -- the tree view draws its arrows the same way |
+| Size | 13px, the toolkit's body | the reference's 12.5 | edit mode is set at the same size, so the path does not jump when the trail turns into text |
+| A current folder too long for the bar | drawn anyway, cut short with an ellipsis | dropped behind the "...", as before | the folder you are in is the one crumb that has to be on screen |
+
+## 1412. A path can be typed into every Open and Save window; the host still does the reading, and says yes or no
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The Open and Save window every program uses showed its folder
+as plain text nobody could edit, so the only way anywhere was clicking. Its
+address bar is now the toolkit's own: click a folder in the path to go there,
+or click past the path (or press Ctrl+L, or type `/` where there is no name
+field) and type one, with the names in the folder offered as you type. The
+window still reads nothing from the disk itself -- the program behind it does,
+as it already did for the listing -- so the window asks, and the program
+answers. A typed folder that is not there is refused, and everything stays
+where it was, the typed text in a red edge to be corrected.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Who reads the folder for completions, and checks a typed one exists | the host: `take_completion_request` / `set_completions`, and a `NavigatedTo` answered by `set_entries` or the new `refuse_navigation`; `FilePicker` does all of it | the dialog, calling `read_dir` itself | the dialog does no I/O by design (tests without a disk; a host decides what it may read), and the listing already works this way -- a second channel for the same kind of answer would be a second protocol |
+| A new `DialogAction` for "is there a folder here?" | no: the existing `NavigatedTo`, with a way to take it back | a variant such as `Validate(path)` | seven programs -- the desktop's Run box among them -- match `DialogAction` exhaustively, so a variant would break every one of them in one commit across two lanes; `refuse_navigation` is additive, and a host that never calls it behaves as before |
+| A refused navigation | undone entirely -- path, both histories, selection, scroll | left in place, listing nothing | an empty listing under the name of a folder that is not there reads as a folder that is there and empty; the same now holds for a shortcut to a missing folder, which used to show one |
+| Which keys start a path | Ctrl+L, and `/` where no name is being typed (Open, choose-a-folder) | `/` everywhere, or Ctrl+L only | in a Save window `/` has always gone to the name field, and taking it would change what a typed name means; elsewhere a `/` has nowhere else to go and is how a path starts |
+| Narrowing the completions | the bar narrows the host's whole-folder answer, case aside, hidden names only after a dot | the host narrows | `design.txt` asks tab-completion to match in any case, and one place deciding it means the explorer and every dialog match alike; the host's answer then stays right while the typing goes on |
+| A typed path's crumbs | shown only once the host has listed the folder | shown on Enter | the bar used to show them on Enter, so a refused path left crumbs of a folder nobody was in above the listing of the one they were |
+
+`FileDialog` keeps what a navigation changed until the host answers it
+(`NavigationUndo`), and lets it go on `set_entries`.
+
+## 1413. Alt+Tab is the reference's glass: each window's picture in a cell, the chosen one's title across the top
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The window switcher was a box 400 pixels wide with the first
+twelve characters of every window's title in a row, cut with no mark -- so
+two documents of one program read alike, a long title read as a short one,
+and twenty windows ran off both ends. It is drawn in the start menu's glass
+now: each window's program picture in a cell of its own, the window the
+switch would go to marked as the accent marks the keyboard's row in the start
+menu, and that window's title -- whole, or cut with a "..." -- across the top.
+A long list wraps into rows, and past what the screen holds turns pages, so
+the chosen window is always on screen.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| What each window shows | its program's picture | a live picture of the window, as Windows 7 draws it | the compositor has no way yet to give the shell a window's contents (the same gap keeps the taskbar's previews waiting); the program picture is what the taskbar tile already shows, so a window looks the same in both |
+| Which titles | only the chosen window's, whole | every window's, each cut to its cell | a cell is too narrow for any real title, and the one title that matters is where the switch goes |
+| The glass | the start menu's, through two shared halves (`glass_under`, `glass_edge`) | its own fill and an accent outline, as before | the reference has no switcher; a floating panel of the desktop's is its glass, and one implementation keeps the two alike |
+| Too many windows | pages of whole rows, turned by the selection | a scrolling strip | a page never shows a cell cut in half, and the chosen window is on every page that is shown |
+
+## 1414. The toolkit has one push button, the reference's, in the theme's colours
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** Every button was drawn where it was used, and no two alike: the
+toolkit's dialogs had flat blue or grey slabs, the Open and Save window flat
+fills with labels placed by guessed widths, the Run box its own. There is one
+button now (`guitk::button`), drawn as the Aero reference draws one (its
+search dialog's `aero-srch-btn`): a face brighter across its upper half, a line
+round it, the label in bold; the button that does what the dialog is for
+tinted with the accent, one that destroys something tinted red, a disabled one
+grey. The dialogs, the Open and Save window and the Run box all use it.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| The colours | the palette's: `surface1` for the face, tinted towards the accent or red; pale tints on a light ground | the reference's blues | the operator's rule (§815): what is themeable follows the theme; the reference's shape is kept, its colours are the theme's |
+| The label's colour | the theme's text colour where it reads on both halves of the face, else black or white -- and a face on which no one colour reads is tinted further until one does | the theme's text colour, always | the gloss makes the face two colours; near the point where dark text stops reading and light text starts, one of the two halves fails either way, and which themes put a face there cannot be known in advance -- a test holds every kind and state, both modes, four grounds, to the text floor |
+| Primary on a light ground | the accent's pale form | the accent itself | a light-mode accent is deepened until it reads as text, so a face tinted towards it goes dark enough to lose a dark label and flip to white between hover and press |
+| Geometry | the caller's: a dialog lays out its own row; the button draws into the rectangle given | fixed button sizes | three layouts already exist with their own heights and their tests; `button::width` is the one measure for a label's width |
+
+## 1415. The file explorer shows every program's Open and Save window, and hands the program only the file chosen
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended this option, C-Q30's A) &middot; **Lane:** C, with E, F, A and D
+
+**In short:** A program's Open and Save window will no longer be drawn by the
+program. The program asks; the file explorer -- a trusted part of the system --
+opens its own window in "choose a file" form above the program; the user
+browses with the explorer's columns, thumbnails and layouts; and the program is
+handed the file chosen and nothing else. Today each program draws the window
+from toolkit code and reads your folders itself to fill it, so it has to be
+able to read any folder you might browse, and it sees every name in each one.
+Under this decision a program needs no access to your files at all until you
+choose one -- the arrangement macOS uses for its sandboxed programs and Linux's
+Flatpak for its "portals", and the one that fits `design.txt`'s rule that a
+program holds only what it was handed.
+
+**The question and the options:** `open-questions.md` C-Q30 (now resolved).
+The design says the explorer is "used as a file save or file(s) load dialog
+for applications", and the detailed roadmap that the dialog "IS the file
+explorer component"; what existed was a separate, plainer dialog in the
+toolkit. Of the three ways offered:
+
+| Option | What it would have meant | |
+|---|---|---|
+| **A. The explorer shows the window** | one implementation; a program handed only the file chosen | **chosen** |
+| B. Every program carries the explorer's view | the same look, but 45 programs grow by the explorer's file readers and still need to read every folder you might browse | not taken |
+| C. Keep two, restyle the dialog | they look alike; the dialog keeps three columns and one layout | not taken |
+
+**What it takes, by lane:**
+
+| Part | Lane |
+|---|---|
+| The explorer opens as a dialog: choose a file to open, or a place and name to save, with the program's filters, and Open/Save and Cancel | E (`apps/explorer`) |
+| A program asks for one and gets the answer back: the request, the reply, and the toolkit call programs already make (`guitk::dialog::FilePicker` asks the explorer instead of drawing a dialog) | C (`gui/toolkit`), with E |
+| The dialog is kept above the program that asked, and belongs to it | F (the window system) |
+| "Handed only that file": passing an open file from the explorer to the program | A and D |
+
+**Until the last part exists** the explorer hands back the file's name, which
+is no weaker than today; the security gain arrives with it.
+
+**Meanwhile:** the toolkit's own dialog stays, as the fallback where no
+explorer can be asked. Lane C does not restyle its layout further -- it is to
+be replaced -- but keeps it working: the typed paths of §1412 and the buttons
+of §1414 stay.
+
+## 1416. The keyboard shortcuts on by default: the few everyone knows, and the rest one setting away
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended option B; the operator chose a set close to it, and added a few) &middot; **Lane:** C, with E
+
+**In short:** `design.txt` asks for very few shortcuts turned on, and the desktop
+turned on 31. The operator chose which stay on. On by default: closing a
+window (Alt+F4), switching windows (Alt+Tab), the Super key for the start menu,
+Super+R for the Run box, Print Screen and its variants, and the dedicated
+volume keys -- plus, inside programs, the editing keys everyone knows. The rest
+(window snapping, desktop switching, and the shell's other panels) stay
+available and are easy to find, but start unbound. Super+Tab goes: what it
+opened becomes a choice of what Alt+Tab shows.
+
+**The question:** `open-questions.md` C-Q24 (now resolved).
+
+| Group | Keys | Default |
+|---|---|---|
+| The window | Alt+F4 close, Alt+Tab and Alt+Shift+Tab switch | **on** |
+| The shell | Super (start menu), Super+R (Run box) | **on** |
+| Screenshots | Print Screen: the whole screen; Alt+Print Screen: the current window (both to the clipboard, as on Windows); Ctrl+Print Screen and Ctrl+Alt+Print Screen: the same two, asking where to save them as a file | **on** |
+| Dedicated keys | volume up, down, mute; brightness up, down where the hardware sends a key | **on** -- they are keys of their own, usually in the top row or behind Fn, where nobody presses one by accident |
+| Inside programs | Ctrl+C copy, Ctrl+X cut, Ctrl+V paste, Ctrl+Z undo, Ctrl+Shift+Z redo, Ctrl+F4 close the current tab or document | **on** -- each program's own, never a desktop-wide grab, since they mean something different in each program |
+| Inside programs, moving (the operator's addition, later the same day) | Page Up, Page Down, Home, End, Ctrl+Home, Ctrl+End, "for relevant apps" | **on** -- wherever there is a list, a text or a view to move through; each program's own, like the row above |
+| Available, off by default | snap left and right, maximise, minimise, show desktop, the zone overlay, next and previous desktop, notifications, task manager, settings, lock, the shortcut card, the keyboard-layout switch (Super+Space), the file explorer (Super+E), a region screenshot (Super+Shift+S), and a new one: put the monitor to sleep | off, one binding away in the shortcut settings |
+| Gone | Super+Tab | what it opens (the overview) becomes a setting: whether Alt+Tab shows the switcher or the overview |
+
+**Two additions the operator made, recorded as work:**
+- **A redo *tree* wherever something can be undone and redone:** an undo that
+  keeps the branches a user undid away from, rather than discarding them the
+  moment something new is done. Today each of 39 programs keeps its own
+  straight-line history, and the toolkit's text area its own; the toolkit gets
+  one tree the rest can adopt.
+- **Print Screen saving to a file**, one key for the window and one for the
+  screen, each asking where to save.
+
+**Judgment calls inside the operator's answer**, easy to change: the exact
+save-to-file keys (Ctrl+ and Ctrl+Alt+Print Screen), and treating the editing
+keys as each program's own rather than the desktop's. And which Print Screen is
+which: the operator wrote "Alt+PrtScrn for the entire screen and Ctrl+PrtScrn
+for the current window, like on Windows?" -- but Windows has it the other way
+round (Print Screen the screen, Alt+Print Screen the focused window). The
+defaults follow Windows, as the "like on Windows" asked, which is also what
+frees Ctrl+ for the save-to-file pair.
+
+**The moving keys, as built (2026-09-27, lane C):** the toolkit reads them
+one way (`guitk::listview::ListKey`): in a list, Home and End with or without
+Ctrl are its ends -- a list has no line for plain Home to start -- and Page Up
+and Page Down move a windowful; Ctrl+Page Up/Down are left alone, since they
+change tab in a program with tabs. Menus and the menu bar, the path bar's
+completions, the text views (plain Home/End as well as Ctrl), the start menu,
+the overview, the notification pane, the shortcut card and its action picker,
+the login screen's users, the Run box and the desktop's icons all answer them;
+the text area, grid, tree and file list already did. Judgment calls, easy to
+change:
+- **A text field over a list** (the start menu's search, the card's picker, the
+  Run box, the path bar): Home and End are the text's while it has text to move
+  through, and the list's when it is empty or Ctrl is held; the page keys are
+  the list's.
+- **A list that is not drawn** (the Run box's history): Page Up goes to its
+  oldest entry and Page Down back to what was typed.
+- **A surface that does not scroll** (the desktop's icons, the overview, the
+  login screen): a page is what is on the screen -- the icons' column, all the
+  cards, all the users.
+
+**As built, 2026-09-27 (lane C):**
+- `hotkeys::register_defaults` holds the operator's set and nothing else --
+  fourteen bindings, down from thirty-one -- pinned whole by
+  `the_defaults_are_the_operators_set_and_nothing_else`. Three actions are new:
+  `ScreenshotWindow`, `ScreenshotToFile` and `ScreenshotWindowToFile`.
+- **The shortcut card lost its chord, so it gained a door:** a Keyboard
+  Shortcuts place in the start menu's places column, which opens it. A card
+  only a shortcut could open would be one nobody could reach to bind the
+  shortcut. The places tighten a little (32 units each down to 26) before the
+  lowest is left out, so an eighth place costs nothing on a small screen.
+- **Switching keyboard layouts still works out of the box:** Alt+Shift is the
+  layout switcher's own setting (`keyboard.layout_switch` in `input.yaml`),
+  never a hotkey-table entry, so taking Super+Space out removed a second way,
+  not the only one.
+- **Waiting on other lanes:** Alt+Print Screen arrives as an unknown key on
+  PS/2 keyboards and in QEMU, which send a different scancode while Alt is held
+  (lane A, `requests/c-a-keys-that-never-reach-the-desktop.md`, which also
+  records that a USB keyboard reaches no window at all); the screenshot tool
+  does not read `--save` yet (lane E, `requests/c-e-print-screen-can-save-to-a-file.md`);
+  putting the monitor to sleep needs a compositor verb that does not exist
+  (lane F, `requests/c-f-a-way-for-the-shell-to-put-the-display-to-sleep.md`).
+- **Still lane C's to do:** the monitor-sleep action, once lane F's verb
+  lands. (What Alt+Tab shows was done the same day, as an action rather than a
+  setting: §1419.)
+
+## 1417. Passwords leave the password manager two ways, and a program can ask for one -- only with a key for it, and your say-so
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended B, and A only if wanted; the operator chose both, and added a third way) &middot; **Lane:** C, with E and A
+
+**In short:** The password manager could not export at all. It will offer both
+ways out: a plain-text export for moving to another password manager, made
+unmistakably clear that it writes every password readable by anyone who gets
+the file, and an encrypted backup that restores everything and is useless to
+anyone else. And the operator added a third: a program may ask the password
+manager for a password directly, over a secure connection, only if it holds a
+capability (a system-issued key) for exactly that -- and when it asks, the
+password manager shows who is asking and lets you allow or refuse.
+
+**The question:** `open-questions.md` C-Q25 (now resolved).
+
+| Way | What it is | Whose |
+|---|---|---|
+| Plain-text export | every password, readable, in a file; a warning that says so plainly before it is written, not a checkbox to click through | lane E, `apps/credmanager` (`export_csv`, written and unused) |
+| Encrypted backup | a file only the password manager can read, with the vault's own password; restores everything | lane E, `apps/credmanager` -- the existing `serialize_backup` omits the passwords and is not to be connected as it stands |
+| A program asks for a password | through the credential service (`gui/credentials`), only with a capability granted for it, and with a prompt showing the asking program's identity, to allow or refuse | lane C, with lane A for the capability |
+
+**Not changed:** the backup writer that holds no passwords stays disconnected
+-- a file named like a backup that restores empty logins is the failure this
+lane keeps finding.
+
+## 1418. A program's settings are its own file; a service tells open windows when they change
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A; the operator chose A, with C added beside it) &middot; **Lane:** C, with E
+
+**In short:** Each program keeps its settings in a file of its own under the
+user's settings folder -- `~/.config/<program>.yaml`, in YAML as the design
+requires -- which the program writes itself. In addition, a settings service
+tells every open window when a setting changes, so a change shows at once
+without reopening anything. The service is *beside* the saving, not in front of
+it: saving a setting is the program writing its file, and the service being
+down or slow cannot lose one.
+
+**The question:** `open-questions.md` C-Q26 (now resolved).
+
+| Part | What | Whose |
+|---|---|---|
+| The file | one YAML file per program, written through `gui/settingsfile` (which already does this, comments preserved) | lane C (`settingsfile`, exists) |
+| The four programs that asked | the lock screen's clock and date, the markdown editor's autosave, the password generator's rules, the explorer's copy-onto-an-existing-name choice, kept across restarts | lane E |
+| Live changes | a service that watches the settings files and tells open programs what changed -- separate from the function that saves, as the operator specified | lane C |
+
+**How "not as the same function that saves" was read:** the service does not
+own the write path. A program saving its settings writes its own file whether
+or not the service is running; the service's job is to notice and tell others.
+If the operator meant something else, this is the entry to correct.
+
+## 1419. What Alt+Tab shows is what Alt+Tab is bound to
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (operator-approved scope: the
+operator asked for "which behavior Alt+Tab uses" in the settings, §1416; the
+shape of it is Claude's) &middot; **Lane:** C
+
+**In short:** Alt+Tab can now show the overview -- every window on the desktop,
+to scale -- instead of the small strip of pictures, which the operator asked
+for when Super+Tab went. It is not a separate setting. There is a second
+window-switching action, "Cycle Windows in the Overview", and a user who wants
+the overview binds Alt+Tab to it on the keyboard shortcut card, the way any
+shortcut is changed. It behaves as Alt+Tab does: hold Alt, Tab through the
+windows, let go to pick.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where the choice lives | which action the chord is bound to, on the shortcut card | a setting, "Alt+Tab shows: switcher / overview", in a settings file with its own control | one place says what a chord does; a setting beside the binding would be a second answer to "what does Alt+Tab do", and a user could bind Super+Tab to the overview and keep Alt+Tab as the strip, which a single setting cannot say |
+| What the overview does during a switch | Alt+Tab's manners: Tab and Shift+Tab step, the arrows and the pointer move the lit card, letting go of Alt takes it, Escape leaves | the overview's own: a toggle, the chord opening it and pressing it again closing it | a toggle on Alt+Tab would make the second Tab close the overview rather than move on, which is not what anybody holding Alt means |
+| The cards' order during a switch | most recently used first, left to right, so each Tab moves one card on | the window list's order | the lit card would otherwise jump about the grid |
+| Shift+Alt+Tab | shows its switch the way the same keys without Shift do | always the strip | binding Alt+Tab to the overview would otherwise leave its reverse opening the strip |
+
+**What turned up in the doing, and was fixed with it:**
+- **The switcher went the wrong way after the first Tab.** It counted through
+  the taskbar's bottom-to-top order, so the first Alt+Tab reached the window
+  before this one but the second went back to the window being left and the
+  third to the oldest. It counts most recent first now, as every desktop does;
+  Shift+Alt+Tab from nothing reaches the window used longest ago (with two
+  windows it used to land on the one already in front).
+- **Only Alt's release ended a switch.** With window switching bound to
+  Super+Tab, the switcher opened and nothing closed it. A switch now ends when
+  a modifier of the chord that started it comes up -- Shift excepted, which is
+  the direction, not the hold -- or, for a bare key, when that key comes up.
+- **The overview's arrow keys walked every desktop's windows** in its
+  one-desktop view, so an arrow could light a card that was not on the screen.
+  They walk the drawn cards, in the drawn order.
+
+## 1420. The redo tree: one history for the toolkit, walked in time order with Alt+Z
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (operator-approved scope: the
+operator asked for "an actual redo tree whenever possible", §1416; the shape and
+the keys are Claude's) &middot; **Lane:** C, with E
+
+**In short:** Undoing and then typing something new used to throw away what was
+undone, for good. Now it is kept on a branch of its own. Ctrl+Z and
+Ctrl+Shift+Z work exactly as before, along the branch you are on. To get back to
+a branch you left, Alt+Z steps back through every version the text has been in,
+in the order you made them, and Alt+Shift+Z steps forward again -- so every
+version is reachable with two keys, without having to picture the tree. The
+toolkit's text area uses it now; the programs with undo of their own can adopt
+the same history.
+
+| Question | Chosen | The alternative | Why |
+|---|---|---|---|
+| Where the tree lives | `guitk::undo::UndoHistory<E>`, generic over a program's step | a tree inside the text area only | twenty-two programs keep an undo of their own, twelve of them with a redo (the paint program, the spreadsheet, the diagram editor ...); one tested history is what "whenever possible" needs, and the text area is its first user |
+| How an old branch is reached | Alt+Z / Alt+Shift+Z walk every state in the order it was first reached, across branches (Vim's `g-` / `g+`) | a key to choose which branch redo takes | a branch key needs the user to know where the forks are; time order needs nothing but "back" and "forward". Choosing a branch stays in the API (`select_branch`) for a program that draws its history |
+| The keys | Alt+Z and Alt+Shift+Z | Ctrl+Alt+Z | Ctrl+Alt is AltGr, which types letters on several layouts (AltGr+Z is ż on a Polish keyboard); the text widgets already refuse Ctrl+Alt chords for that reason |
+| What plain redo takes at a fork | the branch last undone out of, or the one just made | always the newest | undo-undo-redo-redo returns to where it started even where the tree forks |
+| The bound | 500 steps on all branches together; past it, whole branches the user is not on go first, oldest first, then the oldest step of the user's own line | a bound per branch | the line being worked on keeps its depth; a branch abandoned long ago goes before the undo the user is using |
+
+**Judgment call, easy to change:** the two keys. They are in one `match` in
+`TextArea::edit_key`.
+
+## 1421. Each look keeps its own colours: the accent chosen under one theme is not carried into another
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, then A; the operator chose A and added keeping colours per theme) &middot; **Lane:** C, with E
+
+**In short:** Under the optional "Filled" look, the accent you chose is drawn
+deeper on the grey boxes so its text stays readable, and it can look muddier
+than the swatch you picked. The boxes stay as they are. Instead, the accent --
+and any other interface colour you set -- is remembered separately for each
+look: switching to the Filled look brings back the colours you chose for it
+(or its defaults), and switching back brings back the others, so a choice made
+for one look never lands on the other.
+
+**The question:** `open-questions.md` C-Q15 (now resolved).
+
+**The operator's answer, verbatim:** "Can't you do A and save accent and
+whatever other UI colors per desktop theme, so switching to filled theme won't
+keep their previous accent change? Another option, if you think it's better to
+carry accent, etc. changes across themes, is to measure all the contrasts
+whenever they switch to the filled theme and then if something isn't enough
+then ask the user if they want to reset the colors to default for the theme, or
+maybe if they want to do color settings per theme (and then reset to the
+default for the theme if they do)?"
+
+**Chosen of the two:** colours kept per look. The alternative -- measuring on
+every switch and asking -- puts a question in front of the user at the moment
+they changed something else, and a colour that is fine under one look and
+unreadable under the other is exactly what keeping them apart prevents.
+
+| What | How |
+|---|---|
+| Where they live | `appearance.yaml`: the accent and the user's other interface colours under the look they were chosen for (Outlined, Filled); a file written before this -- one accent -- reads as that accent for both, so nobody's choice is lost |
+| What Settings shows | the colours of the look being edited; changing a colour changes it for that look only -- lane E's page |
+| Readability | unchanged: every colour still passes through the palette's legibility floor, under either look |
+
+**As built (lane C, 2026-09-27).** `appearance::LookColours` -- today the accent
+and the colour a custom accent names; an interface colour added later is kept
+per look by being added to it.
+
+- **In memory:** `accent_color` and `custom_accent` keep meaning "the accent",
+  now the look in use's, so nothing that draws changed; the other look's are in
+  `other_look_colours`. `set_surface_style` changes the look and trades the two
+  over; choosing the look already in use trades nothing. `colours_for(look)` and
+  `set_colours_for(look, ..)` reach either look without switching.
+- **On disk:** the outlined look's colours stay at `theme.accent` and
+  `theme.custom_accent`, where the one accent always was, so a desktop from
+  before this still reads the default look's colours from a new file; the
+  filled look's are under `theme.cards`. Whatever `theme.cards` does not say is
+  taken from the outlined look -- which is the migration: an old file's one
+  accent reads for both.
+- **The one convention:** assigning `surface_style` directly does not trade the
+  colours. The field stays public because a private one would break every
+  `AppearanceSettings { .., ..Default::default() }` outside the crate; the
+  field's doc says to use the setter, and Settings -- the one program that
+  changes the look -- is asked to (lane E).
+
+## 1422. The games: each board decided by whether its colours mean something, and every game polished
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A; the operator chose C and left the per-game calls to Claude) &middot; **Lane:** C (the calls), E (the games)
+
+**In short:** Every game's menus, score panels and window follow the desktop's
+theme. The playing surface is decided game by game: where the colours carry
+meaning -- minesweeper's numbers, tetris's seven pieces, a card's suit -- they
+stay what players know; where they are decoration -- a chess board's squares,
+the felt under the cards -- they follow the theme, so dark mode is dark. And
+the operator asked that the games look as polished as possible.
+
+**The question:** `open-questions.md` C-Q16 (now resolved). **Verbatim:** "C,
+and I'll let Claude decide which games get which treament. One other thing: try
+to make the games look as polished as possible."
+
+**The rule for each call**, so the list can be extended without asking: a
+colour keeps its own value when a player *reads* it -- tells two things apart
+by it, or knows a convention by it; it follows the theme when it only fills
+space. The per-game list is in the request to lane E, which owns the games
+(`requests/c-e-the-operators-answers-c-q16-c-q17-c-q19-c-q21.md`).
+
+## 1423. The five unreachable features are wired up; where two versions exist, the one kept gets everything both could do
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, starting with the installer; the operator chose A) &middot; **Lane:** C (the rule), with E (the five are in its programs)
+
+**In short:** Five programs each held a finished, tested feature no one could
+reach: the installer's bootloader setup, the image viewer's video playing, the
+process explorer's six tools, system information's hardware queries, and a
+remote-settings page. All five are to be wired into their programs rather than
+deleted. Where a feature also exists somewhere that *is* reachable -- the image
+viewer's video player beside the separate video player program -- the one that
+survives must end up with every ability of both, before the other goes.
+
+**The question:** `open-questions.md` C-Q17 (now resolved). **Verbatim:**
+"Option A. I think I saw somewhere in C-Q17 that one of the five finished
+features already has a wired up version of itself. If true, make the one that
+survives have all the features of both versions."
+
+**The rule this sets, beyond the five:** dead code with a live twin is merged,
+not merely deleted -- the survivor first takes what only the dead copy had.
+Applied the same day to the shell's own unreachable launcher
+(`TD-C-THE-DESKTOP-CRATE-CARRIES-A-SECOND-LAUNCHER-NOTHING-USES`): compared
+feature by feature with `apps/launcher`, the live one already had everything --
+search, frecency, categories, keywords, Tab completion, Ctrl+number -- except
+an API for adding programs that nothing called; it now needs to list installed
+programs as the start menu does, which is in the request to lane E.
+
+## 1424. An event colour too close to the accent is allowed, with a warning -- both ways round
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended C, weakly; the operator chose to warn) &middot; **Lane:** C (the shared test), with E (the two pickers)
+
+**In short:** A calendar event coloured almost like your accent has its dot
+vanish into today's circle. The colours stay exactly as you chose them -- the
+calendar never alters them. Instead, choosing an event colour too close to the
+accent shows a warning, and so does choosing an accent too close to an event's
+colour; the second warning says which events clash and offers a way straight
+to changing them.
+
+**The question:** `open-questions.md` C-Q19 (now resolved). **Verbatim:**
+"Either don't allow the user to change an event color to something too close to
+the accent color, or warn them if they do, and then leave it alone. And the same
+choice has to to be made in the other direction: the user changing the accent
+color to something that conflicts with an event color. I think that choice
+should definitely be 'warn' rather than 'don't allow,' and in the warning, tell
+how to change the offending event color(s) and/or have a link right there to
+changing the event color(s)."
+
+| Part | Whose |
+|---|---|
+| One test of "too close to see one on the other", so the two warnings cannot disagree | lane C, `appearance` |
+| The warning in the calendar's event-colour picker | lane E, `apps/calendar` |
+| The warning in Settings' accent picker, naming the clashing events, with a way to each | lane E, `apps/settings` |
+| The desktop's calendar drawing | unchanged: it draws the colour chosen (`gui/desktop/src/calendar.rs`) |
+
+**The test, as built (2026-09-27):** `guitk::palette::hard_to_tell_apart`,
+re-exported by `appearance` -- true only when the pair is both under WCAG's 3:1
+for marks that are not text *and* under 40 apart as a CIE 1976 colour
+difference, so a red dot on a blue disc of the same lightness is not flagged
+while a lavender one is. The 40 is a judgment: it is set above the roughly 30
+lightness units that 3:1 takes, so each half decides something; a warning that
+errs toward warning costs a glance.
+
+## 1425. One list of the installed programs, in userspace; nothing it holds is lost on the way
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A or B; the operator chose B, with a condition) &middot; **Lane:** C (the library), A (the kernel's registry), E (the programs that read it)
+
+**In short:** Four parts of the system each kept a list of which programs are
+installed, and none could read another's. The one list will be a library in
+userspace, which the start menu, Settings, the file manager and the file
+associations program all read; the kernel's registry goes. Before anything is
+deleted, every program, category, file type, MIME type and per-role default
+that any of the four held is gathered and carried into the new place, so the
+merge loses nothing.
+
+**The question:** `open-questions.md` C-Q20 (now resolved). **Verbatim:** "B,
+but I think before deleting anything else you should collect all of the
+built-in apps, categories, MIME types, apps, file types, per-role defaults, etc.
+and make sure they survive in the new place or wherever they belong."
+
+**Order of the work:** (1) inventory all four lists -- the kernel's
+`fs::appregistry`, the shell's `launcher.rs` database, `apps/fileassoc`, and the
+per-role defaults that were in `default_apps.rs` (git history) -- into one table;
+(2) the library under `gui/`, holding all of it, read by the shell first; (3) the
+other readers move to it; (4) only then does lane A remove `fs::appregistry` and
+decide what `fs::startmenu` and `/proc/startmenu` become.
+
+**The operator's second point in the same answer**, about how the lanes
+communicate: "whenever you take it upon yourself to do a task, add it to some
+text file that other agents read ... or maybe send that you're starting the task
+to all other agents ... only when the roadmap file doesn't clearly say that the
+program or feature belongs to your own lane." The mechanism is being built as a
+claim every lane can see at once (the same shared store the halts use); the
+change to `CLAUDE.md` that would make it a rule is put to the operator directly,
+because `CLAUDE.md` changes on the operator's own word, not on a relay.
+
+## 1426. A daily backup runs at its time whether or not anyone is signed in, and a missed one runs as soon as the machine is on again
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A, with a prompt for missed backups; the operator chose A without the prompt) &middot; **Lane:** C (the question), with D (the service), B (starting it) and E (the backup program)
+
+**In short:** Setting a backup to run every day did nothing. It will be run by
+a background service that the system starts at boot, so a daily backup happens
+on time even when nobody is signed in. If one was missed because the machine
+was off, it runs as soon as the machine is on again -- before anyone signs in,
+and without asking.
+
+**The question:** `open-questions.md` C-Q21 (now resolved). **Verbatim:** "It
+doesn't matter how long it stays broken as long as it's fixed by the time the OS
+is finished ... option A. Though I think that if a backup is missed because the
+machine is off, it shouldn't just ask when the user signs on, it should backup if
+the machine comes back on after it was missed even if the user hasn't signed on
+yet. And in that case, I don't think it should ask the user whether to backup or
+not regardless. By the way, I guess backup should be a service handled by our
+startup manager ... I don't know if that handles services run all the time too,
+or only things loaded when the user logs in. I think the former?"
+
+**On the operator's question:** yes -- the init system starts services at boot,
+independent of sign-in; the backup service is one of those. The work is lane D's
+(`services/`), with lane B's init starting it and lane E's backup program writing
+the schedule the service reads (`BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS`).
+
+## 1427. Automatic sign-in with no pause; hold a key to choose, and see that you can from the first moment
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended B; the operator chose A, and added showing the key) &middot; **Lane:** C (the login screen), A (the earliest screens)
+
+**In short:** An account set to sign in by itself will do so, with no pause at
+start-up. To choose a different account, hold a key while the machine starts.
+That the key exists is shown on the screen from the moment the system has it
+until automatic sign-in begins -- and, where the firmware lets the system draw
+over its own start-up logo, there too. Starting for repair skips automatic
+sign-in.
+
+**The question:** `open-questions.md` C-Q22 (now resolved). **Verbatim (the
+decision):** "The user can always just use the menu to logout and login/switch
+accounts after it autologs in, so it's not that crucial, and I definitely don't
+want an unnecessary pause during bootup. But also provide the key they can hold
+during startup and show that it's available as soon as the OS gets control of the
+screen up until it starts the automatic login process. Also, either I'm crazy,
+or some BIOSes allow the OS to show a little OS-loading widget ON the BIOS
+screen, maybe you could show that the key is available even there." And on
+repair: "I guess it would be nice to skip auto-login during recovery anyway."
+
+| Part | Whose |
+|---|---|
+| Sign in automatically; held key shows the chooser; no automatic sign-in when starting for repair | lane C, `gui/desktop/src/login_screen.rs` |
+| The hint on the system's first screens, and over the firmware's logo where UEFI leaves it up (the boot graphics table) | lane A |
+
+**As built (lane C, 2026-09-27).** `gui/desktop/src/autologin.rs`, with the rule
+for *which* account in `gui/loginusers` (`automatic_account`), so that the
+earlier screens' hint can use the same rule instead of restating it.
+
+- **Which account:** exactly one account marked `auto_login: true`, and that one
+  not locked.
+- **The key is Shift**, either one, read from the modifiers held as the desktop
+  starts; another modifier held beside it does not cancel it.
+- **A start for repair** is the word `recovery` or `single` on the kernel
+  command line (`/proc/cmdline`), whole words only -- the words the recovery
+  entry of the kernel's own boot configuration model writes.
+- **Before the first frame**, so the login screen is never drawn, and **only at
+  start**: logging out returns to the login screen and stays there.
+- **Locking follows the account:** a desktop that signed in by itself locks if
+  the account has a password and never if it has none (818's rule, reached from
+  the database because no password was checked).
+
+Three smaller calls inside the operator's decision are lane C's own (Decided
+by: Claude, autonomous), each chosen to fail toward *showing* the login screen,
+which is always safe, rather than toward signing somebody in:
+
+| Call | Why | The other way |
+|---|---|---|
+| A locked account never signs in by itself | nothing is typed, so an administrator's lock is all that stands between the account and its desktop | honour the mark regardless -- which makes `usermod -L` a suggestion |
+| Two marked accounts sign neither in | which was meant is written down nowhere; the file's order could open one person's desktop for another | take the first -- simpler, and wrong half the time for the person at the machine |
+| An unreadable command line is an ordinary start | skipping the sign-in for repair is a convenience the operator asked for as "nice", not a lock | refuse to sign in when unsure -- which, on a machine where `/proc` is not mounted yet, turns off the feature everywhere |
+
+Two halves wait on other lanes. The key cannot be read until the compositor
+knows about a key held before it opened the keyboard and can say so (lane F,
+`requests/c-f-which-keys-are-held-when-the-desktop-starts.md`); until then an
+account set to sign in by itself always does, and logging out is the way to
+another account, as the operator said it would suffice. A start for repair is
+not visible until `/proc/cmdline` is the real command line and a boot entry
+carries the word (lane A, with the hint:
+`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`).
+
+## 1428. The feature list is re-checked one section at a time, as work is picked from it, and every check is dated
+
+**Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude's recommendation, B) &middot; **Lane:** C, for every lane
+
+**In short:** About half the items checked in `roadmap-detailed.md` were wrong,
+mostly saying "not built" about built things. It is not re-checked wholesale.
+Whoever picks work from a section first checks that section against the code,
+and each checked item records that it was checked and on what date -- so an
+empty box can be told from an unexamined one, and the list converges instead of
+being re-checked forever.
+
+**The question:** `open-questions.md` C-Q23 (now resolved). **Verbatim:** "B".
+
+**The convention:** a checked item carries `(checked YYYY-MM-DD)` beside its
+status flag; an item whose code contradicts the design is flagged as such, not
+merely marked done. See `roadmap-detailed.md`'s header.
+
+## 1429. The one list of programs is desktop entries; SlateOS's own ship as files like any other program's
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous), inside the operator's §1425 &middot; **Lane:** C
+
+**In short:** the operator chose one list of programs, in a userspace library
+(§1425). That library, `gui/programs`, keeps SlateOS's own programs in the
+same format the start menu already reads for programs installed on the machine:
+one small text file per program, the freedesktop "desktop entry". So there is
+one kind of program record, not two, and the same files can later be installed
+on the image unchanged. What opens what by default is kept the same way, in the
+freedesktop defaults file.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Desktop entries (chosen)** | one format for built-in and installed programs, read by the reader the start menu already uses (`gui/desktopentry`); an installed entry with the same id replaces the built-in one with no merge code; the files install as `/usr/share/applications/*.desktop` as they are; every program ported to SlateOS brings its own | text parsed at start-up (fifteen small files, microseconds); a typo in a file is found by a test rather than the compiler -- `tests/inventory.rs` parses and validates each |
+| A Rust table of structs | typos are compile errors | a second model of "a program" beside the desktop entry, with a conversion between them to keep in step -- the exact shape of the four disagreeing lists this replaces; and nothing to install on the image |
+| Keep the kernel's registry, read it over a system call | already exists | the operator chose userspace (C-Q20, B); the registry named nine paths no crate builds |
+
+**What is not in it:** a person's own choices of what opens what. Those stay
+in `gui/associations` (`fileassoc.yaml`, written by the File Associations
+program); the library's defaults are what stands behind them.
+
+**As built:** `gui/programs` (2026-09-27): fifteen entries, fifty type defaults,
+fourteen roles, and `INVENTORY.md` with the fourteen old sources item by item.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

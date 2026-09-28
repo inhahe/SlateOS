@@ -61,6 +61,7 @@ from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = "scripts/workspace-lints-baseline.txt"
@@ -316,16 +317,10 @@ def main() -> int:
         return 2
 
     if args.update:
-        BASELINE.write_text(
-            HEADER + "".join(
+        write_text(BASELINE, HEADER + "".join(
                 f"{c}  # bare deny(clippy::all)\n" if c in scan.weak else f"{c}\n"
                 for c in scan.exempt
-            ),
-            encoding="utf-8",
-            # newline="" so Python does not translate to CRLF on Windows, which
-            # would commit the exact corruption `scripts/check-eol.py` refuses.
-            newline="",
-        )
+            ), newline="")
         print(f"wrote {BASELINE.relative_to(ROOT)} with {len(scan.exempt)} entries")
         return 0
 

@@ -53,6 +53,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-crate-names.py` | Refuse a crate whose directory name is a *different* crate's package name. |
 | `scripts/check-dead-code-allows.py` | Refuse a NEW crate-level ``#![allow(..., dead_code, ...)]`` in lane B's tree. |
 | `scripts/check-design-decisions-bands.py` | Gate: enforce ``design-decisions.md``'s per-lane numbering bands. |
+| `scripts/check-destructive-writes.py` | Refuse a truncating write, under `scripts/`, aimed at a file in the tree. |
 | `scripts/check-diff-preamble-order.py` | Refuse a differential harness that does work before sourcing the preamble. |
 | `scripts/check-diskcleanup-test-roots.py` | Stop `apps/diskcleanup`'s own tests from pointing the deleter at the host. |
 | `scripts/check-doc-links.py` | Refuse an intra-doc link whose target does not exist anywhere in its crate. |
@@ -303,6 +304,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/rustrungs.py` | Read what a Rust rung asserts, so an oracle can check the assertion itself. |
 | `scripts/rustscan.py` | Read Rust source the way a *gate* has to read it: production code only. |
 | `scripts/sabotage.py` | Break the code on purpose and report which tests noticed. |
+| `scripts/safewrite.py` | Write a file without destroying it when the write goes wrong. |
 | `scripts/scan-orphan-modules.py` | Find library modules whose entire public surface is named by no other file. |
 | `scripts/scan-unwired.py` | Find work that no path from an entry point reaches, but a test does. |
 | `scripts/scan-unwrap.py` | Find `.unwrap()` / `.expect(...)` in *production* kernel code. |
@@ -330,6 +332,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/stdin-hang-sweep.sh` | Does any test binary hang when its stdin is an OPEN PIPE that never delivers? |
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
+| `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
 | `scripts/symbolize.py` | Turn the raw addresses in a kernel panic into `symbol+offset`. |
 | `scripts/tail-diff.sh` | Differential test: our tail against GNU tail. |
 | `scripts/tar-diff.sh` | Differential test: our tar against GNU tar. |
@@ -404,4 +407,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_394 scripts._
+_397 scripts._

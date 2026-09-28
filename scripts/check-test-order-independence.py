@@ -94,19 +94,19 @@ RANDOM_ORDERS = 2
 # the 83 binaries. Unscoped it would build and shuffle all of them -- about
 # twenty minutes an order, an hour for the three -- to re-shuffle 353 lib
 # tests that take seventeen seconds.
-#
-# `vkloader` joined on 2026-09-24, found by that cross-check the day its
-# detector stopped misreading it: `gui/vulkan/src/messenger.rs`'s tests share
-# six statics under an RAII spin lock taken as `Order::lock()`, which
-# raced-globals did not recognise as a lock until then. Serialised is not
-# order-independent -- each test resets under the lock, which is what makes it
-# safe to shuffle, and shuffling is what keeps it so. `--lib`: the statics are
-# in the library's own test module.
 CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
     ("coreutils", "userspace/coreutils", ("--lib",)),
-    ("vkloader", "gui/vulkan", ("--lib",)),
+    # The Vulkan loader's tests drive stub drivers that report what they were
+    # asked -- how many messengers were created, which instance handle a
+    # driver was last given. The reports were module statics behind a spin
+    # lock until lane F made them thread-locals (2026-09-26), so two tests can
+    # no longer collide; but tests that share a thread share its locals, and
+    # nothing about either stops one test reading what an earlier one left
+    # behind. Each test calls `reset()` first, so the claim being checked here
+    # is that it really does clear everything.
+    ("vkloader", "gui/vulkan", ()),
 )
 
 HOST_TARGET = "x86_64-pc-windows-gnu"

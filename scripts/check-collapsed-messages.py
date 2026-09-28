@@ -41,6 +41,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import selftestflag  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 # Derived from `__file__`, never hardcoded. This read
 #
@@ -190,7 +191,7 @@ def repair(path, apply):
         out.append(indent + '"' + fixed + ('",' if st.endswith(",") else '"'))
         changed.append((i + 1, fixed[:64]))
     if apply and changed:
-        path.write_text(NL.join(out), encoding="utf-8", newline=NL)
+        write_text(path, NL.join(out), newline=NL)
     return changed
 
 
@@ -320,7 +321,7 @@ def self_test():
     for name, source, want in SELF_TESTS:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "fixture.rs"
-            path.write_text(source, encoding="utf-8", newline=NL)
+            write_text(path, source, newline=NL)
             got = len(repair(path, False))
         ok = got == want
         print(("ok   " if ok else "FAIL ") + name)

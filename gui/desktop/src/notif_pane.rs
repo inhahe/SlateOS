@@ -846,6 +846,16 @@ impl NotificationPane {
                     self.clamp_scroll();
                     return EventResult::Consumed;
                 }
+                // With or without Ctrl: the top and the bottom of the history
+                // (`design-decisions.md` §1416).
+                Key::Home => {
+                    self.scroll_offset = 0.0;
+                    return EventResult::Consumed;
+                }
+                Key::End => {
+                    self.scroll_offset = self.max_scroll();
+                    return EventResult::Consumed;
+                }
                 _ => {}
             }
         }
@@ -2940,6 +2950,17 @@ mod tests {
         for _ in 0..500 {
             press_key(&mut pane, Key::PageUp);
         }
+        assert_eq!(pane.scroll_offset, 0.0);
+    }
+
+    /// Home and End reach the top and bottom of the history in one press.
+    #[test]
+    fn home_and_end_reach_the_ends_of_the_history() {
+        let mut pane = scrollable_pane(40);
+        assert!(pane.max_scroll() > 0.0, "precondition: the list scrolls");
+        press_key(&mut pane, Key::End);
+        assert_eq!(pane.scroll_offset, pane.max_scroll());
+        press_key(&mut pane, Key::Home);
         assert_eq!(pane.scroll_offset, 0.0);
     }
 

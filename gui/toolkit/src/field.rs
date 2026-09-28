@@ -25,10 +25,13 @@
 //! # What it does not
 //!
 //! The colours are the palette's: the well is `crust`, the edge `surface1`,
-//! warmed towards the accent under the pointer; the focus mark is always the
-//! accent and at least the user's focus width. A field whose content is wrong
-//! has a red edge, whatever else is true of it -- a style may choose how focus
-//! looks, not whether an error shows.
+//! warmed towards the accent under the pointer; the focus mark is the accent
+//! and at least the user's focus width. A field whose content is wrong has a
+//! red edge, whatever else is true of it -- a style may choose how focus
+//! looks, not whether an error shows -- and while it has the keyboard its
+//! focus mark is red too: one signal, rather than a red edge inside a ring of
+//! the accent, which reads as two controls or as a field that is both fine and
+//! wrong.
 
 use crate::color::Color;
 use crate::disabled::DISABLED_OPACITY;
@@ -192,6 +195,9 @@ pub fn draw_at_scale(
     if !state.focused || state.disabled || !(focus_ring > 0.0 && focus_ring.is_finite()) {
         return;
     }
+    // The mark says where the typing goes; on a wrong field it says what is
+    // wrong with it as well.
+    let mark = if state.invalid { p.red } else { p.accent };
     match style.focus {
         FocusMark::Ring => sink.emit(RenderCommand::StrokeRect {
             // Outside the field, so a thicker ring is still a ring round it
@@ -200,13 +206,14 @@ pub fn draw_at_scale(
             y: rect.y - focus_ring,
             width: rect.w + focus_ring * 2.0,
             height: rect.h + focus_ring * 2.0,
-            color: p.accent,
+            color: mark,
             line_width: focus_ring,
             corner_radii: grown(corners, focus_ring),
         }),
         FocusMark::Glow => {
-            // The edge is already the accent (`paint`); the halo round it.
-            let halo = with_alpha(p.accent, GLOW_ALPHA);
+            // The edge is already the mark's colour (`paint`); the halo
+            // round it.
+            let halo = with_alpha(mark, GLOW_ALPHA);
             sink.emit(RenderCommand::StrokeRect {
                 x: rect.x - focus_ring,
                 y: rect.y - focus_ring,
@@ -230,7 +237,7 @@ pub fn draw_at_scale(
                 y: rect.bottom() - thick,
                 width: (rect.w - inset * 2.0).max(0.0),
                 height: thick,
-                color: p.accent,
+                color: mark,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -404,6 +411,39 @@ mod tests {
                 };
                 assert_eq!(paint(&p, state).edge, p.red, "{state:?}");
             }
+        }
+    }
+
+    /// **A wrong field with the keyboard says so with its focus mark too**:
+    /// red, in each of the three marks -- not a red edge inside a ring of the
+    /// accent, which reads as a field both fine and wrong.
+    #[test]
+    fn a_wrong_fields_focus_mark_is_red() {
+        for focus in [FocusMark::Ring, FocusMark::Glow, FocusMark::Underline] {
+            let p = palette(FieldStyle {
+                focus,
+                ..WidgetStyle::AERO.field
+            });
+            let wrong = State {
+                invalid: true,
+                ..FOCUSED
+            };
+            let cmds = drawn(&p, wrong);
+            let hue = |c: &Color| (c.r, c.g, c.b);
+            let marks: Vec<Color> = cmds
+                .iter()
+                .skip(2)
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. }
+                    | RenderCommand::FillRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert!(!marks.is_empty(), "{focus:?}: no focus mark");
+            assert!(
+                marks.iter().all(|c| hue(c) == hue(&p.red)),
+                "{focus:?}: {marks:?}"
+            );
         }
     }
 

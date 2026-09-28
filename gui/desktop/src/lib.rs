@@ -2472,13 +2472,6 @@ pub struct DesktopTheme {
     /// The start menu's places column: a shade apart from the programs
     /// column, as the reference's darker glass is, so the two read as two.
     pub start_menu_side_bg: Color,
-    /// The well of the start menu's search field: the palette's `crust`,
-    /// where the toolkit sinks every text input.
-    pub start_menu_field_bg: Color,
-    /// The line round that well: the palette's `border`, as quiet as the
-    /// reference's `#aac6e0` edge. The caret, not a coloured ring, is what
-    /// says the typing goes there.
-    pub start_menu_field_border: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -2532,8 +2525,6 @@ impl DesktopTheme {
             start_menu_bg: p.base,
             start_menu_fg: p.text,
             start_menu_side_bg: p.mantle,
-            start_menu_field_bg: p.crust,
-            start_menu_field_border: p.border,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -2834,6 +2825,12 @@ impl DesktopShell {
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The focus width with it, to the fields that draw a focus mark
+        // (`guitk::field`), for the same reason.
+        self.run_dialog
+            .set_focus_ring_width(appearance.focus_ring_width());
+        self.icons
+            .set_focus_ring_width(appearance.focus_ring_width());
         // The icon size goes to the layer that draws icons, for the same
         // reason: it was a setting with a working control and no reader --
         // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
@@ -9601,14 +9598,19 @@ impl DesktopShell {
     fn render_start_search(&self, tree: &mut RenderTree) {
         let field = self.start_search_rect();
         let size = self.font_size(TextRole::Body);
-        let radii = CornerRadii::all(self.scale(4.0));
-        fill_round(tree, field, self.theme.start_menu_field_bg, radii);
-        stroke_round(
+        // The toolkit's field (`guitk::field`), in the theme's shape and at the
+        // display's scaling -- but with no focus mark. The search has the
+        // keyboard whenever the menu is open, so a mark would say nothing the
+        // open menu does not; the reference draws none (its input is
+        // `outline: none` inside a bordered box), and the caret is what says
+        // the typing goes here.
+        guitk::field::draw_at_scale(
             tree,
-            field,
-            self.theme.start_menu_field_border,
+            &Palette::from_settings(&self.appearance),
+            guitk::frame::Rect::new(field.x, field.y, field.w, field.h),
+            guitk::field::State::default(),
+            0.0,
             self.scale(1.0),
-            radii,
         );
         let hint = with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA);
         let inset = self.scale(START_SEARCH_INSET);
@@ -12885,6 +12887,7 @@ impl DesktopShell {
                 budget,
                 self.shortcut_context(),
                 self.appearance.caret_width(),
+                self.appearance.focus_ring_width(),
             );
             self.push_shortcut_message(&mut tree, &p, x, y, width, height);
             return Some(tree);

@@ -966,6 +966,12 @@ impl<T: Transport> ShellSession<T> {
         // Before the picture, the pixels the picture refers to — exactly as
         // `paint_background` does, and for the same reason.
         self.refresh_login_image()?;
+        // The user's focus width, for the password field's mark: pushed in
+        // here, where the screen is drawn and the settings are both to hand.
+        let focus_ring = self.shell.appearance.focus_ring_width();
+        if let Some(screen) = self.login.as_mut() {
+            screen.set_focus_ring_width(focus_ring);
+        }
         let Some(screen) = &self.login else {
             return Ok(());
         };

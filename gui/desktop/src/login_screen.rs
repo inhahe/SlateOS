@@ -627,6 +627,10 @@ pub struct LoginScreen {
     background_image_h: f32,
     /// The icons this screen drew, by image id, for the session to upload.
     icon_registry: crate::IconRegistry,
+    /// How wide the password field's focus mark is drawn: the user's focus
+    /// width (`AppearanceSettings::focus_ring_width`), pushed in by the
+    /// session -- this screen is drawn from a palette, which is colours.
+    focus_ring: f32,
 }
 
 impl LoginScreen {
@@ -737,6 +741,7 @@ impl LoginScreen {
             background_image_w: 0.0,
             background_image_h: 0.0,
             icon_registry: crate::IconRegistry::default(),
+            focus_ring: guitk::style::FOCUS_RING_WIDTH,
         }
     }
 
@@ -1158,6 +1163,12 @@ impl LoginScreen {
         LoginAction::Ignored
     }
 
+    /// Draw the password field's focus mark `width` pixels wide: the user's
+    /// focus width. Until told, the toolkit's standard width.
+    pub fn set_focus_ring_width(&mut self, width: f32) {
+        self.focus_ring = width;
+    }
+
     /// Tick animation (shake effect).
     pub fn tick_animation(&mut self, dt: f32) {
         if self.shake_timer > 0.0 {
@@ -1475,20 +1486,20 @@ impl LoginScreen {
             // with the theme's black one under the bordered theme -- and a
             // text field needs an edge under the card theme, which fills
             // without outlining, so the neutral case supplies one.
-            let mut paint = p.surface_paint(Surface::Card);
-            paint.border = Some(if self.error_message.is_some() {
-                p.red
-            } else {
-                paint.border.unwrap_or(p.surface1)
-            });
-            p.push_paint_radii(
+            // The toolkit's field (`guitk::field`), in the theme's shape. It
+            // has the keyboard whenever it is shown, and a refused password
+            // marks it wrong -- the edge and the focus mark both red, one
+            // signal rather than a red ring inside the accent's.
+            guitk::field::draw(
                 commands,
-                field_x,
-                field_y,
-                field_w,
-                field_h,
-                CornerRadii::all(8.0),
-                paint,
+                p,
+                guitk::frame::Rect::new(field_x, field_y, field_w, field_h),
+                guitk::field::State {
+                    focused: true,
+                    invalid: self.error_message.is_some(),
+                    ..guitk::field::State::default()
+                },
+                self.focus_ring,
             );
 
             // Password text or placeholder.
@@ -2752,6 +2763,34 @@ mod tests {
         }
     }
 
+    /// **The password field's focus mark is as wide as the user's focus
+    /// width**, which the session pushes in (`set_focus_ring_width`); until
+    /// then the toolkit's standard width.
+    #[test]
+    fn the_password_fields_focus_mark_is_the_users_width() {
+        let p = Palette::for_mode(false);
+        let halo = |s: &LoginScreen| -> Vec<f32> {
+            s.render(&p)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        color, line_width, ..
+                    } if (color.r, color.g, color.b) == (p.accent.r, p.accent.g, p.accent.b)
+                        && color.a < 255 =>
+                    {
+                        Some(*line_width)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut s = base();
+        s.select_user(0);
+        assert_eq!(halo(&s), [guitk::style::FOCUS_RING_WIDTH]);
+        s.set_focus_ring_width(5.0);
+        assert_eq!(halo(&s), [5.0]);
+    }
+
     /// The thirteen sites in the password panel, one assertion each.
     #[test]
     fn every_colour_in_the_password_entry_is_in_the_role_it_claims() {
@@ -2771,21 +2810,31 @@ mod tests {
                 p.on_wallpaper(),
                 "{mode}: the name sits on the background, not on a panel"
             );
-            // Whatever the theme fills a card with, and nothing at all if it
-            // fills nothing -- written as a vector rather than an `if let` so
-            // that the bordered theme is asserted about too, instead of
-            // quietly skipping the check.
+            // The toolkit's field (`guitk::field`): an input's well, `crust`,
+            // in every theme -- one fill, the size of the field.
             assert_eq!(
                 fills_of_size(&cmds, 260.0, 36.0),
-                p.surface_paint(appearance::Surface::Card)
-                    .fill
-                    .into_iter()
-                    .collect::<Vec<_>>(),
+                vec![p.crust],
                 "{mode}: the password field's ground"
             );
+            // The field's edge, stroked on its rectangle as every toolkit
+            // control's is (`guitk::field`) -- not inset, as the theme's
+            // panels are, so it is found by the path it was given.
+            let edges: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width, *height) == (260.0, 36.0) => Some(*color),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                stroke_of_size(&cmds, 260.0, 36.0),
-                p.red,
+                edges,
+                vec![p.red],
                 "{mode}: a rejected password borders red, never the accent"
             );
             assert_eq!(
@@ -2829,12 +2878,34 @@ mod tests {
             let mut s = base();
             s.select_user(0);
             let cmds = s.render(&p);
+            // The field has the keyboard whenever it is shown, so its edge is
+            // the one the toolkit's field gives a focused field -- the accent,
+            // under the built-in theme's glow.
+            let edges: Vec<Color> = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width, *height) == (260.0, 36.0) => Some(*color),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(
-                stroke_of_size(&cmds, 260.0, 36.0),
-                p.surface_paint(appearance::Surface::Card)
-                    .border
-                    .unwrap_or(p.surface1),
-                "{mode}: a field at rest"
+                edges,
+                vec![
+                    guitk::field::paint(
+                        &p,
+                        guitk::field::State {
+                            focused: true,
+                            ..guitk::field::State::default()
+                        }
+                    )
+                    .edge
+                ],
+                "{mode}: a field with the keyboard"
             );
             assert_eq!(
                 panel_text(&cmds, "Password", 14.0),

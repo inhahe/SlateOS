@@ -511,9 +511,10 @@ fn the_start_menu_glows_and_has_a_light_inside_its_edge() {
     });
 }
 
-/// **The search field is the reference's `aero-sm-search`**: a well with a
-/// quiet line round it -- not the accent's ring -- and a magnifier at its
-/// start, before the hint and before anything typed.
+/// **The search field is the reference's `aero-sm-search`**, drawn as the
+/// toolkit's field: a well with a quiet line round it -- not a focus mark,
+/// though it has the keyboard -- and a magnifier at its start, before the hint
+/// and before anything typed.
 #[test]
 fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
     let mut shell = shell();
@@ -522,10 +523,14 @@ fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
     let same =
         |x: f32, y: f32, w: f32, h: f32| (x, y, w, h) == (field.x, field.y, field.w, field.h);
     let tree = shell.render_start_menu().expect("open");
+    let quiet = guitk::field::paint(
+        &guitk::palette::Palette::from_settings(&shell.appearance),
+        guitk::field::State::default(),
+    );
     assert!(
         tree.commands.iter().any(|c| matches!(c,
             RenderCommand::FillRect { x, y, width, height, color, .. }
-                if same(*x, *y, *width, *height) && *color == shell.theme.start_menu_field_bg)),
+                if same(*x, *y, *width, *height) && *color == quiet.well)),
         "the field is not a well"
     );
     let rings: Vec<guitk::color::Color> = tree
@@ -545,8 +550,8 @@ fn the_start_menu_search_field_is_a_well_with_a_magnifier() {
         .collect();
     assert_eq!(
         rings,
-        [shell.theme.start_menu_field_border],
-        "the field's line is not the quiet border alone"
+        [quiet.edge],
+        "the field's line is not the quiet edge alone"
     );
 
     // The magnifier, inside the field at its start.
@@ -4420,4 +4425,54 @@ fn a_press_on_a_place_first_closes_the_power_menu() {
     assert_eq!(click_at(&mut shell, rect), ShellAction::Consumed);
     assert!(!shell.power_menu_open);
     assert!(shell.start_menu_open, "the start menu closed as well");
+}
+
+/// **The user's focus width reaches the shell's own text fields.** The shell
+/// had never read `focus_ring_scale`; its fields are the toolkit's now
+/// (`guitk::field`), and the Run box and an icon's rename field draw their
+/// focus mark -- the built-in theme's halo -- at the width the settings ask
+/// for, pushed in with the caret width.
+#[test]
+fn the_users_focus_width_reaches_the_shells_text_fields() {
+    let mut shell = shell();
+    let mut settings = shell.appearance.clone();
+    settings.focus_ring_scale = 3.0;
+    let wanted = settings.focus_ring_width();
+    shell.set_appearance(settings);
+    let p = guitk::palette::Palette::from_settings(&shell.appearance);
+    let halo_widths = |cmds: &[RenderCommand]| -> Vec<f32> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    color, line_width, ..
+                } if (color.r, color.g, color.b) == (p.accent.r, p.accent.g, p.accent.b)
+                    && color.a < 255 =>
+                {
+                    Some(*line_width)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    shell.run_dialog.show();
+    assert_eq!(
+        halo_widths(&shell.run_dialog.render(&p)),
+        [wanted],
+        "the Run box's field"
+    );
+
+    let id = icon_for(
+        &mut shell,
+        "notes.txt",
+        std::path::Path::new("/tmp/notes.txt"),
+    );
+    assert!(shell.icons.begin_rename(id));
+    // (The selected icon's own outline is a faint accent line too, a pixel
+    // wide; the field's halo is the one at the user's width.)
+    let drawn = halo_widths(&shell.icons.render(&p));
+    assert!(
+        drawn.contains(&wanted) && !drawn.contains(&guitk::style::FOCUS_RING_WIDTH),
+        "the rename field's mark is not at the user's width: {drawn:?}"
+    );
 }

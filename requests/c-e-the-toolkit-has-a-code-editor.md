@@ -36,7 +36,7 @@ work and gives both of them the rest.
 ## Colouring the code (added 2026-09-28)
 
 Syntax highlighting is there now, and it is tree-sitter's (design-decisions
-§1437): the `syntax` crate (`gui/syntax`) has C, CSS, JSON, Markdown, Python,
+§1437): the `syntax` crate (`gui/syntax`) has Bash, C, CSS, JSON, Markdown, Python,
 Rust, TOML and YAML so far, each grammar passing its authors' own test
 corpus. A language inside another is coloured as itself: a Markdown code
 fence in the language its info string names, front matter as YAML.

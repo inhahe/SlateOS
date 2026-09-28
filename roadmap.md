@@ -2031,12 +2031,12 @@ live.
   few milliseconds at a time, re-parsing only what an edit touched; colours
   from the grammars' own highlight queries through the theme, read as
   tree-sitter's own highlighter reads them (§1438, held to upstream's
-  highlight tests). **Grammars:** C, CSS, JSON, Markdown (block and inline),
-  Python, Rust, TOML and YAML (every settings file), each passing its
-  authors' test corpus. **Injections** (a language inside another): a
+  highlight tests). **Grammars:** Bash (every shell script), C, CSS, JSON,
+  Markdown (block and inline), Python, Rust, TOML and YAML (every settings
+  file), each passing its authors' test corpus. **Injections** (a language inside another): a
   Markdown code fence in the language it names, front matter as YAML or
   TOML, every paragraph in Markdown's inline grammar, a Rust macro's body.
-  **Next:** shell, then JavaScript and HTML.
+  **Next:** JavaScript and HTML.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

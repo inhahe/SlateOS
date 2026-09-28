@@ -1259,6 +1259,29 @@ mod tests {
         assert!(h.tree().is_some() && !h.is_stale());
     }
 
+    /// **Bash is coloured as its query says**: a keyword, a command's name,
+    /// a string, a comment, a variable's name, an option.
+    #[test]
+    fn bash_is_coloured_as_its_query_says() {
+        let got = spans(
+            "# note\nif true; then\n  NAME=x\n  echo \"hi\" -n\nfi\n",
+            "bash",
+        );
+        let at = |s: &str| got.iter().find(|(t, _)| t == s).map(|(_, h)| *h);
+        for (s, want) in [
+            ("# note", Highlight::Comment),
+            ("if", Highlight::Keyword),
+            ("then", Highlight::Keyword),
+            ("NAME", Highlight::Property),
+            ("echo", Highlight::Function),
+            ("\"hi\"", Highlight::String),
+            ("-n", Highlight::Constant),
+            ("fi", Highlight::Keyword),
+        ] {
+            assert_eq!(at(s), Some(want), "{s}: {got:?}");
+        }
+    }
+
     /// **A language another's text names is found by name or alias**, in
     /// any case, with a fence's decorations off.
     #[test]

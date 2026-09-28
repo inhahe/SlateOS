@@ -183,6 +183,18 @@ impl Lexer<'_> {
         }
     }
 
+    /// The column of the character ahead: how many characters since its line
+    /// began (`get_column`). The runtime may have to read back to the line's
+    /// start to answer, so it is asked only where a scanner needs it.
+    pub fn column(&mut self) -> u32 {
+        // SAFETY: as `advance_with`.
+        unsafe {
+            (*self.raw)
+                .get_column
+                .map_or(0, |get_column| get_column(self.raw))
+        }
+    }
+
     /// Whether the text has ended.
     #[must_use]
     pub fn eof(&self) -> bool {

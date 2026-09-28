@@ -261,6 +261,15 @@ fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)])
     );
 }
 
+/// **The Bash grammar -- tables, lexers and its large ported scanner --
+/// parses its whole corpus as upstream's does.** (Its `crlf.txt` has no
+/// carriage returns: upstream's repository normalises every text file to
+/// LF, that one included.)
+#[test]
+fn bash_passes_its_corpus() {
+    check("Bash", "bash", 100, &[]);
+}
+
 /// **The C grammar parses its whole corpus as upstream's does.**
 #[test]
 fn c_passes_its_corpus() {

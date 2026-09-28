@@ -28,6 +28,12 @@ tree-sitter-c2rust:
   texts:
     - tree-sitter-LICENSE
 
+tree-sitter-bash:
+  version: 0.25.1
+  licence: MIT
+  texts:
+    - tree-sitter-bash-LICENSE
+
 tree-sitter-c:
   version: 0.24.2
   licence: MIT

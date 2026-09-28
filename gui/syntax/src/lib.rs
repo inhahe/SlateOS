@@ -139,11 +139,35 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 8;
+const VISIBLE: usize = 9;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 9] = [
+static LANGUAGES: [Language; 10] = [
+    Language {
+        name: "Bash",
+        extensions: &["sh", "bash", "ksh", "zsh"],
+        // A shell's own start-up files, and the build scripts written in it.
+        file_names: &[
+            ".bashrc",
+            ".bash_profile",
+            ".bash_login",
+            ".bash_logout",
+            ".bash_aliases",
+            ".profile",
+            ".zshrc",
+            ".zprofile",
+            ".zshenv",
+            "PKGBUILD",
+            "APKBUILD",
+        ],
+        interpreters: &["sh", "bash", "dash", "ash", "ksh", "mksh", "zsh"],
+        aliases: &["sh", "shell", "shellscript", "ksh", "zsh"],
+        grammar: grammars::bash::generated::language_fn,
+        highlights: grammars::bash::HIGHLIGHTS,
+        injections: "",
+        index: 0,
+    },
     Language {
         name: "C",
         extensions: &["c", "h"],
@@ -153,7 +177,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::c::generated::language_fn,
         highlights: grammars::c::HIGHLIGHTS,
         injections: "",
-        index: 0,
+        index: 1,
     },
     Language {
         name: "CSS",
@@ -164,7 +188,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::css::generated::language_fn,
         highlights: grammars::css::HIGHLIGHTS,
         injections: "",
-        index: 1,
+        index: 2,
     },
     Language {
         name: "JSON",
@@ -175,7 +199,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::json::generated::language_fn,
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
-        index: 2,
+        index: 3,
     },
     Language {
         name: "Markdown",
@@ -186,7 +210,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::markdown::generated::language_fn,
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
-        index: 3,
+        index: 4,
     },
     Language {
         name: "Python",
@@ -197,7 +221,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::python::generated::language_fn,
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
-        index: 4,
+        index: 5,
     },
     Language {
         name: "Rust",
@@ -208,7 +232,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::rust::generated::language_fn,
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
-        index: 5,
+        index: 6,
     },
     Language {
         name: "TOML",
@@ -220,7 +244,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::toml::generated::language_fn,
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
-        index: 6,
+        index: 7,
     },
     Language {
         name: "YAML",
@@ -231,7 +255,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::yaml::generated::language_fn,
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
-        index: 7,
+        index: 8,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -243,7 +267,7 @@ static LANGUAGES: [Language; 9] = [
         grammar: grammars::markdown_inline::generated::language_fn,
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
-        index: 8,
+        index: 9,
     },
 ];
 
@@ -289,7 +313,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 9] = [const { OnceLock::new() }; 9];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 10] = [const { OnceLock::new() }; 10];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -462,6 +486,7 @@ mod tests {
     #[test]
     fn the_runtime_reads_each_grammar_as_it_was_written() {
         for (language, name, abi, kinds, fields) in [
+            ("Bash", Some("bash"), 15, 280, 19),
             ("C", Some("c"), 15, 363, 39),
             ("CSS", Some("css"), 15, 151, 0),
             ("TOML", None, 14, 66, 0),
@@ -526,6 +551,9 @@ mod tests {
         assert_eq!(found("site.css"), Some("CSS"));
         assert_eq!(found("appearance.yaml"), Some("YAML"));
         assert_eq!(found("README.md"), Some("Markdown"));
+        assert_eq!(found("deploy.sh"), Some("Bash"));
+        assert_eq!(found("/home/me/.bashrc"), Some("Bash"));
+        assert_eq!(found("PKGBUILD"), Some("Bash"));
         assert_eq!(found(".github/ci.YML"), Some("YAML"));
         assert_eq!(found(".rs"), None);
         assert_eq!(found("notes.txt"), None);
@@ -553,7 +581,10 @@ mod tests {
             Some("Python")
         );
         assert_eq!(found("#! /usr/local/bin/pypy3"), Some("Python"));
-        assert_eq!(found("#!/bin/sh"), None);
+        assert_eq!(found("#!/bin/sh"), Some("Bash"));
+        assert_eq!(found("#!/usr/bin/env bash"), Some("Bash"));
+        assert_eq!(found("#!/bin/zsh -f"), Some("Bash"));
+        assert_eq!(found("#!/usr/bin/perl"), None);
         assert_eq!(found("import os"), None);
         assert_eq!(found("#!"), None);
     }

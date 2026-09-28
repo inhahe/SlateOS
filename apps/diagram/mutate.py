@@ -159,6 +159,24 @@ MUTATIONS = [
         "        if let Some(note) = None::<&String> {",
         ["the_status_bar_says_what_the_last_save_did"],
     ),
+    (
+        "no selection box starts",
+        "                        self.rect_select_start = Some((cx, cy));\n                        self.rect_select_end = Some((cx, cy));",
+        "",
+        ["dragging_across_empty_canvas_selects_the_shapes_the_box_touches"],
+    ),
+    (
+        "the box selects nothing",
+        "        self.selection.clear();\n        self.selection.nodes = caught;",
+        "        self.selection.clear();\n        let _ = caught;",
+        ["dragging_across_empty_canvas_selects_the_shapes_the_box_touches"],
+    ),
+    (
+        "a press on a selected shape drops the others",
+        "                        if !self.selection.has_node(id) {\n                            self.selection.select_single_node(id);\n                        }",
+        "                        self.selection.select_single_node(id);",
+        ["dragging_across_empty_canvas_selects_the_shapes_the_box_touches"],
+    ),
 ]
 
 if __name__ == "__main__":

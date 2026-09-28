@@ -1973,7 +1973,13 @@ word; text inside them that says "lane C" is history.
   asked for first -- 64x64 tiles of palettes and runs through one zlib stream
   for the whole session, inflated a rectangle at a time by
   `deflate::PiecewiseInflater` (added for it) -- then Hextile, CopyRect and
-  Raw. **Next:** partial uploads instead of the whole screen per change;
+  Raw. **2026-09-27:** a profile's display settings act -- the session asks
+  for its colour depth (8, 16 or 32 bits a pixel, read back as full colour)
+  and keeps its refresh rate by spacing frame requests; the screen is shown
+  at its scale (fitted, 50-200%, full size), clipped to the view with
+  scrollbars to pan, and `Z` chooses it; the mouse wheel reaches the remote
+  machine (RFB buttons 4-7). **Next:** partial uploads instead of the whole
+  screen per change (`oswindow`'s `ImageChange::Patch`, lane F, reaching main);
   the local clipboard to the remote machine (waits on a client for lane C's
   clipboard service -- apps have none); VeNCrypt/TLS once `open-questions.md`
   E-Q2 settles how certificates are checked; Tight (JPEG); RDP.

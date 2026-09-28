@@ -645,6 +645,15 @@ BASELINE_HEADER = """\
 # E's since the split, asked for in
 # requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md.
 # Delete each line when an application draws one.
+
+# Another line was ADDED on 2026-09-28, by lane F:
+# gui/imagecodec/src/avif/animation.rs, the player for animated AVIF pictures
+# (`imagecodec::avif::Animation`).  The same benign case with the commit in
+# another lane: its caller is the image viewer's player, which plays GIF and
+# WebP the same way and is apps/** -- lane E's since the six-lane split --
+# asked for in requests/f-bce-avif-pictures-open-and-animate.md.  Lane F's own
+# tree has no program that plays a picture.  Delete the line when the viewer
+# plays an AVIF sequence.
 #
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the

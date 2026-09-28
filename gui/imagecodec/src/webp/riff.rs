@@ -23,6 +23,11 @@
 //! other -- the `VP8X` chunk may be longer than ten bytes to the demuxer but
 //! not to `WebPGetFeatures` -- the file must pass all three, as it must in
 //! libwebp.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `webp_dec.c`, `demux.c` (copyright 2010-2025 Google Inc.), and changed for
+//! this project; used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec::Vec;
 

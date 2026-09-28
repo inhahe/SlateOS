@@ -1,0 +1,25 @@
+avif_white_1x1 ok 1x1 RGB 1 1
+avif_extended_pixi ok 4x4 RGB 1 1
+avif_draw_points_idat ok 33x11 RGBA 1 1
+avif_draw_points_idat_metasize0 ok 33x11 RGBA 1 1
+avif_draw_points_idat_progressive ok 33x11 RGBA 1 1
+avif_clop_irot_imor ok 12x34 RGBA 1 8
+avif_clap_irot_imir_non_essential err BMFF parsing failed
+avif_circle_custom_properties ok 100x60 RGBA 1 1
+avif_colors_animated_8bpc ok 150x150 RGB 5 1
+avif_unsupported_gainmap_minimum_version ok 100x100 RGBA 1 1
+avif_unsupported_gainmap_version ok 100x100 RGBA 1 1
+avif_supported_gainmap_writer_version_with_extra_bytes err Invalid tone mapped image item
+avif_unsupported_gainmap_writer_version_with_extra_bytes ok 100x100 RGBA 1 1
+avif_alpha_noispe err BMFF parsing failed
+avif_color_nogrid_alpha_nogrid_gainmap_grid ok 128x200 RGBA 1 1
+avif_colors_animated_12bpc_keyframes_0_2_3 ok 64x64 RGBA 5 1
+avif_color_grid_alpha_nogrid ok 80x80 RGBA 1 1
+avif_color_grid_alpha_grid_tile_shared_in_dimg err Not implemented
+avif_color_grid_alpha_grid_gainmap_nogrid ok 512x600 RGBA 1 1
+avif_color_grid_gainmap_different_grid ok 512x600 RGBA 1 1
+avif_colors_animated_8bpc_audio ok 150x150 RGB 5 1
+avif_colors_animated_8bpc_alpha_exif_xmp ok 150x150 RGBA 5 1
+avif_sofa_grid1x5_420 ok 1024x770 RGB 1 1
+avif_sofa_grid1x5_420_dimg_repeat err Invalid image grid
+avif_sofa_grid1x5_420_reversed_dimg_order ok 1024x770 RGB 1 1

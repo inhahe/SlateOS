@@ -12,6 +12,17 @@
 //! knows; this reads the ones that can change the pixels or refuse the file,
 //! and for the rest keeps only the one fact that matters -- a tag of a type
 //! libtiff cannot size makes its strip-size estimate fail.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_open.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.), `tif_dirread.c` (copyright (c) 1988-1997 Sam Leffler; (c)
+//! 1991-1997 Silicon Graphics, Inc.), `tif_dir.c` (copyright (c) 1988-1997
+//! Sam Leffler; (c) 1991-1997 Silicon Graphics, Inc.), `tif_dirinfo.c`
+//! (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon Graphics,
+//! Inc.), `tif_strip.c` (copyright (c) 1991-1997 Sam Leffler; (c) 1991-1997
+//! Silicon Graphics, Inc.) and `tif_tile.c` (copyright (c) 1991-1997 Sam
+//! Leffler; (c) 1991-1997 Silicon Graphics, Inc.), and changed for this
+//! project; used under libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec;
 use alloc::vec::Vec;

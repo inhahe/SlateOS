@@ -13,6 +13,11 @@
 //! accepted if any row of it decoded, the rest of the buffer left as it was.
 //!
 //! The code tables are built as libtiff's `mkg3states` builds them.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_fax3.c` (copyright (c) 1990-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.), and changed for this project; used under libtiff's
+//! licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec;
 use alloc::vec::Vec;

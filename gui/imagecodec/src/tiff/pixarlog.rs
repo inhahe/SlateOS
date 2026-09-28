@@ -32,6 +32,11 @@
 //! checksum after the last block) and reporting an error found there. So a
 //! damaged strip is shown, or refused, exactly as libtiff shows or refuses
 //! it.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_pixarlog.c` (copyright (c) 1996-1997 Sam Leffler; (c) 1996 Pixar),
+//! and changed for this project; used under libtiff's licence,
+//! `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec;
 use alloc::vec::Vec;

@@ -31,7 +31,29 @@
 //!     opacity : f32 (bits)             0.0..=1.0
 //!     present : u8                     1 = a command frame follows, 0 = delta
 //!     if present: <one inline ORDR frame — see [`crate::encode_frame`]>
+//!     n_image : u32                    picture changes for this window
+//!       per change:
+//!         kind : u8                    1 whole picture, 2 patch, 3 drop
+//!         id   : u64                   the window's own id for the picture
+//!         whole: w u32, h u32, then w*h pixels
+//!         patch: x u32, y u32, w u32, h u32, then w*h pixels
+//!         drop : nothing
+//!       a pixel is a u32 0xAARRGGBB, little-endian: what the compositor
+//!       holds after normalising an upload
 //! ```
+//!
+//! ## Pictures
+//!
+//! A window draws a picture with a command that names an image *id*; the
+//! pixels reached the compositor separately (an upload, and patches to it),
+//! and a viewer replaying the commands needs them too. So each window carries
+//! the changes to its pictures since its viewer last saw them
+//! ([`SceneImage`]): a picture new to the viewer, or too far behind, comes
+//! whole; one a few patches behind comes as those patches' rectangles, filled
+//! with the picture's pixels *now* -- which is what the viewer's copy should
+//! hold there, overlapping patches included, so no patch's own bytes need be
+//! kept; one gone comes as a drop. A window leaving the stream takes its
+//! pictures with it. [`SceneViewer`] is the viewer's side.
 //!
 //! ## Delta suppression
 //!
@@ -51,11 +73,21 @@ use crate::{DecodeError, Reader, capacity_hint};
 pub const SCENE_MAGIC: [u8; 4] = *b"SCEN";
 
 /// Scene protocol version. Bump on any incompatible layout change.
-pub const SCENE_VERSION: u8 = 1;
+///
+/// **2** -- every window carries the changes to its pictures after its
+/// commands (`n_image` and what follows; see the module docs), so a viewer
+/// holds the pixels an image command names. Version 1 forwarded none, and a
+/// viewer drew nothing wherever a window showed a picture.
+pub const SCENE_VERSION: u8 = 2;
 
 /// Upper bound on the window count and removed-id count in a single scene
 /// frame, to reject corrupt/hostile input before allocating.
 pub const MAX_WINDOWS_PER_FRAME: u32 = 1 << 16;
+
+/// Upper bound on one window's picture changes in one frame, for the same
+/// reason. A window's pictures are what its program uploaded, and a program
+/// with thousands of them sends most of them once.
+pub const MAX_IMAGE_CHANGES_PER_WINDOW: u32 = 1 << 12;
 
 /// Scene-frame header: magic + version + flags + sequence + dims + n_remove.
 const SCENE_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 4 + 4 + 4;
@@ -73,6 +105,67 @@ pub struct SceneWindow {
     /// and are forwarded in full; `None` is a delta meaning "reuse the commands
     /// you already have for this window".
     pub commands: Option<RenderTree>,
+    /// The changes to the window's pictures since the viewer last saw them,
+    /// in the order to apply them.
+    pub images: Vec<SceneImage>,
+}
+
+/// A change to one of a window's pictures, as a viewer applies it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SceneImage {
+    /// The whole picture, stored under `id` in place of any held there.
+    Whole {
+        id: u64,
+        width: u32,
+        height: u32,
+        /// `width * height` pixels, row-major, `0xAARRGGBB`.
+        pixels: Vec<u32>,
+    },
+    /// A rectangle of a picture the viewer holds, written over it.
+    Patch {
+        id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        /// `width * height` pixels, row-major, `0xAARRGGBB`.
+        pixels: Vec<u32>,
+    },
+    /// The picture is gone; the viewer forgets it.
+    Drop { id: u64 },
+}
+
+/// A rectangle a patch wrote into a picture, and the revision the picture had
+/// after it: one entry of an [`ImageSnapshot`]'s patch log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PatchMark {
+    pub revision: u64,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// One of a window's pictures as its owner holds it, for
+/// [`SceneSession::build_frame`].
+#[derive(Clone, Copy, Debug)]
+pub struct ImageSnapshot<'a> {
+    /// The window's own id for the picture.
+    pub id: u64,
+    /// Changed by every upload and every patch, and never repeated: a viewer
+    /// holding this revision holds these pixels.
+    pub revision: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` pixels, row-major, `0xAARRGGBB`.
+    pub pixels: &'a [u32],
+    /// The oldest revision `patches` can bring up to date. A viewer at this
+    /// revision or a later one is sent the rectangles patched since its own; a
+    /// viewer at an earlier one -- or holding the picture from before it was
+    /// uploaded again -- is sent the whole picture.
+    pub patch_base: u64,
+    /// The rectangles patched since `patch_base`, oldest first.
+    pub patches: &'a [PatchMark],
 }
 
 /// A full streamed frame: the visible window set in bottom→top z-order plus the
@@ -133,8 +226,111 @@ pub fn encode_scene_frame(frame: &SceneFrame) -> Vec<u8> {
             }
             None => out.push(0),
         }
+        crate::write_u32(
+            &mut out,
+            u32::try_from(win.images.len()).unwrap_or(u32::MAX),
+        );
+        for change in &win.images {
+            encode_image(change, &mut out);
+        }
     }
     out
+}
+
+const IMAGE_WHOLE: u8 = 1;
+const IMAGE_PATCH: u8 = 2;
+const IMAGE_DROP: u8 = 3;
+
+fn encode_image(change: &SceneImage, out: &mut Vec<u8>) {
+    let pixels = |out: &mut Vec<u8>, pixels: &[u32]| {
+        out.reserve(pixels.len().saturating_mul(4));
+        for &px in pixels {
+            crate::write_u32(out, px);
+        }
+    };
+    match change {
+        SceneImage::Whole {
+            id,
+            width,
+            height,
+            pixels: px,
+        } => {
+            out.push(IMAGE_WHOLE);
+            crate::write_u64(out, *id);
+            crate::write_u32(out, *width);
+            crate::write_u32(out, *height);
+            pixels(out, px);
+        }
+        SceneImage::Patch {
+            id,
+            x,
+            y,
+            width,
+            height,
+            pixels: px,
+        } => {
+            out.push(IMAGE_PATCH);
+            crate::write_u64(out, *id);
+            crate::write_u32(out, *x);
+            crate::write_u32(out, *y);
+            crate::write_u32(out, *width);
+            crate::write_u32(out, *height);
+            pixels(out, px);
+        }
+        SceneImage::Drop { id } => {
+            out.push(IMAGE_DROP);
+            crate::write_u64(out, *id);
+        }
+    }
+}
+
+/// `width * height` pixels off the wire, refused before anything is allocated
+/// when they would be more than an upload may carry
+/// ([`crate::MAX_IMAGE_BYTES`]) or more than the frame holds.
+fn read_pixels(r: &mut Reader<'_>, width: u32, height: u32) -> Result<Vec<u32>, DecodeError> {
+    let bytes = u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(4);
+    let too_large = || DecodeError::ImageTooLarge(u32::try_from(bytes).unwrap_or(u32::MAX));
+    if bytes > u64::from(crate::MAX_IMAGE_BYTES) {
+        return Err(too_large());
+    }
+    let len = usize::try_from(bytes).map_err(|_| too_large())?;
+    let (pixels, _) = r.take(len)?.as_chunks::<4>();
+    Ok(pixels.iter().map(|b| u32::from_le_bytes(*b)).collect())
+}
+
+fn decode_image(r: &mut Reader<'_>) -> Result<SceneImage, DecodeError> {
+    let kind = r.read_u8()?;
+    let id = r.read_u64()?;
+    Ok(match kind {
+        IMAGE_WHOLE => {
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            SceneImage::Whole {
+                id,
+                width,
+                height,
+                pixels: read_pixels(r, width, height)?,
+            }
+        }
+        IMAGE_PATCH => {
+            let x = r.read_u32()?;
+            let y = r.read_u32()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            SceneImage::Patch {
+                id,
+                x,
+                y,
+                width,
+                height,
+                pixels: read_pixels(r, width, height)?,
+            }
+        }
+        IMAGE_DROP => SceneImage::Drop { id },
+        other => return Err(DecodeError::BadTag(other)),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +403,14 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
             }
             other => return Err(DecodeError::BadTag(other)),
         };
+        let n_image = r.read_u32()?;
+        if n_image > MAX_IMAGE_CHANGES_PER_WINDOW {
+            return Err(DecodeError::TooManyImageChanges(n_image));
+        }
+        let mut images = Vec::with_capacity(n_image as usize);
+        for _ in 0..n_image {
+            images.push(decode_image(&mut r)?);
+        }
         windows.push(SceneWindow {
             id,
             x,
@@ -215,6 +419,7 @@ pub fn decode_scene_frame(input: &[u8]) -> Result<(SceneFrame, usize), DecodeErr
             height,
             opacity,
             commands,
+            images,
         });
     }
 
@@ -275,16 +480,93 @@ pub struct WindowSnapshot<'a> {
     pub height: u32,
     pub opacity: f32,
     pub commands: &'a RenderTree,
+    /// Every picture the window holds, in any order.
+    pub images: Vec<ImageSnapshot<'a>>,
 }
 
 /// Tracks what one remote viewer already holds, so successive frames forward a
 /// window's commands only when its fingerprint changes (geometry-only deltas
-/// otherwise).
+/// otherwise), and its pictures only as far as the viewer is behind.
 #[derive(Clone, Debug, Default)]
 pub struct SceneSession {
     next_sequence: u64,
     /// window id → fingerprint of the last forwarded command frame.
     sent: BTreeMap<u64, u64>,
+    /// (window id, picture id) → the revision of the picture the viewer holds.
+    images: BTreeMap<(u64, u64), u64>,
+}
+
+/// The changes that bring a viewer holding revision `held` of `image` (or not
+/// holding it at all) up to date, or none if it is.
+fn image_changes(image: &ImageSnapshot<'_>, held: Option<u64>) -> Vec<SceneImage> {
+    let whole = || {
+        vec![SceneImage::Whole {
+            id: image.id,
+            width: image.width,
+            height: image.height,
+            pixels: image.pixels.to_vec(),
+        }]
+    };
+    let Some(held) = held else {
+        return whole();
+    };
+    if held == image.revision {
+        return Vec::new();
+    }
+    if held < image.patch_base {
+        return whole();
+    }
+    let behind: Vec<&PatchMark> = image.patches.iter().filter(|p| p.revision > held).collect();
+    // Rectangles that together cover as much as the picture cost more than the
+    // picture: send it whole.
+    let area: u64 = behind
+        .iter()
+        .map(|p| u64::from(p.width).saturating_mul(u64::from(p.height)))
+        .fold(0, u64::saturating_add);
+    if behind.is_empty() || area >= u64::from(image.width).saturating_mul(u64::from(image.height)) {
+        return whole();
+    }
+    let mut out = Vec::with_capacity(behind.len());
+    for mark in behind {
+        match crop(image, mark) {
+            Some(pixels) => out.push(SceneImage::Patch {
+                id: image.id,
+                x: mark.x,
+                y: mark.y,
+                width: mark.width,
+                height: mark.height,
+                pixels,
+            }),
+            // A mark that does not fit the picture cannot be sent as a patch;
+            // the whole picture is always right.
+            None => return whole(),
+        }
+    }
+    out
+}
+
+/// The picture's pixels now, under `mark`'s rectangle; `None` if the
+/// rectangle does not lie inside the picture.
+fn crop(image: &ImageSnapshot<'_>, mark: &PatchMark) -> Option<Vec<u32>> {
+    let right = mark.x.checked_add(mark.width)?;
+    let bottom = mark.y.checked_add(mark.height)?;
+    if right > image.width || bottom > image.height {
+        return None;
+    }
+    let stride = usize::try_from(image.width).ok()?;
+    let (x, w) = (
+        usize::try_from(mark.x).ok()?,
+        usize::try_from(mark.width).ok()?,
+    );
+    let mut out = Vec::with_capacity(w.saturating_mul(usize::try_from(mark.height).ok()?));
+    for row in mark.y..bottom {
+        let start = usize::try_from(row)
+            .ok()?
+            .checked_mul(stride)?
+            .checked_add(x)?;
+        out.extend_from_slice(image.pixels.get(start..start.checked_add(w)?)?);
+    }
+    Some(out)
 }
 
 impl SceneSession {
@@ -313,6 +595,7 @@ impl SceneSession {
         let mut out_windows = Vec::with_capacity(windows.len());
         let mut still_present: BTreeMap<u64, u64> = BTreeMap::new();
 
+        let mut images_now: BTreeMap<(u64, u64), u64> = BTreeMap::new();
         for snap in windows {
             let blob = crate::encode_frame_to_vec(snap.commands);
             let fp = fnv1a_64(&blob);
@@ -323,6 +606,28 @@ impl SceneSession {
                 None
             };
             still_present.insert(snap.id, fp);
+
+            // The pictures, in id order so that a frame is the same bytes
+            // whatever order the owner keeps them in; then the ones the viewer
+            // holds that the window no longer does.
+            let mut ordered: Vec<&ImageSnapshot<'_>> = snap.images.iter().collect();
+            ordered.sort_by_key(|image| image.id);
+            let mut images = Vec::new();
+            for image in ordered {
+                let key = (snap.id, image.id);
+                images.extend(image_changes(image, self.images.get(&key).copied()));
+                images_now.insert(key, image.revision);
+            }
+            for &(window, id) in self
+                .images
+                .range((snap.id, 0)..=(snap.id, u64::MAX))
+                .map(|(k, _)| k)
+            {
+                if !images_now.contains_key(&(window, id)) {
+                    images.push(SceneImage::Drop { id });
+                }
+            }
+
             out_windows.push(SceneWindow {
                 id: snap.id,
                 x: snap.x,
@@ -331,6 +636,7 @@ impl SceneSession {
                 height: snap.height,
                 opacity: snap.opacity,
                 commands,
+                images,
             });
         }
 
@@ -342,6 +648,10 @@ impl SceneSession {
             .collect();
 
         self.sent = still_present;
+        // A removed window's pictures went with it on the viewer's side, and a
+        // window's dropped pictures are gone: what is held now is exactly what
+        // this frame leaves.
+        self.images = images_now;
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
 
@@ -355,9 +665,228 @@ impl SceneSession {
     }
 
     /// Forget all tracked state. The next frame re-sends every window's commands
-    /// in full — use when a viewer (re)connects.
+    /// and pictures in full — use when a viewer (re)connects, or has fallen out
+    /// of step ([`SceneViewer::apply`] refused a frame).
     pub fn reset(&mut self) {
         self.sent.clear();
+        self.images.clear();
+    }
+}
+
+/// Why a viewer could not apply a frame: the stream and the viewer disagree
+/// about what the viewer holds. The sender resynchronises with
+/// [`SceneSession::reset`], after which a frame carries everything whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SceneError {
+    /// A patch to a picture the viewer does not hold.
+    UnknownImage { window: u64, id: u64 },
+    /// A patch that does not lie inside the picture, or whose pixels do not
+    /// fill it; or a whole picture whose pixels are not `width * height`.
+    BadImage { window: u64, id: u64 },
+    /// The frame lists one window twice.
+    WindowTwice { window: u64 },
+}
+
+impl core::fmt::Display for SceneError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownImage { window, id } => {
+                write!(
+                    f,
+                    "patch to picture {id} of window {window}, which is not held"
+                )
+            }
+            Self::BadImage { window, id } => write!(
+                f,
+                "picture {id} of window {window}: pixels that do not fit their rectangle"
+            ),
+            Self::WindowTwice { window } => write!(f, "window {window} listed twice"),
+        }
+    }
+}
+
+impl std::error::Error for SceneError {}
+
+/// One picture as a viewer holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewerImage {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` pixels, row-major, `0xAARRGGBB`.
+    pub pixels: Vec<u32>,
+}
+
+/// One window as a viewer holds it: its commands, and the pictures they name.
+#[derive(Clone, Debug, Default)]
+pub struct ViewerWindow {
+    pub commands: RenderTree,
+    pub images: BTreeMap<u64, ViewerImage>,
+}
+
+/// What a remote viewer holds: every window the stream has shown it, with its
+/// commands and pictures as the frames so far leave them -- the other side of
+/// a [`SceneSession`].
+#[derive(Clone, Debug, Default)]
+pub struct SceneViewer {
+    pub windows: BTreeMap<u64, ViewerWindow>,
+}
+
+impl SceneViewer {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Apply one decoded frame: windows removed, commands carried forward or
+    /// replaced (as [`apply_scene_frame`]), picture changes applied in order.
+    ///
+    /// All or nothing: a frame the viewer cannot apply leaves it as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`SceneError`] when the frame patches a picture the viewer does not hold,
+    /// or carries pixels that do not fit their rectangle -- a stream this viewer
+    /// has fallen out of step with.
+    pub fn apply(&mut self, frame: &SceneFrame) -> Result<(), SceneError> {
+        // Checked whole before anything changes, against the pictures' sizes
+        // alone, so that a refused frame leaves the viewer as it was without
+        // copying what it holds in order to put it back.
+        let mut seen = std::collections::BTreeSet::new();
+        for win in &frame.windows {
+            if !seen.insert(win.id) {
+                return Err(SceneError::WindowTwice { window: win.id });
+            }
+            let mut sizes: BTreeMap<u64, (u32, u32)> = self
+                .windows
+                .get(&win.id)
+                .map(|w| {
+                    w.images
+                        .iter()
+                        .map(|(id, image)| (*id, (image.width, image.height)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for change in &win.images {
+                check_image(&mut sizes, win.id, change)?;
+            }
+        }
+        let mut prev = core::mem::take(&mut self.windows);
+        for win in &frame.windows {
+            let mut held = prev.remove(&win.id).unwrap_or_default();
+            if let Some(tree) = &win.commands {
+                held.commands = tree.clone();
+            }
+            for change in &win.images {
+                apply_image(&mut held.images, change);
+            }
+            self.windows.insert(win.id, held);
+        }
+        Ok(())
+    }
+}
+
+/// How many pixels a `width` x `height` rectangle holds.
+fn pixel_count(width: u32, height: u32) -> usize {
+    usize::try_from(u64::from(width).saturating_mul(u64::from(height))).unwrap_or(usize::MAX)
+}
+
+/// Whether `change` applies to pictures of these `sizes`, which it then
+/// updates as applying it would.
+fn check_image(
+    sizes: &mut BTreeMap<u64, (u32, u32)>,
+    window: u64,
+    change: &SceneImage,
+) -> Result<(), SceneError> {
+    match change {
+        SceneImage::Whole {
+            id,
+            width,
+            height,
+            pixels,
+        } => {
+            if pixels.len() != pixel_count(*width, *height) {
+                return Err(SceneError::BadImage { window, id: *id });
+            }
+            sizes.insert(*id, (*width, *height));
+        }
+        SceneImage::Patch {
+            id,
+            x,
+            y,
+            width,
+            height,
+            pixels,
+        } => {
+            let &(image_w, image_h) = sizes
+                .get(id)
+                .ok_or(SceneError::UnknownImage { window, id: *id })?;
+            let fits = x.checked_add(*width).is_some_and(|r| r <= image_w)
+                && y.checked_add(*height).is_some_and(|b| b <= image_h);
+            if !fits || pixels.len() != pixel_count(*width, *height) {
+                return Err(SceneError::BadImage { window, id: *id });
+            }
+        }
+        SceneImage::Drop { id } => {
+            sizes.remove(id);
+        }
+    }
+    Ok(())
+}
+
+/// Apply a change [`check_image`] has passed. Written not to trust that
+/// anyway: a patch that does not fit writes nothing rather than panicking.
+fn apply_image(images: &mut BTreeMap<u64, ViewerImage>, change: &SceneImage) {
+    match change {
+        SceneImage::Whole {
+            id,
+            width,
+            height,
+            pixels,
+        } => {
+            images.insert(
+                *id,
+                ViewerImage {
+                    width: *width,
+                    height: *height,
+                    pixels: pixels.clone(),
+                },
+            );
+        }
+        SceneImage::Patch {
+            id,
+            x,
+            y,
+            width,
+            pixels,
+            ..
+        } => {
+            let Some(image) = images.get_mut(id) else {
+                return;
+            };
+            let (Ok(stride), Ok(w), Ok(x), Ok(y)) = (
+                usize::try_from(image.width),
+                usize::try_from(*width),
+                usize::try_from(*x),
+                usize::try_from(*y),
+            ) else {
+                return;
+            };
+            if w == 0 {
+                return;
+            }
+            for (row, source) in pixels.chunks_exact(w).enumerate() {
+                let start = y
+                    .saturating_add(row)
+                    .saturating_mul(stride)
+                    .saturating_add(x);
+                if let Some(target) = image.pixels.get_mut(start..start.saturating_add(w)) {
+                    target.copy_from_slice(source);
+                }
+            }
+        }
+        SceneImage::Drop { id } => {
+            images.remove(id);
+        }
     }
 }
 
@@ -442,6 +971,7 @@ mod tests {
                     height: 480,
                     opacity: 0.75,
                     commands: Some(sample_tree()),
+                    images: Vec::new(),
                 },
                 SceneWindow {
                     id: 2,
@@ -451,6 +981,7 @@ mod tests {
                     height: 150,
                     opacity: 1.0,
                     commands: None,
+                    images: Vec::new(),
                 },
             ],
             removed: vec![7, 9],
@@ -501,6 +1032,7 @@ mod tests {
                 height: 1,
                 opacity: 1.0,
                 commands: Some(sample_tree()),
+                images: Vec::new(),
             }],
             removed: vec![],
         });
@@ -525,6 +1057,7 @@ mod tests {
                     height: 10,
                     opacity: 1.0,
                     commands: Some(sample_tree()),
+                    images: Vec::new(),
                 }],
                 removed: vec![],
             }));
@@ -554,6 +1087,7 @@ mod tests {
                 height: 100,
                 opacity: 0.5,
                 commands: Some(sample_tree()),
+                images: Vec::new(),
             }],
             removed: vec![3],
         });
@@ -594,6 +1128,7 @@ mod tests {
             height: 100,
             opacity: 1.0,
             commands: &tree_a,
+            images: Vec::new(),
         }];
 
         let f0 = session.build_frame(800, 600, &snaps_a);
@@ -623,6 +1158,7 @@ mod tests {
             height: 100,
             opacity: 1.0,
             commands: &tree_b,
+            images: Vec::new(),
         }];
         let f2 = session.build_frame(800, 600, &snaps_b);
         assert!(f2.windows[0].commands.is_some());
@@ -641,6 +1177,7 @@ mod tests {
                 height: 1,
                 opacity: 1.0,
                 commands: &tree,
+                images: Vec::new(),
             },
             WindowSnapshot {
                 id: 2,
@@ -650,6 +1187,7 @@ mod tests {
                 height: 1,
                 opacity: 1.0,
                 commands: &tree,
+                images: Vec::new(),
             },
         ];
         session.build_frame(10, 10, &two);
@@ -662,6 +1200,7 @@ mod tests {
             height: 1,
             opacity: 1.0,
             commands: &tree,
+            images: Vec::new(),
         }];
         let f = session.build_frame(10, 10, &one);
         assert_eq!(f.removed, vec![2]);
@@ -679,6 +1218,7 @@ mod tests {
             height: 1,
             opacity: 1.0,
             commands: &tree,
+            images: Vec::new(),
         }];
 
         let f0 = session.build_frame(10, 10, &snaps);
@@ -706,10 +1246,185 @@ mod tests {
             height: 1,
             opacity: 1.0,
             commands: &tree,
+            images: Vec::new(),
         }];
         session.build_frame(10, 10, &snaps);
         session.reset();
         let f = session.build_frame(10, 10, &snaps);
         assert!(f.windows[0].commands.is_some());
+    }
+
+    /// A frame with one window carrying `images`, encoded.
+    fn frame_with(images: Vec<SceneImage>) -> Vec<u8> {
+        encode_scene_frame(&SceneFrame {
+            sequence: 1,
+            display_width: 10,
+            display_height: 10,
+            windows: vec![SceneWindow {
+                id: 4,
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                opacity: 1.0,
+                commands: None,
+                images,
+            }],
+            removed: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn every_kind_of_picture_change_round_trips() {
+        let images = vec![
+            SceneImage::Whole {
+                id: 1,
+                width: 3,
+                height: 2,
+                pixels: vec![1, 2, 3, 4, 5, 0xFFFF_FFFF],
+            },
+            SceneImage::Patch {
+                id: 1,
+                x: 1,
+                y: 1,
+                width: 2,
+                height: 1,
+                pixels: vec![7, 8],
+            },
+            SceneImage::Drop { id: 9 },
+            SceneImage::Whole {
+                id: 2,
+                width: 0,
+                height: 5,
+                pixels: Vec::new(),
+            },
+        ];
+        let bytes = frame_with(images.clone());
+        let (frame, used) = decode_scene_frame(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(frame.windows[0].images, images);
+    }
+
+    /// Sizes and counts a hostile frame could claim are refused before any
+    /// pixel is allocated, and an unknown kind of change by its byte.
+    #[test]
+    fn a_picture_too_large_or_too_many_or_unknown_is_refused() {
+        // A 1x1 picture, its size then rewritten to 100000 x 100000: 40 GB
+        // of pixels, refused on the size alone.
+        let mut bytes = frame_with(vec![SceneImage::Whole {
+            id: 1,
+            width: 1,
+            height: 1,
+            pixels: vec![0],
+        }]);
+        let at = bytes.len() - 4 - 8; // width and height, before the one pixel
+        bytes[at..at + 4].copy_from_slice(&100_000u32.to_le_bytes());
+        bytes[at + 4..at + 8].copy_from_slice(&100_000u32.to_le_bytes());
+        assert!(matches!(
+            decode_scene_frame(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+
+        // More changes than a window may carry, refused on the count.
+        let mut bytes = frame_with(Vec::new());
+        let at = bytes.len() - 4;
+        bytes[at..].copy_from_slice(&(MAX_IMAGE_CHANGES_PER_WINDOW + 1).to_le_bytes());
+        assert_eq!(
+            decode_scene_frame(&bytes).err(),
+            Some(DecodeError::TooManyImageChanges(
+                MAX_IMAGE_CHANGES_PER_WINDOW + 1
+            ))
+        );
+
+        // A kind of change that does not exist.
+        let mut bytes = frame_with(vec![SceneImage::Drop { id: 3 }]);
+        let at = bytes.len() - 8 - 1;
+        bytes[at] = 9;
+        assert_eq!(
+            decode_scene_frame(&bytes).err(),
+            Some(DecodeError::BadTag(9))
+        );
+    }
+
+    /// The session sends a picture whole the first time, nothing while it is
+    /// unchanged, the patched rectangles after a patch, the whole picture again
+    /// once the viewer is further behind than the log reaches, and a drop once
+    /// the window no longer holds it.
+    #[test]
+    fn the_session_sends_each_picture_only_as_far_as_its_viewer_is_behind() {
+        fn snap<'a>(
+            tree: &'a RenderTree,
+            revision: u64,
+            pixels: &'a [u32],
+            base: u64,
+            patches: &'a [PatchMark],
+        ) -> Vec<WindowSnapshot<'a>> {
+            let image = ImageSnapshot {
+                id: 5,
+                revision,
+                width: 4,
+                height: 4,
+                pixels,
+                patch_base: base,
+                patches,
+            };
+            vec![WindowSnapshot {
+                id: 1,
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+                opacity: 1.0,
+                commands: tree,
+                images: vec![image],
+            }]
+        }
+        let tree = sample_tree();
+        let mut pixels = vec![0u32; 16];
+        let mut session = SceneSession::new();
+        let first = session.build_frame(4, 4, &snap(&tree, 10, &pixels, 10, &[]));
+        assert!(matches!(
+            first.windows[0].images.as_slice(),
+            [SceneImage::Whole { id: 5, .. }]
+        ));
+        let again = session.build_frame(4, 4, &snap(&tree, 10, &pixels, 10, &[]));
+        assert!(again.windows[0].images.is_empty());
+
+        pixels[5] = 0xAB;
+        let mark = PatchMark {
+            revision: 11,
+            x: 1,
+            y: 1,
+            width: 1,
+            height: 1,
+        };
+        let patched = session.build_frame(4, 4, &snap(&tree, 11, &pixels, 10, &[mark]));
+        assert_eq!(
+            patched.windows[0].images,
+            [SceneImage::Patch {
+                id: 5,
+                x: 1,
+                y: 1,
+                width: 1,
+                height: 1,
+                pixels: vec![0xAB],
+            }]
+        );
+
+        // Two patches later, with the log moved on past revision 11.
+        let later = PatchMark {
+            revision: 13,
+            ..mark
+        };
+        let behind = session.build_frame(4, 4, &snap(&tree, 13, &pixels, 12, &[later]));
+        assert!(matches!(
+            behind.windows[0].images.as_slice(),
+            [SceneImage::Whole { id: 5, .. }]
+        ));
+
+        let mut gone = snap(&tree, 13, &pixels, 12, &[]);
+        gone[0].images.clear();
+        let dropped = session.build_frame(4, 4, &gone);
+        assert_eq!(dropped.windows[0].images, [SceneImage::Drop { id: 5 }]);
     }
 }

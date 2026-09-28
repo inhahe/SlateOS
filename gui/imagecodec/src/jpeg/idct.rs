@@ -31,6 +31,13 @@
 //! as libjpeg's do. Those shortcuts compute what the full arithmetic would for
 //! any value that does not overflow; they are kept because where one does
 //! overflow they are what libjpeg computes.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jidctint.c` (copyright (C) 1991-1998 Thomas G. Lane; (C) 2002-2018 Guido
+//! Vollbeding; (C) 2015, 2020, 2022 D. R. Commander) and `jidctred.c`
+//! (copyright (C) 1994-1998 Thomas G. Lane; (C) 2015, 2022 D. R. Commander),
+//! and changed for this project; used under the IJG License
+//! (`licenses/README.md` says how).
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 mod sse2;

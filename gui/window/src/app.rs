@@ -211,6 +211,37 @@ pub enum ImageChange {
         /// ARGB, and why the type says so rather than the doc comment.
         bytes: guitk::canvas::WireBytes,
     },
+    /// Write a rectangle of pixels into the picture already stored under
+    /// `id`, leaving the rest of it as it was.
+    ///
+    /// For a picture that changes a little at a time: a remote desktop whose
+    /// screen is one picture and whose updates are a few dozen pixels each,
+    /// which would otherwise re-send the whole screen -- 8 MB at 1920x1080 --
+    /// for every blink of a cursor (`requests/e-f-update-part-of-an-uploaded-image.md`).
+    ///
+    /// The fields are [`WindowHandle::patch_image`](crate::WindowHandle::patch_image)'s,
+    /// and so is the rule: all or nothing, as an upload is -- refused, with no
+    /// pixel written, when `id` is not stored, the rectangle is empty or not
+    /// wholly inside the picture, or the bytes do not cover it. The format is
+    /// the stored picture's. It costs nothing against the image budget: the
+    /// picture holds as many pixels after it as before.
+    Patch {
+        /// The picture to write into, uploaded earlier under this id.
+        id: u64,
+        /// The rectangle's left edge, in the picture's pixels.
+        x: u32,
+        /// The rectangle's top edge.
+        y: u32,
+        /// The rectangle's width in pixels.
+        width: u32,
+        /// The rectangle's height in pixels.
+        height: u32,
+        /// Bytes per row of `bytes`, at least `width * 4`.
+        stride: u32,
+        /// `stride * height` bytes of the rectangle, in the compositor's wire
+        /// byte order, as for [`Self::Upload`].
+        bytes: guitk::canvas::WireBytes,
+    },
     /// Give the pixels under `id` back to the link's image budget.
     ///
     /// Dropping an id that was never uploaded succeeds, so an application
@@ -820,6 +851,15 @@ fn apply_images<T: Transport>(
                 format,
                 bytes,
             } => handle.upload_image(id, width, height, stride, format, bytes)?,
+            ImageChange::Patch {
+                id,
+                x,
+                y,
+                width,
+                height,
+                stride,
+                bytes,
+            } => handle.patch_image(id, (x, y), (width, height), stride, bytes)?,
             ImageChange::Drop(id) => handle.drop_image(id)?,
         }
     }
@@ -2232,6 +2272,7 @@ mod tests {
             .iter()
             .filter_map(|r| match r.body {
                 crate::RequestBody::UploadImage { image_id, .. } => Some(("up", image_id)),
+                crate::RequestBody::PatchImage { image_id, .. } => Some(("patch", image_id)),
                 crate::RequestBody::DropImage { image_id, .. } => Some(("down", image_id)),
                 _ => None,
             })
@@ -2350,6 +2391,64 @@ mod tests {
             images_seen(&desktop),
             [("down", 1), ("up", 2)],
             "the list was reordered, or one of the two was dropped on the floor"
+        );
+    }
+
+    /// A patch goes out where the application put it in the list -- after the
+    /// upload it writes into -- carrying its rectangle and its bytes unaltered.
+    /// A patch that went out *before* its upload would be refused (the id is
+    /// not stored yet) and the change it carried lost.
+    #[test]
+    fn a_patch_goes_out_after_its_upload_with_its_rectangle_and_bytes() {
+        let whole = guitk::canvas::Canvas::filled(4, 4, guitk::color::Color::rgba(0, 0, 0, 255));
+        let rect = guitk::canvas::Canvas::filled(2, 1, guitk::color::Color::rgba(9, 8, 7, 6));
+        let mut app = Recorder::new(Response::Exit).drawing_pictures(vec![
+            ImageChange::Upload {
+                id: 4,
+                width: 4,
+                height: 4,
+                stride: 16,
+                format: PixelFormat::Argb8888,
+                bytes: whole.to_argb8888(),
+            },
+            ImageChange::Patch {
+                id: 4,
+                x: 1,
+                y: 2,
+                width: 2,
+                height: 1,
+                stride: 8,
+                bytes: rect.to_argb8888(),
+            },
+        ]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        events.inject_event(window, Event::CloseRequested);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(images_seen(&desktop), [("up", 4), ("patch", 4)]);
+        let desk = desktop.borrow();
+        let patch = desk
+            .seen
+            .iter()
+            .find_map(|r| match r.body {
+                crate::RequestBody::PatchImage {
+                    window: w,
+                    image_id,
+                    x,
+                    y,
+                    width,
+                    height,
+                    stride,
+                    ref bytes,
+                } => Some((w, image_id, (x, y), (width, height), stride, bytes.clone())),
+                _ => None,
+            })
+            .expect("the patch never went out");
+        assert_eq!(
+            patch,
+            (window, 4, (1, 2), (2, 1), 8, rect.to_argb8888().into_vec())
         );
     }
 

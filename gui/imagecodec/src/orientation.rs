@@ -26,6 +26,10 @@
 //!
 //! The decoders apply it: [`crate::decode`], [`crate::decode_scaled`] and
 //! [`crate::dimensions`] all describe the picture as it is shown, turned.
+//!
+//! Portions of this file are translated into Rust from Skia's `SkExif.cpp`
+//! (copyright 2023 Google LLC), and changed for this project; used under
+//! Skia's BSD licence, `licenses/skia-LICENSE`.
 
 use alloc::vec::Vec;
 

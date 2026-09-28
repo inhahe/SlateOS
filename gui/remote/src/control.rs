@@ -56,13 +56,13 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
-use guitk::event::{Key, Modifiers};
+use guitk::event::{Key, Modifiers, SettingsName};
 
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
-    DecodeError, Reader, capacity_hint, write_bytes, write_f32, write_i32, write_string, write_u32,
-    write_u64,
+    DecodeError, Reader, capacity_hint, read_settings_name, write_bytes, write_f32, write_i32,
+    write_settings_name, write_string, write_u32, write_u64,
 };
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
@@ -118,7 +118,11 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// **18** — [`RequestBody::PatchImage`] (tag `0x29`), by which a window
 /// replaces a rectangle of an image it uploaded instead of the whole of it.
 /// Incompatible on 2's terms: an unknown tag stops the decoder.
-pub const CONTROL_VERSION: u8 = 18;
+/// **19** — [`RequestBody::AnnounceSettings`] (tag `0x2A`), by which a change
+/// to any program's own settings file reaches every open window, relayed as
+/// input version 8's `SettingsGroup::Program`. Incompatible on 2's terms: an
+/// unknown tag stops the decoder.
+pub const CONTROL_VERSION: u8 = 19;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1203,6 +1207,25 @@ pub enum RequestBody {
     /// The compositor keeps no copy of this setting either -- it announces,
     /// the shell reads. Answered with [`ResponseBody::Ok`].
     ReloadSession,
+    /// Tell everyone that settings file `name` (`<name>.yaml` in the settings
+    /// folder) changed, so the program it belongs to re-reads it: any
+    /// program's own file, where the four verbs above are for the four the
+    /// desktop reads (`design-decisions.md` §1418).
+    ///
+    /// Relayed to every window as
+    /// [`SettingsGroup::Program`](guitk::event::SettingsGroup::Program), on
+    /// [`ReloadNotifications`](Self::ReloadNotifications)' terms: it carries no
+    /// settings, only whose file to re-read, so the worst a sender can cause is
+    /// a redundant read. For `appearance`, `input`, `notifications` and
+    /// `session` it does exactly what that file's own verb does, adopting as
+    /// well as announcing, so a sender -- the settings watcher, which knows
+    /// only that a file changed -- need not know which files are which
+    /// ([`settings_group`](crate::input::settings_group)).
+    ///
+    /// The name is a [`SettingsName`], validated on decode like everything
+    /// else here: it cannot name a path, only a file in the settings folder.
+    /// Answered with [`ResponseBody::Ok`], whatever the file says.
+    AnnounceSettings { name: SettingsName },
     /// Recover the display from whatever has gone wrong with it: the same full
     /// redraw as the compositor's own Ctrl+Super+R.
     ///
@@ -1469,6 +1492,7 @@ enum RequestTag {
     ReloadSession = 0x27,
     RecoverDisplay = 0x28,
     PatchImage = 0x29,
+    AnnounceSettings = 0x2A,
 }
 
 impl RequestTag {
@@ -1514,6 +1538,7 @@ impl RequestTag {
             0x27 => Self::ReloadSession,
             0x28 => Self::RecoverDisplay,
             0x29 => Self::PatchImage,
+            0x2A => Self::AnnounceSettings,
             0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
@@ -1830,6 +1855,10 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         }
         RequestBody::ReloadSession => {
             out.push(RequestTag::ReloadSession as u8);
+        }
+        RequestBody::AnnounceSettings { name } => {
+            out.push(RequestTag::AnnounceSettings as u8);
+            write_settings_name(out, *name);
         }
         RequestBody::RecoverDisplay => out.push(RequestTag::RecoverDisplay as u8),
         RequestBody::ShellControl { window, action } => {
@@ -2246,6 +2275,9 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         RequestTag::ReloadInput => RequestBody::ReloadInput,
         RequestTag::ReloadNotifications => RequestBody::ReloadNotifications,
         RequestTag::ReloadSession => RequestBody::ReloadSession,
+        RequestTag::AnnounceSettings => RequestBody::AnnounceSettings {
+            name: read_settings_name(r)?,
+        },
         RequestTag::RecoverDisplay => RequestBody::RecoverDisplay,
         RequestTag::ShellControl => {
             let window = r.read_u64()?;
@@ -2642,8 +2674,49 @@ mod tests {
                     after_ms: 0,
                 },
             ),
+            Request::new(24, RequestBody::ReloadNotifications),
+            Request::new(25, RequestBody::ReloadSession),
+            // A program's settings file and one of the desktop's: both are
+            // announced by name, and the compositor decides which is which.
+            Request::new(
+                26,
+                RequestBody::AnnounceSettings {
+                    name: SettingsName::new(b"calendar").unwrap(),
+                },
+            ),
+            Request::new(
+                27,
+                RequestBody::AnnounceSettings {
+                    name: SettingsName::new(b"appearance").unwrap(),
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// An announcement names a file in the settings folder and nothing else:
+    /// a name `SettingsName` refuses is refused off the wire, before anything
+    /// could act on it.
+    #[test]
+    fn an_announcement_names_a_settings_file_and_nothing_else() {
+        let good = encode_requests(&[Request::new(
+            1,
+            RequestBody::AnnounceSettings {
+                name: SettingsName::new(b"calendar").unwrap(),
+            },
+        )]);
+        // The name is the frame's last field.
+        let at = good.len() - "calendar".len();
+        assert_eq!(&good[at..], b"calendar");
+        for bad in [&b"../etc/p"[..], b"CALENDAR", b"cal ndar", b"notes.md"] {
+            let mut bytes = good.clone();
+            bytes[at..].copy_from_slice(bad);
+            assert_eq!(
+                decode_requests(&bytes).err(),
+                Some(DecodeError::BadSettingsName),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
@@ -2842,8 +2915,13 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x2A),
+            Some(RequestTag::AnnounceSettings),
+            "0x2A was taken by AnnounceSettings in control version 19"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x2B),
             None,
-            "0x2A is the next free tag"
+            "0x2B is the next free tag"
         );
     }
 

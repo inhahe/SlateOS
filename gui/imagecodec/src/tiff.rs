@@ -57,6 +57,12 @@
 //! Every compression libtiff's reader decodes is decoded here. The first
 //! page only is read, as libtiff's viewers read it; the others are not
 //! reached.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_getimage.c` (copyright (c) 1991-1997 Sam Leffler; (c) 1991-1997
+//! Silicon Graphics, Inc.) and `tif_dirread.c` (copyright (c) 1988-1997 Sam
+//! Leffler; (c) 1991-1997 Silicon Graphics, Inc.), and changed for this
+//! project; used under libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 mod color;
 mod dir;

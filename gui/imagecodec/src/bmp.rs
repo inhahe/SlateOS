@@ -46,6 +46,12 @@
 //! present, the picture is checked against [`Limits`] before its buffer
 //! exists, and nothing else is sized from the file: the palette is a fixed 256
 //! entries whatever the file claims.
+//!
+//! Portions of this file are adapted from image-rs 0.25.10's
+//! `src/codecs/bmp/decoder.rs` (copyright the image-rs contributors), with
+//! Chromium's patches to it (copyright The Chromium Authors), and changed for
+//! this project; used under the MIT licence (`licenses/image-rs-LICENSE-MIT`)
+//! and Chromium's BSD licence (`licenses/chromium-LICENSE`).
 
 use alloc::vec;
 

@@ -30,6 +30,11 @@
 //! ([`Reader::sign`]). Each of these was found by decoding thousands of
 //! corrupted files here and in libwebp and comparing the pixels
 //! (design-decisions.md §1312); `tests/webp.rs` keeps one such file.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `bit_reader_utils.c`, `bit_reader_inl_utils.h` (copyright 2010-2025 Google
+//! Inc.), and changed for this project; used under libwebp's BSD licence and
+//! patent grant (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 /// A boolean decoder over one partition.
 pub(super) struct Reader<'a> {

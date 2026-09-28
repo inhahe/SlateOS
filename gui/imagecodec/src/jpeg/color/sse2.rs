@@ -9,6 +9,13 @@
 //! blue's is red's with `B_CB` and `xb`. Every step is exact, so the pixels
 //! are [`super::ycc_to_rgb`]'s, clamped as libjpeg's range limit clamps, and
 //! a test compares the two on every input.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdcolor.c` (copyright (C) 1991-1997 Thomas G. Lane; (C) 2011 Guido
+//! Vollbeding; (C) 2009 Pierre Ossman for Cendio AB; (C) 2009, 2011-2012,
+//! 2014-2015, 2022, 2024 D. R. Commander; (C) 2013 Linaro Limited), and
+//! changed for this project; used under the IJG License (`licenses/README.md`
+//! says how).
 
 use core::arch::x86_64::{
     __m128i, _mm_add_epi16, _mm_add_epi32, _mm_cvtsi128_si64, _mm_madd_epi16, _mm_packs_epi32,

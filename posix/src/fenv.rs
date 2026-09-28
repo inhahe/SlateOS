@@ -199,33 +199,54 @@ pub extern "C" fn feclearexcept(excepts: i32) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn feraiseexcept(excepts: i32) -> i32 {
     if excepts & FE_INVALID != 0 {
-        let mut f: f32 = 0.0;
-        // SAFETY: a register-only SSE division (0/0), which raises invalid.
-        unsafe { asm!("divss {0}, {0}", inout(xmm_reg) f, options(nomem, nostack)) };
-        let _ = f;
+        raise_by_division(0.0, 0.0, FE_INVALID);
     }
     if excepts & FE_DIVBYZERO != 0 {
-        let mut f: f32 = 1.0;
-        let g: f32 = 0.0;
-        // SAFETY: a register-only SSE division (1/0), which raises
-        // divide-by-zero.
-        unsafe { asm!("divss {0}, {1}", inout(xmm_reg) f, in(xmm_reg) g, options(nomem, nostack)) };
-        let _ = f;
+        raise_by_division(1.0, 0.0, FE_DIVBYZERO);
     }
     // Overflow, underflow and inexact have no operation that raises one
     // alone: set the x87 flag and let `fwait` deliver it.
     for bit in [FE_OVERFLOW, FE_UNDERFLOW, FE_INEXACT] {
         if excepts & bit != 0 {
-            let mut env = FenvT::default();
-            fnstenv(&mut env);
-            env.status_word |= u16::try_from(bit).unwrap_or(0);
-            fldenv(&env);
-            // SAFETY: `fwait` delivers pending unmasked x87 exceptions; it
-            // touches no memory.
-            unsafe { asm!("fwait", options(nomem, nostack)) };
+            raise_in_x87(bit);
         }
     }
     0
+}
+
+/// Raise invalid (0/0) or divide-by-zero (1/0) as glibc does: by an SSE
+/// division, so that an exception whose trap MXCSR enables traps. Every
+/// SlateOS program has SSE -- the libc is built for
+/// `x86_64-slateos-libc.json`, `+sse,+sse2`.
+#[cfg(target_feature = "sse")]
+fn raise_by_division(num: f32, den: f32, _bit: i32) {
+    let mut f = num;
+    // SAFETY: a register-only SSE division, which raises the flag it is
+    // chosen for and touches no memory.
+    unsafe { asm!("divss {0}, {1}", inout(xmm_reg) f, in(xmm_reg) den, options(nomem, nostack)) };
+    let _ = f;
+}
+
+/// The crate's other build -- the soft-float `x86_64-unknown-none` its
+/// `.cargo/config.toml` pins for a plain `cargo check`, which push gate 40
+/// compiles -- has no SSE registers to name, and no SSE environment for a
+/// flag to be in: there the flag is raised in the x87 unit, as the other
+/// three always are.
+#[cfg(not(target_feature = "sse"))]
+fn raise_by_division(_num: f32, _den: f32, bit: i32) {
+    raise_in_x87(bit);
+}
+
+/// Set `bit` in the x87 status word and let `fwait` deliver it -- trapping
+/// if its trap is enabled, as raising must.
+fn raise_in_x87(bit: i32) {
+    let mut env = FenvT::default();
+    fnstenv(&mut env);
+    env.status_word |= u16::try_from(bit).unwrap_or(0);
+    fldenv(&env);
+    // SAFETY: `fwait` delivers pending unmasked x87 exceptions; it touches
+    // no memory.
+    unsafe { asm!("fwait", options(nomem, nostack)) };
 }
 
 /// Set the flags in `excepts` without raising them (C23; glibc's

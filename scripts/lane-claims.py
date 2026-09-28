@@ -214,7 +214,8 @@ def _self_test() -> int:
         check(all_claims(d) == [], "claims left after releasing all")
 
         bad = claims_dir(d) / "a-hand-edited.txt"
-        bad.write_text("lane: A\nsince: yesterday\nnonsense line\nwhat: x\n", encoding="utf-8")
+        bad.write_text("lane: A\nsince: yesterday\nnonsense line\nwhat: x\n",
+                       encoding="utf-8", newline="\n")
         got = all_claims(d)
         check(len(got) == 1 and got[0]["since"] is None and got[0]["what"] == "x",
               "a hand-edited claim is not read for what it can say")

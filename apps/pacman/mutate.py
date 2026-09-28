@@ -206,8 +206,8 @@ MUTATIONS = [
     ),
     (
         "the sheet is drawn over the board during play",
-        '            GameState::Playing => return,',
-        '            GameState::Playing => ("PAC-MAN", YELLOW, 220),',
+        "            GameState::Playing => return,",
+        "            GameState::Playing => (\"PAC-MAN\", c.chrome.even, 220),",
         ["nothing_covers_the_board_while_the_game_is_being_played"],
     ),
     # -- Click routing -------------------------------------------------
@@ -355,6 +355,12 @@ MUTATIONS = [
         "        self.palette = palette;",
         "        let _ = palette;",
         ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the sheet's words have no panel of their own",
+        "                pad * 0.6,\n                Surface::Panel,",
+        "                pad * 0.6,\n                Surface::Card,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

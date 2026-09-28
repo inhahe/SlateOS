@@ -2089,6 +2089,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+S", "Save"),
     ("Ctrl+E", "Export"),
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    // The text field's own keys. The toolkit's text area answers them and
+    // draws nothing, so the application whose field it is names them
+    // (scripts/key-survey-answered.txt, `textarea`); this one checks a paste
+    // against the line cap before letting it in.
+    ("Ctrl+A", "Select all of a note"),
+    ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy, cut or paste, in a note"),
     ("Ctrl+F", "Find, in the sidebar"),
     ("Ctrl+B", "Show or hide the sidebar"),
     ("Ctrl+G", "Snap notes to the grid"),

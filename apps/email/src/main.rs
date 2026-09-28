@@ -1969,7 +1969,12 @@ const SHORTCUTS: &[(&str, &str)] = &[
 ];
 
 /// The keys of the compose form, listed on the form itself.
-const COMPOSE_KEYS: &str = "Tab: next field  \u{00B7}  Ctrl+S: save draft  \u{00B7}  Ctrl+Enter: send  \u{00B7}  Esc: close";
+///
+/// The clipboard keys are the text fields' own: the toolkit's fields answer
+/// them and draw nothing, so the application whose fields they are names
+/// them (scripts/key-survey-answered.txt, `textline` and `textarea`) -- and
+/// this one checks a paste against the body's size before letting it in.
+const COMPOSE_KEYS: &str = "Tab: next field  \u{00B7}  Ctrl+S: save draft  \u{00B7}  Ctrl+Enter: send  \u{00B7}  Ctrl+A: select all  \u{00B7}  Ctrl+C / Ctrl+X / Ctrl+V: copy, cut, paste  \u{00B7}  Esc: close";
 
 /// A field of the compose form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -5626,6 +5631,39 @@ mod tests {
                     stroke.key
                 );
             }
+        }
+    }
+
+    /// **The compose form names all its keys on its line**, the clipboard's
+    /// included, at the window's own size. The line is cut with an ellipsis
+    /// where it runs out of room, and a cut line names only the keys before
+    /// the cut -- which, the clipboard keys being the last added, would be
+    /// exactly the ones this line was lengthened for.
+    #[test]
+    fn the_compose_forms_keys_are_all_on_its_line() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::N, true));
+        let cmds = app.render_commands(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let (room, size) = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    font_size,
+                    ..
+                } if text.as_str() == COMPOSE_KEYS => Some((*max_width, *font_size)),
+                _ => None,
+            })
+            .expect("the compose form does not list its keys");
+        let width = text::measure(COMPOSE_KEYS, size, FontWeightHint::Regular);
+        let room = room.unwrap_or(f32::INFINITY);
+        assert!(
+            width <= room,
+            "the keys are {width:.0} px wide on a {room:.0} px line: the end is cut"
+        );
+        for keys in ["Ctrl+A", "Ctrl+C", "Ctrl+X", "Ctrl+V"] {
+            assert!(COMPOSE_KEYS.contains(keys), "{keys} is not named");
         }
     }
 

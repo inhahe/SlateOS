@@ -26,27 +26,86 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// A switched-off control, and faint lines.
+    overlay0: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+
+    /// A rock by its size: the palette's text greys, brighter the bigger,
+    /// each reading on the field.
+    rock_large: Color,
+    rock_medium: Color,
+    rock_small: Color,
+    /// The starfield's two kinds of dot, faint on the field.
+    star_dim: Color,
+    star_bright: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            overlay0: p.overlay0,
+            teal: p.ink(p.teal),
+            rock_large: p.text,
+            rock_medium: p.subtext1,
+            rock_small: p.subtext0,
+            star_dim: with_alpha(p.overlay0, 60),
+            star_bright: with_alpha(p.subtext0, 100),
+        }
+    }
+}
 
 // ── World size ──────────────────────────────────────────────────────
 
@@ -288,11 +347,11 @@ impl AsteroidSize {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            AsteroidSize::Large => SUBTEXT0,
-            AsteroidSize::Medium => OVERLAY0,
-            AsteroidSize::Small => Color::from_hex(0x585B70),
+            AsteroidSize::Large => c.rock_large,
+            AsteroidSize::Medium => c.rock_medium,
+            AsteroidSize::Small => c.rock_small,
         }
     }
 
@@ -482,13 +541,27 @@ impl Ship {
 }
 
 // ── Particle (visual debris) ────────────────────────────────────────
+
+/// What a spark came off, which decides its colour when it is drawn -- so the
+/// sparks in flight when the theme changes take the new colours with
+/// everything else, rather than a colour fixed when they were made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spark {
+    /// A rock of this size, broken.
+    Rock(AsteroidSize),
+    /// The ship, destroyed.
+    Ship,
+    /// The engine's exhaust.
+    Exhaust,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Particle {
     pos: Vec2,
     vel: Vec2,
     lifetime: f32,
     max_lifetime: f32,
-    color: Color,
+    spark: Spark,
 }
 
 impl Particle {
@@ -750,6 +823,12 @@ pub struct AsteroidsApp {
     /// The size the last frame was drawn at, and so the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl AsteroidsApp {
@@ -776,6 +855,8 @@ impl AsteroidsApp {
             rng: SeededRng::new(seed),
             frame_counter: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.spawn_wave(INITIAL_ASTEROIDS);
         app
@@ -860,7 +941,7 @@ impl AsteroidsApp {
 
     // ── Particle effects ────────────────────────────────────────────
 
-    fn spawn_explosion(&mut self, pos: Vec2, count: usize, color: Color) {
+    fn spawn_explosion(&mut self, pos: Vec2, count: usize, spark: Spark) {
         for _ in 0..count {
             let angle = random_angle(&mut self.rng);
             let speed = self.rng.between_f32(30.0, 150.0);
@@ -870,7 +951,7 @@ impl AsteroidsApp {
                 vel: Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed),
                 lifetime,
                 max_lifetime: lifetime,
-                color,
+                spark,
             });
         }
     }
@@ -885,7 +966,7 @@ impl AsteroidsApp {
             vel: Vec2::new(cos_f32(angle) * speed, sin_f32(angle) * speed),
             lifetime,
             max_lifetime: lifetime,
-            color: PEACH,
+            spark: Spark::Exhaust,
         });
     }
 
@@ -899,10 +980,13 @@ impl AsteroidsApp {
     fn new_game(&mut self) {
         let high = self.high_score;
         let size = self.size;
+        let palette = self.palette;
         let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.high_score = high;
         self.size = size;
+        self.palette = palette;
+        self.colours = Colours::of(&palette);
     }
 
     // ── Input handling ──────────────────────────────────────────────
@@ -1139,7 +1223,7 @@ impl AsteroidsApp {
 
         // Collect data from hits before mutating.
         let mut score_gain: u32 = 0;
-        let mut explosions: Vec<(Vec2, Color)> = Vec::new();
+        let mut explosions: Vec<(Vec2, AsteroidSize)> = Vec::new();
         let mut children_to_spawn: Vec<(Vec2, Vec2, AsteroidSize)> = Vec::new();
         let mut destroyed_indices: Vec<usize> = Vec::new();
         let mut spent_bullets: Vec<usize> = Vec::new();
@@ -1149,7 +1233,7 @@ impl AsteroidsApp {
                 continue;
             };
             score_gain = score_gain.saturating_add(asteroid.size.score());
-            explosions.push((asteroid.pos, asteroid.size.color()));
+            explosions.push((asteroid.pos, asteroid.size));
             if let Some(child_size) = asteroid.size.child_size() {
                 children_to_spawn.push((asteroid.pos, asteroid.vel, child_size));
             }
@@ -1168,8 +1252,8 @@ impl AsteroidsApp {
         }
 
         // Spawn explosions.
-        for (pos, color) in explosions {
-            self.spawn_explosion(pos, 8, color);
+        for (pos, size) in explosions {
+            self.spawn_explosion(pos, 8, Spark::Rock(size));
         }
 
         // Spawn children.
@@ -1211,7 +1295,7 @@ impl AsteroidsApp {
     fn destroy_ship(&mut self) {
         self.ship_alive = false;
         self.lives = self.lives.saturating_sub(1);
-        self.spawn_explosion(self.ship.pos, 15, BLUE);
+        self.spawn_explosion(self.ship.pos, 15, Spark::Ship);
         self.input = InputState::new();
 
         if self.lives == 0 {
@@ -1281,16 +1365,21 @@ impl AsteroidsApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame<Target> {
         let mut f = Frame::new(width, height);
         let l = Layout::new(width, height);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        fill(&mut f, l.window, self.colours.base, CornerRadii::ZERO);
         self.draw_header(&mut f, &l);
 
         let field = Field::new(l.body);
-        fill(&mut f, field.rect, MANTLE, CornerRadii::all(4.0));
+        fill(
+            &mut f,
+            field.rect,
+            self.colours.mantle,
+            CornerRadii::all(4.0),
+        );
         // Recorded before anything inside it, so the ship and the asteroids --
         // which are drawn after -- win the hit test where they overlap it.
         f.hit(Target::Field, field.rect);
 
-        draw_stars(&mut f, &field);
+        draw_stars(&mut f, &field, &self.colours);
         self.draw_particles(&mut f, &field);
         self.draw_asteroids(&mut f, &field);
         self.draw_bullets(&mut f, &field);
@@ -1304,15 +1393,27 @@ impl AsteroidsApp {
     /// The five readings along the top, in the order they are written.
     fn readings(&self) -> [(Target, String, Color); 5] {
         [
-            (Target::Title, String::from("Asteroids"), TEAL),
-            (Target::Score, format!("Score: {}", self.score), TEXT_COLOR),
+            (Target::Title, String::from("Asteroids"), self.colours.teal),
+            (
+                Target::Score,
+                format!("Score: {}", self.score),
+                self.colours.text,
+            ),
             (
                 Target::HighScore,
                 format!("Hi: {}", self.high_score),
-                YELLOW,
+                self.colours.yellow,
             ),
-            (Target::Lives, format!("Lives: {}", self.lives), RED),
-            (Target::Wave, format!("Wave: {}", self.wave), LAVENDER),
+            (
+                Target::Lives,
+                format!("Lives: {}", self.lives),
+                self.colours.red,
+            ),
+            (
+                Target::Wave,
+                format!("Wave: {}", self.wave),
+                self.colours.lavender,
+            ),
         ]
     }
 
@@ -1327,7 +1428,7 @@ impl AsteroidsApp {
         if l.header.is_empty() {
             return;
         }
-        fill(f, l.header, MANTLE, CornerRadii::all(4.0));
+        fill(f, l.header, self.colours.mantle, CornerRadii::all(4.0));
         f.hit(Target::Header, l.header);
 
         let inner = Rect::new(
@@ -1385,7 +1486,9 @@ impl AsteroidsApp {
                     text: CONTROLS_LINE,
                     size: l.small,
                     weight: FontWeightHint::Light,
-                    color: OVERLAY0,
+                    // Secondary text: the keys are read, and the palette's
+                    // faintest grey is 2.3:1 on a light band.
+                    color: self.colours.subtext0,
                 },
                 controls,
             );
@@ -1399,7 +1502,11 @@ impl AsteroidsApp {
             if alpha == 0 {
                 continue;
             }
-            let c = particle.color;
+            let c = match particle.spark {
+                Spark::Rock(size) => size.color(&self.colours),
+                Spark::Ship => self.colours.blue,
+                Spark::Exhaust => self.colours.peach,
+            };
             let size = field.scaled(2.0 + f32_from_u8(alpha) / 255.0 * 2.0);
             let (x, y) = field.to_screen(particle.pos);
             fill(
@@ -1414,7 +1521,7 @@ impl AsteroidsApp {
     fn draw_asteroids(&self, f: &mut Frame<Target>, field: &Field) {
         for (index, asteroid) in self.asteroids.iter().enumerate() {
             let verts = asteroid.vertices();
-            let color = asteroid.size.color();
+            let color = asteroid.size.color(&self.colours);
             let width = field.stroke(1.5);
 
             // Each vertex paired with the next, the last joined back to the
@@ -1457,7 +1564,7 @@ impl AsteroidsApp {
         for (index, bullet) in self.bullets.iter().enumerate() {
             let (x, y) = field.to_screen(bullet.pos);
             let box_ = Rect::new(x - r, y - r, r * 2.0, r * 2.0);
-            fill(f, box_, GREEN, CornerRadii::all(r));
+            fill(f, box_, self.colours.green, CornerRadii::all(r));
             f.hit(Target::Bullet(index), box_);
         }
     }
@@ -1486,7 +1593,7 @@ impl AsteroidsApp {
                 y1,
                 x2,
                 y2,
-                color: BLUE,
+                color: self.colours.blue,
                 width,
             });
         }
@@ -1508,9 +1615,9 @@ impl AsteroidsApp {
             self.ship.pos.y - sin_f32(angle) * SHIP_RADIUS * 1.2,
         );
         let flame_color = if self.frame_counter % 4 < 2 {
-            PEACH
+            self.colours.peach
         } else {
-            YELLOW
+            self.colours.yellow
         };
         let outer = field.stroke(1.5);
         for wing in [lw, rw] {
@@ -1543,7 +1650,7 @@ impl AsteroidsApp {
                 y1,
                 x2,
                 y2,
-                color: YELLOW,
+                color: self.colours.yellow,
                 width: inner,
             });
         }
@@ -1564,7 +1671,7 @@ impl AsteroidsApp {
         fill(
             f,
             field.rect,
-            Color::rgba(17, 17, 27, 180),
+            with_alpha(self.palette.crust, 180),
             CornerRadii::ZERO,
         );
         f.hit(Target::Overlay, field.rect);
@@ -1575,24 +1682,38 @@ impl AsteroidsApp {
                 "PAUSED",
                 l.font * 1.5,
                 FontWeightHint::Bold,
-                LAVENDER,
+                self.colours.lavender,
             ),
             (
                 Target::Resume,
                 "Press P or Esc to resume",
                 l.font,
                 FontWeightHint::Regular,
-                SUBTEXT0,
+                self.colours.subtext0,
             ),
             (
                 Target::NewGame,
                 "Press N for new game",
                 l.font * 0.85,
                 FontWeightHint::Regular,
-                TEAL,
+                self.colours.teal,
             ),
         ];
-        stack_centred(f, field.rect, l.pad, &lines);
+        // The lines on a panel of their own, as the game-over lines are: over
+        // the veil alone they sat on whatever was under it, and a spark
+        // passing behind "Press P or Esc to resume" took it to 3.2:1.
+        let (w, h) = stack_extent(l.pad, &lines);
+        let box_w = (w + l.pad * 2.0).min(field.rect.w);
+        let box_h = (h + l.pad * 2.0).min(field.rect.h);
+        let box_ = Rect::new(
+            field.rect.x + (field.rect.w - box_w) / 2.0,
+            field.rect.y + (field.rect.h - box_h) / 2.0,
+            box_w,
+            box_h,
+        );
+        self.palette
+            .push_surface(f, box_.x, box_.y, box_.w, box_.h, 8.0, Surface::Panel);
+        stack_centred(f, box_, l.pad, &lines);
     }
 
     fn draw_game_over_overlay(&self, f: &mut Frame<Target>, l: &Layout, field: &Field) {
@@ -1602,7 +1723,7 @@ impl AsteroidsApp {
         fill(
             f,
             field.rect,
-            Color::rgba(17, 17, 27, 200),
+            with_alpha(self.palette.crust, 200),
             CornerRadii::ZERO,
         );
         f.hit(Target::Overlay, field.rect);
@@ -1618,8 +1739,15 @@ impl AsteroidsApp {
             box_w,
             box_h,
         );
-        fill(f, box_, Color::from_hex(0x0031_3244), CornerRadii::all(8.0));
-        stroke(f, box_, RED, field.stroke(2.0), CornerRadii::all(8.0));
+        self.palette
+            .push_surface(f, box_.x, box_.y, box_.w, box_.h, 8.0, Surface::Panel);
+        stroke(
+            f,
+            box_,
+            self.colours.red,
+            field.stroke(2.0),
+            CornerRadii::all(8.0),
+        );
 
         let lines: [(Target, String, f32, FontWeightHint, Color); 5] = [
             (
@@ -1627,35 +1755,35 @@ impl AsteroidsApp {
                 String::from("GAME OVER"),
                 l.font * 1.5,
                 FontWeightHint::Bold,
-                RED,
+                self.colours.red,
             ),
             (
                 Target::FinalStat(0),
                 format!("Score: {}", self.score),
                 l.font,
                 FontWeightHint::Regular,
-                TEXT_COLOR,
+                self.colours.text,
             ),
             (
                 Target::FinalStat(1),
                 format!("High Score: {}", self.high_score),
                 l.font,
                 FontWeightHint::Regular,
-                YELLOW,
+                self.colours.yellow,
             ),
             (
                 Target::FinalStat(2),
                 format!("Wave reached: {}", self.wave),
                 l.font,
                 FontWeightHint::Regular,
-                LAVENDER,
+                self.colours.lavender,
             ),
             (
                 Target::NewGame,
                 String::from("Press N or Enter for new game"),
                 l.small,
                 FontWeightHint::Regular,
-                SUBTEXT0,
+                self.colours.subtext0,
             ),
         ];
         let borrowed: Vec<(Target, &str, f32, FontWeightHint, Color)> = lines
@@ -1708,10 +1836,9 @@ fn stroke(
 /// They are placed in field coordinates and put on the screen through the
 /// same transform as everything else, so they scale with the field instead of
 /// bunching into one corner of a window that grew.
-fn draw_stars(f: &mut Frame<Target>, field: &Field) {
+fn draw_stars(f: &mut Frame<Target>, field: &Field, c: &Colours) {
     let mut rng = SeededRng::new(999);
-    let dim = Color::rgba(100, 100, 140, 60);
-    let bright = Color::rgba(150, 150, 200, 100);
+    let (dim, bright) = (c.star_dim, c.star_bright);
     for i in 0..40 {
         let at = Vec2::new(
             rng.between_f32(4.0, FIELD_WIDTH - 4.0),
@@ -1797,6 +1924,20 @@ fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
 /// window loses as much off the bottom as off the top instead of running out
 /// through the floor. A line with no room left is dropped, not drawn on top
 /// of the one above it.
+/// The width and height [`stack_centred`] needs for `lines`, `gap` apart.
+fn stack_extent(gap: f32, lines: &[(Target, &str, f32, FontWeightHint, Color)]) -> (f32, f32) {
+    let w = lines
+        .iter()
+        .map(|(_, s, size, weight, _)| text::measure(s, *size, *weight))
+        .fold(0.0_f32, f32::max);
+    let h = lines
+        .iter()
+        .map(|(_, _, size, weight, _)| text::line_height(*size, *weight))
+        .sum::<f32>()
+        + gap * f32_from_usize(lines.len().saturating_sub(1));
+    (w, h)
+}
+
 fn stack_centred(
     f: &mut Frame<Target>,
     area: Rect,
@@ -1919,6 +2060,11 @@ pub fn handle_event(app: &mut AsteroidsApp, event: &Event) -> EventResult {
 }
 
 impl App for AsteroidsApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Asteroids".to_string()
     }
@@ -2007,6 +2153,129 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a game in flight with sparks of every
+    /// kind, a bullet and the engine lit; paused; over; and cramped.
+    fn every_look(p: &Palette) -> Vec<(&'static str, AsteroidsApp)> {
+        let busy = || {
+            let mut a = test_app();
+            a.spawn_explosion(Vec2::new(100.0, 100.0), 3, Spark::Rock(AsteroidSize::Large));
+            a.spawn_explosion(Vec2::new(200.0, 100.0), 3, Spark::Ship);
+            a.spawn_thrust_particle();
+            a.ship.thrusting = true;
+            a.invulnerable_timer = 0.0;
+            a.bullets.push(Bullet {
+                pos: Vec2::new(300.0, 300.0),
+                vel: Vec2::ZERO,
+                lifetime: 1.0,
+            });
+            a
+        };
+        let mut paused = busy();
+        paused.state = GameState::Paused;
+        let mut over = busy();
+        over.state = GameState::GameOver;
+        let mut cramped = busy();
+        cramped.resize(420.0, 320.0);
+        let mut looks = vec![
+            ("playing", busy()),
+            ("paused", paused),
+            ("over", over),
+            ("cramped", cramped),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's (the operator's
+    /// C-Q16). It drew in its own copy of Catppuccin Mocha, dark on a light
+    /// desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, a) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(a.size().0, a.size().1).commands(),
+                    &[],
+                    &format!("asteroids, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look, held to WCAG's floor for its size
+    /// (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, a) in every_look(&p) {
+                let f = a.frame(a.size().0, a.size().1);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "asteroids: {bad:#?}");
+    }
+
+    /// **Every rock, the ship and a bullet stand off the field in either
+    /// theme** (WCAG 1.4.11's 3:1 for what a player must see): a small rock
+    /// was 1.8:1 on a light field.
+    #[test]
+    fn every_rock_the_ship_and_a_bullet_stand_off_the_field() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for (what, colour) in [
+                ("a large rock", AsteroidSize::Large.color(&c)),
+                ("a medium rock", AsteroidSize::Medium.color(&c)),
+                ("a small rock", AsteroidSize::Small.color(&c)),
+                ("the ship", c.blue),
+                ("a bullet", c.green),
+            ] {
+                let ratio = guitk::theme::contrast_ratio(colour, c.mantle);
+                assert!(ratio >= 3.0, "{what} is {ratio:.2}:1 (light: {light})");
+            }
+        }
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the window's size.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut a = test_app();
+        a.theme_changed(&light);
+        a.new_game();
+        assert_eq!(
+            a.palette, light,
+            "a new game went back to the default colours"
+        );
+        assert_eq!(a.colours, Colours::of(&light));
+    }
     use guitk::probe;
 
     /// The size a test reads a click against, spelled once.
@@ -2671,7 +2940,7 @@ mod tests {
             vel: Vec2::ZERO,
             lifetime: 1.0,
             max_lifetime: 1.0,
-            color: RED,
+            spark: Spark::Ship,
         };
         assert!(p.alive());
     }
@@ -2683,7 +2952,7 @@ mod tests {
             vel: Vec2::ZERO,
             lifetime: 0.5,
             max_lifetime: 1.0,
-            color: RED,
+            spark: Spark::Ship,
         };
         p.update(0.6);
         assert!(!p.alive());
@@ -2696,7 +2965,7 @@ mod tests {
             vel: Vec2::ZERO,
             lifetime: 1.0,
             max_lifetime: 1.0,
-            color: RED,
+            spark: Spark::Ship,
         };
         assert_eq!(p.alpha(), 255);
     }
@@ -2708,7 +2977,7 @@ mod tests {
             vel: Vec2::ZERO,
             lifetime: 0.5,
             max_lifetime: 1.0,
-            color: RED,
+            spark: Spark::Ship,
         };
         assert!((p.alpha() as i32 - 127).abs() <= 1);
     }
@@ -3197,14 +3466,14 @@ mod tests {
     fn test_explosion_spawns_particles() {
         let mut app = test_app();
         assert!(app.particles.is_empty());
-        app.spawn_explosion(Vec2::new(100.0, 100.0), 10, RED);
+        app.spawn_explosion(Vec2::new(100.0, 100.0), 10, Spark::Ship);
         assert_eq!(app.particles.len(), 10);
     }
 
     #[test]
     fn test_particles_decay() {
         let mut app = test_app();
-        app.spawn_explosion(Vec2::new(100.0, 100.0), 5, RED);
+        app.spawn_explosion(Vec2::new(100.0, 100.0), 5, Spark::Ship);
         // Advance a long time so all particles expire.
         tick_many(&mut app, 2000, 16);
         assert!(app.particles.is_empty());

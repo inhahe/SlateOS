@@ -2452,16 +2452,37 @@ word; text inside them that says "lane C" is history.
   colour in the shade that reads on its tile, a board's two squares, the
   outline that keeps a piece seen on a square its own shade, and the playing
   cards every card game shares), and in each game a `palette_check` guard
-  over its states in both modes. **Done** (2026-09-28): tic-tac-toe,
-  minesweeper, 2048, connect four, wordle, simon, reversi, gomoku, checkers,
-  chess, tetris, solitaire, freecell, hearts, spades, mahjong, memory -- each
-  swept. On the way: chess drew black's pieces light in a dark theme;
-  solitaire's and freecell's red suits were 1.6:1 on their faces; gomoku's
-  cursor was 1.04:1 on its wood; a new game in minesweeper, reversi, chess
-  and tetris dropped the user's colours. **Next:** match3, battleship,
-  towers, breakout, pacman, yahtzee, sudoku, crossword, nonogram, wordsearch,
-  asteroids, pong, snake, maze, nim, hangman, lightsout, pinball, sokoban,
-  and the rest, one commit each.
+  over its states in both modes, and -- from sudoku on -- a legibility test
+  (`gamechrome::legibility`: every text drawn, read against the fills under
+  it and held to WCAG's floor for its size). **Done** (2026-09-28):
+  tic-tac-toe, minesweeper, 2048, connect four, wordle, simon, reversi,
+  gomoku, checkers, chess, tetris, solitaire, freecell, hearts, spades,
+  mahjong, memory, match3, battleship, towers, breakout, pacman, yahtzee,
+  sudoku, crossword, nonogram, wordsearch, asteroids, pong, snake, maze,
+  nim, lights out, hangman, pinball, pipes -- each swept. On the way: chess drew black's pieces light in a dark
+  theme; solitaire's and freecell's red suits were 1.6:1 on their faces;
+  gomoku's cursor was 1.04:1 on its wood; a new game in minesweeper, reversi,
+  chess and tetris dropped the user's colours; eleven colours games kept as
+  their own were exactly Mocha neutrals, which blinded their palette tests to
+  that neutral left over in a light window (moved to neutral greys; lane C
+  asked to refuse the coincidence, `requests/e-c-palette-check-a-derived-colour-can-hide-a-leftover.md`);
+  sudoku's hints and clashes were 2.5:1 on its selected square in the light
+  theme, and its keys looked live while the game was paused or won; the
+  legibility reader's first catch outside the games was the toolkit's F1
+  card, see-through under the default theme in all 82 apps that raise it
+  (`requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`).
+  From crossword on, the lists, cards, sheets and banners are the toolkit's
+  surfaces (`push_surface`: `Card`, `Selected`, `Panel`, `Strip`), so they
+  follow the user's bordered or card look and the palette's inks read on
+  them; the legibility tests run in both looks. The legibility reader's
+  finds in these twelve were mostly the old design failing in its own dark
+  theme -- crossword's cell numbers at 1.4:1, a wrong letter under its
+  cursor at 1.1:1, word search's anchor letter at 1.1:1, a small asteroid
+  at 1.8:1 -- and it found gamechrome's button promising its label more
+  room than the button has.
+  **Next:** sokoban, dots, flood, sliding, klotski, rush, one commit each;
+  then the legibility test over the games themed before it existed, and
+  the fixed-size boards (match-3, pinball; known-issues).
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

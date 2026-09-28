@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The toolkit's buttons at a game's size (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it the game played itself for nobody: `main` built a
 # `PongApp` and dropped it, so no tick ever moved the ball and no key arrived.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

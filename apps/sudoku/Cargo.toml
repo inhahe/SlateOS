@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The toolkit's buttons at a game's size (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The app drew a sudoku and answered arrow keys for its whole life without ever
 # depending on the window system, so there was nothing for a player to click:
@@ -11,6 +13,10 @@ guitk = { path = "../../gui/toolkit" }
 # difference between a simulation and a program.
 oswindow = { path = "../../gui/window" }
 randrange = { path = "../../randrange" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

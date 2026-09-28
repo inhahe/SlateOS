@@ -11,5 +11,11 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 randrange = { path = "../../randrange" }
 
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
+# `legibility`: every text reads on what is drawn under it.
+gamechrome = { path = "../gamechrome" }
+
 [lints]
 workspace = true

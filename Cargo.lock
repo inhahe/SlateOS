@@ -1336,6 +1336,7 @@ dependencies = [
  "osfont",
  "pathcodec",
  "randrange",
+ "settingsname",
  "textfind",
  "textfmt",
  "tzrules",
@@ -3183,8 +3184,13 @@ name = "settingsfile"
 version = "0.1.0"
 dependencies = [
  "scratchdir",
+ "settingsname",
  "yamldoc",
 ]
+
+[[package]]
+name = "settingsname"
+version = "0.1.0"
 
 [[package]]
 name = "sftp"

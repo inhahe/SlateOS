@@ -251,6 +251,43 @@ fn a_button_as_wide_as_it_asks_shows_its_label_whole() {
     }
 }
 
+/// A button's label is centred in it, across and down -- down on the height
+/// of its line, not on its font size, which is the smaller number and leaves
+/// a label a sixth of a line low.
+#[test]
+fn a_buttons_label_is_centred_on_its_line() {
+    let p = Palette::for_mode(false);
+    let (x, y, w, h) = (10.0, 20.0, 160.0, 40.0);
+    let mut cmds: Vec<RenderCommand> = Vec::new();
+    button(
+        &mut cmds,
+        &p,
+        (x, y, w, h),
+        "Check",
+        15.0,
+        Kind::Plain,
+        State::default(),
+        p.base,
+    );
+    let (tx, ty) = cmds
+        .iter()
+        .find_map(|c| match c {
+            RenderCommand::Text { x, y, .. } => Some((*x, *y)),
+            _ => None,
+        })
+        .expect("a label");
+    let wide = text::measure("Check", 15.0, FontWeightHint::Bold);
+    let line = text::line_height(15.0, FontWeightHint::Bold);
+    assert!(
+        (tx + wide / 2.0 - (x + w / 2.0)).abs() < 0.01,
+        "the label is off centre across"
+    );
+    assert!(
+        (ty + line / 2.0 - (y + h / 2.0)).abs() < 0.01,
+        "the label is off centre down"
+    );
+}
+
 /// A label taller than its button is left out, not drawn over the button's
 /// edges; the face is still drawn, because it is still the control.
 #[test]

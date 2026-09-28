@@ -41,6 +41,12 @@ LIB_MUTATIONS = [
         ["a_button_with_no_room_draws_nothing"],
     ),
     (
+        "a label is centred on its font size rather than its line",
+        "        y: y + (h - line) / 2.0,",
+        "        y: y + (h - font_size) / 2.0,",
+        ["a_buttons_label_is_centred_on_its_line"],
+    ),
+    (
         "large text is held to the small floor",
         "            large: to(legibility::LARGE_TEXT_FLOOR),",
         "            large: to(legibility::TEXT_FLOOR),",

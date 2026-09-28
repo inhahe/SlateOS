@@ -59055,11 +59055,3 @@ is already waiting, not whether the setter exists.
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
 
-- **`/etc/mtab` does not exist** (glibc's `MOUNTED`, `_PATH_MOUNTED`).  The
-  mntent calls read mount tables since 2026-09-27, and `/proc/mounts` and
-  `/proc/self/mounts` are there to read (`kernel/src/fs/procfs.rs`) -- but a
-  program that opens `MOUNTED`, as older ones and some gnulib paths do, gets
-  `ENOENT`.  On Linux it is a symlink to `/proc/self/mounts`.  Whoever builds
-  `/` at boot should make it: the kernel's root is not the rootfs image
-  (that is mounted at `/mnt`), so this is a request to the lane that owns the
-  root filesystem's layout, not a change to the rootfs recipe.

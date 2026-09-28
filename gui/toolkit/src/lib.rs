@@ -74,6 +74,7 @@ pub mod splitter;
 pub mod step;
 pub mod style;
 pub mod svg;
+pub mod switch;
 pub mod table;
 pub mod tabs;
 pub mod text;

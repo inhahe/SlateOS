@@ -1240,7 +1240,7 @@ impl TouchpadSettingsUI {
             overflow: TextOverflow::Clip,
         });
         let track_x = x + 250.0;
-        cmds.extend(crate::switch::switch(
+        cmds.extend(guitk::switch::switch(
             track_x,
             y + 1.0,
             36.0,

@@ -1105,7 +1105,7 @@ impl OsdSettingsUI {
         } else {
             p.subtext0
         };
-        commands.extend(crate::switch::switch(
+        commands.extend(guitk::switch::switch(
             x + padding,
             cy,
             40.0,

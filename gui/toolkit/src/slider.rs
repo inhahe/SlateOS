@@ -67,8 +67,9 @@
 //!
 //! # The thumb is `text`, which is the *opposite* rule from a switch knob
 //!
-//! The desktop's switch derives its knob with [`readable_on`] of the track.
-//! Doing that here would be wrong, and the reason is geometry, not taste.
+//! The switch ([`crate::switch`]) derives its knob with [`readable_on`] of the
+//! track. Doing that here would be wrong, and the reason is geometry, not
+//! taste.
 //!
 //! A switch knob is *contained* by its track: inset two pixels from every edge,
 //! so the track is the only thing behind it and the only thing it has to be

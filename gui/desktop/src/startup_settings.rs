@@ -776,7 +776,7 @@ impl StartupSettingsUI {
 
             // Enable/disable toggle
             let toggle_color = if entry.enabled { p.accent } else { p.surface2 };
-            cmds.extend(crate::switch::switch(
+            cmds.extend(guitk::switch::switch(
                 x + 8.0,
                 cy + 18.0,
                 36.0,
@@ -1028,7 +1028,7 @@ impl StartupSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.extend(crate::switch::switch(
+        cmds.extend(guitk::switch::switch(
             sw_x,
             y + 2.0,
             40.0,

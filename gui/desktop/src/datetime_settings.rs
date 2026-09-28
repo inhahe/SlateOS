@@ -821,7 +821,7 @@ impl DateTimeSettingsUI {
             overflow: TextOverflow::Ellipsis,
         });
         let sw_x = x + width - 44.0;
-        cmds.extend(crate::switch::switch(
+        cmds.extend(guitk::switch::switch(
             sw_x,
             y + 2.0,
             40.0,

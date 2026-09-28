@@ -120,7 +120,10 @@ SESS = "gui/desktop/src/session_mgr.rs"
 FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
 WP = "gui/desktop/src/wallpaper.rs"
-SWITCH = "gui/desktop/src/switch.rs"
+# The switch moved into the toolkit on 2026-09-27 (`guitk::switch`), as the
+# slider did, with its shapes spelled as before; its defects build `guitk`
+# for the module's own tests and `desktop` for the panels that draw one.
+SWITCH = "gui/toolkit/src/switch.rs"
 # The slider moved into the toolkit on 2026-09-27 (`guitk::slider`), with its
 # drawing, its reasoning and its tests; the desktop draws through it. Its
 # defects therefore build `guitk` for the module's own tests and `desktop`
@@ -17097,7 +17100,7 @@ DEFECTS = [
             ('        x + width - knob - INSET\n',
              '        x + width - knob\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_switch_already_used',
             'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
@@ -17110,7 +17113,7 @@ DEFECTS = [
             ('    let knob_x = if on {\n',
              '    let knob_x = if !on {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_switch_already_used',
             'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
@@ -17121,14 +17124,14 @@ DEFECTS = [
         SWITCH,
         [
             ('            color: readable_on(track),\n',
-             '            color: appearance::LIGHT_EXTREME,\n'),
+             '            color: crate::palette::LIGHT_EXTREME,\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The ink is still one of the two extremes, so every 'comes from its
             # palette' sweep still passes -- only *which* extreme changes, and
             # only for a light background.
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
             'the_knob_follows_the_track_rather_than_the_theme',
             # The one call-site test that pins the ink by equality with
@@ -17156,6 +17159,7 @@ DEFECTS = [
         [
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
             'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
+            'a_vertical_slider_fills_from_the_bottom',
         ],
     ),
     (
@@ -17176,7 +17180,10 @@ DEFECTS = [
             # would stop being the right answer.
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
             'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
-            'every_site_draws_the_role_it_claims',
+            'a_vertical_slider_fills_from_the_bottom',
+            'every_control_that_offers_something_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_the_osd_has',
         ],
     ),
     (
@@ -17191,7 +17198,6 @@ DEFECTS = [
             # This is the touchpad bug (1.00:1) generalised to all five sliders.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
             'every_control_that_offers_something_follows_the_accent',
-            'the_thumb_does_not_follow_the_fill_it_ends',
             # `text_beats_readable_on_the_fill_against_the_card` was declared
             # here and the sweep of 2026-08-24 recorded it as MISSING. Correctly
             # so, and the declaration was the error: that test renders nothing.
@@ -17199,6 +17205,8 @@ DEFECTS = [
             # contrast(base, readable_on(fill)) -- to establish *why* the thumb
             # uses `text`, so no change to what the thumb is actually drawn with
             # can reach it. It is the rule's premise, not its witness.
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_alpha_reaches_every_part_of_the_control',
         ],
     ),
     (
@@ -17215,10 +17223,11 @@ DEFECTS = [
             # base card. Containment, not consistency, decides the rule.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
             'every_control_that_offers_something_follows_the_accent',
-            'the_thumb_does_not_follow_the_fill_it_ends',
             # Not `text_beats_readable_on_the_fill_against_the_card`, for the
             # reason given under GGG...x80 above: it renders no slider, so a
             # change to the thumb's colour is invisible to it.
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_alpha_reaches_every_part_of_the_control',
         ],
     ),
     (
@@ -17228,7 +17237,7 @@ DEFECTS = [
             ('pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);\n',
              'pub const LIGHT_TEXT: Color = Color::from_hex(0x8A8DA0);\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
             # 2.90:1 on a Latte base. 0x8C8FA1 would have been the rounder
             # number but it is light overlay1's own value, and a duplicate would
@@ -17256,6 +17265,8 @@ DEFECTS = [
         ["guitk", "desktop"],
         [
             'a_slider_on_its_floor_emits_no_fill_rectangle',
+            'the_fixtures_take_every_branch_the_osd_has',
+            'the_panel_draws_nothing_that_is_immediately_erased',
         ],
     ),
     (
@@ -17283,6 +17294,7 @@ DEFECTS = [
             # everywhere else -- which is exactly why the helper owns the fade
             # rather than the caller pre-multiplying.
             'the_alpha_reaches_every_part_of_the_control',
+            'hover_lights_focus_rings_and_disabled_dims',
         ],
     ),
     (
@@ -17335,7 +17347,7 @@ DEFECTS = [
             ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
              '    if contrast_ratio(bg, DARK_EXTREME) < contrast_ratio(bg, LIGHT_EXTREME) {\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
             # One character. Unlike the luma rule this is wrong for *every*
             # colour, so the two fixtures 536 taught to assert their own
@@ -17384,7 +17396,7 @@ DEFECTS = [
             'the_content_well_is_deeper_than_the_panel_it_sits_in',
             'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
@@ -17429,7 +17441,7 @@ DEFECTS = [
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'a_selected_pattern_chip_is_lettered_for_its_own_fill',
             # Everything below was found by the sweep of 2026-08-24. The
             # eighteen constants that flip are concentrated in the light
@@ -17530,7 +17542,7 @@ DEFECTS = [
             'the_content_well_is_deeper_than_the_panel_it_sits_in',
             'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',

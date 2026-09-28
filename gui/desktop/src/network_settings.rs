@@ -1329,7 +1329,7 @@ impl NetworkSettingsUI {
             // Toggle indicator
             let toggle_x = x + width - 56.0;
             let toggle_bg = if *enabled { p.accent } else { p.surface2 };
-            cmds.extend(crate::switch::switch(
+            cmds.extend(guitk::switch::switch(
                 toggle_x,
                 row_y + 8.0,
                 40.0,

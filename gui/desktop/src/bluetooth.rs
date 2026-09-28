@@ -636,7 +636,7 @@ impl BluetoothSettingsUI {
 
         // Power toggle.
         let power_x = x + w - 80.0;
-        cmds.extend(crate::switch::switch(
+        cmds.extend(guitk::switch::switch(
             power_x,
             y + 11.0,
             36.0,

@@ -3912,11 +3912,13 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSS: the CPU meter's track steps up a surface",
         WID,
         [
-            ('y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),'),
+            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
+            # trough now, so this steps all three up.
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
@@ -3924,11 +3926,13 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTT: the CPU meter follows the accent",
         WID,
         [
-            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
-             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                    ("CPU", live.cpu_fraction, p.blue),\n',
+             '                    ("CPU", live.cpu_fraction, p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             # This is module 19's slider rule applied to something that is not a
             # slider. The accent is a palette member, so only the frozen test sees it.
             'nothing_that_reports_a_measurement_follows_the_accent',
@@ -3963,11 +3967,13 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
         WID,
         [
-            ('y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
+            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
+            # trough now, so this is every meter's track.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
@@ -3976,11 +3982,13 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXX: the Memory meter is the same colour as the CPU meter",
         WID,
         [
-            ('width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),'),
+            ('                    ("Memory", live.memory_fraction, p.green),\n',
+             '                    ("Memory", live.memory_fraction, p.blue),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
             'the_three_meters_never_look_alike',
         ],
@@ -3997,28 +4005,20 @@ DEFECTS = [
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
-    (
-        "ZZZZZZZZZZZZZZZZZ: the Disk meter's track keeps Mocha's surface1",
-        WID,
-        [
-            ('y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'nothing_that_reports_a_measurement_follows_the_accent',
-        ],
-    ),
+    # RETIRED 2026-09-27: the Disk meter's track keeps Mocha's surface1.
+    #   The three meters share one trough now, so this would be the same edit as
+    #   "the Memory meter's track keeps Mocha's surface1" above, which stays.
     (
         "AAAAAAAAAAAAAAAAAA: the Disk meter follows the accent",
         WID,
         [
-            ('width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.peach.r, p.peach.g, p.peach.b, alpha),',
-             'width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                    ("Disk", live.disk_fraction, p.peach),\n',
+             '                    ("Disk", live.disk_fraction, p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
@@ -4026,11 +4026,13 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBB: an empty note's placeholder is drawn like a written one",
         WID,
         [
-            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
-             '                        if w.state_text.is_empty() {\n                            p.text.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.b\n                        } else {\n                            p.text.b\n                        },'),
+            ('                        placeholder: Some((NOTE_PLACEHOLDER, ink(p.subtext0))),\n',
+             '                        placeholder: Some((NOTE_PLACEHOLDER, ink(p.text))),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's
+            # text area now, and its placeholder's ink is passed in.
             'an_empty_note_and_a_written_one_never_look_alike',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4064,29 +4066,33 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEE: the battery glyph follows the accent",
         WID,
         [
-            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                        let g = p.ink(p.green);\n',
+             '                        let g = p.ink(p.accent);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The battery is the theme's icon
+            # now, not an emoji; its colour is chosen here.
             # Green on a battery is the reading itself, not decoration: it is how
             # the widget says the charge is healthy. A red accent would make it lie.
-            'nothing_that_reports_a_measurement_follows_the_accent',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+            'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
     (
         "FFFFFFFFFFFFFFFFFF: the battery glyph keeps Mocha's green",
         WID,
         [
-            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(0xA6, 0xE3, 0xA1, alpha),'),
+            ('                        let g = p.ink(p.green);\n',
+             '                        let g = Color::from_hex(0xA6E3A1);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The battery is the theme's icon
+            # now, not an emoji; its colour is chosen here.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'nothing_that_reports_a_measurement_follows_the_accent',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+            'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
     (

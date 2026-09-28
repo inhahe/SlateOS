@@ -1671,11 +1671,17 @@ DEFECTS = [
     (
         "MMMMMMM: the filter field keeps Mocha's surface0",
         STARTUP,
-        [("            height: 30.0,\n            color: p.surface0,",
-          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "NNNNNNN: a selected entry's row keeps Mocha's surface1",
@@ -1689,29 +1695,45 @@ DEFECTS = [
     (
         "OOOOOOO: the last-boot-time card keeps Mocha's surface0",
         STARTUP,
-        [("                height: 48.0,\n                color: p.surface0,",
-          "                height: 48.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 48.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 48.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
-        "PPPPPPP: the sort indicator keeps Mocha's overlay0",
+        "PPPPPPP: the sort indicator keeps Mocha's subtext0",
         STARTUP,
-        [("            font_size: 11.0,\n            color: p.overlay0,",
-          "            font_size: 11.0,\n            color: Color::from_hex(0x6C7086),")],
+        [
+            ('            text: format!("Sort: {}", self.sort.label()),\n            font_size: 11.0,\n            color: p.subtext0,\n',
+             '            text: format!("Sort: {}", self.sort.label()),\n            font_size: 11.0,\n            color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
-        "QQQQQQQ: the empty-list caption keeps Mocha's overlay0",
+        "QQQQQQQ: the empty-list caption keeps Mocha's subtext0",
         STARTUP,
-        [('                text: "No startup apps".into(),\n'
-          "                font_size: 13.0,\n                color: p.overlay0,",
-          '                text: "No startup apps".into(),\n'
-          "                font_size: 13.0,\n                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No startup apps".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No startup apps".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "RRRRRRR: the filter field's placeholder keeps Mocha's overlay0",
@@ -2469,11 +2491,12 @@ DEFECTS = [
         "BBBBBBBBBBB: the panel's title bar keeps Mocha's mantle",
         TPAD,
         [
-            ('            color: p.mantle,',
-             '            color: Color::from_hex(0x181825),'),
+            ('        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));\n',
+             '        let mut paint = p.surface_paint(Surface::Strip(Edge::Bottom));\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(&mut cmds, x, y, w, 40.0, CornerRadii::all(0.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The title bar is a strip surface now.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -2581,11 +2604,13 @@ DEFECTS = [
         "KKKKKKKKKKK: the cursor behind the selected gesture row keeps Mocha's surface0",
         TPAD,
         [
-            ('                    width: 420.0,\n                    height: 22.0,\n                    color: p.surface0,',
-             '                    width: 420.0,\n                    height: 22.0,\n                    color: Color::from_hex(0x313244),'),
+            ('                p.push_surface(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, 4.0, Surface::Selected);\n',
+             '                let mut paint = p.surface_paint(Surface::Selected);\n                paint.fill = Some(Color::from_hex(0x313244));\n                p.push_paint_radii(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The cursor is `Surface::Selected` now -- outlined in the accent under
+            # the default theme; this gives it a frozen fill.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -2694,11 +2719,12 @@ DEFECTS = [
         "TTTTTTTTTTT: a choice control's label keeps Mocha's text",
         TPAD,
         [
-            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,',
-             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,'),
+            ('            font_size: 12.0,\n            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n',
+             '            font_size: 12.0,\n            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The label is named by the well drawn after it.
             'every_colour_the_panel_draws_comes_from_its_palette',
         ],
     ),
@@ -2706,11 +2732,13 @@ DEFECTS = [
         "UUUUUUUUUUU: a choice control's well keeps Mocha's surface0",
         TPAD,
         [
-            ('            width: 200.0,\n            height: 22.0,\n            color: p.surface0,',
-             '            width: 200.0,\n            height: 22.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x + 250.0, y, 200.0, 22.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -6418,11 +6446,13 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the printer field's fill takes the accent as well as its label",
         PRINTMGR,
         [
-            ('            height: 24.0,\n            color: p.surface0,',
-             '            height: 24.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            4.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.accent);\n        p.push_paint_radii(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            CornerRadii::all(4.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
             'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
         ],
@@ -6431,11 +6461,13 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKK: the printer field is frozen back to Mocha surface0',
         PRINTMGR,
         [
-            ('            height: 24.0,\n            color: p.surface0,',
-             '            height: 24.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            4.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            CornerRadii::all(4.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_dialog_draws_comes_from_its_palette',
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
         ],
@@ -6562,11 +6594,13 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUUUUUUUU: the Cancel button is dressed up as a second default action',
         PRINTMGR,
         [
-            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
-             '            width: 80.0,\n            height: 28.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.accent);\n        p.push_paint_radii(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
             'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
         ],
@@ -6575,11 +6609,13 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Cancel button is frozen back to Mocha surface1',
         PRINTMGR,
         [
-            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
-             '            width: 80.0,\n            height: 28.0,\n            color: Color::from_hex(0x45475A),'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x45475A));\n        p.push_paint_radii(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_dialog_draws_comes_from_its_palette',
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
         ],
@@ -9447,11 +9483,13 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the current-language card drops to the list rows' rung",
         LANG,
         [
-            ('                height: 50.0,\n                color: p.surface1,',
-             '                height: 50.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, cy, width, 50.0, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             # Caught by nothing but the per-site table: both rungs are roles,
             # so the membership sweep accepts either, and the card is still
             # exactly one 552x50 fill so every count still balances. This is
@@ -9463,11 +9501,13 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the current-language card is frozen to Mocha surface1',
         LANG,
         [
-            ('                height: 50.0,\n                color: p.surface1,',
-             '                height: 50.0,\n                color: guitk::color::Color::from_hex(0x45475A),'),
+            ('            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(guitk::color::Color::from_hex(0x45475A));\n            p.push_paint_radii(cmds, x, cy, width, 50.0, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_panel_draws_comes_from_its_palette',
             'every_site_draws_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -9503,11 +9543,13 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the search box is raised to the card's rung",
         LANG,
         [
-            ('            height: 30.0,\n            color: p.surface0,',
-             '            height: 30.0,\n            color: p.surface1,'),
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.surface1);\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -9515,11 +9557,13 @@ DEFECTS = [
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the search box is frozen to Mocha surface0',
         LANG,
         [
-            ('            height: 30.0,\n            color: p.surface0,',
-             '            height: 30.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_panel_draws_comes_from_its_palette',
             'every_site_draws_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',

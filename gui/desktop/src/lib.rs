@@ -208,6 +208,26 @@ const TASKBAR_CONFIG_NAME: &str = "taskbar";
 /// The file the programs pinned to the start menu live in.
 const START_MENU_CONFIG_NAME: &str = "startmenu";
 
+/// The programs on the taskbar of a desktop that has never saved its pins:
+/// the kernel's `fs::pinnedapps` defaults, carried when the program lists
+/// became one (`gui/programs/INVENTORY.md` section 7, design-decisions §1425),
+/// less the web browser this system does not have.
+pub const FIRST_START_TASKBAR_PINS: [&str; 3] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Settings.desktop",
+];
+
+/// The programs pinned to the start menu of a desktop that has never saved
+/// them: the kernel's `fs::startmenu` favourites (inventory section 7).
+pub const FIRST_START_MENU_PINS: [&str; 5] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Editor.desktop",
+    "org.slateos.Settings.desktop",
+    "org.slateos.Calculator.desktop",
+];
+
 /// The toolkit's rectangle, re-exported so the shell and its widgets share
 /// one. This crate declared an identical copy -- same four floats, same
 /// half-open `contains`, documented with the same reasoning -- until
@@ -3541,9 +3561,18 @@ impl DesktopShell {
     /// on it comes from the launcher's entry for that path at the moment it is
     /// drawn. Storing the name too would be a second copy of it, stale the
     /// first time an application is renamed.
+    ///
+    /// A desktop that has never saved its pins -- no `pinned` in the file, or
+    /// no file -- starts with [`FIRST_START_TASKBAR_PINS`]. Not written back:
+    /// they are defaults until the user changes them, and a pin removed is
+    /// saved as a list without it, so it does not come back.
     pub fn load_pinned(&mut self) {
         let doc = config::load(TASKBAR_CONFIG_NAME);
         let Some(execs) = doc.get_seq(&["pinned"]) else {
+            for exec in self.first_start_programs(&FIRST_START_TASKBAR_PINS) {
+                let name = self.app_name_for(&exec);
+                self.pin_app_without_saving(&exec, &name);
+            }
             return;
         };
         for exec in execs {
@@ -4303,9 +4332,10 @@ impl DesktopShell {
                 }
             }
         }
-        let Some(execs) = doc.get_seq(&["pinned"]) else {
-            return;
-        };
+        // Never saved: the first start's pins, as for the taskbar.
+        let execs = doc
+            .get_seq(&["pinned"])
+            .unwrap_or_else(|| self.first_start_programs(&FIRST_START_MENU_PINS));
         for exec in execs {
             if exec.is_empty() || self.is_pinned_to_start(&exec) {
                 continue;
@@ -4313,6 +4343,24 @@ impl DesktopShell {
             let entry = self.start_entry_for(&exec);
             self.start_pins.push(entry);
         }
+    }
+
+    /// The programs `ids` name -- desktop file ids of SlateOS's own
+    /// programs -- by the path each is started by, in order; an id the menu
+    /// does not list is left out rather than pinned as a button that starts
+    /// nothing.
+    ///
+    /// By id rather than by path so the defaults follow a program that moves:
+    /// the one list (`gui/programs`) says where each is.
+    fn first_start_programs(&self, ids: &[&str]) -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                self.apps
+                    .iter()
+                    .find(|app| app.desktop_id.as_deref() == Some(id))
+                    .map(|app| app.executable_path.clone())
+            })
+            .collect()
     }
 
     /// Note that `launch` is being started: the program it starts goes to the
@@ -21121,6 +21169,122 @@ mod taskbar_pin_tests {
                 other => panic!("a pinned button did not launch anything: {other:?}"),
             }
         });
+    }
+
+    // ---- the first start's pins (gui/programs/INVENTORY.md section 7) ----
+
+    /// The execs the pins name, taskbar then start menu.
+    fn pinned_execs(shell: &DesktopShell) -> (Vec<String>, Vec<String>) {
+        (
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|pin| pin.exec_path.clone())
+                .collect(),
+            shell
+                .start_pins()
+                .iter()
+                .map(|entry| entry.executable_path.clone())
+                .collect(),
+        )
+    }
+
+    /// **A desktop that has never saved its pins starts with the kernel's
+    /// defaults** -- File Explorer, Terminal and Settings on the taskbar, and
+    /// the five favourites in the start menu -- carried when the program lists
+    /// became one, less the web browser this system does not have.
+    #[test]
+    fn a_first_start_has_the_pins_the_kernel_listed() {
+        with_scratch_config("shell-first-start-pins", |_root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            let (taskbar, start) = pinned_execs(&shell);
+            assert_eq!(
+                taskbar,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    super::launcher::SETTINGS
+                ]
+            );
+            assert_eq!(
+                start,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    "/usr/bin/editor",
+                    super::launcher::SETTINGS,
+                    "/usr/bin/calculator"
+                ]
+            );
+        });
+    }
+
+    /// **Loading them writes nothing**: they are defaults until the user
+    /// changes something, and reading a file must not create it.
+    #[test]
+    fn the_first_starts_pins_are_not_written_down_by_loading() {
+        with_scratch_config("shell-first-start-no-write", |root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            assert!(!shell.take_start_menu_dirty(), "loading asked for a save");
+            let written: Vec<std::path::PathBuf> = walk(root);
+            assert!(written.is_empty(), "loading wrote {written:?}");
+        });
+    }
+
+    /// **Unpinning everything sticks**: a list saved empty is the user's
+    /// choice, not a first start, so the defaults do not come back.
+    #[test]
+    fn a_pin_list_saved_empty_stays_empty() {
+        with_scratch_config("shell-first-start-emptied", |_root| {
+            let mut first = shell();
+            first.load_pinned();
+            first.load_start_menu();
+            let (taskbar, start) = pinned_execs(&first);
+            for exec in &taskbar {
+                first.unpin_app(exec);
+            }
+            for exec in &start {
+                first.unpin_from_start(exec);
+            }
+            first.save_start_menu().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_pinned();
+            restarted.load_start_menu();
+            let (taskbar, start) = pinned_execs(&restarted);
+            assert!(
+                taskbar.is_empty(),
+                "the taskbar's defaults came back: {taskbar:?}"
+            );
+            assert!(
+                start.is_empty(),
+                "the start menu's defaults came back: {start:?}"
+            );
+        });
+    }
+
+    /// Every file under `root`, for the test that loading writes nothing.
+    fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
     }
 
     /// Pinning the same program twice leaves one button.

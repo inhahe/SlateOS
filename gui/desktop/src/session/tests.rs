@@ -538,7 +538,14 @@ fn right_clicking_a_pinned_tile_draws_its_menu() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let before = desktop.borrow().seen.len();
         let frames = frames_on(&desktop, popups);
 
@@ -705,7 +712,14 @@ fn a_program_started_from_its_pin_is_recently_used() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let (x, y) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
 
         press_at(&desktop, session.panel(), x, y);
@@ -1059,6 +1073,13 @@ fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
     assert_eq!(titles, ["Terminal", "notes.txt"]);
 }
 
+/// The taskbar slot of the `n`th window's button: after the pinned programs,
+/// which a desktop that has never saved its pins has from its first start
+/// (`FIRST_START_TASKBAR_PINS`).
+fn window_slot(session: &Session, n: usize) -> usize {
+    session.shell().taskbar.pinned_apps().len() + n
+}
+
 #[test]
 fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
     let (mut session, desktop, _turn) = session();
@@ -1067,7 +1088,11 @@ fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1095,7 +1120,11 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
         .send_window_list(&[app(1, "Terminal"), focused]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1323,7 +1352,11 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     {
         let mut d = desktop.borrow_mut();
         // Both in flight at once, the list first — the worst ordering for a
@@ -5995,6 +6028,15 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .clone();
         first.shell_mut().pin_to_start(&exec);
         first.pump().expect("pump");
+        // Whatever the pins were -- the first start's, and the one added --
+        // is what the next login must find.
+        let saved: Vec<String> = first
+            .shell()
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        assert!(saved.contains(&exec), "the pin was not made");
         drop(first);
 
         let (restarted, _d2, _turn2) = session();
@@ -6004,7 +6046,7 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .iter()
             .map(|entry| entry.executable_path.clone())
             .collect();
-        assert_eq!(pins, [exec]);
+        assert_eq!(pins, saved);
     });
 }
 

@@ -108,6 +108,8 @@ MUTATIONS = [
         ["the_frame_is_balanced_in_every_state_at_every_size"],
     ),
     (
+        # Popping a clip that was never pushed would also unbalance the frame,
+        # so the balance test fails alongside the one that owns the fault.
         "nothing is clipped to the window",
         "        f.clip(l.window);\n        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
         "        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
@@ -204,8 +206,8 @@ MUTATIONS = [
     ),
     (
         "the sheet is drawn over the board during play",
-        '            GameState::Playing => return,',
-        '            GameState::Playing => ("PAC-MAN", YELLOW, 220),',
+        "            GameState::Playing => return,",
+        "            GameState::Playing => (\"PAC-MAN\", c.chrome.even, 220),",
         ["nothing_covers_the_board_while_the_game_is_being_played"],
     ),
     # -- Click routing -------------------------------------------------
@@ -353,6 +355,12 @@ MUTATIONS = [
         "        self.palette = palette;",
         "        let _ = palette;",
         ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the sheet's words have no panel of their own",
+        "                pad * 0.6,\n                Surface::Panel,",
+        "                pad * 0.6,\n                Surface::Card,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

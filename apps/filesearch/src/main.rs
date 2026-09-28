@@ -417,8 +417,8 @@ pub fn categorize_extension(ext: &str) -> FileCategory {
     match ext.to_lowercase().as_str() {
         "txt" | "doc" | "docx" | "pdf" | "odt" | "rtf" | "md" | "tex" | "csv" | "xls" | "xlsx"
         | "pptx" => FileCategory::Document,
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "tiff" | "psd"
-        | "raw" => FileCategory::Image,
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "avif" | "tif"
+        | "tiff" | "psd" | "raw" => FileCategory::Image,
         "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "opus" | "m4a" | "mid" | "midi" => {
             FileCategory::Audio
         }
@@ -4809,8 +4809,10 @@ mod tests {
 
     #[test]
     fn test_categorize_image() {
-        assert_eq!(categorize_extension("png"), FileCategory::Image);
-        assert_eq!(categorize_extension("jpg"), FileCategory::Image);
+        // Every picture the image viewer opens is a picture here too.
+        for ext in ["png", "jpg", "webp", "avif", "tif", "tiff", "AVIF"] {
+            assert_eq!(categorize_extension(ext), FileCategory::Image, "{ext}");
+        }
     }
 
     #[test]

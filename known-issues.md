@@ -172677,6 +172677,44 @@ and keep heavy builds off the machine while the boot test is in its
 against the poll stamp of the trigger's own batch, and report the controller's
 reaction time separately (the request has the lines).
 
+### [E] Text on a panel an application fills itself may read under 4.5:1 in the light bordered look -- 2026-09-28
+
+**Status:** Open -- fixed in the games as the legibility pass reaches each;
+the applications beyond them are unchecked.
+
+**In short:** the palette makes its text colours readable on the grounds the
+theme itself draws text on. Under the default bordered look a card has no
+fill, so the raised surface (`surface0`) is not one of those grounds -- but an
+application that fills a panel with `surface0` itself, rather than through
+`push_surface`, writes on it anyway. In the light theme the palette's
+secondary grey reads at 4.1:1 there, and a hue at about 3.6:1: under WCAG's
+4.5:1 for ordinary text.
+
+**Where:** any `fill(..., p.surface0 / surface1, ...)` with text on it under
+`SurfaceStyle::Borders`. The games' legibility tests found it in game after
+game (score boxes, side panels, help sheets, game-over cards); the card look
+passes, because there `surface0` is a text ground and the palette's floor
+covers it.
+
+**How it was found:** `gamechrome::legibility`, which reads every run of text
+against the fills drawn under it, over each game's states in both themes and
+both surface looks.
+
+**The proper fix:** in a game, a sheet or a banner becomes the toolkit's
+panel (`Surface::Panel`), and words that stay on a raised ground are moved
+only as far as they must be (`gamechrome::Ink::on`, or `Chrome::on(ground)`
+for a whole panel's roles). On the toolkit's panel the palette's roles read
+as they are: `Palette::ink` holds every text colour to 4.5:1 on each ground
+the toolkit paints text on, and a panel's fill is one of them in either look
+(the page itself under borders, `mantle` under cards). Moving a role for a
+panel moves nothing -- every "unmoved for its panel" mutation survived the
+sweeps in tictactoe, 2048, Connect Four and Simon -- so a panel's words are
+written in the roles as they are, and only a ground the game fills itself is
+a reason to move them. For the other applications: the same reader over
+each one's states -- the reader is in `apps/gamechrome` today, and an
+application that is not a game would need it moved or re-exported where it
+can reach it -- then the same two remedies.
+
 ### [E] Match-3 and pinball draw at one size whatever the window is -- 2026-09-28
 
 **Status:** open.
@@ -172718,3 +172756,32 @@ C's workspace gate twice under load (1e5be9dad), passing otherwise.
 open with `OpenOptions::new().read(true).share_mode(1)` across the second
 save. The fix is lane E's: retry the rename a few times on
 `PermissionDenied`, as cargo and git for Windows do.
+
+### [E] GRUB cannot load the kernel itself: it has no multiboot2 header -- 2026-09-28
+
+**Status:** open, and lane A's to decide (it is the kernel's boot protocol).
+Nothing is blocked: the installer's GRUB entry chainloads Limine instead,
+which works today.
+
+**In short:** GRUB can start an operating system in two ways -- load its
+kernel itself (the `multiboot2` command, which needs a small header in the
+kernel file saying it can be started that way), or hand over to another
+bootloader (`chainloader`). Slate OS's kernel is started by Limine, through
+Limine's own protocol, and carries no multiboot2 header, so only the second
+works: a GRUB menu entry for Slate OS starts Limine, which starts the kernel.
+That takes an EFI system partition with Limine on it, and a machine started
+through UEFI -- GRUB started through the BIOS cannot run an EFI program.
+
+**Where:** `apps/installer/src/grub.rs` keeps both strategies
+(`GrubEntryType::Direct` renders a `multiboot2` entry, and its tests hold it
+to GRUB's quoting rules). The configuration (`bootloader:` with
+`strategy: direct`, `lib.rs` `parse_bootloader`) and the command line
+(`--direct`, `grubcmd.rs` `DIRECT_REFUSED`) refuse it, saying why. The kernel's
+entry (lane A, `kernel/`) reads Limine's boot information.
+
+**What the fix would be:** a multiboot2 header in the kernel image, and an
+entry path that takes multiboot2's boot information (memory map, framebuffer,
+modules) as well as Limine's -- a second boot protocol, which is lane A's
+call. If it lands, the two refusals go, and the installer can offer an entry
+that loads the kernel directly -- the one way to boot Slate OS from a GRUB
+started through the BIOS. Not filed as a request: nothing waits on it.

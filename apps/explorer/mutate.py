@@ -376,6 +376,12 @@ COLUMNS = [
         "            imagecodec::jpeg::orientation(bytes)",
         [EXIF],
     ),
+    (
+        "the picture columns leave AVIF out",
+        "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"avif\", \"ico\", \"cur\", \"tif\", \"tiff\",",
+        "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"ico\", \"cur\", \"tif\", \"tiff\",",
+        ["an_avif_is_measured"],
+    ),
 ]
 
 COLUMNPREFS = [

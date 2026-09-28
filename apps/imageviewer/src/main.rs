@@ -120,7 +120,7 @@ const ZOOM_FACTOR: f32 = 1.189_207;
 
 /// Supported image file extensions for directory browsing.
 const IMAGE_EXTENSIONS: &[&str] = &[
-    "bmp", "png", "jpg", "jpeg", "gif", "webp", "ico", "tiff", "tif", "svg",
+    "bmp", "png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "tiff", "tif", "svg",
 ];
 
 // ============================================================================
@@ -139,6 +139,9 @@ pub enum ImageFormat {
     Jpeg,
     Gif,
     WebP,
+    /// AVIF: a still picture or a sequence, in an ISO media file (`ftyp`
+    /// brand `avif` or `avis`).
+    Avif,
     Ico,
     Tiff,
     /// A drawing, drawn by `guitk::svg` rather than decoded.
@@ -178,6 +181,13 @@ impl ImageFormat {
             return Self::WebP;
         }
 
+        // AVIF: an ISO media file whose `ftyp` brands name a picture or a
+        // sequence. Asked of `imagecodec`, which reads the box, rather than
+        // matched on bytes here: the brand can be any of several in the box.
+        if imagecodec::avif::is_avif(data) {
+            return Self::Avif;
+        }
+
         // ICO: a reserved zero, then type 1 -- or 2, a cursor, which is an
         // icon with a hot spot and which `imagecodec` reads the same way.
         if byteread::starts_with(data, &[0, 0, 1, 0]) || byteread::starts_with(data, &[0, 0, 2, 0])
@@ -208,6 +218,7 @@ impl ImageFormat {
             Self::Jpeg => "JPEG",
             Self::Gif => "GIF",
             Self::WebP => "WebP",
+            Self::Avif => "AVIF",
             Self::Ico => "ICO",
             Self::Tiff => "TIFF",
             Self::Svg => "SVG",
@@ -3327,9 +3338,54 @@ the picture at once, which reads as D advancing the slideshow"
             data.extend_from_slice(&[8, 0, 0, 0]);
             assert_eq!(ImageFormat::detect(&data), ImageFormat::Tiff, "{magic:?}");
         }
-        for format in [ImageFormat::WebP, ImageFormat::Ico, ImageFormat::Tiff] {
+        assert_eq!(ImageFormat::detect(STILL_AVIF), ImageFormat::Avif);
+        assert_eq!(ImageFormat::detect(AVIF_SEQUENCE), ImageFormat::Avif);
+        // An ISO media file of another brand -- an MP4 -- is not an AVIF.
+        assert_eq!(
+            ImageFormat::detect(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"),
+            ImageFormat::Unknown
+        );
+        for format in [
+            ImageFormat::WebP,
+            ImageFormat::Avif,
+            ImageFormat::Ico,
+            ImageFormat::Tiff,
+        ] {
             assert_ne!(format.name(), ImageFormat::Unknown.name());
         }
+    }
+
+    /// A still AVIF, 37x19: lane F's fixture, whose pixels its tests hold to
+    /// libavif's (`gui/imagecodec/tests/data/avif_pixels.txt`).
+    const STILL_AVIF: &[u8] =
+        include_bytes!("../../../gui/imagecodec/tests/data/avifpx_8_420_709.avif");
+    /// An AVIF sequence of eight frames, repeated twice after the first play:
+    /// lane F's fixture, whose frames and timing its tests hold to libavif's
+    /// (`gui/imagecodec/tests/data/avif_frames.txt`).
+    const AVIF_SEQUENCE: &[u8] =
+        include_bytes!("../../../gui/imagecodec/tests/data/avifseq_8_rgba_loop2.avif");
+
+    /// **An AVIF opens**, at its own size, as a still picture: it is in the
+    /// folder's list, and it is named.
+    #[test]
+    fn an_avif_opens_and_is_named() {
+        let guard = scratch("avif-still");
+        let file = guard.dir().join("photo.avif");
+        std::fs::write(&file, STILL_AVIF).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        assert_eq!((state.image_info.width, state.image_info.height), (37, 19));
+        assert_eq!(state.image_info.format, Some(ImageFormat::Avif));
+        assert!(state.player.is_none(), "a still picture was played");
+        assert!(
+            state.entries.iter().any(|e| e.filename == "photo.avif"),
+            "the folder's list left the AVIF out"
+        );
     }
 
     /// Every view there is: all eight ways to turn a rectangle over.
@@ -5110,6 +5166,44 @@ the picture at once, which reads as D advancing the slideshow"
         }
         assert_eq!(shown, [0xFF00_FF00, 0xFFFF_0000, 0xFF00_FF00], "{shown:x?}");
         assert!(state.player.is_none(), "it played past its count");
+    }
+
+    /// **An AVIF sequence plays**, each frame for its time -- 10 ms or less
+    /// shown for 100, as browsers show it -- as many times as its file says:
+    /// AVIF counts the plays *after* the first, as a GIF does. Eight frames,
+    /// repeated twice: twenty-four in all, the first already up.
+    #[test]
+    fn an_avif_sequence_plays_its_count() {
+        let guard = scratch("avif-plays");
+        let file = guard.dir().join("seq.avif");
+        std::fs::write(&file, AVIF_SEQUENCE).expect("write");
+        let mut state = ViewerState::new(1024.0, 768.0);
+        assert_eq!(
+            state.open_file(&file),
+            Opened::Shown,
+            "{:?}",
+            state.load_error
+        );
+        assert!(state.player.is_some(), "no player for an AVIF sequence");
+        assert_eq!(tick(&mut state, 0), None);
+        let mut times = vec![state.frame_left_ms];
+        let mut shown = 1;
+        while state.player.is_some() {
+            let due = state.frame_left_ms;
+            if tick(&mut state, due).is_some() {
+                shown += 1;
+                if times.len() < 8 {
+                    times.push(state.frame_left_ms);
+                }
+            }
+            assert!(shown <= 24, "it played past its count");
+        }
+        assert_eq!(
+            times,
+            [100, 20, 40, 80, 160, 100, 1000, 33],
+            "the first play's timing"
+        );
+        assert_eq!(shown, 24, "three plays of eight frames");
     }
 
     /// A viewer on the second of three pictures, whose recycle bin is in

@@ -405,6 +405,12 @@ MUTATIONS = [
         "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), CornerRadii::ZERO);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "an empty foundation's suit is the page's grey, 4.1:1 on its slot",
+        "                            c.chrome.on(c.table.empty).dim,",
+        "                            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

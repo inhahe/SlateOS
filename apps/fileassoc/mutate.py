@@ -50,6 +50,12 @@ MUTATIONS = [
         "                                String::new()",
         [GROUP],
     ),
+    (
+        "the image viewer is not the default for TIFF",
+        "                    \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"svg\", \"webp\", \"avif\", \"ico\", \"tif\", \"tiff\",",
+        "                    \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"svg\", \"webp\", \"avif\", \"ico\",",
+        ["the_image_viewer_opens_every_picture_it_shows"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -106,6 +106,40 @@ impl Chrome {
             veil: with_alpha(p.crust, 214),
         }
     }
+
+    /// These roles for text written on `ground` rather than on the page:
+    /// every text role moved only as far as it must be to read there as
+    /// ordinary text (4.5:1), keeping its hue; the rest as they are.
+    ///
+    /// The palette's inks are made for the page, and a panel a game raises
+    /// off it -- a score box, a side panel, a sheet -- is darker than the
+    /// page in a light theme: the secondary grey fell to 4.1:1 on one, in
+    /// game after game. `on(page)` is these roles unchanged. The disabled
+    /// grey is left alone: it is below the floor on purpose.
+    #[must_use]
+    pub fn on(self, ground: Color) -> Self {
+        let read = |ink: Color| Ink::on(ink, &[ground]).small;
+        Self {
+            text: read(self.text),
+            dim: read(self.dim),
+            good: read(self.good),
+            bad: read(self.bad),
+            even: read(self.even),
+            title: read(self.title),
+            key: read(self.key),
+            ..self
+        }
+    }
+
+    /// Every text role, in one list: what a palette test declares as
+    /// derived when a window writes on a ground of its own through
+    /// [`on`](Self::on).
+    #[must_use]
+    pub fn inks(&self) -> [Color; 7] {
+        [
+            self.text, self.dim, self.good, self.bad, self.even, self.title, self.key,
+        ]
+    }
 }
 
 /// The hues a second side may take, in the order they are tried: those that

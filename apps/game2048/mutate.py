@@ -1000,6 +1000,18 @@ MUTATIONS = [
         "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the score captions are the page's grey, 4.1:1 on their box",
+        "            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(l.small.min(cap_h * 0.8), false),",
+        "            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "                Surface::Panel,\n",
+        "                Surface::Card,\n",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

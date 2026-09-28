@@ -1983,23 +1983,23 @@ impl SpadesGame {
             }
             let pid = seat(index);
             let acting = pid == self.current_player && self.sweep_ms == 0;
-            fill(
-                f,
-                r,
-                if acting {
-                    c.chrome.lit
-                } else {
-                    c.chrome.raised
-                },
-                l.pad * 0.3,
-            );
+            let plate = if acting {
+                c.chrome.lit
+            } else {
+                c.chrome.raised
+            };
+            fill(f, r, plate, l.pad * 0.3);
+            // Written for the plate, which is raised off the page: the
+            // page's grey was 4.1:1 on it in a light theme, and on the lit
+            // plate of the seat to play the name was 3.0:1.
+            let on = c.chrome.on(plate);
             let budget = (r.w - l.pad * 0.6).max(0.0);
             bounded(
                 f,
                 (r.x + l.pad * 0.3, r.y + r.h * 0.08),
                 budget,
                 pid.name(),
-                if acting { c.chrome.even } else { c.chrome.text },
+                if acting { on.even } else { on.text },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -2008,7 +2008,7 @@ impl SpadesGame {
                 (r.x + l.pad * 0.3, r.y + r.h * 0.52),
                 budget,
                 &format!("{} left", self.hand_of(pid).len()),
-                c.chrome.dim,
+                on.dim,
                 l.small,
                 FontWeightHint::Regular,
             );
@@ -2026,6 +2026,10 @@ impl SpadesGame {
             return;
         }
         fill(f, l.panel, c.chrome.raised, l.pad * 0.4);
+        // Written for the panel, which is raised off the page: its grey was
+        // 4.1:1 there in a light theme, and the partnerships' colours 3.6:1.
+        let on = c.chrome.on(c.chrome.raised);
+        let them = gamechrome::Ink::on(c.them, &[c.chrome.raised]).small;
         let x = l.panel.x + l.pad * 0.6;
         let budget = (l.panel.w - l.pad * 1.2).max(0.0);
         let step = l.small * 1.9;
@@ -2034,7 +2038,7 @@ impl SpadesGame {
             bounded(f, (x, y), budget, text, color, l.small, weight);
             y += step;
         };
-        row(f, "Scores", c.chrome.title, FontWeightHint::Bold);
+        row(f, "Scores", on.title, FontWeightHint::Bold);
         for (index, team) in self.teams.iter().enumerate() {
             let text = format!(
                 "{}: {} \u{00b7} {} bags",
@@ -2042,7 +2046,7 @@ impl SpadesGame {
                 team.score,
                 team.bags
             );
-            let color = if index == 0 { c.chrome.good } else { c.them };
+            let color = if index == 0 { on.good } else { them };
             row(f, &text, color, FontWeightHint::Bold);
             // The partnership's contract against what it has taken -- the one
             // number that says whether the round is being made or set, and the
@@ -2052,7 +2056,7 @@ impl SpadesGame {
                 self.team_bid(index),
                 self.team_tricks(index)
             );
-            row(f, &contract, c.chrome.dim, FontWeightHint::Regular);
+            row(f, &contract, on.dim, FontWeightHint::Regular);
         }
         for (index, pr) in self.player_rounds.iter().enumerate() {
             let bid = pr.bid.map_or_else(|| String::from("\u{2014}"), bid_name);
@@ -2062,7 +2066,7 @@ impl SpadesGame {
                 bid,
                 pr.tricks_won
             );
-            row(f, &text, c.chrome.dim, FontWeightHint::Regular);
+            row(f, &text, on.dim, FontWeightHint::Regular);
         }
     }
 
@@ -2675,8 +2679,8 @@ mod tests {
     /// operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 cards::FACE,
@@ -2705,20 +2709,91 @@ mod tests {
                     derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
                 }
             }
-            let mut game = SpadesGame::with_seed(7);
-            game.theme_changed(&p);
-            let bidding = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            game.show_help = true;
-            let help = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("bidding", bidding), ("help", help)] {
+            // The plates' and the score panel's words, written for them.
+            derived.extend(c.chrome.on(c.chrome.raised).inks());
+            derived.extend(c.chrome.on(c.chrome.lit).inks());
+            derived.push(gamechrome::Ink::on(c.them, &[c.chrome.raised]).small);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("spades, {what}, light: {light}"),
+                    &format!("spades, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut game = SpadesGame::with_seed(7);
+        game.theme_changed(p);
+        let bidding = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = game.frame(320.0, 360.0);
+        game.show_help = true;
+        let help = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![("bidding", bidding), ("help", help), ("cramped", cramped)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "spades: {bad:#?}");
     }
     use guitk::event::Modifiers;
     use guitk::probe::{click_sized, press, press_with, rect_of_sized};

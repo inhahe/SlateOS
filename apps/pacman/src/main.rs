@@ -36,6 +36,7 @@ use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
@@ -1916,6 +1917,9 @@ impl PacmanApp {
     /// `- 50` -- a hand-tuned half-width per string, right only at the one
     /// font size those numbers were eyeballed at.
     fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        // Every word here is on the sheet's own panel, below, where the
+        // chrome's roles read as they are: the palette inks its text
+        // colours for its own panel (`Palette::ink`).
         let (title, title_color, dim) = match self.state {
             GameState::Playing => return,
             GameState::Menu => ("PAC-MAN", c.chrome.even, 220),
@@ -2017,6 +2021,36 @@ impl PacmanApp {
         }
 
         let (cx, cy) = l.window.centre();
+        // A panel of its own under the words, sized to them. Over the page's
+        // wash alone they sat on the maze, whose walls showed through: the
+        // level was 3.7:1 over a blue wall in a light theme.
+        let widest = lines
+            .iter()
+            .map(|line| text::measure(&line.text, line.size, line.weight))
+            .fold(0.0_f32, f32::max);
+        let pad = l.font;
+        let block = Rect::new(
+            cx - widest / 2.0 - pad,
+            cy - total / 2.0 - pad,
+            widest + pad * 2.0,
+            total + pad * 2.0,
+        );
+        // Cut to the window, and not drawn under a point, where the
+        // toolkit's border would reach outside it.
+        if let Some(panel) = block.intersect(l.window)
+            && panel.w >= 1.0
+            && panel.h >= 1.0
+        {
+            self.palette.push_surface(
+                f,
+                panel.x,
+                panel.y,
+                panel.w,
+                panel.h,
+                pad * 0.6,
+                Surface::Panel,
+            );
+        }
         let mut y = cy - total / 2.0;
         for line in &lines {
             let r = centred(f, cx, y, &line.text, line.color, line.size, line.weight);
@@ -2192,26 +2226,98 @@ mod tests {
             EYE_WHITE,
             PUPIL,
         ]);
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = PacmanApp::with_seed(7);
-            app.theme_changed(&p);
-            let menu = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.state = GameState::Playing;
-            app.ghosts[0].mode = GhostMode::Frightened;
-            app.ghosts[1].mode = GhostMode::Eaten;
-            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.state = GameState::GameOver;
-            let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("menu", menu), ("playing", playing), ("over", over)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("pacman, {what}, light: {light}"),
+                    &format!("pacman, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = PacmanApp::with_seed(7);
+        app.theme_changed(p);
+        let menu = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        app.state = GameState::Playing;
+        app.ghosts[0].mode = GhostMode::Frightened;
+        app.ghosts[1].mode = GhostMode::Eaten;
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.state = GameState::GameOver;
+        let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("menu", menu),
+            ("playing", playing),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "pacman: {bad:#?}");
     }
 
     /// **Every ghost and pac-man stand off the page in either theme**, in

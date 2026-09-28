@@ -1207,30 +1207,29 @@ impl BreakoutApp {
             return;
         }
         fill(f, l.header, c.chrome.well, 4.0);
+        // Written for the well, which is not the page: the page's inks were
+        // 4.1:1 on it in a light theme.
+        let on = c.chrome.on(c.chrome.well);
 
         let fields = [
             (
                 format!("Score: {}", self.score),
-                c.chrome.text,
+                on.text,
                 FontWeightHint::Bold,
             ),
             (
                 format!("Lives: {}", self.lives),
-                if self.lives <= 1 {
-                    c.chrome.bad
-                } else {
-                    c.chrome.good
-                },
+                if self.lives <= 1 { on.bad } else { on.good },
                 FontWeightHint::Bold,
             ),
             (
                 format!("Level: {}", self.level),
-                c.chrome.key,
+                on.key,
                 FontWeightHint::Bold,
             ),
             (
                 format!("Best: {}", self.high_score),
-                c.chrome.even,
+                on.even,
                 FontWeightHint::Regular,
             ),
         ];
@@ -1401,6 +1400,10 @@ impl BreakoutApp {
         }
         fill(f, r, c.chrome.raised, 8.0);
         stroke(f, r, c.chrome.high, 1.0, 8.0);
+        // Written for the card, which is raised off the page: the page's
+        // inks were 3.6:1 (the score) and 4.1:1 (the way on) on it in a
+        // light theme.
+        let on = c.chrome.on(c.chrome.raised);
 
         let title_size = (r.h * 0.26).clamp(l.font, TITLE_FONT_SIZE);
         let th = text::line_height(title_size, FontWeightHint::Bold);
@@ -1414,36 +1417,12 @@ impl BreakoutApp {
         let (cx, cy) = r.centre();
         let mut y = cy - total / 2.0 + th / 2.0;
         f.clip(r);
-        centred(
-            f,
-            cx,
-            y,
-            title,
-            title_size,
-            c.chrome.title,
-            FontWeightHint::Bold,
-        );
+        centred(f, cx, y, title, title_size, on.title, FontWeightHint::Bold);
         y += th / 2.0 + gap + bh / 2.0;
-        centred(
-            f,
-            cx,
-            y,
-            hint,
-            l.font,
-            c.chrome.dim,
-            FontWeightHint::Regular,
-        );
+        centred(f, cx, y, hint, l.font, on.dim, FontWeightHint::Regular);
         if let Some(extra) = &extra {
             y += bh + gap;
-            centred(
-                f,
-                cx,
-                y,
-                extra,
-                l.font,
-                c.chrome.even,
-                FontWeightHint::Regular,
-            );
+            centred(f, cx, y, extra, l.font, on.even, FontWeightHint::Regular);
         }
         f.unclip();
 
@@ -1713,50 +1692,120 @@ mod tests {
         let mut derived: Vec<Color> = BRICK_ROWS_HUES.iter().flat_map(|&(a, b)| [a, b]).collect();
         derived.extend(POWERUP_HUES.iter().flat_map(|&(a, b)| [a, b]));
         derived.extend([POWERUP_INKS.0, POWERUP_INKS.1]);
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let mut all = derived.clone();
             all.extend(gamechrome::button_colours(
                 &p,
                 guitk::button::Kind::Plain,
                 Chrome::of(&p).band,
             ));
-            let mut app = test_app();
-            app.theme_changed(&p);
-            app.powerups.push(PowerUp {
-                x: PLAY_WIDTH / 2.0,
-                y: PLAY_HEIGHT / 2.0,
-                kind: PowerUpKind::MultiBall,
-            });
-            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            // The falling power-up's letter, as drawn, reads on its box.
-            let letter = playing
-                .commands()
-                .iter()
-                .find_map(|cmd| match cmd {
-                    RenderCommand::Text { text, color, .. } if text == "M" => Some(*color),
-                    _ => None,
-                })
-                .expect("the power-up's letter is not drawn");
-            let face = Colours::of(&p).powerup(PowerUpKind::MultiBall);
-            let ratio = guitk::theme::contrast_ratio(letter, face);
-            assert!(
-                ratio >= 4.5,
-                "the letter is {ratio:.2}:1 on its box (light: {light})"
-            );
-            app.state = GameState::Paused;
-            let paused = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.state = GameState::GameOver;
-            let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("playing", playing), ("paused", paused), ("over", over)] {
+            // The header's words, written for the well, and the card's.
+            let chrome = Chrome::of(&p);
+            all.extend(chrome.on(chrome.well).inks());
+            all.extend(chrome.on(chrome.raised).inks());
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &all,
-                    &format!("breakout, {what}, light: {light}"),
+                    &format!("breakout, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = test_app();
+        app.theme_changed(p);
+        app.powerups.push(PowerUp {
+            x: PLAY_WIDTH / 2.0,
+            y: PLAY_HEIGHT / 2.0,
+            kind: PowerUpKind::MultiBall,
+        });
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        // The falling power-up's letter is among the texts the legibility
+        // test reads on its box, as drawn.
+        assert!(
+            playing
+                .commands()
+                .iter()
+                .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "M")),
+            "the power-up's letter is not drawn"
+        );
+        app.state = GameState::Paused;
+        let paused = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.state = GameState::GameOver;
+        let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("playing", playing),
+            ("paused", paused),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "breakout: {bad:#?}");
     }
 
     /// **Every brick row and power-up stands off the field in either theme**,

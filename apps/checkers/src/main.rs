@@ -1725,7 +1725,12 @@ fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, piece: Piece
         // Centred by measurement. The old spelling drew the crown at
         // `cx - 8.0, cy - 10.0`: two nudges chosen for one font size, which put
         // the crown off its own piece at any other.
-        let ink = Ink::new(radius * 1.1, FontWeightHint::Bold, KING_CROWN);
+        // The crown's gold, moved only as far as it must be to read on the
+        // piece it crowns: on red's core it was 2.9:1, under the 3:1 even a
+        // symbol drawn large needs.
+        let size = radius * 1.1;
+        let gold = gamechrome::Ink::on(KING_CROWN, &[inner]).at(size, true);
+        let ink = Ink::new(size, FontWeightHint::Bold, gold);
         let crown = "\u{265A}";
         label(
             f,
@@ -1947,8 +1952,8 @@ mod tests {
     /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 RED_PIECE,
@@ -1964,30 +1969,102 @@ mod tests {
             for kind in [guitk::button::Kind::Plain, guitk::button::Kind::Primary] {
                 derived.extend(gamechrome::button_colours(&p, kind, c.chrome.band));
             }
-            let mut app = CheckersApp::new();
-            app.theme_changed(&p);
-            app.last_move_from = Some(Pos::new(2, 2));
-            app.last_move_to = Some(Pos::new(3, 3));
-            app.board.set(
-                Pos::new(3, 3),
-                Some(Piece {
-                    side: Side::Red,
-                    is_king: true,
-                }),
-            );
-            app.click_square(Pos::new(2, 6));
-            let playing = app.draw(CheckersApp::SIZE);
-            app.game_result = GameResult::RedWins;
-            let over = app.draw(CheckersApp::SIZE);
-            for (what, f) in [("playing", playing), ("over", over)] {
+            // The crown's gold, moved to read on a piece's core.
+            for core in [RED_PIECE, RED_PIECE_DARK, BLACK_PIECE, BLACK_PIECE_DARK] {
+                let moved = gamechrome::Ink::on(KING_CROWN, &[core]);
+                derived.extend([moved.large, moved.small]);
+            }
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("checkers, {what}, light: {light}"),
+                    &format!("checkers, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = CheckersApp::new();
+        app.theme_changed(p);
+        app.last_move_from = Some(Pos::new(2, 2));
+        app.last_move_to = Some(Pos::new(3, 3));
+        app.board.set(
+            Pos::new(3, 3),
+            Some(Piece {
+                side: Side::Red,
+                is_king: true,
+            }),
+        );
+        app.click_square(Pos::new(2, 6));
+        let playing = app.draw(CheckersApp::SIZE);
+        let cramped = app.draw((320.0, 360.0));
+        app.game_result = GameResult::RedWins;
+        let over = app.draw(CheckersApp::SIZE);
+        vec![("playing", playing), ("over", over), ("cramped", cramped)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "checkers: {bad:#?}");
     }
 
     /// **Every piece is seen on its square in either theme**: the squares

@@ -1382,6 +1382,10 @@ impl Yahtzee {
     }
 
     fn draw_row(&self, f: &mut Frame<Target>, l: &Layout, band: Rect, row: Row, c: &Colours) {
+        // Every row is written for its own ground -- the head and the total
+        // lit, the categories on the well and the band by turns, the tallies
+        // raised -- none of which is the page the palette's inks are made
+        // for: they fell to 3.0:1 on a lit row in a light theme.
         // The score column is a share of the row rather than a fixed 80 pixels
         // from its right edge, which at a narrow card left the name and the
         // number on top of one another.
@@ -1423,12 +1427,13 @@ impl Yahtzee {
         match row {
             Row::Head => {
                 fill(f, c.chrome.lit);
+                let on = c.chrome.on(c.chrome.lit);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Category"),
-                    c.chrome.text,
+                    on.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1437,7 +1442,7 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     String::from("Score"),
-                    c.chrome.text,
+                    on.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1446,16 +1451,15 @@ impl Yahtzee {
                 let Some(cat) = Category::at(i) else { return };
                 let selected = self.focus == FocusRegion::Scorecard && self.selected_category == i;
                 let filled = self.score_at(i);
-                fill(
-                    f,
-                    if selected {
-                        c.chrome.lit
-                    } else if i.is_multiple_of(2) {
-                        c.chrome.well
-                    } else {
-                        c.chrome.band
-                    },
-                );
+                let ground = if selected {
+                    c.chrome.lit
+                } else if i.is_multiple_of(2) {
+                    c.chrome.well
+                } else {
+                    c.chrome.band
+                };
+                fill(f, ground);
+                let on = c.chrome.on(ground);
                 if selected {
                     f.push(RenderCommand::FillRect {
                         x: band.x,
@@ -1471,11 +1475,7 @@ impl Yahtzee {
                     name_x,
                     score_x - name_x,
                     String::from(cat.name()),
-                    if filled.is_some() {
-                        c.chrome.dim
-                    } else {
-                        c.chrome.text
-                    },
+                    if filled.is_some() { on.dim } else { on.text },
                     if selected {
                         FontWeightHint::Bold
                     } else {
@@ -1484,18 +1484,19 @@ impl Yahtzee {
                     l.font,
                 );
                 let (s, color) = match filled {
-                    Some(v) => (
-                        format!("{v}"),
-                        if v > 0 { c.chrome.good } else { c.chrome.bad },
-                    ),
+                    Some(v) => (format!("{v}"), if v > 0 { on.good } else { on.bad }),
                     None if self.roll_number > 0 => {
                         let pot = potential_score(&self.dice, cat);
                         (
                             format!("({pot})"),
-                            if pot > 0 { c.potential } else { c.chrome.dim },
+                            if pot > 0 {
+                                gamechrome::Ink::on(c.potential, &[ground]).small
+                            } else {
+                                on.dim
+                            },
                         )
                     }
-                    None => (String::from("-"), c.chrome.dim),
+                    None => (String::from("-"), on.dim),
                 };
                 write(
                     f,
@@ -1510,12 +1511,13 @@ impl Yahtzee {
             }
             Row::UpperTotal => {
                 fill(f, c.chrome.raised);
+                let on = c.chrome.on(c.chrome.raised);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Upper Total"),
-                    c.chrome.dim,
+                    on.dim,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1526,9 +1528,9 @@ impl Yahtzee {
                     score_w,
                     format!("{total} / {UPPER_BONUS_THRESHOLD}"),
                     if total >= UPPER_BONUS_THRESHOLD {
-                        c.chrome.good
+                        on.good
                     } else {
-                        c.chrome.dim
+                        on.dim
                     },
                     FontWeightHint::Regular,
                     l.font,
@@ -1537,12 +1539,13 @@ impl Yahtzee {
             }
             Row::Bonus => {
                 fill(f, c.chrome.raised);
+                let on = c.chrome.on(c.chrome.raised);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("Bonus"),
-                    c.chrome.dim,
+                    on.dim,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1556,11 +1559,7 @@ impl Yahtzee {
                     } else {
                         String::from("-")
                     },
-                    if bonus > 0 {
-                        c.chrome.good
-                    } else {
-                        c.chrome.dim
-                    },
+                    if bonus > 0 { on.good } else { on.dim },
                     FontWeightHint::Regular,
                     l.font,
                 );
@@ -1584,7 +1583,7 @@ impl Yahtzee {
                     name_x,
                     score_x - name_x,
                     format!("Yahtzee Bonus (x{})", self.yahtzee_bonus_count),
-                    c.bonus,
+                    gamechrome::Ink::on(c.bonus, &[c.chrome.raised]).small,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1593,7 +1592,7 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     format!("+{}", self.yahtzee_bonus_total()),
-                    c.bonus,
+                    gamechrome::Ink::on(c.bonus, &[c.chrome.raised]).small,
                     FontWeightHint::Regular,
                     l.font,
                 );
@@ -1601,12 +1600,13 @@ impl Yahtzee {
             }
             Row::GrandTotal => {
                 fill(f, c.chrome.lit);
+                let on = c.chrome.on(c.chrome.lit);
                 write(
                     f,
                     name_x,
                     score_x - name_x,
                     String::from("GRAND TOTAL"),
-                    c.chrome.text,
+                    on.text,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1615,7 +1615,7 @@ impl Yahtzee {
                     score_x,
                     score_w,
                     format!("{}", self.grand_total()),
-                    c.chrome.even,
+                    on.even,
                     FontWeightHint::Bold,
                     l.font,
                 );
@@ -1761,8 +1761,8 @@ mod tests {
     /// palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let page = Chrome::of(&p).page;
             let mut derived = vec![DIE_FACE, DIE_PIP];
             derived.extend(gamechrome::button_colours(
@@ -1770,24 +1770,104 @@ mod tests {
                 guitk::button::Kind::Primary,
                 page,
             ));
-            let mut game = Yahtzee::with_seed(7);
-            game.theme_changed(&p);
-            let fresh = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            assert!(game.roll(), "the dice would not roll");
-            game.held[0] = true;
-            game.scores[0] = Some(3);
-            let rolled = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            game.roll_number = MAX_ROLLS;
-            let spent = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("fresh", fresh), ("rolled", rolled), ("spent", spent)] {
+            // The score sheet's words, written for each row's ground.
+            let chrome = Chrome::of(&p);
+            let own = Colours::of(&p);
+            for ground in [chrome.lit, chrome.well, chrome.band, chrome.raised] {
+                derived.extend(chrome.on(ground).inks());
+                derived.push(gamechrome::Ink::on(own.potential, &[ground]).small);
+                derived.push(gamechrome::Ink::on(own.bonus, &[ground]).small);
+            }
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("yahtzee, {what}, light: {light}"),
+                    &format!("yahtzee, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut game = Yahtzee::with_seed(7);
+        game.theme_changed(p);
+        let fresh = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = game.frame(320.0, 360.0);
+        assert!(game.roll(), "the dice would not roll");
+        game.held[0] = true;
+        game.scores[0] = Some(3);
+        let rolled = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        game.roll_number = MAX_ROLLS;
+        let spent = game.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("fresh", fresh),
+            ("rolled", rolled),
+            ("spent", spent),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "yahtzee: {bad:#?}");
     }
 
     /// **The roll button is switched off with no rolls left**, in the

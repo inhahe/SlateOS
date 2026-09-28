@@ -61,6 +61,12 @@ MUTATIONS = [
         "                    let _ = size;",
         ["a_restart_keeps_the_users_colours_and_the_window_size"],
     ),
+    (
+        "the overlay's way on is the page's grey, 4.1:1 on its card",
+        "        let on = c.chrome.on(c.chrome.raised);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

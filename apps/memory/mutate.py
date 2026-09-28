@@ -53,6 +53,18 @@ MUTATIONS = [
         "    fill(f, l.window, Color::rgba(0x1E, 0x1E, 0x2E, 158), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the cleared banner has no ground of its own",
+        "(r.h * 0.2).min(10.0), Surface::Panel);",
+        "(r.h * 0.2).min(10.0), Surface::Card);",
+        ["the_banner_and_the_help_sheet_are_grounded"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);",
+        "        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Card);",
+        ["the_banner_and_the_help_sheet_are_grounded"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -396,6 +396,8 @@ MUTATIONS = [
         ],
     ),
     (
+        # The win notice is a notice, not a sheet.  Giving it a hit box puts a
+        # control the player never asked for over the middle of the maze.
         "the win notice swallows the clicks under it",
         "            (h * 0.12).min(12.0),\n            Surface::Panel,\n        );",
         "            (h * 0.12).min(12.0),\n            Surface::Panel,\n        );\n        f.hit(Target::NewMaze, plate);",

@@ -504,8 +504,8 @@ MUTATIONS = [
     ),
     (
         "the panel says the game is over while it is being played",
-        "            (Phase::Playing, Cell::White) => (\"White to move\", c.white_side),\n            (Phase::Playing, _) => (\"Your turn (Black)\", c.black_side),",
-        "            (Phase::Playing, Cell::White) => (\"Game Over\", c.white_side),\n            (Phase::Playing, _) => (\"Game Over\", c.black_side),",
+        "            (Phase::Playing, Cell::White) => (\"White to move\", read(c.white_side)),\n            (Phase::Playing, _) => (\"Your turn (Black)\", read(c.black_side)),",
+        "            (Phase::Playing, Cell::White) => (\"Game Over\", read(c.white_side)),\n            (Phase::Playing, _) => (\"Game Over\", read(c.black_side)),",
         ["the_panel_names_whose_turn_it_is_and_only_says_so_while_there_is_one"],
     ),
     (
@@ -715,6 +715,18 @@ MUTATIONS = [
         "                    color: c.last,",
         "                    color: c.square,",
         ["the_last_move_is_highlighted_on_the_square_it_was_played"],
+    ),
+    (
+        "the side panel's words are the page's inks, 4.1:1 on it",
+        "        let on = c.chrome.on(c.chrome.raised);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a side's colour on the panel is the page's, 3.6:1 on it",
+        "        let read = |ink: Color| gamechrome::Ink::on(ink, &[c.chrome.raised]).small;",
+        "        let read = |ink: Color| ink;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

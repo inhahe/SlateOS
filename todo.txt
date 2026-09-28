@@ -56560,14 +56560,47 @@ failed; no session started" instead of being let in with a warning. That is the
 correct behaviour for an expired password and the wrong reason for it, so if it
 shows up, check setuid before changing this code.
 
+## Games: read every word under themes that leave no room (lane E, 2026-09-28) -- NEXT
+
+The games' legibility tests read the four stock looks (light and dark, bordered
+and card). Those palettes' text and hues read on every ground a game fills
+itself -- a raised panel, a well, a board, a score track -- with room to
+spare, so a word a game forgot to move for such a ground passes. A user's
+theme need not leave that room: `Palette::ink` holds a theme's text colours to
+4.5:1 on the palette's own text grounds (the page, and under the card look the
+card grounds) and no further. Found by the sweep: reversi's score counts are
+moved for their track (`Chrome::on(lit)`) and no stock look can tell -- the
+row "the score bar's counts are the page's text on its track" was dropped
+from `apps/reversi/mutate.py` for now, to come back with this.
+
+What it wants: a list of such themes in `gamechrome::legibility` (soft text,
+light and dark -- a mid grey the palette moves only as far as the page needs,
+as Solarized's `#657b83`; pale hues on light; deep hues on dark; each in both
+surface looks), read by every game's legibility test beside the stock looks,
+and every word it finds moved for the ground it is on (`Chrome::on`,
+`gamechrome::Ink::on`). Not needed for the toolkit's own panel, where the
+palette's inks read as they are (known-issues, "[E] Text on a panel an
+application fills itself").
+
 ## C-Q17: what is left of "wire the five up" (lane E, 2026-09-27)
 
 The operator answered C-Q17 (lane C's design-decisions §1423): the five
 finished-but-unreachable features are wired up, and where a live twin exists
 the survivor takes everything both could do. State, measured 2026-09-27:
 
-* installer bootloader setup -- wired (known-issues
-  `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`, fixed 09-25).
+* installer bootloader setup -- **wired 2026-09-28.** (The line here said
+  "wired" on 09-25, when two dead fields had been deleted from `grub.rs`
+  (known-issues `TD-C-THE-INSTALLER-RECORDS-A-GRUB-PATH-NOTHING-EVER-READS`);
+  nothing reached the module until 09-28.) A configuration's `bootloader:`
+  section chooses Limine or a GRUB entry, which the plan adds after Limine;
+  `installer --grub-detect`, `--grub-add`, `--grub-update` and
+  `--grub-remove` find a GRUB and write, rewrite or remove its
+  `/etc/grub.d/40_slateos`, rebuilding the running system's menu and reading
+  it back (another system's root is left for that system to rebuild). The
+  entry chainloads Limine: GRUB loading the kernel itself waits on a
+  multiboot2 header (known-issues `[E] GRUB cannot load the kernel itself`).
+  What is still missing is the installer's executor -- every step of an
+  install, this one included, is a dry run that prints what it would do.
 * system information's hardware queries -- wired (fixed 09-15).
 * image viewer's video -- the code is gone; `apps/videoplayer` is the live
   twin and had everything it did.
@@ -58801,6 +58834,19 @@ test of the fixture, not of the bound.
   reformat every file saved after a glance at the raw view. If the operator
   wants reformatting, it belongs in an explicit "Format document" command;
   reversing this is the one `as_bytes()` in each save function.
+
+- **Minesweeper's level chip is the toolkit's button, and loses the level's
+  colour.** (2026-09-28, `apps/minesweeper/src/main.rs` -> `chip`, and
+  `every_difficulty_has_its_own_name`.) The chip was a raised slab with the
+  level's name in its colour (Beginner green, Intermediate yellow, Expert
+  red), which read at 3.6:1 in the light theme. The operator's polish ask
+  for C-Q16 names the toolkit's buttons for a game's chrome, and a toolkit
+  button writes its label in the toolkit's ink, so the colour went with the
+  slab; the level is still named on its button and in the header's line.
+  The alternative -- keep the slab and ink its word for it
+  (`gamechrome::Ink`) -- keeps the colour at the cost of the one chrome
+  control in the games that is not the toolkit's. Reversing it is the
+  `chip` function and a `Difficulty::color` again.
 
 ### Deferred, each with the condition that un-defers it
 

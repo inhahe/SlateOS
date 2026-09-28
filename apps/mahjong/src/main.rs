@@ -1847,24 +1847,93 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         let mut derived = vec![TILE_BG_FREE, TILE_BG, TILE_HINT, TILE_SHADOW];
         derived.extend(LEGEND_ITEMS.iter().map(|&(_, k)| k.text_color()));
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
-            let mut g = Mahjong::with_seed(7);
-            g.theme_changed(&p);
-            let free = g.board.free_tiles();
-            assert!(g.try_select(free[0]), "a free tile could not be picked up");
-            g.hint = Some((free[1], free[2]));
-            g.show_hint = true;
-            g.cursor.tile_idx = free.get(3).copied();
-            let f = g.draw(Mahjong::SIZE);
-            appearance::palette_check::assert_drawn_from(
-                &p,
-                f.commands(),
-                &[derived.as_slice(), &[c.cursor, c.on_selected]].concat(),
-                &format!("mahjong, light: {light}"),
-            );
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &[derived.as_slice(), &[c.cursor, c.on_selected]].concat(),
+                    &format!("mahjong, {what}, light: {light}, cards: {cards}"),
+                );
+            }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a tile picked
+    /// up, a hint shown and the keyboard's outline on a third, and a
+    /// cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut g = Mahjong::with_seed(7);
+        g.theme_changed(p);
+        let free = g.board.free_tiles();
+        assert!(g.try_select(free[0]), "a free tile could not be picked up");
+        g.hint = Some((free[1], free[2]));
+        g.show_hint = true;
+        g.cursor.tile_idx = free.get(3).copied();
+        vec![
+            ("playing", g.draw(Mahjong::SIZE)),
+            ("cramped", g.draw((480.0, 400.0))),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page]
+                .into_iter()
+                .map(|ground| {
+                    guitk::button::paint(
+                        &p,
+                        guitk::button::Kind::Plain,
+                        guitk::button::State {
+                            disabled: true,
+                            ..guitk::button::State::default()
+                        },
+                        ground,
+                    )
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "mahjong: {bad:#?}");
     }
 
     /// **The keyboard's outline reads on a tile** in either theme: the accent

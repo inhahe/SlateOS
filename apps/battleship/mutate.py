@@ -445,6 +445,12 @@ MUTATIONS = [
         "            hulls: [p.blue, p.mauve, p.green, p.green, p.yellow],",
         ["every_hull_is_seen_and_the_two_three_cell_ships_told_apart"],
     ),
+    (
+        "a grid's caption is the faintest grey",
+        "        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.dim);\n        let caption = side.caption();",
+        "        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.off);\n        let caption = side.caption();",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

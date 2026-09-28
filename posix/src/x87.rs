@@ -56,7 +56,7 @@
 /// parameter/object layout. Only the first 10 bytes are meaningful; the rest
 /// is padding whose contents are unspecified (we zero it when we write one).
 #[repr(C, align(16))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct LongDouble {
     /// Significand, with the integer bit explicitly stored at bit 63.
     pub significand: u64,

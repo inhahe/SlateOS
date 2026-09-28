@@ -1651,7 +1651,7 @@ pub extern "C" fn isfinite(x: f64) -> i32 {
 /// # Safety
 ///
 /// `tag` is NULL or a NUL-terminated string that outlives `'a`.
-unsafe fn tag_bytes<'a>(tag: *const u8) -> &'a [u8] {
+pub(crate) unsafe fn tag_bytes<'a>(tag: *const u8) -> &'a [u8] {
     if tag.is_null() {
         return &[];
     }
@@ -1686,7 +1686,7 @@ pub extern "C" fn nanf(tag: *const u8) -> f32 {
 }
 
 /// The payload of a whole tag: every byte an n-char, the run a number.
-fn tag_payload(tag: &[u8]) -> Option<u64> {
+pub(crate) fn tag_payload(tag: &[u8]) -> Option<u64> {
     if !tag.iter().all(|&c| crate::decfloat::is_nchar(c)) {
         return None;
     }
@@ -4579,12 +4579,14 @@ mod tests {
 
     /// Where a relative comparison says nothing: near a root of the
     /// function, a result of 1e-17 carrying an absolute error of 1e-17 is
-    /// "a million ulps" off and exactly as good as either library can do.
-    /// That is every call of `lgamma` (roots where the gamma function is 1
-    /// or -1, which glibc's `lgamma_neg.c` treats specially and musl does
-    /// not) and of the Bessel functions (infinitely many roots), and the
-    /// trigonometric functions only at |x| >= 2^20, where a result near zero
-    /// depends on the last bits of the argument reduction.
+    /// "a million ulps" off and as good as musl's formula can do. That is
+    /// every call of `lgamma` (roots where the gamma function is 1 or -1,
+    /// which glibc's `lgamma_neg.c` treats specially and musl does not, so
+    /// glibc is right there and we are not: known-issues.md,
+    /// D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS) and of the Bessel
+    /// functions (infinitely many roots), and the trigonometric functions
+    /// only at |x| >= 2^20, where a result near zero depends on the last bits
+    /// of the argument reduction.
     fn near_root(name: &str, x: f64) -> bool {
         match double_name(name) {
             "lgamma" | "lgamma_r" | "gamma" | "j0" | "j1" | "y0" | "y1" | "jn" | "yn" => true,

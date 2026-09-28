@@ -20205,6 +20205,15 @@ comes first.
 
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 
+**Status (2026-09-28): PARTLY FIXED.** The maths functions now compute in
+80 bits: all 72 `long double` names of `<math.h>` exist, on the x87 unit
+(`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`; design-decisions §1134). What
+this entry still describes is conversion: `printf`'s `%Lf`/`%Le`/`%Lg`,
+`scanf`'s `%Lf` and `strtold` narrow through `f64` at the `x87::to_f64` /
+`from_f64` boundary, so a long double printed or parsed carries 53 bits and a
+double's range. The arithmetic the fix below asked for exists now
+(`ld80.rs`), so what is left is decimal conversion with a 64-bit significand.
+
 **Where:** `posix/src/x87.rs` (`to_f64`/`from_f64`), `posix/src/printf.rs`
 (`va_arg_long_double`), `posix/src/stdlib.rs` (`strtold`).
 
@@ -20223,7 +20232,8 @@ double is produced) re-encoded. Consequences:
   (round-to-nearest, overflow → ±inf) rather than producing a wrong finite
   number, so it degrades predictably.
 - There are no `sqrtl`/`powl`/`fabsl`/… in the sysroot at all. That is the
-  *safe* failure mode: a link error, not a silently wrong answer.
+  *safe* failure mode: a link error, not a silently wrong answer. (No longer
+  so: they exist, in 80 bits, since 2026-09-28 -- §1134.)
 
 **Why accepted:** the double-precision core is shared with every other float
 path in the sysroot and is well tested; an 80-bit software arithmetic layer
@@ -175117,7 +175127,7 @@ glibc's `errno` (design-decisions §1132).
 **Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
 23,113 calls answered by glibc 2.39 under WSL (`dlm/oracle/math_harness.py`).
 
-## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions remain)**
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions done 2026-09-28: posix/src/mathl.rs, §1134; the 22 `long double` complex functions remain)**
 
 **In short:** three parts of C's maths are missing from the C library, so a C
 program that uses them does not link: changing or reading the rounding mode
@@ -175145,6 +175155,11 @@ reached from Rust's standard library.
   `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic
   `ld80` C for the rest. Rust has no 80-bit type, so these are `asm!` over
   memory operands.
+  **Done 2026-09-28** (`posix/src/mathl.rs`, `ld80.rs`, `ld_abi.rs`,
+  design-decisions §1134): all 72 C names, each an assembly thunk in front of
+  Rust, computing on the x87 unit; musl's algorithms but for `powl` and
+  `exp10l`, whose general case is new (musl's `powl` was off by up to 303
+  ulps); replayed against glibc 2.39 for 31,062 calls.
 - **`<complex.h>`** -- musl's `src/complex/`: seventy functions, formulas over
   the real ones plus their special cases (Annex G).
   **Done 2026-09-28** (`posix/src/complex.rs`) but for the 22 `long double`
@@ -175298,3 +175313,153 @@ cursor blink is a few dozen pixels, not a screen) and one further behind the
 whole image again. A window leaving the stream takes its images with it.
 Tests: capture, encode, decode and `apply_scene_frame` end to end, with an
 upload, a patch, a drop and a late-joining viewer.
+
+## D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS — `lgamma`, `lgammaf` and `lgammal` are only absolutely accurate where the gamma function is +-1 below -2 (lane D, 2026-09-28) — **Status: OPEN**
+
+**In short:** `lgamma(x)` is the logarithm of |gamma(x)|. Below -2 the
+gamma function passes through 1 or -1 twice in every unit interval, so
+`lgamma` is 0 there and tiny near it -- and there our library's answers are
+right only to about 1e-16 *absolutely*, not relatively. `lgamma(-2.4570247382208006)`
+is 5.6191923589500965e-17 (glibc returns that); ours returns 1.1e-16, twice
+it. Nothing crashes and no other argument is affected; a program sees it only
+if it takes `lgamma` of a negative number near one of those points and relies
+on the digits of the near-zero result.
+
+**Where:** `posix/src/math.rs` (`lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r`,
+`gamma`, `gammaf`, from musl's `e_lgamma_r.c` via the vendored `libm`) and
+`posix/src/mathl.rs` (`lgammal_core`, musl's ld80 `lgammal.c`). All three use
+the reflection formula, `lgamma(x) = log(pi / |x sin(pi x)|) - lgamma(-x)`,
+which subtracts two numbers near 1 to get one near 0.
+
+| x | true value (mpmath) | glibc 2.39 | ours (musl) |
+|---|---|---|---|
+| -2.4570247382208006 | 5.6191923589500965e-17 | 5.6191923589500967e-17 | 1.1102230246251565e-16 |
+| -2.457024738220801 | -6.1687121408846648e-16 | -6.1687121408846647e-16 | -7.2164496600635175e-16 |
+| -3.1435808883499798 | 1.6978655906121084e-15 | 1.6978655906121083e-15 | 1.7763568394002505e-15 |
+
+`lgammal` loses less, relatively (5.6568e-17 for glibc's 5.6521e-17 at the
+long double nearest the first root), for the same reason.
+
+**The tests allow it:** `math.rs`'s oracle replay compares `lgamma` by
+absolute error when glibc's result is under 1 (`near_root`), and `mathl.rs`'s
+does the same for `lgammal`. Both allowances go when this is fixed.
+
+**Proper fix:** evaluate near each root from an expansion about the root, as
+glibc's `lgamma_neg.c` does -- but not by translating it: glibc is LGPL, and
+this library is linked statically into every program (design-decisions §1133's
+licence note). The mathematics is public: tabulate each root `x_k` below -2
+where |gamma| = 1, to twice the working precision (`x_k = hi + lo`), and the
+Taylor coefficients of `log|gamma|` about it (`psi(x_k)`, `psi'(x_k)/2`, ...),
+both computed offline with mpmath; near `x_k` answer the polynomial in
+`(x - hi) - lo`. Only finitely many roots matter -- the k-th lies about
+`1/k!` from a negative integer, and once that is under the spacing of the
+numbers there, no argument can land near it: about 16 integers deep for
+double, 20 for long double. For float, CORE-MATH's correctly rounded
+`lgammaf` (MIT) is a ready alternative.
+
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN**
+
+**In short:** a C program that calls one of the functions below does not
+link. None is in C99; they are C23 additions, GNU extensions, or the `long
+double` versions of functions the library has for `double`. The list is exact:
+every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
+`_FloatN` aliases and glibc-internal names (`comm` of the two symbol tables).
+
+| Family | Names | Notes |
+|---|---|---|
+| `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | FreeBSD msun has `ld80` versions of the ones `complex.rs` took from it (§1133); the rest are formulas over `mathl.rs` |
+| GNU complex | `clog10` `clog10f` `clog10l` | `clog`, divided by `ln 10` with glibc's care near `|z| = 1` |
+| `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | musl has none; FreeBSD msun has no `ld80` Bessel either; glibc's are LGPL -- needs its own derivation (Cephes' `j0l` family is the usual permissive source) |
+| C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | exact functions, IEEE 754-2019 section 5.3 and 9.7 -- short, and testable bit for bit against glibc |
+| C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | the `double` and `float` ones exist -- but as **compiler_builtins' weak exports**, never checked against glibc; this work should define all twelve in `math.rs`/`mathl.rs`, with oracle rows |
+| C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | one rounding into the narrower type: round-to-odd in the wider one, then round |
+| XSI, obsolete | `scalb` `scalbf` `scalbl` | removed from POSIX in 2008; glibc keeps them |
+| fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
+
+`matherr` (an SVID hook glibc keeps only for old binaries) is deliberately
+absent.
+
+**Where:** `posix/src/math.rs`, `mathl.rs`, `complex.rs`. **Found by**
+comparing the symbol tables while adding the `long double` functions
+(design-decisions §1134).
+
+## D-POSIX-CONVERSIONS-IGNORE-THE-ROUNDING-MODE — `printf` and `strtod` always round to nearest; glibc's follow `fesetround` (lane D, 2026-09-28) — **Status: OPEN**
+
+**In short:** a program that changes the rounding direction with
+`fesetround` -- to round up, say, for interval arithmetic -- gets glibc's
+directed rounding from `printf` and `strtod` there, and not here: ours round
+to nearest whatever the mode. `printf("%.1f", 0.25)` under `FE_UPWARD` prints
+`0.3` on glibc and `0.2` here; `strtod("0.3")` under `FE_UPWARD` is
+`0x3fd3333333333334` on glibc and `...333` here. Under the default mode, which
+nearly every program keeps, the two agree. It became reachable on 2026-09-27,
+when `fesetround` started working (`posix/src/fenv.rs`).
+
+| Call, under the mode | glibc 2.39 | ours |
+|---|---|---|
+| `printf("%.1f", 0.25)`, `FE_UPWARD` | `0.3` | `0.2` |
+| `printf("%.1f", -0.25)`, `FE_DOWNWARD` | `-0.3` | `-0.2` |
+| `printf("%.0e", 25.0)`, `FE_UPWARD` | `3e+01` | `2e+01` |
+| `printf("%.2a", 1 + 0x1p-12)`, `FE_UPWARD` | `0x1.01p+0` | `0x1.00p+0` |
+| `strtod("0.3")`, `FE_UPWARD` | `0x3fd3333333333334` | `0x3fd3333333333333` |
+| `strtof("0.3")`, `FE_DOWNWARD` | `0x3e999999` | `0x3e99999a` |
+
+**Where:** `posix/src/decfloat.rs` -- `Decimal::round_to_significant`
+(printf's `%f`/`%e`/`%g`), `round_to_binary` (`strtod`, `strtof`, `wcstod`,
+`scanf`) -- and `printf.rs`'s `%a` rounding: each rounds ties-to-even and
+never reads the mode.
+
+**Proper fix:** read `fegetround()` once per conversion and round the exact
+expansion (which decfloat already has, so every case is decidable) in that
+direction: toward +inf rounds a positive value's magnitude up when anything
+nonzero is dropped, toward -inf a negative one's, toward zero never. Due with
+the 80-bit conversions (TD-POSIX-LONG-DOUBLE-PRECISION), which go through the
+same code.
+
+## D-POSIX-LIBC-LACKS-FUNCTIONS-ITS-HEADERS-DECLARE — 104 functions musl's headers declare do not exist in `libc.a`, so a C program calling one does not link (lane D, 2026-09-28) — **Status: OPEN**
+
+**In short:** C programs here are compiled against musl's headers (`zig cc`)
+and linked against our `libc.a`. The headers declare 126 functions the library
+does not define -- 22 are the `long double` complex functions
+(D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS) and these 104 are the rest. A program
+that calls one compiles and then fails to link. Two are invisible in the
+source: musl's `pthread_cleanup_push`/`pthread_cleanup_pop` are macros that
+call `_pthread_cleanup_push`/`_pthread_cleanup_pop`, so *any* C program using
+cleanup handlers fails to link; and the whole of C11's `<threads.h>` is
+missing, so no program written to it links at all.
+
+| Area | Missing |
+|---|---|
+| C11 threads | `thrd_create` `thrd_current` `thrd_detach` `thrd_equal` `thrd_exit` `thrd_join` `thrd_sleep` `thrd_yield` `mtx_init` `mtx_lock` `mtx_timedlock` `mtx_trylock` `mtx_unlock` `mtx_destroy` `cnd_init` `cnd_signal` `cnd_broadcast` `cnd_wait` `cnd_timedwait` `cnd_destroy` `tss_create` `tss_delete` `tss_get` `tss_set` `call_once` |
+| POSIX threads | `_pthread_cleanup_push` `_pthread_cleanup_pop` `pthread_attr_getinheritsched` `pthread_attr_setinheritsched` `pthread_attr_getschedparam` `pthread_attr_setschedparam` `pthread_attr_getschedpolicy` `pthread_attr_setschedpolicy` `pthread_attr_getscope` `pthread_attr_setscope` `pthread_getattr_default_np` `pthread_setattr_default_np` `pthread_getconcurrency` `pthread_setconcurrency` `pthread_setschedprio` `pthread_timedjoin_np` `pthread_tryjoin_np` |
+| locale (`_l`) | `strcasecmp_l` `strncasecmp_l` `iswctype_l` `wctype_l` `towctrans_l` `wctrans_l` `wcscasecmp_l` `wcsncasecmp_l` `wcsftime_l` |
+| strings | `wcsnlen` `wcswcs` |
+| signals (XSI) | `sighold` `sigignore` `sigpause` `sigrelse` `sigandset` `sigorset` `sigisemptyset` |
+| accounts | `fgetpwent` `putpwent` `fgetgrent` `putgrent` `fgetspent` `sgetspent` `putspent` `lckpwdf` `ulckpwdf` `getusershell` `setusershell` `endusershell` `cuserid` `getpass` |
+| numbers | `ecvt` `fcvt` `gcvt` `lcong48` `scalb` `scalbf` |
+| search | `hcreate_r` `hsearch_r` `hdestroy_r` |
+| time | `getdate` `stime` `ftime` `clock_getcpuclockid` |
+| DNS messages | `ns_initparse` `ns_parserr` `ns_skiprr` `ns_name_uncompress` |
+| contexts | `getcontext` `setcontext` `makecontext` `swapcontext` (musl declares them and does not define them either) |
+| terminals | `tcgetwinsize` `tcsetwinsize` `vhangup` |
+| processes, files, IPC | `_Fork` `posix_close` `acct` `remap_file_pages` `dlinfo` `ftok` |
+
+**Where:** `posix/src/` -- each belongs beside its siblings (`pthread.rs`,
+`string.rs`, `wchar.rs`, `signal*.rs`, `pwd.rs`/`grp.rs`, `stdlib.rs`,
+`search.rs`, `time.rs`, `termios.rs`, `unistd.rs`).
+
+**How it was found:** preprocess each of the 182 musl headers zig ships, on
+its own, with `_GNU_SOURCE`, take every declared function's name, and subtract
+the names `libc.a` defines. Six hits are not functions and are left out:
+`return` (`tgmath.h`), `volatile` (`sys/io.h`'s inline assembly),
+`seqbuf_dump` (a macro's helper in `sys/soundcard.h`), and `cachectl`,
+`cacheflush`, `_flush_cache` (MIPS-only `sys/cachectl.h`). No gate does this
+today -- `check-libc-abi.py` checks the layouts and numbers of what exists,
+not that what is declared exists.
+
+**Proper fix:** implement them, most are a few lines (the `_l` functions
+delegate as `isalpha_l` does; `wcsnlen` is `wcslen` with a bound), and add the
+subtraction above as a gate with a baseline that can only shrink, so the next
+function a header declares cannot go missing unnoticed. `ecvt`/`fcvt`/`gcvt`
+need a decision first: glibc's scale by powers of ten in floating point and
+so round differently from the exact digits musl's `sprintf`-based versions
+give.

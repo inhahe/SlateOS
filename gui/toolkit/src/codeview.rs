@@ -25,6 +25,12 @@
 //! tab runs to the next stop. What is drawn is the same string that was
 //! measured (tabs as spaces), so a caret sits where its character was drawn.
 //!
+//! # Finding
+//!
+//! Ctrl+F and Ctrl+H open the find bar across the top ([`findbar`]); the
+//! rows start below it. F3 and Shift+F3 step through the matches from the
+//! text as well.
+//!
 //! # The clipboard
 //!
 //! The view does not own one: Ctrl+C and Ctrl+X hand the text to the host
@@ -46,6 +52,10 @@ use crate::surface::CommandSink;
 use crate::text;
 use crate::theme::with_alpha;
 use crate::wheel;
+
+mod findbar;
+
+use findbar::{BarAction, Field, FindBar};
 
 /// Room between the gutter's numbers and its edges, in cells.
 const GUTTER_PADDING_CELLS: f32 = 1.0;
@@ -142,6 +152,11 @@ pub struct CodeView {
     wheel: wheel::Accumulator,
     /// Each caret's distance from the left for Up and Down under wrapping.
     goal_x: Option<Vec<f32>>,
+    /// The find bar.
+    find: FindBar,
+    /// Where the caret was when the find bar opened: an incremental search
+    /// looks for the first match from here, however far typing has taken it.
+    find_origin: usize,
 }
 
 impl CodeView {
@@ -160,6 +175,8 @@ impl CodeView {
             bar_hover: false,
             wheel: wheel::Accumulator::default(),
             goal_x: None,
+            find: FindBar::default(),
+            find_origin: 0,
         }
     }
 
@@ -216,6 +233,121 @@ impl CodeView {
         self.after_edit();
     }
 
+    /// Open the find bar with the keyboard in its find field -- and the
+    /// replace row too when `replace`. The field starts with the selected
+    /// text when that is one line, all of it selected, so typing replaces
+    /// it.
+    pub fn open_find(&mut self, replace: bool) {
+        let primary = self.editor.primary();
+        if !primary.is_empty() {
+            let selected = self
+                .editor
+                .buffer()
+                .slice(primary.range())
+                .unwrap_or_default();
+            if !selected.contains('\n') {
+                self.find.find.set_text(&selected);
+            }
+        }
+        self.find.find.select_all();
+        self.find.open = true;
+        self.find.replace = replace;
+        self.find.focused = true;
+        self.find.field = Field::Find;
+        self.find_origin = primary.range().start;
+        self.refresh_matches();
+    }
+
+    /// Close the find bar and give the keyboard back to the text.
+    pub fn close_find(&mut self) {
+        self.find.open = false;
+        self.find.focused = false;
+        self.find.matches.clear();
+    }
+
+    /// Whether the find bar is open.
+    #[must_use]
+    pub fn find_open(&self) -> bool {
+        self.find.open
+    }
+
+    /// Find the matches again, for a changed query or a changed text.
+    fn refresh_matches(&mut self) {
+        let finder = self.find.finder();
+        self.find.matches = finder.map_or_else(Vec::new, |f| self.editor.find_all(&f));
+        self.find.revision = Some(self.editor.revision());
+    }
+
+    /// Carry out what a key in the find bar asked for.
+    fn act_on_bar(&mut self, action: BarAction) -> CodeViewEvent {
+        match action {
+            BarAction::Redraw => CodeViewEvent::Moved,
+            BarAction::Close => {
+                self.close_find();
+                CodeViewEvent::Moved
+            }
+            BarAction::Search => {
+                self.refresh_matches();
+                // The first match from where the caret was when the bar
+                // opened, round the end if need be.
+                let next = self
+                    .find
+                    .matches
+                    .iter()
+                    .find(|m| m.start >= self.find_origin)
+                    .or_else(|| self.find.matches.first())
+                    .cloned();
+                if let Some(m) = next {
+                    self.editor.set_selections(vec![Selection {
+                        anchor: m.start,
+                        head: m.end,
+                    }]);
+                    self.reveal();
+                }
+                CodeViewEvent::Moved
+            }
+            BarAction::Next { backwards } => {
+                if let Some(finder) = self.find.finder() {
+                    self.editor.find_next(&finder, backwards);
+                    self.reveal();
+                }
+                CodeViewEvent::Moved
+            }
+            BarAction::SelectAll => {
+                if let Some(finder) = self.find.finder()
+                    && self.editor.select_all_matches(&finder) > 0
+                {
+                    self.find.focused = false;
+                    self.reveal();
+                }
+                CodeViewEvent::Moved
+            }
+            BarAction::Replace | BarAction::ReplaceAll => {
+                let Some(finder) = self.find.finder() else {
+                    return CodeViewEvent::Moved;
+                };
+                let with = self.find.with.text().to_owned();
+                let changed = if action == BarAction::ReplaceAll {
+                    self.editor.replace_all(&finder, &with) > 0
+                } else {
+                    self.editor.replace_next(&finder, &with)
+                };
+                self.after_edit();
+                if changed {
+                    CodeViewEvent::Changed
+                } else {
+                    CodeViewEvent::Moved
+                }
+            }
+        }
+    }
+
+    /// Which of the matches the primary selection is on, if any.
+    fn current_match(&self) -> Option<usize> {
+        let primary = self.editor.primary().range();
+        self.find.matches.iter().position(|m| *m == primary)
+    }
+
     // ------------------------------------------------------------------
     // Geometry
     // ------------------------------------------------------------------
@@ -245,17 +377,27 @@ impl CodeView {
         cells * self.cell()
     }
 
-    /// Where the text is drawn: the bounds less the gutter, the inset and
-    /// the scrollbar's column.
+    /// Where the text is drawn: the bounds less the find bar, the gutter,
+    /// the inset and the scrollbar's column.
     fn text_rect(&self) -> Rect {
         let left = self.bounds.x + self.gutter_width() + TEXT_INSET;
         let width = (self.bounds.right() - scrollbar::WIDTH - left).max(0.0);
-        Rect::new(left, self.bounds.y, width, self.bounds.h)
+        Rect::new(left, self.rows_top(), width, self.rows_height())
+    }
+
+    /// Where the first row is drawn: below the find bar, when it is open.
+    fn rows_top(&self) -> f32 {
+        self.bounds.y + self.find.height()
+    }
+
+    /// The height the rows have.
+    fn rows_height(&self) -> f32 {
+        (self.bounds.h - self.find.height()).max(0.0)
     }
 
     /// How many rows fit on screen, at least one.
     fn visible_rows(&self) -> usize {
-        let rows = (self.bounds.h / self.line_height()).floor();
+        let rows = (self.rows_height() / self.line_height()).floor();
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -390,7 +532,7 @@ impl CodeView {
         let Some(last) = rows.last() else {
             return self.editor.buffer().len();
         };
-        let index = ((y - self.bounds.y) / self.line_height()).floor();
+        let index = ((y - self.rows_top()) / self.line_height()).floor();
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -496,9 +638,9 @@ impl CodeView {
         }
         let track = Rect::new(
             self.bounds.right() - scrollbar::WIDTH,
-            self.bounds.y,
+            self.rows_top(),
             scrollbar::WIDTH,
-            self.bounds.h,
+            self.rows_height(),
         );
         Some((
             track,
@@ -538,7 +680,7 @@ impl CodeView {
         });
         for (i, row) in rows.iter().enumerate() {
             #[allow(clippy::cast_precision_loss, reason = "a row on screen")]
-            let y = b.y + i as f32 * line_h;
+            let y = self.rows_top() + i as f32 * line_h;
             if self.focused && primary.is_empty() && row.line == caret_line {
                 sink.emit(fill(
                     Rect::new(text.x - TEXT_INSET, y, text.w + TEXT_INSET, line_h),
@@ -570,11 +712,14 @@ impl CodeView {
             }
             self.draw_row(sink, p, row, y, text);
         }
+        self.draw_matches(sink, p, &rows, text);
         self.draw_bracket_pair(sink, p, &rows, text);
-        if self.focused {
+        if self.focused && !self.find.focused {
             self.draw_carets(sink, p, &rows, text);
         }
         sink.emit(RenderCommand::PopFont);
+        self.find
+            .draw(sink, p, b, self.current_match(), self.options.caret_width);
         if let Some((track, thumb)) = self.scroll_geometry() {
             scrollbar::draw(
                 sink,
@@ -671,6 +816,43 @@ impl CodeView {
         });
     }
 
+    /// Every match of the find bar's query on screen, outlined in yellow's
+    /// ink: the one the caret is on is the selection already.
+    fn draw_matches(&self, sink: &mut impl CommandSink, p: &Palette, rows: &[Row], text: Rect) {
+        if !self.find.open {
+            return;
+        }
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return;
+        };
+        let (top, bottom) = (first.range.start, last.range.end);
+        for m in &self.find.matches {
+            if m.end < top || m.start > bottom {
+                continue;
+            }
+            for (i, row) in rows.iter().enumerate() {
+                let from = m.start.max(row.range.start);
+                let to = m.end.min(row.range.end);
+                if from >= to && !(m.start == m.end && m.start == row.range.start) {
+                    continue;
+                }
+                #[allow(clippy::cast_precision_loss, reason = "a row on screen")]
+                let y = self.rows_top() + i as f32 * self.line_height();
+                let x1 = self.x_in_row(row, from);
+                let x2 = self.x_in_row(row, to);
+                sink.emit(RenderCommand::StrokeRect {
+                    x: text.x - self.scroll_x + x1,
+                    y,
+                    width: (x2 - x1).max(1.0),
+                    height: self.line_height(),
+                    color: p.ink(p.yellow),
+                    line_width: 1.0,
+                    corner_radii: CornerRadii::all(2.0),
+                });
+            }
+        }
+    }
+
     /// The bracket at the primary caret and its partner, outlined.
     fn draw_bracket_pair(
         &self,
@@ -708,7 +890,7 @@ impl CodeView {
                 continue;
             };
             #[allow(clippy::cast_precision_loss, reason = "a row on screen")]
-            let y = self.bounds.y + i as f32 * self.line_height();
+            let y = self.rows_top() + i as f32 * self.line_height();
             let x = text.x - self.scroll_x + self.x_in_row(row, s.head);
             sink.emit(fill(
                 Rect::new(x, y, self.options.caret_width.max(1.0), self.line_height()),
@@ -733,7 +915,7 @@ impl CodeView {
         let row = self.row_on_screen(rows, at)?;
         let i = rows.iter().position(|r| r == row)?;
         #[allow(clippy::cast_precision_loss, reason = "a row on screen")]
-        let y = self.bounds.y + i as f32 * self.line_height();
+        let y = self.rows_top() + i as f32 * self.line_height();
         let x = self.x_in_row(row, at);
         let c = self.editor.buffer().char_at(at)?;
         let w = self.char_width(c, row.x_in_line + x);
@@ -752,6 +934,29 @@ impl CodeView {
         let m = key.modifiers;
         let shift = m.shift;
         let ctrl = m.ctrl && !m.alt;
+        match key.key {
+            Key::F if ctrl => {
+                self.open_find(false);
+                return Some(CodeViewEvent::Moved);
+            }
+            Key::H if ctrl => {
+                self.open_find(true);
+                return Some(CodeViewEvent::Moved);
+            }
+            Key::F3 => {
+                let event = self.act_on_bar(BarAction::Next { backwards: shift });
+                return Some(event);
+            }
+            _ => {}
+        }
+        if self.find.open && self.find.focused {
+            // Every other key is the bar's while it has the keyboard -- a key
+            // it does not use is nobody's, not the text's behind it.
+            return self
+                .find
+                .handle_key(key)
+                .map(|action| self.act_on_bar(action));
+        }
         let page = self.visible_rows().saturating_sub(1).max(1);
         let event = match key.key {
             Key::Left if ctrl => Some(self.moved(|e| e.move_word_left(shift))),
@@ -836,6 +1041,9 @@ impl CodeView {
 
     fn after_edit(&mut self) {
         self.goal_x = None;
+        if self.find.open && self.find.revision != Some(self.editor.revision()) {
+            self.refresh_matches();
+        }
         self.reveal();
     }
 
@@ -964,9 +1172,13 @@ impl CodeView {
                 self.drag.take().map(|_| CodeViewEvent::Moved)
             }
             MouseEventKind::Press(MouseButton::Left) if self.bounds.contains(x, y) => {
+                if self.find.open && y < self.rows_top() {
+                    return Some(self.press_find_bar(x, y));
+                }
                 if let (true, Some((_, thumb))) = (on_bar, geometry) {
                     return Some(self.press_bar(thumb, y));
                 }
+                self.find.focused = false;
                 Some(self.press_text(x, y, modifiers))
             }
             MouseEventKind::DoubleClick(MouseButton::Left)
@@ -982,6 +1194,23 @@ impl CodeView {
             }
             _ => None,
         }
+    }
+
+    /// A press on the find bar: a switch flips, a field takes the keyboard.
+    fn press_find_bar(&mut self, x: f32, y: f32) -> CodeViewEvent {
+        let layout = self.find.layout(self.bounds);
+        if let Some((switch, _)) = layout.switches.iter().find(|(_, r)| r.contains(x, y)) {
+            self.find.flip(*switch);
+            return self.act_on_bar(BarAction::Search);
+        }
+        if layout.find.contains(x, y) {
+            self.find.focused = true;
+            self.find.field = Field::Find;
+        } else if layout.replace.is_some_and(|r| r.contains(x, y)) {
+            self.find.focused = true;
+            self.find.field = Field::Replace;
+        }
+        CodeViewEvent::Moved
     }
 
     fn press_bar(&mut self, thumb: Rect, y: f32) -> CodeViewEvent {
@@ -1197,7 +1426,7 @@ mod tests {
         let text = v.text_rect();
         (
             text.x - v.scroll_x + v.x_in_row(row, offset) + 0.5,
-            BOUNDS.y + (i as f32 + 0.5) * v.line_height(),
+            v.rows_top() + (i as f32 + 0.5) * v.line_height(),
         )
     }
 
@@ -1590,6 +1819,207 @@ mod tests {
         assert_eq!(v.editor().selections().len(), 1);
         // A key the view does not use is not claimed.
         assert_eq!(v.handle_key(&key(Key::F5, false, false)), None);
+    }
+
+    fn alt(k: Key) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        }
+    }
+
+    fn type_into(v: &mut CodeView, text: &str) {
+        for c in text.chars() {
+            v.handle_key(&typed(&c.to_string()));
+        }
+    }
+
+    /// The text of every `Text` command, for the bar's status.
+    fn status_of(cmds: &[RenderCommand]) -> Vec<String> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **Ctrl+F opens the bar on the selected text; typing searches as it
+    /// goes, from where the caret was; the bar says which match of how
+    /// many.** The rows start below the bar, and again at the top once
+    /// Escape closes it.
+    #[test]
+    fn the_find_bar_searches_as_it_is_typed() {
+        let mut v = view("alpha beta\nbeta gamma\nalphabet");
+        v.editor_mut()
+            .set_selections(vec![Selection { anchor: 0, head: 5 }]);
+        v.handle_key(&key(Key::F, true, false));
+        assert!(v.find_open());
+        assert_eq!(v.find.find.text(), "alpha");
+        assert!(v.rows_top() > BOUNDS.y, "the rows start below the bar");
+
+        // Typing replaces the selected field text.
+        type_into(&mut v, "bet");
+        assert_eq!(v.find.find.text(), "bet");
+        assert_eq!(
+            v.editor().primary().range(),
+            6..9,
+            "the first match from the caret"
+        );
+        assert_eq!(v.find.matches.len(), 3);
+        assert!(
+            status_of(&drawn(&v)).contains(&"1 of 3".to_owned()),
+            "{:?}",
+            status_of(&drawn(&v))
+        );
+
+        v.handle_key(&key(Key::Enter, false, false));
+        assert_eq!(v.editor().primary().range(), 11..14);
+        v.handle_key(&key(Key::Enter, false, true));
+        assert_eq!(v.editor().primary().range(), 6..9, "Shift+Enter goes back");
+
+        v.handle_key(&key(Key::Escape, false, false));
+        assert!(!v.find_open());
+        assert_eq!(v.rows_top(), BOUNDS.y);
+
+        // From a caret past the first two, the search starts there.
+        v.editor_mut().set_selections(vec![Selection::caret(12)]);
+        v.handle_key(&key(Key::F, true, false));
+        v.handle_key(&key(Key::Backspace, false, false));
+        type_into(&mut v, "bet");
+        assert_eq!(
+            v.editor().primary().range(),
+            27..30,
+            "from the caret, not the top"
+        );
+    }
+
+    /// **Alt+Enter selects every match as a caret and hands the keyboard
+    /// back, so typing edits them all.**
+    #[test]
+    fn alt_enter_makes_every_match_a_caret() {
+        let mut v = view("x = f(x) + x");
+        v.handle_key(&key(Key::F, true, false));
+        type_into(&mut v, "x");
+        v.handle_key(&alt(Key::W));
+        v.handle_key(&KeyEvent {
+            modifiers: Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            ..key(Key::Enter, false, false)
+        });
+        assert!(!v.find.focused, "the keyboard went back to the text");
+        type_into(&mut v, "y");
+        assert_eq!(v.editor().text(), "y = f(y) + y");
+    }
+
+    /// **The switches search again; a pattern that is not one says why, in
+    /// red, with the field marked wrong.**
+    #[test]
+    fn the_switches_search_again_and_a_bad_pattern_says_why() {
+        let p = Palette::for_mode(false);
+        let mut v = view("Cat cat cat9");
+        v.handle_key(&key(Key::F, true, false));
+        type_into(&mut v, "cat");
+        assert_eq!(v.find.matches.len(), 3);
+        v.handle_key(&alt(Key::C));
+        assert_eq!(v.find.matches.len(), 2, "case-sensitive");
+        v.handle_key(&alt(Key::W));
+        assert_eq!(v.find.matches.len(), 1, "and whole words");
+        v.handle_key(&alt(Key::R));
+        type_into(&mut v, "(");
+        assert!(v.find.error.is_some());
+        let cmds = drawn(&v);
+        assert!(cmds.iter().any(|c| matches!(c,
+            RenderCommand::Text { text, color, .. }
+                if text.contains("not a regular expression") && *color == p.ink(p.red))));
+        assert!(
+            cmds.iter().any(|c| matches!(c,
+                RenderCommand::StrokeRect { color, .. } if *color == p.red)),
+            "the field is not marked wrong"
+        );
+    }
+
+    /// **Replace takes the selected match and moves on; replace-all is one
+    /// undo step.**
+    #[test]
+    fn replace_and_replace_all_from_the_bar() {
+        let mut v = view("a1 a2 a3");
+        v.handle_key(&key(Key::H, true, false));
+        type_into(&mut v, "a");
+        assert_eq!(v.editor().primary().range(), 0..1);
+        v.handle_key(&key(Key::Tab, false, false));
+        type_into(&mut v, "b");
+        assert_eq!(
+            v.handle_key(&key(Key::Enter, false, false)),
+            Some(CodeViewEvent::Changed)
+        );
+        assert_eq!(v.editor().text(), "b1 a2 a3");
+        assert_eq!(v.editor().primary().range(), 3..4, "on to the next");
+        v.handle_key(&KeyEvent {
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            ..key(Key::Enter, false, false)
+        });
+        assert_eq!(v.editor().text(), "b1 b2 b3");
+        v.handle_key(&key(Key::Escape, false, false));
+        v.handle_key(&key(Key::Z, true, false));
+        assert_eq!(v.editor().text(), "b1 a2 a3", "replace-all was one step");
+    }
+
+    /// **Every match on screen is outlined in yellow's ink.**
+    #[test]
+    fn matches_on_screen_are_outlined() {
+        let p = Palette::for_mode(false);
+        let mut v = view("ab ab ab");
+        v.handle_key(&key(Key::F, true, false));
+        type_into(&mut v, "ab");
+        let outlines = drawn(&v)
+            .iter()
+            .filter(|c| {
+                matches!(c,
+                RenderCommand::StrokeRect { color, .. } if *color == p.ink(p.yellow))
+            })
+            .count();
+        assert_eq!(outlines, 3);
+    }
+
+    /// **A click on a switch flips it; a click in the text takes the
+    /// keyboard back; F3 from the text steps on.**
+    #[test]
+    fn the_bar_answers_the_pointer_and_f3() {
+        let mut v = view("one two one");
+        v.handle_key(&key(Key::F, true, false));
+        type_into(&mut v, "one");
+        let layout = v.find.layout(BOUNDS);
+        let (_, case) = layout.switches[0];
+        v.handle_mouse(
+            &mouse(
+                case.x + 2.0,
+                case.y + 2.0,
+                MouseEventKind::Press(MouseButton::Left),
+            ),
+            Modifiers::NONE,
+        );
+        assert!(v.find.case_sensitive);
+
+        let (x, y) = point_of(&v, 5);
+        v.handle_mouse(
+            &mouse(x, y, MouseEventKind::Press(MouseButton::Left)),
+            Modifiers::NONE,
+        );
+        assert!(!v.find.focused);
+        v.handle_key(&key(Key::F3, false, false));
+        assert_eq!(v.editor().primary().range(), 8..11);
     }
 
     /// Digits of a line count.

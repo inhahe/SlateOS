@@ -3507,6 +3507,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "statehistory"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
 name = "stickynotes"
 version = "0.1.0"
 dependencies = [

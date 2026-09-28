@@ -84,15 +84,13 @@ full, both call sites at once". True of boot-test.sh, false here: this script ne
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import gittree  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 TARGET = "x86_64-unknown-linux-gnu"
@@ -105,18 +103,16 @@ GATED = re.compile(
     r'|cfg\(target_family\s*=\s*"unix"\)'
     r'|#\[cfg\(not\(windows\)\)\]'
 )
-CRATE_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
 
 
-def crates_with_unix_code() -> list[str]:
-    """Every crate in the workspace holding a unix-gated block.
+def crates_with_unix_code(candidates: list[tuple[str, Path]] | None = None) -> list[str]:
+    """Every member crate holding a unix-gated block, of `candidates` (by default
+    [`candidate_crates`]).
 
-    Derived by reading, so a crate joins by growing its first one. Skips
-    `target/` and `.git/`, and skips a `Cargo.toml` with no `src/` -- a
-    workspace root is not a crate to check.
+    Derived by reading, so a crate joins by growing its first one.
     """
     found: set[str] = set()
-    for name, src in candidate_crates():
+    for name, src in candidates if candidates is not None else candidate_crates():
         for f in src.rglob("*.rs"):
             if GATED.search(f.read_text(encoding="utf-8", errors="surrogateescape")):
                 found.add(name)
@@ -124,8 +120,39 @@ def crates_with_unix_code() -> list[str]:
     return sorted(found)
 
 
-def candidate_crates() -> list[tuple[str, Path]]:
-    """Every crate this gate *could* check: (name, src dir), workspace-wide.
+def workspace_members(root: Path = REPO) -> list[tuple[str, Path]]:
+    """The workspace's member crates as cargo lists them: (name, manifest dir).
+
+    `cargo metadata --no-deps`, not a walk of the disk. Until 2026-09-28 this was a
+    walk: first `REPO.rglob("Cargo.toml")`, which descended into every `target/` and
+    took minutes, then (lane C, 26efac00c) `gittree`'s walk, which prunes those and
+    takes 0.3 s. Either walk finds every `Cargo.toml` under the root, the crates the
+    root manifest *excludes* included: vendored code (`rustcrypto/`, `posix/vendor/`),
+    the bare-metal services under `services/`. `cargo clippy -p` then either cannot
+    name one ("package ID specification ... did not match any packages") or, when it
+    is a path dependency of a member, builds it with `--all-targets` -- upstream's
+    benches and tests, with upstream's nightly features and dev-dependencies -- and the
+    gate refused every push for code nobody here wrote
+    (`requests/e-a-check-cfg-unix-checks-crates-the-workspace-excludes.md`: `base64ct`,
+    vendored under `rustcrypto/`, whose bench needs `#![feature(test)]`).
+
+    `--no-deps` resolves nothing, so this reads the members' manifests only: no walk,
+    no network, no lockfile write. A failure is an error, not an empty list -- a gate
+    that found no members would otherwise report nothing to check as success.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline",
+         "--manifest-path", str(root / "Cargo.toml")],
+        capture_output=True, text=True, timeout=600, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"cargo metadata failed:\n{proc.stderr[-2000:]}")
+    packages = json.loads(proc.stdout).get("packages", [])
+    return [(p["name"], Path(p["manifest_path"]).parent) for p in packages]
+
+
+def candidate_crates(root: Path = REPO) -> list[tuple[str, Path]]:
+    """Every crate this gate *could* check: (name, src dir), the workspace's members.
 
     Exists to supply the DENOMINATOR. The gate checks the subset holding a unix-gated
     block, and for a long time it reported only that subset's size -- "62 crates with
@@ -139,27 +166,16 @@ def candidate_crates() -> list[tuple[str, Path]]:
     inside a branch only the push hook reached. Their phrasing is the one to keep -- *the
     run that reads as a complete audit was the one run that said nothing about its own
     gaps.*
+
+    Members only ([`workspace_members`]): a crate the root excludes is not the
+    workspace's to check, and `-p` cannot name it. A member with no `src/` -- a
+    workspace root -- is not a crate to check either.
 """
     out: list[tuple[str, Path]] = []
-    # Walked through `gittree.WorkTree`, which prunes `target*/` and `.git`
-    # *while walking*. This was `REPO.rglob("Cargo.toml")` with the build
-    # directories filtered out of the results afterwards -- which descends
-    # into every one of them first. On a lane whose `target/` holds a
-    # `-Zbuild-std` userland that is minutes of stat() per walk, inside the
-    # push hook: measured on lane C 2026-09-25, the pruned walk takes 0.3 s
-    # and finds the same 421 manifests git tracks; the unpruned one was still
-    # going after eighteen minutes.
-    for rel in gittree.WorkTree(str(REPO)).files_under(""):
-        if rel != "Cargo.toml" and not rel.endswith("/Cargo.toml"):
-            continue
-        tom = REPO / rel
-        src = tom.parent / "src"
-        if not src.is_dir():
-            continue
-        m = CRATE_NAME.search(tom.read_text(encoding="utf-8", errors="surrogateescape"))
-        if not m:
-            continue
-        out.append((m.group(1), src))
+    for name, manifest_dir in workspace_members(root):
+        src = manifest_dir / "src"
+        if src.is_dir():
+            out.append((name, src))
     return out
 
 
@@ -218,12 +234,41 @@ def self_test() -> int:
     """
     failures: list[str] = []
 
-    derived = crates_with_unix_code()
+    try:
+        derived = crates_with_unix_code()
+    except RuntimeError as e:
+        failures.append(f"the workspace's members could not be listed: {e}")
+        derived = []
     for expect in ("su", "sshd", "coreutils"):
         if expect not in derived:
             failures.append(f"the derivation missed `{expect}`, which has unix-gated code")
     if len(derived) < 20:
         failures.append(f"the derivation found only {len(derived)} crates; it is probably broken")
+
+    # THE CRATES IT NAMES ARE THE WORKSPACE'S. A scratch workspace whose one member
+    # depends on a crate the root excludes -- both with unix-gated code, which is the
+    # shape `rustcrypto/` and `posix/vendor/` have: only the member is a candidate. The
+    # disk walk this replaced listed both, and `-p` on the excluded one broke the run.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "2"\nmembers = ["member"]\nexclude = ["vendored"]\n',
+            encoding="utf-8", newline="")
+        for name, dep in (("member", 'vendored = { path = "../vendored" }\n'), ("vendored", "")):
+            (root / name / "src").mkdir(parents=True)
+            (root / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n\n'
+                f"[dependencies]\n{dep}", encoding="utf-8", newline="")
+            (root / name / "src" / "lib.rs").write_text(
+                "#[cfg(unix)]\npub fn gated() {}\n", encoding="utf-8", newline="")
+        try:
+            names = sorted(n for n, _ in candidate_crates(root))
+        except RuntimeError as e:
+            names = [f"<{e}>"]
+        if names != ["member"]:
+            failures.append(
+                f"the candidates of a workspace with an excluded path dependency were "
+                f"{names}, not ['member']: an excluded crate would be named with -p")
 
     if not target_installed():
         print(f"check-cfg-unix --self-test: {TARGET} not installed; compile fixtures skipped")
@@ -349,8 +394,15 @@ def main() -> int:
     if args.selftest:
         return self_test()
 
-    crates = crates_with_unix_code()
-    candidates = len(candidate_crates())
+    try:
+        members = candidate_crates()
+        crates = crates_with_unix_code(members)
+    except RuntimeError as e:
+        # 2, "the checker could not run" (the usage above): not a pass, and not a
+        # finding about the code either.
+        print(f"check-cfg-unix: cannot list the workspace's crates -- {e}")
+        return 2
+    candidates = len(members)
     if args.list:
         for c in crates:
             print(c)

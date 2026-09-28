@@ -83453,7 +83453,7 @@ one field of a form.
 
 **Where it bites:** `gui/toolkit/src/checkbox.rs`, `gui/toolkit/src/radio.rs`.
 No program uses them yet; lane E's are asked to in
-`requests/c-e-the-toolkit-has-switches-checkboxes-and-radio-buttons.md`.
+`requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

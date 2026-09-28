@@ -1968,15 +1968,17 @@ live.
   Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
   real cross-crate breaks; option A is in force, and nothing is added.
 
-- `[C]` **A switch, checkboxes and radio buttons in the toolkit** -- done
-  2026-09-27 (`design-decisions.md` §1432). The retained widget tree declared
-  checkboxes and radio buttons and nothing used it, so every program drew its
-  own. `guitk::switch` (moved from the desktop, where it had replaced seventeen
-  copies, and made a control: hover, focus ring, disabled, a generous target),
-  `guitk::checkbox` (two-state, and design.txt's yes/no/default three-state
-  box) and `guitk::radio` (a group whose arrows choose and wrap; emptied by a
-  second click only where "none" is an answer). **Lane E:** the applications'
-  own (`requests/c-e-the-toolkit-has-switches-checkboxes-and-radio-buttons.md`).
+- `[C]` **A switch, checkboxes, radio buttons and a drop-down in the toolkit**
+  -- done 2026-09-27 (`design-decisions.md` §1432). The retained widget tree
+  declared checkboxes and radio buttons and nothing used it, so every program
+  drew its own. `guitk::switch` (moved from the desktop, where it had replaced
+  seventeen copies, and made a control: hover, focus ring, disabled, a generous
+  target), `guitk::checkbox` (two-state, and design.txt's yes/no/default
+  three-state box), `guitk::radio` (a group whose arrows choose and wrap;
+  emptied by a second click only where "none" is an answer) and
+  `guitk::dropdown` (the Aero reference's select; Windows' keys; its list
+  placed about the field, so it never opens over it). **Lane E:** the applications'
+  own (`requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`).
 
 - `[C]` **A slider you can drag, and targets larger than what is drawn** --
   done 2026-09-27 (`design-decisions.md` §1431). `guitk::slider`: the

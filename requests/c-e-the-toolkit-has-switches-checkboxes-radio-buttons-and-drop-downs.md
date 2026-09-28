@@ -1,4 +1,4 @@
-# C → E — the toolkit has a switch, checkboxes and radio buttons, and your applications draw their own
+# C → E — the toolkit has a switch, checkboxes, radio buttons and a drop-down, and your applications draw their own
 
 **From:** lane C. **To:** lane E. **Filed:** 2026-09-27.
 **Status:** open — adoption, one application at a time; nothing is blocked on
@@ -7,13 +7,13 @@ it and nothing breaks if it waits. The companion request for the slider is
 
 ## In short
 
-Three controls every settings page and dialog is made of are toolkit
+Four controls every settings page and dialog is made of are toolkit
 components now, drawn in the user's colours with the default theme's look:
 `guitk::switch` (moved from the desktop shell, where it had replaced
-seventeen hand-drawn copies), `guitk::checkbox` and `guitk::radio` (new). This
-asks you to draw yours through them, so a user meets one switch, one checkbox
-and one radio button across the system, with the same keys and the same size
-of target. Nothing about *what* your controls do changes.
+seventeen hand-drawn copies), `guitk::checkbox`, `guitk::radio` and
+`guitk::dropdown` (new). This asks you to draw yours through them, so a user
+meets one of each across the system, with the same keys and the same size of
+target. Nothing about *what* your controls do changes.
 
 ## What there is
 
@@ -50,6 +50,18 @@ chosen option does nothing -- unless the group is built with
 `design.txt`'s "a way for the user to go back to having no radio button
 selected").
 
+**`guitk::dropdown`** -- a `Dropdown` holds the options, the choice and its
+list. `draw(sink, palette, field, State, focus_ring)` draws the field (the
+Aero reference's `aero-srch-select`: 26 pixels, the input's well and edge, a
+chevron); while `is_open()`, draw `draw_list(palette)` on top of everything
+else. Send it every mouse event (`handle_mouse(field, &event, viewport)`) and
+the keys while it has the keyboard (`handle_key(field, &key, viewport)` ->
+`(event, taken)`); it reports `Selected(i)`, `Opened` and `Closed`. Closed, the
+arrows change the choice in place and a letter steps through the choices
+starting with it; Alt+Down, F4, Space or Enter open it; open, Enter or Space
+chooses, Escape closes unchanged, Tab closes and is passed on. The list opens
+below the field, or above it where there is no room below -- never over it.
+
 ## Your applications with their own
 
 Found by a search on 2026-09-27; each count is mentions, not controls.
@@ -68,12 +80,14 @@ Found by a search on 2026-09-27; each count is mentions, not controls.
 | radio | `undelete` | 13 |
 | radio | `netmanager` | 5 |
 | radio | `podcast` | 4 |
+| drop-down | `settings` (main and `remote.rs`) | own painters |
+| drop-down | `unitconverter` | own painter |
 
 (`apps/radio` is the internet-radio player, not radio buttons.)
 
 The Aero search dialog (`apps/filesearch`) and Indexing Options
 (`apps/indexer`) in `roadmap-detailed.md` §3.4 are made of these three
-controls, a text field and buttons -- all in the toolkit now.
+controls, a text field, drop-downs and buttons -- all in the toolkit now.
 
 If one of yours needs something these do not do, tell me and it goes into the
 toolkit rather than into a copy.

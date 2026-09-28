@@ -27,6 +27,7 @@ pub mod button;
 pub mod canvas;
 pub mod checkbox;
 pub mod codeedit;
+pub mod codeview;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;

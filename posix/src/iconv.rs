@@ -22,7 +22,7 @@
 //! | `UCS-4` | big-endian, no mark, up to U+7FFFFFFF; `UCS-4LE` |
 //! | `WCHAR_T` | what a `wchar_t` holds: glibc's own form, UCS-4 in the machine's order, unchecked |
 //! | `UTF-7`, `UTF-7-IMAP` | RFC 2152's mail-safe Unicode, and IMAP's variant for folder names: ASCII, with runs of base64-coded UTF-16 opened by `+` (`&`); stateful, the state kept from call to call |
-//! | `CP1255` (`WINDOWS-1255`, `MS-HEBR`), `CP1258` (`WINDOWS-1258`) | Hebrew and Vietnamese: 8-bit, with combining marks.  Decoding keeps each letter back, from call to call, until it is known whether a mark follows, and writes a letter and its mark as the precomposed character when Unicode has one; a reset writes the letter kept back.  Encoding writes a precomposed character with no byte of its own as its letter and marks ([`crate::iconv_combining`], from glibc's `cp1255.c` and `cp1258.c`) |
+//! | `CP1255` (`WINDOWS-1255`, `MS-HEBR`), `CP1258` (`WINDOWS-1258`), `TCVN5712-1` (`TCVN`, `TCVN-5712`, `TCVN5712-1:1993`) | Hebrew and Vietnamese: 8-bit, with combining marks.  Decoding keeps each letter back, from call to call, until it is known whether a mark follows, and writes a letter and its mark as the precomposed character when Unicode has one; a reset writes the letter kept back.  Encoding writes a precomposed character with no byte of its own as its letter and marks ([`crate::iconv_combining`], from glibc's `cp1255.c`, `cp1258.c` and `tcvn5712-1.c`).  TCVN5712-1 has letters among the C0 controls, and every byte is a character |
 //!
 //! A name is read as glibc reads one: options peeled off the end -- the last
 //! `/`- or `,`-separated word, while there are two slashes -- then every
@@ -161,13 +161,16 @@ impl Form {
     }
 }
 
-/// glibc's two 8-bit sets with combining characters.
+/// glibc's three 8-bit sets with combining characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Combining {
     /// `CP1255//`: Hebrew, with its points.
     Cp1255,
     /// `CP1258//`: Vietnamese, with its tone marks.
     Cp1258,
+    /// `TCVN5712-1//`: Vietnamese, the national standard -- letters in the
+    /// C0 control range too, and every byte a character.
+    Tcvn,
 }
 
 /// The character sets this libc converts: one per glibc conversion module.
@@ -199,7 +202,7 @@ enum Charset {
     /// `UTF-7//`, or `imap`, `UTF-7-IMAP//`: stateful -- runs of base64
     /// between ASCII, with state kept between calls (see [`decode_utf7`]).
     Utf7 { imap: bool },
-    /// `CP1255//` or `CP1258//`: 8-bit, with combining marks the decoder
+    /// `CP1255//`, `CP1258//` or `TCVN5712-1//`: 8-bit, with combining marks the decoder
     /// composes with the letter before them -- kept back, from call to call,
     /// to see whether one follows -- and the encoder decomposes into (see
     /// [`decode_combining`]).
@@ -452,11 +455,11 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 }
 
 // ---------------------------------------------------------------------------
-// CP1255 and CP1258: 8-bit, with combining characters
+// CP1255, CP1258 and TCVN5712-1: 8-bit, with combining characters
 // ---------------------------------------------------------------------------
 //
-// glibc writes these two by hand (iconvdata/cp1255.c, cp1258.c), and so is
-// this: a byte table like the others, plus composition.  A Hebrew point or a
+// glibc writes these three by hand (iconvdata/cp1255.c, cp1258.c,
+// tcvn5712-1.c), and so is this: a byte table like the others, plus composition.  A Hebrew point or a
 // Vietnamese tone mark follows the letter it goes on; the decoder keeps each
 // letter back until it sees whether a mark follows, and writes the pair as
 // the one precomposed character Unicode has for it, if there is one.  The
@@ -464,13 +467,15 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 // is written as its letter and marks.  The tables are glibc's, read out of
 // the C (`crate::iconv_combining`); the loops below are glibc's, line by line.
 
-/// The character sets a stripped name names, of these two.
+/// The character set a stripped name names, of these three.
 fn combining_named(name: &[u8]) -> Option<Charset> {
-    use crate::iconv_combining::{CP1255_NAMES, CP1258_NAMES};
+    use crate::iconv_combining::{CP1255_NAMES, CP1258_NAMES, TCVN_NAMES};
     if CP1255_NAMES.contains(&name) {
         Some(Charset::Combining(Combining::Cp1255))
     } else if CP1258_NAMES.contains(&name) {
         Some(Charset::Combining(Combining::Cp1258))
+    } else if TCVN_NAMES.contains(&name) {
+        Some(Charset::Combining(Combining::Tcvn))
     } else {
         None
     }
@@ -483,10 +488,11 @@ type ComposeGroups = [(u16, &'static [(u16, u16)])];
 /// The composition of `last` with the mark `ch`, if glibc's table has one:
 /// `comp_table_data`, searched in the group of `ch`.
 fn compose(set: Combining, last: u32, ch: u32) -> Option<u32> {
-    use crate::iconv_combining::{CP1255_COMPOSE, CP1258_COMPOSE};
+    use crate::iconv_combining::{CP1255_COMPOSE, CP1258_COMPOSE, TCVN_COMPOSE};
     let (range, groups): (core::ops::Range<u32>, &ComposeGroups) = match set {
         Combining::Cp1255 => (0x05b0..0x05c5, &CP1255_COMPOSE),
         Combining::Cp1258 => (0x0300..0x0340, &CP1258_COMPOSE),
+        Combining::Tcvn => (0x0300..0x0340, &TCVN_COMPOSE),
     };
     if !range.contains(&ch) {
         return None;
@@ -498,8 +504,8 @@ fn compose(set: Combining, last: u32, ch: u32) -> Option<u32> {
     pairs.get(at).map(|&(_, composed)| u32::from(composed))
 }
 
-/// glibc's CP1255 and CP1258 decoders (`from_cp1255`, `from_cp1258`), over
-/// glibc's generic loop.  `held` is the character kept back -- glibc's
+/// glibc's CP1255, CP1258 and TCVN5712-1 decoders (`from_cp1255`,
+/// `from_cp1258`, `from_tcvn5712_1`), over glibc's generic loop.  `held` is the character kept back -- glibc's
 /// `*statep >> 3`, 0 for none -- kept from call to call; [`Descriptor::reset`]
 /// writes it out.  A letter that a mark may follow is kept back; a mark that
 /// composes with the kept letter makes the precomposed character, written at
@@ -514,11 +520,6 @@ fn decode_combining(
     ignore: bool,
     held: &mut u32,
 ) -> Pass {
-    use crate::iconv_combining::{CP1255_TO_UCS4, CP1258_TO_UCS4};
-    let table = match set {
-        Combining::Cp1255 => &CP1255_TO_UCS4,
-        Combining::Cp1258 => &CP1258_TO_UCS4,
-    };
     let (mut i, mut o, mut irreversible) = (0, 0, 0);
     let mut status = Status::EmptyInput;
     while let Some(&byte) = input.get(i) {
@@ -526,26 +527,20 @@ fn decode_combining(
             status = Status::FullOutput;
             break;
         }
-        let mut ch = u32::from(byte);
-        if byte >= 0x80 {
-            ch = table
-                .get(usize::from(byte - 0x80))
-                .map_or(0, |&u| u32::from(u));
-            if ch == 0 {
-                // glibc's STANDARD_FROM_LOOP_ERR_HANDLER, before anything
-                // is done with the letter kept back: it stays kept.
-                status = Status::IllegalInput;
-                if !ignore {
-                    break;
-                }
-                i += 1;
-                irreversible += 1;
-                continue;
+        let Some(ch) = combining_char(set, byte) else {
+            // glibc's STANDARD_FROM_LOOP_ERR_HANDLER, before anything is
+            // done with the letter kept back: it stays kept.
+            status = Status::IllegalInput;
+            if !ignore {
+                break;
             }
-        }
+            i += 1;
+            irreversible += 1;
+            continue;
+        };
         let must_hold = match set {
             Combining::Cp1255 => (0x05d0..=0x05f2).contains(&ch),
-            Combining::Cp1258 => (0x0041..=0x01b0).contains(&ch),
+            Combining::Cp1258 | Combining::Tcvn => (0x0041..=0x01b0).contains(&ch),
         };
         if *held != 0 {
             if let Some(composed) = compose(set, *held, ch) {
@@ -584,8 +579,35 @@ fn decode_combining(
     }
 }
 
-/// glibc's CP1255 and CP1258 encoders (`to_cp1255`, `to_cp1258`), one
-/// character: its byte, by glibc's ranges into `from_ucs4`, or else its
+/// The character `byte` is in `set`, by glibc's tables; `None` for a byte
+/// CP1255 or CP1258 leaves out.  TCVN5712-1 leaves none out: glibc's
+/// decoder has no check, and its tables give every byte a character (0x00's
+/// is U+0000); its letters below 0x18 have a table of their own.
+fn combining_char(set: Combining, byte: u8) -> Option<u32> {
+    use crate::iconv_combining::{CP1255_TO_UCS4, CP1258_TO_UCS4, TCVN_FROM_HIGH, TCVN_FROM_LOW};
+    let high = |table: &[u16; 128]| {
+        let u = table.get(usize::from(byte.checked_sub(0x80)?)).copied()?;
+        (u != 0).then_some(u32::from(u))
+    };
+    match set {
+        Combining::Cp1255 if byte >= 0x80 => high(&CP1255_TO_UCS4),
+        Combining::Cp1258 if byte >= 0x80 => high(&CP1258_TO_UCS4),
+        Combining::Cp1255 | Combining::Cp1258 => Some(u32::from(byte)),
+        Combining::Tcvn => {
+            let u = if byte < 0x18 {
+                TCVN_FROM_LOW.get(usize::from(byte)).copied()
+            } else if byte >= 0x80 {
+                TCVN_FROM_HIGH.get(usize::from(byte - 0x80)).copied()
+            } else {
+                Some(u16::from(byte))
+            };
+            u.map(u32::from)
+        }
+    }
+}
+
+/// glibc's CP1255, CP1258 and TCVN5712-1 encoders (`to_cp1255`,
+/// `to_cp1258`, `to_tcvn5712_1`), one character: its byte, by glibc's ranges into `from_ucs4`, or else its
 /// canonical decomposition -- a letter's byte and one or two marks' -- or
 /// `None` for a character neither covers.
 fn encode_combining(set: Combining, ch: u32) -> Option<([u8; 3], usize)> {
@@ -671,6 +693,36 @@ fn encode_combining(set: Combining, ch: u32) -> Option<([u8; 3], usize)> {
                 .binary_search_by_key(&ch, |&(c, ..)| u32::from(c))
                 .ok()?;
             let &(_, base, comb1) = t::CP1258_DECOMPOSE.get(at)?;
+            Some(([base, comb1, 0], 2))
+        }
+        Combining::Tcvn => {
+            if ch == 0x00 || (0x18..0x80).contains(&ch) || ch == 0xa0 {
+                return one(u8::try_from(ch).ok()?);
+            }
+            // glibc's ranges are inclusive here.  0x0001-0x0010 go through the
+            // table: the controls TCVN5712-1 gave to letters have no byte.
+            let res = if ch <= 0x0010 {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_00, 0x0001)
+            } else if (0x00c0..=0x0129).contains(&ch) {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_01, 0x00c0)
+            } else if (0x0168..=0x0169).contains(&ch) {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_02, 0x0168)
+            } else if (0x01a0..=0x01b0).contains(&ch) {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_03, 0x01a0)
+            } else if (0x0300..=0x0323).contains(&ch) {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_04, 0x0300)
+            } else if (0x1ea0..=0x1ef9).contains(&ch) {
+                from(&t::TCVN_FROM_UCS4, t::TCVN_FROM_IDX_05, 0x1ea0)
+            } else {
+                None
+            };
+            if let Some(b) = res {
+                return one(b);
+            }
+            let at = t::TCVN_DECOMPOSE
+                .binary_search_by_key(&ch, |&(c, ..)| u32::from(c))
+                .ok()?;
+            let &(_, base, comb1) = t::TCVN_DECOMPOSE.get(at)?;
             Some(([base, comb1, 0], 2))
         }
     }
@@ -4551,6 +4603,238 @@ mod tests {
         ),
     ];
 
+    // Generated by dlm/oracle/tcvn_harness.py from glibc 2.39's iconv under WSL:
+    // (name, to, from, chunks, outsize, reset, glibc's line).
+    const GLIBC_TCVN: &[OracleCase] = &[
+        (
+            "tc_low_letters",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x01, 0x02, 0x03, 0x11]],
+            64,
+            "out",
+            "tc_low_letters 0,0,4,c39ae1bba403e1bba8|0,0,",
+        ),
+        (
+            "tc_high_letter",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0xb5, 0x78]],
+            64,
+            "out",
+            "tc_high_letter 0,0,2,c3a0|0,0,78",
+        ),
+        (
+            "tc_compose_grave",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x61, 0xb0]],
+            64,
+            "out",
+            "tc_compose_grave 0,0,2,c3a0|0,0,",
+        ),
+        (
+            "tc_compose_tilde",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x4e, 0xb2]],
+            64,
+            "out",
+            "tc_compose_tilde 0,0,2,c391|0,0,",
+        ),
+        (
+            "tc_compose_hook",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x6f, 0xb1]],
+            64,
+            "out",
+            "tc_compose_hook 0,0,2,e1bb8f|0,0,",
+        ),
+        (
+            "tc_mark_alone",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0xb0]],
+            64,
+            "out",
+            "tc_mark_alone 0,0,1,cc80|0,0,",
+        ),
+        (
+            "tc_nocompose",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x71, 0xb0]],
+            64,
+            "out",
+            "tc_nocompose 0,0,2,71cc80|0,0,",
+        ),
+        (
+            "tc_across_calls",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x65], &[0xb3]],
+            64,
+            "out",
+            "tc_across_calls 0,0,1,;0,0,1,c3a9|0,0,",
+        ),
+        (
+            "tc_held_null",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x78, 0x79, 0x7a]],
+            64,
+            "null",
+            "tc_held_null 0,0,3,7879|0,0,",
+        ),
+        (
+            "tc_every_byte_valid",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[
+                0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8d,
+                0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b,
+                0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9,
+                0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+                0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5,
+                0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2, 0xd3,
+                0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0, 0xe1,
+                0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee, 0xef,
+                0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+                0xfe, 0xff,
+            ]],
+            512,
+            "out",
+            "tc_every_byte_valid 0,0,128,c380e1baa2c383c381e1baa0e1bab6e1baacc388e1babae1babcc389e1bab8e1bb86c38ce1bb88c4a8c38de1bb8ac392e1bb8ec395c393e1bb8ce1bb98e1bb9ce1bb9ee1bba0e1bb9ae1bba2c399e1bba6c5a8c2a0c482c382c38ac394c6a0c6afc490c483c3a2c3aac3b4c6a1c6b0c491e1bab0cc80cc89cc83cc81cca3c3a0e1baa3c3a3c3a1e1baa1e1bab2e1bab1e1bab3e1bab5e1baafe1bab4e1baaee1baa6e1baa8e1baaae1baa4e1bb80e1bab7e1baa7e1baa9e1baabe1baa5e1baadc3a8e1bb82e1babbe1babdc3a9e1bab9e1bb81e1bb83e1bb85e1babfe1bb87c3ace1bb89e1bb84e1babee1bb92c4a9c3ade1bb8bc3b2e1bb94e1bb8fc3b5c3b3e1bb8de1bb93e1bb95e1bb97e1bb91e1bb99e1bb9de1bb9fe1bba1e1bb9be1bba3c3b9e1bb96e1bba7c5a9c3bae1bba5e1bbabe1bbade1bbafe1bba9e1bbb1e1bbb3e1bbb7e1bbb9c3bde1bbb5e1bb90|0,0,",
+        ),
+        (
+            "tc_nul",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x00, 0x61]],
+            64,
+            "out",
+            "tc_nul 0,0,2,00|0,0,61",
+        ),
+        (
+            "tc_tight",
+            "UTF-8",
+            "TCVN5712-1",
+            &[&[0x61, 0x62, 0xb5, 0x63]],
+            3,
+            "out",
+            "tc_tight -1,E2BIG,3,6162|0,0,c3a0",
+        ),
+        (
+            "tc_to_wchar",
+            "WCHAR_T",
+            "TCVN5712-1",
+            &[&[0x61, 0xb0, 0x01]],
+            64,
+            "out",
+            "tc_to_wchar 0,0,3,e0000000|0,0,da000000",
+        ),
+        (
+            "tc_enc_direct",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0xc3, 0xa0, 0xe1, 0xba, 0xa0, 0xc2, 0xa0, 0x03]],
+            64,
+            "out",
+            "tc_enc_direct 0,0,8,b584a003|0,0,",
+        ),
+        (
+            "tc_enc_low",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0xc3, 0x9a, 0xe1, 0xbb, 0xa4, 0xe1, 0xbb, 0xb4]],
+            64,
+            "out",
+            "tc_enc_low 0,0,8,010217|0,0,",
+        ),
+        (
+            "tc_enc_control_taken",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0x61, 0x01, 0x62]],
+            64,
+            "out",
+            "tc_enc_control_taken -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "tc_enc_control_17",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0x61, 0x11, 0x62]],
+            64,
+            "out",
+            "tc_enc_control_17 -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "tc_enc_decomp",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0xc3, 0x91, 0xc3, 0xb1]],
+            64,
+            "out",
+            "tc_enc_decomp 0,0,4,4eb26eb2|0,0,",
+        ),
+        (
+            "tc_enc_marks",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0x61, 0xcc, 0x80, 0xcc, 0xa3]],
+            64,
+            "out",
+            "tc_enc_marks 0,0,5,61b0b4|0,0,",
+        ),
+        (
+            "tc_enc_unwritable",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0x61, 0xe4, 0xb8, 0x80]],
+            64,
+            "out",
+            "tc_enc_unwritable -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "tc_enc_tight_decomp",
+            "TCVN5712-1",
+            "UTF-8",
+            &[&[0x61, 0x62, 0xc3, 0x91]],
+            3,
+            "out",
+            "tc_enc_tight_decomp -1,E2BIG,2,6162|0,0,",
+        ),
+        (
+            "tc_names",
+            "UTF-8",
+            "TCVN",
+            &[&[0x61, 0xb0]],
+            64,
+            "out",
+            "tc_names 0,0,2,c3a0|0,0,",
+        ),
+        (
+            "tc_names2",
+            "TCVN-5712",
+            "UTF-8",
+            &[&[0xc3, 0xa0]],
+            64,
+            "out",
+            "tc_names2 0,0,2,b5|0,0,",
+        ),
+        (
+            "tc_names3",
+            "UTF-8",
+            "TCVN5712-1:1993",
+            &[&[0xb5]],
+            64,
+            "out",
+            "tc_names3 0,0,1,|0,0,c3a0",
+        ),
+    ];
+
     fn hex_of(b: &[u8]) -> String {
         use core::fmt::Write as _;
         b.iter().fold(String::new(), |mut s, x| {
@@ -4576,8 +4860,23 @@ mod tests {
     /// dropped, by the reset.
     #[test]
     fn cp1255_and_cp1258_are_glibcs() {
+        let failures = replay_glibc(GLIBC_CP125X);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// glibc 2.39's iconv for TCVN5712-1 (`dlm/oracle/tcvn_harness.py`),
+    /// replayed as `cp1255_and_cp1258_are_glibcs` replays those two.
+    #[test]
+    fn tcvn5712_1_is_glibcs() {
+        let failures = replay_glibc(GLIBC_TCVN);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// An oracle table's cases, call by call and then the reset: the cases
+    /// whose line is not glibc's.
+    fn replay_glibc(cases: &[OracleCase]) -> Vec<String> {
         let mut failures = Vec::new();
-        for &(name, to, from, chunks, outsize, reset_kind, glibc) in GLIBC_CP125X {
+        for &(name, to, from, chunks, outsize, reset_kind, glibc) in cases {
             let cd = open(to, from);
             assert_ne!(cd, ICONV_OPEN_ERR, "{name}: {to} <- {from}");
             let mut line = format!("{name} ");
@@ -4628,36 +4927,44 @@ mod tests {
                 failures.push(format!("{name}:\n  glibc {glibc}\n  ours  {line}"));
             }
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        failures
     }
 
-    /// Every byte either set decodes is written back as that byte, and every
+    /// Every byte a set decodes is written back as that byte, and every
     /// decomposition's parts decode to what composes back into it -- the
     /// tables agree with themselves, as glibc's do.
     #[test]
-    fn cp1255_and_cp1258_round_trip() {
-        for set in [Combining::Cp1255, Combining::Cp1258] {
-            let table = match set {
-                Combining::Cp1255 => &crate::iconv_combining::CP1255_TO_UCS4,
-                Combining::Cp1258 => &crate::iconv_combining::CP1258_TO_UCS4,
-            };
-            for (k, &u) in table.iter().enumerate() {
-                if u == 0 {
+    fn the_combining_sets_round_trip() {
+        for set in [Combining::Cp1255, Combining::Cp1258, Combining::Tcvn] {
+            for byte in 0..=255u8 {
+                let Some(u) = combining_char(set, byte) else {
                     continue;
-                }
-                let byte = u8::try_from(k + 0x80).unwrap();
+                };
                 assert_eq!(
-                    encode_combining(set, u32::from(u)),
+                    encode_combining(set, u),
                     Some(([byte, 0, 0], 1)),
                     "{set:?} {byte:#04x} U+{u:04X}"
                 );
             }
         }
-        for &(composed, ..) in &crate::iconv_combining::CP1258_DECOMPOSE {
-            let (bytes, n) = encode_combining(Combining::Cp1258, u32::from(composed)).unwrap();
+        let decompositions = crate::iconv_combining::CP1255_DECOMPOSE
+            .iter()
+            .map(|&(c, ..)| (Combining::Cp1255, c))
+            .chain(
+                crate::iconv_combining::CP1258_DECOMPOSE
+                    .iter()
+                    .map(|&(c, ..)| (Combining::Cp1258, c)),
+            )
+            .chain(
+                crate::iconv_combining::TCVN_DECOMPOSE
+                    .iter()
+                    .map(|&(c, ..)| (Combining::Tcvn, c)),
+            );
+        for (set, composed) in decompositions {
+            let (bytes, n) = encode_combining(set, u32::from(composed)).unwrap();
             let mut held = 0;
             let mut out = [0u8; 16];
-            let pass = decode_combining(Combining::Cp1258, &bytes[..n], &mut out, false, &mut held);
+            let pass = decode_combining(set, &bytes[..n], &mut out, false, &mut held);
             // A letter and a mark compose back at once; a character with a
             // byte of its own (U+00C0 has 0xC0, which glibc's encoder finds
             // first) decodes to itself, kept back in case a mark follows.
@@ -4669,18 +4976,18 @@ mod tests {
             // Not always the character itself: glibc's tables compose A8 EC
             // to U+0385, which U+1FEE also decomposes into.  What holds is
             // that the bytes are stable: what they decode to, they encode as.
-            assert_eq!(pass.read, n, "U+{composed:04X}");
+            assert_eq!(pass.read, n, "{set:?} U+{composed:04X}");
             assert_eq!(
-                encode_combining(Combining::Cp1258, got),
+                encode_combining(set, got),
                 Some((bytes, n)),
-                "U+{composed:04X} -> U+{got:04X}"
+                "{set:?} U+{composed:04X} -> U+{got:04X}"
             );
         }
     }
 
-    /// The names glibc's gconv-modules gives the two.
+    /// The names glibc's gconv-modules gives the three.
     #[test]
-    fn cp1255_and_cp1258_have_glibcs_names() {
+    fn the_combining_sets_have_glibcs_names() {
         for name in [
             "CP1255",
             "WINDOWS-1255",
@@ -4688,6 +4995,10 @@ mod tests {
             "cp1255",
             "CP1258",
             "WINDOWS-1258",
+            "TCVN5712-1",
+            "TCVN",
+            "TCVN-5712",
+            "TCVN5712-1:1993",
         ] {
             let cd = open(name, "UTF-8");
             assert_ne!(cd, ICONV_OPEN_ERR, "{name}");

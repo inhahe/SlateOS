@@ -19,7 +19,9 @@
 //!   window;
 //! - [`apart_from_accent`], the second of two sides' colours, for a game whose
 //!   pieces follow the theme: a palette hue that cannot be mistaken for the
-//!   accent, the first side's.
+//!   accent, the first side's;
+//! - [`legibility`], for a game's tests: every text a frame draws, read
+//!   against what is drawn under it and held to WCAG's floor for its size.
 //!
 //! A game's own colours -- the seven tetrominoes, the four ghosts, a card's
 //! red suits -- stay in the game, named, and its palette test lists them as
@@ -133,6 +135,83 @@ pub fn apart_from_accent(p: &Palette) -> Color {
         // six spread hues, but a theme may set them all alike; its text colour
         // is then the one thing the accent is not.
         .unwrap_or(p.text)
+}
+
+/// A text colour for text drawn on grounds of a game's own, in the two
+/// strengths WCAG 1.4.3 asks for: [`large`](Self::large), moved only as far
+/// as large text needs to read on every ground (3:1), and
+/// [`small`](Self::small), as far as ordinary text needs (4.5:1). Whether a
+/// game's text is large depends on the size it is drawn at, which follows the
+/// window, so it holds both and picks with [`Ink::at`].
+///
+/// The palette's inks are made for the page (`Palette::ink`); a game writes
+/// on squares, cards and tints the palette never saw, darker than the page in
+/// a light theme and lighter in a dark one -- sudoku's hints fell to 2.5:1 on
+/// its selected square. Moving an ink only as far as it must leaves a theme
+/// whose inks already read exactly as it is, and keeps a hue as near to the
+/// palette's as legibility allows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ink {
+    /// For large text: at least 3:1 on every ground.
+    pub large: Color,
+    /// For ordinary text: at least 4.5:1 on every ground.
+    pub small: Color,
+}
+
+impl Ink {
+    /// `ink` made to read on every one of `grounds`, in both strengths.
+    #[must_use]
+    pub fn on(ink: Color, grounds: &[Color]) -> Self {
+        let to = |floor: f32| {
+            grounds
+                .iter()
+                .fold(ink, |ink, &ground| moved_to_read(ink, ground, floor))
+        };
+        Self {
+            large: to(legibility::LARGE_TEXT_FLOOR),
+            small: to(legibility::TEXT_FLOOR),
+        }
+    }
+
+    /// The strength for text drawn at `size` pixels, bold or not.
+    #[must_use]
+    pub fn at(self, size: f32, bold: bool) -> Color {
+        if legibility::is_large(size, bold) {
+            self.large
+        } else {
+            self.small
+        }
+    }
+}
+
+/// `ink`, moved toward black or white -- whichever reads on `ground` -- only
+/// as far as it must be to reach `floor` against it; unchanged where it
+/// already does.
+///
+/// `guitk::palette::legible_on` with the floor as a parameter: that one is
+/// fixed at 4.5:1, and moving large text there moves its hue twice as far as
+/// large text needs. Scaling toward an extreme keeps the hue, for the reason
+/// that function's documentation gives; the bisection is its too.
+fn moved_to_read(ink: Color, ground: Color, floor: f32) -> Color {
+    if contrast_ratio(ink, ground) >= floor {
+        return ink;
+    }
+    let (black, white) = (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255));
+    let toward = if contrast_ratio(ground, black) >= contrast_ratio(ground, white) {
+        black
+    } else {
+        white
+    };
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let mid = f32::midpoint(lo, hi);
+        if contrast_ratio(ink.lerp(toward, mid), ground) >= floor {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    ink.lerp(toward, hi)
 }
 
 /// Of a colour's two shades -- the dark theme's and the light theme's -- the
@@ -308,9 +387,27 @@ pub fn button_colours(p: &Palette, kind: Kind, ground: Color) -> Vec<Color> {
     .collect()
 }
 
+/// The width [`button`] needs to show `label` whole at `font_size` in a
+/// button `h` high: the label, and the room the button keeps either side of
+/// it. A game that lays its buttons out by their labels asks this rather than
+/// adding a padding of its own, which is a second copy of the button's and
+/// cuts the label the day the two disagree.
+#[must_use]
+pub fn button_width(label: &str, font_size: f32, h: f32) -> f32 {
+    text::measure(label, font_size, FontWeightHint::Bold) + label_pad(h) * 2.0
+}
+
+/// The room [`button`] keeps either side of its label, in a button `h` high:
+/// the toolkit's padding, or less in a button too short to afford it.
+fn label_pad(h: f32) -> f32 {
+    (h * 0.3).min(tk_button::PADDING_H)
+}
+
 /// A push button in the reference's look -- the toolkit's colours for its
 /// kind and state, on `ground` -- with its label at `font_size` in bold,
-/// centred and cut with an ellipsis if the button is too narrow.
+/// centred and cut with an ellipsis if the button is too narrow. A label
+/// taller than the button, or with no room across it, is left out rather
+/// than drawn over the button's edges: the face is still the control.
 ///
 /// The toolkit's own `guitk::button::draw` draws the label at a fixed 13
 /// pixels, which a game that scales with its window cannot use; the colours
@@ -373,21 +470,29 @@ pub fn button(
             corner_radii: CornerRadii::all(radius + 2.0),
         });
     }
-    let pad = (h * 0.3).min(tk_button::PADDING_H);
-    let room = (w - pad * 2.0).max(0.0);
-    let text_w = text::measure(label, font_size, FontWeightHint::Bold).min(room);
+    let room = (w - label_pad(h) * 2.0).max(0.0);
     let line = text::line_height(font_size, FontWeightHint::Bold);
+    if line > h || room <= 0.0 {
+        return;
+    }
+    let text_w = text::measure(label, font_size, FontWeightHint::Bold).min(room);
+    let text_x = x + (w - text_w) / 2.0;
     sink.emit(RenderCommand::Text {
-        x: x + (w - text_w) / 2.0,
+        x: text_x,
         y: y + (h - line) / 2.0,
         text: label.to_owned(),
         color: paint.ink,
         font_size,
         font_weight: FontWeightHint::Bold,
-        max_width: Some(room),
+        // The room from where the label starts to the padding's edge -- not
+        // the whole room, which measured from a centred start reaches past
+        // the button's right edge by half the slack.
+        max_width: Some(x + w - label_pad(h) - text_x),
         overflow: TextOverflow::Ellipsis,
     });
 }
+
+pub mod legibility;
 
 #[cfg(test)]
 mod tests;

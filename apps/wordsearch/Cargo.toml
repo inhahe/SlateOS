@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS Word Search — find hidden words in a grid of letters"
 
 [dependencies]
+# The toolkit's buttons at a game's size (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 randrange = { path = "../../randrange" }
 # The window. Without it `main` built a `WordSearchApp`, bound it to `_app` and
@@ -13,6 +15,10 @@ randrange = { path = "../../randrange" }
 # the file, a clock field that nothing incremented, and a `format_time` that
 # four tests covered and the header did not call.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -118,6 +118,8 @@ dependencies = [
 name = "asteroids"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -684,6 +686,8 @@ dependencies = [
 name = "crossword"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1397,6 +1401,7 @@ name = "hangman"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1818,6 +1823,8 @@ dependencies = [
 name = "lightsout"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2123,6 +2130,8 @@ dependencies = [
 name = "maze"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2364,6 +2373,8 @@ dependencies = [
 name = "nim"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2394,6 +2405,8 @@ version = "0.1.0"
 name = "nonogram"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2687,6 +2700,7 @@ name = "pinball"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "pathtext",
@@ -2706,6 +2720,8 @@ dependencies = [
 name = "pipes"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2779,6 +2795,8 @@ dependencies = [
 name = "pong"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3322,6 +3340,8 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 name = "snake"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3580,6 +3600,8 @@ dependencies = [
 name = "sudoku"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -4181,6 +4203,8 @@ dependencies = [
 name = "wordsearch"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",

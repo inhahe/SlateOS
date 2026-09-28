@@ -10,14 +10,19 @@ oswindow = { path = "../../gui/window" }
 # The shared random source. Was a local LCG reduced with `% bound` -- the
 # copy-pasted one randrange's module docs dissect.
 randrange = { path = "../../randrange" }
-# The user's colours, for the list of keys. The table keeps its own.
+# The user's colours, from the settings the game starts with.
 appearance = { path = "../../gui/appearance" }
+# The toolkit's buttons at a game's size, the chrome's veil, and the
+# legibility reader (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 # The high scores are kept in the user's settings directory
 # (`settingsfile::config_dir`), read capped and written atomically.
 settingsfile = { path = "../../gui/settingsfile" }
 safeio = { path = "../safeio" }
 
 [dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 # `with_scratch_config`, so a test that keeps scores keeps them in a scratch
 # directory rather than the user's.
 settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }

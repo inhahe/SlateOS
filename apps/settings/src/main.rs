@@ -5040,7 +5040,7 @@ impl SettingsState {
 
         if self.lock_after_minutes == 0 {
             s.note(
-                "The screen will not lock on its own. It can still be locked at any time from the start menu or with the lock shortcut.",
+                "The screen will not lock on its own. It can still be locked at any time from the start menu's power menu, or with a shortcut if you set one.",
                 40.0,
             );
         } else {

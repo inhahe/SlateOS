@@ -295,6 +295,9 @@ exclude = [
     "init/.cargo",
     "net/.cargo",
     "userspace/.cargo",
+    # rust-lang's libm, vendored as published (posix/vendor/README.md): a path
+    # dependency of posix, judged by its own lint settings, as rustcrypto is.
+    "posix/vendor",
 ]
 
 [workspace.lints.rust]

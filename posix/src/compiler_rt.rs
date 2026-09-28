@@ -269,6 +269,11 @@ pub extern "C" fn __muldc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
 
 /// `(a + bi) / (c + di)` for `double _Complex`: scaled by the divisor's
 /// exponent against overflow, with Annex G's recovery of infinities and zeros.
+///
+/// The scaling is `libm::scalbn`, not the C `scalbn` in `crate::math`: that
+/// one sets `errno` on overflow, as glibc's does, and complex division must
+/// not -- compiler-rt's `__divdc3` scales with an internal `scalbn` that
+/// touches nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __divdc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
     let (mut a, mut b, mut c, mut d) = (a, b, c, d);
@@ -279,13 +284,13 @@ pub extern "C" fn __divdc3(a: f64, b: f64, c: f64, d: f64) -> Complex64 {
         #[allow(clippy::cast_possible_truncation)]
         let e = logbw as i32;
         ilogbw = e;
-        c = crate::math::scalbn(c, ilogbw.saturating_neg());
-        d = crate::math::scalbn(d, ilogbw.saturating_neg());
+        c = libm::scalbn(c, ilogbw.saturating_neg());
+        d = libm::scalbn(d, ilogbw.saturating_neg());
     }
     let denom = c * c + d * d;
     let mut z = Complex64 {
-        re: crate::math::scalbn((a * c + b * d) / denom, ilogbw.saturating_neg()),
-        im: crate::math::scalbn((b * c - a * d) / denom, ilogbw.saturating_neg()),
+        re: libm::scalbn((a * c + b * d) / denom, ilogbw.saturating_neg()),
+        im: libm::scalbn((b * c - a * d) / denom, ilogbw.saturating_neg()),
     };
     if z.re.is_nan() && z.im.is_nan() {
         // Exactly zero, as compiler-rt compares: the divisor vanished.
@@ -372,13 +377,13 @@ pub extern "C" fn __divsc3(a: f32, b: f32, c: f32, d: f32) -> Complex32 {
         #[allow(clippy::cast_possible_truncation)]
         let e = logbw as i32;
         ilogbw = e;
-        c = crate::math::scalbnf(c, ilogbw.saturating_neg());
-        d = crate::math::scalbnf(d, ilogbw.saturating_neg());
+        c = libm::scalbnf(c, ilogbw.saturating_neg());
+        d = libm::scalbnf(d, ilogbw.saturating_neg());
     }
     let denom = c * c + d * d;
     let mut z = Complex32 {
-        re: crate::math::scalbnf((a * c + b * d) / denom, ilogbw.saturating_neg()),
-        im: crate::math::scalbnf((b * c - a * d) / denom, ilogbw.saturating_neg()),
+        re: libm::scalbnf((a * c + b * d) / denom, ilogbw.saturating_neg()),
+        im: libm::scalbnf((b * c - a * d) / denom, ilogbw.saturating_neg()),
     };
     if z.re.is_nan() && z.im.is_nan() {
         // Exactly zero, as compiler-rt compares: the divisor vanished.

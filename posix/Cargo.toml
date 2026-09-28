@@ -14,6 +14,11 @@ crate-type = ["staticlib", "rlib"]
 # time; see tzrules/src/lib.rs's "Why this is a crate and not a module".
 [dependencies]
 tzrules = { path = "../tzrules" }
+# The implementations behind <math.h>: rust-lang's port of musl's libm,
+# vendored exactly as crates.io publishes it (posix/vendor/README.md,
+# design-decisions.md section 1132). math.rs is the C ABI and glibc's errno
+# over it. Default features: "arch" lets it use SSE2's sqrt, which is exact.
+libm = { path = "vendor/libm" }
 
 [lints]
 workspace = true

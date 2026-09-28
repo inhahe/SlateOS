@@ -175088,3 +175088,61 @@ does (`login`, `su`, `sshd`, cron daemons, and the backup scheduler lane D is
 writing for `requests/e-db-the-backup-service-runs-backup-run-due.md`).
 Without `CAP_SETGID` they now fail loudly instead of silently keeping root's
 groups: the right failure, but a new one.
+
+## D-POSIX-MATH-WAS-HAND-WRITTEN — the C library's maths was written here, and wrong in places no test looked (lane D, 2026-09-27) — **Status: FIXED 2026-09-27**
+
+**In short:** `sin`, `exp`, `pow`, `sqrt`, `round` and the rest of `<math.h>`
+were hand-written approximations -- "accurate to roughly 10-15 digits", their
+documentation said -- and some were much worse than that. Every Rust program
+on SlateOS used them too, since `f64::sin` and its kin compile to these
+symbols there. They are now musl's libm through rust-lang's `libm` crate, with
+glibc's `errno` (design-decisions §1132).
+
+| Was | Example |
+|---|---|
+| `round` as `floor(x + 0.5)` | `round(0.49999999999999994)` = 1; `round(2^52 + 1)` = 2^52 + 2 (lane E's `requests/e-d-libc-round-is-wrong-just-below-a-half-and-past-2-52.md`) |
+| `ceil`, `trunc`, `rint` lost a zero's sign | `ceil(-0.3)` = +0.0 |
+| `fma` as `x*y + z`, two roundings | `f64::mul_add` was not fused |
+| `sqrt` by Newton's method | not correctly rounded, which IEEE 754 requires |
+| `sin`/`cos`/`tan` reduced by `fmod(x, 2*pi)` | `sin(1e22)` was noise |
+| `exp` saturated at |x| = 709 | `exp(709.5)` was infinity; `exp(-710)` was 0, not a subnormal |
+| `ldexp` truncated subnormal results, and misread subnormal arguments | `ldexp(5e-324, 1)` wrong |
+| `lround`/`lrint` saturated | glibc and musl answer `LONG_MIN` out of range |
+| no `errno` anywhere | `log(-1)` left `errno` alone; glibc sets `EDOM` |
+| `nan(tag)` ignored the tag | glibc puts it in the payload |
+| missing: `llrint`, `llrintf`, `__fpclassify`, `__fpclassifyf`, `__signbit`, `signgam`, `j0f`..`ynf`, `roundeven` | C programs using them did not link |
+
+**Where:** `posix/src/math.rs` (the C ABI and glibc's `errno` rules),
+`posix/vendor/libm` (the implementations, vendored as published).
+**Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
+23,113 calls answered by glibc 2.39 under WSL (`dlm/oracle/math_harness.py`).
+
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN**
+
+**In short:** three parts of C's maths are missing from the C library, so a C
+program that uses them does not link: changing or reading the rounding mode
+and the exception flags (`fesetround`, `fetestexcept` ...), the `long double`
+versions of every function (`sinl`, `sqrtl` ...), and complex numbers
+(`cabs`, `cexp` ...). Rust programs are not affected -- none of it is
+reached from Rust's standard library.
+
+**What each needs:**
+
+- **`<fenv.h>`** -- `fegetround`, `fesetround`, `feclearexcept`,
+  `fetestexcept`, `feraiseexcept`, `fegetenv`, `fesetenv`, `feholdexcept`,
+  `feupdateenv`, `fegetexceptflag`, `fesetexceptflag`: musl's
+  `src/fenv/x86_64/fenv.s`, i.e. `stmxcsr`/`ldmxcsr` for SSE and
+  `fnstcw`/`fldcw`/`fnstsw`/`fnclex` for the x87 unit, as `core::arch::asm!`.
+  Until it exists, `rint` and `nearbyint` always round to nearest, which is
+  also what they do after any `fesetround` a program could not link.
+- **`long double`** -- on x86-64 an 80-bit x87 value: musl's
+  `src/math/x86_64/*.s` for the functions the x87 unit computes (`sqrtl`,
+  `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic
+  `ld80` C for the rest. Rust has no 80-bit type, so these are `asm!` over
+  memory operands.
+- **`<complex.h>`** -- musl's `src/complex/`: seventy functions, formulas over
+  the real ones plus their special cases (Annex G).
+
+**Where:** `posix/src/math.rs` (and new `fenv.rs`, `complex.rs`).
+**Found by** reading the archive's symbols while replacing the maths
+(`D-POSIX-MATH-WAS-HAND-WRITTEN`).

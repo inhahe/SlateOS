@@ -73,6 +73,7 @@ NOT_SUBJECTS: dict[str, str] = {
     "net/.cargo": "a cargo config directory caught by the `net/*` glob, not a crate",
     "userspace/.cargo": "a cargo config directory caught by the `userspace/*` glob, not a crate",
     "rustcrypto": "vetted cryptography vendored byte-for-byte from crates.io (rustcrypto/README.md, design-decisions 1218); upstream's own suites want upstream's dev-dependencies and rewrite the published Cargo.lock files, so their published vectors run instead in rustcrypto/seal, a workspace member",
+    "posix/vendor": "rust-lang's libm vendored byte-for-byte from crates.io (posix/vendor/README.md, design-decisions 1132); upstream's own suite wants upstream's dev-dependencies (no-panic, from the network), so glibc 2.39's answers are replayed instead by posix's math tests, a workspace member",
 }
 
 # A `#[test]` on its own line. Anchored so a commented-out one, a doc-comment

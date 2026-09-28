@@ -13,5 +13,13 @@ guitk = { path = "../../gui/toolkit" }
 # nothing but its own tests.
 oswindow = { path = "../../gui/window" }
 
+# The installed programs' desktop entries, read as the start menu reads them
+# (C-Q17, design-decisions §1423): the launcher finds what is installed rather
+# than keeping its own list of what might be.
+desktopentry = { path = "../../gui/desktopentry" }
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

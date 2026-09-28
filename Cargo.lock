@@ -1756,8 +1756,10 @@ name = "launcher"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "desktopentry",
  "guitk",
  "oswindow",
+ "scratchdir",
 ]
 
 [[package]]

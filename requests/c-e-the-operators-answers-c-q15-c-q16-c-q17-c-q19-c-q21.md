@@ -113,6 +113,15 @@ installed.
 The operator: "warn rather than don't allow, and in the warning, tell how to
 change the offending event color(s) and/or have a link right there to changing
 the event color(s)."
+**Done 2026-09-28 (lane E):** `apps/launcher` reads them as the start menu
+does -- `scan`, `shows_in_menu`, `TryExec` on `PATH`, no entry without `Exec`
+-- and keeps your merge rule: an entry takes its program's row, in place, and
+the launcher's own rows stay for what no entry names. Two things it does that
+the start menu does not, which you may want to take: the rows that start a
+program with arguments (Settings' pages) are not replaced by an entry for the
+program, and an entry's `Path` is the directory its program starts in (the
+shell's `Launch` has nowhere to carry one).
+
 
 - **`apps/calendar`:** picking an event colour too close to the accent shows a
   warning (the dot would vanish into today's circle); the colour is kept as

@@ -853,6 +853,11 @@ pub enum DropdownId {
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
     QuietEnd,
+    /// When "System (Auto)" turns light, in the clock's time zone
+    /// (`AppearanceSettings::auto_light_hours`, design-decisions §876).
+    AutoLightFrom,
+    /// When it turns dark again.
+    AutoDarkFrom,
     Resolution,
     RefreshRate,
     Scale,
@@ -907,9 +912,11 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 15] = [
+    pub const FIXED: [Self; 17] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::AutoLightFrom,
+        Self::AutoDarkFrom,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
@@ -3984,6 +3991,25 @@ impl SettingsState {
         s.advance(THEME_CARD_HEIGHT);
         s.gap();
 
+        // The automatic mode's hours, where it is chosen. "System (Auto)" is
+        // light from one time to the other in the clock's time zone; the hours
+        // were a setting with nowhere here to change them (lane C,
+        // c-e-the-automatic-modes-hours).
+        if selected == ThemeMode::System {
+            let hours = self.appearance.settings.auto_light_hours;
+            s.dropdown_row(
+                "Light from",
+                DropdownId::AutoLightFrom,
+                &notifsettings::format_hm(hours.start()),
+            );
+            s.dropdown_row(
+                "Dark from",
+                DropdownId::AutoDarkFrom,
+                &notifsettings::format_hm(hours.end()),
+            );
+            s.gap();
+        }
+
         // Transparency. A row of levels rather than the on/off switch this
         // page used to show: the setting has four values, and a switch that
         // meant "Off or whatever it was" would forget a user's choice of
@@ -4034,7 +4060,10 @@ impl SettingsState {
         s.advance(28.0);
 
         let presets = AccentColor::presets();
-        let light = self.appearance.settings.theme_mode.is_light();
+        // What is drawn, not what is set: "System (Auto)" is light by day and
+        // dark by night, and `theme_mode.is_light()` answers "no" for it at
+        // noon (lane C, c-e-the-automatic-modes-hours).
+        let light = self.appearance.settings.is_light();
         let chosen = self.appearance.settings.accent_color;
         for (idx, accent) in presets.iter().enumerate() {
             let (dx, dy) = swatch_offset(idx);
@@ -5206,6 +5235,18 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
+                let (current, other) = self.auto_hour_ends(dropdown_id);
+                let choices = Self::auto_time_choices(current, other);
+                let at = choices.iter().position(|t| *t == current).unwrap_or(0);
+                (
+                    choices
+                        .iter()
+                        .map(|t| notifsettings::format_hm(*t))
+                        .collect(),
+                    at,
+                )
+            }
             DropdownId::LoginBackground => {
                 let mut items: Vec<String> =
                     LOGIN_BACKGROUNDS.iter().map(|b| (*b).to_string()).collect();
@@ -6179,6 +6220,33 @@ impl SettingsState {
     /// own setting would show the dropdown reading "00:00" -- the page
     /// reporting a time the user never chose, and writing it the moment they
     /// touched anything else on the row.
+    /// The end of the automatic mode's hours `id` sets, and the other end.
+    fn auto_hour_ends(
+        &self,
+        id: DropdownId,
+    ) -> (notifsettings::TimeOfDay, notifsettings::TimeOfDay) {
+        let hours = self.appearance.settings.auto_light_hours;
+        if id == DropdownId::AutoLightFrom {
+            (hours.start(), hours.end())
+        } else {
+            (hours.end(), hours.start())
+        }
+    }
+
+    /// The times one end of the automatic mode's hours may be set to: every
+    /// half hour, and the current time if it is not on one -- less the other
+    /// end's. Hours whose two ends are equal never change, which is not an
+    /// automatic mode at all, so the list does not offer them.
+    fn auto_time_choices(
+        current: notifsettings::TimeOfDay,
+        other: notifsettings::TimeOfDay,
+    ) -> Vec<notifsettings::TimeOfDay> {
+        Self::quiet_time_choices(current)
+            .into_iter()
+            .filter(|t| *t != other)
+            .collect()
+    }
+
     fn quiet_time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
         let mut times: Vec<notifsettings::TimeOfDay> = (0..48)
             .filter_map(|half| {
@@ -6262,6 +6330,18 @@ impl SettingsState {
             DropdownId::Scale => {
                 if let Some(scale) = ScalePercent::ALL.get(index) {
                     self.scale = *scale;
+                }
+            }
+            DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
+                let hours = self.appearance.settings.auto_light_hours;
+                let (current, other) = self.auto_hour_ends(dropdown_id);
+                if let Some(chosen) = Self::auto_time_choices(current, other).get(index) {
+                    self.appearance.settings.auto_light_hours =
+                        if dropdown_id == DropdownId::AutoLightFrom {
+                            notifsettings::DailyWindow::new(*chosen, hours.end())
+                        } else {
+                            notifsettings::DailyWindow::new(hours.start(), *chosen)
+                        };
                 }
             }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
@@ -7043,6 +7123,63 @@ mod tests {
             app.notif.settings.quiet_hours.days[3],
             "it did not come back"
         );
+    }
+
+    /// **The automatic mode's hours are beside "System (Auto)", and only
+    /// there**; a time chosen from the list is saved to the file the desktop
+    /// reads, and the other end's time is not offered, since equal hours
+    /// never change.
+    #[test]
+    fn the_automatic_modes_hours_are_chosen_beside_it_and_reach_the_file() {
+        appearance::config::testing::with_scratch_config("settings-auto-hours", |root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Themes;
+            app.appearance.settings.theme_mode = ThemeMode::Dark;
+            assert!(
+                center_of(&app, RowHit::Dropdown(DropdownId::AutoLightFrom)).is_none(),
+                "the hours are shown for a mode they do not govern"
+            );
+            app.appearance.settings.theme_mode = ThemeMode::System;
+            for id in [DropdownId::AutoLightFrom, DropdownId::AutoDarkFrom] {
+                assert!(
+                    center_of(&app, RowHit::Dropdown(id)).is_some(),
+                    "{id:?} is not beside System (Auto)"
+                );
+            }
+            let dark_from = app.appearance.settings.auto_light_hours.end();
+
+            app.show_dropdown(DropdownId::AutoLightFrom);
+            let items = app.dropdown_layout().expect("a layout").items;
+            assert!(
+                !items.contains(&notifsettings::format_hm(dark_from)),
+                "the dark hour is offered as the light one: {items:?}"
+            );
+            let at = items
+                .iter()
+                .position(|label| label == "06:30")
+                .expect("half past six is not offered");
+            app.apply_dropdown_selection(at);
+            let hours = app.appearance.settings.auto_light_hours;
+            assert_eq!(notifsettings::format_hm(hours.start()), "06:30");
+            assert_eq!(
+                hours.end(),
+                dark_from,
+                "the dark hour moved with the light one"
+            );
+
+            // What handle_event does after a change (the auto-hide test drives
+            // that path end to end); this checks the hours reach the file.
+            app.save_appearance();
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "nothing was written to {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                notifsettings::format_hm(saved.auto_light_hours.start()),
+                "06:30",
+                "the hour did not survive the round trip to disk"
+            );
+        });
     }
 
     /// Setting one end of the window leaves the other where it was.
@@ -8765,6 +8902,9 @@ mod tests {
         // control as the fit chooser above. `rotation_detail_rows_wait_for_a_folder`
         // is where that is asserted from the other side.
         state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pictures"));
+        // And the automatic mode's hours, which are beside "System (Auto)"
+        // only when it is the mode chosen.
+        state.appearance.settings.theme_mode = ThemeMode::System;
         // And the two font pickers, which are drawn only when the system has
         // families to offer -- a chooser with nothing in it reads as broken,
         // so the page says so in a note instead. A test enumerates no fonts,

@@ -15,6 +15,13 @@ pathcodec = { path = "../pathcodec" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
 
+# Regular expressions for the code editor's find and replace
+# (`codeedit::FindQuery`, design-decisions 1436). The published crate, which
+# upstream reviews, tests and fuzzes, rather than an engine of ours; code an
+# application never searches with is not linked into it. Plain-text find is
+# `textfind`'s, above, whose case folding keeps offsets honest.
+regex = "1.13.1"
+
 # The shared TZ-rules engine, for the file dialog's Modified column. The libc's
 # `localtime`, the shell's `%(…)T` and the taskbar clock all render local time
 # through this crate; a file dialog with its own calendar arithmetic would be a

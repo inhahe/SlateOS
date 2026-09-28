@@ -24,6 +24,18 @@
 //! Every edit is made at every selection, as one batch
 //! ([`TextBuffer::apply`]) and one undo step.
 //!
+//! # Finding and replacing
+//!
+//! A [`FindQuery`] -- plain text or a regular expression, case-sensitive or
+//! not, whole words or not -- compiles to a [`Finder`], and the editor steps
+//! through its matches (wrapping round the end), selects them all as carets,
+//! replaces the one selected, or replaces every one as a single undo step.
+//! Plain text is `textfind`'s search, whose case folding keeps offsets in the
+//! text searched; regular expressions are the `regex` crate's, and a
+//! replacement may name the match's groups (`$1`, `${name}`, `$$` for a `$`).
+//! A match of nothing -- `a*` before a `b` -- is never a match: selecting
+//! nothing is not finding something.
+//!
 //! # Columns
 //!
 //! Moving up and down keeps a *goal column* -- where the caret wanted to be,
@@ -40,6 +52,183 @@ use crate::undo::{Travel, UndoHistory};
 
 /// How many steps the undo history keeps.
 const HISTORY_LIMIT: usize = 1000;
+
+/// The most a compiled regular expression may take, in bytes: generous for
+/// anything a person types, and a bound on what a pathological one can cost.
+const REGEX_SIZE_LIMIT: usize = 1 << 22;
+
+/// What to look for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FindQuery {
+    /// The text, or the regular expression.
+    pub pattern: String,
+    /// Whether `pattern` is a regular expression rather than text.
+    pub regex: bool,
+    /// Whether upper and lower case are told apart.
+    pub case_sensitive: bool,
+    /// Whether a match must be a whole word: not preceded or followed by a
+    /// letter, digit or underscore.
+    pub whole_word: bool,
+}
+
+/// Why a query cannot be searched for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FindError {
+    /// The pattern is empty: there is nothing to look for.
+    Empty,
+    /// The pattern is not a regular expression the engine accepts; its
+    /// reason, as it gives it.
+    Pattern(String),
+}
+
+impl core::fmt::Display for FindError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("there is nothing to look for"),
+            Self::Pattern(why) => write!(f, "not a regular expression: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for FindError {}
+
+/// A compiled [`FindQuery`].
+#[derive(Clone, Debug)]
+pub struct Finder {
+    how: How,
+}
+
+#[derive(Clone, Debug)]
+enum How {
+    Plain {
+        needle: String,
+        case: textfind::Case,
+        whole_word: bool,
+    },
+    Regex(regex::Regex),
+}
+
+impl Finder {
+    /// Compile `query`.
+    ///
+    /// # Errors
+    ///
+    /// [`FindError::Empty`] for an empty pattern, [`FindError::Pattern`] for a
+    /// regular expression the engine refuses -- or one so large it would
+    /// cost more than [`REGEX_SIZE_LIMIT`] bytes.
+    pub fn new(query: &FindQuery) -> Result<Self, FindError> {
+        if query.pattern.is_empty() {
+            return Err(FindError::Empty);
+        }
+        let how = if query.regex {
+            let pattern = if query.whole_word {
+                format!(r"\b(?:{})\b", query.pattern)
+            } else {
+                query.pattern.clone()
+            };
+            let compiled = regex::RegexBuilder::new(&pattern)
+                .case_insensitive(!query.case_sensitive)
+                .multi_line(true)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .build()
+                .map_err(|e| FindError::Pattern(e.to_string()))?;
+            How::Regex(compiled)
+        } else {
+            How::Plain {
+                needle: query.pattern.clone(),
+                case: textfind::Case::sensitive(query.case_sensitive),
+                whole_word: query.whole_word,
+            }
+        };
+        Ok(Self { how })
+    }
+
+    /// The first match starting at or after `from` in `text`, never empty.
+    #[must_use]
+    pub fn find_from(&self, text: &str, from: usize) -> Option<Range<usize>> {
+        let mut at = from;
+        while at <= text.len() {
+            if !text.is_char_boundary(at) {
+                at = at.saturating_add(1);
+                continue;
+            }
+            let found = match &self.how {
+                How::Plain {
+                    needle,
+                    case,
+                    whole_word,
+                } => {
+                    let (start, end) = textfind::find_from(text, needle, at, *case)?;
+                    if *whole_word && !is_whole_word(text, start..end) {
+                        // Not a whole word: look again from its next
+                        // character, which may start one that is.
+                        at = text
+                            .get(start..)
+                            .and_then(|rest| rest.chars().next())
+                            .map_or(text.len().saturating_add(1), |c| {
+                                start.saturating_add(c.len_utf8())
+                            });
+                        continue;
+                    }
+                    start..end
+                }
+                How::Regex(re) => re.find_at(text, at).map(|m| m.range())?,
+            };
+            if found.is_empty() {
+                // Nothing matched here; step past the character and look on.
+                at = text
+                    .get(found.start..)
+                    .and_then(|rest| rest.chars().next())
+                    .map_or(text.len().saturating_add(1), |c| {
+                        found.start.saturating_add(c.len_utf8())
+                    });
+                continue;
+            }
+            return Some(found);
+        }
+        None
+    }
+
+    /// Every match in `text`, in order, none overlapping and none empty.
+    #[must_use]
+    pub fn find_all(&self, text: &str) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while let Some(found) = self.find_from(text, at) {
+            at = found.end;
+            out.push(found);
+        }
+        out
+    }
+
+    /// What replaces the match `found` in `text`: `with` itself for plain
+    /// text; for a regular expression, `with` with the match's groups put in
+    /// for `$1`, `${name}` and the like.
+    #[must_use]
+    pub fn replacement(&self, text: &str, found: Range<usize>, with: &str) -> String {
+        match &self.how {
+            How::Plain { .. } => with.to_owned(),
+            How::Regex(re) => {
+                let mut out = String::new();
+                match re.captures_at(text, found.start) {
+                    Some(caps) if caps.get(0).is_some_and(|m| m.range() == found) => {
+                        caps.expand(with, &mut out);
+                    }
+                    _ => out.push_str(with),
+                }
+                out
+            }
+        }
+    }
+}
+
+/// Whether `range` of `text` is a whole word: no word character just before
+/// or just after it.
+fn is_whole_word(text: &str, range: Range<usize>) -> bool {
+    let before = text.get(..range.start).and_then(|t| t.chars().next_back());
+    let after = text.get(range.end..).and_then(|t| t.chars().next());
+    !before.is_some_and(is_word) && !after.is_some_and(is_word)
+}
 
 /// The widest a tab may be set.
 pub const MAX_TAB_WIDTH: u8 = 16;
@@ -892,6 +1081,111 @@ impl CodeEditor {
         // Block rows never overlap -- one per line -- but empty rows at one
         // offset (a short line) would, so merge as usual.
         self.normalise(primary);
+    }
+
+    // ------------------------------------------------------------------
+    // Find and replace
+    // ------------------------------------------------------------------
+
+    /// Every match of `finder` in the text.
+    #[must_use]
+    pub fn find_all(&self, finder: &Finder) -> Vec<Range<usize>> {
+        finder.find_all(&self.buffer.text())
+    }
+
+    /// Select the next match after the primary selection -- or, `backwards`,
+    /// the one before it -- going round the end of the text to the other if
+    /// there is none that way. The match is the only selection afterwards.
+    /// Answers whether there was a match at all.
+    pub fn find_next(&mut self, finder: &Finder, backwards: bool) -> bool {
+        let text = self.buffer.text();
+        let primary = self.primary().range();
+        let found = if backwards {
+            let all = finder.find_all(&text);
+            all.iter()
+                .rev()
+                .find(|m| m.end <= primary.start && *m != &primary)
+                .or_else(|| all.last())
+                .cloned()
+        } else {
+            finder
+                .find_from(&text, primary.end)
+                .or_else(|| finder.find_from(&text, 0))
+        };
+        let Some(found) = found else {
+            return false;
+        };
+        self.set_selections(vec![Selection {
+            anchor: found.start,
+            head: found.end,
+        }]);
+        true
+    }
+
+    /// Select every match as a selection of its own, to edit them all at
+    /// once. Answers how many there were; with none, the selections are left.
+    pub fn select_all_matches(&mut self, finder: &Finder) -> usize {
+        let all = finder.find_all(&self.buffer.text());
+        if all.is_empty() {
+            return 0;
+        }
+        let count = all.len();
+        self.set_selections(
+            all.into_iter()
+                .map(|m| Selection {
+                    anchor: m.start,
+                    head: m.end,
+                })
+                .collect(),
+        );
+        count
+    }
+
+    /// Replace the match the primary selection is on with `with`, then
+    /// select the next one; when the selection is not on a match, only
+    /// select the next. Answers whether a replacement was made.
+    pub fn replace_next(&mut self, finder: &Finder, with: &str) -> bool {
+        let text = self.buffer.text();
+        let primary = self.primary().range();
+        let on_match =
+            !primary.is_empty() && finder.find_from(&text, primary.start) == Some(primary.clone());
+        if !on_match {
+            self.find_next(finder, false);
+            return false;
+        }
+        let replacement = finder.replacement(&text, primary.clone(), with);
+        let end = primary.start.saturating_add(replacement.len());
+        self.set_selections(vec![Selection {
+            anchor: primary.start,
+            head: primary.end,
+        }]);
+        self.edit(
+            vec![(primary, replacement)],
+            StepKind::Other,
+            |_, start, _| Selection::caret(start),
+        );
+        self.set_selections(vec![Selection::caret(end)]);
+        self.find_next(finder, false);
+        true
+    }
+
+    /// Replace every match with `with`, as one undo step. Answers how many
+    /// were replaced.
+    pub fn replace_all(&mut self, finder: &Finder, with: &str) -> usize {
+        let text = self.buffer.text();
+        let edits: Vec<(Range<usize>, String)> = finder
+            .find_all(&text)
+            .into_iter()
+            .map(|m| {
+                let replacement = finder.replacement(&text, m.clone(), with);
+                (m, replacement)
+            })
+            .collect();
+        let count = edits.len();
+        if count > 0 {
+            self.edit_keeping_selections(edits);
+        }
+        count
     }
 
     // ------------------------------------------------------------------
@@ -1967,6 +2261,136 @@ mod tests {
         assert_eq!(e.word_at(4), 4..9, "at its start");
         assert_eq!(e.word_at(9), 4..9, "at its end");
         assert_eq!(e.word_at(10), 10..10, "none");
+    }
+
+    fn finder(pattern: &str, regex: bool, case_sensitive: bool, whole_word: bool) -> Finder {
+        Finder::new(&FindQuery {
+            pattern: pattern.to_owned(),
+            regex,
+            case_sensitive,
+            whole_word,
+        })
+        .expect("a query")
+    }
+
+    /// **Plain text is found case-folded or not, whole words or not**, the
+    /// matches never overlapping.
+    #[test]
+    fn plain_text_is_found_by_case_and_by_word() {
+        let text = "Cat cat catalog aaaa";
+        assert_eq!(
+            finder("cat", false, false, false).find_all(text),
+            [0..3, 4..7, 8..11]
+        );
+        assert_eq!(
+            finder("cat", false, true, false).find_all(text),
+            [4..7, 8..11]
+        );
+        assert_eq!(
+            finder("cat", false, false, true).find_all(text),
+            [0..3, 4..7]
+        );
+        assert_eq!(
+            finder("aa", false, true, false).find_all(text),
+            [16..18, 18..20]
+        );
+        // A whole-word match right after one that is not.
+        assert_eq!(
+            finder("aa", false, true, true).find_all("aaa aa"),
+            [Range { start: 4, end: 6 }]
+        );
+    }
+
+    /// **A regular expression is found, and its replacement takes the
+    /// match's groups; a match of nothing is not a match.**
+    #[test]
+    fn regular_expressions_are_found_and_replace_with_groups() {
+        let f = finder(r"(\w+)@(\w+)", true, true, false);
+        let text = "to: ann@example, bob@test";
+        let found = f.find_all(text);
+        assert_eq!(found, [4..15, 17..25]);
+        assert_eq!(
+            f.replacement(text, found[0].clone(), "$2 at ${1}"),
+            "example at ann"
+        );
+        assert!(
+            finder("x*", true, true, false)
+                .find_all("abxc")
+                .iter()
+                .all(|m| !m.is_empty())
+        );
+        assert_eq!(
+            finder("x*", true, true, false).find_all("abxc"),
+            [Range { start: 2, end: 3 }]
+        );
+        // Whole words, case folded, as a regular expression too.
+        assert_eq!(
+            finder("cat", true, false, true).find_all("Cat cat catalog"),
+            [0..3, 4..7]
+        );
+        // `^` and `$` are the lines'.
+        assert_eq!(
+            finder("^b", true, true, false).find_all("a\nb\nb"),
+            [2..3, 4..5]
+        );
+        let refused = Finder::new(&FindQuery {
+            pattern: "(".to_owned(),
+            regex: true,
+            ..FindQuery::default()
+        })
+        .map(|_| ());
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("not a regular expression")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            Finder::new(&FindQuery::default()).map(|_| ()),
+            Err(FindError::Empty)
+        );
+    }
+
+    /// **Stepping through matches goes round the end, both ways.**
+    #[test]
+    fn find_next_goes_round_the_end_both_ways() {
+        let mut e = editor("x| a x a x");
+        let f = finder("x", false, true, false);
+        assert!(e.find_next(&f, false));
+        assert_eq!(marked(&e), "x a [x] a x");
+        e.find_next(&f, false);
+        e.find_next(&f, false);
+        assert_eq!(marked(&e), "[x] a x a x", "round the end");
+        e.find_next(&f, true);
+        assert_eq!(marked(&e), "x a x a [x]", "and back round it");
+        assert!(!e.find_next(&finder("zzz", false, true, false), false));
+        assert_eq!(marked(&e), "x a x a [x]", "no match leaves the selection");
+    }
+
+    /// **Every match becomes a selection of its own, to edit at once.**
+    #[test]
+    fn every_match_can_be_selected_at_once() {
+        let mut e = editor("|foo bar foo baz foo");
+        assert_eq!(e.select_all_matches(&finder("foo", false, true, false)), 3);
+        e.type_text("qux");
+        assert_eq!(e.text(), "qux bar qux baz qux");
+        assert_eq!(e.select_all_matches(&finder("nope", false, true, false)), 0);
+    }
+
+    /// **Replace takes the selected match and moves to the next; replace-all
+    /// is one undo step.**
+    #[test]
+    fn replace_one_then_the_rest_as_one_step() {
+        let mut e = editor("|a1 b2 c3");
+        let f = finder(r"([a-z])(\d)", true, true, false);
+        assert!(!e.replace_next(&f, "$2$1"), "first it finds");
+        assert_eq!(marked(&e), "[a1] b2 c3");
+        assert!(e.replace_next(&f, "$2$1"));
+        assert_eq!(marked(&e), "1a [b2] c3");
+        assert_eq!(e.replace_all(&f, "<$0>"), 2);
+        assert_eq!(e.text(), "1a <b2> <c3>");
+        e.undo();
+        assert_eq!(e.text(), "1a b2 c3", "replace-all was one step");
     }
 
     /// **Every edit bumps the revision; a move does not.**

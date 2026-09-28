@@ -83375,9 +83375,13 @@ states both. 24 is WCAG 2.2's success criterion 2.5.8, *Target Size
 target; a slider's drawn size (a 12-pixel thumb on a 4-pixel track) is well
 under it and does not need to be larger to be *seen*. An edge between two
 areas cannot grow like that -- the panes on both sides are clickable -- so a
-divider keeps the splitter's 3 pixels either side. Where two handles' regions
-overlap, the press goes to the one drawn nearer. The numbers are in logical
-pixels, so they scale with everything else on a dense display.
+divider keeps the splitter's 3 pixels either side. A scrollbar's thumb is the
+third case: it runs in a track the scrollbar owns, so it grows along the track
+(a press just past its end takes hold of it rather than paging) but not across
+it, where the list is (`grab::in_track`); the scrollbar stays the width every
+desktop draws one. Where two handles' regions overlap, the press goes to the
+one drawn nearer. The numbers are in logical pixels, so they scale with
+everything else on a dense display.
 
 **What it reports** uses the colour picker's three words, so a host handles
 both alike: `Changed` while a drag moves the value (show it, do not save it),
@@ -83387,7 +83391,9 @@ that ends where it began confirms nothing, so a host that saves on `Confirmed`
 does not rewrite a file for a click that changed nothing.
 
 **Where it bites:** `gui/toolkit/src/slider.rs`, `gui/toolkit/src/grab.rs`; the
-desktop's notification pane is the first host. Applications draw their own
+desktop's notification pane is the first host of the slider, and the colour
+picker (`colorpicker.rs`) and the scrollbars of the file dialog and the tree
+view take hold by the same rule. Applications draw their own
 sliders and are asked to move onto this one in
 `requests/c-e-the-toolkit-has-a-slider-now.md`.
 

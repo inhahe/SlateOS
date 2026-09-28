@@ -169064,6 +169064,18 @@ launcher's dialog), and their 400 entries were removed on 2026-09-27, since
 they can never apply. What is left: **1,459 defects, of which 308 no longer
 match the code they break and 3 match it ambiguously** (`--check`, 2026-09-27).
 
+**First repair pass, 2026-09-27: 296 stale.** Thirteen had only moved -- the
+palette went from `appearance` into the toolkit (design-decisions §838) while
+its tests stayed -- and now target `gui/toolkit/src/palette.rs`; the real sweep
+re-proved all thirteen. It also found **defect B had become a no-op**: the
+light palette's text inks are recomputed from `ink_sources` by the legibility
+floor, so copying the dark value into the `subtext1:` field changed nothing.
+B now copies it into `overlay0`, a role nothing recomputes, and is caught
+again. Four entries declared a test fewer than catch them; declared now. Of the
+296 left, a search of `gui/` finds 265 whose text no longer exists anywhere
+(the code was rewritten, and each needs its defect re-derived by hand) and the
+rest matching only generic lines in unrelated files.
+
 **Where:** `scripts/reintro-palette.py`; the stale entries are listed by
 `python scripts/reintro-palette.py --check`.
 

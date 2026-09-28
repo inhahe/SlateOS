@@ -77,6 +77,10 @@ TARGET = "x86_64-pc-windows-gnu"
 
 APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
+# The palette itself, since design-decisions 838 moved it from `appearance`
+# into the toolkit; its tests stayed in `appearance`, which is why the
+# defects below still name that package.
+TK_PALETTE = "gui/toolkit/src/palette.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
 ICON = "gui/desktop/src/icons.rs"
@@ -141,31 +145,37 @@ DEFECTS = [
         ["every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette"],
     ),
     (
+        # Re-modelled 2026-09-27. It copied the dark value into `subtext1:`,
+        # which the legibility floor now recomputes from `ink_sources`, so the
+        # edit changed nothing and the sweep reported it escaped. `overlay0` is
+        # the same defect -- one line left as its dark counterpart -- on a
+        # role nothing recomputes.
         "B: one line of the light palette was left as its dark counterpart",
-        APP,
-        [("                subtext1: LIGHT_SUBTEXT1,", "                subtext1: SUBTEXT1,")],
+        TK_PALETTE,
+        [("                overlay0: LIGHT_OVERLAY0,", "                overlay0: OVERLAY0,")],
         ["appearance"],
-        ["every_role_has_a_different_value_in_the_two_modes"],
+        ["every_role_has_a_different_value_in_the_two_modes",
+         "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "C: two rungs of the light ladder are swapped",
-        APP,
+        TK_PALETTE,
         [("                surface1: LIGHT_SURFACE1,\n"
           "                surface2: LIGHT_SURFACE2,",
           "                surface1: LIGHT_SURFACE2,\n"
           "                surface2: LIGHT_SURFACE1,")],
         ["appearance", "desktop"],
-        ["the_surface_ladder_climbs_away_from_the_base_in_both_modes"],
+        ["the_surface_ladder_climbs_away_from_the_base_in_both_modes", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "D: crust and mantle are swapped in light mode",
-        APP,
+        TK_PALETTE,
         [("                crust: LIGHT_CRUST,\n"
           "                mantle: LIGHT_MANTLE,",
           "                crust: LIGHT_MANTLE,\n"
           "                mantle: LIGHT_CRUST,")],
         ["appearance"],
-        ["the_recessed_layers_are_darker_than_the_base_in_both_modes"],
+        ["the_recessed_layers_are_darker_than_the_base_in_both_modes", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "E: the accent setting never reaches the palette",
@@ -193,7 +203,7 @@ DEFECTS = [
     ),
     (
         "H: a panel is drawn opaque however transparent the user asked for",
-        APP,
+        TK_PALETTE,
         [("    pub fn panel_bg(&self) -> Color {\n"
           "        with_alpha(self.base, self.panel_alpha)",
           "    pub fn panel_bg(&self) -> Color {\n"
@@ -212,7 +222,7 @@ DEFECTS = [
     ),
     (
         "J: the scrim dims with the palette's own base, as the shell used to",
-        APP,
+        TK_PALETTE,
         [("    pub fn scrim(&self) -> Color {\n        Color::rgba(0, 0, 0, 140)",
           "    pub fn scrim(&self) -> Color {\n        with_alpha(self.base, 140)")],
         ["appearance"],
@@ -220,7 +230,7 @@ DEFECTS = [
     ),
     (
         "K: a label's shadow is no stronger than a panel's",
-        APP,
+        TK_PALETTE,
         [("    pub fn text_shadow(&self) -> Color {\n        Color::rgba(0, 0, 0, 180)",
           "    pub fn text_shadow(&self) -> Color {\n        Color::rgba(0, 0, 0, 120)")],
         ["appearance"],
@@ -240,7 +250,7 @@ DEFECTS = [
     ),
     (
         "M: text on the accent is the palette's text, not chosen for the accent",
-        APP,
+        TK_PALETTE,
         [("    pub fn on_accent(&self) -> Color {\n        readable_on(self.accent)",
           "    pub fn on_accent(&self) -> Color {\n        self.text")],
         ["appearance"],
@@ -248,7 +258,7 @@ DEFECTS = [
     ),
     (
         "N: two of the accent washes are the same strength",
-        APP,
+        TK_PALETTE,
         [("    pub fn selection_border(&self) -> Color {\n"
           "        with_alpha(self.accent, wash::EDGE)",
           "    pub fn selection_border(&self) -> Color {\n"
@@ -258,7 +268,7 @@ DEFECTS = [
     ),
     (
         "O: a drop target is the accent, like the selection shown beside it",
-        APP,
+        TK_PALETTE,
         [("    pub fn drop_target(&self) -> Color {\n        with_alpha(self.green, 60)",
           "    pub fn drop_target(&self) -> Color {\n        with_alpha(self.accent, 60)")],
         ["appearance"],
@@ -280,11 +290,11 @@ DEFECTS = [
     ),
     (
         "T: SKY carries the transposed byte pair it shipped with",
-        APP,
+        TK_PALETTE,
         [("pub const SKY: Color = Color::from_hex(0x89DCEB);",
           "pub const SKY: Color = Color::from_hex(0x89DCFE);")],
         ["appearance"],
-        ["every_dark_constant_is_the_published_catppuccin_mocha_value"],
+        ["every_dark_constant_is_the_published_catppuccin_mocha_value", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         # Defect F is this collapse unconditionally. This one happens only in
@@ -462,7 +472,7 @@ DEFECTS = [
     ),
     (
         "FF: `on_wallpaper` is made to follow the mode after all",
-        APP,
+        TK_PALETTE,
         [("    pub fn on_wallpaper(&self) -> Color {\n        LIGHT_EXTREME",
           "    pub fn on_wallpaper(&self) -> Color {\n        self.text")],
         ["appearance"],
@@ -17297,7 +17307,7 @@ DEFECTS = [
     # below is caught by something.
     (
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ink chooser goes back to estimating brightness from a luma sum",
-        APP,
+        TK_PALETTE,
         [
             ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
              '    if 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b) > 140.0 {\n'),
@@ -17314,7 +17324,7 @@ DEFECTS = [
     ),
     (
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the ink chooser returns whichever of the two inks is harder to read",
-        APP,
+        TK_PALETTE,
         [
             ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
              '    if contrast_ratio(bg, DARK_EXTREME) < contrast_ratio(bg, LIGHT_EXTREME) {\n'),

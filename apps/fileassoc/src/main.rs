@@ -4789,10 +4789,16 @@ mod tests {
 
     /// Applying to a group sets what the app opens, and reports the rest.
     ///
-    /// The partial case is the one worth pinning. `musicplayer` opens five of
-    /// the ten types in Music, so the honest outcome is five changed and five
+    /// The partial case is the one worth pinning. `musicplayer` opens only
+    /// part of Music, so the honest outcome is that part changed and the rest
     /// named -- not "Music now opens with Music Player", which would read as
-    /// settled while half the group still opened with nothing.
+    /// settled while the rest of the group still opened with nothing.
+    ///
+    /// The group, and which of it `musicplayer` can take, are asked of the
+    /// tables the dialog itself reads rather than written out here. They
+    /// were written out -- ten types and "5 of 10" -- so a type added to the
+    /// audio group (lane C's `.oga`) would have turned this red without the
+    /// code under test changing at all.
     #[test]
     fn applying_to_a_group_sets_what_it_can_and_names_what_it_cannot() {
         writing("group_apply", || {
@@ -4814,15 +4820,28 @@ mod tests {
             );
             probe::click(&mut ui, Target::DialogOk);
 
-            for ext in ["mp3", "wav", "flac", "ogg", "m4a"] {
+            // What setting each type of the group alone would do, asked of
+            // a registry of its own: the group applied must do the same.
+            let group = associations::category_of("mp3").expect("mp3 is in a group");
+            let mut alone = AssociationRegistry::with_defaults();
+            let (opens, cannot): (Vec<&str>, Vec<&str>) = group
+                .extensions()
+                .partition(|ext| alone.set_default_app(ext, "musicplayer").is_ok());
+            assert!(
+                !opens.is_empty() && !cannot.is_empty(),
+                "control: this is about a group musicplayer opens only part of \
+                 (opens {opens:?}, cannot {cannot:?})"
+            );
+
+            for ext in &opens {
                 assert_eq!(
                     ui.registry.get_default_app(ext).map(|a| a.id.clone()),
                     Some(String::from("musicplayer")),
                     ".{ext} is opened by musicplayer and was not set"
                 );
             }
-            // The five it cannot open were left alone rather than cleared.
-            for ext in ["aac", "wma", "opus", "midi", "mid"] {
+            // The ones it cannot open were left alone rather than cleared.
+            for ext in &cannot {
                 assert_ne!(
                     ui.registry.get_default_app(ext).map(|a| a.id.clone()),
                     Some(String::from("musicplayer")),
@@ -4830,16 +4849,19 @@ mod tests {
                 );
             }
 
+            let counted = format!("{} of {}", opens.len(), opens.len() + cannot.len());
             assert!(
-                ui.status.contains("5 of 10"),
-                "the status does not give both numbers: {}",
+                ui.status.contains(&counted),
+                "the status does not give both numbers ({counted}): {}",
                 ui.status
             );
-            assert!(
-                ui.status.contains(".aac"),
-                "the status does not name what it skipped: {}",
-                ui.status
-            );
+            for ext in &cannot {
+                assert!(
+                    ui.status.contains(&format!(".{ext}")),
+                    "the status does not name .{ext}, which it skipped: {}",
+                    ui.status
+                );
+            }
         });
     }
 

@@ -1968,6 +1968,13 @@ live.
   Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
   real cross-crate breaks; option A is in force, and nothing is added.
 
+- `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
+  and a night picture, or any number at any times: `wallpaper.schedule` in
+  `appearance.yaml`, each picture up from its time until the next's. The
+  shell changes it at each time, in its own zone, without being touched.
+  **Lane E:** a place for it on the Wallpaper page
+  (`requests/c-e-day-and-night-wallpapers-need-a-place-in-settings.md`).
+
 - `[C]` **A switch, checkboxes, radio buttons and a drop-down in the toolkit**
   -- done 2026-09-27 (`design-decisions.md` §1432). The retained widget tree
   declared checkboxes and radio buttons and nothing used it, so every program

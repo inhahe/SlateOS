@@ -1848,7 +1848,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 
 ##### Tier 3 — Wallpaper Integration
 - [ ] Theme can bundle or recommend wallpapers
-- [ ] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00)
+- [x] Dynamic wallpapers: list of images with time-of-day triggers (e.g., day image 06:00-18:00, night image 18:00-06:00) — *2026-09-27: `wallpaper.schedule` in `appearance.yaml`, one `"HH:MM path"` per entry; each picture is up from its time until the next entry's, the last one wrapping round midnight. The shell shows it in its own time zone, ahead of a rotation folder or a single picture, and sleeps until the next edge exactly. The Settings page's control for it is lane E's: `requests/c-e-day-and-night-wallpapers-need-a-place-in-settings.md`.*
 
 ##### Tier 3 — Terminal Color Scheme
 - [x] 16 ANSI colors + background + foreground, specifically for terminal emulators — *2026-09-27 (`design-decisions.md` §1410): `Palette::terminal`, the theme's own hues in a terminal's slots by default; the terminal application adopting it is lane E's (`requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md`).*

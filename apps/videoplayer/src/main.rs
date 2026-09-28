@@ -20,6 +20,7 @@ use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::text;
 use mediaprobe::Codec;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
@@ -3679,10 +3680,60 @@ impl VideoPlayerApp {
             self.render_chapter_list(&mut cmds);
         }
 
+        self.render_osd(&mut cmds);
+
         // The picker last, over everything.
         cmds.extend(self.picker.render(&self.palette, self.width, self.height));
 
         cmds
+    }
+
+    /// The message of the moment -- what a key did, what went wrong -- over
+    /// whichever tab is showing.
+    ///
+    /// The player view drew it, alone, in a box 200 pixels wide. So a change
+    /// on the Settings tab said nothing where it was made -- "Hardware
+    /// Decode: Off", and a setting that could not be saved, went to a tab
+    /// nobody was looking at -- and a longer message, a file that could not
+    /// be opened and why, was cut to its first twenty-odd characters.
+    ///
+    /// The box fits the message now, up to the window's width. On the player
+    /// it sits where it did, over the picture's top left; on the other tabs
+    /// along the bottom, clear of each one's own heading.
+    fn render_osd(&self, cmds: &mut Vec<RenderCommand>) {
+        const SIZE: f32 = 14.0;
+        const PAD: f32 = 12.0;
+        let Some(msg) = &self.osd_message else {
+            return;
+        };
+        let room = (self.width - 32.0).max(0.0);
+        let width = (text::measure(msg, SIZE, FontWeightHint::Bold) + 2.0 * PAD).min(room);
+        if width <= 2.0 * PAD {
+            return;
+        }
+        let y = if self.active_tab == PlayerTab::Player {
+            CONTENT_TOP + 16.0
+        } else {
+            self.height - 48.0
+        };
+        cmds.push(RenderCommand::FillRect {
+            x: 16.0,
+            y,
+            width,
+            height: 32.0,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::all(6.0),
+        });
+        cmds.push(RenderCommand::Text {
+            x: 16.0 + PAD,
+            y: y + 8.0,
+            text: msg.clone(),
+            font_size: SIZE,
+            color: Color::rgb(255, 255, 255),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width - 2.0 * PAD),
+            overflow: TextOverflow::Ellipsis,
+        });
     }
 
     /// The chapter list, which `C` opens.
@@ -3947,28 +3998,6 @@ impl VideoPlayerApp {
                     color: Color::rgb(255, 255, 255),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(380.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-
-            // OSD message
-            if let Some(msg) = &self.osd_message {
-                cmds.push(RenderCommand::FillRect {
-                    x: 16.0,
-                    y: top + 16.0,
-                    width: 200.0,
-                    height: 32.0,
-                    color: Color::rgba(0, 0, 0, 160),
-                    corner_radii: CornerRadii::all(6.0),
-                });
-                cmds.push(RenderCommand::Text {
-                    x: 28.0,
-                    y: top + 24.0,
-                    text: msg.clone(),
-                    font_size: 14.0,
-                    color: Color::rgb(255, 255, 255),
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(180.0),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
@@ -8702,8 +8731,57 @@ as many times as before",
             let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
             assert!(app.keep_settings().is_empty());
             change_setting(&mut app, SettingRow::OnFinish, 1);
-            let said = app.osd_message.clone().unwrap_or_default();
-            assert!(said.contains("not saved"), "{said:?}");
+            assert!(
+                drawn_texts(&app).iter().any(|t| t.contains("not saved")),
+                "the Settings tab does not say the change was not saved: {:?}",
+                app.osd_message
+            );
         });
+    }
+
+    // == The message is drawn on every tab, whole (2026-09-27) ====================
+
+    /// The width the message was given to be drawn in, on the tab showing.
+    fn message_room(app: &VideoPlayerApp, msg: &str) -> Option<f32> {
+        app.render_commands().into_iter().find_map(|c| match c {
+            RenderCommand::Text {
+                text, max_width, ..
+            } if text == msg => max_width,
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn the_message_is_drawn_on_every_tab_and_whole() {
+        let msg = "Could not open /home/user/Videos/a film with a long name.mkv: permission denied";
+        let needs = text::measure(msg, 14.0, FontWeightHint::Bold);
+        for &tab in PlayerTab::all() {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.active_tab = tab;
+            app.show_osd(msg);
+            let room = message_room(&app, msg);
+            assert!(
+                room.is_some(),
+                "the {} tab does not draw the message",
+                tab.label()
+            );
+            assert!(
+                room.is_some_and(|r| r >= needs),
+                "the {} tab cuts the message: {room:?} for {needs}",
+                tab.label()
+            );
+        }
+        // A window too narrow for it still draws it, cut, inside the window.
+        let mut narrow = VideoPlayerApp::new(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        narrow.show_osd(msg);
+        assert!(message_room(&narrow, msg).is_some_and(|r| r + 32.0 <= MIN_WINDOW_WIDTH));
+    }
+
+    #[test]
+    fn a_setting_changed_is_said_on_the_settings_tab() {
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        change_setting(&mut app, SettingRow::HardwareDecode, 1);
+        let said = app.osd_message.clone().expect("the change is said");
+        assert!(drawn_texts(&app).contains(&said), "{said:?} is not drawn");
     }
 }

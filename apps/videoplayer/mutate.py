@@ -34,6 +34,8 @@ QUIET = "a_player_a_test_builds_keeps_nothing"
 LEAVES = "a_language_back_to_the_files_own_leaves_the_file"
 UNKNOWN = "what_the_file_holds_that_is_not_a_setting_is_said_and_the_setting_kept"
 UNSAVED = "a_setting_that_cannot_be_saved_says_so"
+EVERY_TAB = "the_message_is_drawn_on_every_tab_and_whole"
+SAID_ON_SETTINGS = "a_setting_changed_is_said_on_the_settings_tab"
 
 MUTATIONS = [
     (
@@ -155,6 +157,24 @@ MUTATIONS = [
         '    doc.set_str(&["on_finish"], prefs.on_finish.yaml_name());',
         "",
         [KEPT],
+    ),
+    (
+        "the message is drawn on the player tab alone",
+        "        self.render_osd(&mut cmds);",
+        "        if self.active_tab == PlayerTab::Player {\n            self.render_osd(&mut cmds);\n        }",
+        [EVERY_TAB, SAID_ON_SETTINGS, UNSAVED],
+    ),
+    (
+        "the message box is 200 wide whatever it says",
+        "        let width = (text::measure(msg, SIZE, FontWeightHint::Bold) + 2.0 * PAD).min(room);",
+        "        let width = 200.0_f32.min(room);",
+        [EVERY_TAB],
+    ),
+    (
+        "the message box runs past a narrow window",
+        "        let width = (text::measure(msg, SIZE, FontWeightHint::Bold) + 2.0 * PAD).min(room);",
+        "        let width = (text::measure(msg, SIZE, FontWeightHint::Bold) + 2.0 * PAD).max(room);",
+        [EVERY_TAB],
     ),
     (
         "a save that failed is not said",

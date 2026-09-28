@@ -42632,6 +42632,11 @@ same. CORE-MATH's correctly rounded `sin`, `cos` and `tan` would honour the
 direction exactly; that is a step of its own (it would replace §1132's
 musl for those functions), not part of this fix.
 
+**The `long double` functions** (`mathl.rs`) follow the same rule, in the
+x87 unit's rounding direction: `ranged` is generic over the type, and its
+second evaluation switches both units to nearest
+(`fenv::in_nearest_x87`).
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

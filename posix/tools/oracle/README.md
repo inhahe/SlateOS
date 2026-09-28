@@ -19,6 +19,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `math_harness.py` (cases: `math_cases.py`) | `posix/src/math_oracle.txt` | `math.rs`, `include_str!` |
 | `math_modes_harness.py` (the same cases, in the three directed rounding modes) | `posix/src/math_modes_oracle.txt` (the answers that differ from nearest) | `math.rs`, `include_str!` |
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
+| `mathl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/mathl_modes_oracle.txt` (the answers that differ from nearest) | `mathl.rs`, `include_str!` |
 | `lgammal_zeros.py table 30` (mpmath, not glibc) | the `LGAMMAL_ZEROS` table, pasted | `mathl.rs` (`lgammal_near_zero`) |
 | `lgammal_zeros.py oracle` (mpmath, not glibc) | `posix/src/lgammal_zero_oracle.txt` | `mathl.rs`, `include_str!` |
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |

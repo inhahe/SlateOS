@@ -155,6 +155,34 @@ fn fldenv(env: &FenvT) {
     };
 }
 
+/// Whether the x87 unit -- every `long double` operation -- rounds to
+/// nearest.
+pub(crate) fn x87_rounds_to_nearest() -> bool {
+    fnstcw() & 0xc00 == 0
+}
+
+/// [`in_nearest`] for the `long double` functions, which compute in the x87
+/// unit and convert constants through the SSE one: `f(args)` with both units
+/// rounding to nearest (glibc's `SET_RESTORE_ROUNDL (FE_TONEAREST)`), then
+/// each put back as it was -- the x87 control word whole (its flags are in
+/// the status word, which this leaves alone), `MXCSR` with the flags `f`
+/// raised kept. `f` is pinned between the switches as in [`in_nearest`]; the
+/// x87 operations, being inline assembly with side effects themselves, keep
+/// their order anyway.
+pub(crate) fn in_nearest_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
+    let cw = fnstcw();
+    let csr = stmxcsr();
+    if cw & 0xc00 == 0 && csr & MXCSR_ROUNDING == 0 {
+        return f(args);
+    }
+    fldcw(cw & !0xc00);
+    ldmxcsr(csr & !MXCSR_ROUNDING);
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    fldcw(cw);
+    ldmxcsr(csr | (stmxcsr() & 0x3f));
+    r
+}
+
 /// `f(args)` with the SSE unit's flags held, glibc's `libc_feholdexcept_sse`
 /// and `libc_fesetenv_sse` (`sysdeps/x86/fpu/fenv_private.h`) around it, for
 /// the double and float functions, which run in that unit alone: its flags

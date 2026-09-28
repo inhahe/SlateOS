@@ -108,7 +108,7 @@ fn set(e: i32) {
 /// Where a function's result lies against the range of its type, judged on
 /// its round-to-nearest value ([`ranged`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Range {
+pub(crate) enum Range {
     /// In range; or exactly an infinity or a zero (a pole, `pow(0, 2)`), or
     /// not a number. No range error.
     Within,
@@ -118,8 +118,10 @@ enum Range {
     Underflow,
 }
 
-/// What [`ranged`] needs of `f64` and `f32`.
-trait Real: Copy {
+/// What [`ranged`] needs of a floating-point type: `f64` and `f32` here,
+/// which compute in the SSE unit, and `long double` in `mathl.rs`, which
+/// computes in the x87 unit -- each with its own rounding direction.
+pub(crate) trait Real: Copy {
     /// Whether a result is where the rounding direction can decide between a
     /// range error and none: within a factor of 2 of the largest finite
     /// value, or below twice the least normal one (zero included). An
@@ -127,6 +129,13 @@ trait Real: Copy {
     fn at_the_edge(self) -> bool;
     /// Whether it is a zero, of either sign.
     fn is_zero(self) -> bool;
+    /// Whether it is an infinity, of either sign.
+    fn is_inf(self) -> bool;
+    /// Whether the unit the type computes in rounds to nearest.
+    fn unit_rounds_to_nearest() -> bool;
+    /// `f(args)` with that unit rounding to nearest
+    /// ([`crate::fenv::in_nearest`], [`crate::fenv::in_nearest_x87`]).
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self;
     /// An overflow with `sign`'s sign, rounded in the current direction: the
     /// largest finite value times itself -- an infinity, or the largest
     /// finite value where the direction rounds toward zero -- with the
@@ -148,6 +157,18 @@ impl Real for f64 {
 
     fn is_zero(self) -> bool {
         self == 0.0
+    }
+
+    fn is_inf(self) -> bool {
+        self.is_infinite()
+    }
+
+    fn unit_rounds_to_nearest() -> bool {
+        crate::fenv::sse_rounds_to_nearest()
+    }
+
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self {
+        crate::fenv::in_nearest(args, f)
     }
 
     fn overflow(sign: f64) -> f64 {
@@ -174,6 +195,18 @@ impl Real for f32 {
         self == 0.0
     }
 
+    fn is_inf(self) -> bool {
+        self.is_infinite()
+    }
+
+    fn unit_rounds_to_nearest() -> bool {
+        crate::fenv::sse_rounds_to_nearest()
+    }
+
+    fn to_nearest<A>(args: A, f: impl FnOnce(A) -> Self) -> Self {
+        crate::fenv::in_nearest(args, f)
+    }
+
     fn overflow(sign: f32) -> f32 {
         core::hint::black_box(f32::MAX).copysign(sign) * core::hint::black_box(f32::MAX)
     }
@@ -194,26 +227,30 @@ impl Real for f32 {
 /// comparisons: only a result at an end of the range ([`Real::at_the_edge`])
 /// is judged at all, and it is its own round-to-nearest value. In another
 /// direction such a result is also judged on `f(args)` computed again to
-/// nearest ([`crate::fenv::in_nearest`]) -- the module documentation says
-/// why -- and where that overflows or underflows to zero, the answer is
+/// nearest ([`Real::to_nearest`]) -- the module documentation says why --
+/// and where that overflows or underflows to zero, the answer is
 /// [`Real::overflow`] or [`Real::underflow`]: an infinity or the largest
 /// finite value, zero or the least subnormal, as IEEE 754 prescribes for the
 /// direction, in place of whatever the algorithm's own arithmetic made of
 /// it.
 ///
 /// `range` must answer `Underflow` only for a zero.
-fn ranged<A: Copy, R: Real>(args: A, f: impl Fn(A) -> R, range: impl Fn(R) -> Range) -> R {
+pub(crate) fn ranged<A: Copy, R: Real>(
+    args: A,
+    f: impl Fn(A) -> R,
+    range: impl Fn(R) -> Range,
+) -> R {
     let r = f(args);
     if !r.at_the_edge() {
         return r;
     }
-    if crate::fenv::sse_rounds_to_nearest() {
+    if R::unit_rounds_to_nearest() {
         if range(r) != Range::Within {
             set(errno::ERANGE);
         }
         return r;
     }
-    let near = crate::fenv::in_nearest(args, &f);
+    let near = R::to_nearest(args, &f);
     match range(near) {
         Range::Within => {
             // In range to nearest, but not as rounded here: DBL_MAX + 1
@@ -243,12 +280,12 @@ fn ranged<A: Copy, R: Real>(args: A, f: impl Fn(A) -> R, range: impl Fn(R) -> Ra
 /// zero from finite arguments and is never exactly either: `exp`, `exp2`,
 /// `exp10` (glibc's `w_exp_template.c`, and the double implementations'
 /// `__math_oflow` and `__math_uflow`), `ldexp` and its kin (`w_scalbn`).
-fn overflow_or_underflow(args_finite: bool, r: f64) -> Range {
+pub(crate) fn overflow_or_underflow<R: Real>(args_finite: bool, r: R) -> Range {
     if !args_finite {
         Range::Within
-    } else if r.is_infinite() {
+    } else if r.is_inf() {
         Range::Overflow
-    } else if r == 0.0 {
+    } else if r.is_zero() {
         Range::Underflow
     } else {
         Range::Within
@@ -257,8 +294,8 @@ fn overflow_or_underflow(args_finite: bool, r: f64) -> Range {
 
 /// The range of a result that can overflow but not underflow: an infinity
 /// from finite arguments (`expm1`, `sinh`, `cosh`, `hypot`).
-fn overflow_only(args_finite: bool, r: f64) -> Range {
-    if args_finite && r.is_infinite() {
+pub(crate) fn overflow_only<R: Real>(args_finite: bool, r: R) -> Range {
+    if args_finite && r.is_inf() {
         Range::Overflow
     } else {
         Range::Within
@@ -267,7 +304,7 @@ fn overflow_only(args_finite: bool, r: f64) -> Range {
 
 /// The range of a result that can underflow but not overflow: a zero where
 /// the function is not zero (`erfc`, `atan2`, the Bessel `j`s).
-fn underflow_only(underflowed: bool) -> Range {
+pub(crate) fn underflow_only(underflowed: bool) -> Range {
     if underflowed {
         Range::Underflow
     } else {
@@ -5702,6 +5739,10 @@ mod tests {
     /// - `pow(x, 1)` is `x`, exactly and without an error, where glibc's
     ///   `pow(5e-324, 1)` rounding downward is 0 with `ERANGE` and its
     ///   `powf(FLT_MAX, 1)` rounding upward an infinity.
+    ///
+    /// And a function computed to nearest in every direction
+    /// ([`computed_to_nearest`]) answers what glibc's does to nearest,
+    /// wherever that is finite and nonzero.
     fn directed_answer(
         mode: &str,
         name: &str,
@@ -5709,8 +5750,21 @@ mod tests {
         near: &str,
         glibc: &str,
     ) -> Vec<String> {
-        let mut outs: Vec<String> = glibc.split(' ').map(str::to_owned).collect();
         let near_outs: Vec<&str> = near.split(' ').collect();
+        let glibc = if computed_to_nearest(name) && !answers_an_int(name) && {
+            let hex = near_outs[0];
+            let v = if hex.len() == 16 {
+                d(hex)
+            } else {
+                f64::from(f(hex))
+            };
+            v.is_finite() && v != 0.0
+        } {
+            near
+        } else {
+            glibc
+        };
+        let mut outs: Vec<String> = glibc.split(' ').map(str::to_owned).collect();
         let near_errno = *near_outs.last().expect("an errno");
         if near_errno != "0" {
             *outs.last_mut().expect("an errno") = near_errno.to_owned();
@@ -5767,6 +5821,15 @@ mod tests {
             *outs.last_mut().expect("an errno") = "0".to_owned();
         }
         outs
+    }
+
+    /// Whether `name` is computed to nearest in every rounding direction:
+    /// the trigonometric and Bessel functions.
+    fn computed_to_nearest(name: &str) -> bool {
+        matches!(
+            double_name(name),
+            "sin" | "cos" | "tan" | "sincos" | "j0" | "j1" | "jn" | "y0" | "y1" | "yn"
+        )
     }
 
     /// Whether `name` answers an integer, not a float's bits.

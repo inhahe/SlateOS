@@ -11,6 +11,11 @@ Ctrl+S asked where every time, and what a save did was drawn nowhere, so a
 failed one looked like one that worked.  The table covers the repair; the rest
 of the suite predates it.
 
+The undo history is a tree now (C-Q24): an edit after an undo keeps the undone
+picture as a branch, reached with Alt+Z.  Its rows cover the keys -- and
+AltGr, which arrives as Ctrl+Alt, not being taken for either -- the status bar
+and the cap; the tree itself is `statehistory`'s and the toolkit's to test.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -34,19 +39,25 @@ NAMED = "a_save_is_the_format_its_name_says"
 TRANSPARENT = "a_saved_bmp_keeps_its_transparency"
 CROPPED = "a_picture_wider_than_any_canvas_is_cropped"
 LISTS = "the_open_dialog_lists_pictures"
+TREE = "an_edit_after_an_undo_keeps_the_undone_picture_reachable_with_alt_z"
+CTRL_SHIFT_Z = "ctrl_shift_z_redoes"
+ALTGR = "altgr_z_does_not_undo"
+SUPER = "alt_z_with_the_windows_key_goes_nowhere"
+STATUS = "the_status_bar_says_whether_undo_and_redo_can_go"
+CAP = "the_history_keeps_the_last_fifty_edits"
 
 MUTATIONS = [
     (
         "an edit does not mark the picture",
-        "        self.history.push(snapshot);\n        self.dirty = true;\n",
-        "        self.history.push(snapshot);\n",
+        "        self.history.begin(snapshot);\n        self.dirty = true;\n",
+        "        self.history.begin(snapshot);\n",
         [MARKS, CLOSE],
     ),
     (
-        "an undo does not mark the picture",
-        "            self.active_layer = prev.active_layer;\n            self.dirty = true;\n",
-        "            self.active_layer = prev.active_layer;\n",
-        [MARKS],
+        "a picture the history puts back is not marked",
+        "        self.active_layer = snapshot.active_layer;\n        self.dirty = true;\n",
+        "        self.active_layer = snapshot.active_layer;\n",
+        [MARKS, TREE],
     ),
     (
         "a save leaves the picture marked",
@@ -119,6 +130,82 @@ MUTATIONS = [
         "                self.dirty = false;\n",
         "                // is still one undo away, and undoing marks it again.\n",
         [REPLACE],
+    ),
+    # -- the history: a tree, walked with Alt+Z (C-Q24) -----------------------
+    (
+        "Alt+Z goes nowhere",
+        "            } else {\n                self.earlier();\n            }\n            return true;",
+        "            }\n            return true;",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "                self.later();\n            } else {",
+        "                self.earlier();\n            } else {",
+        [TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let earlier = self.history.earlier(current);",
+        "        let earlier = self.history.undo(current);",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let later = self.history.later(current);",
+        "        let later = self.history.redo(current);",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "key.key == Key::Z && key.modifiers.alt && !key.modifiers.super_key",
+        [ALTGR],
+    ),
+    (
+        "Super+Alt+Z goes back",
+        "key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key",
+        "key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl",
+        [SUPER],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "            key.modifiers.ctrl && !key.modifiers.alt,\n",
+        "            key.modifiers.ctrl,\n",
+        [ALTGR],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                'z' | 'Z' if shift => {\n"
+        "                    self.redo();\n"
+        "                    return true;\n"
+        "                }\n",
+        "",
+        [CTRL_SHIFT_Z],
+    ),
+    (
+        "redo undoes",
+        "        let next = self.history.redo(current);",
+        "        let next = self.history.undo(current);",
+        [CTRL_SHIFT_Z],
+    ),
+    (
+        "the status bar says undo never can",
+        'if self.history.can_undo() { "yes" } else { "no" },',
+        'if false { "yes" } else { "no" },',
+        [STATUS],
+    ),
+    (
+        "the status bar says whether undo can for redo",
+        'if self.history.can_redo() { "yes" } else { "no" }',
+        'if self.history.can_undo() { "yes" } else { "no" }',
+        [STATUS],
+    ),
+    (
+        "the history keeps more than fifty edits",
+        "            history: StateHistory::new(UNDO_LIMIT),",
+        "            history: StateHistory::new(UNDO_LIMIT.saturating_add(20)),",
+        [CAP],
     ),
     # -- pictures of every format --------------------------------------------
     (

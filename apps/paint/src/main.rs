@@ -33,6 +33,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use statehistory::StateHistory;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use unsaved::{Choice, Question};
@@ -61,6 +62,11 @@ const LAYERS_PANEL_WIDTH: f32 = 180.0;
 const LAYER_ROW_HEIGHT: f32 = 28.0;
 /// Maximum number of undo steps.
 const MAX_UNDO_STEPS: usize = 50;
+/// [`MAX_UNDO_STEPS`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO_STEPS) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 /// Default canvas width.
 /// The largest canvas this program will hold, per side.
 ///
@@ -835,73 +841,6 @@ pub struct HistorySnapshot {
     pub description: String,
 }
 
-/// Manages undo/redo history.
-#[derive(Clone, Debug)]
-pub struct History {
-    /// Undo stack (past states).
-    pub undo_stack: VecDeque<HistorySnapshot>,
-    /// Redo stack (future states that were undone).
-    pub redo_stack: VecDeque<HistorySnapshot>,
-    /// Maximum number of snapshots to keep.
-    pub max_steps: usize,
-}
-
-impl History {
-    /// Creates a new history manager.
-    pub fn new(max_steps: usize) -> Self {
-        Self {
-            undo_stack: VecDeque::new(),
-            redo_stack: VecDeque::new(),
-            max_steps,
-        }
-    }
-
-    /// Pushes a snapshot onto the undo stack, clearing redo.
-    pub fn push(&mut self, snapshot: HistorySnapshot) {
-        self.redo_stack.clear();
-        if self.undo_stack.len() >= self.max_steps {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(snapshot);
-    }
-
-    /// Pops the last undo state. Returns it if available.
-    pub fn undo(&mut self, current: HistorySnapshot) -> Option<HistorySnapshot> {
-        if let Some(prev) = self.undo_stack.pop_back() {
-            self.redo_stack.push_back(current);
-            Some(prev)
-        } else {
-            None
-        }
-    }
-
-    /// Pops the last redo state. Returns it if available.
-    pub fn redo(&mut self, current: HistorySnapshot) -> Option<HistorySnapshot> {
-        if let Some(next) = self.redo_stack.pop_back() {
-            self.undo_stack.push_back(current);
-            Some(next)
-        } else {
-            None
-        }
-    }
-
-    /// Returns the number of available undo steps.
-    pub fn undo_count(&self) -> usize {
-        self.undo_stack.len()
-    }
-
-    /// Returns the number of available redo steps.
-    pub fn redo_count(&self) -> usize {
-        self.redo_stack.len()
-    }
-
-    /// Clears all history.
-    pub fn clear(&mut self) {
-        self.undo_stack.clear();
-        self.redo_stack.clear();
-    }
-}
-
 // ============================================================================
 // Polygon builder
 // ============================================================================
@@ -1656,7 +1595,11 @@ impl Default for DragState {
 /// test ever called -- 33 rows of promises that reached no screen.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z", "Undo"),
-    ("Ctrl+Y", "Redo"),
+    ("Ctrl+Y", "Redo; Ctrl+Shift+Z too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The picture before / after this, on any branch",
+    ),
     ("Ctrl+C", "Copy selection"),
     ("Ctrl+V", "Paste"),
     ("Ctrl+X", "Cut selection"),
@@ -1774,8 +1717,13 @@ pub struct PaintApp {
     pub recent_colors: VecDeque<Color>,
     /// Color picker state.
     pub color_picker: ColorPicker,
-    /// Undo/redo history.
-    pub history: History,
+    /// The pictures before each edit, kept as a tree: an edit made after
+    /// undoing starts a branch beside what was undone, rather than throwing
+    /// it away (C-Q24, `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go
+    /// back and forth along the branch the picture is on; Alt+Z and
+    /// Alt+Shift+Z walk every picture there has been, in the order each was
+    /// made.
+    pub history: StateHistory<HistorySnapshot>,
     /// Current selection (if any).
     pub selection: Option<Selection>,
     /// Clipboard for copy/paste.
@@ -1862,7 +1810,7 @@ impl PaintApp {
             palette: default_palette(),
             recent_colors: VecDeque::new(),
             color_picker: ColorPicker::default(),
-            history: History::new(MAX_UNDO_STEPS),
+            history: StateHistory::new(UNDO_LIMIT),
             selection: None,
             clipboard: Clipboard::new(),
             polygon_builder: PolygonBuilder::new(),
@@ -2062,6 +2010,19 @@ impl PaintApp {
             return true;
         }
 
+        // Alt+Z and Alt+Shift+Z: every picture there has been, in the order
+        // each was made -- the way back to a branch undone out of. Alt
+        // without Ctrl: Ctrl+Alt is AltGr.
+        if key.key == Key::Z && key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key
+        {
+            if key.modifiers.shift {
+                self.later();
+            } else {
+                self.earlier();
+            }
+            return true;
+        }
+
         if let Some(special) = match key.key {
             Key::Enter => Some(SpecialKey::Enter),
             Key::Escape => Some(SpecialKey::Escape),
@@ -2121,7 +2082,13 @@ impl PaintApp {
         let Some(ch) = typed.or(from_key) else {
             return false;
         };
-        self.handle_key_press(ch, key.modifiers.ctrl, key.modifiers.shift)
+        // Ctrl without Alt: Ctrl+Alt is AltGr, and what it types is not a
+        // chord.
+        self.handle_key_press(
+            ch,
+            key.modifiers.ctrl && !key.modifiers.alt,
+            key.modifiers.shift,
+        )
     }
 
     /// Set the canvas dimensions, bounded.
@@ -2389,7 +2356,7 @@ impl PaintApp {
             active_layer: self.active_layer,
             description: description.to_string(),
         };
-        self.history.push(snapshot);
+        self.history.begin(snapshot);
         self.dirty = true;
     }
 
@@ -2398,36 +2365,54 @@ impl PaintApp {
     /// An undo is a change like any other: undoing past a save leaves a
     /// picture the file does not hold.
     pub fn undo(&mut self) -> bool {
-        let current = HistorySnapshot {
+        let current = self.snapshot_now();
+        let prev = self.history.undo(current);
+        self.put_back(prev)
+    }
+
+    /// Redoes the last undone action, on the branch the picture is on.
+    /// Returns true if redo was performed.
+    pub fn redo(&mut self) -> bool {
+        let current = self.snapshot_now();
+        let next = self.history.redo(current);
+        self.put_back(next)
+    }
+
+    /// Goes to the picture as it was before this one was first reached, on
+    /// whichever branch -- Alt+Z. Returns true if there was one.
+    pub fn earlier(&mut self) -> bool {
+        let current = self.snapshot_now();
+        let earlier = self.history.earlier(current);
+        self.put_back(earlier)
+    }
+
+    /// Goes to the picture first reached after this one, on whichever
+    /// branch -- Alt+Shift+Z. Returns true if there was one.
+    pub fn later(&mut self) -> bool {
+        let current = self.snapshot_now();
+        let later = self.history.later(current);
+        self.put_back(later)
+    }
+
+    /// The picture as it is, for the history.
+    fn snapshot_now(&self) -> HistorySnapshot {
+        HistorySnapshot {
             layers: self.layers.clone(),
             active_layer: self.active_layer,
             description: String::new(),
-        };
-        if let Some(prev) = self.history.undo(current) {
-            self.layers = prev.layers;
-            self.active_layer = prev.active_layer;
-            self.dirty = true;
-            true
-        } else {
-            false
         }
     }
 
-    /// Redoes the last undone action. Returns true if redo was performed.
-    pub fn redo(&mut self) -> bool {
-        let current = HistorySnapshot {
-            layers: self.layers.clone(),
-            active_layer: self.active_layer,
-            description: String::new(),
+    /// Put the picture the history handed back in place, if it handed one
+    /// back.
+    fn put_back(&mut self, snapshot: Option<HistorySnapshot>) -> bool {
+        let Some(snapshot) = snapshot else {
+            return false;
         };
-        if let Some(next) = self.history.redo(current) {
-            self.layers = next.layers;
-            self.active_layer = next.active_layer;
-            self.dirty = true;
-            true
-        } else {
-            false
-        }
+        self.layers = snapshot.layers;
+        self.active_layer = snapshot.active_layer;
+        self.dirty = true;
+        true
     }
 
     // ========================================================================
@@ -4567,10 +4552,13 @@ impl PaintApp {
         cmds.push(RenderCommand::Text {
             x: sx,
             y: sy + 5.0,
+            // Whether each can go, not how far: the history is a tree and
+            // does not count its line yet
+            // (`requests/e-c-undohistory-could-say-how-far-undo-and-redo-go.md`).
             text: format!(
                 "Undo: {} Redo: {}",
-                self.history.undo_count(),
-                self.history.redo_count()
+                if self.history.can_undo() { "yes" } else { "no" },
+                if self.history.can_redo() { "yes" } else { "no" }
             ),
             font_size: 11.0,
             color: self.theme.subtext0,
@@ -4871,6 +4859,10 @@ impl PaintApp {
         // Ctrl shortcuts
         if ctrl {
             match key {
+                'z' | 'Z' if shift => {
+                    self.redo();
+                    return true;
+                }
                 'z' | 'Z' => {
                     self.undo();
                     return true;
@@ -6136,124 +6128,144 @@ mod tests {
         assert!(!sel.contains(9, 10));
     }
 
-    // ---- History tests ----
+    // ---- History: the picture's, as a tree (C-Q24, §1416) ----
 
-    #[test]
-    fn test_history_push_and_undo() {
-        let mut history = History::new(5);
-        let snap1 = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "action1".to_string(),
-        };
-        history.push(snap1);
-        assert_eq!(history.undo_count(), 1);
-
-        let current = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "current".to_string(),
-        };
-        let prev = history.undo(current);
-        assert!(prev.is_some());
-        assert_eq!(history.undo_count(), 0);
-        assert_eq!(history.redo_count(), 1);
+    /// A pixel of the first layer, which the tests draw on.
+    fn first_pixel(app: &PaintApp) -> Color {
+        app.layers[0]
+            .pixels
+            .get(0, 0)
+            .expect("the canvas has a first pixel")
     }
 
-    #[test]
-    fn test_history_redo() {
-        let mut history = History::new(5);
-        let snap1 = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "a".to_string(),
-        };
-        history.push(snap1);
-
-        let current = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "b".to_string(),
-        };
-        let prev = history.undo(current).unwrap();
-
-        let redone = history.redo(prev);
-        assert!(redone.is_some());
-        assert_eq!(history.redo_count(), 0);
-        assert_eq!(history.undo_count(), 1);
+    fn paint_first_pixel(app: &mut PaintApp, color: Color) {
+        app.push_history("test stroke");
+        app.layers[0].pixels.set(0, 0, color);
     }
 
-    #[test]
-    fn test_history_max_steps() {
-        let mut history = History::new(3);
-        for i in 0..5 {
-            history.push(HistorySnapshot {
-                layers: vec![],
-                active_layer: i,
-                description: format!("step {}", i),
-            });
+    fn alt_z(shift: bool) -> KeyEvent {
+        KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                alt: true,
+                shift,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
         }
-        assert_eq!(history.undo_count(), 3);
     }
 
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every picture there has been, in the order each was made;
+    /// Alt+Shift+Z comes forward again.
     #[test]
-    fn test_history_push_clears_redo() {
-        let mut history = History::new(5);
-        history.push(HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "a".to_string(),
+    fn an_edit_after_an_undo_keeps_the_undone_picture_reachable_with_alt_z() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let blank = first_pixel(&app);
+        let red = Color::rgb(255, 0, 0);
+        let blue = Color::rgb(0, 0, 255);
+        paint_first_pixel(&mut app, red);
+        assert!(app.undo());
+        assert_eq!(first_pixel(&app), blank);
+        paint_first_pixel(&mut app, blue);
+        assert!(!app.redo(), "redo went onto the branch left");
+        assert_eq!(first_pixel(&app), blue);
+        app.dirty = false;
+        assert!(app.handle_key(&alt_z(false)));
+        assert_eq!(first_pixel(&app), red, "the undone picture was lost");
+        assert!(app.dirty, "a journey did not mark the picture changed");
+        app.handle_key(&alt_z(false));
+        assert_eq!(first_pixel(&app), blank);
+        app.handle_key(&alt_z(true));
+        app.handle_key(&alt_z(true));
+        assert_eq!(first_pixel(&app), blue);
+        assert!(!app.later(), "past the newest picture");
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let red = Color::rgb(255, 0, 0);
+        paint_first_pixel(&mut app, red);
+        assert!(app.handle_key_press('z', true, false));
+        assert_ne!(first_pixel(&app), red);
+        assert!(app.handle_key_press('z', true, true));
+        assert_eq!(first_pixel(&app), red);
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types is not a
+    /// chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let red = Color::rgb(255, 0, 0);
+        paint_first_pixel(&mut app, red);
+        app.handle_key(&KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                alt: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: "z".to_string(),
         });
-        let current = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "b".to_string(),
-        };
-        history.undo(current);
-        assert_eq!(history.redo_count(), 1);
-
-        // Push new action should clear redo
-        history.push(HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "c".to_string(),
-        });
-        assert_eq!(history.redo_count(), 0);
+        assert_eq!(first_pixel(&app), red, "AltGr+Z undid");
     }
 
+    /// The status bar says whether undo and redo can go.
     #[test]
-    fn test_history_clear() {
-        let mut history = History::new(5);
-        history.push(HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "x".to_string(),
-        });
-        history.clear();
-        assert_eq!(history.undo_count(), 0);
-        assert_eq!(history.redo_count(), 0);
+    fn the_status_bar_says_whether_undo_and_redo_can_go() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let said = |app: &PaintApp| {
+            let mut cmds = Vec::new();
+            app.render_status_bar(&mut cmds);
+            cmds.iter().any(
+                |c| matches!(c, RenderCommand::Text { text, .. } if text == "Undo: yes Redo: no"),
+            )
+        };
+        assert!(!said(&app));
+        paint_first_pixel(&mut app, Color::rgb(1, 2, 3));
+        assert!(said(&app), "the status bar does not say undo can go");
     }
 
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
     #[test]
-    fn test_history_undo_empty() {
-        let mut history = History::new(5);
-        let current = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "x".to_string(),
-        };
-        assert!(history.undo(current).is_none());
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let red = Color::rgb(255, 0, 0);
+        paint_first_pixel(&mut app, red);
+        let mut key = alt_z(false);
+        key.modifiers.super_key = true;
+        app.handle_key(&key);
+        assert_eq!(first_pixel(&app), red, "Super+Alt+Z went back");
     }
 
+    /// **The history keeps the last fifty edits** and drops the oldest:
+    /// each holds a whole picture.
     #[test]
-    fn test_history_redo_empty() {
-        let mut history = History::new(5);
-        let current = HistorySnapshot {
-            layers: vec![],
-            active_layer: 0,
-            description: "x".to_string(),
-        };
-        assert!(history.redo(current).is_none());
+    fn the_history_keeps_the_last_fifty_edits() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        // A small picture, so sixty of them are cheap; making it is the
+        // first edit, and the eleven after it are the ones to go.
+        app.new_canvas(2, 2);
+        for shade in 0..60 {
+            paint_first_pixel(&mut app, Color::rgb(shade, 0, 0));
+        }
+        let mut undone = 0;
+        while undone <= MAX_UNDO_STEPS && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, MAX_UNDO_STEPS);
+        assert_eq!(
+            first_pixel(&app),
+            Color::rgb(9, 0, 0),
+            "not the picture before the oldest edit kept"
+        );
+        assert_eq!(app.canvas_width, 2, "the edit that made the canvas is kept");
     }
 
     // ---- Polygon builder tests ----
@@ -7487,10 +7499,10 @@ mod tests {
     fn test_place_text_empty() {
         let mut app = PaintApp::new(100.0, 100.0);
         app.current_tool = Tool::Text;
-        let undo_before = app.history.undo_count();
+        assert!(!app.history.can_undo());
         app.place_text();
         // Should not push history for empty text
-        assert_eq!(app.history.undo_count(), undo_before);
+        assert!(!app.history.can_undo(), "empty text went on the history");
     }
 
     // ---- Crop to selection test ----
@@ -7763,8 +7775,10 @@ mod tests {
         let (vx, vy, _, _) = app.canvas_viewport();
         press(&mut app, vx + 10.0, vy + 10.0);
         release(&mut app, vx + 10.0, vy + 10.0);
-        let after_stroke = app.history.undo_stack.len();
-        assert!(after_stroke > 0, "the stroke recorded no history to undo");
+        assert!(
+            app.history.can_undo(),
+            "the stroke recorded no history to undo"
+        );
 
         let handled = app.handle_event(&Event::Key(KeyEvent {
             key: Key::Z,
@@ -7773,10 +7787,7 @@ mod tests {
             text: String::new(),
         }));
         assert!(handled, "Ctrl+Z was not handled");
-        assert!(
-            app.history.undo_stack.len() < after_stroke,
-            "Ctrl+Z did not undo: the undo stack stayed at {after_stroke}"
-        );
+        assert!(app.history.can_redo(), "Ctrl+Z did not undo");
     }
 
     /// A key coming *up* is not a second press.

@@ -1968,6 +1968,20 @@ live.
   Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
   real cross-crate breaks; option A is in force, and nothing is added.
 
+- `[C]` **A slider you can drag, and targets larger than what is drawn** --
+  done 2026-09-27 (`design-decisions.md` §1431). `guitk::slider`: the
+  toolkit had declared a slider it never drew, and the desktop's could be
+  clicked but not dragged, and only on the track's exact pixels. Now a press
+  near the thumb takes hold where it pressed, a press on the track jumps
+  there, the keys and (while focused) the wheel move it, and it reports
+  `Changed` while dragged, `Confirmed` when let go, `Cancelled` on Escape.
+  `guitk::grab` is the rule for every draggable thing: a handle is a 24-pixel
+  target however small it is drawn (WCAG 2.5.8), an edge gets three pixels
+  either side. The notification pane's volume and brightness drag now.
+  **Lane C, next:** the toolkit's colour picker sliders, scrollbar thumbs and
+  `WidgetKind::Slider` onto it. **Lane E:** the applications' own sliders
+  (`requests/c-e-the-toolkit-has-a-slider-now.md`).
+
 - `[C]` **One push button, the reference's** -- done 2026-09-27
   (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's
   button in the theme's colours -- a face brighter above, an edge, the label

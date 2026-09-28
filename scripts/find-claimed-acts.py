@@ -69,16 +69,24 @@ WHAT IT CANNOT SEE, stated plainly:
     `std::net` to parse an address, which is not network access -- the same
     blind spot `find-stale-admissions` documents, and for the same reason.
 
-THE SIX IT STILL REPORTS, so nobody investigates them twice. All six are
-correct code: the first four read against the source on 2026-09-15, the last
-two on 2026-09-17 -- and those two were investigated from scratch that day
-precisely because this list still said four. A list like this is only worth
+THE NINE IT STILL REPORTS, so nobody investigates them twice. All nine are
+correct code: four read against the source on 2026-09-15, two on 2026-09-17 --
+investigated from scratch that day precisely because this list still said four
+-- and three on 2026-09-27, when it said six. A list like this is only worth
 having if it is added to when the scanner's output grows.
 
-  * `apps/terminal` [process] -- "terminated by {s:?}". A `Display` impl for an
-    exit-status enum. It describes how a child process ended; it does not claim
+  * `apps/termchild` [process] -- "was killed by {name} (signal {sig})" and
+    "was killed by signal {sig}". The `Display` impl for a child's exit status
+    (it was `apps/terminal`'s "terminated by {s:?}" until the child moved into
+    its own crate). It describes how a child process ended; it does not claim
     this program ended it. The vocabulary cannot tell a report of someone
     else's act from a claim about one's own.
+  * `apps/terminal` [network] -- "No shell. {why} Nothing is connected to this
+    terminal, so what you type goes nowhere". A denial, not a claim: "connected"
+    is network vocabulary, and the sentence says nothing is.
+  * `apps/rssreader` [network] -- "Open a feed file you have downloaded -- Open…
+    or Ctrl+O -- to read it here." An instruction to the user, who did the
+    downloading; the reader claims no fetch, and has none.
   * `apps/tmux` [process] -- "Killed session: {name}". A tmux session here is
     one of the app's own panes in its own `Vec`, and it really is removed. The
     `process` kind assumes the object is external, and this one is not.

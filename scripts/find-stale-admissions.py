@@ -61,9 +61,10 @@ WHAT IT CANNOT SEE, stated plainly:
     with the error messages and not printed. "Cannot open {path}: this program
     has no file access" would be missed.
 
-THE FOUR IT STILL REPORTS, so nobody investigates them twice. All four are
-correct code, and three of them are the documented blind spot above -- a crate
-holding one capability and truthfully denying another:
+THE SEVEN IT STILL REPORTS, so nobody investigates them twice. All seven are
+correct code, and most are the documented blind spot above -- a crate holding
+one capability and truthfully denying another. (The last three were read on
+2026-09-27, when this list said four and the scan reported five.)
 
   * `apps/dbviewer` [file] -- "a .db or .sqlite file cannot be read; one CSV
     becomes one table". It reads CSV and genuinely has no database driver.
@@ -79,6 +80,14 @@ holding one capability and truthfully denying another:
     uses exactly one call from it: `read_capped`, for the `.torrent` a user
     opens with Ctrl+O. Reading is not writing, and the sentence claims only
     that it cannot write.
+  * `apps/credmanager` [file] -- "The vault cannot be opened". The heading of
+    the panel shown when the vault file is there and one attempt to open it
+    failed; the reason is printed under it. A report of that attempt, not a
+    standing incapacity -- the same program opens a readable vault.
+  * `apps/hexeditor` [file] -- "It has no file yet", and `apps/jsonviewer`
+    [file] -- "Not saved: it has no file yet -- use Save As". Both are about
+    one document that has never been saved, said when plain Save is pressed on
+    it; both programs open and save files.
 
 On 2026-09-17 this list said three and the scan reported eight. The five it
 did not cover were not exceptions; three were real, and the scanner was right

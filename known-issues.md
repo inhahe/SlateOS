@@ -68870,6 +68870,16 @@ design-decisions.md §382.)*
 
 ## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — harnesses fixed, the duplication itself is open
 
+**Status (lane D, 2026-09-28):** two pairs are left, `kill` and `logger`,
+and both are on the image now, so "nothing we *install* is affected" below no
+longer holds: built in one cargo invocation, the image's `/bin/kill` was
+coreutils' copy, without `killall`. `scripts/create-ext4-rootfs.sh` now builds
+the standalone crates in a second invocation, so theirs are the copies left in
+`release/`, and refuses to stage coreutils' copy of a name two packages build.
+Merging the two pairs is asked of lane B in
+`requests/d-b-kill-and-logger-are-built-twice-and-three-image-crates-miss-sysroot-dep.md`.
+
+
 **In short:** Forty-two of our command-line utilities exist *twice* in this
 tree, as two separate programs with the same name — one inside the big
 `userspace/coreutils` package, one as its own little `userspace/<name>` crate.

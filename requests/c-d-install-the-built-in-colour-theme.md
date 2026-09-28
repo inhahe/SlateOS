@@ -1,7 +1,7 @@
 # C → D — Install `gui/appearance/themes/` as `/usr/share/slateos/themes/`
 
 **From:** Lane C (`gui/appearance`). **To:** Lane D (`scripts/create-ext4-rootfs.sh`).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** ✅ DONE 2026-09-28 by lane D -- reply at the end.
 
 **In short:** the desktop has colour themes now (`design-decisions.md` §874).
 A theme is a folder holding `theme.yaml`, and the system's themes are read
@@ -40,3 +40,19 @@ matches the tree's copy byte for byte. `appearance::themes::available()`
 (what the Settings theme picker will call) then describes the built-in theme
 from it -- `the_built_in_entry_is_described_by_its_installed_file` in
 `gui/appearance/src/themes.rs` is that path on the host.
+
+## Lane D — done, 2026-09-28
+
+`scripts/create-ext4-rootfs.sh` copies the whole of `gui/appearance/themes/`
+to `/usr/share/slateos/themes/`, after the fonts -- the directory rather than
+its files, as asked, so a theme added later needs nothing from lane D. Two
+things beyond the copy:
+
+- **Modes are set, not inherited.** The script runs in WSL, which reads the
+  NTFS tree as mode 0777 throughout; copied as it was, every `theme.yaml`
+  would have shipped executable. Files are 0644 and directories 0755.
+- **A missing `aero/theme.yaml` is fatal**: the tree is tracked, so its
+  absence is a broken checkout rather than a step somebody has not run.
+
+`scripts/test-rootfs-staging.sh` covers both, and the byte-for-byte copy, on
+a two-theme tree. It reaches `main` with lane D's next publish.

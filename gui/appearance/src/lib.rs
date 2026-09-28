@@ -1162,6 +1162,31 @@ pub struct FontsApplied {
 }
 
 impl FontSettings {
+    /// How glyphs are rasterized under these settings: smoothing, the subpixel
+    /// order and hinting, with `palette` -- which of a colour font's palettes
+    /// its emoji are painted with -- taken from the theme in force.
+    ///
+    /// The one mapping from the settings to a rasterizer's terms, for every
+    /// process that rasterizes text: the toolkit's own cache (through
+    /// [`apply`](Self::apply)) and the compositor's, which must agree or the
+    /// same label looks different depending on who drew it.
+    #[must_use]
+    pub fn rendering(&self, palette: guitk::text::ColourPalette) -> guitk::text::Rendering {
+        use guitk::text::Subpixel;
+        guitk::text::Rendering {
+            smoothing: self.smoothing,
+            subpixel: match self.subpixel {
+                SubpixelMode::None => Subpixel::None,
+                SubpixelMode::Rgb => Subpixel::Rgb,
+                SubpixelMode::Bgr => Subpixel::Bgr,
+                SubpixelMode::VRgb => Subpixel::VRgb,
+                SubpixelMode::VBgr => Subpixel::VBgr,
+            },
+            hinting: self.hinting,
+            palette,
+        }
+    }
+
     /// Draw in these families from now on, in *this* process.
     ///
     /// `guitk`'s font selection is per-process global state, and its own
@@ -1186,6 +1211,11 @@ impl FontSettings {
     /// machine does not have.
     #[must_use]
     pub fn apply(&self) -> FontsApplied {
+        // The way glyphs are rasterized, alongside the faces: text this
+        // process's toolkit rasterizes itself was drawn unhinted while the
+        // compositor's was hinted. The colour-emoji palette is the theme's,
+        // which this section does not know, so the one in force is kept.
+        guitk::text::set_rendering(self.rendering(guitk::text::rendering().palette));
         // Asking first, because installing is not free: `set_font_family`
         // reloads the faces and drops every rasterized glyph, so calling it
         // for the family already in use would throw the cache away to arrive
@@ -3325,6 +3355,54 @@ mod tests {
             before_mono,
             "a failed lookup changed the monospace font"
         );
+    }
+
+    /// The settings' rasterizing choices reach the toolkit's own cache.
+    ///
+    /// Text the toolkit rasterizes itself was drawn unhinted while the
+    /// compositor's was hinted. The cache starts unhinted, and every caller of
+    /// `apply` in this binary applies the defaults, whose hinting is on --
+    /// so this holds whatever runs beside it.
+    #[test]
+    fn applying_the_fonts_sets_how_this_process_rasterizes() {
+        let _ = FontSettings::default().apply();
+        let r = guitk::text::rendering();
+        assert!(r.hinting, "hinting did not reach the toolkit's cache");
+        assert!(r.smoothing);
+        assert_eq!(r.subpixel, guitk::text::Subpixel::Rgb);
+    }
+
+    /// One mapping from the settings to a rasterizer's terms, field by field.
+    #[test]
+    fn the_rendering_is_the_settings_field_for_field() {
+        use guitk::text::{ColourPalette, Subpixel};
+        let plain = FontSettings {
+            hinting: false,
+            smoothing: false,
+            subpixel: SubpixelMode::None,
+            ..FontSettings::default()
+        };
+        let r = plain.rendering(ColourPalette::Dark);
+        assert!(!r.hinting && !r.smoothing);
+        assert_eq!(r.subpixel, Subpixel::None);
+        assert_eq!(
+            r.palette,
+            ColourPalette::Dark,
+            "the palette is the caller's"
+        );
+        for (mode, want) in [
+            (SubpixelMode::Rgb, Subpixel::Rgb),
+            (SubpixelMode::Bgr, Subpixel::Bgr),
+            (SubpixelMode::VRgb, Subpixel::VRgb),
+            (SubpixelMode::VBgr, Subpixel::VBgr),
+        ] {
+            let s = FontSettings {
+                subpixel: mode,
+                ..FontSettings::default()
+            };
+            assert_eq!(s.rendering(ColourPalette::Light).subpixel, want, "{mode:?}");
+            assert!(s.rendering(ColourPalette::Light).hinting);
+        }
     }
 
     /// Choosing nothing is not the same as choosing something absent.

@@ -59027,21 +59027,6 @@ is already waiting, not whether the setter exists.
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
 
-## Lane C — the toolkit's font cache follows the hinting setting (2026-09-26)
-
-- **Wire `FontSettings::hinting` into the toolkit's own `FontCache`.** Lane F
-  made hinting live in the compositor (lane-f 98dff3b7b, a port of FreeType's
-  light auto-hinter, on by default through the compositor's settings mapping).
-  Text the toolkit rasterizes itself -- into an application's own buffers --
-  is still drawn unhinted, so at small sizes it looks slightly different from
-  the same text drawn by the compositor. The fix: a
-  `guitk::text::set_rendering(hinting)` that calls
-  `FontCache::set_rendering(Rendering { hinting, .. })` on the process cache,
-  called from `appearance::FontSettings::apply` beside `set_font_family`, with
-  a test that the setting reaches the cache. **Trigger:** 98dff3b7b (the
-  `Rendering` type and `FontCache::set_rendering`) is on origin/main -- it
-  cannot be referenced before then. Told by lane F, 2026-09-26.
-
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
 - **Done 2026-09-26.** The power button reads "Shut down" and shuts down in

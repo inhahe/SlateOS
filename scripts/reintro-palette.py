@@ -129,6 +129,9 @@ SWITCH = "gui/toolkit/src/switch.rs"
 # defects therefore build `guitk` for the module's own tests and `desktop`
 # for the panels that draw sliders.
 SLIDER = "gui/toolkit/src/slider.rs"
+# The toolkit's one-line text field, where the Run box's caret movement
+# went when the box moved onto it.
+TK_TEXTINPUT = "gui/toolkit/src/textinput.rs"
 MM = "gui/desktop/src/multimon.rs"
 # The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
 # down here so there would be one copy of it; a defect patched into this file
@@ -388,22 +391,33 @@ DEFECTS = [
     (
         "Y: the run box's focus border is left as this module's own Mocha blue",
         RUN,
-        [("            color: p.accent,\n"
-          "            line_width: 1.0,\n"
-          "            corner_radii: CornerRadii::all(4.0),",
-          "            color: guitk::color::Color::from_hex(0x89B4FA),\n"
-          "            line_width: 1.0,\n"
-          "            corner_radii: CornerRadii::all(4.0),")],
+        [
+            ('        paint.border = Some(p.accent);\n',
+             '        paint.border = Some(guitk::color::Color::from_hex(0x89B4FA));\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The field's edge is a paint's
+            # border now; Mocha's blue is a role in the dark palette, so the light pass
+            # is the one that catches it.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn when the query matched something.
         "Z: the autocomplete dropdown keeps its own Mocha mantle",
         RUN,
-        [("                color: p.mantle,", "                color: guitk::color::Color::from_hex(0x181825),")],
+        [
+            ('            paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '            paint.border = Some(guitk::color::Color::from_hex(0x45475A));\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The list's fill is the panel
+            # paint's now, so the colour put back is its edge's: Mocha surface1, which
+            # the light palette does not have.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The OK button's label. Mocha `base` on a blue fill was fine while
@@ -411,10 +425,18 @@ DEFECTS = [
         # has to go dark by computation, not by constant.
         "AA: the OK button's label is left as this module's own Mocha base",
         RUN,
-        [("        let fg = if primary { p.on_accent() } else { p.text };",
-          "        let fg = if primary { guitk::color::Color::from_hex(0x1E1E2E) } else { p.text };")],
+        [
+            ('                ..guitk::button::State::default()\n            },\n            p.base,\n',
+             '                ..guitk::button::State::default()\n            },\n            guitk::color::Color::from_hex(0x1E1E2E),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The OK button is the toolkit's,
+            # which derives its face and label from the ground it is told it sits on;
+            # told Mocha's base instead of the palette's, every colour it derives is
+            # one no palette has.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     # `icons.rs`, 16 constants + 2 written inline. Its sweep is the first that
     # had to *drive a gesture* to reach a colour at all, so the defects below
@@ -17811,30 +17833,23 @@ DEFECTS = [
     ),
     (
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Run dialog's arrows go back to stepping through the string",
-        RUN,
+        TK_TEXTINPUT,
         [
-            ('        if let Some(prev) = text::caret_left(\n'
-             '            &self.text,\n'
-             '            self.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        ) {\n',
+            ('        if let Some(prev) = text::caret_left(&self.text, self.cursor, font_size, weight) {\n',
              '        if let Some(prev) = self.cursor.prev_in(&self.text) {\n'),
-            ('        if let Some(next) = text::caret_right(\n'
-             '            &self.text,\n'
-             '            self.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        ) {\n',
+            ('        if let Some(next) = text::caret_right(&self.text, self.cursor, font_size, weight) {\n',
              '        if let Some(next) = self.cursor.next_in(&self.text) {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
+            # Re-derived 2026-09-27 against the code as it now reads. The Run box moved onto the
+            # toolkit's `TextInput`, and the screen-order arrows with it, so the defect
+            # -- the arrows walking the string -- is put back there.
             # Undeclared until the sweep of 2026-08-24, for the same reason as
             # N above: a logical Right moves the offset from 2 to 6, and the
             # shaper draws 6 to the *left* of 2, so the drawn-caret test sees
             # a movement defect even though nothing about the drawing changed.
+            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
             'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
         ],
     ),
@@ -17842,20 +17857,13 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Run dialog goes back to slicing its text at the caret's raw byte offset",
         RUN,
         [
-            ('        let cursor_px = text::caret_x(\n'
-             '            &self.input.text,\n'
-             '            self.input.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        );\n',
-             '        let cursor_px = text::measure(\n'
-             '            &self.input.text[..self.input.cursor.byte()],\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        );\n'),
+            ('        let cursor_px = text::caret_x(\n            self.input.text(),\n            self.input.cursor(),\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n',
+             '        let cursor_px = text::measure(\n            &self.input.text()[..self.input.cursor().byte()],\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The same regression against
+            # the field's accessors: the caret measured from a byte slice.
             # Two faults in one line, so two catchers. The prefix width puts
             # the caret in the wrong place on a bidirectional line, and the
             # *slice* panics outright on an offset inside a character -- inside

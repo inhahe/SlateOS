@@ -278,6 +278,65 @@ fn a_label_taller_than_its_button_is_left_out() {
     );
 }
 
+/// An ink is moved only when it does not read, and then only as far as the
+/// floor for its strength: a colour that reads is kept exactly, one between
+/// the two floors is kept for large text and moved for small, and every ink
+/// reads on every ground at its floor afterwards, whichever way the grounds
+/// lie.
+#[test]
+fn an_ink_is_moved_only_as_far_as_it_must_be_to_read() {
+    let (dark, grey) = (Color::from_hex(0x303030), Color::from_hex(0x606060));
+    let white = Color::from_hex(0xFFFFFF);
+    assert_eq!(
+        Ink::on(white, &[dark, grey]),
+        Ink {
+            large: white,
+            small: white
+        },
+        "an ink that reads was moved"
+    );
+    // Between the floors on the dark ground.
+    let between = Color::from_hex(0x858585);
+    let ratio = contrast_ratio(between, dark);
+    assert!((3.0..4.5).contains(&ratio), "the fixture is {ratio:.2}:1");
+    let ink = Ink::on(between, &[dark]);
+    assert_eq!(ink.large, between, "large text that reads was moved");
+    assert_ne!(ink.small, between, "small text that does not read was kept");
+    // Moved only as far as it must: just over the floor, not far past it.
+    let dim = Color::from_hex(0x505050);
+    let ink = Ink::on(dim, &[dark, grey]);
+    for ground in [dark, grey] {
+        let large = contrast_ratio(ink.large, ground);
+        let small = contrast_ratio(ink.small, ground);
+        assert!(large >= 3.0, "large text is {large:.2}:1");
+        assert!(small >= 4.5, "small text is {small:.2}:1");
+    }
+    assert!(
+        contrast_ratio(ink.large, grey) < 3.2,
+        "large text was moved past its floor: {:.2}:1",
+        contrast_ratio(ink.large, grey)
+    );
+    // On light grounds it goes the other way.
+    let (pale, paler) = (Color::from_hex(0xC0C0C0), Color::from_hex(0xE0E0E0));
+    let ink = Ink::on(Color::from_hex(0xA0A0A0), &[pale, paler]);
+    for ground in [pale, paler] {
+        assert!(contrast_ratio(ink.small, ground) >= 4.5);
+    }
+}
+
+/// A text is large at 24px, or at 18.66px bold, and takes that strength.
+#[test]
+fn an_ink_is_picked_by_the_size_it_is_drawn_at() {
+    let ink = Ink {
+        large: Color::from_hex(0x111111),
+        small: Color::from_hex(0x222222),
+    };
+    assert_eq!(ink.at(24.0, false), ink.large);
+    assert_eq!(ink.at(23.9, false), ink.small);
+    assert_eq!(ink.at(18.66, true), ink.large);
+    assert_eq!(ink.at(18.6, true), ink.small);
+}
+
 /// Nothing is drawn for a button with no room.
 #[test]
 fn a_button_with_no_room_draws_nothing() {

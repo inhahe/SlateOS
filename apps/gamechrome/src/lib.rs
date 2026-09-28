@@ -137,6 +137,83 @@ pub fn apart_from_accent(p: &Palette) -> Color {
         .unwrap_or(p.text)
 }
 
+/// A text colour for text drawn on grounds of a game's own, in the two
+/// strengths WCAG 1.4.3 asks for: [`large`](Self::large), moved only as far
+/// as large text needs to read on every ground (3:1), and
+/// [`small`](Self::small), as far as ordinary text needs (4.5:1). Whether a
+/// game's text is large depends on the size it is drawn at, which follows the
+/// window, so it holds both and picks with [`Ink::at`].
+///
+/// The palette's inks are made for the page (`Palette::ink`); a game writes
+/// on squares, cards and tints the palette never saw, darker than the page in
+/// a light theme and lighter in a dark one -- sudoku's hints fell to 2.5:1 on
+/// its selected square. Moving an ink only as far as it must leaves a theme
+/// whose inks already read exactly as it is, and keeps a hue as near to the
+/// palette's as legibility allows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ink {
+    /// For large text: at least 3:1 on every ground.
+    pub large: Color,
+    /// For ordinary text: at least 4.5:1 on every ground.
+    pub small: Color,
+}
+
+impl Ink {
+    /// `ink` made to read on every one of `grounds`, in both strengths.
+    #[must_use]
+    pub fn on(ink: Color, grounds: &[Color]) -> Self {
+        let to = |floor: f32| {
+            grounds
+                .iter()
+                .fold(ink, |ink, &ground| moved_to_read(ink, ground, floor))
+        };
+        Self {
+            large: to(legibility::LARGE_TEXT_FLOOR),
+            small: to(legibility::TEXT_FLOOR),
+        }
+    }
+
+    /// The strength for text drawn at `size` pixels, bold or not.
+    #[must_use]
+    pub fn at(self, size: f32, bold: bool) -> Color {
+        if legibility::is_large(size, bold) {
+            self.large
+        } else {
+            self.small
+        }
+    }
+}
+
+/// `ink`, moved toward black or white -- whichever reads on `ground` -- only
+/// as far as it must be to reach `floor` against it; unchanged where it
+/// already does.
+///
+/// `guitk::palette::legible_on` with the floor as a parameter: that one is
+/// fixed at 4.5:1, and moving large text there moves its hue twice as far as
+/// large text needs. Scaling toward an extreme keeps the hue, for the reason
+/// that function's documentation gives; the bisection is its too.
+fn moved_to_read(ink: Color, ground: Color, floor: f32) -> Color {
+    if contrast_ratio(ink, ground) >= floor {
+        return ink;
+    }
+    let (black, white) = (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255));
+    let toward = if contrast_ratio(ground, black) >= contrast_ratio(ground, white) {
+        black
+    } else {
+        white
+    };
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let mid = f32::midpoint(lo, hi);
+        if contrast_ratio(ink.lerp(toward, mid), ground) >= floor {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    ink.lerp(toward, hi)
+}
+
 /// Of a colour's two shades -- the dark theme's and the light theme's -- the
 /// one that reads better on `ground`.
 ///

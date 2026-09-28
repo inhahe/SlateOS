@@ -40,6 +40,30 @@ LIB_MUTATIONS = [
         "    if false {\n        return;\n    }",
         ["a_button_with_no_room_draws_nothing"],
     ),
+    (
+        "large text is held to the small floor",
+        "            large: to(legibility::LARGE_TEXT_FLOOR),",
+        "            large: to(legibility::TEXT_FLOOR),",
+        ["an_ink_is_moved_only_as_far_as_it_must_be_to_read"],
+    ),
+    (
+        "an ink is moved toward the pole that does not read",
+        "    let toward = if contrast_ratio(ground, black) >= contrast_ratio(ground, white) {",
+        "    let toward = if contrast_ratio(ground, black) < contrast_ratio(ground, white) {",
+        ["an_ink_is_moved_only_as_far_as_it_must_be_to_read"],
+    ),
+    (
+        "an ink is moved past its floor",
+        "    for _ in 0..24 {",
+        "    for _ in 0..2 {",
+        ["an_ink_is_moved_only_as_far_as_it_must_be_to_read"],
+    ),
+    (
+        "every text takes the large strength",
+        "        if legibility::is_large(size, bold) {\n            self.large",
+        "        if true {\n            self.large",
+        ["an_ink_is_picked_by_the_size_it_is_drawn_at"],
+    ),
 ]
 
 LEGIBILITY_MUTATIONS = [
@@ -80,9 +104,9 @@ LEGIBILITY_MUTATIONS = [
         ["a_text_is_read_at_the_middle_of_its_line_not_its_corner"],
     ),
     (
-        "large text is held to the small floor",
-        "        if self.is_large() { 3.0 } else { 4.5 }",
-        "        if false { 3.0 } else { 4.5 }",
+        "a large text read is held to the small text's floor",
+        "        if self.is_large() {\n            LARGE_TEXT_FLOOR\n",
+        "        if false {\n            LARGE_TEXT_FLOOR\n",
         ["a_faint_text_is_illegible_unless_exempt_and_large_text_has_the_lower_floor"],
     ),
     (
@@ -90,6 +114,12 @@ LEGIBILITY_MUTATIONS = [
         "        .filter(|r| !exempt(r) && r.ratio() < r.floor())",
         "        .filter(|r| r.ratio() < r.floor())",
         ["a_faint_text_is_illegible_unless_exempt_and_large_text_has_the_lower_floor"],
+    ),
+    (
+        "bold text is large only at the plain size",
+        "    size >= 24.0 || (bold && size >= 18.66)",
+        "    size >= 24.0 || (bold && size >= 24.0)",
+        ["an_ink_is_picked_by_the_size_it_is_drawn_at"],
     ),
 ]
 

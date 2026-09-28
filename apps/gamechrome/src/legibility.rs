@@ -35,18 +35,34 @@ pub struct Read {
     pub bold: bool,
 }
 
+/// Ordinary text's contrast floor (WCAG 1.4.3).
+pub const TEXT_FLOOR: f32 = 4.5;
+
+/// Large text's contrast floor (WCAG 1.4.3).
+pub const LARGE_TEXT_FLOOR: f32 = 3.0;
+
+/// Whether WCAG counts text at `size` pixels as large -- 18pt, or 14pt bold,
+/// which at 96 pixels to the inch is 24px, or 18.66px bold.
+#[must_use]
+pub fn is_large(size: f32, bold: bool) -> bool {
+    size >= 24.0 || (bold && size >= 18.66)
+}
+
 impl Read {
-    /// Whether WCAG counts this as large text -- 18pt, or 14pt bold, which at
-    /// 96 pixels to the inch is 24px, or 18.66px bold.
+    /// Whether WCAG counts this as large text ([`is_large`]).
     #[must_use]
     pub fn is_large(&self) -> bool {
-        self.size >= 24.0 || (self.bold && self.size >= 18.66)
+        is_large(self.size, self.bold)
     }
 
     /// The floor this text is held to: 3:1 when large, 4.5:1 otherwise.
     #[must_use]
     pub fn floor(&self) -> f32 {
-        if self.is_large() { 3.0 } else { 4.5 }
+        if self.is_large() {
+            LARGE_TEXT_FLOOR
+        } else {
+            TEXT_FLOOR
+        }
     }
 
     /// Its contrast against its ground.

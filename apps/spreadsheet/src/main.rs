@@ -35,6 +35,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
+use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -109,7 +110,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Delete", "Clear the selected cells"),
     ("Escape", "Stop editing, keeping what was there"),
     ("Ctrl+C / Ctrl+X / Ctrl+V", "Copy / cut / paste"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The workbook before / after this, on any branch",
+    ),
     ("Ctrl+B / Ctrl+I", "Bold / italic"),
     ("Ctrl+F / Ctrl+H", "Find / find and replace"),
     ("Alt+C", "Find and replace: match case, or ignore it"),
@@ -134,6 +139,11 @@ const HEADER_FONT: f32 = 12.0;
 const RESIZE_HANDLE_SIZE: f32 = 5.0;
 const AUTOFILL_HANDLE_SIZE: f32 = 7.0;
 const UNDO_STACK_LIMIT: usize = 200;
+/// [`UNDO_STACK_LIMIT`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(UNDO_STACK_LIMIT) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 const SCROLLBAR_WIDTH: f32 = 14.0;
 /// The shortest a thumb may be drawn, so a very long sheet still leaves
 /// something big enough to aim at.
@@ -818,10 +828,15 @@ pub enum UndoAction {
     RemoveSheet { sheet_idx: usize, sheet: Sheet },
 }
 
-/// Manages undo/redo stacks.
+/// Manages the undo history.
 pub struct UndoManager {
-    undo_stack: Vec<UndoAction>,
-    redo_stack: Vec<UndoAction>,
+    /// The actions, kept as a tree: one done after undoing starts a branch
+    /// beside what was undone, rather than throwing it away (C-Q24,
+    /// `design-decisions.md` §1416). Undo and redo go back and forth along
+    /// the branch the workbook is on; [`UndoManager::earlier`] and
+    /// [`UndoManager::later`] walk every version it has been in, in the order
+    /// each was made.
+    history: UndoHistory<UndoAction>,
     /// Whether anything has been done, undone or redone since the workbook
     /// was last saved or opened. Every change to a cell, a sheet or a size
     /// comes through here, which makes this the one place to learn it.
@@ -838,57 +853,59 @@ impl UndoManager {
     /// Create a new empty undo manager.
     pub fn new() -> Self {
         Self {
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             changed: false,
         }
     }
 
-    /// Record an action for potential undo.
+    /// Record an action as the next step. One done after undoing starts a
+    /// branch, and what was undone stays in the history; past
+    /// [`UNDO_STACK_LIMIT`] the oldest go, branches the workbook is not on
+    /// first.
     pub fn push_action(&mut self, action: UndoAction) {
-        if self.undo_stack.len() >= UNDO_STACK_LIMIT {
-            self.undo_stack.remove(0);
-        }
-        self.undo_stack.push(action);
-        self.redo_stack.clear();
+        self.history.record(action);
         self.changed = true;
     }
 
     /// Check if undo is available.
     pub fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
+        self.history.can_undo()
     }
 
-    /// Check if redo is available.
+    /// Check if redo is available, on the branch the workbook is on.
     pub fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
+        self.history.can_redo()
     }
 
-    /// Pop the last undo action.
+    /// The action to take back, if there is one.
     pub fn pop_undo(&mut self) -> Option<UndoAction> {
-        let action = self.undo_stack.pop()?;
-        self.redo_stack.push(action.clone());
+        let action = self.history.undo()?;
         // Undoing past a save leaves a workbook the file does not hold.
         self.changed = true;
         Some(action)
     }
 
-    /// Pop the last redo action.
+    /// The action to do again, if there is one.
     pub fn pop_redo(&mut self) -> Option<UndoAction> {
-        let action = self.redo_stack.pop()?;
-        self.undo_stack.push(action.clone());
+        let action = self.history.redo()?;
         self.changed = true;
         Some(action)
     }
 
-    /// Count of undo actions available.
-    pub fn undo_count(&self) -> usize {
-        self.undo_stack.len()
+    /// The steps to the version before this one in time, on whichever
+    /// branch. Empty at the first.
+    pub fn earlier(&mut self) -> Vec<Travel<UndoAction>> {
+        let steps = self.history.earlier();
+        self.changed |= !steps.is_empty();
+        steps
     }
 
-    /// Count of redo actions available.
-    pub fn redo_count(&self) -> usize {
-        self.redo_stack.len()
+    /// The steps to the version after this one in time, on whichever branch.
+    /// Empty at the newest.
+    pub fn later(&mut self) -> Vec<Travel<UndoAction>> {
+        let steps = self.history.later();
+        self.changed |= !steps.is_empty();
+        steps
     }
 }
 
@@ -3424,6 +3441,32 @@ impl SpreadsheetApp {
         }
     }
 
+    /// Go to the version the workbook was in before this one was first
+    /// reached, on whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.undo_manager.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version first reached after this one, on whichever branch
+    /// -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.undo_manager.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoAction>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.apply_undo_action(&action, true),
+                Travel::Redo(action) => self.apply_undo_action(&action, false),
+            }
+        }
+        moved
+    }
+
     /// Apply an undo or redo action.
     fn apply_undo_action(&mut self, action: &UndoAction, is_undo: bool) {
         match action {
@@ -4398,8 +4441,34 @@ impl SpreadsheetApp {
             return handle_editing_key(buffer, event);
         }
 
-        // Ctrl shortcuts
-        if event.modifiers.ctrl {
+        // Alt+Z and Alt+Shift+Z: every version the workbook has been in, in
+        // the order each was made -- the way back to a branch undone out of.
+        // Alt without Ctrl: Ctrl+Alt is AltGr.
+        if event.key == Key::Z
+            && event.modifiers.alt
+            && !event.modifiers.ctrl
+            && !event.modifiers.super_key
+        {
+            let moved = if event.modifiers.shift {
+                self.later()
+            } else {
+                self.earlier()
+            };
+            // Answered either way, as every key here is; at either end of
+            // time the notice says so rather than the key doing nothing.
+            if !moved {
+                self.notice = Some(String::from(if event.modifiers.shift {
+                    "This is the newest version"
+                } else {
+                    "This is the first version"
+                }));
+            }
+            return EventResult::Consumed;
+        }
+
+        // Ctrl shortcuts. Ctrl without Alt: Ctrl+Alt is AltGr, which types a
+        // letter on several layouts -- AltGr+Z is Polish's ż, which undid.
+        if event.modifiers.ctrl && !event.modifiers.alt {
             match event.key {
                 Key::C => {
                     self.copy_selection();
@@ -4411,6 +4480,10 @@ impl SpreadsheetApp {
                 }
                 Key::V => {
                     self.paste();
+                    return EventResult::Consumed;
+                }
+                Key::Z if event.modifiers.shift => {
+                    self.redo();
                     return EventResult::Consumed;
                 }
                 Key::Z => {
@@ -9782,7 +9855,12 @@ mod tests {
                 new_cell: Cell::empty(),
             });
         }
-        assert_eq!(um.undo_count(), UNDO_STACK_LIMIT);
+        // The history keeps no count; counted by taking them all back.
+        let mut kept = 0;
+        while um.pop_undo().is_some() {
+            kept += 1;
+        }
+        assert_eq!(kept, UNDO_STACK_LIMIT);
     }
 
     // -- SpreadsheetApp tests --
@@ -11801,5 +11879,107 @@ mod tests {
             !texts.iter().any(|t| t == EXAMPLE_SHEET_NOTE),
             "the note stays on a sheet that is no longer the example"
         );
+    }
+
+    // ---- the actions as a tree, and the keys (C-Q24, §1416) ------------------
+
+    fn a1(app: &SpreadsheetApp) -> CellValue {
+        app.active_sheet()
+            .get_cell(CellAddr::new(0, 0))
+            .value
+            .clone()
+    }
+
+    fn text(s: &str) -> CellValue {
+        CellValue::Text(s.to_string())
+    }
+
+    fn alt_shift(k: Key) -> Event {
+        let mut modifiers = Modifiers::NONE;
+        modifiers.alt = true;
+        modifiers.shift = true;
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every version there has been, in the order each was made; Alt+Shift+Z
+    /// comes forward again.
+    #[test]
+    fn an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "first");
+        app.undo();
+        app.set_cell_input(CellAddr::new(0, 0), "second");
+        assert!(
+            !app.undo_manager.can_redo(),
+            "redo would go onto the branch left"
+        );
+        // As a save leaves it: a journey away from what was saved is a change.
+        app.undo_manager.changed = false;
+        app.handle_event(&alt(Key::Z));
+        assert!(
+            app.undo_manager.changed,
+            "a journey did not mark the workbook changed"
+        );
+        assert_eq!(a1(&app), text("first"), "the undone edit was lost");
+        app.handle_event(&alt(Key::Z));
+        assert!(a1(&app).is_empty());
+        app.handle_event(&alt_shift(Key::Z));
+        app.handle_event(&alt_shift(Key::Z));
+        assert_eq!(a1(&app), text("second"));
+    }
+
+    /// At either end of time the notice says so.
+    #[test]
+    fn the_ends_of_the_history_are_said() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        assert_eq!(app.handle_event(&alt(Key::Z)), EventResult::Consumed);
+        assert_eq!(app.notice.as_deref(), Some("This is the first version"));
+        app.set_cell_input(CellAddr::new(0, 0), "one");
+        app.handle_event(&alt_shift(Key::Z));
+        assert_eq!(app.notice.as_deref(), Some("This is the newest version"));
+        assert_eq!(a1(&app), text("one"));
+    }
+
+    /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.
+    #[test]
+    fn ctrl_shift_z_redoes() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "one");
+        app.handle_event(&ctrl(Key::Z));
+        assert!(a1(&app).is_empty());
+        app.handle_event(&ctrl_shift(Key::Z));
+        assert_eq!(a1(&app), text("one"));
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt: AltGr+Z -- Polish's
+    /// ż -- undid the last edit, and AltGr+E -- € on most European layouts
+    /// -- could not start typing into a cell.
+    #[test]
+    fn an_altgr_letter_is_typed_not_taken_for_a_chord() {
+        let mut app = SpreadsheetApp::new(1280.0, 800.0);
+        app.set_cell_input(CellAddr::new(0, 0), "one");
+        let altgr = |key: Key, letter: &str| {
+            let mut modifiers = Modifiers::ctrl();
+            modifiers.alt = true;
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: letter.to_string(),
+            })
+        };
+        app.handle_event(&altgr(Key::Z, "\u{17c}"));
+        assert_eq!(a1(&app), text("one"), "AltGr+Z undid");
+        match &app.mode {
+            InteractionMode::Editing { buffer } => assert_eq!(buffer.text(), "\u{17c}"),
+            other => panic!("AltGr+Z did not start typing: {other:?}"),
+        }
     }
 }

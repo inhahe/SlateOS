@@ -32,11 +32,9 @@ CLOSE = "closing_or_opening_over_unsaved_changes_asks"
 MUTATIONS = [
     (
         "an edit does not mark the workbook",
-        "        self.undo_stack.push(action);\n"
-        "        self.redo_stack.clear();\n"
+        "        self.history.record(action);\n"
         "        self.changed = true;\n",
-        "        self.undo_stack.push(action);\n"
-        "        self.redo_stack.clear();\n",
+        "        self.history.record(action);\n",
         [KEYS, CLOSE],
     ),
     (
@@ -162,6 +160,49 @@ MUTATIONS = [
         "        app\n"
         "    }",
         ["a_new_book_opens_blank"],
+    ),
+    # -- the actions as a tree, and the keys (C-Q24, §1416) ----------------------
+    (
+        "a journey takes its steps the wrong way",
+        "                Travel::Undo(action) => self.apply_undo_action(&action, true),",
+        "                Travel::Undo(action) => self.apply_undo_action(&action, false),",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Z goes forward in time",
+        "        let steps = self.history.earlier();",
+        "        let steps = self.history.later();",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "a journey does not mark the workbook",
+        "        let steps = self.history.earlier();\n        self.changed |= !steps.is_empty();",
+        "        let steps = self.history.earlier();",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "Alt+Shift+Z goes back as Alt+Z does",
+        "            let moved = if event.modifiers.shift {\n                self.later()",
+        "            let moved = if event.modifiers.shift {\n                self.earlier()",
+        ["an_edit_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"],
+    ),
+    (
+        "the ends of the history are not said",
+        "            if !moved {\n                self.notice = Some(",
+        "            if false {\n                self.notice = Some(",
+        ["the_ends_of_the_history_are_said"],
+    ),
+    (
+        "AltGr is taken for Ctrl",
+        "        if event.modifiers.ctrl && !event.modifiers.alt {",
+        "        if event.modifiers.ctrl {",
+        ["an_altgr_letter_is_typed_not_taken_for_a_chord"],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "                Key::Z if event.modifiers.shift => {\n                    self.redo();",
+        "                Key::Z if event.modifiers.shift => {\n                    self.undo();",
+        ["ctrl_shift_z_redoes"],
     ),
 ]
 

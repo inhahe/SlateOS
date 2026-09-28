@@ -185,6 +185,102 @@ MUTATIONS = [
         "",
         ["a_modifier_the_program_does_not_use_is_ignored"],
     ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours", "a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the tiles are the palette's raw hues, pale on a light well",
+        "            .map(|hue| p.ink(hue)),",
+        "            .map(|hue| hue),",
+        ["the_tiles_are_told_apart_and_stand_off_the_board_in_either_theme"],
+    ),
+    (
+        "a tile's number is written dark whatever the tile",
+        "                        ink,\n                        FontWeightHint::Bold,",
+        "                        INKS.1,\n                        FontWeightHint::Bold,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a home tile is outlined in its own colour",
+        "                    stroke(f, inner, ink, (inner.w * 0.05).clamp(1.0, 3.0), radius);",
+        "                    stroke(f, inner, colour, (inner.w * 0.05).clamp(1.0, 3.0), radius);",
+        ["a_home_tiles_outline_stands_off_it_in_either_theme"],
+    ),
+    (
+        "the size in play looks like the others",
+        "                if active { Kind::Primary } else { Kind::Plain },",
+        "                Kind::Plain,",
+        ["the_chosen_controls_look_chosen"],
+    ),
+    (
+        "the numbers switch looks the same on and off",
+        "            if self.show_numbers {\n                Kind::Primary\n            } else {\n                Kind::Plain\n            },",
+        "            Kind::Plain,",
+        ["the_chosen_controls_look_chosen"],
+    ),
+    (
+        "the size in play's record is not the selected row",
+        "                if chosen {\n                    Surface::Selected\n                } else {\n                    Surface::Card\n                },",
+        "                Surface::Card,",
+        ["the_chosen_controls_look_chosen"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "            Surface::Panel,",
+        "            Surface::Card,",
+        ["the_help_sheet_is_grounded_over_a_dimmed_window"],
+    ),
+    (
+        "nothing dims the window behind the help sheet",
+        "        fill(f, l.window, self.colours.chrome.scrim, 0.0);",
+        "        let _ = l.window;",
+        ["the_help_sheet_is_grounded_over_a_dimmed_window"],
+    ),
+    (
+        "the help sheet's scrim is Mocha's whatever the theme",
+        "        fill(f, l.window, self.colours.chrome.scrim, 0.0);",
+        "        fill(f, l.window, Color::rgba(0x1E, 0x1E, 0x2E, 158), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a win is told in secondary text",
+        "            self.colours.chrome.good\n        } else {",
+        "            self.colours.chrome.dim\n        } else {",
+        ["a_solved_board_is_told_in_the_colour_for_a_win"],
+    ),
+    (
+        "the other sizes' records are the faintest grey",
+        "                    self.colours.chrome.dim\n                },\n                FontWeightHint::Bold,",
+        "                    self.colours.chrome.off\n                },\n                FontWeightHint::Bold,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help sheet's descriptions are the faintest grey",
+        "                what,\n                size,\n                self.colours.chrome.text,",
+        "                what,\n                size,\n                self.colours.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the board's well is Mocha's whatever the theme",
+        "            l.board,\n            self.colours.chrome.well,",
+        "            l.board,\n            Color::from_hex(0x11111B),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the title is Mocha's lavender whatever the theme",
+        "            l.big.min(l.header.h * 0.8),\n            self.colours.chrome.title,",
+        "            l.big.min(l.header.h * 0.8),\n            Color::from_hex(0xB4BEFE),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

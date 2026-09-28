@@ -47,12 +47,16 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::similar_names)]
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -75,39 +79,40 @@ use std::process::ExitCode;
 //     vertically, in a game whose entire subject is growing a blob.
 use randrange::{RandomSource, SeededRng};
 
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-
-/// Laid over a swatch whose colour cannot move the game.
-///
-/// Translucent rather than a substitute colour, because the colour is the
-/// whole of what the swatch says: a disabled swatch still has to be
-/// identifiable as the one it is.
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-/// Behind the win/loss banner, which sits over the board it reports on.
-const COL_BANNER: Color = Color::rgba(0x11, 0x11, 0x1B, 224);
-/// Behind the help sheet, dimming the window it covers.
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// The six colours are the game: the player tells the cells apart by them and
+// chooses by them, so they keep their own values in every theme (the
+// operator's answer to C-Q16, §1422, as simon's pads and match3's gems do) --
+// a theme whose green and teal came close would deal a board nobody could
+// read. Everything round them -- the page, the bands, the buttons, the banner
+// and the help sheet -- follows the user's palette, through
+// `gamechrome::Chrome`. It all used to be a copy of Catppuccin Mocha, dark on
+// a light desktop.
 
 const NUM_COLORS: usize = 6;
+/// The game's six colours, in key order: red, orange, yellow, green, teal and
+/// mauve, Catppuccin Mocha's. The pieces, not the user's palette -- which the
+/// chrome follows and these do not.
 const PALETTE: [Color; NUM_COLORS] = [
-    COL_RED, COL_PEACH, COL_YELLOW, COL_GREEN, COL_TEAL, COL_MAUVE,
+    Color::from_hex(0xF38BA8),
+    Color::from_hex(0xFAB387),
+    Color::from_hex(0xF9E2AF),
+    Color::from_hex(0xA6E3A1),
+    Color::from_hex(0x94E2D5),
+    Color::from_hex(0xCBA6F7),
 ];
 const PALETTE_LABELS: [&str; NUM_COLORS] = ["R", "O", "Y", "G", "T", "M"];
+
+/// The two inks that may be drawn on one of the six, `(light, dark)`:
+/// whichever reads on what is under it -- a swatch, dimmed or not, and the
+/// corner cell's mark.
+///
+/// The near-black is a neutral one rather than Mocha's crust (`11111B`),
+/// which it used to be: the palette test matches the game's own colours on
+/// RGB, and Mocha's crust among them would pass a leftover Mocha crust
+/// anywhere in a light window.
+const INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 /// The board sizes the game offers, smallest first.
 ///
@@ -374,6 +379,13 @@ pub struct FloodIt {
     show_help: bool,
     width: f32,
     height: f32,
+    /// The user's colours -- the desktop theme, which everything but the six
+    /// colours follows -- replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s roles as the chrome draws them: rebuilt with it.
+    chrome: Chrome,
 }
 
 impl Default for FloodIt {
@@ -395,6 +407,8 @@ impl FloodIt {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
+            chrome: Chrome::of(&Palette::for_mode(false)),
         }
     }
 
@@ -678,38 +692,38 @@ fn centred_in(
     );
 }
 
-/// A button: its box, its label, and its hit target.
+/// A button: the toolkit's, on `ground`, and its hit target.
 ///
-/// Recorded even when `enabled` is false. A dimmed button that lets the click
-/// through is a button that does something else's job, and the board is
-/// directly behind the footer.
+/// Every button here can be pressed. The board size in play is drawn as the
+/// toolkit's primary button, the chosen one, rather than switched off:
+/// pressing it again is answered, and changes nothing.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a button's box, words, size, kind, ground and target, and where \
+              to draw them: each a separate fact the call site knows"
+)]
 fn button(
     f: &mut Frame,
+    p: &Palette,
     r: Rect,
     body: &str,
     size: f32,
-    enabled: bool,
-    active: bool,
+    kind: Kind,
+    ground: Color,
     target: Target,
 ) {
     if r.is_empty() {
         return;
     }
-    let bg = if active { COL_SURFACE1 } else { COL_SURFACE0 };
-    fill(f, r, bg, 4.0);
-    if active {
-        stroke(f, r, COL_BLUE, 1.0, 4.0);
-    }
-    let fg = if enabled { COL_TEXT } else { COL_OVERLAY0 };
-    centred_in(
+    gamechrome::button(
         f,
-        r.x,
-        r.w,
-        r.centre().1,
+        p,
+        (r.x, r.y, r.w, r.h),
         body,
         size,
-        fg,
-        FontWeightHint::Regular,
+        kind,
+        State::default(),
+        ground,
     );
     f.hit(target, r);
 }
@@ -719,7 +733,7 @@ impl FloodIt {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        fill(&mut f, l.window, self.chrome.page, 0.0);
 
         self.draw_header(&mut f, &l);
         if l.shows_palette() {
@@ -745,7 +759,7 @@ impl FloodIt {
         if l.header.h < 8.0 {
             return;
         }
-        fill(f, l.header, COL_MANTLE, 0.0);
+        fill(f, l.header, self.chrome.band, 0.0);
         let btn = l.help_button();
         let title_span = (btn.x - l.header.x - l.pad * 2.0).max(0.0);
         label(
@@ -754,12 +768,13 @@ impl FloodIt {
             l.header.centre().1 - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Flood It",
             l.font,
-            COL_LAVENDER,
+            self.chrome.title,
             FontWeightHint::Bold,
             Some(title_span),
         );
         button(
             f,
+            &self.palette,
             btn,
             if self.show_help {
                 "H  Close"
@@ -767,8 +782,8 @@ impl FloodIt {
                 "H  Help"
             },
             l.small,
-            true,
-            self.show_help,
+            Kind::Plain,
+            self.chrome.band,
             Target::Help,
         );
     }
@@ -783,12 +798,20 @@ impl FloodIt {
             // A swatch that cannot move the game is greyed by a scrim rather
             // than by a different colour, because the colour is the thing it is
             // for: the player still has to be able to tell which one it is.
-            if !self.can_choose(i) {
-                fill(f, r, COL_SCRIM, 4.0);
+            let dimmed = !self.can_choose(i);
+            if dimmed {
+                fill(f, r, self.chrome.scrim, 4.0);
             }
             if self.head() == i as u8 {
-                stroke(f, r, COL_TEXT, 2.0, 4.0);
+                stroke(f, r, self.chrome.text, 2.0, 4.0);
             }
+            // Named in whichever ink reads on the swatch as drawn: the page's
+            // scrim darkens it in a dark theme and pales it in a light one.
+            let under = if dimmed {
+                self.chrome.scrim.over(*color)
+            } else {
+                *color
+            };
             let body = format!(
                 "{}  {}",
                 i.saturating_add(1),
@@ -801,7 +824,7 @@ impl FloodIt {
                 r.centre().1,
                 &body,
                 l.small,
-                COL_CRUST,
+                gamechrome::legible_on(INKS, under),
                 FontWeightHint::Bold,
             );
             f.hit(Target::Swatch(i), r);
@@ -826,7 +849,7 @@ impl FloodIt {
             l.info.centre().1,
             &body,
             l.small,
-            COL_SUBTEXT0,
+            self.chrome.dim,
             FontWeightHint::Regular,
         );
     }
@@ -840,7 +863,7 @@ impl FloodIt {
         fill(
             f,
             Rect::new(inset, l.board.y - 3.0, l.board.w + 6.0, l.board.h + 6.0),
-            COL_CRUST,
+            self.chrome.well,
             4.0,
         );
         let cs = l.board.w / (size.max(1) as f32);
@@ -852,7 +875,10 @@ impl FloodIt {
         for (row, cells) in self.grid.iter().enumerate() {
             for (col, &value) in cells.iter().enumerate() {
                 let cell = l.cell(size, row, col);
-                let color = PALETTE.get(value as usize).copied().unwrap_or(COL_SURFACE0);
+                let color = PALETTE
+                    .get(value as usize)
+                    .copied()
+                    .unwrap_or(self.chrome.raised);
                 fill(
                     f,
                     Rect::new(
@@ -874,6 +900,10 @@ impl FloodIt {
         let corner = l.cell(size, 0, 0);
         if corner.w >= 6.0 {
             let d = corner.w * 0.34;
+            let under = PALETTE
+                .get(self.head() as usize)
+                .copied()
+                .unwrap_or(self.chrome.raised);
             fill(
                 f,
                 Rect::new(
@@ -882,26 +912,33 @@ impl FloodIt {
                     d,
                     d,
                 ),
-                COL_CRUST,
+                gamechrome::legible_on(INKS, under),
                 d / 2.0,
             );
         }
     }
 
     fn draw_banner(&self, f: &mut Frame, l: &Layout) {
-        let r = l.banner();
-        if r.is_empty() {
-            return;
-        }
-        fill(f, r, COL_BANNER, 4.0);
+        // What it says first: a game in play has no banner at all, not an
+        // empty one.
         let (body, color) = match self.state {
-            GameState::Won => (format!("Flooded in {} moves", self.moves), COL_GREEN),
+            GameState::Won => (format!("Flooded in {} moves", self.moves), self.chrome.good),
             GameState::Lost => (
                 format!("Out of moves ({}/{})", self.moves, self.max_moves),
-                COL_RED,
+                self.chrome.bad,
             ),
             GameState::Playing => return,
         };
+        let r = l.banner();
+        // Under a point the toolkit's border, stroked half a point in, would
+        // reach outside the banner.
+        if r.w < 1.0 || r.h < 1.0 {
+            return;
+        }
+        // The toolkit's panel: a ground of its own over the cells, in the
+        // theme's look.
+        self.palette
+            .push_surface(f, r.x, r.y, r.w, r.h, 4.0, Surface::Panel);
         let line = text::line_height(l.font, FontWeightHint::Bold);
         centred_in(
             f,
@@ -920,7 +957,7 @@ impl FloodIt {
             r.centre().1 + line * 0.6,
             "N for a new board",
             l.small,
-            COL_SUBTEXT0,
+            self.chrome.dim,
             FontWeightHint::Regular,
         );
         // It says to press N, so it may as well be N. Recorded after the cells
@@ -929,26 +966,33 @@ impl FloodIt {
     }
 
     fn draw_footer(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.footer, COL_MANTLE, 0.0);
+        fill(f, l.footer, self.chrome.band, 0.0);
         for (i, side) in SIZES.iter().enumerate() {
             let body = format!("{}  {side}", SIZE_KEY_LABELS.get(i).unwrap_or(&"?"));
             button(
                 f,
+                &self.palette,
                 l.footer_button(i),
                 &body,
                 l.small,
-                *side != self.size(),
-                *side == self.size(),
+                // The size in play is the chosen one.
+                if *side == self.size() {
+                    Kind::Primary
+                } else {
+                    Kind::Plain
+                },
+                self.chrome.band,
                 Target::Size(i),
             );
         }
         button(
             f,
+            &self.palette,
             l.footer_button(SIZES.len()),
             "N  New",
             l.small,
-            true,
-            false,
+            Kind::Plain,
+            self.chrome.band,
             Target::NewGame,
         );
     }
@@ -981,10 +1025,14 @@ const HELP_ROWS: [(&str, &str); 7] = [
 
 impl FloodIt {
     fn draw_help(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.window, COL_VEIL, 0.0);
+        fill(f, l.window, self.chrome.veil, 0.0);
         let p = l.help;
-        fill(f, p, COL_SURFACE0, 8.0);
-        stroke(f, p, COL_SURFACE1, 1.0, 8.0);
+        // The toolkit's panel, in the theme's look. Under a point its border,
+        // stroked half a point in, would reach outside the sheet.
+        if p.w >= 1.0 && p.h >= 1.0 {
+            self.palette
+                .push_surface(f, p.x, p.y, p.w, p.h, 8.0, Surface::Panel);
+        }
 
         let pad = l.pad.max(6.0);
         let inner = (p.w - pad * 2.0).max(0.0);
@@ -998,7 +1046,7 @@ impl FloodIt {
             y + line / 2.0,
             HELP_TITLE,
             l.font,
-            COL_YELLOW,
+            self.chrome.even,
             FontWeightHint::Bold,
         );
         y += line * 1.6;
@@ -1019,7 +1067,7 @@ impl FloodIt {
                 y,
                 key,
                 l.small,
-                COL_BLUE,
+                self.chrome.key,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1029,7 +1077,7 @@ impl FloodIt {
                 y,
                 desc,
                 l.small,
-                COL_SUBTEXT0,
+                self.chrome.dim,
                 FontWeightHint::Regular,
                 Some(desc_w),
             );
@@ -1167,6 +1215,11 @@ pub fn handle_event(app: &mut FloodIt, event: &Event) -> EventResult {
 }
 
 impl App for FloodIt {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.chrome = Chrome::of(palette);
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
@@ -1245,6 +1298,384 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state in `p`'s colours, with the window it is drawn in: a game
+    /// in play (one swatch dimmed, five live), won and lost (every swatch
+    /// dimmed, the banner up), the help sheet up, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, FloodIt, (f32, f32))> {
+        let playing = || {
+            let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            mid_game(&mut a);
+            a
+        };
+        let mut won = playing();
+        won.state = GameState::Won;
+        let mut lost = playing();
+        lost.state = GameState::Lost;
+        let mut help = playing();
+        help.show_help = true;
+        let mut looks = vec![
+            ("playing", playing(), (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("won", won, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("lost", lost, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("help", help, (WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("cramped", playing(), (360.0, 300.0)),
+        ];
+        for (_, a, _) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// Every filled box in a frame, with its colour, in the order painted.
+    fn fills(f: &Frame) -> Vec<(Rect, Color)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // ── The theme ───────────────────────────────────────────────────
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look: every colour is the palette's, the toolkit's
+    /// buttons', or one of the game's own six and the inks drawn on them
+    /// (the operator's C-Q16). It drew in its own copy of Catppuccin Mocha,
+    /// dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            derived.extend(PALETTE);
+            derived.extend([INKS.0, INKS.1]);
+            for (what, a, (w, h)) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(w, h).commands(),
+                    &derived,
+                    &format!("flood, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`) -- a dimmed swatch's
+    /// name included, which the scrim darkens in a dark theme and pales in a
+    /// light one.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, a, (w, h)) in every_look(&p) {
+                let f = a.frame(w, h);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "flood: {bad:#?}");
+    }
+
+    /// **The six colours are the game's own in every theme**: every cell and
+    /// every swatch is filled with its entry of [`PALETTE`], light or dark
+    /// (C-Q16: a colour the player tells things apart by keeps its value).
+    #[test]
+    fn the_six_colours_are_the_same_in_every_theme() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (light, cards) in LOOKS {
+            let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            mid_game(&mut a);
+            a.theme_changed(&palette(light, cards));
+            let drawn = fills(&a.frame(WINDOW_WIDTH, WINDOW_HEIGHT));
+            // The first fill inside `r` and over half its width: the thing
+            // itself, not the window, the well or a scrim laid on it later.
+            let fill_in = |r: Rect| {
+                drawn
+                    .iter()
+                    .find(|(b, _)| {
+                        b.x >= r.x - 0.01
+                            && b.y >= r.y - 0.01
+                            && b.right() <= r.right() + 0.01
+                            && b.bottom() <= r.bottom() + 0.01
+                            && b.w > r.w * 0.5
+                    })
+                    .map(|(_, c)| *c)
+            };
+            for (row, cells) in a.grid.iter().enumerate() {
+                for (col, &value) in cells.iter().enumerate() {
+                    assert_eq!(
+                        fill_in(l.cell(a.size(), row, col)),
+                        Some(PALETTE[value as usize]),
+                        "cell ({row}, {col}) is not its colour (light: {light}, cards: {cards})"
+                    );
+                }
+            }
+            for (i, colour) in PALETTE.iter().enumerate() {
+                assert_eq!(
+                    fill_in(l.swatch(i)),
+                    Some(*colour),
+                    "swatch {i} is not its colour (light: {light}, cards: {cards})"
+                );
+            }
+        }
+    }
+
+    /// **The board size in play looks chosen** among the footer's buttons, as
+    /// the toolkit's primary button; the others are its plain one.
+    #[test]
+    fn the_size_in_play_looks_chosen() {
+        let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for &side in &SIZES {
+            a.apply(Action::SetSize(side));
+            let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let drawn = fills(&f);
+            // A toolkit button is its face and then the gloss on its upper
+            // half: the same box, half as tall.
+            let buttons: Vec<(Rect, Color)> = drawn
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            let face_of = |label: &str| {
+                f.commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                        _ => None,
+                    })
+                    .find_map(|(tx, ty)| {
+                        buttons
+                            .iter()
+                            .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                            .map(|(_, colour)| *colour)
+                    })
+                    .unwrap_or_else(|| panic!("{label} is on no button"))
+            };
+            let paint = |kind| {
+                guitk::button::paint(&a.palette, kind, State::default(), a.chrome.band).lower
+            };
+            for (i, &other) in SIZES.iter().enumerate() {
+                let label = format!("{}  {other}", SIZE_KEY_LABELS[i]);
+                let want = if other == side {
+                    Kind::Primary
+                } else {
+                    Kind::Plain
+                };
+                assert_eq!(
+                    face_of(&label),
+                    paint(want),
+                    "playing {side}: {label} looks wrong"
+                );
+            }
+        }
+    }
+
+    /// **The banner and the help sheet each have a ground of their own**,
+    /// the toolkit's panel, in either look: under the bordered look a plain
+    /// card has no fill, and the banner's words would sit on the cells.
+    #[test]
+    fn the_banner_and_the_help_sheet_are_grounded() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let panel = p.painted(Surface::Panel);
+            for (what, a, (w, h)) in every_look(&p) {
+                let want = match what {
+                    "won" | "lost" => l.banner(),
+                    "help" => l.help,
+                    _ => continue,
+                };
+                let grounded = fills(&a.frame(w, h)).iter().any(|(r, colour)| {
+                    *colour == panel
+                        && (r.x - want.x).abs() < 0.01
+                        && (r.y - want.y).abs() < 0.01
+                        && (r.w - want.w).abs() < 0.01
+                        && (r.h - want.h).abs() < 0.01
+                });
+                assert!(
+                    grounded,
+                    "{what} has no ground of its own (light: {light}, cards: {cards})"
+                );
+            }
+        }
+    }
+
+    /// **A win is told in the palette's colour for one, and a loss in its
+    /// colour for the other**, whichever the theme.
+    #[test]
+    fn a_win_and_a_loss_are_told_in_their_colours() {
+        for light in [false, true] {
+            let p = palette(light, false);
+            let c = Chrome::of(&p);
+            for (state, needle, want) in [
+                (GameState::Won, "Flooded in", c.good),
+                (GameState::Lost, "Out of moves", c.bad),
+            ] {
+                let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+                a.theme_changed(&p);
+                a.state = state;
+                let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+                let colour = f
+                    .commands()
+                    .iter()
+                    .find_map(|c| match c {
+                        RenderCommand::Text { text, color, .. } if text.starts_with(needle) => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("{state:?} drew no banner"));
+                assert_eq!(
+                    colour, want,
+                    "{state:?} is told in the wrong colour (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **The corner the flood grows from is marked**, whatever its colour, in
+    /// an ink that stands off the cell (WCAG 1.4.11's 3:1): the rule "your
+    /// region is the one touching the top-left" is seen rather than told.
+    #[test]
+    fn the_corner_the_flood_grows_from_is_marked() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (k, colour) in PALETTE.iter().enumerate() {
+            let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            mid_game(&mut a);
+            a.grid[0][0] = k as u8;
+            let corner = l.cell(a.size(), 0, 0);
+            let (cx, cy) = corner.centre();
+            let (_, mark) = fills(&a.frame(WINDOW_WIDTH, WINDOW_HEIGHT))
+                .into_iter()
+                .find(|(r, _)| {
+                    (r.centre().0 - cx).abs() < 0.01
+                        && (r.centre().1 - cy).abs() < 0.01
+                        && r.w < corner.w * 0.5
+                })
+                .unwrap_or_else(|| panic!("the corner is not marked when it is colour {k}"));
+            let ratio = guitk::theme::contrast_ratio(mark, *colour);
+            assert!(
+                ratio >= 3.0,
+                "the corner's mark is {ratio:.2}:1 on colour {k}"
+            );
+        }
+    }
+
+    /// **After a win or a loss, a new board is one to play**: N, and the
+    /// banner that says to press it, both deal a board in play with its
+    /// moves unspent.
+    #[test]
+    fn a_new_board_after_the_end_is_playable() {
+        let b = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).banner();
+        for state in [GameState::Won, GameState::Lost] {
+            for by_click in [false, true] {
+                let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+                mid_game(&mut a);
+                a.moves = 7;
+                a.state = state;
+                if by_click {
+                    click(&mut a, b.centre().0, b.centre().1);
+                } else {
+                    press(&mut a, Key::N);
+                }
+                assert_eq!(
+                    a.state(),
+                    GameState::Playing,
+                    "{state:?}, by click: {by_click}"
+                );
+                assert_eq!(a.moves(), 0, "{state:?}, by click: {by_click}");
+            }
+        }
+    }
+
+    /// **Your own colour is outlined among the swatches**, and no other, in
+    /// the theme's text colour.
+    #[test]
+    fn your_own_colour_is_outlined_among_the_swatches() {
+        let l = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for light in [false, true] {
+            let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+            mid_game(&mut a);
+            a.grid[0][0] = 3;
+            a.theme_changed(&palette(light, false));
+            let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let outlined: Vec<usize> = (0..NUM_COLORS)
+                .filter(|&i| {
+                    let r = l.swatch(i);
+                    f.commands().iter().any(|c| {
+                        matches!(c, RenderCommand::StrokeRect { x, y, width, height, color, .. }
+                            if *color == a.chrome.text
+                                && (*x - r.x).abs() < 0.01
+                                && (*y - r.y).abs() < 0.01
+                                && (*width - r.w).abs() < 0.01
+                                && (*height - r.h).abs() < 0.01)
+                    })
+                })
+                .collect();
+            assert_eq!(outlined, vec![3], "light: {light}");
+        }
+    }
+
+    /// **The theme is taken up when it changes, and kept by a new game.**
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = palette(true, false);
+        let mut a = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
+        a.theme_changed(&light);
+        for action in [Action::NewGame, Action::SetSize(8)] {
+            a.apply(action);
+            assert_eq!(a.palette, light, "{action:?} dropped the user's palette");
+            assert_eq!(
+                fills(&a.frame(WINDOW_WIDTH, WINDOW_HEIGHT))
+                    .first()
+                    .map(|(_, c)| *c),
+                Some(light.base),
+                "after {action:?} the page is not the user's"
+            );
+        }
+    }
 
     /// Window sizes to sweep, from a large desktop down past anything a
     /// compositor would sensibly hand out. The small end is the interesting
@@ -1708,6 +2139,22 @@ mod tests {
         {
             assert!(r.w > 0.0 && r.h > 0.0, "a cell was laid out with no area");
         }
+        // And each is drawn in its colour: the gap went, not the cell.
+        let l = Layout::new(24.0, 24.0);
+        let coloured = fills(&f)
+            .iter()
+            .filter(|(r, c)| {
+                PALETTE.contains(c)
+                    && r.w > 0.0
+                    && r.h > 0.0
+                    && l.board.contains(r.centre().0, r.centre().1)
+            })
+            .count();
+        assert_eq!(
+            coloured,
+            18 * 18,
+            "cells lost their colour to the gap in a tiny window"
+        );
     }
 
     #[test]
@@ -1998,17 +2445,27 @@ mod tests {
         probe_actions.push(Action::NewGame);
         probe_actions.push(Action::ToggleHelp);
 
-        for state in [GameState::Playing, GameState::Won, GameState::Lost] {
-            for action in &probe_actions {
-                let mut app = FloodIt::new();
-                mid_game(&mut app);
-                app.state = state;
-                let claimed = app.enabled(*action);
-                let happened = app.apply(*action);
-                assert_eq!(
-                    claimed, happened,
-                    "{action:?} in {state:?}: enabled said {claimed}, apply did {happened}"
-                );
+        // From a board of a size the game offers as well as from the 4x4
+        // `mid_game` deals. On the 4x4 no size button is the size in play, so
+        // "ask for the size you are on" -- the one size button that must do
+        // nothing -- was never asked, and a game that dealt a new board for it
+        // passed.
+        for offered in [false, true] {
+            for state in [GameState::Playing, GameState::Won, GameState::Lost] {
+                for action in &probe_actions {
+                    let mut app = FloodIt::new();
+                    if !offered {
+                        mid_game(&mut app);
+                    }
+                    app.state = state;
+                    let claimed = app.enabled(*action);
+                    let happened = app.apply(*action);
+                    assert_eq!(
+                        claimed, happened,
+                        "{action:?} in {state:?} on a board the game offers: {offered}: \
+                         enabled said {claimed}, apply did {happened}"
+                    );
+                }
             }
         }
     }
@@ -2088,7 +2545,9 @@ mod tests {
     #[test]
     fn a_flood_takes_the_whole_connected_region_and_nothing_else() {
         let mut app = FloodIt::new();
-        app.grid = vec![vec![0, 0, 1], vec![0, 1, 1], vec![2, 2, 2]];
+        // The 0 in the far corner is the colour being flooded, and nothing
+        // joins it to the corner: it is not the player's.
+        app.grid = vec![vec![0, 0, 1], vec![0, 1, 1], vec![2, 2, 0]];
         app.max_moves = 10;
         app.moves = 0;
         assert!(app.apply(Action::Choose(1)));
@@ -2097,6 +2556,11 @@ mod tests {
         assert_eq!(app.at(0, 1), Some(1));
         assert_eq!(app.at(1, 0), Some(1));
         assert_eq!(app.at(2, 0), Some(2));
+        assert_eq!(
+            app.at(2, 2),
+            Some(0),
+            "a cell of the old colour that the corner cannot reach was flooded"
+        );
         assert_eq!(app.moves(), 1);
     }
 

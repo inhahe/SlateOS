@@ -114,16 +114,10 @@ MUTATIONS = [
         ["cycling_difficulty_visits_all_three_and_comes_home"],
     ),
     (
-        "two difficulties share a colour",
-        "            Self::Intermediate => c.even,",
-        "            Self::Intermediate => c.good,",
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
-    ),
-    (
         "two difficulties share a name",
         '            Self::Intermediate => "Intermediate",',
         '            Self::Intermediate => "Beginner",',
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
+        ["every_difficulty_has_its_own_name"],
     ),
     # ── Addressing the board ──────────────────────────────────────────────
     (
@@ -786,8 +780,8 @@ MUTATIONS = [
     ),
     (
         "a flagged cell is drawn blank",
-        "                centred_in(f, r, \"F\", size, c.flag, FontWeightHint::Bold);",
-        "                centred_in(f, r, \"\", size, c.flag, FontWeightHint::Bold);",
+        "                centred_in(f, r, \"F\", size, c.flag.at(size, true), FontWeightHint::Bold);",
+        "                centred_in(f, r, \"\", size, c.flag.at(size, true), FontWeightHint::Bold);",
         ["a_flagged_cell_carries_a_flag_and_an_uncovered_mine_carries_a_star"],
     ),
     (
@@ -939,8 +933,8 @@ MUTATIONS = [
     ),
     (
         "a digit's two shades are never chosen between",
-        "                gamechrome::legible_on(pair, self.open)",
-        "                pair.0",
+        "Ink::on(gamechrome::legible_on(pair, self.open), &[self.open])",
+        "Ink::on(pair.0, &[self.open])",
         ["every_digit_reads_on_an_open_tile_in_either_theme"],
     ),
     (
@@ -950,10 +944,22 @@ MUTATIONS = [
         ["covered_and_open_tiles_are_clearly_apart"],
     ),
     (
-        "the New chip is written in Mocha's text colour whatever the theme",
-        "            \"New\",\n            l.font,\n            c.chrome.title,",
-        "            \"New\",\n            l.font,\n            Color::from_hex(0xCDD6F4),",
-        ["the_window_is_drawn_in_the_users_colours"],
+        "the header's chips are raised slabs with a page ink on them again",
+        "    gamechrome::button(\n        f,\n        p,\n        (r.x, r.y, r.w, r.h),\n        s,\n        size,\n        guitk::button::Kind::Plain,\n        guitk::button::State::default(),\n        ground,\n    );",
+        "    let _ = ground;\n    fill(f, r, Chrome::of(p).raised, 5.0);\n    centred_in(f, r, s, size, Chrome::of(p).title, FontWeightHint::Bold);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the flag's letter is the page's peach, 2.5:1 on its tile",
+        "                centred_in(f, r, \"F\", size, c.flag.at(size, true), FontWeightHint::Bold);",
+        "                centred_in(f, r, \"F\", size, self.palette.ink(self.palette.peach), FontWeightHint::Bold);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a small digit keeps its colour unmoved, 4.2:1 on its tile",
+        "                Ink::on(gamechrome::legible_on(pair, self.open), &[self.open]).at(size, true)",
+        "                gamechrome::legible_on(pair, self.open)",
+        ["every_text_reads_on_what_is_under_it_in_either_theme", "every_digit_reads_on_an_open_tile_in_either_theme"],
     ),
 ]
 

@@ -64,6 +64,39 @@ fn the_chrome_is_the_palettes_in_either_mode() {
 
 /// **The second side is never mistaken for the first**, whatever accent the
 /// user picks, in either mode.
+/// **The chrome on a ground of a game's own reads there**: every text role
+/// at 4.5:1 on a raised panel, a lit one, the well and a band, in either
+/// theme -- and on the page, which the roles were made for, unchanged.
+#[test]
+fn the_chrome_on_a_ground_reads_there() {
+    for light in [false, true] {
+        let p = Palette::for_mode(light);
+        let c = Chrome::of(&p);
+        assert_eq!(
+            c.on(p.base).inks(),
+            c.inks(),
+            "on the page the inks moved (light: {light})"
+        );
+        for (what, ground) in [
+            ("raised", c.raised),
+            ("lit", c.lit),
+            ("well", c.well),
+            ("band", c.band),
+        ] {
+            let on = c.on(ground);
+            for (i, ink) in on.inks().iter().enumerate() {
+                let ratio = contrast_ratio(*ink, ground);
+                assert!(
+                    ratio >= 4.5,
+                    "text role {i} is {ratio:.2}:1 on {what} (light: {light})"
+                );
+            }
+            assert_eq!(on.off, c.off, "the disabled grey moved on {what}");
+            assert_eq!(on.page, c.page, "a ground role moved on {what}");
+        }
+    }
+}
+
 #[test]
 fn the_second_side_is_never_mistaken_for_the_accent() {
     for &accent in AccentColor::presets() {

@@ -672,6 +672,12 @@ MUTATIONS = [
         "            lines: p.surface1,",
         ["the_lines_stand_off_the_board_in_either_theme"],
     ),
+    (
+        "the board's coordinates are the page's grey, 4.1:1 on it",
+        "        let label_ink = c.chrome.on(c.board).dim;",
+        "        let label_ink = c.chrome.dim;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 

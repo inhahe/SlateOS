@@ -1232,8 +1232,8 @@ MUTATIONS = [
     ),
     (
         "the sheet's hit box is recorded before the controls it covers",
-        "        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));",
-        "        f.hit(Target::HelpSheet, l.window);\n        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));",
+        "        // palette inks its text colours for its own panel (`Palette::ink`).\n",
+        "        f.hit(Target::HelpSheet, l.window);\n        // palette inks its text colours for its own panel (`Palette::ink`).\n",
         ["the_sheet_takes_the_whole_window_and_takes_it_last"],
     ),
     (
@@ -1319,6 +1319,24 @@ MUTATIONS = [
         "        fill(&mut f, l.window, c.chrome.page, 0.0);",
         "        fill(&mut f, l.window, Color::from_hex(0x11111B), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the score captions are the page's grey, 4.1:1 on their box",
+        "                Ink::on(c.chrome.dim, &[c.chrome.raised]).at(size, false),",
+        "                c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a side's count is its disc's shade unmoved, 3.8:1 on its box",
+        "                Ink::on(ink, &[c.chrome.raised]).at(count_size, true),",
+        "                ink,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "                Surface::Panel,\n            );\n        }\n        // On the toolkit's panel",
+        "                Surface::Card,\n            );\n        }\n        // On the toolkit's panel",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

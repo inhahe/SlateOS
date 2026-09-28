@@ -46,13 +46,25 @@ MUTATIONS = [
         "a power-up's letter is always near-black",
         "                gamechrome::legible_on(POWERUP_INKS, face),",
         "                POWERUP_INKS.1,",
-        ["the_window_is_drawn_in_the_users_colours"],
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
     (
         "a new game drops the user's colours",
         "        self.palette = palette;",
         "        let _ = palette;",
         ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the header's words are the page's inks, 4.1:1 in the well",
+        "        let on = c.chrome.on(c.chrome.well);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the pause and game-over card's words are the page's inks, 3.6:1 on it",
+        "        let on = c.chrome.on(c.chrome.raised);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

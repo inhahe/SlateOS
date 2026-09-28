@@ -1249,15 +1249,20 @@ impl ReversiApp {
         f.hit(Target::Panel, band);
 
         let inner = inset(band, l.pad);
-        let label_ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.dim);
-        let body_ink = Ink::new(l.font, FontWeightHint::Regular, c.chrome.text);
+        // The panel's words in inks moved to read on it: the palette's are
+        // made for the page, and the panel is raised off it -- its grey was
+        // 4.1:1 there in a light theme, and a side's colour 3.6:1.
+        let on = c.chrome.on(c.chrome.raised);
+        let read = |ink: Color| gamechrome::Ink::on(ink, &[c.chrome.raised]).small;
+        let label_ink = Ink::new(l.small, FontWeightHint::Bold, on.dim);
+        let body_ink = Ink::new(l.font, FontWeightHint::Regular, on.text);
         let mut y = inner.y;
 
         // Whose turn.
         let (turn_text, turn_color) = match (self.phase, self.current_turn) {
-            (Phase::GameOver, _) => ("Game Over", c.chrome.bad),
-            (Phase::Playing, Cell::White) => ("White to move", c.white_side),
-            (Phase::Playing, _) => ("Your turn (Black)", c.black_side),
+            (Phase::GameOver, _) => ("Game Over", on.bad),
+            (Phase::Playing, Cell::White) => ("White to move", read(c.white_side)),
+            (Phase::Playing, _) => ("Your turn (Black)", read(c.black_side)),
         };
         let drawn = panel_row(
             f,
@@ -1305,7 +1310,11 @@ impl ReversiApp {
                 },
             });
         }
-        let chip = Ink::new(l.small, FontWeightHint::Bold, c.chrome.text);
+        let chip = Ink::new(
+            l.small,
+            FontWeightHint::Bold,
+            c.chrome.on(c.chrome.lit).text,
+        );
         let b_text = format!("B: {black}");
         let w_text = format!("W: {white}");
         let chip_y = bar.y + (bar.h - chip.height()) / 2.0;
@@ -1362,7 +1371,7 @@ impl ReversiApp {
                 inner,
                 &mut y,
                 &last.notation(),
-                Ink::new(l.font, FontWeightHint::Regular, c.last_move),
+                Ink::new(l.font, FontWeightHint::Regular, read(c.last_move)),
             );
             f.hit(Target::LastMove, drawn);
             y += l.small * 0.6;
@@ -1371,12 +1380,12 @@ impl ReversiApp {
         // The help sits on the floor of the panel, and the history fills
         // whatever is between the cursor and it -- so the two cannot collide
         // however long the game runs or however short the window is.
-        let help_ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
+        let help_ink = Ink::new(l.small, FontWeightHint::Regular, on.dim);
         let help_h = help_ink.height() * 2.0;
         let help_top = (inner.bottom() - help_h).max(y);
 
         let heading = panel_row(f, inner, &mut y, "History", label_ink);
-        let row_ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.text);
+        let row_ink = Ink::new(l.small, FontWeightHint::Regular, on.text);
         let rows = count_from_f32((help_top - y) / row_ink.height());
         let start = self.move_history.len().saturating_sub(rows);
         let mut history_box = Rect::new(heading.x, heading.y, heading.w, heading.h);
@@ -1385,9 +1394,9 @@ impl ReversiApp {
                 l.small,
                 FontWeightHint::Regular,
                 if record.color == Cell::Black {
-                    c.black_side
+                    read(c.black_side)
                 } else {
-                    c.white_side
+                    read(c.white_side)
                 },
             );
             let text = format!("{}. {}", idx.saturating_add(1), record.notation());
@@ -1696,8 +1705,8 @@ mod tests {
     use super::*;
     use guitk::probe;
 
-    /// **The window is drawn in the user's colours**, light or dark -- in
-    /// play with a move on the board, and over -- with only the board's own
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look and every state it shows, with only the board's own
     /// colours not the palette's. It drew in its own copy of Catppuccin Mocha,
     /// dark on a light desktop (the operator's C-Q16).
     #[test]
@@ -1711,24 +1720,77 @@ mod tests {
             gamechrome::RIMS.0,
             gamechrome::RIMS.1,
         ];
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = ReversiApp::new();
-            app.theme_changed(&p);
-            app.cursor = Pos::new(2, 3);
-            app.handle_key(Key::Enter);
-            let playing = app.draw(NATURAL);
-            app.phase = Phase::GameOver;
-            let over = app.draw(NATURAL);
-            for (what, f) in [("playing", playing), ("over", over)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The side panel's words, moved to read on it (and the score
+            // bar's counts on its track).
+            let c = Colours::of(&p);
+            let mut derived = board.to_vec();
+            derived.extend(c.chrome.on(c.chrome.raised).inks());
+            derived.extend(c.chrome.on(c.chrome.lit).inks());
+            for ink in [c.white_side, c.black_side, c.last_move] {
+                derived.push(gamechrome::Ink::on(ink, &[c.chrome.raised]).small);
+            }
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
-                    &board,
-                    &format!("reversi, {what}, light: {light}"),
+                    &derived,
+                    &format!("reversi, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: in play with a
+    /// move on the board, over, and in a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = ReversiApp::new();
+        app.theme_changed(p);
+        app.cursor = Pos::new(2, 3);
+        app.handle_key(Key::Enter);
+        let playing = app.draw(NATURAL);
+        let cramped = app.draw((320.0, 340.0));
+        app.phase = Phase::GameOver;
+        let over = app.draw(NATURAL);
+        vec![("playing", playing), ("over", over), ("cramped", cramped)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "reversi: {bad:#?}");
     }
 
     /// **A new game keeps the user's colours.** It rebuilds the game from

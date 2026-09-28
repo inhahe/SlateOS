@@ -425,6 +425,12 @@ MUTATIONS = [
         "            height: l.window.h,\n            color: Color::from_hex(0x313244),",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the crown is its own gold unmoved, 2.9:1 on a red piece",
+        "        let gold = gamechrome::Ink::on(KING_CROWN, &[inner]).at(size, true);",
+        "        let gold = KING_CROWN;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

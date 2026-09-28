@@ -74,6 +74,7 @@ use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1320,7 +1321,7 @@ impl Towers {
             self.draw_scores(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l, &c);
+            draw_help(&mut f, &l, &c, &self.palette);
         }
         f
     }
@@ -1498,7 +1499,15 @@ impl Towers {
             w,
             h,
         );
-        fill(f, r, c.chrome.veil, (h * 0.3).min(12.0));
+        // The toolkit's panel, a ground of its own over the pegs. It was the
+        // chrome's veil, and the palette's inks -- made for the page -- fell
+        // to 4.2:1 on it in a light theme. On the panel the chrome's roles
+        // read as they are: the palette inks its text colours for its own
+        // panel (`Palette::ink`).
+        if r.w >= 1.0 && r.h >= 1.0 {
+            self.palette
+                .push_surface(f, r.x, r.y, r.w, r.h, (h * 0.3).min(12.0), Surface::Panel);
+        }
         centred_in(
             f,
             r.x,
@@ -1597,6 +1606,9 @@ impl Towers {
             let disks = MIN_DISKS.saturating_add(i);
             let here = disks == self.disks;
             fill(f, r, c.chrome.well, (r.h * 0.22).min(7.0));
+            // Written for the well, which is not the page: the page's grey
+            // was 4.2:1 on it in a light theme.
+            let on = c.chrome.on(c.chrome.well);
             let best = self.best.get(i).copied().flatten();
             let shortest = pow2(disks as u32).saturating_sub(1);
             let body = match best {
@@ -1612,11 +1624,11 @@ impl Towers {
                 &body,
                 (l.small - 1.0).max(6.0),
                 if here {
-                    c.chrome.even
+                    on.even
                 } else if best.is_some() {
-                    c.chrome.text
+                    on.text
                 } else {
-                    c.chrome.dim
+                    on.dim
                 },
                 if here {
                     FontWeightHint::Bold
@@ -1628,12 +1640,18 @@ impl Towers {
     }
 }
 
-fn draw_help(f: &mut Frame, l: &Layout, c: &Colours) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours, palette: &Palette) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the puzzle rather than part of it.
     fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, c.chrome.veil, 10.0);
+    // The toolkit's panel. Under a point either way its border, stroked half
+    // a point in, would reach outside the sheet.
+    if p.w >= 1.0 && p.h >= 1.0 {
+        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
+    }
+    // On the panel the chrome's roles read as they are: the palette inks
+    // its text colours for its own panel (`Palette::ink`).
 
     let pad = (p.w * 0.05).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1938,8 +1956,8 @@ mod tests {
     /// palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let mut derived: Vec<Color> = DISK_COLORS.to_vec();
             derived.push(DISK_INK);
             derived.extend(gamechrome::button_colours(
@@ -1947,22 +1965,101 @@ mod tests {
                 guitk::button::Kind::Plain,
                 Chrome::of(&p).page,
             ));
-            let mut app = Towers::new();
-            app.theme_changed(&p);
-            app.set_disks(8);
-            assert!(app.grab(0), "the first peg's top disk could not be taken");
-            let holding = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.show_help = true;
-            let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("holding", holding), ("help", help)] {
+            // The records' words, written for the well.
+            let chrome = gamechrome::Chrome::of(&p);
+            derived.extend(chrome.on(chrome.well).inks());
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("towers, {what}, light: {light}"),
+                    &format!("towers, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = Towers::new();
+        app.theme_changed(p);
+        app.set_disks(8);
+        assert!(app.grab(0), "the first peg's top disk could not be taken");
+        let holding = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        app.show_help = true;
+        let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut solved = Towers::new();
+        solved.theme_changed(p);
+        solve_by_hand(&mut solved);
+        let solved = solved.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("holding", holding),
+            ("help", help),
+            ("solved", solved),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "towers: {bad:#?}");
     }
 
     /// **A button that would do nothing is switched off**, in the toolkit's

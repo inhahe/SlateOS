@@ -162,7 +162,7 @@
 //! `key_px(key)` now) and written up as `known-issues.md` lesson 64; with the
 //! toolkit honest, simon's guard was dead after all and went.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -171,6 +171,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -388,17 +389,21 @@ impl SimonColor {
         if lit { self.lit() } else { self.dim() }
     }
 
-    /// The ink of the pad's name and number: its lit colour on its dim face,
-    /// and on its lit face the one of [`PAD_INKS`] that reads there.
+    /// The ink of the pad's name and number, drawn at `size` (bold or not):
+    /// on its dim face its lit colour, moved toward white only as far as
+    /// that size needs, and on its lit face the one of [`PAD_INKS`] that
+    /// reads there.
     ///
     /// The name is what a player who cannot tell the colours apart plays by.
     /// On an unlit pad it was the lit colour at 140 alpha, about 2:1 on the
-    /// face; the lit colour at full strength is 3.3:1 at worst.
-    fn name_ink(self, lit: bool) -> Color {
+    /// face; the lit colour at full strength is 3.3:1 at worst, which is
+    /// enough only for large text -- and the names and the numbers are drawn
+    /// smaller than that.
+    fn name_ink(self, lit: bool, size: f32, bold: bool) -> Color {
         if lit {
             gamechrome::legible_on(PAD_INKS, self.lit())
         } else {
-            self.lit()
+            Ink::on(self.lit(), &[self.dim()]).at(size, bold)
         }
     }
 
@@ -1526,12 +1531,15 @@ impl Simon {
         let cap_h = text::line_height(cap, FontWeightHint::Regular);
         let num_h = text::line_height(num, FontWeightHint::Bold);
         let top = box_rect.y + (box_rect.h - cap_h - num_h).max(0.0) / 2.0;
+        // Both moved only as far as they must be to read on the raised box:
+        // the palette's inks are made for the page, and were 4.1:1 (the
+        // caption) and 3.6:1 (the value) here in a light theme.
         centred(
             f,
             Rect::new(box_rect.x, top, box_rect.w, cap_h),
             name,
             cap,
-            c.chrome.dim,
+            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(cap, false),
             FontWeightHint::Regular,
         );
         centred(
@@ -1539,7 +1547,7 @@ impl Simon {
             Rect::new(box_rect.x, top + cap_h, box_rect.w, num_h),
             &value.to_string(),
             num,
-            ink,
+            Ink::on(ink, &[c.chrome.raised]).at(num, true),
             FontWeightHint::Bold,
         );
     }
@@ -1652,13 +1660,13 @@ impl Simon {
                 );
             }
 
-            let ink = colour.name_ink(is_lit);
+            let name_size = (l.font).min(r.h * 0.22);
             centred(
                 f,
                 r,
                 colour.label(),
-                (l.font).min(r.h * 0.22),
-                ink,
+                name_size,
+                colour.name_ink(is_lit, name_size, true),
                 FontWeightHint::Bold,
             );
             // The number that presses this pad, in its corner. Written from the
@@ -1671,7 +1679,7 @@ impl Simon {
                 r.y + inset,
                 &index.saturating_add(1).to_string(),
                 (l.small).min(r.h * 0.16),
-                ink,
+                colour.name_ink(is_lit, (l.small).min(r.h * 0.16), false),
                 FontWeightHint::Regular,
                 Some((r.w - inset * 2.0).max(0.0)),
             );
@@ -1718,8 +1726,24 @@ impl Simon {
         // A wash over the grid first, so the pads behind the panel are plainly
         // out of play rather than merely partly covered.
         fill(f, l.grid, c.chrome.veil, 0.0);
-        fill(f, panel, c.chrome.raised, (panel.h * 0.06).min(12.0));
+        // The toolkit's panel, in the theme's look, with the red edge that
+        // says how the game ended. It was a slab of the raised surface, and
+        // the palette's inks -- made for the page -- fell to 3.6:1 on it in
+        // a light theme.
+        if panel.w >= 1.0 && panel.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                panel.x,
+                panel.y,
+                panel.w,
+                panel.h,
+                (panel.h * 0.06).min(12.0),
+                Surface::Panel,
+            );
+        }
         stroke(f, panel, c.chrome.bad, 2.0, (panel.h * 0.06).min(12.0));
+        // On the toolkit's panel the chrome's roles read as they are: the
+        // palette inks its text colours for its own panel (`Palette::ink`).
         // The whole panel takes the click, and it is recorded after the pads, so
         // `hit_test` — which reads the last box first — gives it the click even
         // though the pads are underneath.
@@ -1766,8 +1790,21 @@ impl Simon {
         // nothing behind it can be reached while it is up.
         fill(f, l.window, c.chrome.scrim, 0.0);
         f.hit(Target::HelpSheet, l.window);
-        fill(f, l.help, c.chrome.raised, (l.help.h * 0.05).min(12.0));
-        stroke(f, l.help, c.chrome.lit, 1.0, (l.help.h * 0.05).min(12.0));
+        // The toolkit's panel, in the theme's look. Under a point either way
+        // its border, stroked half a point in, would reach outside the sheet.
+        if l.help.w >= 1.0 && l.help.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                l.help.x,
+                l.help.y,
+                l.help.w,
+                l.help.h,
+                (l.help.h * 0.05).min(12.0),
+                Surface::Panel,
+            );
+        }
+        // On the toolkit's panel the chrome's roles read as they are: the
+        // palette inks its text colours for its own panel (`Palette::ink`).
 
         let rows = HELP_ROWS.len() as f32 + 2.0;
         let row_h = l.help.h / rows;
@@ -2004,6 +2041,16 @@ mod tests {
                 .flat_map(|pad| [pad.lit(), pad.dim()])
                 .collect();
             derived.extend([PAD_INKS.0, PAD_INKS.1]);
+            // A name on an unlit pad: the lit colour, moved to read there.
+            for pad in SimonColor::ALL {
+                let moved = Ink::on(pad.lit(), &[pad.dim()]);
+                derived.extend([moved.large, moved.small]);
+            }
+            // A readout's caption and value, moved to read on its box.
+            for ink in [c.chrome.dim, c.chrome.even, c.chrome.good, c.turn] {
+                let moved = Ink::on(ink, &[c.chrome.raised]);
+                derived.extend([moved.large, moved.small]);
+            }
             derived.extend(gamechrome::button_colours(
                 &p,
                 guitk::button::Kind::Plain,
@@ -2024,6 +2071,57 @@ mod tests {
         }
     }
 
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it), in every state
+    /// the game has and in a cramped window -- every pad's name among them.
+    /// A switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut p = Palette::for_mode(light);
+            p.set_surface_style(if cards {
+                guitk::palette::SurfaceStyle::Cards
+            } else {
+                guitk::palette::SurfaceStyle::Borders
+            });
+            let c = Colours::of(&p);
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                c.chrome.band,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, mut app) in states() {
+                app.theme_changed(&p);
+                app.show_selection = true;
+                for (size, how) in [
+                    ((WINDOW_WIDTH, WINDOW_HEIGHT), ""),
+                    ((300.0, 320.0), ", cramped"),
+                ] {
+                    let f = app.frame(size.0, size.1);
+                    for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                        bad.push(format!(
+                            "{what}{how}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                            r.text,
+                            r.ratio(),
+                            r.ground
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "simon: {bad:#?}");
+    }
+
     /// **Every pad's name and outline read on it**, lit or not: a player who
     /// cannot tell the colours apart plays by the names, and a keyboard player
     /// by the outline.
@@ -2032,8 +2130,15 @@ mod tests {
         for &pad in &SimonColor::ALL {
             for lit in [false, true] {
                 let face = pad.face(lit);
-                let name = guitk::theme::contrast_ratio(pad.name_ink(lit), face);
+                // Drawn large, 3:1; drawn small -- as the names and the
+                // numbers are in every window this game fits -- 4.5:1.
+                let name = guitk::theme::contrast_ratio(pad.name_ink(lit, 24.0, true), face);
                 assert!(name >= 3.0, "{pad:?} (lit: {lit}): its name is {name:.2}:1");
+                let small = guitk::theme::contrast_ratio(pad.name_ink(lit, 12.0, false), face);
+                assert!(
+                    small >= 4.5,
+                    "{pad:?} (lit: {lit}): its name drawn small is {small:.2}:1"
+                );
                 let ring = guitk::theme::contrast_ratio(pad.ring(lit), face);
                 assert!(
                     ring >= 3.0,

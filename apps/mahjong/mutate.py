@@ -912,6 +912,18 @@ MUTATIONS = [
         "            height: h,\n            color: Color::from_hex(0x1E1E2E),",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the help text is the faintest grey",
+        "            text: HELP_TEXT.into(),\n            color: c.chrome.dim,",
+        "            text: HELP_TEXT.into(),\n            color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the legend's note is the faintest grey",
+        "            text: LEGEND_NOTE.into(),\n            color: c.chrome.dim,",
+        "            text: LEGEND_NOTE.into(),\n            color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

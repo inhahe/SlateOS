@@ -47,6 +47,24 @@ MUTATIONS = [
         "const DISK_INK: Color = Color::from_hex(0xCDD6F4);",
         ["every_disks_number_reads_on_it"],
     ),
+    (
+        "the records are the page's inks, 4.2:1 in the well",
+        "            let on = c.chrome.on(c.chrome.well);",
+        "            let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the solved banner has no ground of its own",
+        "(h * 0.3).min(12.0), Surface::Panel);",
+        "(h * 0.3).min(12.0), Surface::Card);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the help sheet has no ground of its own",
+        "        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);",
+        "        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Card);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

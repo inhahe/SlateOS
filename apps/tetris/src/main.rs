@@ -1764,12 +1764,15 @@ impl TetrisApp {
 
         let big = (l.overlay.h * 0.26).clamp(10.0, 24.0);
         let small = (l.overlay.h * 0.15).clamp(7.0, 14.0);
+        // Written for the card, which is raised off the page: the page's
+        // grey was 4.1:1 on it in a light theme.
+        let on = c.chrome.on(c.chrome.raised);
         centred(
             f,
             l.overlay,
             l.overlay.y + l.overlay.h * 0.20,
             title,
-            c.chrome.text,
+            on.text,
             big,
             FontWeightHint::Bold,
         );
@@ -1778,7 +1781,7 @@ impl TetrisApp {
             l.overlay,
             l.overlay.y + l.overlay.h * 0.58,
             subtitle,
-            c.chrome.dim,
+            on.dim,
             small,
             FontWeightHint::Regular,
         );
@@ -2087,28 +2090,104 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         let mut derived: Vec<Color> = PieceKind::ALL.iter().map(|k| k.color()).collect();
         derived.push(SHINE);
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = TetrisApp::with_seed(7);
-            app.theme_changed(&p);
-            app.field_set(TOTAL_ROWS - 1, 0, Some(BLUE));
-            app.field_set(TOTAL_ROWS - 1, 1, Some(RED));
-            app.hold_piece = Some(PieceKind::T);
-            app.hold_used = true;
-            let playing = app.frame(640.0, 720.0);
-            app.status = GameStatus::Paused;
-            let paused = app.frame(640.0, 720.0);
-            app.status = GameStatus::GameOver;
-            let over = app.frame(640.0, 720.0);
-            for (what, f) in [("playing", playing), ("paused", paused), ("over", over)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The overlay card's words, moved to read on it.
+            let chrome = gamechrome::Chrome::of(&p);
+            let mut derived = derived.clone();
+            derived.extend(chrome.on(chrome.raised).inks());
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("tetris, {what}, light: {light}"),
+                    &format!("tetris, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = TetrisApp::with_seed(7);
+        app.theme_changed(p);
+        app.field_set(TOTAL_ROWS - 1, 0, Some(BLUE));
+        app.field_set(TOTAL_ROWS - 1, 1, Some(RED));
+        app.hold_piece = Some(PieceKind::T);
+        app.hold_used = true;
+        let playing = app.frame(640.0, 720.0);
+        let cramped = app.frame(320.0, 360.0);
+        app.status = GameStatus::Paused;
+        let paused = app.frame(640.0, 720.0);
+        app.status = GameStatus::GameOver;
+        let over = app.frame(640.0, 720.0);
+        vec![
+            ("playing", playing),
+            ("paused", paused),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "tetris: {bad:#?}");
     }
 
     /// **A restart keeps the user's colours and the window's size.** It

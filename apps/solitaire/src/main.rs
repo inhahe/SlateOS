@@ -35,6 +35,7 @@ use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 
@@ -1465,7 +1466,14 @@ impl GameState {
                         f,
                         slot,
                         suit.symbol(),
-                        Ink::new(t.card_w * 0.3, FontWeightHint::Regular, c.chrome.dim),
+                        // For the empty slot it marks, which is not the
+                        // page: the page's grey was 4.1:1 on it in a light
+                        // theme.
+                        Ink::new(
+                            t.card_w * 0.3,
+                            FontWeightHint::Regular,
+                            c.chrome.on(c.table.empty).dim,
+                        ),
                     );
                 }
             }
@@ -1722,6 +1730,11 @@ impl GameState {
             corner_radii: CornerRadii::ZERO,
         });
 
+        // The toolkit's panel under the words. Over the scrim alone they sat
+        // on whatever cards were beneath: a scrimmed card face put the count
+        // at 2.2:1 in a dark theme. On the panel the chrome's roles read as
+        // they are: the palette inks its text colours for its own panel
+        // (`Palette::ink`).
         let ink = Ink::new(
             (l.title * 1.6).min(l.window.w * 0.12),
             FontWeightHint::Bold,
@@ -1733,6 +1746,22 @@ impl GameState {
         let moves = format!("Moves: {}", self.move_count);
 
         let total = ink.height() + sub.height() * 2.0 + l.pad * 2.0;
+        let wide = ink.width(msg).max(sub.width(&moves)).max(sub.width(note));
+        let block = Rect::new(
+            l.window.x + (l.window.w - wide).max(0.0) / 2.0 - l.pad,
+            l.window.y + (l.window.h - total).max(0.0) / 2.0 - l.pad,
+            wide + l.pad * 2.0,
+            total + l.pad * 2.0,
+        );
+        // Cut to the window, and not drawn under a point, where the
+        // toolkit's border would reach outside it.
+        if let Some(panel) = block.intersect(l.window)
+            && panel.w >= 1.0
+            && panel.h >= 1.0
+        {
+            self.palette
+                .push_surface(f, panel.x, panel.y, panel.w, panel.h, l.pad, Surface::Panel);
+        }
         let mut y = l.window.y + (l.window.h - total).max(0.0) / 2.0;
         let mut banner = centred_line(f, l.window, y, msg, ink);
         y += ink.height() + l.pad;
@@ -2065,23 +2094,94 @@ mod tests {
             gamechrome::RIMS.0,
             gamechrome::RIMS.1,
         ];
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = SolitaireApp::new();
-            app.theme_changed(&p);
-            app.state.focus = FocusArea::Stock;
-            let dealt = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.state.won = true;
-            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("dealt", dealt), ("won", won)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The empty slot's suit, written for the slot.
+            let chrome = gamechrome::Chrome::of(&p);
+            let mut derived = derived.to_vec();
+            derived.push(chrome.on(Colours::of(&p).table.empty).dim);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("solitaire, {what}, light: {light}"),
+                    &format!("solitaire, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = SolitaireApp::new();
+        app.theme_changed(p);
+        app.state.focus = FocusArea::Stock;
+        let dealt = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        app.state.won = true;
+        let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![("dealt", dealt), ("won", won), ("cramped", cramped)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "solitaire: {bad:#?}");
     }
 
     /// **The cards are white with red and black suits in either theme**, and

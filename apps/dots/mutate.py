@@ -421,6 +421,48 @@ MUTATIONS = [
         "        self.frame(width, height).into_tree()",
         ["render_records_the_window_it_was_given"],
     ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the two players are one colour",
+        "        let (one, two) = (p.ink(p.accent), gamechrome::apart_from_accent(p));",
+        "        let (one, two) = (p.ink(p.accent), p.ink(p.accent));",
+        ["the_two_players_are_told_apart_and_seen"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        self.palette = palette;\n        self.colours = Colours::of(&palette);",
+        "        let _ = palette;",
+        ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "                // faintest grey is 2.3:1 on a light band.\n                self.colours.subtext0,",
+        "                // faintest grey is 2.3:1 on a light band.\n                self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the size in play looks like the others",
+        "                if *on { Kind::Primary } else { Kind::Plain },",
+        "                Kind::Plain,",
+        ["the_size_in_play_looks_chosen_and_the_card_is_grounded"],
+    ),
+    (
+        "the end-of-game card has no ground of its own",
+        "Surface::Panel",
+        "Surface::Card",
+        ["the_size_in_play_looks_chosen_and_the_card_is_grounded"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -978,6 +978,8 @@ dependencies = [
 name = "dots"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1230,6 +1232,8 @@ dependencies = [
 name = "flood"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -1767,6 +1771,8 @@ version = "0.1.0"
 name = "klotski"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3147,6 +3153,8 @@ dependencies = [
 name = "rush"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3388,6 +3396,8 @@ dependencies = [
 name = "sliding"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3442,6 +3452,8 @@ dependencies = [
 name = "sokoban"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

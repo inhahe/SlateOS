@@ -25,6 +25,7 @@
 
 pub mod button;
 pub mod canvas;
+pub mod checkbox;
 pub mod color;
 pub mod colorpicker;
 pub mod context_ext;
@@ -51,6 +52,7 @@ mod osbytes;
 pub mod palette;
 pub mod pathbar;
 pub mod probe;
+pub mod radio;
 pub mod ratio;
 pub mod render;
 pub mod surface;

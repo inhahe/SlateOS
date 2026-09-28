@@ -162,9 +162,11 @@
 //! `key_px(key)` now) and written up as `known-issues.md` lesson 64; with the
 //! toolkit honest, simon's guard was dead after all and went.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
@@ -174,24 +176,42 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────────────
+// ── Colours ─────────────────────────────────────────────────────────────────
+//
+// A player repeats the sequence by its colours, so the four pads keep theirs
+// in every theme -- a pad's dim face and the colour it lights to, in
+// `SimonColor` below (the operator's answer to C-Q16, §1422). Everything round
+// them -- the page, the bands, the readouts, the panels -- follows the user's
+// palette. It all used to be a copy of Catppuccin Mocha, dark on a light
+// desktop.
 
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_RED: Color = Color::from_hex(0xF38BA8);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_PEACH: Color = Color::from_hex(0xFAB387);
-const COL_MAUVE: Color = Color::from_hex(0xCBA6F7);
-const COL_TEAL: Color = Color::from_hex(0x94E2D5);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+/// The two inks that may be written on a pad, `(light, dark)`: whichever
+/// reads on its face -- light on a dim pad, dark on a lit one.
+///
+/// The near-black is a neutral one, not Mocha's crust (`11111B`): the palette
+/// test matches the game's own colours on RGB, and Mocha's crust among them
+/// would pass a leftover Mocha crust anywhere in a light window.
+const PAD_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
+
+/// The colours this window's chrome draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The status line while the sequence is being shown.
+    watch: Color,
+    /// The status line while it is the player's turn, and the round readout.
+    turn: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            watch: p.ink(p.mauve),
+            turn: p.ink(p.teal),
+        }
+    }
+}
 
 // ── The grid ────────────────────────────────────────────────────────────────
 
@@ -356,11 +376,43 @@ impl SimonColor {
     /// The pad's colour when it is lit.
     fn lit(self) -> Color {
         match self {
-            SimonColor::Red => COL_RED,
-            SimonColor::Green => COL_GREEN,
-            SimonColor::Blue => COL_BLUE,
-            SimonColor::Yellow => COL_YELLOW,
+            SimonColor::Red => Color::from_hex(0xF38BA8),
+            SimonColor::Green => Color::from_hex(0xA6E3A1),
+            SimonColor::Blue => Color::from_hex(0x89B4FA),
+            SimonColor::Yellow => Color::from_hex(0xF9E2AF),
         }
+    }
+
+    /// The pad's face, lit or not.
+    fn face(self, lit: bool) -> Color {
+        if lit { self.lit() } else { self.dim() }
+    }
+
+    /// The ink of the pad's name and number: its lit colour on its dim face,
+    /// and on its lit face the one of [`PAD_INKS`] that reads there.
+    ///
+    /// The name is what a player who cannot tell the colours apart plays by.
+    /// On an unlit pad it was the lit colour at 140 alpha, about 2:1 on the
+    /// face; the lit colour at full strength is 3.3:1 at worst.
+    fn name_ink(self, lit: bool) -> Color {
+        if lit {
+            gamechrome::legible_on(PAD_INKS, self.lit())
+        } else {
+            self.lit()
+        }
+    }
+
+    /// The keyboard's outline round the pad: whichever of [`PAD_INKS`] reads
+    /// on its face. It was the theme's text colour, which a light theme makes
+    /// dark -- and dark on a dim pad is no outline at all.
+    fn ring(self, lit: bool) -> Color {
+        gamechrome::legible_on(PAD_INKS, self.face(lit))
+    }
+
+    /// This pad's colour as text on `ground`: its lit colour on a dark page,
+    /// its dim one on a light page, where the pale lit colour would not read.
+    fn text_on(self, ground: Color) -> Color {
+        gamechrome::legible_on((self.lit(), self.dim()), ground)
     }
 
     /// Where in the grid this colour's pad sits, counting from zero.
@@ -835,17 +887,33 @@ fn centred(f: &mut Frame, r: Rect, body: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A button: a filled box with a hit box on it and a centred label.
-fn button(f: &mut Frame, r: Rect, target: Target, body: &str, size: f32, face: Color, ink: Color) {
-    // No `r.is_empty()` guard, and none is needed: `fill` and `centred` return
-    // on an empty box, and `Frame::hit` refuses to record one — so a button with
-    // no box paints nothing and takes no clicks whichever way round it is
-    // written. A guard here would be lesson 51 again.
-    fill(f, r, face, (r.h * 0.22).min(8.0));
+/// A button: the toolkit's push button, in the palette, with its label at
+/// the window's size, and a hit box on it.
+///
+/// No `r.is_empty()` guard, and none is needed: `gamechrome::button` returns
+/// on an empty box, and `Frame::hit` refuses to record one -- so a button with
+/// no box paints nothing and takes no clicks.
+fn button(
+    f: &mut Frame,
+    palette: &Palette,
+    r: Rect,
+    (target, body): (Target, &str),
+    size: f32,
+    ground: Color,
+) {
+    gamechrome::button(
+        f,
+        palette,
+        (r.x, r.y, r.w, r.h),
+        body,
+        size,
+        guitk::button::Kind::Plain,
+        guitk::button::State::default(),
+        ground,
+    );
     // Recorded by the pass that paints it, so a button that moved took its hit
     // box with it and there is no second copy of the geometry to disagree.
     f.hit(target, r);
-    centred(f, r, body, size, ink, FontWeightHint::Bold);
 }
 
 // ── The controls, written once ──────────────────────────────────────────────
@@ -919,6 +987,10 @@ pub struct Simon {
     show_help: bool,
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl Simon {
@@ -952,6 +1024,7 @@ impl Simon {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         game.deal_round();
         game
@@ -1367,13 +1440,13 @@ impl Simon {
         }
     }
 
-    fn status_colour(&self) -> Color {
+    fn status_colour(&self, c: &Colours) -> Color {
         match self.state {
-            GameState::PreSequence => COL_SUBTEXT0,
-            GameState::ShowSequence => COL_MAUVE,
-            GameState::PlayerInput => COL_TEAL,
-            GameState::RoundSuccess => COL_GREEN,
-            GameState::GameOver => COL_RED,
+            GameState::PreSequence => c.chrome.dim,
+            GameState::ShowSequence => c.watch,
+            GameState::PlayerInput => c.turn,
+            GameState::RoundSuccess => c.chrome.good,
+            GameState::GameOver => c.chrome.bad,
         }
     }
 
@@ -1382,26 +1455,27 @@ impl Simon {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
-        self.draw_header(&mut f, &l);
-        self.draw_status(&mut f, &l);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_status(&mut f, &l, &c);
         self.draw_pads(&mut f, &l);
-        self.draw_footer(&mut f, &l);
+        self.draw_footer(&mut f, &l, &c);
         if self.game_over_shown() {
-            self.draw_game_over(&mut f, &l);
+            self.draw_game_over(&mut f, &l, &c);
         }
         if self.show_help {
-            self.draw_help(&mut f, &l);
+            self.draw_help(&mut f, &l, &c);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // No "did the header fit?" guard. A band that did not fit is
         // `Rect::EMPTY`, and every call below already refuses one: `fill` and
         // `centred` return on an empty box, and `score_box` returns empty boxes
         // of its own when the header is empty.
-        fill(f, l.header, COL_MANTLE, 0.0);
+        fill(f, l.header, c.chrome.band, 0.0);
         let title = (l.font * 1.3).min(l.header.h * 0.55);
         // Never over the readouts: the title is given the room to their left and
         // elides into it rather than running underneath them.
@@ -1412,13 +1486,13 @@ impl Simon {
             l.header.y + (l.header.h - text::line_height(title, FontWeightHint::Bold)) / 2.0,
             HELP_TITLE.to_uppercase().as_str(),
             title,
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(limit),
         );
-        self.draw_readout(f, l, 0, "BEST", self.best, COL_YELLOW);
-        self.draw_readout(f, l, 1, "SCORE", self.score, COL_GREEN);
-        self.draw_readout(f, l, 2, "ROUND", self.round() as u32, COL_TEAL);
+        self.draw_readout(f, l, c, 0, "BEST", self.best, c.chrome.even);
+        self.draw_readout(f, l, c, 1, "SCORE", self.score, c.chrome.good);
+        self.draw_readout(f, l, c, 2, "ROUND", self.round() as u32, c.turn);
     }
 
     /// The left edge of the leftmost readout that is actually drawn, or the
@@ -1439,13 +1513,14 @@ impl Simon {
         &self,
         f: &mut Frame,
         l: &Layout,
+        c: &Colours,
         index: usize,
         name: &str,
         value: u32,
         ink: Color,
     ) {
         let box_rect = l.score_box(index);
-        fill(f, box_rect, COL_SURFACE0, (box_rect.h * 0.2).min(6.0));
+        fill(f, box_rect, c.chrome.raised, (box_rect.h * 0.2).min(6.0));
         let cap = (l.small).min(box_rect.h * 0.34);
         let num = (l.font).min(box_rect.h * 0.46);
         let cap_h = text::line_height(cap, FontWeightHint::Regular);
@@ -1456,7 +1531,7 @@ impl Simon {
             Rect::new(box_rect.x, top, box_rect.w, cap_h),
             name,
             cap,
-            COL_SUBTEXT0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
         centred(
@@ -1469,7 +1544,7 @@ impl Simon {
         );
     }
 
-    fn draw_status(&self, f: &mut Frame, l: &Layout) {
+    fn draw_status(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if !l.shows(l.status) {
             // Not a redundant guard: the dot and the tone below are positioned
             // from the band's own height, and a band of no height would put them
@@ -1497,7 +1572,7 @@ impl Simon {
             side,
             side,
         );
-        disc(f, dot, lit.map_or(COL_SURFACE1, SimonColor::lit));
+        disc(f, dot, lit.map_or(c.chrome.lit, SimonColor::lit));
 
         let text_x = dot.right() + l.pad;
         // The tone label is the sound this machine cannot make. It is only there
@@ -1514,7 +1589,7 @@ impl Simon {
             l.status.y + (l.status.h - text::line_height(size, FontWeightHint::Bold)) / 2.0,
             &self.status_line(),
             size,
-            self.status_colour(),
+            self.status_colour(c),
             FontWeightHint::Bold,
             Some(line_w),
         );
@@ -1526,7 +1601,7 @@ impl Simon {
                 l.status.y + (l.status.h - text::line_height(l.small, FontWeightHint::Bold)) / 2.0,
                 tone,
                 l.small,
-                colour.lit(),
+                colour.text_on(c.chrome.page),
                 FontWeightHint::Bold,
                 Some(w),
             );
@@ -1564,24 +1639,20 @@ impl Simon {
                 fill(f, halo, Color::rgba(c.r, c.g, c.b, 60), radius + grow);
             }
 
-            fill(
-                f,
-                r,
-                if is_lit { colour.lit() } else { colour.dim() },
-                radius,
-            );
+            fill(f, r, colour.face(is_lit), radius);
             f.hit(Target::Pad(colour), r);
 
             if self.show_selection && index == self.selected {
-                stroke(f, r, COL_TEXT, (r.w * 0.012).clamp(1.0, 3.0), radius);
+                stroke(
+                    f,
+                    r,
+                    colour.ring(is_lit),
+                    (r.w * 0.012).clamp(1.0, 3.0),
+                    radius,
+                );
             }
 
-            let ink = if is_lit {
-                COL_CRUST
-            } else {
-                let c = colour.lit();
-                Color::rgba(c.r, c.g, c.b, 140)
-            };
+            let ink = colour.name_ink(is_lit);
             centred(
                 f,
                 r,
@@ -1607,75 +1678,73 @@ impl Simon {
         }
     }
 
-    fn draw_footer(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.footer, COL_MANTLE, 0.0);
+    fn draw_footer(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        fill(f, l.footer, c.chrome.band, 0.0);
         let size = (l.small).min(l.footer_button(0).h * 0.42);
+        let ground = c.chrome.band;
         button(
             f,
+            &self.palette,
             l.footer_button(0),
-            Target::NewGame,
-            "New game",
+            (Target::NewGame, "New game"),
             size,
-            COL_SURFACE0,
-            COL_TEXT,
+            ground,
         );
         button(
             f,
+            &self.palette,
             l.footer_button(1),
-            Target::Speed,
             // The speed is on the control that changes it, so there is one place
             // in the window that knows what it is.
-            &format!("Speed: {}", self.speed.label()),
+            (Target::Speed, &format!("Speed: {}", self.speed.label())),
             size,
-            COL_SURFACE0,
-            COL_PEACH,
+            ground,
         );
         button(
             f,
+            &self.palette,
             l.footer_button(2),
-            Target::Help,
-            "Help",
+            (Target::Help, "Help"),
             size,
-            COL_SURFACE0,
-            COL_TEXT,
+            ground,
         );
     }
 
-    fn draw_game_over(&self, f: &mut Frame, l: &Layout) {
+    fn draw_game_over(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let panel = l.game_over();
         if panel.is_empty() {
             return;
         }
         // A wash over the grid first, so the pads behind the panel are plainly
         // out of play rather than merely partly covered.
-        fill(f, l.grid, Color::rgba(17, 17, 27, 200), 0.0);
-        fill(f, panel, COL_SURFACE0, (panel.h * 0.06).min(12.0));
-        stroke(f, panel, COL_RED, 2.0, (panel.h * 0.06).min(12.0));
+        fill(f, l.grid, c.chrome.veil, 0.0);
+        fill(f, panel, c.chrome.raised, (panel.h * 0.06).min(12.0));
+        stroke(f, panel, c.chrome.bad, 2.0, (panel.h * 0.06).min(12.0));
         // The whole panel takes the click, and it is recorded after the pads, so
         // `hit_test` — which reads the last box first — gives it the click even
         // though the pads are underneath.
         f.hit(Target::GameOver, panel);
 
         let rows: [(String, Color, FontWeightHint); 5] = [
-            ("GAME OVER".to_string(), COL_RED, FontWeightHint::Bold),
+            ("GAME OVER".to_string(), c.chrome.bad, FontWeightHint::Bold),
             (
                 format!("Score: {} rounds", self.score),
-                COL_TEXT,
+                c.chrome.text,
                 FontWeightHint::Regular,
             ),
             (
                 format!("Best: {} rounds", self.best),
-                COL_YELLOW,
+                c.chrome.even,
                 FontWeightHint::Regular,
             ),
             (
                 format!("Games lost: {}", self.games_lost),
-                COL_SUBTEXT0,
+                c.chrome.dim,
                 FontWeightHint::Regular,
             ),
             (
                 "Click here, or Enter, to play again".to_string(),
-                COL_OVERLAY0,
+                c.chrome.dim,
                 FontWeightHint::Regular,
             ),
         ];
@@ -1692,13 +1761,13 @@ impl Simon {
         }
     }
 
-    fn draw_help(&self, f: &mut Frame, l: &Layout) {
+    fn draw_help(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         // The sheet takes every click that lands on it, and it is drawn last, so
         // nothing behind it can be reached while it is up.
-        fill(f, l.window, Color::rgba(17, 17, 27, 190), 0.0);
+        fill(f, l.window, c.chrome.scrim, 0.0);
         f.hit(Target::HelpSheet, l.window);
-        fill(f, l.help, COL_SURFACE0, (l.help.h * 0.05).min(12.0));
-        stroke(f, l.help, COL_SURFACE1, 1.0, (l.help.h * 0.05).min(12.0));
+        fill(f, l.help, c.chrome.raised, (l.help.h * 0.05).min(12.0));
+        stroke(f, l.help, c.chrome.lit, 1.0, (l.help.h * 0.05).min(12.0));
 
         let rows = HELP_ROWS.len() as f32 + 2.0;
         let row_h = l.help.h / rows;
@@ -1708,7 +1777,7 @@ impl Simon {
             Rect::new(l.help.x, l.help.y, l.help.w, row_h),
             HELP_TITLE,
             (l.font * 1.1).min(row_h * 0.7),
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
         );
         let key_w = l.help.w * 0.42;
@@ -1720,7 +1789,7 @@ impl Simon {
                 y + (row_h - text::line_height(size, FontWeightHint::Bold)) / 2.0,
                 key,
                 size,
-                COL_PEACH,
+                c.chrome.key,
                 FontWeightHint::Bold,
                 Some((key_w - l.pad * 2.0).max(0.0)),
             );
@@ -1730,7 +1799,7 @@ impl Simon {
                 y + (row_h - text::line_height(size, FontWeightHint::Regular)) / 2.0,
                 what,
                 size,
-                COL_TEXT,
+                c.chrome.text,
                 FontWeightHint::Regular,
                 Some((l.help.right() - l.pad * 2.0 - (l.help.x + key_w)).max(0.0)),
             );
@@ -1740,7 +1809,7 @@ impl Simon {
             Rect::new(l.help.x, l.help.bottom() - row_h, l.help.w, row_h),
             "Click anywhere to close",
             size,
-            COL_OVERLAY0,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
@@ -1827,6 +1896,10 @@ pub fn handle_event(game: &mut Simon, event: &Event) -> EventResult {
 }
 
 impl App for Simon {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Simon".to_string()
     }
@@ -1915,6 +1988,74 @@ mod tests {
     use super::*;
     use guitk::event::Modifiers;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark, in every
+    /// state the game has -- the sequence shown, the player's turn, the game
+    /// over, the help sheet -- with only the four pads' colours and the inks
+    /// written on them not the palette's. It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut derived: Vec<Color> = SimonColor::ALL
+                .iter()
+                .flat_map(|pad| [pad.lit(), pad.dim()])
+                .collect();
+            derived.extend([PAD_INKS.0, PAD_INKS.1]);
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                c.chrome.band,
+            ));
+            for (what, mut app) in states() {
+                app.theme_changed(&p);
+                // The keyboard's outline is on, so its colour is checked too.
+                app.show_selection = true;
+                let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("simon, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **Every pad's name and outline read on it**, lit or not: a player who
+    /// cannot tell the colours apart plays by the names, and a keyboard player
+    /// by the outline.
+    #[test]
+    fn every_pads_name_and_outline_read_on_it() {
+        for &pad in &SimonColor::ALL {
+            for lit in [false, true] {
+                let face = pad.face(lit);
+                let name = guitk::theme::contrast_ratio(pad.name_ink(lit), face);
+                assert!(name >= 3.0, "{pad:?} (lit: {lit}): its name is {name:.2}:1");
+                let ring = guitk::theme::contrast_ratio(pad.ring(lit), face);
+                assert!(
+                    ring >= 3.0,
+                    "{pad:?} (lit: {lit}): its outline is {ring:.2}:1"
+                );
+            }
+        }
+    }
+
+    /// The tone named beside the status line is in its pad's colour, and reads
+    /// on the page in either theme -- the pale lit yellow did not on a light
+    /// one.
+    #[test]
+    fn the_tone_reads_on_the_page_in_either_theme() {
+        for light in [false, true] {
+            let page = Colours::of(&Palette::for_mode(light)).chrome.page;
+            for &pad in &SimonColor::ALL {
+                let ratio = guitk::theme::contrast_ratio(pad.text_on(page), page);
+                assert!(ratio >= 3.0, "{pad:?} is {ratio:.2}:1 (light: {light})");
+            }
+        }
+    }
 
     /// Windows to check the layout against, from a desktop down to something no
     /// sane person would resize to.
@@ -4469,7 +4610,10 @@ mod tests {
         let lines: Vec<(String, String, Color)> = states()
             .into_iter()
             .filter(|(name, _)| *name != "the losing pad still lit" && *name != "the help sheet")
-            .map(|(name, app)| (name.to_string(), app.status_line(), app.status_colour()))
+            .map(|(name, app)| {
+                let c = Colours::of(&app.palette);
+                (name.to_string(), app.status_line(), app.status_colour(&c))
+            })
             .collect();
         for (i, (an, a_line, a_col)) in lines.iter().enumerate() {
             for (bn, b_line, b_col) in &lines[i + 1..] {
@@ -4729,7 +4873,7 @@ mod tests {
         assert_eq!(app.lit(), None);
         assert_eq!(
             fill_at(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT), dark),
-            Some(COL_SURFACE1),
+            Some(Colours::of(&app.palette).chrome.lit),
             "the dot is coloured with nothing lit"
         );
 

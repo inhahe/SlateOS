@@ -155,9 +155,27 @@ MUTATIONS = [
     # -- content search -------------------------------------------------------
     (
         "content searches run on the window's thread",
-        "        if self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {",
-        "        if false && self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {",
+        "        if criteria.mode == SearchMode::Content && !criteria.query.is_empty() {",
+        "        if false && criteria.mode == SearchMode::Content && !criteria.query.is_empty() {",
         ["content_mode_searches_contents_not_names"],
+    ),
+    (
+        "ext: is searched for as text",
+        '            if let Some(ext) = word.strip_prefix("ext:") {',
+        '            if let Some(ext) = word.strip_prefix("ext-never:") {',
+        ["ext_and_in_words_narrow_the_search_and_leave_the_query"],
+    ),
+    (
+        "the search ignores ext: and in:",
+        "        self.content = None;\n        let criteria = self.criteria.effective();",
+        "        self.content = None;\n        let criteria = self.criteria.clone();",
+        ["a_search_typed_with_ext_and_in_finds_only_those_files"],
+    ),
+    (
+        "a regex loses its ext:",
+        "        if self.mode == SearchMode::Regex {\n            return out;\n        }",
+        "",
+        ["ext_and_in_words_narrow_the_search_and_leave_the_query"],
     ),
     (
         "a search in progress outlives a change of mode",

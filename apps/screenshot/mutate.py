@@ -78,7 +78,7 @@ MUTATIONS = [
     ),
     (
         "the refusal does not say which names",
-        '        Some(last) => format!("every name up to {} is in use", last.display()),',
+        '        Some(last) => format!("every name up to {} is in use", last.shown()),',
         '        Some(_) => String::from("every name is in use"),',
         [FULL],
     ),
@@ -157,6 +157,64 @@ MUTATIONS += [
         "        part(into_day / 3_600),",
         "        part(into_day % 3_600 / 60),",
         ["a_new_capture_is_stamped_with_the_clock"],
+    ),
+]
+
+# `--save`: Ctrl+Print Screen asks where the capture goes
+# (requests/c-e-print-screen-can-save-to-a-file.md).
+ASK = "the_save_word_asks_where_the_capture_goes"
+MUTATIONS += [
+    (
+        "--save is read and ignored",
+        '            Some(word) if word == "--save" => true,',
+        '            Some(word) if word == "--save" => false,',
+        [ASK],
+    ),
+    (
+        "a capture asked about takes the default action",
+        "        if std::mem::take(&mut self.ask_where) {",
+        "        if false {",
+        [ASK],
+    ),
+    (
+        "every capture after asks too",
+        "        if std::mem::take(&mut self.ask_where) {",
+        "        if self.ask_where {",
+        [ASK],
+    ),
+    (
+        "the place chosen is not written",
+        "            Picked::Chose(path) => {\n                self.save_where_chosen(&path);",
+        "            Picked::Chose(path) => {\n                let _ = path;",
+        [ASK],
+    ),
+    (
+        "the Save dialog is not drawn",
+        "        tree.commands.extend(self.picker.render(",
+        "        drop(self.picker.render(",
+        [ASK],
+    ),
+    (
+        "a cancelled capture is kept",
+        "        if self.awaiting.take().is_some() {",
+        "        if self.awaiting.is_some() {",
+        ["cancelling_the_save_dialog_discards_the_capture"],
+    ),
+    (
+        "a third word is taken",
+        "        if let Some(extra) = words.next() {\n            return Err(format!(\n"
+        "                \"{} is one argument more",
+        "        if let Some(extra) = None::<&OsString> {\n            return Err(format!(\n"
+        "                \"{} is one argument more",
+        ["the_save_word_is_taken_only_after_a_mode"],
+    ),
+    (
+        "a mistyped mode opens the menu without a word",
+        "            _ => {\n                return Err(format!(\n"
+        "                    \"{} is not a capture mode;",
+        "            _ => {\n                return Ok(());\n                #[allow(unreachable_code)]\n"
+        "                return Err(format!(\n                    \"{} is not a capture mode;",
+        ["a_mistyped_flag_captures_nothing"],
     ),
 ]
 

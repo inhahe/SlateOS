@@ -79,6 +79,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-kshell-rungs-vs-bash.py` | Check rung 115's assertions against real bash, exactly as written. |
 | `scripts/check-lane-signals.py` | Cross-lane operational signalling, over the one directory all lanes share. |
 | `scripts/check-libc-abi.py` | Check our `#[repr(C)]` types against musl's headers, using musl as the oracle. |
+| `scripts/check-libc-declared.py` | Refuse a function musl's headers declare that `libc.a` does not define. |
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
@@ -175,7 +176,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/find-claimed-acts.py` | Which programs tell the user they DID something they cannot do? |
 | `scripts/find-diff.sh` | Differential test: our find against GNU find. |
+| `scripts/find-drawn-only-settings.py` | Which settings does a window let you change, and then only draw? |
 | `scripts/find-echoed-settings.py` | Which settings does the program only ever read in order to print back? |
+| `scripts/find-options-only-emptied.py` | Which `Option` fields does a program read and only ever empty? |
 | `scripts/find-overstated-records.py` | Which of our own documents credit a program with an act it cannot perform? |
 | `scripts/find-reachable-fixtures.py` | Which invented-data builders can a *shipping* build reach? |
 | `scripts/find-silent-incapacity.py` | Which programs cannot do the thing they are for, and do not say so? |
@@ -330,6 +333,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/stat-diff.sh` | Differential test: our `stat` against GNU `stat`. |
 | `scripts/stderr-exit-zero-sweep.py` | Find a program that reports a failure on stderr and then exits 0. |
 | `scripts/stdin-hang-sweep.sh` | Does any test binary hang when its stdin is an OPEN PIPE that never delivers? |
+| `scripts/stillreports.py` | The note a report-only scanner keeps of findings already read -- and the check that it still covers what the scan reports. |
 | `scripts/straddle-check.py` | Report which loops in a kernel binary straddle a 4 KiB guest page. |
 | `scripts/strings-diff.sh` | Differential test: our `strings` against GNU binutils `strings`. |
 | `scripts/suite_pool.py` | Run a tooling suite's independent cases a few at a time, with one-at-a-time output. |
@@ -407,4 +411,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_397 scripts._
+_401 scripts._

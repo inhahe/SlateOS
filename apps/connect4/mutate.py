@@ -871,8 +871,8 @@ MUTATIONS = [
     ),
     (
         "N and U are swapped",
-        "        Key::N => Some(Intent::NewGame),\n        Key::U => Some(Intent::Undo),",
-        "        Key::N => Some(Intent::Undo),\n        Key::U => Some(Intent::NewGame),",
+        "        Key::N => Some(Intent::NewGame),\n        Key::S => Some(Intent::SwapSides),\n        Key::U => Some(Intent::Undo),",
+        "        Key::N => Some(Intent::Undo),\n        Key::S => Some(Intent::SwapSides),\n        Key::U => Some(Intent::NewGame),",
         ["n_starts_a_new_game_and_u_takes_a_move_back_and_h_shows_the_sheet"],
     ),
     (
@@ -1034,8 +1034,8 @@ MUTATIONS = [
     ),
     (
         "a button's hit box is not the button",
-        "    f.hit(target, r);\n    centred(f, r, body, size, ink, FontWeightHint::Bold);",
-        "    f.hit(target, Rect::new(r.x, r.y, r.w * 2.0, r.h));\n    centred(f, r, body, size, ink, FontWeightHint::Bold);",
+        "        ground,\n    );\n    f.hit(target, r);",
+        "        ground,\n    );\n    f.hit(target, Rect::new(r.x, r.y, r.w * 2.0, r.h));",
         ["the_three_footer_buttons_are_controls_and_are_labelled"],
     ),
     (
@@ -1046,8 +1046,8 @@ MUTATIONS = [
     ),
     (
         "a readout shows a neighbour's tally",
-        '            ("You", self.human_wins, COL_RED),\n            ("AI", self.ai_wins, COL_YELLOW),\n            ("Draw", self.draws, COL_OVERLAY0),',
-        '            ("You", self.ai_wins, COL_RED),\n            ("AI", self.draws, COL_YELLOW),\n            ("Draw", self.human_wins, COL_OVERLAY0),',
+        "                \"You\",\n                self.human_wins,\n                self.human_player.text_on(c.chrome.raised, c),\n            ),\n            (\n                \"AI\",\n                self.ai_wins,\n                self.ai_player.text_on(c.chrome.raised, c),\n            ),\n            (\"Draw\", self.draws, c.chrome.dim),",
+        "                \"You\",\n                self.ai_wins,\n                self.human_player.text_on(c.chrome.raised, c),\n            ),\n            (\n                \"AI\",\n                self.draws,\n                self.ai_player.text_on(c.chrome.raised, c),\n            ),\n            (\"Draw\", self.human_wins, c.chrome.dim),",
         ["a_readout_shows_the_tally_it_names_and_not_a_neighbours"],
     ),
     (
@@ -1070,8 +1070,8 @@ MUTATIONS = [
     ),
     (
         "the window does not say what game it is",
-        '            "Connect Four",\n            l.font,\n            COL_LAVENDER,',
-        '            "",\n            l.font,\n            COL_LAVENDER,',
+        "            \"Connect Four\",\n            l.font,\n            c.chrome.title,",
+        "            \"\",\n            l.font,\n            c.chrome.title,",
         ["the_window_says_what_game_it_is"],
     ),
     (
@@ -1082,32 +1082,32 @@ MUTATIONS = [
     ),
     (
         "the status line is always the same colour",
-        "            self.status_colour(),",
-        "            COL_BLUE,",
+        "            self.status_colour(c),",
+        "            c.chrome.key,",
         ["the_status_line_reaches_the_frame_in_the_colour_it_chose"],
     ),
     (
         "a game being thought about looks like a game waiting on you",
-        '                if self.ai_to_play() {\n                    "Yellow is thinking...".to_string()',
-        '                if self.ai_to_play() {\n                    format!("Your turn ({})", self.human_player.name())',
+        "                    format!(\"{} is thinking...\", self.ai_player.name())",
+        "                    format!(\"Your turn ({})\", self.human_player.name())",
         ["the_status_line_says_the_search_is_thinking_while_it_owes_a_move"],
     ),
     (
         "a loss is announced as a win",
-        '            GameStatus::Won(winner) if winner == self.human_player => "You win!".to_string(),\n            GameStatus::Won(_) => "Yellow wins!".to_string(),',
-        '            GameStatus::Won(_) => "You win!".to_string(),\n            GameStatus::Won(_) => "Yellow wins!".to_string(),',
+        "            GameStatus::Won(winner) if winner == self.human_player => \"You win!\".to_string(),\n            GameStatus::Won(_) => format!(\"{} wins!\", self.ai_player.name()),",
+        "            GameStatus::Won(_) => \"You win!\".to_string(),\n            GameStatus::Won(_) => format!(\"{} wins!\", self.ai_player.name()),",
         ["the_status_line_announces_a_win_a_loss_and_a_draw_differently"],
     ),
     (
         "a draw is coloured like a win",
-        "            GameStatus::Draw => COL_PEACH,",
-        "            GameStatus::Draw => COL_GREEN,",
+        "            GameStatus::Draw => c.chrome.even,",
+        "            GameStatus::Draw => c.chrome.good,",
         ["the_status_line_is_coloured_by_what_it_says"],
     ),
     (
         "a loss is coloured like a win",
-        "            GameStatus::Won(winner) if winner == self.human_player => COL_GREEN,\n            GameStatus::Won(_) => COL_RED,",
-        "            GameStatus::Won(_) => COL_GREEN,\n            GameStatus::Won(_) => COL_RED,",
+        "            GameStatus::Won(winner) if winner == self.human_player => c.chrome.good,\n            GameStatus::Won(_) => c.chrome.bad,",
+        "            GameStatus::Won(_) => c.chrome.good,\n            GameStatus::Won(_) => c.chrome.bad,",
         ["the_status_line_is_coloured_by_what_it_says"],
     ),
     (
@@ -1142,20 +1142,20 @@ MUTATIONS = [
     ),
     (
         "the board is not drawn",
-        "        for row in 0..ROWS {\n            for col in 0..COLS {\n                disc(f, l.cell(row, col), self.board.get(row, col).face());\n            }\n        }",
+        "        for row in 0..ROWS {\n            for col in 0..COLS {\n                disc(f, l.cell(row, col), self.board.get(row, col).face(c));\n            }\n        }",
         "",
         ["every_hole_of_the_board_is_painted"],
     ),
     (
         "every hole is painted as though it were empty",
-        "                disc(f, l.cell(row, col), self.board.get(row, col).face());",
-        "                disc(f, l.cell(row, col), Cell::Empty.face());",
+        "                disc(f, l.cell(row, col), self.board.get(row, col).face(c));",
+        "                disc(f, l.cell(row, col), Cell::Empty.face(c));",
         ["a_piece_is_painted_in_the_hole_it_landed_in"],
     ),
     (
         "a piece is painted in the hole across the board from its own",
-        "                disc(f, l.cell(row, col), self.board.get(row, col).face());",
-        "                disc(f, l.cell(row, col), self.board.get(row, COLS - 1 - col).face());",
+        "                disc(f, l.cell(row, col), self.board.get(row, col).face(c));",
+        "                disc(f, l.cell(row, col), self.board.get(row, COLS - 1 - col).face(c));",
         ["a_piece_is_painted_in_the_hole_it_landed_in"],
     ),
     (
@@ -1208,20 +1208,20 @@ MUTATIONS = [
     ),
     (
         "the undo button is greyed whether or not there is anything to undo",
-        "        let (undo_face, undo_ink) = if self.can_undo() {\n            (COL_SURFACE1, COL_TEXT)\n        } else {\n            (COL_SURFACE0, COL_OVERLAY0)\n        };",
-        "        let (undo_face, undo_ink) = (COL_SURFACE0, COL_OVERLAY0);",
+        "            \"Undo\",\n            size,\n            self.can_undo(),",
+        "            \"Undo\",\n            size,\n            false,",
         ["the_undo_button_is_greyed_when_there_is_nothing_to_take_back"],
     ),
     (
         "the undo button is drawn live with nothing to take back",
-        "        let (undo_face, undo_ink) = if self.can_undo() {\n            (COL_SURFACE1, COL_TEXT)\n        } else {\n            (COL_SURFACE0, COL_OVERLAY0)\n        };",
-        "        let (undo_face, undo_ink) = (COL_SURFACE1, COL_TEXT);",
+        "            \"Undo\",\n            size,\n            self.can_undo(),",
+        "            \"Undo\",\n            size,\n            true,",
         ["the_undo_button_is_greyed_when_there_is_nothing_to_take_back"],
     ),
     (
         "the sheet is drawn over a game nobody asked it about",
-        "        if self.show_help {\n            self.draw_help(&mut f, &l);\n        }",
-        "        self.draw_help(&mut f, &l);",
+        "        if self.show_help {\n            self.draw_help(&mut f, &l, &c);\n        }",
+        "        self.draw_help(&mut f, &l, &c);",
         ["the_sheet_is_not_drawn_until_it_is_asked_for"],
     ),
     (
@@ -1232,8 +1232,8 @@ MUTATIONS = [
     ),
     (
         "the sheet's hit box is recorded before the controls it covers",
-        "        fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));",
-        "        f.hit(Target::HelpSheet, l.window);\n        fill(f, h, COL_SURFACE0, (h.h * 0.04).min(10.0));",
+        "        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));",
+        "        f.hit(Target::HelpSheet, l.window);\n        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));",
         ["the_sheet_takes_the_whole_window_and_takes_it_last"],
     ),
     (
@@ -1289,6 +1289,36 @@ MUTATIONS = [
         "        for (i, &(key, meaning)) in HELP_ROWS.iter().enumerate() {",
         "        for (i, &(key, meaning)) in HELP_ROWS\n            .iter()\n            .take(HELP_ROWS.len() - 1)\n            .enumerate()\n        {",
         ["the_sheet_lists_every_control_and_what_it_does"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the player's count is red whichever side they play",
+        "                self.human_player.text_on(c.chrome.raised, c),",
+        "                Cell::Red.text_on(c.chrome.raised, c),",
+        ["the_players_count_is_in_the_colour_they_play"],
+    ),
+    (
+        "the pale yellow is written on a light panel",
+        "            Self::Yellow => gamechrome::legible_on(YELLOW_DISC, ground),",
+        "            Self::Yellow => YELLOW_DISC.0,",
+        ["each_sides_count_reads_in_its_own_colour"],
+    ),
+    (
+        "a red disc is painted yellow",
+        "            Self::Red => RED_DISC.0,",
+        "            Self::Red => YELLOW_DISC.0,",
+        ["a_piece_is_painted_in_the_hole_it_landed_in"],
+    ),
+    (
+        "the page is Mocha's crust whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x11111B), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
     ),
 ]
 

@@ -507,14 +507,13 @@ MUTATIONS = [
     # ── What the window says ──────────────────────────────────────────────
     (
         "a card on the table is drawn as a blank rectangle",
-        "            draw_card_face(f, r, tc.card, false);",
-        "            fill(f, r, SURFACE0, r.w * 0.1);",
+        "            draw_card_face(f, r, tc.card, false, c);",
+        "            fill(f, r, c.chrome.raised, r.w * 0.1);",
         ["a_card_on_the_table_is_drawn_with_its_rank_and_its_suit"],
     ),
     (
         "the table does not say who took the trick",
-        "            if self.taker == Some(tc.player) {\n"
-        "                outline(f, r, GREEN, (l.card.0 * 0.07).clamp(1.0, 4.0));\n            }",
+        "            if self.taker == Some(tc.player) {\n                outline(f, r, c.chrome.good, (l.card.0 * 0.07).clamp(1.0, 4.0));\n            }",
         "        {}",
         ["the_taker_of_the_trick_on_the_table_is_ringed"],
     ),
@@ -533,8 +532,8 @@ MUTATIONS = [
     ),
     (
         "the selection is not marked",
-        "            if i == self.selected {\n                outline(f, r, YELLOW, ring);",
-        "            if false {\n                outline(f, r, YELLOW, ring);",
+        "            if i == self.selected {\n                outline(f, r, c.table.focus, ring);",
+        "            if false {\n                outline(f, r, c.table.focus, ring);",
         ["the_selected_card_is_ringed_and_only_that_one"],
     ),
     (
@@ -603,6 +602,36 @@ MUTATIONS = [
         "            if x + w > l.footer.right() - l.pad {\n                break;\n            }",
         "        {}",
         ["the_buttons_are_inside_the_footer_and_clear_of_the_status"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a forbidden card is not washed out",
+        "        fill(f, r, c.veil, r.w * 0.12);",
+        "",
+        ["a_card_the_rules_forbid_is_drawn_dimmed"],
+    ),
+    (
+        "the help card's scrim is black whatever the theme",
+        "        fill(f, l.window, c.chrome.scrim, 0.0);",
+        "        fill(f, l.window, Color::rgba(17, 17, 27, 180), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a back is Mocha's grey whatever the accent",
+        "    fill(f, r, c.table.back, r.w * 0.16);",
+        "    fill(f, r, Color::from_hex(0x3B4261), r.w * 0.16);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
     ),
 ]
 

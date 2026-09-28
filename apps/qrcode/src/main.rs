@@ -351,7 +351,7 @@ impl VersionInfo {
     /// to whole bytes because a partial byte cannot hold a character.
     #[allow(
         dead_code,
-        reason = "the table's proofreader; called by the test that compares                   every row's stated capacity against its implied one"
+        reason = "the table's proofreader; called by the test that compares every row's stated capacity against its implied one"
     )]
     fn byte_mode_capacity(&self) -> usize {
         let header_bits = 4_usize.saturating_add(count_indicator_bits(self.version));

@@ -62848,6 +62848,15 @@ reason `add_file` takes a path as a string.
 
 ### TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE — 2026-09-04 — OPEN
 
+**Status 2026-09-27 (lane E):** everything in the table below is reachable now except swimlanes -- kept in
+the boards file and never drawn, which is the one row left open. The export and import had doors already;
+this adds the keys: the open card's E, D, C and L, the checklist's Tab and Space, the archive's Enter
+(restoring to the column the card came from), the board's R, Z, Shift+T and Shift+Delete, the board list's N,
+and the filter bar's Ctrl+P, Ctrl+U and Ctrl+L. **A larger hole turned up under it:** nothing in the running
+program ever chose a card -- Up and Down only scrolled, and every test that pressed Enter, P, M, B, Ctrl+D or
+Ctrl+A set `selected_card` itself first -- so every card operation worked in the tests and did nothing in the
+window. The arrows choose now. `apps/kanban/mutate.py` covers both.
+
 > **Correction, 2026-09-15.** "A complete JSON importer" below is wrong. What
 > exists is a tokeniser -- string, number and escape parsing -- and nothing that
 > reconstructs a `Board`. See `TD-C-THE-IMPORTER-THAT-WAS-NOT-THERE`.
@@ -175205,6 +175214,103 @@ day the kernel makes it confining.
 anything in it went wrong; `--log FILE` journals somewhere other than
 `/var/log/syslog.jsonl`.
 
+### [E] Thirteen fields in nine applications are read and never filled, so the features behind them cannot be reached -- 2026-09-27
+
+**Status:** FIXED or ANSWERED, every row, the same day -- see the last
+column.
+Found by `scripts/find-options-only-emptied.py`; a row fixed stops being
+reported, and one answered goes into the script's `KNOWN` table.
+
+**In short:** each of these is an `Option` the program reads -- to draw
+something, or to decide what a key does -- and only ever clears. Nothing sets
+it, so whatever it would show or allow never happens. It is the shape
+`apps/kanban` had with `selected_card`, where it made every card operation
+unreachable; here the losses are smaller and more scattered.
+
+| App | Field | What cannot happen | Now |
+|---|---|---|---|
+| `diagram` | `rect_select_start`, `rect_select_end` | dragging a box to select several shapes: the rectangle is drawn from these and nothing starts one | FIXED: a drag on empty canvas draws the box and selects what it touches; dragging one of them moves them all |
+| `filediff` | `dir_compare` | comparing two folders: the view draws a result nothing produces | FIXED: Ctrl+D asks for two folders and compares them on disk -- byte for byte within a 256 MiB budget, past which a pair is `NotCompared`, and a pair one side cannot read is `Unreadable`, never guessed; Enter opens a pair, Escape goes back |
+| `filesearch` | `extension_filter` (the tests set it), `path_contains` | filtering results by extension or by a folder in the path | FIXED: `ext:pdf` and `in:Documents` in the query set them, and the status line says so |
+| `ircclient` | `password` | joining a server that wants a password (`PASS`) | FIXED: `/connect server [port] [password]`; the history keeps stars |
+| `magnifier` | `picked` (the tests set it) | picking a colour: the swatch and its values are drawn from it | ANSWERED: nothing can capture the screen, and picking refuses and says so |
+| `paint` | `active_slider` | dragging the colour sliders | FIXED -- and it hid a larger hole: no colour could be chosen at all. The palette ignored clicks, and the colour dialog was opened only by a test. The tool panel is hit-tested now (tools, both swatches, the palette: left click the colour, right click the background) and the dialog works -- dragged sliders, Tab and the arrows, typed hex, Enter and Escape -- opened by the swatches or C / Shift+C |
+| `screenrecorder` | `active_annotation_tool`, `current_annotation`, `hovered_sidebar` | annotating a recording, and the sidebar's hover | `hovered_sidebar` FIXED -- and the sidebar answered clicks no better: a click opens the view under it now, and the row under the pointer is lit. The two annotation fields ANSWERED: the toolbar that sets them is drawn only while recording, and recording refuses -- no frame source -- and says so |
+| `videoplayer` | `audio_preferred_lang` | choosing an audio language: the preferences show "Any" for ever | FIXED, with its frozen twin `subtitle_preferred_lang` ("eng", drawn and read by nothing): Audio Language and Subtitle Language are rows stepping through sixteen languages and back to the file's own, and a file opens with the tracks in them -- matched by ISO 639-2 in either form (`deu`, Matroska's `ger`) or a BCP 47 tag (`de-AT`). The subtitle default is now the file's own: English, once something read it, would have turned on the subtitles of every film with an English track |
+| `whiteboard` | `marquee` | dragging a box to select strokes | FIELD REMOVED: the box works through `DragState::Marquee`; this was a second copy only ever cleared |
+
+**Why the tests did not notice:** where a test covers the feature it sets the
+field itself first (two of the rows), which is the whole defect in miniature.
+
+**The fix, per row:** give the field its writer -- the drag, the key or the
+control the rest of the feature already assumes -- with a test that reaches it
+the way a user does, then remove the row from this table; or, where the
+feature should not exist, remove the field and what reads it.
+
+### [E] The video player refuses a subtitle file in a Windows code page -- 2026-09-27
+
+**Status:** OPEN -- a limitation, said on screen, not a silent failure.
+
+**In short:** with Auto-load Subtitles on, opening `Film.mp4` loads the
+`Film.srt` beside it (or `Film.en.srt` and the like, for the preferred
+language). A file saved as UTF-8 or UTF-16 is read. An older file saved in
+a Windows code page -- common for `.srt`, which predates Unicode's spread --
+is refused with "Film.srt was not loaded: it is not UTF-8 or UTF-16 text".
+
+**Why refused rather than guessed:** the bytes do not say which code page
+they are in. Read as Windows-1252, a Russian file in Windows-1251 turns
+every letter into an accented Latin one, and nothing tells the viewer the
+text is wrong rather than the film.
+
+**Where:** `apps/videoplayer/src/main.rs`, `subtitle_text` and
+`load_sibling_subtitles`.
+
+**The proper fix:** let the user say, the way desktop players do -- a
+"Subtitle encoding" setting (Automatic, then a list of code pages), where
+Automatic reads Unicode and, for anything else, the code page of the
+subtitle language preferred (Windows-1251 for Russian, 1252 for the
+Western European languages, 932 for Japanese, and so on), saying which it
+used. It needs a code-page decoder the tree does not have yet: nothing in
+`apps/` or `gui/` converts a legacy encoding today.
+
+### [E] Settings a window draws and lets you change, and nothing acts on -- 2026-09-27
+
+**Status:** `apps/` -- every row fixed or answered, the same day. `gui/` --
+33 rows, lane C's to triage; listed by the scanner, not here.
+
+**In short:** a settings row that draws its value, lets you change it, draws
+the new value -- and nothing else in the program ever reads it. The user did
+the only check they could, and it passed. `apps/videoplayer` had six of eight
+rows like that (fixed the same day: four act now, and the ones that need a
+decoder say "Not applied"). `scripts/find-drawn-only-settings.py` asks the
+question for every program with a window; `find-echoed-settings.py` asks it
+for command-line programs and could not see these -- the reads are not in a
+`println!`, and it does not match structs called `...Preferences`.
+
+| App | Setting | Verdict |
+|---|---|---|
+| `videoplayer` | six rows | **fixed** -- Auto-load Subtitles, Remember Volume and both languages act; Resume, Hardware Decode, On Finish and Deinterlace say "Not applied: nothing here decodes video" |
+| `pomodoro` | Notification Sound | **fixed** -- the settings say nothing here plays sound |
+| `diskimager` | `CreateOptions::format` | **fixed** -- the field is gone; the label reads what the copy writes |
+| `remotedesktop` | Scaling, Color Depth, Refresh Rate | **fixed** -- a VNC session asks for the profile's bits a pixel and keeps its frame rate; the screen is shown at its scale (fitted, 50-200%, full size) with scrollbars to pan, and Z chooses it -- it had no control, every preset set Auto-fit |
+| `torrent`, `fontmanager` | 9 | answered -- each panel says its settings are not applied |
+| `netscan`, `diskimager` | a method, an output path | answered -- labels and records, not controls |
+| `netmanager` | the VPN rows | answered -- the list is empty in the shipping program |
+| `screenrecorder` | `auto_increment` | answered -- data (a file name), and no take is made |
+| `settings` | `remote.rs`'s three | answered -- the page is reached from nowhere (C-Q17) |
+| `mediaconvert` | 6 | set aside -- read only by `summary()`, which only tests call |
+
+**How it decides.** A read is not acting when it turns the value into its own
+text, computes the value's own next state, or writes it to a file; anything
+else acts -- including a render function's `if prefs.show_grid`, which is what
+a display setting correctly does. A field is reported only beside a sibling
+the program does act on, the echo checker's rule for telling a dump from a
+straggler.
+
+**Where it is blind:** a read in another crate. `gui/appearance`'s wallpaper
+settings are read by the desktop, from the file, so they report there as
+"kept" and nothing else; the same will be true of most of `gui/`'s rows.
+
 ### [F] AVIF decoding has no committed benchmark, and rav1d runs without dav1d's assembly -- 2026-09-27
 
 **Status:** HALF FIXED on `lane-f` 2026-09-27. Part (1) is done:
@@ -175500,3 +175606,61 @@ real with nothing further to change.
 `F_SETLKW` as `F_SETLK` retried with a yield until granted (the kernel does
 not block for locks yet -- the same shape `flock` has), and `F_OFD_*`
 refused with `EINVAL` until they are wired too.
+
+### [E] Notes cannot change a checklist's items or a table's cells -- 2026-09-28
+
+**Status:** open. Writing in them is refused, and says why, since 2026-09-28.
+
+**In short:** the notes app can show a checklist note and a table note, but
+nothing in its window can make one, tick an item, add or remove an item, or
+change a cell. Ctrl+N makes a plain note, and the only checklists and tables
+a user can have are ones in a library written before the sample content went
+test-only (2026-09-15). Until 2026-09-28, pressing Enter on one opened its
+hidden `content` for writing: what was typed was drawn nowhere once the
+writing finished, and stayed in the library and in every search. That is
+refused now (`not_written_as_text`, `apps/notes/src/main.rs`), with the
+reason on the status line.
+
+**The proper fix.** A checklist edited item by item: a click on the box ticks
+it (`Note::toggle_checklist_item` exists and has no caller), each item's
+words in a one-line field, Enter adding the next item and Backspace on an
+empty one removing it. A table edited a cell at a time, with Tab moving along
+the row. And a way to make each kind -- a kind switch on the note, or the
+templates `create_note_from_template` already has and nothing offers.
+
+### [E] Notes' Markdown page, checklist and table views do not scroll -- 2026-09-28
+
+**Status:** open.
+
+**In short:** a long Markdown note, checklist or table is cut off at the
+status bar and the rest cannot be read in that view -- the wheel does nothing
+over it. A plain note scrolls, and so does any note while it is being written
+(its Markdown source included), because both are drawn through the toolkit's
+multi-line field, which keeps a scroll offset. Before 2026-09-28 the other
+views drew past the status bar and off the bottom of the window; they are
+clipped to the panel now (`render_editor_area`), which is the half that could
+be done without state.
+
+**The proper fix.** A scroll offset for the page views, moved by the wheel
+through `guitk::wheel`, clamped to the page's height (which
+`render_markdown_preview` already walks line by line), and reset when the
+selection moves to another note.
+
+### [E] The terminal draws no combining mark -- 2026-09-28
+
+**Status:** open.
+
+**In short:** text with an accent written as a separate mark -- "e" followed by
+U+0301, as macOS writes file names and many programs print -- shows as a plain
+"e" in the terminal. `put_char` (`apps/terminal/src/lib.rs`) gives a mark no
+cell, which is right, and then does not keep it anywhere, so nothing draws it.
+The cursor and the width query both count the mark as taking no cell, so
+nothing is misplaced; the accent is simply missing, and a copy of the line
+loses it too.
+
+**The proper fix.** A cell keeps the marks that follow its character (a short
+list on `Cell`), the glyph call draws the cell's whole cluster clipped to its
+cells, and a selection's copy carries the marks. Whether the font places the
+mark over its base is the text layer's (`GPOS` mark attachment, which
+`gui/toolkit`'s shaper has); the terminal's part is to keep the mark and hand
+it over.

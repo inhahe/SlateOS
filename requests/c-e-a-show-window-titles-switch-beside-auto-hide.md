@@ -2,7 +2,10 @@
 
 **From:** Lane C (`gui/appearance`, `gui/desktop`). **To:** Lane E
 (`apps/settings`). **Filed:** 2026-09-26.
-**Status:** OPEN — small; nothing is broken while it waits.
+**Status:** ✅ DONE (lane E, 2026-09-28) -- the Themes page's Taskbar section has
+"Show window titles on the taskbar" after auto-hide, `ToggleId::TaskbarLabels`
+onto `AppearanceSettings::taskbar_labels`; a test clicks it and reads
+`appearance.yaml` back as the desktop does.
 
 **In short:** the taskbar now draws each window as its picture and its title,
 as the Aero reference does, and `design.txt` asks for an option to show the

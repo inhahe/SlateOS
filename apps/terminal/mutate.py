@@ -754,6 +754,88 @@ MUTATIONS = [
         "        self.flush_to_child();\n        if false {\n            Response::Exit",
         ["a_clean_exit_found_on_a_wake_closes_the_window"],
     ),
+    # requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md
+    (
+        "the sixteen stay fixed whatever the theme",
+        "            ansi: palette.terminal.ansi,",
+        "            ansi: ColorScheme::default().ansi,",
+        ["the_chrome_and_the_sixteen_follow_the_theme"],
+    ),
+    # -- the width query, and OSC strings read as the screen reads bytes ---
+    # (lane B's b-c-the-terminal-should-answer-how-wide-it-will-draw-text,
+    # design-decisions §1042 and §1224)
+    (
+        "the width query is not answered",
+        "                    self.to_child(&reply);",
+        "                    drop(reply);",
+        ["the_width_query_answers_what_printing_takes", "the_width_answer_is_framed_like_its_query"],
+    ),
+    (
+        "the width query counts every character as one cell",
+        "        .map(advance_of)\n        .fold(0, usize::saturating_add)",
+        "        .map(|_| 1)\n        .fold(0, usize::saturating_add)",
+        ["the_width_query_answers_what_printing_takes"],
+    ),
+    (
+        "the width answer ends with ST whatever the query ended with",
+        "                    reply.extend_from_slice(terminator);",
+        "                    reply.extend_from_slice(b\"\\x1b\\\\\");",
+        ["the_width_answer_is_framed_like_its_query"],
+    ),
+    (
+        "a title is read as Latin-1",
+        "                self.title = decode_as_drawn(payload)\n",
+        "                self.title = payload.iter().map(|&b| char::from(b)).collect::<String>()\n",
+        ["a_utf8_title_is_the_title_it_says"],
+    ),
+    (
+        "an OSC grows without a limit",
+        "                if self.osc_bytes.len() < OSC_LIMIT {",
+        "                if true {",
+        ["an_osc_past_the_limit_is_dropped"],
+    ),
+    (
+        "an OSC past the limit is acted on",
+        "        if std::mem::take(&mut self.osc_overflow) {\n            return;\n        }\n",
+        "",
+        ["an_osc_past_the_limit_is_dropped"],
+    ),
+    (
+        "a DCS's ST dispatches the last OSC",
+        "                self.parser_state = ParserState::DcsEscape;",
+        "                self.parser_state = ParserState::OscEscape;",
+        ["a_dcs_does_not_repeat_the_last_osc"],
+    ),
+    (
+        "an overlong form is the character it spells",
+        "    let ch = if codepoint < partial.least {",
+        "    let ch = if false {",
+        ["an_overlong_form_is_a_replacement_character"],
+    ),
+    (
+        "SO and SI draw replacement characters",
+        "            0x01..=0x06 | 0x0E..=0x1A | 0x1C..=0x1F => {}\n",
+        "",
+        ["the_other_c0_controls_draw_nothing"],
+    ),
+    (
+        "a broken sequence swallows the byte that broke it",
+        "                self.put_char('\\u{FFFD}');\n                self.process_byte(byte);",
+        "                self.put_char('\\u{FFFD}');",
+        ["the_width_query_answers_what_printing_takes"],
+    ),
+    (
+        "a sequence cut short at the end of an OSC string is dropped",
+        "    if partial.is_some() {\n        out.push('\\u{FFFD}');\n    }\n",
+        "",
+        ["the_width_query_answers_what_printing_takes"],
+    ),
+    (
+        "the foreground is drawn in the background's colour",
+        "            foreground: palette.terminal.foreground,",
+        "            foreground: palette.terminal.background,",
+        ["the_chrome_and_the_sixteen_follow_the_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

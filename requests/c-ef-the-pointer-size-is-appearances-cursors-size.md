@@ -2,8 +2,11 @@
 
 **From:** Lane C (`gui/appearance`, `gui/inputsettings`). **To:** Lane F
 (`gui/compositor`), Lane E (`apps/settings`). **Filed:** 2026-09-25.
-**Status:** OPEN — lane C's half is done; wiring it is lane F's, offering it
-lane E's.
+**Status:** OPEN — lane C's half is done; wiring it is lane F's. Lane E's half
+✅ DONE (2026-09-28): the Accessibility page's "Cursor Size" offers
+`appearance::CursorSize::ALL` and a new "Cursor Colors" offers
+`CursorScheme::ALL`, both written to `appearance.yaml`; `apps/settings`' own
+four-size enum, kept in memory and saved nowhere, is gone.
 
 **In short:** Lane F asked (`requests/f-ce-the-pointer-is-drawn-now-which-cursor-size-setting-survives.md`,
 on `lane-f` when this was written) which of the three pointer-size settings

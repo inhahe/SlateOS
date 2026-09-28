@@ -45,6 +45,8 @@ settingsfile = { path = "../../gui/settingsfile" }
 # `yamldoc::Document` is named in `defaultapps`'s signature. `settingsfile`
 # hands one back but keeps the type private, so the name comes from here.
 yamldoc = { path = "../../yamldoc" }
+# The clock's zone, the taskbar clock and the world clocks: datetime.yaml.
+datetimesettings = { path = "../../gui/datetimesettings" }
 
 # The real compositor, for the one test module that puts the shipped code on
 # *both* ends of the display protocol. A test against a stand-in compositor and
@@ -53,6 +55,8 @@ yamldoc = { path = "../../yamldoc" }
 # Settings binary does not link a display server.
 [dev-dependencies]
 compositor = { path = "../../gui/compositor" }
+# Theme folders for the theme picker's tests, so none of the machine's is read.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 # `settingsfile::testing` -- reached here as `appearance::config::testing` -- for the tests that
 # run against a scratch configuration directory instead of the developer's

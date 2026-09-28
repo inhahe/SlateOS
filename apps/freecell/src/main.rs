@@ -27,11 +27,13 @@
 //! reports each frame, records a hit box for everything it draws, and answers
 //! keys and clicks through one body the tests drive too.
 
+use gamechrome::{Chrome, cards};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -39,35 +41,36 @@ use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-
-// ── Card display colors ─────────────────────────────────────────────
+// ── Colours ─────────────────────────────────────────────────────────
 //
-// Each of these names a *role* -- what the colour is for -- and takes its value
-// from the palette above rather than repeating the hex. Six of the seven were
-// second copies of a palette entry written out again by hand, which is a colour
-// that can drift: retheme the palette and the cards keep the old scheme, with
-// nothing to say they had ever agreed.
-const CARD_BG: Color = TEXT_COLOR;
-const CARD_RED: Color = RED;
-const CARD_BLACK: Color = BASE;
-const SELECTED_HIGHLIGHT: Color = BLUE;
-const CURSOR_HIGHLIGHT: Color = YELLOW;
-const EMPTY_PILE: Color = SURFACE0;
+// The cards are white with red and black suits in every theme -- that is what
+// a card is (`gamechrome::cards`) -- and the table, the rings and everything
+// round them follow the user's palette (the operator's answer to C-Q16, §1422,
+// and lane C's call for the card games). It was all a copy of Catppuccin
+// Mocha: dark on a light desktop, with the red suits a pale pink on a
+// lavender face, 1.6:1.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    table: cards::Table,
+    /// The foundations' progress while it is short of the full deck.
+    progress: Color,
+    /// The win sheet's invitation to play again.
+    again: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            table: cards::Table::of(p),
+            progress: p.ink(p.teal),
+            again: p.ink(p.mauve),
+        }
+    }
+}
 
 // ── The shape of a card ─────────────────────────────────────────────
 //
@@ -609,7 +612,7 @@ impl Suit {
 
     /// Display color for this suit.
     fn color(self) -> Color {
-        if self.is_red() { CARD_RED } else { CARD_BLACK }
+        cards::suit_ink(self.is_red())
     }
 
     /// Index 0..3 for foundation ordering.
@@ -823,6 +826,10 @@ struct GameState {
     won: bool,
     /// RNG for new games.
     rng: SeededRng,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl GameState {
@@ -847,6 +854,7 @@ impl GameState {
             move_count: 0,
             won: false,
             rng: SeededRng::new(seed),
+            palette: Palette::for_mode(false),
         };
         state.deal();
         state
@@ -1568,21 +1576,22 @@ impl GameState {
         // wide for a narrow window spilled past the edge, and a zero-sized
         // window still recorded a clickable `Press N` at its centre -- a
         // control in a window with no pixels to show it.
+        let c = Colours::of(&self.palette);
         f.clip(l.window);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
-        self.draw_header(&mut f, &l);
+        fill(&mut f, l.window, c.table.felt, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l, &c);
 
         // The table's own box goes down before anything on it, so a card drawn
         // over it answers a hit test first.
         f.hit(Target::Board, l.body);
         f.clip(l.body);
-        self.draw_top_row(&mut f, &l, &t);
-        self.draw_tableau(&mut f, &t);
+        self.draw_top_row(&mut f, &l, &t, &c);
+        self.draw_tableau(&mut f, &t, &c);
         f.unclip();
 
-        self.draw_footer(&mut f, &l);
+        self.draw_footer(&mut f, &l, &c);
         if self.won {
-            self.draw_win_sheet(&mut f, &l);
+            self.draw_win_sheet(&mut f, &l, &c);
         }
         f.unclip();
         f
@@ -1590,8 +1599,8 @@ impl GameState {
 
     /// The title and the two readings along the top, each placed by measuring
     /// it rather than by a hardcoded `x` of 200, 340 and 520.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::all(l.pad * 0.5));
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, CornerRadii::all(l.pad * 0.5));
         f.hit(Target::Header, l.header);
         if l.header.is_empty() {
             return;
@@ -1604,11 +1613,27 @@ impl GameState {
         let regular = FontWeightHint::Regular;
         let y = l.header.y + (l.header.h - text::line_height(l.head, bold)) / 2.0;
 
-        let r = label(f, l.header.x + inner, y, "FreeCell", LAVENDER, l.head, bold);
+        let r = label(
+            f,
+            l.header.x + inner,
+            y,
+            "FreeCell",
+            c.chrome.title,
+            l.head,
+            bold,
+        );
         f.hit(Target::Title, r);
 
         let moves = format!("Moves: {}", self.move_count);
-        let r = centred(f, l.header.centre().0, y, &moves, SUBTEXT0, l.head, regular);
+        let r = centred(
+            f,
+            l.header.centre().0,
+            y,
+            &moves,
+            c.chrome.dim,
+            l.head,
+            regular,
+        );
         f.hit(Target::Moves, r);
 
         // Right-aligned by measuring the string, so it stays against the right
@@ -1621,9 +1646,9 @@ impl GameState {
             y,
             &done,
             if self.foundation_total() == 52 {
-                GREEN
+                c.chrome.good
             } else {
-                TEAL
+                c.progress
             },
             l.head,
             regular,
@@ -1634,7 +1659,7 @@ impl GameState {
 
     /// The four free cells and the four foundations, with the caption over each
     /// half and a count under each pile.
-    fn draw_top_row(&self, f: &mut Frame<Target>, l: &Layout, t: &Table) {
+    fn draw_top_row(&self, f: &mut Frame<Target>, l: &Layout, t: &Table, c: &Colours) {
         let regular = FontWeightHint::Regular;
         // The caption sits in the strip above the row, its bottom edge on the
         // row's top edge, so it cannot overlap the cards however tall the font.
@@ -1644,7 +1669,7 @@ impl GameState {
             t.slot_x(0),
             cap_y,
             "Free Cells",
-            SUBTEXT0,
+            c.chrome.dim,
             l.small,
             regular,
         );
@@ -1654,7 +1679,7 @@ impl GameState {
             t.slot_x(FREE_CELL_COUNT),
             cap_y,
             "Foundations",
-            SUBTEXT0,
+            c.chrome.dim,
             l.small,
             regular,
         );
@@ -1666,8 +1691,8 @@ impl GameState {
             let focused = self.focus == FocusArea::FreeCell(idx);
             let selected = self.selection == Some(Selection::FreeCell(idx));
             match self.free_cell(idx) {
-                Some(card) => self.draw_card(f, card, rect, t, focused, selected),
-                None => draw_empty(f, rect, t, focused),
+                Some(card) => self.draw_card(f, card, rect, t, focused, selected, c),
+                None => draw_empty(f, rect, t, focused, c),
             }
         }
 
@@ -1676,9 +1701,9 @@ impl GameState {
             f.hit(Target::Foundation(byte(idx)), rect);
             let focused = self.focus == FocusArea::Foundation(idx);
             match self.foundation_top(idx) {
-                Some(card) => self.draw_card(f, card, rect, t, focused, false),
+                Some(card) => self.draw_card(f, card, rect, t, focused, false, c),
                 None => {
-                    draw_empty(f, rect, t, focused);
+                    draw_empty(f, rect, t, focused, c);
                     // The suit a pile is waiting for, ghosted on the empty slot.
                     if let Some(suit) = Suit::ALL.get(idx) {
                         let (cx, cy) = rect.centre();
@@ -1687,7 +1712,7 @@ impl GameState {
                             cx,
                             cy - text::line_height(t.card_w * 0.29, regular) / 2.0,
                             suit.symbol(),
-                            OVERLAY0,
+                            c.chrome.dim,
                             t.card_w * 0.29,
                             regular,
                         );
@@ -1700,7 +1725,7 @@ impl GameState {
                 rect.centre().0,
                 rect.bottom() + t.card_h * PILE_COUNT_SHARE * 0.1,
                 &count,
-                SUBTEXT0,
+                c.chrome.dim,
                 l.small,
                 regular,
             );
@@ -1716,13 +1741,13 @@ impl GameState {
             y1: rule_y,
             x2: t.slot_x(TABLEAU_COLS - 1) + t.card_w,
             y2: rule_y,
-            color: SURFACE1,
+            color: c.chrome.lit,
             width: 1.0,
         });
     }
 
     /// The eight columns.
-    fn draw_tableau(&self, f: &mut Frame<Target>, t: &Table) {
+    fn draw_tableau(&self, f: &mut Frame<Target>, t: &Table, c: &Colours) {
         for col in 0..TABLEAU_COLS {
             // The column's whole strip goes down first, so a click in the empty
             // space under its cards still reaches the column -- which is the
@@ -1734,14 +1759,14 @@ impl GameState {
                 continue;
             };
             if pile.is_empty() {
-                draw_empty(f, t.card_at(col, 0), t, focused);
+                draw_empty(f, t.card_at(col, 0), t, focused, c);
                 continue;
             }
             let last = pile.len().saturating_sub(1);
             for (depth, &card) in pile.iter().enumerate() {
                 let top = depth == last;
                 let rect = t.card_at(col, depth);
-                self.draw_card(f, card, rect, t, top && focused, top && selected);
+                self.draw_card(f, card, rect, t, top && focused, top && selected, c);
                 f.hit(Target::Card(byte(col), byte(depth)), rect);
             }
         }
@@ -1761,6 +1786,7 @@ impl GameState {
         t: &Table,
         focused: bool,
         selected: bool,
+        c: &Colours,
     ) {
         let corner = t.corner();
         if selected {
@@ -1768,7 +1794,7 @@ impl GameState {
             stroke(
                 f,
                 Rect::new(r.x - g, r.y - g, r.w + g * 2.0, r.h + g * 2.0),
-                SELECTED_HIGHLIGHT,
+                c.table.picked,
                 (t.card_w * 0.036).max(1.0),
                 CornerRadii::all(corner + g),
             );
@@ -1777,15 +1803,18 @@ impl GameState {
             stroke(
                 f,
                 Rect::new(r.x - g, r.y - g, r.w + g * 2.0, r.h + g * 2.0),
-                CURSOR_HIGHLIGHT,
+                c.table.focus,
                 (t.card_w * 0.029).max(1.0),
                 CornerRadii::all(corner + g),
             );
         }
-        fill(f, r, CARD_BG, CornerRadii::all(corner));
+        fill(f, r, cards::FACE, CornerRadii::all(corner));
         if r.is_empty() {
             return;
         }
+        // Its edge: white on a light theme's table is a card seen by nothing
+        // but its shadow, so there it is ringed.
+        stroke(f, r, c.table.face_edge(), 1.0, CornerRadii::all(corner));
 
         let color = card.suit.color();
         let bold = FontWeightHint::Bold;
@@ -1848,8 +1877,8 @@ impl GameState {
     /// Buttons, not a caption. What was here was a help line naming six
     /// controls in a program with no pointer handling at all, so every one of
     /// the six was a promise only the keyboard could keep.
-    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, CornerRadii::all(l.pad * 0.5));
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.footer, c.chrome.band, CornerRadii::all(l.pad * 0.5));
         f.hit(Target::Footer, l.footer);
         if l.footer.is_empty() {
             return;
@@ -1860,17 +1889,17 @@ impl GameState {
         let text_y = l.footer.y + (l.footer.h - text::line_height(l.font, regular)) / 2.0;
         let mut x = l.footer.x + inner;
         for (i, control) in Control::ALL.into_iter().enumerate() {
-            let w = text::measure(control.label(), l.font, regular) + inner * 2.0;
+            let w = text::measure(control.label(), l.font, FontWeightHint::Bold) + inner * 2.0;
             let button = Rect::new(l.footer.x.max(x), l.footer.y, w, l.footer.h);
-            fill(f, button, SURFACE0, CornerRadii::all(l.pad * 0.4));
-            label(
+            gamechrome::button(
                 f,
-                button.x + inner,
-                text_y,
+                &self.palette,
+                (button.x, button.y, button.w, button.h),
                 control.label(),
-                TEXT_COLOR,
                 l.font,
-                regular,
+                guitk::button::Kind::Plain,
+                guitk::button::State::default(),
+                c.chrome.band,
             );
             f.hit(Target::Control(byte(i)), button);
             x = button.right() + inner;
@@ -1891,7 +1920,7 @@ impl GameState {
             f.unclip();
             return;
         }
-        let drawn = label(f, room_x, text_y, &room, SUBTEXT0, l.font, regular);
+        let drawn = label(f, room_x, text_y, &room, c.chrome.dim, l.font, regular);
         f.hit(Target::Room, drawn);
 
         // What the keyboard can do that the buttons do not. A reminder, not a
@@ -1901,7 +1930,7 @@ impl GameState {
         let hint_w = text::measure(hint, l.font, regular);
         let hint_x = room_x - inner * 2.0 - hint_w;
         if hint_x >= x {
-            label(f, hint_x, text_y, hint, OVERLAY0, l.font, regular);
+            label(f, hint_x, text_y, hint, c.chrome.dim, l.font, regular);
         }
         f.unclip();
     }
@@ -1911,8 +1940,8 @@ impl GameState {
     /// Centred on the window it is in. Its three lines used to be placed at a
     /// hardcoded x of 280, 300 and 270 and a y of 300, 350 and 390 -- three
     /// separate guesses at the middle of one fixed 900x800 board.
-    fn draw_win_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, Color::rgba(17, 17, 27, 200), CornerRadii::ZERO);
+    fn draw_win_sheet(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.window, c.chrome.scrim, CornerRadii::ZERO);
         f.hit(Target::Overlay, l.window);
         if l.window.is_empty() {
             return;
@@ -1929,16 +1958,16 @@ impl GameState {
         let block = title_h + line_h * 2.0 + gap * 2.0;
         let mut y = cy - block / 2.0;
 
-        let r = centred(f, cx, y, "You Win!", GREEN, l.title, bold);
+        let r = centred(f, cx, y, "You Win!", c.chrome.good, l.title, bold);
         f.hit(Target::OverlayTitle, r);
         y += title_h + gap;
 
         let moves = format!("Moves: {}", self.move_count);
-        let r = centred(f, cx, y, &moves, SUBTEXT0, l.font, regular);
+        let r = centred(f, cx, y, &moves, c.chrome.dim, l.font, regular);
         f.hit(Target::OverlayMoves, r);
         y += line_h + gap;
 
-        let r = centred(f, cx, y, "Press N for a new game", MAUVE, l.font, regular);
+        let r = centred(f, cx, y, "Press N for a new game", c.again, l.font, regular);
         f.hit(Target::NewGame, r);
     }
 }
@@ -1949,13 +1978,17 @@ impl GameState {
 /// A free function rather than a method: it reads no game state, and a slot
 /// that looked at the board to decide how to draw itself would be a second
 /// place for the board to be misread.
-fn draw_empty(f: &mut Frame<Target>, r: Rect, t: &Table, focused: bool) {
+fn draw_empty(f: &mut Frame<Target>, r: Rect, t: &Table, focused: bool, c: &Colours) {
     let corner = t.corner();
-    fill(f, r, EMPTY_PILE, CornerRadii::all(corner));
+    fill(f, r, c.table.empty, CornerRadii::all(corner));
     stroke(
         f,
         r,
-        if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 },
+        if focused {
+            c.table.focus
+        } else {
+            c.table.empty_edge
+        },
         if focused {
             (t.card_w * 0.029).max(1.0)
         } else {
@@ -2096,6 +2129,10 @@ fn handle_event(app: &mut FreeCell, event: &Event) -> EventResult {
 }
 
 impl App for FreeCell {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.state.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "FreeCell".to_string()
     }
@@ -2186,6 +2223,85 @@ mod tests {
 
     use super::*;
 
+    /// **The window is drawn in the user's colours**, light or dark -- a deal
+    /// with a card picked up and the keyboard on another, and a won game --
+    /// with only the cards' own white, red and black, and the rim a card is
+    /// ringed in, not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived = vec![
+            cards::FACE,
+            cards::RED,
+            cards::BLACK,
+            gamechrome::RIMS.0,
+            gamechrome::RIMS.1,
+        ];
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                Chrome::of(&p).band,
+            ));
+            let mut app = FreeCell::with_seed(42);
+            app.theme_changed(&p);
+            app.state.selection = Some(Selection::Tableau(0));
+            app.state.focus = FocusArea::Tableau(1);
+            let dealt = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            app.state = won_board();
+            app.state.won = true;
+            app.theme_changed(&p);
+            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            for (what, f) in [("dealt", dealt), ("won", won)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("freecell, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **The cards are white with red and black suits in either theme**, and
+    /// every card on a light theme's table is ringed so it can be seen.
+    #[test]
+    fn the_cards_are_white_and_seen_on_either_themes_table() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let t = cards::Table::of(&p);
+            let mut app = FreeCell::with_seed(42);
+            app.theme_changed(&p);
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let faces = f
+                .commands()
+                .iter()
+                .filter(|cmd| {
+                    matches!(cmd, RenderCommand::FillRect { color, .. } if *color == cards::FACE)
+                })
+                .count();
+            assert_eq!(faces, 52, "a deal shows all 52 cards (light: {light})");
+            let edge = t.face_edge();
+            let edges = f
+                .commands()
+                .iter()
+                .filter(
+                    |cmd| matches!(cmd, RenderCommand::StrokeRect { color, .. } if *color == edge),
+                )
+                .count();
+            assert!(
+                edges >= 52,
+                "{edges} of 52 cards are outlined (light: {light})"
+            );
+            let seen = guitk::theme::contrast_ratio(cards::FACE, t.felt)
+                .max(guitk::theme::contrast_ratio(edge, t.felt));
+            assert!(
+                seen >= 3.0,
+                "a card is seen at {seen:.2}:1 (light: {light})"
+            );
+        }
+    }
+
     /// The window sizes every layout claim is checked at.
     ///
     /// The natural size, the extremes a compositor can hand a program mid-drag,
@@ -2247,6 +2363,7 @@ mod tests {
             move_count: 0,
             won: false,
             rng: SeededRng::new(99),
+            palette: Palette::for_mode(false),
         }
     }
 
@@ -2293,10 +2410,10 @@ mod tests {
 
     #[test]
     fn test_suit_color() {
-        assert_eq!(Suit::Hearts.color(), CARD_RED);
-        assert_eq!(Suit::Diamonds.color(), CARD_RED);
-        assert_eq!(Suit::Clubs.color(), CARD_BLACK);
-        assert_eq!(Suit::Spades.color(), CARD_BLACK);
+        assert_eq!(Suit::Hearts.color(), cards::RED);
+        assert_eq!(Suit::Diamonds.color(), cards::RED);
+        assert_eq!(Suit::Clubs.color(), cards::BLACK);
+        assert_eq!(Suit::Spades.color(), cards::BLACK);
     }
 
     #[test]
@@ -3718,11 +3835,11 @@ mod tests {
             })
             .collect();
         assert!(
-            strokes.contains(&SELECTED_HIGHLIGHT),
+            strokes.contains(&cards::Table::of(&Palette::for_mode(false)).picked),
             "the card in hand was not marked"
         );
         assert!(
-            strokes.contains(&CURSOR_HIGHLIGHT),
+            strokes.contains(&cards::Table::of(&Palette::for_mode(false)).focus),
             "the cursor was not marked"
         );
     }

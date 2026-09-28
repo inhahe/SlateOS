@@ -1,7 +1,10 @@
 # C → E — The automatic mode's hours, beside "System (Auto)" in Settings
 
 **From:** Lane C (`gui/appearance`). **To:** Lane E (`apps/settings`).
-**Filed:** 2026-09-25. **Status:** OPEN -- lane C's half is done.
+**Filed:** 2026-09-25. **Status:** ✅ DONE (lane E, 2026-09-28) -- "Light from" and
+"Dark from" dropdowns under the Theme Mode cards when "System (Auto)" is
+chosen, every half hour less the other end's time (equal hours are not
+offered); the accent swatches ask `AppearanceSettings::is_light()`.
 
 **In short:** "System (Auto)" now does something: light from 07:00 until 19:00
 and dark the rest of the day, in the clock's time zone (`design-decisions.md`

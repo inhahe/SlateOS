@@ -46,9 +46,6 @@ path = "src/lib.rs"
 name = "lib"
 path = "tests/lib.rs"
 
-[[bench]]
-name = "poly1305"
-path = "benches/poly1305.rs"
 
 [dependencies.universal-hash]
 path = "../universal-hash"

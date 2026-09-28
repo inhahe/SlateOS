@@ -7002,14 +7002,25 @@ impl App for SpreadsheetApp {
 }
 
 impl SpreadsheetApp {
-    /// Fill the empty book with something to look at.
+    /// The window the program opens: a new, blank book, as every
+    /// spreadsheet opens one.
     ///
-    /// In a method rather than in `main` because a test cannot call `main`, and
-    /// a window that opens on a blank grid when it should not is exactly the
-    /// sort of thing that goes unnoticed. This is also what exercises the
-    /// formula engine on the first frame: `D2:D4` are products and `D6` sums
-    /// them, so a recalculation that had stopped working would be visible in
-    /// the opening screen rather than only to whoever typed an `=` sign.
+    /// `main` filled it with [`seed_sample_content`](Self::seed_sample_content)
+    /// until 2026-09-28 -- Item, Price and three rows of products under a
+    /// sum -- so the first thing a user typed went into a sheet they had not
+    /// made, and saving it kept the sample rows in their file.
+    /// `known-issues.md` listed spreadsheet with the programs that invented
+    /// their user's data, and `find-reachable-fixtures.py` found this was the
+    /// one left.
+    pub fn opened(width: f32, height: f32) -> Self {
+        Self::new(width, height)
+    }
+
+    /// Fill the empty book with something to look at -- for the tests.
+    ///
+    /// Also what exercises the formula engine end to end: `D2:D4` are
+    /// products and `D6` sums them.
+    #[cfg(test)]
     pub fn seed_sample_content(&mut self) {
         for (addr, input) in [
             ((0, 0), "Item"),
@@ -7069,8 +7080,7 @@ impl SpreadsheetApp {
 }
 
 fn main() -> ExitCode {
-    let mut app = SpreadsheetApp::new(1280.0, 800.0);
-    app.seed_sample_content();
+    let mut app = SpreadsheetApp::opened(1280.0, 800.0);
     app::launch("spreadsheet", &mut app)
 }
 
@@ -7588,8 +7598,16 @@ mod tests {
     // The window
     // ------------------------------------------------------------------
 
-    /// A test cannot call `main`, so what `main` puts on screen has to live in
-    /// a method for anything to check that the window does not open blank.
+    #[test]
+    fn a_new_book_opens_blank() {
+        let app = SpreadsheetApp::opened(1280.0, 800.0);
+        assert!(
+            app.active_sheet().cells.is_empty(),
+            "the book the program opens holds cells nobody typed"
+        );
+    }
+
+    /// The fixture the formula tests stand on.
     #[test]
     fn the_seeded_sheet_has_values_and_a_working_formula() {
         let mut app = SpreadsheetApp::new(1280.0, 800.0);

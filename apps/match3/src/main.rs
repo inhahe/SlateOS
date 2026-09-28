@@ -19,32 +19,64 @@
 //! Randomness comes from the shared `randrange` crate, seeded from the
 //! system so that two players do not get the same game.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
+use guitk::palette::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A gem's colour is its kind -- a player matches by it -- so the seven keep
+// their colours in every theme; the board, the header, the marks on the board
+// and the panels follow the user's palette (the operator's answer to C-Q16,
+// §1422, and lane C's call for this game). It was all a copy of Catppuccin
+// Mocha, dark on a light desktop.
+
+// The seven gems.
+const RUBY: Color = Color::from_hex(0xF38BA8);
+const SAPPHIRE: Color = Color::from_hex(0x89B4FA);
+const EMERALD: Color = Color::from_hex(0xA6E3A1);
+const TOPAZ: Color = Color::from_hex(0xF9E2AF);
+const AMBER: Color = Color::from_hex(0xFAB387);
+const AMETHYST: Color = Color::from_hex(0xCBA6F7);
+const AQUA: Color = Color::from_hex(0x94E2D5);
+/// What is written on a gem -- its symbol, a special's marks: every gem is
+/// pale, so near-black on all of them.
+///
+/// A neutral near-black and not Mocha's base (`1E1E2E`): the palette test
+/// names this as the game's own colour and matches it on RGB, so Mocha's
+/// base here would let a leftover Mocha base through in a light window.
+const GEM_INK: Color = Color::from_hex(0x161616);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The glow under the keyboard's cell, the gem picked up, and a hint.
+    cursor: Color,
+    selected: Color,
+    hint: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            cursor: with_alpha(p.text, 80),
+            selected: with_alpha(p.accent, 120),
+            hint: p.green,
+        }
+    }
+}
 
 // ── Layout constants ────────────────────────────────────────────────
 const GRID_SIZE: usize = 8;
@@ -101,7 +133,7 @@ const GEM_SYMBOLS: [&str; 7] = [
 ];
 
 // ── Gem colors ──────────────────────────────────────────────────────
-const GEM_COLORS: [Color; 7] = [RED, BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL];
+const GEM_COLORS: [Color; 7] = [RUBY, SAPPHIRE, EMERALD, TOPAZ, AMBER, AMETHYST, AQUA];
 
 // ── Randomness ──────────────────────────────────────────────────────
 
@@ -166,13 +198,13 @@ impl GemType {
         // adding a variant to `GemType` now fails to compile instead of
         // panicking the first time that colour is drawn.
         match self {
-            Self::Ruby => RED,
-            Self::Sapphire => BLUE,
-            Self::Emerald => GREEN,
-            Self::Topaz => YELLOW,
-            Self::Amber => PEACH,
-            Self::Amethyst => MAUVE,
-            Self::Aqua => TEAL,
+            Self::Ruby => RUBY,
+            Self::Sapphire => SAPPHIRE,
+            Self::Emerald => EMERALD,
+            Self::Topaz => TOPAZ,
+            Self::Amber => AMBER,
+            Self::Amethyst => AMETHYST,
+            Self::Aqua => AQUA,
         }
     }
 
@@ -370,6 +402,10 @@ struct Match3 {
     pulse_counter: u32,
     /// Total elapsed time in ms.
     total_elapsed_ms: u64,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl Match3 {
@@ -401,6 +437,7 @@ impl Match3 {
             rng: SeededRng::new(seed),
             pulse_counter: 0,
             total_elapsed_ms: 0,
+            palette: Palette::for_mode(false),
         };
         app.fill_board_no_matches();
         app
@@ -949,10 +986,13 @@ impl Match3 {
     fn new_game(&mut self) {
         let mode = self.mode;
         let high_scores = self.high_scores.clone();
+        let palette = self.palette;
         let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.mode = mode;
         self.high_scores = high_scores;
+        // The window's colours, like the scores, outlive a game.
+        self.palette = palette;
         self.time_remaining_ms = TIMED_MODE_SECONDS * 1000;
         self.moves_remaining = MOVES_MODE_COUNT;
     }
@@ -1041,6 +1081,7 @@ impl Match3 {
     /// to the trait method and reported a missing-argument error rather than
     /// calling this one. A distinct name says which is meant everywhere.
     fn render_commands(&self) -> Vec<RenderCommand> {
+        let c = Colours::of(&self.palette);
         let mut cmds = Vec::new();
         let win_w = Self::window_width();
         let win_h = Self::window_height();
@@ -1051,26 +1092,26 @@ impl Match3 {
             y: 0.0,
             width: win_w,
             height: win_h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_header(&mut cmds);
-        self.render_grid(&mut cmds);
+        self.render_header(&mut cmds, &c);
+        self.render_grid(&mut cmds, &c);
         self.render_gems(&mut cmds);
-        self.render_cursor(&mut cmds);
-        self.render_selection(&mut cmds);
-        self.render_hint_highlight(&mut cmds);
-        self.render_footer(&mut cmds);
+        self.render_cursor(&mut cmds, &c);
+        self.render_selection(&mut cmds, &c);
+        self.render_hint_highlight(&mut cmds, &c);
+        self.render_footer(&mut cmds, &c);
 
         if self.state == GameState::GameOver {
-            self.render_game_over_overlay(&mut cmds);
+            self.render_game_over_overlay(&mut cmds, &c);
         }
 
         cmds
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_header(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         let header_w = Self::window_width() - PADDING * 2.0;
 
         // Header background.
@@ -1079,7 +1120,7 @@ impl Match3 {
             y: PADDING / 2.0,
             width: header_w,
             height: HEADER_HEIGHT - PADDING / 2.0,
-            color: SURFACE0,
+            color: c.chrome.raised,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1088,7 +1129,7 @@ impl Match3 {
             x: PADDING + 12.0,
             y: PADDING / 2.0 + 8.0,
             text: format!("Mode: {}", self.mode.label()),
-            color: LAVENDER,
+            color: c.chrome.title,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1100,7 +1141,7 @@ impl Match3 {
             x: PADDING + 12.0,
             y: PADDING / 2.0 + 30.0,
             text: format!("Score: {}", self.score),
-            color: TEXT_COLOR,
+            color: c.chrome.text,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1113,7 +1154,7 @@ impl Match3 {
             x: PADDING + header_w / 2.0 - 20.0,
             y: PADDING / 2.0 + 8.0,
             text: format!("Best: {high}"),
-            color: YELLOW,
+            color: c.chrome.even,
             font_size: HEADER_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1124,7 +1165,11 @@ impl Match3 {
         match self.mode {
             GameMode::Timed => {
                 let secs = self.time_remaining_ms / 1000;
-                let color = if secs <= 10 { RED } else { GREEN };
+                let color = if secs <= 10 {
+                    c.chrome.bad
+                } else {
+                    c.chrome.good
+                };
                 cmds.push(RenderCommand::Text {
                     x: PADDING + header_w - 120.0,
                     y: PADDING / 2.0 + 8.0,
@@ -1137,7 +1182,11 @@ impl Match3 {
                 });
             }
             GameMode::Moves => {
-                let color = if self.moves_remaining <= 5 { RED } else { BLUE };
+                let color = if self.moves_remaining <= 5 {
+                    c.chrome.bad
+                } else {
+                    c.chrome.key
+                };
                 cmds.push(RenderCommand::Text {
                     x: PADDING + header_w - 120.0,
                     y: PADDING / 2.0 + 8.0,
@@ -1154,7 +1203,7 @@ impl Match3 {
                     x: PADDING + header_w - 120.0,
                     y: PADDING / 2.0 + 8.0,
                     text: String::from("No limit"),
-                    color: SUBTEXT0,
+                    color: c.chrome.dim,
                     font_size: HEADER_FONT_SIZE - 2.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1164,7 +1213,7 @@ impl Match3 {
         }
     }
 
-    fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_grid(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         let ox = Self::grid_origin_x();
         let oy = Self::grid_origin_y();
 
@@ -1174,7 +1223,7 @@ impl Match3 {
             y: oy - 4.0,
             width: Self::grid_width() + 8.0,
             height: Self::grid_height() + 8.0,
-            color: SURFACE0,
+            color: c.chrome.raised,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1183,9 +1232,9 @@ impl Match3 {
             for col in 0..GRID_SIZE {
                 let (cx, cy) = Self::cell_origin(Pos::new(row, col));
                 let bg = if row.saturating_add(col) % 2 == 0 {
-                    SURFACE1
+                    c.chrome.lit
                 } else {
-                    SURFACE0
+                    c.chrome.raised
                 };
                 cmds.push(RenderCommand::FillRect {
                     x: cx,
@@ -1230,7 +1279,7 @@ impl Match3 {
             x: cx + CELL_SIZE / 2.0 - 6.0,
             y: cy + CELL_SIZE / 2.0 - 8.0,
             text: String::from(gem.gem_type.symbol()),
-            color: BASE,
+            color: GEM_INK,
             font_size: CELL_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1246,7 +1295,7 @@ impl Match3 {
                     y1: cy + CELL_SIZE / 2.0,
                     x2: cx + CELL_SIZE - inset - 2.0,
                     y2: cy + CELL_SIZE / 2.0,
-                    color: TEXT_COLOR,
+                    color: GEM_INK,
                     width: 2.0,
                 });
             }
@@ -1257,7 +1306,7 @@ impl Match3 {
                     y1: cy + inset + 2.0,
                     x2: cx + CELL_SIZE / 2.0,
                     y2: cy + CELL_SIZE - inset - 2.0,
-                    color: TEXT_COLOR,
+                    color: GEM_INK,
                     width: 2.0,
                 });
             }
@@ -1275,7 +1324,7 @@ impl Match3 {
                         y: cy + dy - r,
                         width: r * 2.0,
                         height: r * 2.0,
-                        color: YELLOW,
+                        color: GEM_INK,
                         corner_radii: CornerRadii::all(r),
                     });
                 }
@@ -1284,7 +1333,7 @@ impl Match3 {
         }
     }
 
-    fn render_cursor(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_cursor(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         if self.state == GameState::GameOver {
             return;
         }
@@ -1296,12 +1345,12 @@ impl Match3 {
             y: cy - 2.0,
             width: CELL_SIZE + 4.0,
             height: CELL_SIZE + 4.0,
-            color: Color::rgba(205, 214, 244, 80),
+            color: c.cursor,
             corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 2.0),
         });
     }
 
-    fn render_selection(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_selection(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         if let Some(sel) = self.selected {
             let (cx, cy) = Self::cell_origin(sel);
 
@@ -1311,13 +1360,13 @@ impl Match3 {
                 y: cy - 3.0,
                 width: CELL_SIZE + 6.0,
                 height: CELL_SIZE + 6.0,
-                color: Color::rgba(137, 180, 250, 120),
+                color: c.selected,
                 corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 3.0),
             });
         }
     }
 
-    fn render_hint_highlight(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_hint_highlight(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         if !self.hint_visible {
             return;
         }
@@ -1334,21 +1383,21 @@ impl Match3 {
                     y: cy - 3.0,
                     width: CELL_SIZE + 6.0,
                     height: CELL_SIZE + 6.0,
-                    color: Color::rgba(166, 227, 161, alpha),
+                    color: with_alpha(c.hint, alpha),
                     corner_radii: CornerRadii::all(CELL_CORNER_RADIUS + 3.0),
                 });
             }
         }
     }
 
-    fn render_footer(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_footer(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         let y = Self::window_height() - FOOTER_HEIGHT + 8.0;
 
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y,
             text: String::from("Arrows/Click:Move  Enter/Click:Swap  H:Hint  N:New  1/2/3:Mode"),
-            color: OVERLAY0,
+            color: c.chrome.dim,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1356,7 +1405,7 @@ impl Match3 {
         });
     }
 
-    fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_game_over_overlay(&self, cmds: &mut Vec<RenderCommand>, c: &Colours) {
         let ox = Self::grid_origin_x();
         let oy = Self::grid_origin_y();
         let gw = Self::grid_width();
@@ -1368,7 +1417,7 @@ impl Match3 {
             y: oy - 4.0,
             width: gw + 8.0,
             height: gh + 8.0,
-            color: Color::rgba(30, 30, 46, 200),
+            color: c.chrome.veil,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -1380,7 +1429,7 @@ impl Match3 {
             x: center_x - 80.0,
             y: center_y - 50.0,
             text: String::from("GAME OVER"),
-            color: RED,
+            color: c.chrome.bad,
             font_size: TITLE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1391,7 +1440,7 @@ impl Match3 {
             x: center_x - 60.0,
             y: center_y - 10.0,
             text: format!("Final Score: {}", self.score),
-            color: TEXT_COLOR,
+            color: c.chrome.text,
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1403,7 +1452,7 @@ impl Match3 {
             x: center_x - 50.0,
             y: center_y + 15.0,
             text: format!("Best: {high}"),
-            color: YELLOW,
+            color: c.chrome.even,
             font_size: OVERLAY_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1414,7 +1463,7 @@ impl Match3 {
             x: center_x - 80.0,
             y: center_y + 50.0,
             text: String::from("Press N for new game"),
-            color: SUBTEXT0,
+            color: c.chrome.dim,
             font_size: OVERLAY_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1689,6 +1738,10 @@ fn refuse_arguments(first: Option<&std::ffi::OsStr>) {
 }
 
 impl App for Match3 {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Match 3".to_string()
     }
@@ -1813,6 +1866,56 @@ mod tests {
     }
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// board with a gem picked up and a hint showing, and a game over --
+    /// with only the gems' own colours and their ink not the palette's (the
+    /// operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived: Vec<Color> = GEM_COLORS.to_vec();
+        derived.push(GEM_INK);
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut game = Match3::with_seed(7);
+            game.theme_changed(&p);
+            game.selected = Some(Pos::new(2, 2));
+            game.hint = Some((Pos::new(3, 3), Pos::new(3, 4)));
+            game.hint_visible = true;
+            let playing = game.render_commands();
+            game.state = GameState::GameOver;
+            let over = game.render_commands();
+            for (what, cmds) in [("playing", playing), ("over", over)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &derived,
+                    &format!("match3, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the scores.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut game = Match3::with_seed(7);
+        game.theme_changed(&light);
+        game.new_game();
+        assert_eq!(game.palette, light);
+    }
+
+    /// **Every gem's marks read on it**: the symbol and a special's lines and
+    /// dots, near-black on every gem. The lines were the text colour --
+    /// near-white -- and the colour bomb's dots the topaz's own yellow.
+    #[test]
+    fn every_gems_marks_read_on_it() {
+        for gem in GEM_COLORS {
+            let ratio = guitk::theme::contrast_ratio(GEM_INK, gem);
+            assert!(ratio >= 4.5, "the marks are {ratio:.2}:1 on {gem:?}");
+        }
+    }
 
     // ── Helper functions ────────────────────────────────────────────
 

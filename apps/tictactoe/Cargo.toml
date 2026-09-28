@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The chrome every game draws in the user's theme (C-Q16, §1422).
+gamechrome = { path = "../gamechrome" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it `main` built a `TicTacToeApp`, dropped it and exited:
 # no grid ever reached a screen and no key or click ever arrived.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `palette_check`: the window is drawn from the palette.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

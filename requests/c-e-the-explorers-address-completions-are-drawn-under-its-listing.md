@@ -1,8 +1,12 @@
 # C -> E -- the explorer's address-bar completions are drawn under its listing
 
 **From:** Lane C (`gui/toolkit/src/pathbar.rs`). **To:** Lane E (`apps/explorer`).
-**Filed:** 2026-09-27. **Status:** OPEN -- nothing breaks while it waits; the
-completions are simply never seen.
+**Filed:** 2026-09-27. **Status:** DONE (lane E, 2026-09-28) -- the address bar
+is drawn after the sidebar, the listing and the Transfers view, so its
+completions lie over them; and a press on them reaches the bar
+(`on_address_bar`, which reads `completions_rect`) before the divider and the
+rows. A test types "/ap" over a folder holding apples, apricots and bananas,
+checks the list is drawn last and that a press on "apricots" takes it.
 
 **In short:** when you type a path into the explorer's address bar, the list
 of folder names it offers hangs *below* the bar -- over the sidebar and the

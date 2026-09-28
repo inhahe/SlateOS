@@ -40,37 +40,61 @@
 //! [`TetrisApp::clear_lines`]: a multi-line clear left one of the cleared rows
 //! behind as a solid line the player could never remove.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE2: Color = Color::from_hex(0x585B70);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A player knows a piece by its colour before its shape has finished falling
+// into view, so the seven keep theirs in every theme; the well, its grid and
+// everything round them follow the user's palette (the operator's answer to
+// C-Q16, §1422, and lane C's call for this game). It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The seven pieces' colours, named for the colour (the pieces are named
+/// for their shapes in [`PieceKind::color`]).
+const SKY: Color = Color::from_hex(0x89DCEB);
+const YELLOW: Color = Color::from_hex(0xF9E2AF);
+const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
+const BLUE: Color = Color::from_hex(0x89B4FA);
 const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const SKY: Color = Color::from_hex(0x89DCEB);
+/// The shine along the top of every block: part of how a block looks.
+const SHINE: Color = Color::rgba(255, 255, 255, 30);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The lines of the well's grid: a reading aid, faint.
+    grid: Color,
+    /// The level, in the header and the stats.
+    level: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            grid: with_alpha(p.surface1, 70),
+            level: p.ink(p.teal),
+        }
+    }
+}
 
 // ── Layout constants ────────────────────────────────────────────────
 const FIELD_COLS: usize = 10;
@@ -785,6 +809,10 @@ struct TetrisApp {
     /// the window: everything else is derived from these two on each frame.
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl TetrisApp {
@@ -832,6 +860,7 @@ impl TetrisApp {
             // sends first. This is a starting guess and never a measurement.
             width: 640.0,
             height: 720.0,
+            palette: Palette::for_mode(false),
         };
 
         app.spawn_piece();
@@ -1301,7 +1330,13 @@ impl TetrisApp {
                     // A new seed, not the same one: replaying the identical
                     // piece order after a loss is a different game from the
                     // one the player thinks they are starting.
+                    // A new game, not a new window: its size and colours
+                    // carry over. Rebuilt with the rest, a light desktop's
+                    // game went dark at the first restart.
+                    let (size, palette) = ((self.width, self.height), self.palette);
                     *self = Self::with_seed(self.seed.wrapping_add(1));
+                    (self.width, self.height) = size;
+                    self.palette = palette;
                     true
                 } else {
                     false
@@ -1413,25 +1448,26 @@ impl TetrisApp {
     #[must_use]
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(l.window.w, l.window.h);
 
-        fill(&mut f, l.window, BASE, 8.0);
-        self.draw_header(&mut f, &l);
-        self.draw_field(&mut f, &l);
+        fill(&mut f, l.window, c.chrome.page, 8.0);
+        self.draw_header(&mut f, &l, &c);
+        self.draw_field(&mut f, &l, &c);
         // Both sidebars stand or fall together, and `hold` is empty exactly
         // when the window was too narrow to give them room.
         if !l.hold.is_empty() {
-            self.draw_left(&mut f, &l);
-            self.draw_right(&mut f, &l);
+            self.draw_left(&mut f, &l, &c);
+            self.draw_right(&mut f, &l, &c);
         }
-        self.draw_overlay(&mut f, &l);
+        self.draw_overlay(&mut f, &l, &c);
 
         f
     }
 
     /// Title, score, level and lines, spread across the header bar.
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.header, MANTLE, 6.0);
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, 6.0);
         let inset = (l.header.h * 0.25).max(2.0);
         // Four even slots rather than the old fixed 150/350-pixel offsets,
         // which overlapped as soon as the window was narrower than the one
@@ -1446,15 +1482,15 @@ impl TetrisApp {
             l.header.x + inset,
             l.header.y + (l.header.h - title) / 2.0,
             "TETRIS",
-            LAVENDER,
+            c.chrome.title,
             title,
             FontWeightHint::Bold,
             room,
         );
         let fields = [
-            (format!("Score: {}", self.score), TEXT_COLOR),
-            (format!("Level: {}", self.level), TEAL),
-            (format!("Lines: {}", self.lines_cleared), GREEN),
+            (format!("Score: {}", self.score), c.chrome.text),
+            (format!("Level: {}", self.level), c.level),
+            (format!("Lines: {}", self.lines_cleared), c.chrome.good),
         ];
         for (i, (text, color)) in fields.into_iter().enumerate() {
             label(
@@ -1471,7 +1507,7 @@ impl TetrisApp {
     }
 
     /// The playfield: border, grid, placed blocks, ghost, and the live piece.
-    fn draw_field(&self, f: &mut Frame, l: &Layout) {
+    fn draw_field(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         stroke(
             f,
             Rect::new(
@@ -1480,18 +1516,18 @@ impl TetrisApp {
                 l.field.w + 4.0,
                 l.field.h + 4.0,
             ),
-            SURFACE2,
+            c.chrome.high,
             2.0,
             2.0,
         );
-        fill(f, l.field, CRUST, 0.0);
+        fill(f, l.field, c.chrome.well, 0.0);
 
         // The grid is a reading aid, not decoration: below a couple of pixels
         // per cell the lines are most of the ink and the board is harder to
         // read with them than without.
         if l.cell >= 4.0 {
             let step = l.cell + l.gap;
-            let grid = Color::rgba(49, 50, 68, 60);
+            let grid = c.grid;
             for col in 1..FIELD_COLS {
                 let x = l.field.x + col as f32 * step - l.gap / 2.0;
                 f.push(RenderCommand::Line {
@@ -1530,16 +1566,16 @@ impl TetrisApp {
             && let (Some(piece), Some(ghost_row)) = (&self.current_piece, self.ghost_row())
             && ghost_row > piece.row
         {
-            let c = piece.kind.color();
-            let faint = Color::rgba(c.r, c.g, c.b, 50);
+            let own = piece.kind.color();
+            let faint = Color::rgba(own.r, own.g, own.b, 50);
             let ghost = ActivePiece {
                 kind: piece.kind,
                 rotation: piece.rotation,
                 row: ghost_row,
                 col: piece.col,
             };
-            for (r, c) in ghost.absolute_cells() {
-                if let Some(rect) = visible_cell(l, r, c) {
+            for (row, col) in ghost.absolute_cells() {
+                if let Some(rect) = visible_cell(l, row, col) {
                     stroke(f, rect, faint, 1.5, 3.0);
                 }
             }
@@ -1549,8 +1585,8 @@ impl TetrisApp {
             && let Some(piece) = &self.current_piece
         {
             let color = piece.kind.color();
-            for (r, c) in piece.absolute_cells() {
-                if let Some(rect) = visible_cell(l, r, c) {
+            for (row, col) in piece.absolute_cells() {
+                if let Some(rect) = visible_cell(l, row, col) {
                     block(f, rect, color);
                 }
             }
@@ -1558,8 +1594,8 @@ impl TetrisApp {
     }
 
     /// The left column: the HOLD box, which is also a button, and STATS.
-    fn draw_left(&self, f: &mut Frame, l: &Layout) {
-        fill(f, l.hold, MANTLE, 6.0);
+    fn draw_left(&self, f: &mut Frame, l: &Layout, c: &Colours) {
+        fill(f, l.hold, c.chrome.band, 6.0);
         // Clicking the box does what C does. The panel was already showing the
         // held piece; it costs nothing for it to also be the way to swap.
         f.hit(Target::HoldBox, l.hold);
@@ -1569,7 +1605,7 @@ impl TetrisApp {
             l.hold.x + 4.0,
             l.hold.y + 2.0,
             "HOLD",
-            SUBTEXT0,
+            c.chrome.dim,
             l.font,
             FontWeightHint::Bold,
             (l.hold.w - 8.0).max(0.0),
@@ -1594,13 +1630,13 @@ impl TetrisApp {
         if l.stats.is_empty() {
             return;
         }
-        fill(f, l.stats, MANTLE, 6.0);
+        fill(f, l.stats, c.chrome.band, 6.0);
         label(
             f,
             l.stats.x + 4.0,
             l.stats.y + 2.0,
             "STATS",
-            SUBTEXT0,
+            c.chrome.dim,
             l.font,
             FontWeightHint::Bold,
             (l.stats.w - 8.0).max(0.0),
@@ -1609,11 +1645,11 @@ impl TetrisApp {
         let value = (row_h * 0.5).clamp(8.0, VALUE_FONT_SIZE);
         let room = (l.stats.w - 8.0).max(0.0);
         let rows: [(&str, String, Color); 5] = [
-            ("Score", format!("{}", self.score), YELLOW),
-            ("Level", format!("{}", self.level), TEAL),
-            ("Lines", format!("{}", self.lines_cleared), GREEN),
-            ("Pieces", format!("{}", self.pieces_placed), BLUE),
-            ("Time", self.format_time(), LAVENDER),
+            ("Score", format!("{}", self.score), c.chrome.even),
+            ("Level", format!("{}", self.level), c.level),
+            ("Lines", format!("{}", self.lines_cleared), c.chrome.good),
+            ("Pieces", format!("{}", self.pieces_placed), c.chrome.key),
+            ("Time", self.format_time(), c.chrome.title),
         ];
         for (i, (name, text, color)) in rows.iter().enumerate().take(shown) {
             let y = l.stats.y + head + i as f32 * row_h;
@@ -1622,7 +1658,7 @@ impl TetrisApp {
                 l.stats.x + 4.0,
                 y,
                 name,
-                OVERLAY0,
+                c.chrome.dim,
                 l.font,
                 FontWeightHint::Regular,
                 room,
@@ -1641,15 +1677,15 @@ impl TetrisApp {
     }
 
     /// The right column: the NEXT previews and the CONTROLS buttons.
-    fn draw_right(&self, f: &mut Frame, l: &Layout) {
+    fn draw_right(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let head = l.font * 2.0;
-        fill(f, l.next, MANTLE, 6.0);
+        fill(f, l.next, c.chrome.band, 6.0);
         label(
             f,
             l.next.x + 4.0,
             l.next.y + 2.0,
             "NEXT",
-            SUBTEXT0,
+            c.chrome.dim,
             l.font,
             FontWeightHint::Bold,
             (l.next.w - 8.0).max(0.0),
@@ -1672,13 +1708,13 @@ impl TetrisApp {
         if l.controls.is_empty() {
             return;
         }
-        fill(f, l.controls, MANTLE, 6.0);
+        fill(f, l.controls, c.chrome.band, 6.0);
         label(
             f,
             l.controls.x + 4.0,
             l.controls.y + 2.0,
             "CONTROLS",
-            SUBTEXT0,
+            c.chrome.dim,
             l.font,
             FontWeightHint::Bold,
             (l.controls.w - 8.0).max(0.0),
@@ -1699,7 +1735,7 @@ impl TetrisApp {
                 row.x + 2.0,
                 row.y + (row.h - size) / 2.0,
                 text,
-                OVERLAY0,
+                c.chrome.dim,
                 size,
                 FontWeightHint::Regular,
                 (row.w - 4.0).max(0.0),
@@ -1712,7 +1748,7 @@ impl TetrisApp {
     /// Last, so its hit box wins: `hit_test` walks the recorded boxes in
     /// reverse, and a message box that a click passes straight through to the
     /// board behind it would be a lie about being modal.
-    fn draw_overlay(&self, f: &mut Frame, l: &Layout) {
+    fn draw_overlay(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let Some((title, subtitle)) = (match self.status {
             GameStatus::Paused => Some(("PAUSED", "Click or press P to resume")),
             GameStatus::GameOver => Some(("GAME OVER", "Click or press R to restart")),
@@ -1721,9 +1757,9 @@ impl TetrisApp {
             return;
         };
 
-        fill(f, l.window, Color::rgba(17, 17, 27, 180), 0.0);
-        fill(f, l.overlay, SURFACE0, 10.0);
-        stroke(f, l.overlay, LAVENDER, 2.0, 10.0);
+        fill(f, l.window, c.chrome.scrim, 0.0);
+        fill(f, l.overlay, c.chrome.raised, 10.0);
+        stroke(f, l.overlay, c.chrome.title, 2.0, 10.0);
         f.hit(Target::Overlay, l.overlay);
 
         let big = (l.overlay.h * 0.26).clamp(10.0, 24.0);
@@ -1733,7 +1769,7 @@ impl TetrisApp {
             l.overlay,
             l.overlay.y + l.overlay.h * 0.20,
             title,
-            TEXT_COLOR,
+            c.chrome.text,
             big,
             FontWeightHint::Bold,
         );
@@ -1742,7 +1778,7 @@ impl TetrisApp {
             l.overlay,
             l.overlay.y + l.overlay.h * 0.58,
             subtitle,
-            SUBTEXT0,
+            c.chrome.dim,
             small,
             FontWeightHint::Regular,
         );
@@ -1845,7 +1881,7 @@ fn block(f: &mut Frame, rect: Rect, color: Color) {
         y: rect.y + 1.0,
         width: rect.w - 2.0,
         height: rect.h / 2.0 - 1.0,
-        color: Color::rgba(255, 255, 255, 30),
+        color: SHINE,
         corner_radii: CornerRadii {
             top_left: 2.0,
             top_right: 2.0,
@@ -1945,6 +1981,10 @@ fn handle_event(app: &mut TetrisApp, event: &Event) -> EventResult {
 }
 
 impl App for TetrisApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         match handle_event(self, event) {
             EventResult::Consumed => Response::Redraw,
@@ -2037,6 +2077,61 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- in
+    /// play with blocks in the well, a ghost and a held piece, paused, and
+    /// over -- with only the seven pieces' colours and a block's shine not the
+    /// palette's. It drew in its own copy of Catppuccin Mocha, dark on a light
+    /// desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived: Vec<Color> = PieceKind::ALL.iter().map(|k| k.color()).collect();
+        derived.push(SHINE);
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut app = TetrisApp::with_seed(7);
+            app.theme_changed(&p);
+            app.field_set(TOTAL_ROWS - 1, 0, Some(BLUE));
+            app.field_set(TOTAL_ROWS - 1, 1, Some(RED));
+            app.hold_piece = Some(PieceKind::T);
+            app.hold_used = true;
+            let playing = app.frame(640.0, 720.0);
+            app.status = GameStatus::Paused;
+            let paused = app.frame(640.0, 720.0);
+            app.status = GameStatus::GameOver;
+            let over = app.frame(640.0, 720.0);
+            for (what, f) in [("playing", playing), ("paused", paused), ("over", over)] {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("tetris, {what}, light: {light}"),
+                );
+            }
+        }
+    }
+
+    /// **A restart keeps the user's colours and the window's size.** It
+    /// rebuilds the game from scratch, which reset both.
+    #[test]
+    fn a_restart_keeps_the_users_colours_and_the_window_size() {
+        let light = Palette::for_mode(true);
+        let mut app = TetrisApp::with_seed(7);
+        app.theme_changed(&light);
+        app.resize(333.0, 444.0);
+        app.status = GameStatus::GameOver;
+        assert!(
+            app.apply(Action::Restart),
+            "a finished game did not restart"
+        );
+        assert_eq!(app.status, GameStatus::Playing);
+        assert_eq!(app.palette, light, "the restart dropped the theme");
+        assert_eq!(
+            (app.width, app.height),
+            (333.0, 444.0),
+            "the restart forgot the size"
+        );
+    }
 
     // ── Helper functions ────────────────────────────────────────────
 

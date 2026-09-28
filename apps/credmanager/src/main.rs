@@ -6641,6 +6641,13 @@ fn render_vault_dialog(
                     "Use it only to move to another password manager, and delete it after.",
                     state.palette.subtext0,
                 ),
+                // Formula injection is warned of, not defended against by
+                // changing the file: a password altered on the way out no
+                // longer works (lane B's request, the operator's §1417).
+                small(
+                    "Don't open it in a spreadsheet: it may run a password as a formula.",
+                    state.palette.subtext0,
+                ),
             ],
             [
                 ("Export anyway", Target::ExportAnyway, true),
@@ -9196,6 +9203,10 @@ mod tests {
         let shown = drawn(&state);
         assert!(shown.contains("plain text"), "{shown}");
         assert!(shown.contains("readable by anyone"), "{shown}");
+        assert!(
+            shown.contains("spreadsheet"),
+            "the warning does not say to keep it out of a spreadsheet: {shown}"
+        );
         act_on(&mut state, Target::DialogCancel);
         assert!(state.dialog.is_none() && !state.picker.is_open());
 
@@ -9385,6 +9396,11 @@ mod tests {
             state.vault.is_unlocked(),
             "a key reached the vault behind the file dialog"
         );
+        // Ctrl+L started a path in the dialog's own address bar (the dialog
+        // takes it, as a file manager does), so the first Escape stops the
+        // typing and the second is the dialog's.
+        state.on_event(&key(Key::Escape));
+        assert!(state.picker.is_open(), "Escape left a path and the dialog");
         state.on_event(&key(Key::Escape));
         assert!(!state.picker.is_open());
         assert_eq!(state.pick_for, None);

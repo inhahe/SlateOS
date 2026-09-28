@@ -170,6 +170,7 @@ impl SettingsCategory {
                 SettingsPage::Sound,
                 SettingsPage::Mouse,
                 SettingsPage::Notifications,
+                SettingsPage::DateTime,
                 SettingsPage::Power,
             ],
             Self::Network => &[
@@ -216,6 +217,7 @@ pub enum SettingsPage {
     Sound,
     Mouse,
     Notifications,
+    DateTime,
     Power,
     // Network
     NetworkStatus,
@@ -270,6 +272,7 @@ impl SettingsPage {
             Self::Sound => "sound",
             Self::Mouse => "mouse",
             Self::Notifications => "notifications",
+            Self::DateTime => "date-time",
             Self::Power => "power",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
@@ -318,6 +321,7 @@ impl SettingsPage {
             Self::Sound => "Sound",
             Self::Mouse => "Mouse",
             Self::Notifications => "Notifications",
+            Self::DateTime => "Date & Time",
             Self::Power => "Power",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
@@ -477,28 +481,6 @@ pub struct UserAccount {
 // Accessibility types
 // ============================================================================
 
-/// Cursor size option.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CursorSize {
-    Small,
-    Medium,
-    Large,
-    XLarge,
-}
-
-impl CursorSize {
-    const ALL: &[Self] = &[Self::Small, Self::Medium, Self::Large, Self::XLarge];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small",
-            Self::Medium => "Medium",
-            Self::Large => "Large",
-            Self::XLarge => "Extra Large",
-        }
-    }
-}
-
 /// Narrator verbosity level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NarratorVerbosity {
@@ -645,6 +627,10 @@ pub struct SettingsState {
     /// `NotifFile` gives: a save splices into the document that was read, so
     /// the user's comments and any key a newer desktop wrote survive.
     pub notif: notifsettings::NotifFile,
+    /// The clock's settings, `datetime.yaml` (lane C's `datetimesettings`,
+    /// design-decisions §875): the zone, the taskbar clock and the world
+    /// clocks. Read by `main`, not by `new`, like the other files.
+    pub datetime: datetimesettings::DateTimeFile,
     /// Set when the rules have been written and the desktop has not been told.
     notif_dirty: bool,
 
@@ -671,7 +657,6 @@ pub struct SettingsState {
     // Accessibility settings
     /// Range stated by [`SliderId::range`], not repeated here.
     pub text_size_percent: u16,
-    pub cursor_size: CursorSize,
     pub reduce_animations: bool,
     pub reduce_transparency: bool,
     pub mono_audio: bool,
@@ -738,6 +723,13 @@ pub struct SettingsState {
     /// file somewhere, which is not something this application can be
     /// notified about -- unlike the settings file, which has a watcher.
     font_families: Vec<String>,
+    /// The installed themes -- colour themes and icon packs -- read on
+    /// entering the Themes page, since installing one is a folder appearing
+    /// that nothing here is told about.
+    themes: Vec<appearance::themes::ThemeInfo>,
+    /// Where they are read from: the standard folders, or a scratch pair in a
+    /// test, which must not read the machine's.
+    theme_dirs: appearance::themes::ThemeDirs,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
@@ -853,11 +845,27 @@ pub enum DropdownId {
     /// When they end. Earlier than the start means they run through midnight,
     /// which is what nearly everyone wants and what the default is.
     QuietEnd,
+    /// When "System (Auto)" turns light, in the clock's time zone
+    /// (`AppearanceSettings::auto_light_hours`, design-decisions §876).
+    AutoLightFrom,
+    /// When it turns dark again.
+    AutoDarkFrom,
+    /// The colour theme: an installed theme's colours, or the built-in ones
+    /// (`AppearanceSettings::color_theme`, design-decisions §874).
+    ColorTheme,
+    /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
+    IconTheme,
+    /// The clock's time zone, or the machine's own.
+    TimeZone,
+    /// A zone to add a world clock for.
+    AddClock,
     Resolution,
     RefreshRate,
     Scale,
     ColorFilter,
     CursorSize,
+    /// The pointer's colours: `appearance.yaml`'s `cursors.scheme`.
+    CursorScheme,
     NarratorVerbosity,
     HighContrast,
     /// How the desktop picture is placed on the screen.
@@ -907,15 +915,22 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 15] = [
+    pub const FIXED: [Self; 22] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::TimeZone,
+        Self::AddClock,
+        Self::AutoLightFrom,
+        Self::AutoDarkFrom,
+        Self::ColorTheme,
+        Self::IconTheme,
         Self::WallpaperFit,
         Self::Resolution,
         Self::RefreshRate,
         Self::Scale,
         Self::ColorFilter,
         Self::CursorSize,
+        Self::CursorScheme,
         Self::NarratorVerbosity,
         Self::HighContrast,
         Self::RotationInterval,
@@ -935,6 +950,7 @@ struct SettingsSnapshot {
     notif: notifsettings::NotifSettings,
     /// The lock screen's clock: (seconds, date) -- `lockscreen.yaml`.
     lock_clock: (bool, bool),
+    datetime: datetimesettings::DateTimeSettings,
 }
 
 /// Which of them an event changed.
@@ -947,6 +963,7 @@ struct ChangedDocuments {
     input: bool,
     notif: bool,
     lock_clock: bool,
+    datetime: bool,
 }
 
 impl Default for SettingsState {
@@ -981,6 +998,159 @@ impl SettingsState {
         self.mono_families = guitk::text::available_mono_families();
     }
 
+    /// The zones a world clock can be added for: every zone not already on
+    /// a clock of its city's name.
+    fn zones_to_add(&self) -> Vec<&'static datetimesettings::TimezoneInfo> {
+        let clocks = &self.datetime.settings.additional_clocks;
+        datetimesettings::zones()
+            .iter()
+            .filter(|z| !clocks.iter().any(|c| c.label == z.city))
+            .collect()
+    }
+
+    /// The Date & Time page: the clock's zone, what the taskbar clock shows,
+    /// and the world clocks the calendar shows. It had no page at all: the
+    /// shell obeyed `datetime.yaml` and nothing but a text editor could
+    /// change it (lane C, c-e-a-date-and-time-page).
+    fn build_datetime_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let settings = &self.datetime.settings;
+        let now = datetimesettings::clock::now_utc_secs();
+
+        s.section("Time Zone");
+        let zone = settings
+            .current_zone()
+            .map_or_else(|| AUTOMATIC_ZONE.to_string(), |z| zone_row(z, now));
+        s.dropdown_row("Time zone", DropdownId::TimeZone, &zone);
+
+        s.section("Taskbar Clock");
+        s.toggle_row(
+            "Show seconds",
+            ToggleId::ClockSeconds,
+            settings.show_seconds,
+        );
+        s.toggle_row(
+            "Show the day of the week",
+            ToggleId::ClockDayOfWeek,
+            settings.show_day_of_week,
+        );
+        s.toggle_row("Show the date", ToggleId::ClockDate, settings.show_date);
+
+        s.section("World Clocks");
+        if settings.additional_clocks.is_empty() {
+            s.note(
+                "No world clocks. The calendar shows each one you add.",
+                28.0,
+            );
+        }
+        for (index, clock) in settings.additional_clocks.iter().enumerate() {
+            let zone = datetimesettings::zone(&clock.tz_id)
+                .map_or(clock.tz_id.as_str(), |z| z.display_name.as_str());
+            s.toggle_row(
+                &format!("{} -- {zone}", clock.label),
+                ToggleId::WorldClock(index),
+                clock.visible,
+            );
+            s.button_row(
+                "",
+                "Remove",
+                pal.accent,
+                Some(RowHit::Press(ButtonId::RemoveClock(index))),
+            );
+        }
+        if settings.additional_clocks.len() < datetimesettings::MAX_CLOCKS {
+            s.dropdown_row("Add a clock", DropdownId::AddClock, "Choose a zone");
+        } else {
+            s.note(
+                "Four clocks is as many as the calendar shows. Remove one to add another.",
+                28.0,
+            );
+        }
+        s.note(
+            "The taskbar clock takes these the next time the desktop starts.",
+            28.0,
+        );
+    }
+
+    /// Read the installed themes, the built-in one first.
+    ///
+    /// I/O, and so on entering the Themes page rather than per frame.
+    pub fn refresh_themes(&mut self) {
+        self.themes = appearance::themes::available_in(&self.theme_dirs);
+    }
+
+    /// The listed theme a chosen colour or icon theme is, by its id.
+    fn listed_theme(&self, id: &std::ffi::OsStr) -> Option<&appearance::themes::ThemeInfo> {
+        self.themes.iter().find(|t| t.id.as_os_str() == id)
+    }
+
+    /// A theme's row in the Colors list: its name, and why it cannot be
+    /// chosen when it cannot -- listed rather than left out, so a theme's
+    /// author can see why theirs is not offered.
+    fn color_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_colors() {
+            match (info.has_dark, info.has_light) {
+                (true, false) => format!("{} (dark only)", info.name),
+                (false, true) => format!("{} (light only)", info.name),
+                _ => info.name.clone(),
+            }
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else if info.provides_icons() {
+            // An icon pack: nothing wrong with it, and chosen under Icons.
+            format!("{} -- icons only", info.name)
+        } else {
+            // Read, and setting no colours: the listing leaves `problem` for
+            // a file it could not read, so the reason is said here.
+            format!(
+                "{} -- cannot be used: it {}",
+                info.name,
+                appearance::themes::ThemeError::NoColors
+            )
+        }
+    }
+
+    /// A theme's row in the Icons list.
+    fn icon_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.provides_icons() {
+            info.name.clone()
+        } else {
+            format!("{} -- no icons", info.name)
+        }
+    }
+
+    /// What the page says under the colour theme: that it draws one mode
+    /// only, that high contrast hides it, and why a chosen theme is not in
+    /// use.
+    fn color_theme_notes(&self) -> Vec<String> {
+        let settings = &self.appearance.settings;
+        let mut notes = Vec::new();
+        if let Some(info) = self.listed_theme(settings.color_theme.id())
+            && info.provides_colors()
+        {
+            match (info.has_dark, info.has_light) {
+                (true, false) => notes.push(
+                    "Dark only: this theme is shown dark whichever mode is chosen above."
+                        .to_string(),
+                ),
+                (false, true) => notes.push(
+                    "Light only: this theme is shown light whichever mode is chosen above."
+                        .to_string(),
+                ),
+                _ => {}
+            }
+        }
+        if settings.high_contrast.is_some() && !settings.color_theme.is_built_in() {
+            notes.push(
+                "High contrast is on, so no theme's colours are shown until it is off.".to_string(),
+            );
+        }
+        if let Some(problem) = settings.color_theme.problem() {
+            notes.push(problem.to_string());
+        }
+        notes
+    }
+
     /// Re-read the file associations the File Associations program writes.
     ///
     /// I/O, and so out of [`new`](Self::new) for the reason given above.
@@ -1005,6 +1175,9 @@ impl SettingsState {
         self.current_page = page;
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
+        }
+        if page == SettingsPage::Themes {
+            self.refresh_themes();
         }
     }
 
@@ -1260,6 +1433,11 @@ impl SettingsState {
         self.notif = notifsettings::NotifFile::load();
     }
 
+    /// Read the user's saved clock settings, for the Date & Time page.
+    pub fn load_datetime(&mut self) {
+        self.datetime = datetimesettings::DateTimeFile::load();
+    }
+
     /// Read the machine's real accounts from the system account database.
     ///
     /// Separate from [`SettingsState::new`] and called by `main`, the same as
@@ -1383,6 +1561,16 @@ impl SettingsState {
         }
     }
 
+    /// Write `datetime.yaml`. The running desktop reads it when it starts:
+    /// the relay that would tell it to read the file again is lane F's to add
+    /// (`requests/c-f-a-settings-group-for-the-date-and-time.md`), and the
+    /// page says so rather than implying the change is already on the bar.
+    fn save_datetime(&mut self) {
+        if let Err(err) = self.datetime.save() {
+            eprintln!("settings: could not save datetime.yaml: {err}");
+        }
+    }
+
     fn save_notifications(&mut self) {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
@@ -1433,6 +1621,7 @@ impl SettingsState {
             // `appearance` below; `load_input()` does the I/O, from `main`.
             input: InputFile::new(),
             notif: notifsettings::NotifFile::new(),
+            datetime: datetimesettings::DateTimeFile::from_document(yamldoc::Document::new()),
             notif_dirty: false,
 
             // Personalization defaults, not a read of the configuration
@@ -1452,7 +1641,6 @@ impl SettingsState {
 
             // Accessibility defaults
             text_size_percent: 100,
-            cursor_size: CursorSize::Small,
             reduce_animations: false,
             reduce_transparency: false,
             mono_audio: false,
@@ -1478,6 +1666,8 @@ impl SettingsState {
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
+            themes: Vec::new(),
+            theme_dirs: appearance::themes::ThemeDirs::standard(),
             mono_families: Vec::new(),
             lock_after_minutes: 0,
             lock_clock_seconds: false,
@@ -2168,6 +2358,14 @@ enum ToggleId {
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
     NotifBanner(usize),
+    /// The taskbar clock shows seconds.
+    ClockSeconds,
+    /// It shows the day of the week.
+    ClockDayOfWeek,
+    /// It shows the date.
+    ClockDate,
+    /// The `n`-th world clock is shown in the calendar (hidden, it is kept).
+    WorldClock(usize),
     /// Whether the nightly quiet hours are in force at all.
     /// Whether a rotation is shuffled or goes in folder order.
     RotationShuffle,
@@ -2193,6 +2391,10 @@ enum ToggleId {
     /// is saved to `appearance.yaml` and announced to the running desktop by
     /// `handle_event`'s before/after comparison -- no extra plumbing.
     TaskbarAutohide,
+    /// Draw each window on the taskbar as its picture and its title, or as
+    /// its picture alone. `appearance.yaml`'s `taskbar.labels`, beside
+    /// auto-hide's key; the desktop watches the file and redraws the bar.
+    TaskbarLabels,
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -2488,6 +2690,8 @@ enum ButtonId {
     AddExclusion,
     /// Stop rotating and go back to a single picture.
     ClearRotation,
+    /// Remove the `n`-th world clock.
+    RemoveClock(usize),
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -2514,6 +2718,23 @@ const LOGIN_BACKGROUNDS: [&str; 4] = [
     "Same as my desktop",
     "A picture",
 ];
+
+/// The Date & Time page's row for the machine's own zone -- the default, and
+/// what the C library and `date` use.
+const AUTOMATIC_ZONE: &str = "Automatic (this computer's zone)";
+
+/// A zone as the Date & Time page lists it: its offset now, its city, and
+/// its name -- "(UTC+00:00) London -- GMT/BST". The city because it is what
+/// people look for; a zone's own name alone ("GMT/BST", "Central European")
+/// does not say which of several cities it is.
+fn zone_row(zone: &datetimesettings::TimezoneInfo, now: u64) -> String {
+    format!(
+        "({}) {} -- {}",
+        zone.offset_string(now),
+        zone.city,
+        zone.display_name
+    )
+}
 
 /// What to call a greeter background in the interface.
 fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
@@ -3348,6 +3569,7 @@ impl SettingsState {
         match self.current_page {
             SettingsPage::Display => self.build_display_page(sink),
             SettingsPage::Notifications => self.build_notifications_page(sink),
+            SettingsPage::DateTime => self.build_datetime_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
             SettingsPage::Wallpaper => self.build_wallpaper_page(sink),
             SettingsPage::Mouse => self.build_mouse_page(sink),
@@ -3980,6 +4202,57 @@ impl SettingsState {
         s.advance(THEME_CARD_HEIGHT);
         s.gap();
 
+        // The colour theme and the icon theme: the installed themes, chosen
+        // here rather than by editing appearance.yaml (lane C,
+        // c-e-a-colour-theme-picker). The accent below applies under any
+        // theme: a theme never sets it.
+        s.section("Theme");
+        let color_name = self
+            .listed_theme(self.appearance.settings.color_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.color_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Colors", DropdownId::ColorTheme, &color_name);
+        for note in self.color_theme_notes() {
+            s.note(&note, 28.0);
+        }
+        let icon_name = self
+            .listed_theme(self.appearance.settings.icon_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.icon_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Icons", DropdownId::IconTheme, &icon_name);
+        s.gap();
+
+        // The automatic mode's hours, where it is chosen. "System (Auto)" is
+        // light from one time to the other in the clock's time zone; the hours
+        // were a setting with nowhere here to change them (lane C,
+        // c-e-the-automatic-modes-hours).
+        if selected == ThemeMode::System {
+            let hours = self.appearance.settings.auto_light_hours;
+            s.dropdown_row(
+                "Light from",
+                DropdownId::AutoLightFrom,
+                &notifsettings::format_hm(hours.start()),
+            );
+            s.dropdown_row(
+                "Dark from",
+                DropdownId::AutoDarkFrom,
+                &notifsettings::format_hm(hours.end()),
+            );
+            s.gap();
+        }
+
         // Transparency. A row of levels rather than the on/off switch this
         // page used to show: the setting has four values, and a switch that
         // meant "Off or whatever it was" would forget a user's choice of
@@ -4006,6 +4279,11 @@ impl SettingsState {
             ToggleId::TaskbarAutohide,
             self.appearance.settings.taskbar_autohide,
         );
+        s.toggle_row(
+            "Show window titles on the taskbar",
+            ToggleId::TaskbarLabels,
+            self.appearance.settings.taskbar_labels,
+        );
     }
 
     // --- Colors page (accent color picker) ---
@@ -4025,7 +4303,10 @@ impl SettingsState {
         s.advance(28.0);
 
         let presets = AccentColor::presets();
-        let light = self.appearance.settings.theme_mode.is_light();
+        // What is drawn, not what is set: "System (Auto)" is light by day and
+        // dark by night, and `theme_mode.is_light()` answers "no" for it at
+        // noon (lane C, c-e-the-automatic-modes-hours).
+        let light = self.appearance.settings.is_light();
         let chosen = self.appearance.settings.accent_color;
         for (idx, accent) in presets.iter().enumerate() {
             let (dx, dy) = swatch_offset(idx);
@@ -4500,10 +4781,20 @@ impl SettingsState {
             DropdownId::HighContrast,
             high_contrast_label(self.appearance.settings.high_contrast),
         );
+        // The pointer's size and colours are `appearance.yaml`'s `cursors.size`
+        // and `cursors.scheme`, the one pair of pointer settings that survives
+        // (design-decisions §872) and what the compositor draws the pointer
+        // from. This dropdown was this app's own four sizes, kept in memory
+        // and saved nowhere.
         s.dropdown_row(
             "Cursor Size",
             DropdownId::CursorSize,
-            self.cursor_size.label(),
+            self.appearance.settings.cursor_size.label(),
+        );
+        s.dropdown_row(
+            "Cursor Colors",
+            DropdownId::CursorScheme,
+            self.appearance.settings.cursor_scheme.label(),
         );
         s.toggle_row(
             "Reduce Animations",
@@ -4749,7 +5040,7 @@ impl SettingsState {
 
         if self.lock_after_minutes == 0 {
             s.note(
-                "The screen will not lock on its own. It can still be locked at any time from the start menu or with the lock shortcut.",
+                "The screen will not lock on its own. It can still be locked at any time from the start menu's power menu, or with a shortcut if you set one.",
                 40.0,
             );
         } else {
@@ -5197,6 +5488,62 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::TimeZone => {
+                let now = datetimesettings::clock::now_utc_secs();
+                let items = std::iter::once(AUTOMATIC_ZONE.to_string())
+                    .chain(datetimesettings::zones().iter().map(|z| zone_row(z, now)))
+                    .collect();
+                let at = self
+                    .datetime
+                    .settings
+                    .current_zone()
+                    .and_then(|chosen| {
+                        datetimesettings::zones()
+                            .iter()
+                            .position(|z| z.tz_id == chosen.tz_id)
+                    })
+                    .map_or(0, |i| i.saturating_add(1));
+                (items, at)
+            }
+            DropdownId::AddClock => {
+                let now = datetimesettings::clock::now_utc_secs();
+                let items = self
+                    .zones_to_add()
+                    .iter()
+                    .map(|z| zone_row(z, now))
+                    .collect();
+                (items, 0)
+            }
+            DropdownId::ColorTheme => {
+                let items = self.themes.iter().map(Self::color_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.color_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::IconTheme => {
+                let items = self.themes.iter().map(Self::icon_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
+                let (current, other) = self.auto_hour_ends(dropdown_id);
+                let choices = Self::auto_time_choices(current, other);
+                let at = choices.iter().position(|t| *t == current).unwrap_or(0);
+                (
+                    choices
+                        .iter()
+                        .map(|t| notifsettings::format_hm(*t))
+                        .collect(),
+                    at,
+                )
+            }
             DropdownId::LoginBackground => {
                 let mut items: Vec<String> =
                     LOGIN_BACKGROUNDS.iter().map(|b| (*b).to_string()).collect();
@@ -5298,13 +5645,24 @@ impl SettingsState {
                 (items, sel)
             }
             DropdownId::CursorSize => {
-                let items: Vec<String> = CursorSize::ALL
+                let items: Vec<String> = appearance::CursorSize::ALL
                     .iter()
                     .map(|c| c.label().to_string())
                     .collect();
-                let sel = CursorSize::ALL
+                let sel = appearance::CursorSize::ALL
                     .iter()
-                    .position(|c| *c == self.cursor_size)
+                    .position(|c| *c == self.appearance.settings.cursor_size)
+                    .unwrap_or(0);
+                (items, sel)
+            }
+            DropdownId::CursorScheme => {
+                let items: Vec<String> = appearance::CursorScheme::ALL
+                    .iter()
+                    .map(|c| c.label().to_string())
+                    .collect();
+                let sel = appearance::CursorScheme::ALL
+                    .iter()
+                    .position(|c| *c == self.appearance.settings.cursor_scheme)
                     .unwrap_or(0);
                 (items, sel)
             }
@@ -5504,6 +5862,9 @@ impl SettingsState {
         if changed.lock_clock {
             self.save_lock_clock();
         }
+        if changed.datetime {
+            self.save_datetime();
+        }
         result
     }
 
@@ -5520,6 +5881,7 @@ impl SettingsState {
             input: self.input.settings.clone(),
             notif: self.notif.settings.clone(),
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date),
+            datetime: self.datetime.settings.clone(),
         }
     }
 
@@ -5535,6 +5897,7 @@ impl SettingsState {
             input: self.input.settings != before.input,
             notif: self.notif.settings != before.notif,
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date) != before.lock_clock,
+            datetime: self.datetime.settings != before.datetime,
         }
     }
 
@@ -5956,7 +6319,11 @@ impl SettingsState {
             }
             RowHit::Pill(crate::PillId::SurfaceStyle, idx) => {
                 if let Some(style) = SURFACE_STYLES.get(idx) {
-                    self.appearance.settings.surface_style = *style;
+                    // Through the setter, which trades the looks' colours
+                    // over: each look keeps its own accent (§1421, C-Q15).
+                    // Assigning the field left the accent chosen under the
+                    // old look on the new one.
+                    self.appearance.settings.set_surface_style(*style);
                 }
             }
             RowHit::Pill(crate::PillId::StripStyle, idx) => {
@@ -5995,6 +6362,9 @@ impl SettingsState {
                 self.set_current_account_picture(idx);
             }
             RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
+            RowHit::Press(ButtonId::RemoveClock(index)) => {
+                self.datetime.settings.remove_clock(index);
+            }
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
             }
@@ -6144,6 +6514,17 @@ impl SettingsState {
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
+            ToggleId::ClockSeconds => &mut self.datetime.settings.show_seconds,
+            ToggleId::ClockDayOfWeek => &mut self.datetime.settings.show_day_of_week,
+            ToggleId::ClockDate => &mut self.datetime.settings.show_date,
+            ToggleId::WorldClock(index) => {
+                &mut self
+                    .datetime
+                    .settings
+                    .additional_clocks
+                    .get_mut(index)?
+                    .visible
+            }
             ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
             ToggleId::MonoAudio => &mut self.mono_audio,
             ToggleId::VisualAlerts => &mut self.visual_alerts,
@@ -6156,6 +6537,7 @@ impl SettingsState {
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
+            ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,
             ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
             ToggleId::LockClockDate => &mut self.lock_clock_date,
         })
@@ -6169,6 +6551,33 @@ impl SettingsState {
     /// own setting would show the dropdown reading "00:00" -- the page
     /// reporting a time the user never chose, and writing it the moment they
     /// touched anything else on the row.
+    /// The end of the automatic mode's hours `id` sets, and the other end.
+    fn auto_hour_ends(
+        &self,
+        id: DropdownId,
+    ) -> (notifsettings::TimeOfDay, notifsettings::TimeOfDay) {
+        let hours = self.appearance.settings.auto_light_hours;
+        if id == DropdownId::AutoLightFrom {
+            (hours.start(), hours.end())
+        } else {
+            (hours.end(), hours.start())
+        }
+    }
+
+    /// The times one end of the automatic mode's hours may be set to: every
+    /// half hour, and the current time if it is not on one -- less the other
+    /// end's. Hours whose two ends are equal never change, which is not an
+    /// automatic mode at all, so the list does not offer them.
+    fn auto_time_choices(
+        current: notifsettings::TimeOfDay,
+        other: notifsettings::TimeOfDay,
+    ) -> Vec<notifsettings::TimeOfDay> {
+        Self::quiet_time_choices(current)
+            .into_iter()
+            .filter(|t| *t != other)
+            .collect()
+    }
+
     fn quiet_time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
         let mut times: Vec<notifsettings::TimeOfDay> = (0..48)
             .filter_map(|half| {
@@ -6252,6 +6661,55 @@ impl SettingsState {
             DropdownId::Scale => {
                 if let Some(scale) = ScalePercent::ALL.get(index) {
                     self.scale = *scale;
+                }
+            }
+            DropdownId::TimeZone => {
+                if index == 0 {
+                    self.datetime.settings.set_zone(None);
+                } else if let Some(zone) = datetimesettings::zones().get(index.saturating_sub(1)) {
+                    self.datetime.settings.set_zone(Some(&zone.tz_id));
+                }
+            }
+            DropdownId::AddClock => {
+                if let Some(zone) = self.zones_to_add().get(index) {
+                    // Named for its city: the file keys clocks by name, and a
+                    // zone already added is not offered, so the name is free.
+                    let (tz_id, city) = (zone.tz_id.clone(), zone.city.clone());
+                    self.datetime.settings.add_clock(&tz_id, &city);
+                }
+            }
+            // A theme that cannot be used is listed saying why, and choosing it
+            // changes nothing: its row already says what is wrong.
+            DropdownId::ColorTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_colors()
+                {
+                    self.appearance.settings.color_theme =
+                        appearance::themes::ColorTheme::load_from(&self.theme_dirs, &info.id);
+                }
+            }
+            DropdownId::IconTheme => {
+                if let Some(info) = self.themes.get(index)
+                    && info.provides_icons()
+                {
+                    self.appearance.settings.icon_theme =
+                        if info.origin == appearance::themes::Origin::BuiltIn {
+                            appearance::icons::IconTheme::built_in()
+                        } else {
+                            appearance::icons::IconTheme::load(&info.id)
+                        };
+                }
+            }
+            DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
+                let hours = self.appearance.settings.auto_light_hours;
+                let (current, other) = self.auto_hour_ends(dropdown_id);
+                if let Some(chosen) = Self::auto_time_choices(current, other).get(index) {
+                    self.appearance.settings.auto_light_hours =
+                        if dropdown_id == DropdownId::AutoLightFrom {
+                            notifsettings::DailyWindow::new(*chosen, hours.end())
+                        } else {
+                            notifsettings::DailyWindow::new(hours.start(), *chosen)
+                        };
                 }
             }
             DropdownId::QuietStart | DropdownId::QuietEnd => {
@@ -6340,8 +6798,13 @@ impl SettingsState {
                 }
             }
             DropdownId::CursorSize => {
-                if let Some(size) = CursorSize::ALL.get(index) {
-                    self.cursor_size = *size;
+                if let Some(size) = appearance::CursorSize::ALL.get(index) {
+                    self.appearance.settings.cursor_size = *size;
+                }
+            }
+            DropdownId::CursorScheme => {
+                if let Some(scheme) = appearance::CursorScheme::ALL.get(index) {
+                    self.appearance.settings.cursor_scheme = *scheme;
                 }
             }
             DropdownId::HighContrast => {
@@ -6592,6 +7055,7 @@ fn main() -> ExitCode {
     // deleting the rest, because a save splices the model into the document it
     // was loaded from and an unloaded model has nothing in it.
     state.load_notifications();
+    state.load_datetime();
 
     // The machine's real accounts. Empty if the database cannot be read, which
     // the Accounts page says rather than drawing a blank panel.
@@ -6605,6 +7069,10 @@ fn main() -> ExitCode {
     // The installed font families, for the Fonts page's picker. Once: a font
     // appears by a file being put somewhere, which nothing here is told about.
     state.load_font_families();
+
+    // The installed themes, in case the Themes page is the first shown;
+    // entering it reads them again.
+    state.refresh_themes();
 
     // The screen-lock delay, for the Lock Screen page.
     state.load_lock_delay();
@@ -7033,6 +7501,368 @@ mod tests {
             app.notif.settings.quiet_hours.days[3],
             "it did not come back"
         );
+    }
+
+    // == The Date & Time page (lane C, c-e-a-date-and-time-page) ================
+
+    #[test]
+    fn the_date_and_time_page_sets_the_zone_the_clock_and_the_world_clocks() {
+        appearance::config::testing::with_scratch_config("settings-datetime", |root| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DateTime);
+            assert_eq!(SettingsPage::DateTime.name(), "date-time");
+
+            // The zone: the machine's own first, then a named one.
+            app.show_dropdown(DropdownId::TimeZone);
+            let items = app.dropdown_layout().expect("a layout").items;
+            assert_eq!(items.first().map(String::as_str), Some(AUTOMATIC_ZONE));
+            let tokyo = items
+                .iter()
+                .position(|i| i.contains("Tokyo") || i.contains("Japan"))
+                .expect("Tokyo is offered");
+            app.apply_dropdown_selection(tokyo);
+            let chosen = app
+                .datetime
+                .settings
+                .current_zone()
+                .map(|z| z.tz_id.clone());
+            assert_eq!(chosen.as_deref(), Some("Asia/Tokyo"));
+
+            // A world clock, named for its city, then removed.
+            app.show_dropdown(DropdownId::AddClock);
+            let zones = app.dropdown_layout().expect("a layout").items;
+            let london = zones
+                .iter()
+                .position(|i| i.contains("London"))
+                .expect("London is offered");
+            app.apply_dropdown_selection(london);
+            let labels: Vec<&str> = app
+                .datetime
+                .settings
+                .additional_clocks
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect();
+            assert_eq!(labels, ["London"]);
+            app.show_dropdown(DropdownId::AddClock);
+            let again = app.dropdown_layout().expect("a layout").items;
+            assert!(
+                !again.iter().any(|i| i.contains("London")),
+                "a zone already on a clock is offered again"
+            );
+
+            // The file the shell reads.
+            app.save_datetime();
+            let text = std::fs::read_to_string(appearance::config::testing::scratch_path(
+                root, "datetime",
+            ))
+            .unwrap_or_default();
+            assert!(text.contains("Asia/Tokyo"), "{text:?}");
+            assert!(text.contains("London"), "{text:?}");
+
+            app.datetime.settings.remove_clock(0);
+            assert!(app.datetime.settings.additional_clocks.is_empty());
+        });
+    }
+
+    /// **A click on the Date & Time page reaches the file the shell reads**,
+    /// by the path every other page's clicks take: `handle_event` compares
+    /// the settings around the click and saves what changed. The test above
+    /// calls the save itself, so it would pass with that path cut.
+    #[test]
+    fn a_click_on_the_date_and_time_page_reaches_the_file() {
+        appearance::config::testing::with_scratch_config("settings-datetime-click", |_| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DateTime);
+            assert!(app.datetime.settings.add_clock("Asia/Tokyo", "Tokyo"));
+            let click = |app: &mut SettingsState, hit| {
+                let (x, y) = center_of(app, hit).expect("the row is on the page");
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+            };
+            let seconds = app.datetime.settings.show_seconds;
+            click(&mut app, RowHit::Toggle(ToggleId::ClockSeconds));
+            click(&mut app, RowHit::Toggle(ToggleId::WorldClock(0)));
+            let saved = datetimesettings::DateTimeFile::load().settings;
+            assert_eq!(
+                saved.show_seconds, !seconds,
+                "the seconds switch did not reach the file"
+            );
+            assert_eq!(saved.additional_clocks.len(), 1, "the clock was not kept");
+            assert!(
+                saved.additional_clocks.iter().all(|c| !c.visible),
+                "the clock's switch did not reach the file"
+            );
+        });
+    }
+
+    #[test]
+    fn four_world_clocks_are_the_most_and_the_page_says_so() {
+        let mut app = SettingsState::new();
+        app.go_to_page(SettingsPage::DateTime);
+        for zone in datetimesettings::zones()
+            .iter()
+            .take(datetimesettings::MAX_CLOCKS)
+        {
+            assert!(app.datetime.settings.add_clock(&zone.tz_id, &zone.city));
+        }
+        assert!(
+            center_of(&app, RowHit::Dropdown(DropdownId::AddClock)).is_none(),
+            "a fifth clock is offered"
+        );
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("Four clocks")),
+            "the page does not say why there is no Add: {texts:?}"
+        );
+        // Each clock's Remove button takes it off.
+        let (x, y) = center_of(&app, RowHit::Press(ButtonId::RemoveClock(0))).expect("a Remove");
+        app.handle_click(x, y);
+        assert_eq!(app.datetime.settings.additional_clocks.len(), 3);
+    }
+
+    // == The theme picker (lane C, c-e-a-colour-theme-picker) ==================
+
+    /// Every text the window draws.
+    fn drawn_texts(state: &SettingsState) -> Vec<String> {
+        state
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Themes in a scratch directory: one of both modes, one dark only, one
+    /// whose file sets no colours, and an icon pack.
+    fn scratch_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-themes");
+        let theme = |id: &str, yaml: Option<&str>, icons: bool| {
+            let folder = dir.dir().join(id);
+            std::fs::create_dir_all(&folder).expect("theme folder");
+            if let Some(yaml) = yaml {
+                std::fs::write(folder.join("theme.yaml"), yaml).expect("theme file");
+            }
+            if icons {
+                std::fs::create_dir_all(folder.join("icons")).expect("icons folder");
+            }
+        };
+        theme(
+            "nord",
+            Some(
+                "meta:\n  name: Nord\ncolors:\n  base: \"#2e3440\"\ncolors-light:\n  base: \"#eceff4\"\n",
+            ),
+            false,
+        );
+        theme(
+            "dusk",
+            Some("meta:\n  name: Dusk\ncolors:\n  base: \"#101018\"\n"),
+            false,
+        );
+        theme("plain", Some("meta:\n  name: Plain\n"), false);
+        theme("pack", None, true);
+        dir
+    }
+
+    fn themes_state(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut app = SettingsState::new();
+        app.theme_dirs = appearance::themes::ThemeDirs {
+            user: Some(dir.dir().to_path_buf()),
+            system: dir.dir().join("no-system-themes"),
+        };
+        app.go_to_page(SettingsPage::Themes);
+        app
+    }
+
+    #[test]
+    fn the_installed_themes_are_listed_and_one_that_cannot_be_used_says_why() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        app.show_dropdown(DropdownId::ColorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        assert!(
+            items.len() >= 5,
+            "the built-in theme and four installed: {items:?}"
+        );
+        assert!(items.contains(&"Nord".to_string()), "{items:?}");
+        assert!(items.contains(&"Dusk (dark only)".to_string()), "{items:?}");
+        assert!(
+            items
+                .iter()
+                .any(|i| i.starts_with("Plain -- cannot be used: it sets no colours")),
+            "{items:?}"
+        );
+        assert!(
+            items.iter().any(|i| i.ends_with("-- icons only")),
+            "{items:?}"
+        );
+
+        // Choosing one that cannot be used changes nothing.
+        let before = app.appearance.settings.color_theme.id().to_os_string();
+        let plain = items
+            .iter()
+            .position(|i| i.starts_with("Plain"))
+            .expect("listed");
+        app.apply_dropdown_selection(plain);
+        assert_eq!(app.appearance.settings.color_theme.id(), before.as_os_str());
+    }
+
+    #[test]
+    fn a_chosen_theme_is_the_settings_and_one_mode_themes_say_so() {
+        let dir = scratch_themes();
+        let mut app = themes_state(&dir);
+        app.show_dropdown(DropdownId::ColorTheme);
+        let items = app.dropdown_layout().expect("a layout").items;
+        let dusk = items
+            .iter()
+            .position(|i| i.starts_with("Dusk"))
+            .expect("listed");
+        app.apply_dropdown_selection(dusk);
+        assert_eq!(
+            app.appearance.settings.color_theme.id(),
+            std::ffi::OsStr::new("dusk")
+        );
+        assert_eq!(app.appearance.settings.color_theme.problem(), None);
+        let texts = drawn_texts(&app);
+        assert!(
+            texts.iter().any(|t| t.starts_with("Dark only")),
+            "a dark-only theme does not say so: {texts:?}"
+        );
+
+        app.show_dropdown(DropdownId::IconTheme);
+        let icons = app.dropdown_layout().expect("a layout").items;
+        let pack = icons
+            .iter()
+            .position(|i| i == "pack")
+            .expect("the pack is listed");
+        app.apply_dropdown_selection(pack);
+        assert_eq!(
+            app.appearance.settings.icon_theme.id(),
+            std::ffi::OsStr::new("pack")
+        );
+        assert_eq!(
+            app.appearance.settings.color_theme.id(),
+            std::ffi::OsStr::new("dusk"),
+            "choosing icons changed the colours"
+        );
+    }
+
+    /// **Each look keeps its own accent** (§1421, the operator's answer to
+    /// C-Q15): an accent chosen under Filled is Filled's, and switching back
+    /// to Outlined brings Outlined's back. The look pill assigned the field,
+    /// which carried the accent across.
+    #[test]
+    fn each_look_keeps_its_own_accent() {
+        let mut state = SettingsState::new();
+        // The look is chosen on the Themes page, the accent on the Colors page.
+        let click = |state: &mut SettingsState, page, hit| {
+            state.current_page = page;
+            let (x, y) = center_of(state, hit).expect("the control is on its page");
+            state.handle_click(x, y);
+        };
+        let accent = |name: AccentColor| {
+            RowHit::Select(
+                SelectId::AccentColor,
+                AccentColor::presets()
+                    .iter()
+                    .position(|a| *a == name)
+                    .expect("a preset"),
+            )
+        };
+        let look = |style: SurfaceStyle| {
+            RowHit::Pill(
+                PillId::SurfaceStyle,
+                SURFACE_STYLES
+                    .iter()
+                    .position(|s| *s == style)
+                    .expect("a look"),
+            )
+        };
+        let (themes, colors) = (SettingsPage::Themes, SettingsPage::Colors);
+        click(&mut state, themes, look(SurfaceStyle::Borders));
+        click(&mut state, colors, accent(AccentColor::Green));
+        click(&mut state, themes, look(SurfaceStyle::Cards));
+        click(&mut state, colors, accent(AccentColor::Mauve));
+        assert_eq!(state.appearance.settings.accent_color, AccentColor::Mauve);
+        click(&mut state, themes, look(SurfaceStyle::Borders));
+        assert_eq!(
+            state.appearance.settings.accent_color,
+            AccentColor::Green,
+            "the outlined look lost its accent to the filled one's"
+        );
+        click(&mut state, themes, look(SurfaceStyle::Cards));
+        assert_eq!(state.appearance.settings.accent_color, AccentColor::Mauve);
+    }
+
+    /// **The automatic mode's hours are beside "System (Auto)", and only
+    /// there**; a time chosen from the list is saved to the file the desktop
+    /// reads, and the other end's time is not offered, since equal hours
+    /// never change.
+    #[test]
+    fn the_automatic_modes_hours_are_chosen_beside_it_and_reach_the_file() {
+        appearance::config::testing::with_scratch_config("settings-auto-hours", |root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Themes;
+            app.appearance.settings.theme_mode = ThemeMode::Dark;
+            assert!(
+                center_of(&app, RowHit::Dropdown(DropdownId::AutoLightFrom)).is_none(),
+                "the hours are shown for a mode they do not govern"
+            );
+            app.appearance.settings.theme_mode = ThemeMode::System;
+            for id in [DropdownId::AutoLightFrom, DropdownId::AutoDarkFrom] {
+                assert!(
+                    center_of(&app, RowHit::Dropdown(id)).is_some(),
+                    "{id:?} is not beside System (Auto)"
+                );
+            }
+            let dark_from = app.appearance.settings.auto_light_hours.end();
+
+            app.show_dropdown(DropdownId::AutoLightFrom);
+            let items = app.dropdown_layout().expect("a layout").items;
+            assert!(
+                !items.contains(&notifsettings::format_hm(dark_from)),
+                "the dark hour is offered as the light one: {items:?}"
+            );
+            let at = items
+                .iter()
+                .position(|label| label == "06:30")
+                .expect("half past six is not offered");
+            app.apply_dropdown_selection(at);
+            let hours = app.appearance.settings.auto_light_hours;
+            assert_eq!(notifsettings::format_hm(hours.start()), "06:30");
+            assert_eq!(
+                hours.end(),
+                dark_from,
+                "the dark hour moved with the light one"
+            );
+
+            // What handle_event does after a change (the auto-hide test drives
+            // that path end to end); this checks the hours reach the file.
+            app.save_appearance();
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "nothing was written to {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(
+                notifsettings::format_hm(saved.auto_light_hours.start()),
+                "06:30",
+                "the hour did not survive the round trip to disk"
+            );
+        });
     }
 
     /// Setting one end of the window leaves the other where it was.
@@ -8755,6 +9585,16 @@ mod tests {
         // control as the fit chooser above. `rotation_detail_rows_wait_for_a_folder`
         // is where that is asserted from the other side.
         state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pictures"));
+        // And the automatic mode's hours, which are beside "System (Auto)"
+        // only when it is the mode chosen.
+        state.appearance.settings.theme_mode = ThemeMode::System;
+        // The themes list, from folders that do not exist: the built-in
+        // theme alone, and nothing of the machine running the test read.
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: std::path::PathBuf::from("/nonexistent/slateos-test/themes"),
+        };
+        state.refresh_themes();
         // And the two font pickers, which are drawn only when the system has
         // families to offer -- a chooser with nothing in it reads as broken,
         // so the page says so in a note instead. A test enumerates no fonts,
@@ -9666,6 +10506,44 @@ mod tests {
         }
     }
 
+    /// **The window-titles switch is beside auto-hide and reaches the file**
+    /// the desktop reads -- on by default, as the reference labels every
+    /// running window, and off after one click.
+    #[test]
+    fn test_the_taskbar_labels_toggle_is_on_the_themes_page_and_reaches_the_file() {
+        appearance::config::testing::with_scratch_config("settings-labels", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Themes;
+            assert!(
+                state.appearance.settings.taskbar_labels,
+                "window titles should start on"
+            );
+            let (cx, cy) = center_of(&state, RowHit::Toggle(ToggleId::TaskbarLabels))
+                .expect("the toggle should be on the Themes page");
+            let (_, below) = center_of(&state, RowHit::Toggle(ToggleId::TaskbarAutohide))
+                .expect("auto-hide should be on the Themes page too");
+            assert!(cy > below, "the switch should come after auto-hide");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert!(
+                !state.appearance.settings.taskbar_labels,
+                "the click did not take"
+            );
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "the click should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert!(
+                !saved.taskbar_labels,
+                "the setting did not survive the round trip to disk"
+            );
+        });
+    }
+
     #[test]
     fn test_the_taskbar_autohide_toggle_is_on_the_themes_page_and_reaches_the_file() {
         // Two claims the exhaustive walk above does not make on its own. It
@@ -10503,6 +11381,51 @@ mod tests {
         click(&mut state, layout.x + 20.0, layout.y + 1.0);
         assert_eq!(state.resolution_index, 2);
         assert!(state.open_dropdown.is_none());
+    }
+
+    /// **The pointer's size and colours are the appearance settings the
+    /// compositor reads**: every size appearance offers, Huge and Giant
+    /// included, and each choice reaching `appearance.yaml`.
+    #[test]
+    fn the_cursor_size_and_colours_reach_the_file_the_compositor_reads() {
+        appearance::config::testing::with_scratch_config("settings-cursor", |root| {
+            let mut app = SettingsState::new();
+            app.current_page = SettingsPage::Visual;
+            app.show_dropdown(DropdownId::CursorSize);
+            let items = app.dropdown_layout().expect("a layout").items;
+            let offered: Vec<String> = appearance::CursorSize::ALL
+                .iter()
+                .map(|c| c.label().to_string())
+                .collect();
+            assert_eq!(items, offered, "not every size appearance has is offered");
+            let giant = items
+                .iter()
+                .position(|l| l.starts_with("Giant"))
+                .expect("Giant is offered");
+            app.apply_dropdown_selection(giant);
+            assert_eq!(
+                app.appearance.settings.cursor_size,
+                appearance::CursorSize::Giant
+            );
+
+            app.show_dropdown(DropdownId::CursorScheme);
+            let schemes = app.dropdown_layout().expect("a layout").items;
+            let inverted = schemes
+                .iter()
+                .position(|l| l == "Inverted")
+                .expect("Inverted is offered");
+            app.apply_dropdown_selection(inverted);
+
+            // What handle_event does after a change; the auto-hide test drives
+            // that path end to end.
+            app.save_appearance();
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "nothing was written to {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.cursor_size, appearance::CursorSize::Giant);
+            assert_eq!(saved.cursor_scheme, appearance::CursorScheme::Inverted);
+        });
     }
 
     #[test]
@@ -12256,7 +13179,7 @@ mod against_the_real_compositor {
         let strokes_for = |style| {
             let mut state = SettingsState::new();
             state.current_page = SettingsPage::Themes;
-            state.appearance.settings.surface_style = style;
+            state.appearance.settings.set_surface_style(style);
             let mut tree = RenderTree::new();
             state.render_current_page(&mut tree, 0.0, 0.0);
             tree.commands

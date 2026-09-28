@@ -397,9 +397,9 @@ impl BinView {
     pub fn button_state(&self, button: BinButton) -> DisabledState {
         let reason = match button {
             BinButton::Restore if self.chosen.is_empty() => Some("Choose what to put back"),
-            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => Some(
-                "A damaged entry does not say where it came from, so it cannot be put back",
-            ),
+            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => {
+                Some("A damaged entry does not say where it came from, so it cannot be put back")
+            }
             BinButton::DeleteForever if self.chosen.is_empty() => Some("Choose what to delete"),
             BinButton::Empty if self.entries.is_empty() => Some("The recycle bin is empty"),
             _ => None,
@@ -538,7 +538,13 @@ impl BinView {
             let y = layout.rows.y + row as f32 * ROW_H;
             let table_w = layout.table_w();
             if self.chosen.contains(&entry.id) {
-                tree.fill_rect(layout.rows.x, y, table_w, ROW_H, with_alpha(palette.accent, 40));
+                tree.fill_rect(
+                    layout.rows.x,
+                    y,
+                    table_w,
+                    ROW_H,
+                    with_alpha(palette.accent, 40),
+                );
             } else if index % 2 == 1 {
                 tree.fill_rect(layout.rows.x, y, table_w, ROW_H, palette.base);
             }
@@ -649,7 +655,8 @@ mod tests {
         RecycleEntry {
             id: id.to_string(),
             original_path: path.map(PathBuf::from),
-            recycled_at: path.and_then(|_| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs))),
+            recycled_at: path
+                .and_then(|_| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs))),
             size: 1536,
             is_dir: false,
             is_link: false,
@@ -705,7 +712,11 @@ mod tests {
         let e = entry("damaged", None, 0);
         assert_eq!(folder_text(&e), "Unknown");
         assert_eq!(deleted_text(&e), "Unknown");
-        assert!(!e.display_name().contains("damaged_"), "{}", e.display_name());
+        assert!(
+            !e.display_name().contains("damaged_"),
+            "{}",
+            e.display_name()
+        );
     }
 
     #[test]
@@ -717,20 +728,32 @@ mod tests {
         assert_eq!(chosen_ids(&view), ["a"]);
         assert_eq!(view.cursor(), Some(2));
         view.choose_only(9);
-        assert_eq!(chosen_ids(&view), ["a"], "a row that is not there chose nothing");
+        assert_eq!(
+            chosen_ids(&view),
+            ["a"],
+            "a row that is not there chose nothing"
+        );
     }
 
     #[test]
     fn the_arrows_move_the_choice_and_shift_extends_it() {
         let mut view = three();
         view.step(1, false);
-        assert_eq!(chosen_ids(&view), ["c"], "the first press lands on the first row");
+        assert_eq!(
+            chosen_ids(&view),
+            ["c"],
+            "the first press lands on the first row"
+        );
         view.step(1, true);
         assert_eq!(chosen_ids(&view), ["c", "b"]);
         view.step(1, true);
         assert_eq!(chosen_ids(&view), ["c", "b", "a"]);
         view.step(-1, true);
-        assert_eq!(chosen_ids(&view), ["c", "b"], "shrinks back towards the anchor");
+        assert_eq!(
+            chosen_ids(&view),
+            ["c", "b"],
+            "shrinks back towards the anchor"
+        );
         view.step(1, false);
         assert_eq!(chosen_ids(&view), ["a"]);
         view.step(5, false);
@@ -768,7 +791,10 @@ mod tests {
         damaged.choose_only(0);
         let restore = damaged.button_state(BinButton::Restore);
         assert!(restore.is_disabled());
-        assert!(restore.reason().is_some_and(|r| r.contains("damaged")), "{restore:?}");
+        assert!(
+            restore.reason().is_some_and(|r| r.contains("damaged")),
+            "{restore:?}"
+        );
         assert!(damaged.button_state(BinButton::DeleteForever).is_enabled());
 
         let empty = view_of(Vec::new());
@@ -815,11 +841,17 @@ mod tests {
         for (button, rect) in layout.buttons {
             let hit = view.hit(pane, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
             assert_eq!(hit, Some(BinHit::Button(button)));
-            assert!(rect.x + rect.w <= pane.x + pane.w, "{button:?} runs off the pane");
+            assert!(
+                rect.x + rect.w <= pane.x + pane.w,
+                "{button:?} runs off the pane"
+            );
         }
         let [(_, restore), (_, forever), (_, empty)] = layout.buttons;
         assert!(restore.x + restore.w < forever.x);
-        assert!(forever.x + forever.w < empty.x, "Empty overlaps Delete permanently");
+        assert!(
+            forever.x + forever.w < empty.x,
+            "Empty overlaps Delete permanently"
+        );
     }
 
     #[test]

@@ -624,7 +624,10 @@ enum Modal {
     ///
     /// Its own variant rather than a [`PendingAction`]: that one acts on the
     /// folder's selection, and this on entries of the bin, named by id.
-    ConfirmBin { dialog: AlertDialog, action: BinAction },
+    ConfirmBin {
+        dialog: AlertDialog,
+        action: BinAction,
+    },
     /// A rename in progress, awaiting the new name.
     Rename {
         dialog: InputDialog,
@@ -6917,7 +6920,10 @@ fn restore_outcome(restored: &[(String, PathBuf, bool)], failed: &[String]) -> O
     } else {
         format!("{done}; {not}")
     };
-    Outcome::failed(message.clone(), format!("{message}.\n\n{}", failed.join("\n")))
+    Outcome::failed(
+        message.clone(),
+        format!("{message}.\n\n{}", failed.join("\n")),
+    )
 }
 
 fn main() -> std::process::ExitCode {
@@ -7545,7 +7551,10 @@ mod tests {
         }
         let bottom = state.viewport.first_visible();
         let last_page = state.entries.len().saturating_sub(state.visible_capacity());
-        assert_eq!(bottom, last_page, "the wheel stopped somewhere other than the last page");
+        assert_eq!(
+            bottom, last_page,
+            "the wheel stopped somewhere other than the last page"
+        );
 
         // And the first notch back moves the view: no overshoot to spend.
         let _ = state.handle_event(&notch(1.0));
@@ -7607,7 +7616,10 @@ mod tests {
         let mut state = state_at(&dir.path(""));
         state.view_mode = ViewMode::Icons;
         let cols = state.icon_columns();
-        assert!(cols > 1 && 61 % cols != 0, "{cols} columns leave no short last row");
+        assert!(
+            cols > 1 && 61 % cols != 0,
+            "{cols} columns leave no short last row"
+        );
         let _ = state.handle_event(&Event::Key(key_press(Key::End)));
         let _ = state.render();
         assert!(
@@ -7645,7 +7657,11 @@ mod tests {
         for _ in 0..70 {
             let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
             let _ = state.render();
-            let chosen = state.selected_indices.first().copied().expect("a selection");
+            let chosen = state
+                .selected_indices
+                .first()
+                .copied()
+                .expect("a selection");
             assert!(
                 state.dropzone.file_row_rect(chosen).is_some(),
                 "icon {chosen} is chosen and not drawn"
@@ -7662,11 +7678,18 @@ mod tests {
         let mut state = state_at(&dir.path(""));
         state.preview_open = true;
         state.preview_side = columnprefs::PreviewSide::Bottom;
-        assert!(state.list_rect().h < state.pane_rect().h, "the preview took no room");
+        assert!(
+            state.list_rect().h < state.pane_rect().h,
+            "the preview took no room"
+        );
         for _ in 0..40 {
             let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
             let _ = state.render();
-            let chosen = state.selected_indices.first().copied().expect("a selection");
+            let chosen = state
+                .selected_indices
+                .first()
+                .copied()
+                .expect("a selection");
             let list = state.list_rect();
             let row = state
                 .dropzone
@@ -7692,7 +7715,10 @@ mod tests {
         state.preview_side = columnprefs::PreviewSide::Left;
         let (pane, list) = (state.pane_rect(), state.list_rect());
         assert!(list.x > pane.x, "the preview is not on the left");
-        assert!(!state.over_column_header(pane.x + 5.0, pane.y + 5.0), "the preview's top opened the column menu");
+        assert!(
+            !state.over_column_header(pane.x + 5.0, pane.y + 5.0),
+            "the preview's top opened the column menu"
+        );
         assert!(state.over_column_header(list.x + 5.0, list.y + 5.0));
     }
 
@@ -7706,8 +7732,13 @@ mod tests {
         state.preview_open = true;
         state.preview_side = columnprefs::PreviewSide::Right;
         let list = state.list_rect();
-        assert!(list.w < state.pane_rect().w, "the preview took no room, so this checks nothing");
-        let track = state.scrollbar_track().expect("sixty files and no scrollbar");
+        assert!(
+            list.w < state.pane_rect().w,
+            "the preview took no room, so this checks nothing"
+        );
+        let track = state
+            .scrollbar_track()
+            .expect("sixty files and no scrollbar");
         assert!(
             (track.x + track.w - (list.x + list.w)).abs() < 0.5,
             "the bar is at {track:?}, the listing ends at {}",
@@ -13802,7 +13833,10 @@ mod tests {
         let _ = state.render();
         let row = state.sidebar_bin_rect();
         click_point(&mut state, (row.x + 20.0, row.y + row.h / 2.0));
-        assert!(state.bin.is_some(), "the sidebar's Recycle Bin opened nothing");
+        assert!(
+            state.bin.is_some(),
+            "the sidebar's Recycle Bin opened nothing"
+        );
 
         let drawn = texts(&state.render());
         assert!(drawn.iter().any(|t| t == "report.txt"), "{drawn:?}");
@@ -13824,7 +13858,11 @@ mod tests {
             explorer_for(&["--recycle-bin".into()], Some(home.dir().to_path_buf()))
         };
         assert!(state.bin.is_some(), "--recycle-bin opened a folder");
-        assert_eq!(state.current_path, home.dir(), "Back from the bin should go home");
+        assert_eq!(
+            state.current_path,
+            home.dir(),
+            "Back from the bin should go home"
+        );
         assert!(state.status_message.is_empty(), "{}", state.status_message);
     }
 
@@ -13849,7 +13887,11 @@ mod tests {
         // What was put back is no longer chosen: nothing is, and the buttons
         // that act on the choice are off again.
         assert!(bin_of(&state).chosen().is_empty());
-        assert!(bin_of(&state).button_state(BinButton::DeleteForever).is_disabled());
+        assert!(
+            bin_of(&state)
+                .button_state(BinButton::DeleteForever)
+                .is_disabled()
+        );
 
         // And the folder shows it once the bin is left.
         send(&mut state, &key(Key::Escape));
@@ -13870,10 +13912,16 @@ mod tests {
         state.bin.as_mut().unwrap().choose_only(0);
         send(&mut state, &key(Key::Enter));
 
-        assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "the new one");
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).unwrap(),
+            "the new one"
+        );
         assert_eq!(fs::read_to_string(root.join("a (2).txt")).unwrap(), "a.txt");
         let said = state.status_bar_text().to_string();
-        assert!(said.contains("as a (2).txt") && said.contains("taken"), "{said}");
+        assert!(
+            said.contains("as a (2).txt") && said.contains("taken"),
+            "{said}"
+        );
     }
 
     #[test]
@@ -13917,7 +13965,11 @@ mod tests {
             _ => panic!("Delete in the bin did not ask"),
         }
         send(&mut state, &key(Key::Enter));
-        assert_eq!(bin_names(&state), ["a.txt", "b.txt"], "a refusal erased something");
+        assert_eq!(
+            bin_names(&state),
+            ["a.txt", "b.txt"],
+            "a refusal erased something"
+        );
 
         send(&mut state, &key(Key::Delete));
         confirm_modal(&mut state);
@@ -13953,7 +14005,10 @@ mod tests {
 
         assert_eq!(bin_names(&state), ["late.txt"]);
         let said = state.status_bar_text().to_string();
-        assert!(said.contains("Deleted 2 items permanently") && said.contains("kept"), "{said}");
+        assert!(
+            said.contains("Deleted 2 items permanently") && said.contains("kept"),
+            "{said}"
+        );
 
         // With nothing arriving, it says the bin is empty -- and it is.
         let _ = state.render();
@@ -13973,7 +14028,11 @@ mod tests {
         fs::write(state.recycle.root().join(&id).join("meta.txt"), "damaged").unwrap();
         state.open_recycle_bin();
         state.bin.as_mut().unwrap().choose_only(0);
-        assert!(bin_of(&state).button_state(BinButton::Restore).is_disabled());
+        assert!(
+            bin_of(&state)
+                .button_state(BinButton::Restore)
+                .is_disabled()
+        );
         // The button is off, and a press on it is spent there.
         let _ = state.render();
         let at = bin_button_at(&state, BinButton::Restore);
@@ -13987,12 +14046,18 @@ mod tests {
             "{}",
             state.status_bar_text()
         );
-        assert!(matches!(state.modal, Some(Modal::Notice { .. })), "a failure goes unseen");
+        assert!(
+            matches!(state.modal, Some(Modal::Notice { .. })),
+            "a failure goes unseen"
+        );
         send(&mut state, &key(Key::Escape));
 
         send(&mut state, &key(Key::Delete));
         confirm_modal(&mut state);
-        assert!(bin_of(&state).entries().is_empty(), "the damaged entry could not be erased");
+        assert!(
+            bin_of(&state).entries().is_empty(),
+            "the damaged entry could not be erased"
+        );
     }
 
     #[test]
@@ -14004,7 +14069,10 @@ mod tests {
             state.open_recycle_bin();
             state.bin.as_mut().unwrap().choose_only(0);
             let _ = state.render();
-            assert!(bin_of(&state).button_state(button).is_enabled(), "{button:?}");
+            assert!(
+                bin_of(&state).button_state(button).is_enabled(),
+                "{button:?}"
+            );
             let at = bin_button_at(&state, button);
             click_point(&mut state, at);
             let acted = state.modal.is_some() || root.join("a.txt").exists();
@@ -14060,7 +14128,10 @@ mod tests {
             .unwrap();
         click_point(&mut state, (back.x + back.w / 2.0, back.y + back.h / 2.0));
         assert!(state.bin.is_none());
-        assert_eq!(state.current_path, root, "Back went through history instead");
+        assert_eq!(
+            state.current_path, root,
+            "Back went through history instead"
+        );
     }
 
     #[test]
@@ -14077,7 +14148,10 @@ mod tests {
         // The folder it was opened over is a way out too, not a no-op.
         state.open_recycle_bin();
         state.navigate_to(&root.join("sub"));
-        assert!(state.bin.is_none(), "choosing the current folder left the bin up");
+        assert!(
+            state.bin.is_none(),
+            "choosing the current folder left the bin up"
+        );
     }
 
     #[test]
@@ -14092,7 +14166,10 @@ mod tests {
         // Nothing is chosen in the bin, so Delete there has nothing to ask
         // about -- and must not ask about the folder's keep.txt instead.
         send(&mut state, &key(Key::Delete));
-        assert!(state.modal.is_none(), "Delete asked about a file behind the bin");
+        assert!(
+            state.modal.is_none(),
+            "Delete asked about a file behind the bin"
+        );
         send(&mut state, &key(Key::F2));
         assert!(state.modal.is_none(), "F2 renamed a file behind the bin");
         state.clipboard = Some(ClipboardOp::Copy(vec![root.join("keep.txt")]));
@@ -14111,14 +14188,23 @@ mod tests {
         dir_with_files(&root, 5);
         let mut state = state_with_recycled(&root, &["gone.txt"]);
         let _ = state.render();
-        let row = state.dropzone.file_row_rect(2).expect("the folder's rows were drawn");
+        let row = state
+            .dropzone
+            .file_row_rect(2)
+            .expect("the folder's rows were drawn");
         // The bin opens, and no frame is drawn before the click: the zones
         // still hold the folder's rows.
         state.open_recycle_bin();
         click_point(&mut state, (row.x + 30.0, row.y + row.h / 2.0));
-        assert!(state.selected_indices.is_empty(), "the click chose a file behind the bin");
+        assert!(
+            state.selected_indices.is_empty(),
+            "the click chose a file behind the bin"
+        );
         send(&mut state, &double_click(row.x + 30.0, row.y + row.h / 2.0));
-        assert_eq!(state.current_path, root, "a double click opened something behind the bin");
+        assert_eq!(
+            state.current_path, root,
+            "a double click opened something behind the bin"
+        );
     }
 
     #[test]
@@ -14128,17 +14214,37 @@ mod tests {
         let names: Vec<String> = (0..60).map(|i| format!("f{i:02}.txt")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut state = state_with_recycled(&root, &refs);
-        assert!(state.scrollbar_track().is_none(), "an empty folder has no scrollbar");
+        assert!(
+            state.scrollbar_track().is_none(),
+            "an empty folder has no scrollbar"
+        );
 
         state.open_recycle_bin();
         let _ = state.render();
-        let track = state.scrollbar_track().expect("sixty items and no scrollbar");
-        assert!(press(&mut state, track.x + track.w / 2.0, track.y + track.h - 2.0));
-        assert!(bin_of(&state).first_visible() > 0, "the track did not page the bin");
-        assert_eq!(state.viewport.first_visible(), 0, "the folder behind scrolled");
+        let track = state
+            .scrollbar_track()
+            .expect("sixty items and no scrollbar");
+        assert!(press(
+            &mut state,
+            track.x + track.w / 2.0,
+            track.y + track.h - 2.0
+        ));
+        assert!(
+            bin_of(&state).first_visible() > 0,
+            "the track did not page the bin"
+        );
+        assert_eq!(
+            state.viewport.first_visible(),
+            0,
+            "the folder behind scrolled"
+        );
 
         send(&mut state, &key(Key::Home));
-        assert_eq!(bin_of(&state).first_visible(), 0, "Home did not bring the first row back");
+        assert_eq!(
+            bin_of(&state).first_visible(),
+            0,
+            "Home did not bring the first row back"
+        );
         for _ in 0..5 {
             send(
                 &mut state,
@@ -14149,11 +14255,17 @@ mod tests {
                 }),
             );
         }
-        assert!(bin_of(&state).first_visible() > 0, "the wheel did not scroll the bin");
+        assert!(
+            bin_of(&state).first_visible() > 0,
+            "the wheel did not scroll the bin"
+        );
         // The keyboard brings its row back into sight.
         send(&mut state, &key(Key::Down));
         assert_eq!(bin_of(&state).cursor(), Some(1));
-        assert!(bin_of(&state).first_visible() <= 1, "the chosen row is out of sight");
+        assert!(
+            bin_of(&state).first_visible() <= 1,
+            "the chosen row is out of sight"
+        );
     }
 
     #[test]
@@ -14162,9 +14274,15 @@ mod tests {
         let root = scratch.dir().to_path_buf();
         let mut state = state_with_recycled(&root, &["a.txt"]);
         state.preview_open = true;
-        assert!(state.preview_divider_rect().is_some(), "the preview is not open, so this checks nothing");
+        assert!(
+            state.preview_divider_rect().is_some(),
+            "the preview is not open, so this checks nothing"
+        );
         state.open_recycle_bin();
-        assert!(state.preview_divider_rect().is_none(), "the preview's divider is over the bin");
+        assert!(
+            state.preview_divider_rect().is_none(),
+            "the preview's divider is over the bin"
+        );
         assert_eq!(state.list_rect(), state.pane_rect());
     }
 
@@ -14219,9 +14337,20 @@ mod tests {
             &[("a.txt".into(), at("/x/a.txt"), false)],
             &["b.txt: denied".to_string()],
         );
-        assert_eq!(partly.message, "Restored a.txt to /x; 1 item could not be put back");
-        assert!(partly.failure.as_deref().is_some_and(|d| d.contains("b.txt: denied")));
+        assert_eq!(
+            partly.message,
+            "Restored a.txt to /x; 1 item could not be put back"
+        );
+        assert!(
+            partly
+                .failure
+                .as_deref()
+                .is_some_and(|d| d.contains("b.txt: denied"))
+        );
         let none = restore_outcome(&[], &["b.txt: denied".to_string()]);
-        assert_eq!(none.message, "Nothing restored: 1 item could not be put back");
+        assert_eq!(
+            none.message,
+            "Nothing restored: 1 item could not be put back"
+        );
     }
 }

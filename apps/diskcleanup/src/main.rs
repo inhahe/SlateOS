@@ -2882,7 +2882,8 @@ mod tests {
         scratch.file("home/alice/Documents/gone.txt", 8);
         let home = Path::new(scratch.as_str()).join("home/alice");
         let bin = recyclebin::RecycleBin::new(home.join(".recycle"), Duration::from_hours(1));
-        bin.recycle(&home.join("Documents/gone.txt")).expect("recycle");
+        bin.recycle(&home.join("Documents/gone.txt"))
+            .expect("recycle");
 
         let mut scanner = CleanupScanner::new().with_home("home/alice");
         scanner.scan_recycle_bin(scratch.as_str());
@@ -2890,7 +2891,10 @@ mod tests {
         assert_eq!(scanner.items().len(), 1);
         let item = &scanner.items()[0];
         assert_eq!(item.category, CleanupCategory::RecycleBin);
-        assert_eq!(item.estimated_size_bytes, 8 + fs::metadata(item.path.join("meta.txt")).unwrap().len());
+        assert_eq!(
+            item.estimated_size_bytes,
+            8 + fs::metadata(item.path.join("meta.txt")).unwrap().len()
+        );
         let label = item.label();
         assert!(label.starts_with("gone.txt, from "), "{label}");
         assert!(label.contains("Documents"), "{label}");
@@ -2899,7 +2903,10 @@ mod tests {
         let plan = CleanupPlan::build(&scanner, &[CleanupCategory::RecycleBin]);
         let result = CleanupExecutor::execute(&plan);
         assert!(result.is_success(), "{result:?}");
-        assert!(bin.list().expect("list").is_empty(), "the bin still lists it");
+        assert!(
+            bin.list().expect("list").is_empty(),
+            "the bin still lists it"
+        );
     }
 
     /// Another desktop's bin, which nothing on SlateOS writes, is not looked in.
@@ -2944,7 +2951,11 @@ mod tests {
         assert_eq!(place("/home/alice"), Some(PathBuf::from("home/alice")));
         assert_eq!(place("/home/alice/"), Some(PathBuf::from("home/alice")));
         assert_eq!(place("/"), None, "the root is nobody's home");
-        assert_eq!(place("home/alice"), None, "a relative home cannot be placed");
+        assert_eq!(
+            place("home/alice"),
+            None,
+            "a relative home cannot be placed"
+        );
         assert_eq!(place("/home/../etc"), None, "a home that climbs is refused");
         assert_eq!(home_under_root(None), None);
     }

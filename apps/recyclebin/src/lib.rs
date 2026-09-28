@@ -1381,7 +1381,10 @@ mod tests {
 
         let left: Vec<String> = bin.list().unwrap().into_iter().map(|e| e.id).collect();
         assert_eq!(left, [b]);
-        assert!(!bin.root().join(&a).exists(), "the entry's folder is still there");
+        assert!(
+            !bin.root().join(&a).exists(),
+            "the entry's folder is still there"
+        );
         assert!(!dir.join("a.txt").exists(), "deleting it put it back");
     }
 
@@ -1413,7 +1416,16 @@ mod tests {
         write_file(&dir.join("a.txt"), "aaa");
         bin.recycle(&dir.join("a.txt")).unwrap();
 
-        for id in ["../victim", "..", ".", "", "a/b", "../keep.txt", "/tmp", "sub/../x"] {
+        for id in [
+            "../victim",
+            "..",
+            ".",
+            "",
+            "a/b",
+            "../keep.txt",
+            "/tmp",
+            "sub/../x",
+        ] {
             let deleted = bin.delete(id);
             assert_eq!(
                 deleted.as_ref().map_err(io::Error::kind),
@@ -1427,9 +1439,16 @@ mod tests {
                 "restore({id:?})"
             );
         }
-        assert_eq!(read_file(&dir.join("victim").join("inside.txt")), "not in the bin");
+        assert_eq!(
+            read_file(&dir.join("victim").join("inside.txt")),
+            "not in the bin"
+        );
         assert_eq!(read_file(&dir.join("keep.txt")), "not in the bin");
-        assert_eq!(bin.list().unwrap().len(), 1, "a refused id touched the real entry");
+        assert_eq!(
+            bin.list().unwrap().len(),
+            1,
+            "a refused id touched the real entry"
+        );
     }
 
     /// Emptying says which entries it could not delete; they stay listed.
@@ -1459,8 +1478,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(bin.root().join(&held), fs::Permissions::from_mode(0o500))
-                .unwrap();
+            fs::set_permissions(bin.root().join(&held), fs::Permissions::from_mode(0o500)).unwrap();
         }
 
         let emptied = bin.empty().unwrap();
@@ -1478,7 +1496,10 @@ mod tests {
             assert_eq!(entry.id, held, "blamed the wrong entry");
         }
         #[cfg(windows)]
-        assert!(still_there, "the lock did not hold, so this checked nothing");
+        assert!(
+            still_there,
+            "the lock did not hold, so this checked nothing"
+        );
     }
 
     /// A recycled link is listed as a link, and not as what it names.
@@ -1510,7 +1531,10 @@ mod tests {
         let scratch = temp_dir("recycle_planted_link");
         let root = scratch.dir().to_path_buf();
         fs::create_dir_all(root.join("outside")).unwrap();
-        write_file(&root.join("outside").join("meta.txt"), "slate-recycle-v2\n/x\n5\n");
+        write_file(
+            &root.join("outside").join("meta.txt"),
+            "slate-recycle-v2\n/x\n5\n",
+        );
         write_file(&root.join("outside").join("keep.txt"), "not in the bin");
         let bin = RecycleBin::new(root.join("bin"), Duration::from_hours(24));
         fs::create_dir_all(bin.root()).unwrap();
@@ -1519,10 +1543,16 @@ mod tests {
             return;
         }
 
-        assert!(bin.list().unwrap().is_empty(), "the link was listed as an entry");
+        assert!(
+            bin.list().unwrap().is_empty(),
+            "the link was listed as an entry"
+        );
         let emptied = bin.empty().unwrap();
         assert_eq!(emptied.deleted, 0);
-        assert_eq!(read_file(&root.join("outside").join("keep.txt")), "not in the bin");
+        assert_eq!(
+            read_file(&root.join("outside").join("keep.txt")),
+            "not in the bin"
+        );
     }
 
     /// A damaged entry's size counts what is in the bin, never what a link
@@ -1546,7 +1576,15 @@ mod tests {
         let listed = bin.list().unwrap();
         let entry = listed.first().expect("one entry");
         assert!(!entry.is_readable());
-        assert!(entry.size < 100_000, "measured through the link: {}", entry.size);
-        assert!(entry.size >= 5, "missed the file that is in the bin: {}", entry.size);
+        assert!(
+            entry.size < 100_000,
+            "measured through the link: {}",
+            entry.size
+        );
+        assert!(
+            entry.size >= 5,
+            "missed the file that is in the bin: {}",
+            entry.size
+        );
     }
 }

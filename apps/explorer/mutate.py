@@ -540,8 +540,8 @@ BINVIEW = [
     ),
     (
         "a damaged entry may be put back",
-        "            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => Some(",
-        "            BinButton::Restore if false => Some(",
+        "            BinButton::Restore if !self.chosen().iter().any(|e| e.is_readable()) => {",
+        "            BinButton::Restore if false => {",
         [BIN_BUTTONS],
     ),
     (

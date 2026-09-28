@@ -170,6 +170,7 @@ impl SettingsCategory {
                 SettingsPage::Sound,
                 SettingsPage::Mouse,
                 SettingsPage::Notifications,
+                SettingsPage::DateTime,
                 SettingsPage::Power,
             ],
             Self::Network => &[
@@ -216,6 +217,7 @@ pub enum SettingsPage {
     Sound,
     Mouse,
     Notifications,
+    DateTime,
     Power,
     // Network
     NetworkStatus,
@@ -270,6 +272,7 @@ impl SettingsPage {
             Self::Sound => "sound",
             Self::Mouse => "mouse",
             Self::Notifications => "notifications",
+            Self::DateTime => "date-time",
             Self::Power => "power",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
@@ -318,6 +321,7 @@ impl SettingsPage {
             Self::Sound => "Sound",
             Self::Mouse => "Mouse",
             Self::Notifications => "Notifications",
+            Self::DateTime => "Date & Time",
             Self::Power => "Power",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
@@ -623,6 +627,10 @@ pub struct SettingsState {
     /// `NotifFile` gives: a save splices into the document that was read, so
     /// the user's comments and any key a newer desktop wrote survive.
     pub notif: notifsettings::NotifFile,
+    /// The clock's settings, `datetime.yaml` (lane C's `datetimesettings`,
+    /// design-decisions §875): the zone, the taskbar clock and the world
+    /// clocks. Read by `main`, not by `new`, like the other files.
+    pub datetime: datetimesettings::DateTimeFile,
     /// Set when the rules have been written and the desktop has not been told.
     notif_dirty: bool,
 
@@ -847,6 +855,10 @@ pub enum DropdownId {
     ColorTheme,
     /// The icon theme, chosen apart from the colours (`icon_theme`, §880).
     IconTheme,
+    /// The clock's time zone, or the machine's own.
+    TimeZone,
+    /// A zone to add a world clock for.
+    AddClock,
     Resolution,
     RefreshRate,
     Scale,
@@ -903,9 +915,11 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 20] = [
+    pub const FIXED: [Self; 22] = [
         Self::QuietStart,
         Self::QuietEnd,
+        Self::TimeZone,
+        Self::AddClock,
         Self::AutoLightFrom,
         Self::AutoDarkFrom,
         Self::ColorTheme,
@@ -936,6 +950,7 @@ struct SettingsSnapshot {
     notif: notifsettings::NotifSettings,
     /// The lock screen's clock: (seconds, date) -- `lockscreen.yaml`.
     lock_clock: (bool, bool),
+    datetime: datetimesettings::DateTimeSettings,
 }
 
 /// Which of them an event changed.
@@ -948,6 +963,7 @@ struct ChangedDocuments {
     input: bool,
     notif: bool,
     lock_clock: bool,
+    datetime: bool,
 }
 
 impl Default for SettingsState {
@@ -980,6 +996,80 @@ impl SettingsState {
     pub fn load_font_families(&mut self) {
         self.font_families = guitk::text::available_families();
         self.mono_families = guitk::text::available_mono_families();
+    }
+
+    /// The zones a world clock can be added for: every zone not already on
+    /// a clock of its city's name.
+    fn zones_to_add(&self) -> Vec<&'static datetimesettings::TimezoneInfo> {
+        let clocks = &self.datetime.settings.additional_clocks;
+        datetimesettings::zones()
+            .iter()
+            .filter(|z| !clocks.iter().any(|c| c.label == z.city))
+            .collect()
+    }
+
+    /// The Date & Time page: the clock's zone, what the taskbar clock shows,
+    /// and the world clocks the calendar shows. It had no page at all: the
+    /// shell obeyed `datetime.yaml` and nothing but a text editor could
+    /// change it (lane C, c-e-a-date-and-time-page).
+    fn build_datetime_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let settings = &self.datetime.settings;
+        let now = datetimesettings::clock::now_utc_secs();
+
+        s.section("Time Zone");
+        let zone = settings
+            .current_zone()
+            .map_or_else(|| AUTOMATIC_ZONE.to_string(), |z| zone_row(z, now));
+        s.dropdown_row("Time zone", DropdownId::TimeZone, &zone);
+
+        s.section("Taskbar Clock");
+        s.toggle_row(
+            "Show seconds",
+            ToggleId::ClockSeconds,
+            settings.show_seconds,
+        );
+        s.toggle_row(
+            "Show the day of the week",
+            ToggleId::ClockDayOfWeek,
+            settings.show_day_of_week,
+        );
+        s.toggle_row("Show the date", ToggleId::ClockDate, settings.show_date);
+
+        s.section("World Clocks");
+        if settings.additional_clocks.is_empty() {
+            s.note(
+                "No world clocks. The calendar shows each one you add.",
+                28.0,
+            );
+        }
+        for (index, clock) in settings.additional_clocks.iter().enumerate() {
+            let zone = datetimesettings::zone(&clock.tz_id)
+                .map_or(clock.tz_id.as_str(), |z| z.display_name.as_str());
+            s.toggle_row(
+                &format!("{} -- {zone}", clock.label),
+                ToggleId::WorldClock(index),
+                clock.visible,
+            );
+            s.button_row(
+                "",
+                "Remove",
+                pal.accent,
+                Some(RowHit::Press(ButtonId::RemoveClock(index))),
+            );
+        }
+        if settings.additional_clocks.len() < datetimesettings::MAX_CLOCKS {
+            s.dropdown_row("Add a clock", DropdownId::AddClock, "Choose a zone");
+        } else {
+            s.note(
+                "Four clocks is as many as the calendar shows. Remove one to add another.",
+                28.0,
+            );
+        }
+        s.note(
+            "The taskbar clock takes these the next time the desktop starts.",
+            28.0,
+        );
     }
 
     /// Read the installed themes, the built-in one first.
@@ -1343,6 +1433,11 @@ impl SettingsState {
         self.notif = notifsettings::NotifFile::load();
     }
 
+    /// Read the user's saved clock settings, for the Date & Time page.
+    pub fn load_datetime(&mut self) {
+        self.datetime = datetimesettings::DateTimeFile::load();
+    }
+
     /// Read the machine's real accounts from the system account database.
     ///
     /// Separate from [`SettingsState::new`] and called by `main`, the same as
@@ -1466,6 +1561,16 @@ impl SettingsState {
         }
     }
 
+    /// Write `datetime.yaml`. The running desktop reads it when it starts:
+    /// the relay that would tell it to read the file again is lane F's to add
+    /// (`requests/c-f-a-settings-group-for-the-date-and-time.md`), and the
+    /// page says so rather than implying the change is already on the bar.
+    fn save_datetime(&mut self) {
+        if let Err(err) = self.datetime.save() {
+            eprintln!("settings: could not save datetime.yaml: {err}");
+        }
+    }
+
     fn save_notifications(&mut self) {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
@@ -1516,6 +1621,7 @@ impl SettingsState {
             // `appearance` below; `load_input()` does the I/O, from `main`.
             input: InputFile::new(),
             notif: notifsettings::NotifFile::new(),
+            datetime: datetimesettings::DateTimeFile::from_document(yamldoc::Document::new()),
             notif_dirty: false,
 
             // Personalization defaults, not a read of the configuration
@@ -2252,6 +2358,14 @@ enum ToggleId {
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
     NotifBanner(usize),
+    /// The taskbar clock shows seconds.
+    ClockSeconds,
+    /// It shows the day of the week.
+    ClockDayOfWeek,
+    /// It shows the date.
+    ClockDate,
+    /// The `n`-th world clock is shown in the calendar (hidden, it is kept).
+    WorldClock(usize),
     /// Whether the nightly quiet hours are in force at all.
     /// Whether a rotation is shuffled or goes in folder order.
     RotationShuffle,
@@ -2576,6 +2690,8 @@ enum ButtonId {
     AddExclusion,
     /// Stop rotating and go back to a single picture.
     ClearRotation,
+    /// Remove the `n`-th world clock.
+    RemoveClock(usize),
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -2602,6 +2718,23 @@ const LOGIN_BACKGROUNDS: [&str; 4] = [
     "Same as my desktop",
     "A picture",
 ];
+
+/// The Date & Time page's row for the machine's own zone -- the default, and
+/// what the C library and `date` use.
+const AUTOMATIC_ZONE: &str = "Automatic (this computer's zone)";
+
+/// A zone as the Date & Time page lists it: its offset now, its city, and
+/// its name -- "(UTC+00:00) London -- GMT/BST". The city because it is what
+/// people look for; a zone's own name alone ("GMT/BST", "Central European")
+/// does not say which of several cities it is.
+fn zone_row(zone: &datetimesettings::TimezoneInfo, now: u64) -> String {
+    format!(
+        "({}) {} -- {}",
+        zone.offset_string(now),
+        zone.city,
+        zone.display_name
+    )
+}
 
 /// What to call a greeter background in the interface.
 fn login_background_label(bg: &appearance::LoginBackground) -> &'static str {
@@ -3436,6 +3569,7 @@ impl SettingsState {
         match self.current_page {
             SettingsPage::Display => self.build_display_page(sink),
             SettingsPage::Notifications => self.build_notifications_page(sink),
+            SettingsPage::DateTime => self.build_datetime_page(sink),
             SettingsPage::Sound => self.build_sound_page(sink),
             SettingsPage::Wallpaper => self.build_wallpaper_page(sink),
             SettingsPage::Mouse => self.build_mouse_page(sink),
@@ -5354,6 +5488,32 @@ impl SettingsState {
                     at,
                 )
             }
+            DropdownId::TimeZone => {
+                let now = datetimesettings::clock::now_utc_secs();
+                let items = std::iter::once(AUTOMATIC_ZONE.to_string())
+                    .chain(datetimesettings::zones().iter().map(|z| zone_row(z, now)))
+                    .collect();
+                let at = self
+                    .datetime
+                    .settings
+                    .current_zone()
+                    .and_then(|chosen| {
+                        datetimesettings::zones()
+                            .iter()
+                            .position(|z| z.tz_id == chosen.tz_id)
+                    })
+                    .map_or(0, |i| i.saturating_add(1));
+                (items, at)
+            }
+            DropdownId::AddClock => {
+                let now = datetimesettings::clock::now_utc_secs();
+                let items = self
+                    .zones_to_add()
+                    .iter()
+                    .map(|z| zone_row(z, now))
+                    .collect();
+                (items, 0)
+            }
             DropdownId::ColorTheme => {
                 let items = self.themes.iter().map(Self::color_theme_item).collect();
                 let at = self
@@ -5702,6 +5862,9 @@ impl SettingsState {
         if changed.lock_clock {
             self.save_lock_clock();
         }
+        if changed.datetime {
+            self.save_datetime();
+        }
         result
     }
 
@@ -5718,6 +5881,7 @@ impl SettingsState {
             input: self.input.settings.clone(),
             notif: self.notif.settings.clone(),
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date),
+            datetime: self.datetime.settings.clone(),
         }
     }
 
@@ -5733,6 +5897,7 @@ impl SettingsState {
             input: self.input.settings != before.input,
             notif: self.notif.settings != before.notif,
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date) != before.lock_clock,
+            datetime: self.datetime.settings != before.datetime,
         }
     }
 
@@ -6193,6 +6358,9 @@ impl SettingsState {
                 self.set_current_account_picture(idx);
             }
             RowHit::Press(ButtonId::ChooseWallpaper) => self.open_wallpaper_dialog(),
+            RowHit::Press(ButtonId::RemoveClock(index)) => {
+                self.datetime.settings.remove_clock(index);
+            }
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
             }
@@ -6342,6 +6510,17 @@ impl SettingsState {
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
+            ToggleId::ClockSeconds => &mut self.datetime.settings.show_seconds,
+            ToggleId::ClockDayOfWeek => &mut self.datetime.settings.show_day_of_week,
+            ToggleId::ClockDate => &mut self.datetime.settings.show_date,
+            ToggleId::WorldClock(index) => {
+                &mut self
+                    .datetime
+                    .settings
+                    .additional_clocks
+                    .get_mut(index)?
+                    .visible
+            }
             ToggleId::QuietHours => &mut self.notif.settings.quiet_hours.enabled,
             ToggleId::MonoAudio => &mut self.mono_audio,
             ToggleId::VisualAlerts => &mut self.visual_alerts,
@@ -6478,6 +6657,21 @@ impl SettingsState {
             DropdownId::Scale => {
                 if let Some(scale) = ScalePercent::ALL.get(index) {
                     self.scale = *scale;
+                }
+            }
+            DropdownId::TimeZone => {
+                if index == 0 {
+                    self.datetime.settings.set_zone(None);
+                } else if let Some(zone) = datetimesettings::zones().get(index.saturating_sub(1)) {
+                    self.datetime.settings.set_zone(Some(&zone.tz_id));
+                }
+            }
+            DropdownId::AddClock => {
+                if let Some(zone) = self.zones_to_add().get(index) {
+                    // Named for its city: the file keys clocks by name, and a
+                    // zone already added is not offered, so the name is free.
+                    let (tz_id, city) = (zone.tz_id.clone(), zone.city.clone());
+                    self.datetime.settings.add_clock(&tz_id, &city);
                 }
             }
             // A theme that cannot be used is listed saying why, and choosing it
@@ -6857,6 +7051,7 @@ fn main() -> ExitCode {
     // deleting the rest, because a save splices the model into the document it
     // was loaded from and an unloaded model has nothing in it.
     state.load_notifications();
+    state.load_datetime();
 
     // The machine's real accounts. Empty if the database cannot be read, which
     // the Accounts page says rather than drawing a blank panel.
@@ -7302,6 +7497,135 @@ mod tests {
             app.notif.settings.quiet_hours.days[3],
             "it did not come back"
         );
+    }
+
+    // == The Date & Time page (lane C, c-e-a-date-and-time-page) ================
+
+    #[test]
+    fn the_date_and_time_page_sets_the_zone_the_clock_and_the_world_clocks() {
+        appearance::config::testing::with_scratch_config("settings-datetime", |root| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DateTime);
+            assert_eq!(SettingsPage::DateTime.name(), "date-time");
+
+            // The zone: the machine's own first, then a named one.
+            app.show_dropdown(DropdownId::TimeZone);
+            let items = app.dropdown_layout().expect("a layout").items;
+            assert_eq!(items.first().map(String::as_str), Some(AUTOMATIC_ZONE));
+            let tokyo = items
+                .iter()
+                .position(|i| i.contains("Tokyo") || i.contains("Japan"))
+                .expect("Tokyo is offered");
+            app.apply_dropdown_selection(tokyo);
+            let chosen = app
+                .datetime
+                .settings
+                .current_zone()
+                .map(|z| z.tz_id.clone());
+            assert_eq!(chosen.as_deref(), Some("Asia/Tokyo"));
+
+            // A world clock, named for its city, then removed.
+            app.show_dropdown(DropdownId::AddClock);
+            let zones = app.dropdown_layout().expect("a layout").items;
+            let london = zones
+                .iter()
+                .position(|i| i.contains("London"))
+                .expect("London is offered");
+            app.apply_dropdown_selection(london);
+            let labels: Vec<&str> = app
+                .datetime
+                .settings
+                .additional_clocks
+                .iter()
+                .map(|c| c.label.as_str())
+                .collect();
+            assert_eq!(labels, ["London"]);
+            app.show_dropdown(DropdownId::AddClock);
+            let again = app.dropdown_layout().expect("a layout").items;
+            assert!(
+                !again.iter().any(|i| i.contains("London")),
+                "a zone already on a clock is offered again"
+            );
+
+            // The file the shell reads.
+            app.save_datetime();
+            let text = std::fs::read_to_string(appearance::config::testing::scratch_path(
+                root, "datetime",
+            ))
+            .unwrap_or_default();
+            assert!(text.contains("Asia/Tokyo"), "{text:?}");
+            assert!(text.contains("London"), "{text:?}");
+
+            app.datetime.settings.remove_clock(0);
+            assert!(app.datetime.settings.additional_clocks.is_empty());
+        });
+    }
+
+    /// **A click on the Date & Time page reaches the file the shell reads**,
+    /// by the path every other page's clicks take: `handle_event` compares
+    /// the settings around the click and saves what changed. The test above
+    /// calls the save itself, so it would pass with that path cut.
+    #[test]
+    fn a_click_on_the_date_and_time_page_reaches_the_file() {
+        appearance::config::testing::with_scratch_config("settings-datetime-click", |_| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DateTime);
+            assert!(app.datetime.settings.add_clock("Asia/Tokyo", "Tokyo"));
+            let click = |app: &mut SettingsState, hit| {
+                let (x, y) = center_of(app, hit).expect("the row is on the page");
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+            };
+            let seconds = app.datetime.settings.show_seconds;
+            click(&mut app, RowHit::Toggle(ToggleId::ClockSeconds));
+            click(&mut app, RowHit::Toggle(ToggleId::WorldClock(0)));
+            let saved = datetimesettings::DateTimeFile::load().settings;
+            assert_eq!(
+                saved.show_seconds, !seconds,
+                "the seconds switch did not reach the file"
+            );
+            assert_eq!(saved.additional_clocks.len(), 1, "the clock was not kept");
+            assert!(
+                saved.additional_clocks.iter().all(|c| !c.visible),
+                "the clock's switch did not reach the file"
+            );
+        });
+    }
+
+    #[test]
+    fn four_world_clocks_are_the_most_and_the_page_says_so() {
+        let mut app = SettingsState::new();
+        app.go_to_page(SettingsPage::DateTime);
+        for zone in datetimesettings::zones()
+            .iter()
+            .take(datetimesettings::MAX_CLOCKS)
+        {
+            assert!(app.datetime.settings.add_clock(&zone.tz_id, &zone.city));
+        }
+        assert!(
+            center_of(&app, RowHit::Dropdown(DropdownId::AddClock)).is_none(),
+            "a fifth clock is offered"
+        );
+        let texts: Vec<String> = app
+            .render_tree()
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("Four clocks")),
+            "the page does not say why there is no Add: {texts:?}"
+        );
+        // Each clock's Remove button takes it off.
+        let (x, y) = center_of(&app, RowHit::Press(ButtonId::RemoveClock(0))).expect("a Remove");
+        app.handle_click(x, y);
+        assert_eq!(app.datetime.settings.additional_clocks.len(), 3);
     }
 
     // == The theme picker (lane C, c-e-a-colour-theme-picker) ==================

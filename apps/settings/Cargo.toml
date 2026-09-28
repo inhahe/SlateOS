@@ -45,6 +45,8 @@ settingsfile = { path = "../../gui/settingsfile" }
 # `yamldoc::Document` is named in `defaultapps`'s signature. `settingsfile`
 # hands one back but keeps the type private, so the name comes from here.
 yamldoc = { path = "../../yamldoc" }
+# The clock's zone, the taskbar clock and the world clocks: datetime.yaml.
+datetimesettings = { path = "../../gui/datetimesettings" }
 
 # The real compositor, for the one test module that puts the shipped code on
 # *both* ends of the display protocol. A test against a stand-in compositor and

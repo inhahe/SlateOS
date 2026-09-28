@@ -1235,8 +1235,8 @@ MUTATIONS = [
     ),
     (
         "an unlit pad's name is written in its own face's colour",
-        "        } else {\n            self.lit()\n        }\n    }",
-        "        } else {\n            self.dim()\n        }\n    }",
+        "            Ink::on(self.lit(), &[self.dim()]).at(size, bold)",
+        "            self.dim()",
         ["every_pads_name_and_outline_read_on_it"],
     ),
     (
@@ -1274,6 +1274,30 @@ MUTATIONS = [
         "        fill(&mut f, l.window, c.chrome.page, 0.0);",
         "        fill(&mut f, l.window, Color::from_hex(0x11111B), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a name on an unlit pad is its lit colour unmoved, 3.3:1 drawn small",
+        "            Ink::on(self.lit(), &[self.dim()]).at(size, bold)",
+        "            self.lit()",
+        ["every_text_reads_on_what_is_under_it_in_either_theme", "every_pads_name_and_outline_read_on_it"],
+    ),
+    (
+        "a readout's caption is the page's grey, 4.1:1 on its box",
+        "            Ink::on(c.chrome.dim, &[c.chrome.raised]).at(cap, false),",
+        "            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a readout's value is the page's ink unmoved, 3.6:1 on its box",
+        "            Ink::on(ink, &[c.chrome.raised]).at(num, true),",
+        "            ink,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the game-over card has no ground of its own",
+        "                Surface::Panel,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
+        "                Surface::Card,\n            );\n        }\n        stroke(f, panel, c.chrome.bad",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

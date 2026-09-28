@@ -10,7 +10,9 @@
 //! - Cursor styles (block, underline, bar) with blink support
 //! - Selection (start, extend, clipboard copy)
 //! - Tab stops (default every 8, configurable via HTS/TBC)
-//! - OSC sequences (set window title)
+//! - OSC sequences: the window title, and SlateOS's width query
+//!   ([`WIDTH_QUERY`]): a program asks how many cells a piece of text will take
+//!   here, and reads the answer from its input
 //! - Visual bell
 //! - Dark color scheme
 //!
@@ -553,9 +555,159 @@ enum ParserState {
     OscEscape,
     /// Inside a DCS sequence (ESC P ...).
     Dcs,
+    /// An ESC inside a DCS sequence: the `\` after it ends the DCS.
+    ///
+    /// Its own state rather than the OSC's. Sharing `OscEscape` made the ST
+    /// that ends a DCS dispatch whatever OSC string came last -- setting the
+    /// title again, and with the width query, answering it twice.
+    DcsEscape,
     /// Accumulating a UTF-8 multi-byte character.
-    Utf8 { remaining: u8, codepoint: u32 },
+    Utf8(Utf8Partial),
 }
+
+/// A UTF-8 sequence in progress: how many continuation bytes it still needs,
+/// the bits it has so far, and the least code point a sequence of its length
+/// may carry.
+///
+/// The least is what refuses an *overlong* form -- `C0 AF` spelling `/` in two
+/// bytes. A decoder that accepted one drew a character the bytes do not
+/// honestly encode; it is U+FFFD now, as a surrogate or a value past U+10FFFF
+/// already was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Utf8Partial {
+    remaining: u8,
+    codepoint: u32,
+    least: u32,
+}
+
+/// The sequence a byte from 0x80 up starts, or `None` for a byte that starts
+/// none -- a stray continuation byte, or one of `F8`-`FF`.
+fn utf8_start(byte: u8) -> Option<Utf8Partial> {
+    let (remaining, codepoint, least) = match byte {
+        0xC0..=0xDF => (1, u32::from(byte) & 0x1F, 0x80),
+        0xE0..=0xEF => (2, u32::from(byte) & 0x0F, 0x800),
+        0xF0..=0xF7 => (3, u32::from(byte) & 0x07, 0x1_0000),
+        _ => return None,
+    };
+    Some(Utf8Partial {
+        remaining,
+        codepoint,
+        least,
+    })
+}
+
+/// What the next byte does to a UTF-8 sequence in progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Utf8Next {
+    /// The sequence needs more.
+    More(Utf8Partial),
+    /// It is complete: this character, or U+FFFD for an overlong form, a
+    /// surrogate or a value past U+10FFFF.
+    Done(char),
+    /// The byte is not a continuation: the sequence is broken, which draws a
+    /// U+FFFD, and the byte is read again on its own.
+    Broken,
+}
+
+/// One step of UTF-8 decoding: the screen's and an OSC string's, which are
+/// one decoder so that the width query measures text exactly as it would be
+/// drawn.
+fn utf8_next(partial: Utf8Partial, byte: u8) -> Utf8Next {
+    if byte & 0xC0 != 0x80 {
+        return Utf8Next::Broken;
+    }
+    let codepoint = (partial.codepoint << 6) | (u32::from(byte) & 0x3F);
+    // `saturating_sub` rather than `- 1`: this is only ever reached with
+    // `remaining >= 1`, but the state comes from the byte stream, and a decode
+    // bug that set it to zero should leave a replacement character behind
+    // rather than a subtraction overflow.
+    let remaining = partial.remaining.saturating_sub(1);
+    if remaining > 0 {
+        return Utf8Next::More(Utf8Partial {
+            remaining,
+            codepoint,
+            least: partial.least,
+        });
+    }
+    let ch = if codepoint < partial.least {
+        None
+    } else {
+        char::from_u32(codepoint)
+    };
+    Utf8Next::Done(ch.unwrap_or('\u{FFFD}'))
+}
+
+/// `bytes` as the screen reads them: ASCII as itself, UTF-8 sequences as their
+/// characters, and a U+FFFD for each byte or broken sequence the screen would
+/// draw as one -- a sequence cut short by the end of the bytes included.
+/// Control characters are kept; what to do with them is the caller's.
+fn decode_as_drawn(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    let mut partial: Option<Utf8Partial> = None;
+    let mut rest = bytes.iter().copied();
+    let mut again: Option<u8> = None;
+    while let Some(byte) = again.take().or_else(|| rest.next()) {
+        match partial.take() {
+            Some(sequence) => match utf8_next(sequence, byte) {
+                Utf8Next::More(next) => partial = Some(next),
+                Utf8Next::Done(ch) => out.push(ch),
+                Utf8Next::Broken => {
+                    out.push('\u{FFFD}');
+                    again = Some(byte);
+                }
+            },
+            None if byte < 0x80 => out.push(char::from(byte)),
+            None => match utf8_start(byte) {
+                Some(sequence) => partial = Some(sequence),
+                None => out.push('\u{FFFD}'),
+            },
+        }
+    }
+    if partial.is_some() {
+        out.push('\u{FFFD}');
+    }
+    out
+}
+
+/// How far the cursor moves when `ch` is printed: the width table's cells --
+/// two for a wide character, none for a mark that joins the one before it --
+/// and one for anything the table calls a control, which reaches here only as
+/// a decoded C1 code point.
+fn advance_of(ch: char) -> usize {
+    charwidth::char_width(ch).unwrap_or(1)
+}
+
+/// How many cells `text` takes when printed here, the answer to the width
+/// query: what [`TerminalState::put_char`] advances the cursor by for each of
+/// its characters, and nothing for an ASCII control character, which the
+/// parser acts on rather than prints.
+#[must_use]
+pub fn drawn_cells(text: &str) -> usize {
+    text.chars()
+        .filter(|ch| !ch.is_ascii_control())
+        .map(advance_of)
+        .fold(0, usize::saturating_add)
+}
+
+/// SlateOS's width query, an OSC of the terminal's own:
+/// `ESC ] 7730 ; w ; <text> ST` asks how many cells `<text>` -- UTF-8, a
+/// grapheme cluster or a run of them -- takes when printed here, and the
+/// terminal answers `ESC ] 7730 ; w ; <cells> ST` into the program's input,
+/// ended as the query was (ST or BEL), after everything it wrote before
+/// asking has been drawn. The answer is exactly the cursor's advance
+/// ([`drawn_cells`]), since that is what a program lining text up needs.
+///
+/// A private OSC because every terminal ignores one it does not know: sent to
+/// another terminal, the query draws nothing and is never answered, so a
+/// program waits for the reply with a timeout and falls back to its width
+/// table (`design-decisions.md` §1042, the operator's answer to B-Q8; the shape
+/// is §1224).
+pub const WIDTH_QUERY: &[u8] = b"7730";
+
+/// The most an OSC string may hold. A title or a query is short; one that
+/// grows past this is dropped whole rather than cut mid-character, and an
+/// OSC that never ends cannot take the terminal's memory with it.
+const OSC_LIMIT: usize = 4096;
 
 // ============================================================================
 // Selection
@@ -639,8 +791,13 @@ pub struct TerminalState {
     csi_param_started: bool,
     /// Private mode prefix (e.g., '?' in CSI ? 25 h).
     csi_private_marker: Option<u8>,
-    /// OSC string accumulator.
-    osc_string: String,
+    /// The OSC string being read, as bytes: it is decoded once, when it
+    /// ends, the way the screen decodes (`decode_as_drawn`). It was pushed a
+    /// byte at a time as a `char`, so a UTF-8 title became Latin-1 mojibake.
+    osc_bytes: Vec<u8>,
+    /// The OSC string grew past [`OSC_LIMIT`]: it is read to its end and
+    /// dropped.
+    osc_overflow: bool,
 
     /// Window title (set via OSC 0 or OSC 2).
     pub title: String,
@@ -809,7 +966,8 @@ impl TerminalState {
             csi_intermediates: Vec::with_capacity(4),
             csi_param_started: false,
             csi_private_marker: None,
-            osc_string: String::new(),
+            osc_bytes: Vec::new(),
+            osc_overflow: false,
             title: String::from("Terminal"),
             child: None,
             child_exit: None,
@@ -878,12 +1036,13 @@ impl TerminalState {
             ParserState::Osc => self.osc_byte(byte),
             ParserState::OscEscape => self.osc_escape_byte(byte),
             ParserState::Dcs => self.dcs_byte(byte),
-            ParserState::Utf8 {
-                remaining,
-                codepoint,
-            } => {
-                self.utf8_byte(byte, remaining, codepoint);
+            ParserState::DcsEscape => {
+                // The `\` of an ST ends the DCS, whose content is not kept;
+                // anything else after the ESC ends it too. Nothing is
+                // dispatched.
+                self.parser_state = ParserState::Ground;
             }
+            ParserState::Utf8(partial) => self.utf8_byte(byte, partial),
         }
     }
 
@@ -902,36 +1061,22 @@ impl TerminalState {
             }
             // DEL — ignore
             0x7F => {}
-            // UTF-8 multi-byte start
-            0xC0..=0xDF => {
-                let codepoint = (byte as u32) & 0x1F;
-                self.parser_state = ParserState::Utf8 {
-                    remaining: 1,
-                    codepoint,
-                };
-            }
-            0xE0..=0xEF => {
-                let codepoint = (byte as u32) & 0x0F;
-                self.parser_state = ParserState::Utf8 {
-                    remaining: 2,
-                    codepoint,
-                };
-            }
-            0xF0..=0xF7 => {
-                let codepoint = (byte as u32) & 0x07;
-                self.parser_state = ParserState::Utf8 {
-                    remaining: 3,
-                    codepoint,
-                };
-            }
-            // Printable ASCII or other single-byte
+            // Printable ASCII
             0x20..=0x7E => {
-                self.put_char(byte as char);
+                self.put_char(char::from(byte));
             }
-            // Invalid or unhandled high bytes treated as replacement character
-            _ => {
-                self.put_char('\u{FFFD}');
-            }
+            // The other C0 controls -- SO and SI, FS to US -- are ignored, as
+            // xterm ignores them. They were drawn as replacement characters,
+            // so a program shifting character sets with SO and SI left
+            // garbage on the screen; and the width query, which counts a
+            // control as taking no cell, would have disagreed with the screen.
+            0x01..=0x06 | 0x0E..=0x1A | 0x1C..=0x1F => {}
+            // The start of a UTF-8 sequence, or a byte that starts none, which
+            // is drawn as a replacement character.
+            _ => match utf8_start(byte) {
+                Some(partial) => self.parser_state = ParserState::Utf8(partial),
+                None => self.put_char('\u{FFFD}'),
+            },
         }
     }
 
@@ -950,7 +1095,8 @@ impl TerminalState {
             b']' => {
                 // OSC sequence
                 self.parser_state = ParserState::Osc;
-                self.osc_string.clear();
+                self.osc_bytes.clear();
+                self.osc_overflow = false;
             }
             b'P' => {
                 // DCS sequence (currently just consume until ST)
@@ -1052,16 +1198,18 @@ impl TerminalState {
         match byte {
             0x07 => {
                 // BEL terminates OSC
-                self.dispatch_osc();
                 self.parser_state = ParserState::Ground;
+                self.dispatch_osc(b"\x07");
             }
             0x1B => {
                 // Possible ST (ESC \)
                 self.parser_state = ParserState::OscEscape;
             }
             _ => {
-                if let Some(ch) = char::from_u32(byte as u32) {
-                    self.osc_string.push(ch);
+                if self.osc_bytes.len() < OSC_LIMIT {
+                    self.osc_bytes.push(byte);
+                } else {
+                    self.osc_overflow = true;
                 }
             }
         }
@@ -1070,8 +1218,8 @@ impl TerminalState {
     /// Handle byte after ESC within OSC (looking for ST = ESC \).
     fn osc_escape_byte(&mut self, byte: u8) {
         if byte == b'\\' {
-            self.dispatch_osc();
             self.parser_state = ParserState::Ground;
+            self.dispatch_osc(b"\x1b\\");
         } else {
             // Not ST — the ESC was something else; discard and return to ground
             self.parser_state = ParserState::Ground;
@@ -1083,7 +1231,7 @@ impl TerminalState {
         match byte {
             0x1B => {
                 // Possible ST
-                self.parser_state = ParserState::OscEscape;
+                self.parser_state = ParserState::DcsEscape;
             }
             0x07 => {
                 // BEL can also terminate DCS in some terminals
@@ -1096,31 +1244,20 @@ impl TerminalState {
     }
 
     /// Process a UTF-8 continuation byte.
-    fn utf8_byte(&mut self, byte: u8, remaining: u8, codepoint: u32) {
-        if byte & 0xC0 != 0x80 {
-            // Invalid continuation byte — emit replacement and reprocess
-            self.put_char('\u{FFFD}');
-            self.parser_state = ParserState::Ground;
-            self.process_byte(byte);
-            return;
-        }
-
-        let codepoint = (codepoint << 6) | (u32::from(byte) & 0x3F);
-        // `saturating_sub` rather than `- 1`: this is only ever reached with
-        // `remaining >= 1`, but the state that carries it comes from the byte
-        // stream, and a decode bug that set it to zero should leave a
-        // replacement character behind rather than a subtraction overflow.
-        let remaining = remaining.saturating_sub(1);
-
-        if remaining == 0 {
-            let ch = char::from_u32(codepoint).unwrap_or('\u{FFFD}');
-            self.put_char(ch);
-            self.parser_state = ParserState::Ground;
-        } else {
-            self.parser_state = ParserState::Utf8 {
-                remaining,
-                codepoint,
-            };
+    fn utf8_byte(&mut self, byte: u8, partial: Utf8Partial) {
+        match utf8_next(partial, byte) {
+            Utf8Next::More(next) => self.parser_state = ParserState::Utf8(next),
+            Utf8Next::Done(ch) => {
+                self.parser_state = ParserState::Ground;
+                self.put_char(ch);
+            }
+            Utf8Next::Broken => {
+                // Not a continuation: the broken sequence is a replacement
+                // character, and the byte is read again on its own.
+                self.parser_state = ParserState::Ground;
+                self.put_char('\u{FFFD}');
+                self.process_byte(byte);
+            }
         }
     }
 
@@ -1169,7 +1306,7 @@ impl TerminalState {
         // not reach here -- the parser handles those. One column is the safe
         // reading if one does: it is what this function did for everything
         // before, so an unexpected input cannot be made worse by the change.
-        let width = charwidth::char_width(ch).unwrap_or(1);
+        let width = advance_of(ch);
 
         // A combining mark attaches to what it follows rather than taking a
         // cell of its own. It is *not* written: doing so would replace the
@@ -2356,23 +2493,38 @@ terminal, so what you type goes nowhere.\r\n"
     // OSC dispatch
     // ========================================================================
 
-    fn dispatch_osc(&mut self) {
-        let osc = self.osc_string.clone();
-        // OSC format: "Ps ; Pt" where Ps is the command number
-        if let Some((cmd_str, text)) = osc.split_once(';') {
-            if let Ok(cmd) = cmd_str.parse::<u16>() {
-                match cmd {
-                    0 | 2 => {
-                        // Set window title
-                        self.title = text.to_string();
-                    }
-                    1 => {
-                        // Set icon name (we use it as title too)
-                        self.title = text.to_string();
-                    }
-                    _ => {} // Other OSC commands not implemented
+    /// Act on the OSC string that has just ended with `terminator` -- BEL or
+    /// ST, which a reply ends with too, as xterm's do.
+    fn dispatch_osc(&mut self, terminator: &[u8]) {
+        let bytes = std::mem::take(&mut self.osc_bytes);
+        if std::mem::take(&mut self.osc_overflow) {
+            return;
+        }
+        // "Ps ; Pt": the command number, and what it is given.
+        let Some(split) = bytes.iter().position(|&b| b == b';') else {
+            return;
+        };
+        let command = bytes.get(..split).unwrap_or_default();
+        let payload = bytes.get(split.saturating_add(1)..).unwrap_or_default();
+        match command {
+            // The window title (2), and the icon name (1), which is the title
+            // here too. Read as the screen reads bytes; the controls go, a
+            // title being one line.
+            b"0" | b"1" | b"2" => {
+                self.title = decode_as_drawn(payload)
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .collect();
+            }
+            _ if command == WIDTH_QUERY => {
+                if let Some(text) = payload.strip_prefix(b"w;") {
+                    let cells = drawn_cells(&decode_as_drawn(text));
+                    let mut reply = format!("\x1b]7730;w;{cells}").into_bytes();
+                    reply.extend_from_slice(terminator);
+                    self.to_child(&reply);
                 }
             }
+            _ => {} // Other OSC commands not implemented
         }
     }
 
@@ -3698,6 +3850,161 @@ mod tests {
     /// stays dark on a light desktop is the defect; a terminal whose red is
     /// not red is a worse one, since a program that prints colour 1 expects
     /// red on every terminal ever made.
+    /// The width query's answer, read back out of what the terminal queued
+    /// for the program: `ESC ] 7730 ; w ; <cells>` and its terminator.
+    fn width_reply(t: &mut TerminalState) -> Option<(usize, Vec<u8>)> {
+        let out = std::mem::take(&mut t.output_buffer);
+        let rest = out.strip_prefix(b"\x1b]7730;w;".as_slice())?;
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        let cells = std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()?;
+        Some((cells, rest[digits..].to_vec()))
+    }
+
+    /// **The width query answers what printing the text would take here**:
+    /// for each text, the answer is the cursor's advance when the same bytes
+    /// are printed (lane B's request, the operator's §1042). Narrow, wide,
+    /// combining, an emoji sequence, a flag, and bytes that are not UTF-8.
+    #[test]
+    fn the_width_query_answers_what_printing_takes() {
+        let texts: [&[u8]; 9] = [
+            b"a",
+            "\u{4E2D}\u{6587}".as_bytes(),
+            "e\u{301}".as_bytes(),
+            "\u{1F44D}\u{1F3FD}".as_bytes(),
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".as_bytes(),
+            "\u{1F1EF}\u{1F1F5}".as_bytes(),
+            b"\xFFab\xC3",
+            "caf\u{e9} \u{3b1}\u{3b2}".as_bytes(),
+            b"",
+        ];
+        for text in texts {
+            let mut printed = TerminalState::new(TerminalConfig::default());
+            printed.feed(text);
+            // A text cut short at its end is broken there: printing it and
+            // then anything else draws the replacement the query counts.
+            printed.feed(b" ");
+            let advance = printed.cursor_col.saturating_sub(1);
+
+            let mut asked = TerminalState::new(TerminalConfig::default());
+            let mut query = b"\x1b]7730;w;".to_vec();
+            query.extend_from_slice(text);
+            query.extend_from_slice(b"\x1b\\");
+            asked.feed(&query);
+            let (cells, end) = width_reply(&mut asked).expect("an answer");
+            assert_eq!(
+                cells, advance,
+                "{text:?}: answered {cells}, printed {advance}"
+            );
+            assert_eq!(end, b"\x1b\\", "the answer is not ended as the query was");
+            assert_eq!(asked.cursor_col, 0, "the query drew something");
+        }
+    }
+
+    /// The answer ends as the query did -- BEL for BEL -- and comes after what
+    /// was printed before the query.
+    #[test]
+    fn the_width_answer_is_framed_like_its_query() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed(b"\x1b[6n\x1b]7730;w;\xE4\xB8\xAD\x07");
+        let out = std::mem::take(&mut t.output_buffer);
+        assert_eq!(out, b"\x1b[1;1R\x1b]7730;w;2\x07");
+    }
+
+    /// **A title in UTF-8 is the title it says.** The OSC string was pushed a
+    /// byte at a time as a character, so "caf\u{e9}" read as Latin-1 mojibake.
+    #[test]
+    fn a_utf8_title_is_the_title_it_says() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed("\x1b]2;caf\u{e9} \u{4E2D}\x07".as_bytes());
+        assert_eq!(t.title, "caf\u{e9} \u{4E2D}");
+        t.feed(b"\x1b]0;bad \xFF byte\x1b\\");
+        assert_eq!(
+            t.title, "bad \u{FFFD} byte",
+            "an invalid byte is drawn as the screen draws it"
+        );
+    }
+
+    /// An OSC that runs past the limit is dropped whole: no title cut
+    /// mid-character, no answer, and no memory taken without end.
+    #[test]
+    fn an_osc_past_the_limit_is_dropped() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed(b"\x1b]2;kept\x07");
+        let mut long = b"\x1b]2;".to_vec();
+        long.extend(std::iter::repeat_n(b'x', super::OSC_LIMIT * 3));
+        t.feed(&long);
+        assert_eq!(
+            t.osc_bytes.len(),
+            super::OSC_LIMIT,
+            "the OSC grew past its limit"
+        );
+        t.feed(b"\x07");
+        assert_eq!(t.title, "kept");
+        let mut query = b"\x1b]7730;w;".to_vec();
+        query.extend(std::iter::repeat_n(b'x', super::OSC_LIMIT));
+        query.push(0x07);
+        t.feed(&query);
+        assert!(t.output_buffer.is_empty(), "an overlong query was answered");
+    }
+
+    /// **A DCS ended by ST does not re-send the last OSC.** Its ESC went
+    /// through the OSC's own state, so the ST dispatched the OSC string left
+    /// from before -- answering a width query twice.
+    #[test]
+    fn a_dcs_does_not_repeat_the_last_osc() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed(b"\x1b]7730;w;ab\x1b\\");
+        assert_eq!(width_reply(&mut t).map(|(cells, _)| cells), Some(2));
+        t.feed(b"\x1bPq#0;2;0;0;0\x1b\\");
+        assert!(
+            t.output_buffer.is_empty(),
+            "the DCS answered the old query again"
+        );
+        t.feed(b"z");
+        assert_eq!(t.screen[0].cells[0].ch, 'z', "the DCS ate what followed it");
+
+        // An OSC broken off by an ESC that begins no ST is abandoned, its
+        // bytes still held; a DCS after it must not finish it.
+        t.feed(b"]2;abandonedxPq\\");
+        assert_ne!(t.title, "abandoned", "a DCS's ST finished an abandoned OSC");
+    }
+
+    /// **SO, SI and the other C0 controls draw nothing.** They were drawn
+    /// as replacement characters, so a program shifting character sets left
+    /// garbage between its letters.
+    #[test]
+    fn the_other_c0_controls_draw_nothing() {
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed(b"abcd");
+        let drawn: String = t.screen[0].cells[..4].iter().map(|c| c.ch).collect();
+        assert_eq!(drawn, "abcd");
+        assert_eq!(t.cursor_col, 4);
+    }
+
+    /// **An overlong UTF-8 form is not the character it spells.** `C0 AF` is
+    /// `/` in two bytes; it was drawn as `/`.
+    #[test]
+    fn an_overlong_form_is_a_replacement_character() {
+        for bytes in [
+            &b"\xC0\xAF"[..],
+            b"\xE0\x80\xAF",
+            b"\xF0\x80\x80\xAF",
+            b"\xED\xA0\x80",
+        ] {
+            let mut t = TerminalState::new(TerminalConfig::default());
+            t.feed(bytes);
+            assert_eq!(t.screen[0].cells[0].ch, '\u{FFFD}', "{bytes:?}");
+            assert_eq!(t.cursor_col, 1, "{bytes:?} took more than one cell");
+        }
+        let mut t = TerminalState::new(TerminalConfig::default());
+        t.feed("\u{80}\u{800}\u{10000}".as_bytes());
+        assert_eq!(
+            [0, 1, 2].map(|c| t.screen[0].cells[c].ch),
+            ['\u{80}', '\u{800}', '\u{10000}'],
+            "the least of each length is refused"
+        );
+    }
+
     /// **A double-width character occupies two cells.**
     ///
     /// `put_char` advanced by exactly one column for every character, so the

@@ -157917,7 +157917,7 @@ constant is the shipped value and a test reaches the branch honestly.
 disk space as a real, finite constraint that build output has already filled
 once. A cache with no ceiling is the same failure with a slower fuse.
 
-## TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS
+## TD-C-THE-FILE-OPERATIONS-MODULE-ADVERTISES-POLICIES-NOTHING-SELECTS -- FIXED 2026-09-28
 
 **Date:** 2026-09-16. **Lane:** C.
 **Where:** `apps/explorer/src/fileops.rs` — the module doc, `ConflictPolicy`,
@@ -157930,7 +157930,7 @@ whether anything should call it:
 | finding | now |
 |---|---|
 | `ConflictPolicy::Ask`, `::Overwrite`, `::OverwriteIfNewer` | wired 2026-09-27: the window asks, and the menu offers the rest |
-| `ErrorPolicy` | **wired**: the window's operations stop at a file they cannot carry out and ask -- try again, skip, skip all, stop -- where they used to skip it and say so at the end. `SkipAndContinue` is what "Skip all" makes the policy for the rest |
+| `ErrorPolicy` | **wired**: the window's operations stop at a file they cannot carry out and ask -- try again, skip, skip all, stop -- where they used to skip it and say so at the end. `SkipAndContinue` is what "Skip all" makes the policy for the rest, and what the folder menu's "When a file cannot be done" makes it for good, for a copy left running unattended (design-decisions §1228) |
 | `ErrorPolicy::StopOnFirst`, `::RetryN` | **removed**: nothing chose them. Stopping is one of the answers, given when the user can see what failed, and "Try again" is a retry the user times -- a drive plugged back in, a file closed elsewhere -- where `RetryN` retried at once, when nothing had changed |
 | `ExecutorConfig`, the `Progress`, `Conflict` and `UndoAvailable` events, four `OperationSummary` fields | **removed**: nothing read them. The window reads progress and questions from the executor, not the event stream |
 

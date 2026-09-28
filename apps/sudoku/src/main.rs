@@ -69,16 +69,17 @@
 //! input — key or click — turns into an [`Intent`] and goes through
 //! [`SudokuApp::apply`], so the two can never drift apart.
 
+use gamechrome::Ink;
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
-use guitk::palette::{Palette, legible_on};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::theme::{contrast_ratio, with_alpha};
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seed_from_system};
 use std::process::ExitCode;
@@ -125,14 +126,16 @@ struct Colours {
     /// The digits, one ink for each kind a player tells apart: a clue, the
     /// player's own, a hint, and a digit that clashes with another. Each is
     /// the palette's ink for its hue -- made for the page -- moved only as
-    /// far as it must be to read as large text on every square it can sit on
-    /// (`large_on`): a selected square is darker than the page in a light
+    /// far as it must be to read on every square it can sit on
+    /// (`gamechrome::Ink`), in a strength for large text and one for small:
+    /// a digit is six tenths of a square, large in a roomy window and small
+    /// in a cramped one. A selected square is darker than the page in a light
     /// theme and lighter in a dark one, and a hint and a clash fell to 2.5:1
     /// on it in the light theme.
-    clue: Color,
-    own: Color,
-    hint: Color,
-    clash: Color,
+    clue: Ink,
+    own: Ink,
+    hint: Ink,
+    clash: Ink,
     /// A square's pencil marks: small text, so held to 4.5:1 on every square
     /// an empty one can be.
     note: Color,
@@ -143,30 +146,6 @@ struct Colours {
 /// by [`Colours::of`], which reads the digits against the tinted squares.
 const MATCH_ALPHA: u8 = 45;
 const CLASH_ALPHA: u8 = 60;
-
-/// Large text's contrast floor, 3:1 (WCAG 1.4.3): a digit is six tenths of a
-/// square high.
-const LARGE_TEXT: f32 = 3.0;
-
-/// `ink`, moved only as far as it must be to read as large text on every one
-/// of `grounds`. A no-op where it already does, so a theme whose inks read
-/// keeps them exactly.
-fn large_on(ink: Color, grounds: &[Color]) -> Color {
-    grounds.iter().fold(ink, |ink, &ground| {
-        if contrast_ratio(ink, ground) >= LARGE_TEXT {
-            ink
-        } else {
-            legible_on(ink, ground)
-        }
-    })
-}
-
-/// `ink`, legible as ordinary text (4.5:1) on every one of `grounds`.
-fn small_on(ink: Color, grounds: &[Color]) -> Color {
-    grounds
-        .iter()
-        .fold(ink, |ink, &ground| legible_on(ink, ground))
-}
 
 impl Colours {
     fn of(p: &Palette) -> Self {
@@ -194,15 +173,15 @@ impl Colours {
             lavender: p.ink(p.lavender),
             overlay0: p.overlay0,
             subtext0: p.subtext0,
-            clue: large_on(p.text, &squares),
-            own: large_on(p.ink(p.blue), &squares),
+            clue: Ink::on(p.text, &squares),
+            own: Ink::on(p.ink(p.blue), &squares),
             // Green, not the peach it was: peach and a clash's red are
             // neighbours, and moved to read on the squares they closed to
             // 28 apart in the light theme -- a hint that looks like a mistake.
-            hint: large_on(p.ink(p.green), &squares),
-            clash: large_on(p.ink(p.red), &[clashing]),
+            hint: Ink::on(p.ink(p.green), &squares),
+            clash: Ink::on(p.ink(p.red), &[clashing]),
             // An empty square is never tinted: marks sit on the three greys.
-            note: small_on(p.subtext0, &[p.surface0, p.surface1, p.surface2]),
+            note: Ink::on(p.subtext0, &[p.surface0, p.surface1, p.surface2]).small,
         }
     }
 }
@@ -2172,7 +2151,7 @@ impl SudokuApp {
             self.draw_notes(f, l, r, cell);
             return;
         }
-        let color = if conflicting {
+        let ink = if conflicting {
             self.colours.clash
         } else {
             match cell.origin {
@@ -2186,7 +2165,9 @@ impl SudokuApp {
         } else {
             FontWeightHint::Regular
         };
-        centred_in(f, r, &cell.value.to_string(), l.cell * 0.6, color, weight);
+        let size = l.cell * 0.6;
+        let color = ink.at(size, weight == FontWeightHint::Bold);
+        centred_in(f, r, &cell.value.to_string(), size, color, weight);
     }
 
     fn draw_notes(&self, f: &mut Frame, l: &Layout, r: Rect, cell: Cell) {
@@ -2465,9 +2446,13 @@ mod tests {
             let p = Palette::for_mode(light);
             let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
             derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
-            // The digits' inks, each moved to read on the squares.
+            // The digits' inks, each moved to read on the squares, in both
+            // strengths.
             let c = Colours::of(&p);
-            derived.extend([c.clue, c.own, c.hint, c.clash, c.note]);
+            for ink in [c.clue, c.own, c.hint, c.clash] {
+                derived.extend([ink.large, ink.small]);
+            }
+            derived.push(c.note);
             let mut a = playground();
             a.theme_changed(&p);
             // A clash: row 1 already holds a 6.
@@ -2539,114 +2524,89 @@ mod tests {
             a.apply(Intent::ToggleNotes);
             assert!(!a.conflicts().is_empty(), "there is no clash to read");
 
-            let l = layout_of(&a);
             let grid = a.colours.crust;
-            let (mut digits, mut marks) = (0, 0);
-            for i in 0..TOTAL_CELLS {
-                let (row, col) = row_col(i);
-                a.apply(Intent::Select(row, col));
-                let f = a.frame(SIZE.0, SIZE.1);
-                for j in 0..TOTAL_CELLS {
-                    let (r2, c2) = row_col(j);
-                    let square = l.cell_rect(r2, c2);
-                    // The last fill over the square is the one on top.
-                    let ground = f
-                        .commands()
-                        .iter()
-                        .rev()
-                        .find_map(|cmd| match cmd {
-                            RenderCommand::FillRect {
+            let (mut digits, mut marks, mut small) = (0, 0, 0);
+            // The default window, where a digit is large text, and a cramped
+            // one, where it is not and takes the stronger ink.
+            for (w, h) in [SIZE, (360.0, 440.0)] {
+                a.resize(w, h);
+                let l = layout_of(&a);
+                for i in 0..TOTAL_CELLS {
+                    let (row, col) = row_col(i);
+                    a.apply(Intent::Select(row, col));
+                    let f = a.frame(w, h);
+                    for j in 0..TOTAL_CELLS {
+                        let (r2, c2) = row_col(j);
+                        let square = l.cell_rect(r2, c2);
+                        // The last fill over the square is the one on top.
+                        let ground = f
+                            .commands()
+                            .iter()
+                            .rev()
+                            .find_map(|cmd| match cmd {
+                                RenderCommand::FillRect {
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    color,
+                                    ..
+                                } if (*x - square.x).abs() < 0.01
+                                    && (*y - square.y).abs() < 0.01
+                                    && (*width - square.w).abs() < 0.01
+                                    && (*height - square.h).abs() < 0.01 =>
+                                {
+                                    Some(*color)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| panic!("square ({r2}, {c2}) is not drawn"))
+                            .over(grid);
+                        for cmd in f.commands() {
+                            let RenderCommand::Text {
                                 x,
                                 y,
-                                width,
-                                height,
+                                text,
                                 color,
+                                font_size,
+                                font_weight,
                                 ..
-                            } if (*x - square.x).abs() < 0.01
-                                && (*y - square.y).abs() < 0.01
-                                && (*width - square.w).abs() < 0.01
-                                && (*height - square.h).abs() < 0.01 =>
-                            {
-                                Some(*color)
+                            } = cmd
+                            else {
+                                continue;
+                            };
+                            if !square.contains(*x + 0.5, *y + 0.5) {
+                                continue;
                             }
-                            _ => None,
-                        })
-                        .unwrap_or_else(|| panic!("square ({r2}, {c2}) is not drawn"))
-                        .over(grid);
-                    for cmd in f.commands() {
-                        let RenderCommand::Text {
-                            x,
-                            y,
-                            text,
-                            color,
-                            font_size,
-                            ..
-                        } = cmd
-                        else {
-                            continue;
-                        };
-                        if !square.contains(*x + 0.5, *y + 0.5) {
-                            continue;
-                        }
-                        let ratio = guitk::theme::contrast_ratio(*color, ground);
-                        let (floor, kind) = if *font_size >= l.cell * 0.5 {
-                            digits += 1;
-                            (3.0, "digit")
-                        } else {
-                            marks += 1;
-                            (4.5, "mark")
-                        };
-                        assert!(
-                            ratio >= floor,
-                            "the {kind} {text} at ({r2}, {c2}) is {ratio:.2}:1 on its square \
+                            let ratio = guitk::theme::contrast_ratio(*color, ground);
+                            let large = gamechrome::legibility::is_large(
+                                *font_size,
+                                *font_weight == FontWeightHint::Bold,
+                            );
+                            let kind = if *font_size >= l.cell * 0.5 {
+                                digits += 1;
+                                if !large {
+                                    small += 1;
+                                }
+                                "digit"
+                            } else {
+                                marks += 1;
+                                "mark"
+                            };
+                            let floor = if large { 3.0 } else { 4.5 };
+                            assert!(
+                                ratio >= floor,
+                                "the {kind} {text} at ({r2}, {c2}) is {ratio:.2}:1 on its square \
                              with ({row}, {col}) selected (light: {light})"
-                        );
+                            );
+                        }
                     }
                 }
             }
             assert!(
-                digits > 0 && marks > 0,
-                "nothing was read: {digits} digits, {marks} marks"
+                digits > 0 && marks > 0 && small > 0,
+                "nothing was read: {digits} digits ({small} small), {marks} marks"
             );
-        }
-    }
-
-    /// **An ink is moved only when it does not read**, and then until it
-    /// does on every ground: `large_on` leaves an ink that already reads as
-    /// large text exactly as the palette made it -- the promise that a theme
-    /// whose inks read keeps them -- and `small_on` holds small text to the
-    /// higher floor.
-    #[test]
-    fn an_ink_is_moved_only_when_it_does_not_read() {
-        let (dark, grey) = (Color::from_hex(0x303030), Color::from_hex(0x606060));
-        let white = Color::from_hex(0xFFFFFF);
-        assert_eq!(
-            large_on(white, &[dark, grey]),
-            white,
-            "an ink that reads was moved"
-        );
-        // Between the two floors: large text reads there, and small does not,
-        // so `large_on` must leave it where `legible_on` alone would move it.
-        let between = Color::from_hex(0x858585);
-        let ratio = guitk::theme::contrast_ratio(between, dark);
-        assert!(
-            (LARGE_TEXT..4.5).contains(&ratio),
-            "the fixture is {ratio:.2}:1, not between the floors"
-        );
-        assert_eq!(
-            large_on(between, &[dark]),
-            between,
-            "an ink that reads as large text was moved"
-        );
-        let dim = Color::from_hex(0x707070);
-        let large = large_on(dim, &[dark, grey]);
-        assert_ne!(large, dim, "an ink that does not read was left as it was");
-        let small = small_on(dim, &[dark, grey]);
-        for ground in [dark, grey] {
-            let ratio = guitk::theme::contrast_ratio(large, ground);
-            assert!(ratio >= LARGE_TEXT, "moved, it is still {ratio:.2}:1");
-            let ratio = guitk::theme::contrast_ratio(small, ground);
-            assert!(ratio >= 4.5, "small text is {ratio:.2}:1");
         }
     }
 
@@ -2723,25 +2683,40 @@ mod tests {
     fn the_kinds_of_digit_are_told_apart_in_either_theme() {
         for light in [false, true] {
             let c = Colours::of(&Palette::for_mode(light));
-            let kinds = [
-                ("clue", c.clue),
-                ("own", c.own),
-                ("hint", c.hint),
-                ("clash", c.clash),
-            ];
-            for (i, &(a, x)) in kinds.iter().enumerate() {
-                for &(b, y) in kinds.iter().skip(i + 1) {
-                    // A clue is bold and the player's own digit is not
-                    // (`a_clue_a_hint_and_the_players_own_digit_are_three_different_colours`),
-                    // and in the dark theme the palette's text and blue are
-                    // near: weight is the cue there, and colour the second.
-                    if (a, b) == ("clue", "own") {
-                        continue;
+            for (strength, kinds) in [
+                (
+                    "large",
+                    [
+                        ("clue", c.clue.large),
+                        ("own", c.own.large),
+                        ("hint", c.hint.large),
+                        ("clash", c.clash.large),
+                    ],
+                ),
+                (
+                    "small",
+                    [
+                        ("clue", c.clue.small),
+                        ("own", c.own.small),
+                        ("hint", c.hint.small),
+                        ("clash", c.clash.small),
+                    ],
+                ),
+            ] {
+                for (i, &(a, x)) in kinds.iter().enumerate() {
+                    for &(b, y) in kinds.iter().skip(i + 1) {
+                        // A clue is bold and the player's own digit is not
+                        // (`a_clue_a_hint_and_the_players_own_digit_are_three_different_colours`),
+                        // and in the dark theme the palette's text and blue are
+                        // near: weight is the cue there, and colour the second.
+                        if (a, b) == ("clue", "own") {
+                            continue;
+                        }
+                        assert!(
+                            !guitk::palette::hard_to_tell_apart(x, y),
+                            "a {a} and a {b} look alike, {strength}: {x:?} and {y:?} (light: {light})"
+                        );
                     }
-                    assert!(
-                        !guitk::palette::hard_to_tell_apart(x, y),
-                        "a {a} and a {b} look alike: {x:?} and {y:?} (light: {light})"
-                    );
                 }
             }
         }
@@ -4888,7 +4863,7 @@ mod tests {
             short,
             "Sudoku",
             30.0,
-            colours().clue,
+            colours().clue.large,
             FontWeightHint::Bold,
         );
 
@@ -5674,15 +5649,16 @@ mod tests {
         assert_eq!(clue, KNOWN_SOLUTION[idx(4, 4)].to_string());
         assert_eq!(own, KNOWN_SOLUTION[idx(1, 7)].to_string());
         assert_eq!(hint, KNOWN_SOLUTION[idx(7, 1)].to_string());
-        assert_eq!(clue_color, colours().clue);
+        let size = l.cell * 0.6;
+        assert_eq!(clue_color, colours().clue.at(size, true));
         assert_eq!(
             own_color,
-            colours().own,
+            colours().own.at(size, false),
             "the player's own digit looks like a clue"
         );
         assert_eq!(
             hint_color,
-            colours().hint,
+            colours().hint.at(size, false),
             "a hint looks like the player's own work"
         );
         assert_eq!(clue_weight, FontWeightHint::Bold);
@@ -5701,7 +5677,7 @@ mod tests {
         let (_, color, _) = text_in(&f, l.cell_rect(1, 7)).expect("no digit drawn");
         assert_eq!(
             color,
-            colours().clash,
+            colours().clash.at(l.cell * 0.6, false),
             "a digit that breaks a rule is not flagged"
         );
         assert!(a.conflicts().contains(&(1, 7)));

@@ -1115,8 +1115,8 @@ MUTATIONS = [
     ),
     (
         "a digit that breaks a rule is drawn like any other",
-        "        let color = if conflicting {\n            self.colours.clash\n",
-        "        let color = if false {\n            self.colours.clash\n",
+        "        let ink = if conflicting {\n            self.colours.clash\n",
+        "        let ink = if false {\n            self.colours.clash\n",
         ["a_digit_that_breaks_a_rule_is_drawn_in_red"],
     ),
     (
@@ -1302,8 +1302,8 @@ MUTATIONS = [
     ),
     (
         "a clash's ink is the page's, not its square's",
-        "            clash: large_on(p.ink(p.red), &[clashing]),",
-        "            clash: p.ink(p.red),",
+        "            clash: Ink::on(p.ink(p.red), &[clashing]),",
+        "            clash: Ink::on(p.ink(p.red), &[]),",
         ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
     (
@@ -1314,21 +1314,21 @@ MUTATIONS = [
     ),
     (
         "pencil marks are the palette's grey wherever they sit",
-        "            note: small_on(p.subtext0, &[p.surface0, p.surface1, p.surface2]),",
+        "            note: Ink::on(p.subtext0, &[p.surface0, p.surface1, p.surface2]).small,",
         "            note: p.subtext0,",
         ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
     (
         "a hint is peach again, a neighbour of a clash",
-        "            hint: large_on(p.ink(p.green), &squares),",
-        "            hint: large_on(p.ink(p.peach), &squares),",
+        "            hint: Ink::on(p.ink(p.green), &squares),",
+        "            hint: Ink::on(p.ink(p.peach), &squares),",
         ["the_kinds_of_digit_are_told_apart_in_either_theme"],
     ),
     (
-        "an ink that already reads is moved anyway",
-        "        if contrast_ratio(ink, ground) >= LARGE_TEXT {\n            ink\n",
-        "        if false {\n            ink\n",
-        ["an_ink_is_moved_only_when_it_does_not_read"],
+        "a digit takes the large ink whatever its size",
+        "        let color = ink.at(size, weight == FontWeightHint::Bold);",
+        "        let color = ink.large;",
+        ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
 ]
 

@@ -21,7 +21,10 @@
 //!   pieces follow the theme: a palette hue that cannot be mistaken for the
 //!   accent, the first side's;
 //! - [`legibility`], for a game's tests: every text a frame draws, read
-//!   against what is drawn under it and held to WCAG's floor for its size.
+//!   against what is drawn under it and held to WCAG's floor for its size;
+//! - [`history`], the keys a game's undo history answers (C-Q24, §1416):
+//!   Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z, read the same
+//!   way in every game.
 //!
 //! A game's own colours -- the seven tetrominoes, the four ghosts, a card's
 //! red suits -- stay in the game, named, and its palette test lists them as
@@ -526,7 +529,10 @@ pub fn button(
     });
 }
 
+pub mod history;
 pub mod legibility;
+
+pub use history::HistoryKey;
 
 #[cfg(test)]
 mod tests;

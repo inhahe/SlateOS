@@ -4,8 +4,9 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
-Two tables, one per source file: the chrome and its buttons (`lib.rs`), and
-the legibility reader a game's tests hold every text to (`legibility.rs`).
+Three tables, one per source file: the chrome and its buttons (`lib.rs`),
+the legibility reader a game's tests hold every text to (`legibility.rs`),
+and the keys a game's undo history answers (`history.rs`).
 
 Usage:  python -u apps/gamechrome/mutate.py [substring ...]
 """
@@ -19,6 +20,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 LIB = Path(__file__).parent / "src" / "lib.rs"
 LEGIBILITY = Path(__file__).parent / "src" / "legibility.rs"
+HISTORY = Path(__file__).parent / "src" / "history.rs"
 
 # (name, old, new, [tests that must fail])
 LIB_MUTATIONS = [
@@ -171,11 +173,72 @@ LEGIBILITY_MUTATIONS = [
     ),
 ]
 
+HISTORY_MUTATIONS = [
+    (
+        "a key held with the Windows key is a history key",
+        "        if !key.pressed || m.super_key {",
+        "        if !key.pressed {",
+        ["nothing_with_the_windows_key"],
+    ),
+    (
+        "a release is a press",
+        "        if !key.pressed || m.super_key {",
+        "        if m.super_key {",
+        ["a_bare_key_or_a_release_is_not_one"],
+    ),
+    (
+        "AltGr+Z undoes",
+        "            (Key::Z, true, false, false) => Some(Self::Undo),",
+        "            (Key::Z, true, _, false) => Some(Self::Undo),",
+        ["altgr_is_neither_ctrl_nor_alt"],
+    ),
+    (
+        "Ctrl+Z redoes",
+        "            (Key::Z, true, false, false) => Some(Self::Undo),",
+        "            (Key::Z, true, false, false) => Some(Self::Redo),",
+        ["the_four_are_read"],
+    ),
+    (
+        "Ctrl+Shift+Z is not a redo",
+        "            (Key::Z, true, false, true) | (Key::Y, true, false, false) => Some(Self::Redo),",
+        "            (Key::Y, true, false, false) => Some(Self::Redo),",
+        ["the_four_are_read"],
+    ),
+    (
+        "Ctrl+Shift+Y redoes",
+        "(Key::Y, true, false, false) => Some(Self::Redo),",
+        "(Key::Y, true, false, _) => Some(Self::Redo),",
+        ["other_keys_are_not_one"],
+    ),
+    (
+        "AltGr+Z goes back",
+        "            (Key::Z, false, true, false) => Some(Self::Earlier),",
+        "            (Key::Z, _, true, false) => Some(Self::Earlier),",
+        ["altgr_is_neither_ctrl_nor_alt"],
+    ),
+    (
+        "a bare Z goes back",
+        "            (Key::Z, false, true, false) => Some(Self::Earlier),",
+        "            (Key::Z, false, _, false) => Some(Self::Earlier),",
+        ["a_bare_key_or_a_release_is_not_one"],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "            (Key::Z, false, true, true) => Some(Self::Later),",
+        "            (Key::Z, false, true, true) => Some(Self::Earlier),",
+        ["the_four_are_read"],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
     only = sys.argv[1:]
-    tables = [(LIB, LIB_MUTATIONS), (LEGIBILITY, LEGIBILITY_MUTATIONS)]
+    tables = [
+        (LIB, LIB_MUTATIONS),
+        (LEGIBILITY, LEGIBILITY_MUTATIONS),
+        (HISTORY, HISTORY_MUTATIONS),
+    ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]
     if unmatched:

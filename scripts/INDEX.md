@@ -211,6 +211,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ki_archive.py` | Move lane B's resolved entries from `known-issues.md` into the archive. |
 | `scripts/ki_dupes.py` | Detect entries that exist in BOTH `known-issues.md` and its resolved archive. |
 | `scripts/ki_split.py` | Fence-aware structural scanner for `known-issues.md`. |
+| `scripts/lane-claims.py` | Say, where every lane can see it at once, that you have started a task. |
 | `scripts/lanec_scan.py` | Lane C's per-line scanner for the write-only-field and uncalled-function gates. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
@@ -360,6 +361,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
 | `scripts/test-ki-dupes.py` | Regression tests for `scripts/ki_dupes.py` and its entry/subsection split. |
+| `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
 | `scripts/test-msysbash.py` | Tests for `msysbash.py`, the one place that decides which bash runs our scripts. |
 | `scripts/test-mutation_harness.py` | Tests for mutation_harness.check_the_table: where a table's tests are found. |
@@ -406,4 +408,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_396 scripts._
+_398 scripts._

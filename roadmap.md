@@ -1939,10 +1939,10 @@ live.
   event colour, Settings' accent).
 
 - `[C]` **A claim every lane sees when it starts a task outside its obvious
-  territory** -- open (the operator's C-Q20 suggestion, §1425). A shared record
-  in the git common directory, like the halts, so another lane can see at once
-  that a feature is being built; the `CLAUDE.md` wording that would make it a
-  rule goes to the operator.
+  territory** -- **done 2026-09-27** (the operator's C-Q20 suggestion, §1425):
+  `scripts/lane-claims.py` (`--claim`, `--check`, `--list`, `--release`), in
+  the git common directory beside the halts. The `CLAUDE.md` paragraph that
+  would make it a rule is put to the operator as C-Q31.
 
 - `[C]` **A program may ask the password manager for a password -- with a key
   for it, and the user's consent** -- open (C-Q25, §1417). In the credential

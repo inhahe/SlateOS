@@ -367,6 +367,42 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q31 — [C] You suggested a lane say when it starts work outside its own part of the tree. The tool exists -- may `CLAUDE.md` make it a rule? — Status: OPEN (raised 2026-09-27)
+
+**In short:** answering C-Q20 you suggested that whenever a lane takes on a task
+the roadmap does not clearly give it, it should write that down where the other
+lanes will see it, so two lanes do not build the same thing. There is now a
+small tool for exactly that: a lane records "I am doing X" and every other lane
+sees it at once, without waiting for anyone's work to be merged. A tool nobody
+is told about goes unused, and the place every lane is told things is
+`CLAUDE.md`, which changes only on your word. So the question is whether to add
+the paragraph below.
+
+**The tool:** `scripts/lane-claims.py`. A claim is a small file in the one
+folder all six lanes share -- where "stop everything" halts already live -- so it
+is seen the moment it is written. It is a notice, not a lock: nothing is refused
+because of it. Claims older than a week are shown as stale, not hidden.
+
+**The paragraph proposed**, for `CLAUDE.md` under "Six Sessions", after the
+paragraph about `requests/`:
+
+> **Before starting a task the roadmap does not clearly give your lane, check
+> and claim it.** `python scripts/lane-claims.py --check <the paths you will
+> touch>` shows whether another lane has claimed them; if not, `python
+> scripts/lane-claims.py --claim "<what>" --paths <paths>` tells every lane at
+> once, and `--release <what>` when it is done or dropped. A claim is a notice,
+> not a lock.
+
+| Option | *What changes* |
+|---|---|
+| **A. Add it as written** (recommended) | every lane checks for and records a claim before out-of-territory work |
+| **B. Add it, worded your way** | the same, in your words -- tell me the change, or edit it in yourself |
+| **C. Leave `CLAUDE.md` as it is** | the tool exists and is used only by lanes that remember it |
+
+**If it is never answered:** nothing breaks and nothing is blocked; the tool is
+there and lane C uses it. What is lost is the protection it exists for, because
+a claim only helps if the lane about to duplicate the work thinks to look.
+
 ## C-Q29 — [C] Copying in one program and pasting in another works nowhere. Should copy and paste travel through the window system? — Status: OPEN (raised 2026-09-26)
 
 **In short:** nothing you copy can be pasted into a *different* program. Each

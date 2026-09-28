@@ -87,6 +87,8 @@ use crate::color::Color;
 use crate::disabled::{DISABLED_OPACITY, DisabledState, render_disabled};
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
+use crate::grab;
+use crate::layout::Axis;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
@@ -1486,8 +1488,18 @@ impl<K: Clone + Ord> TreeView<K> {
                 Vec::new()
             }
             Some(TreeHit::ScrollTrack) => {
-                // A press in the groove pages towards the pointer, as every
-                // scrollbar does, rather than jumping to it.
+                // Just past the thumb's end, the press is aimed at the thumb
+                // and takes hold of it (`grab::in_track`). The hit test put it
+                // on the track already, so only how far along matters.
+                if let Some((track, thumb)) = self.scroll_geometry()
+                    && grab::in_track(thumb, track, Axis::Vertical)
+                        .contains(track.x + track.w / 2.0, y)
+                {
+                    self.thumb_grab = Some(y - thumb.y);
+                    return Vec::new();
+                }
+                // Elsewhere in the groove it pages towards the pointer, as
+                // every scrollbar does, rather than jumping to it.
                 if let Some((_, thumb)) = self.scroll_geometry() {
                     let page = isize::try_from(self.capacity().max(1)).unwrap_or(isize::MAX);
                     self.scroll_by(if y < thumb.y {
@@ -2549,6 +2561,33 @@ mod tests {
             &source,
         );
         assert_eq!(view.first_visible(), 80);
+    }
+
+    /// A press in the groove just past the thumb's end takes hold of the
+    /// thumb rather than paging; the drag then follows the pointer.
+    #[test]
+    fn a_press_just_past_the_thumb_takes_hold_of_it() {
+        let names: Vec<&'static str> = (0..100)
+            .map(|i| &*Box::leak(format!("n{i}").into_boxed_str()))
+            .collect();
+        let source = Literal(names.iter().map(|n| leaf(n)).collect());
+        let mut view = view_over(&source, 10);
+        let mut frame = Frame::new(view.bounds().right(), view.bounds().bottom());
+        view.draw(&Palette::for_mode(false), &mut frame, |h| h);
+        let thumb = frame
+            .rect_of(|h| *h == TreeHit::ScrollThumb)
+            .expect("a long tree has a scrollbar");
+        let (tx, below) = (thumb.centre().0, thumb.bottom() + 2.0);
+        view.handle_mouse(
+            &mouse(tx, below, MouseEventKind::Press(MouseButton::Left)),
+            &source,
+        );
+        assert_eq!(view.first_visible(), 0, "the press paged instead");
+        view.handle_mouse(
+            &mouse(tx, view.bounds().bottom() + 50.0, MouseEventKind::Move),
+            &source,
+        );
+        assert_eq!(view.first_visible(), 90, "the press did not take the thumb");
     }
 
     #[test]

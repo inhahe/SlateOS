@@ -23,6 +23,15 @@
 //! adds [`HANDLE_MARGIN`] on every side, then grows any direction still short
 //! of [`MIN_TARGET`] to it, centred on what is drawn.
 //!
+//! **A handle that runs in a track of its own** -- a scrollbar's thumb -- is
+//! between the two. Along the track the handle can grow, since the rest of the
+//! track is the scrollbar's too; across it the track is already the whole
+//! column the scrollbar owns, and growing past it would take clicks from the
+//! list beside it. [`in_track`] grows the thumb along the track only, and
+//! never outside it. (A scrollbar is narrower than [`MIN_TARGET`]; that is the
+//! width every desktop draws one, and making the column wider is a layout
+//! choice, not a hit-test one.)
+//!
 //! Where two handles' regions overlap -- two sliders stacked close, a thumb at
 //! the end of its track beside another control's -- [`nearest`] gives the
 //! press to the one whose *drawn* shape is closer, so the answer never depends
@@ -112,6 +121,33 @@ pub fn handle(drawn: Rect) -> Rect {
         drawn.w + gx * 2.0,
         drawn.h + gy * 2.0,
     )
+}
+
+/// The region a press takes hold of a thumb drawn at `thumb` in, when it runs
+/// along `track` in the direction `axis`.
+///
+/// Grown along the track by [`HANDLE_MARGIN`] each way, and further to
+/// [`MIN_TARGET`] if the thumb is shorter; as wide as the track across it; and
+/// never outside the track. So a press on the track a few pixels past the
+/// thumb's end takes hold of the thumb rather than paging the list, and a
+/// press in the list beside the scrollbar is still the list's.
+#[must_use]
+pub fn in_track(thumb: Rect, track: Rect, axis: Axis) -> Rect {
+    let (thumb, track) = (sane(thumb), sane(track));
+    let grow = |extent: f32| HANDLE_MARGIN.max((MIN_TARGET - extent) / 2.0);
+    let grown = match axis {
+        Axis::Horizontal => {
+            let g = grow(thumb.w);
+            Rect::new(thumb.x - g, track.y, thumb.w + g * 2.0, track.h)
+        }
+        Axis::Vertical => {
+            let g = grow(thumb.h);
+            Rect::new(track.x, thumb.y - g, track.w, thumb.h + g * 2.0)
+        }
+    };
+    grown
+        .intersect(track)
+        .unwrap_or(Rect::new(track.x, track.y, 0.0, 0.0))
 }
 
 /// How far `(x, y)` is from the nearest point of `rect`: zero inside it.
@@ -229,6 +265,42 @@ mod tests {
         assert!(close(r.h, MIN_TARGET), "{r:?}");
         assert!(close(r.w, 150.0 + HANDLE_MARGIN * 2.0), "{r:?}");
         assert!(close(r.y + r.h / 2.0, 102.0), "centred on the track: {r:?}");
+    }
+
+    /// A scrollbar thumb grows along its track only, and never out of it.
+    #[test]
+    fn a_thumb_in_a_track_grows_along_it_and_stays_inside_it() {
+        let track = Rect::new(390.0, 0.0, 10.0, 300.0);
+        let thumb = Rect::new(390.0, 100.0, 10.0, 40.0);
+        let r = in_track(thumb, track, Axis::Vertical);
+        assert!(
+            close(r.x, 390.0) && close(r.w, 10.0),
+            "not wider than the track: {r:?}"
+        );
+        assert!(
+            close(r.y, 100.0 - HANDLE_MARGIN) && close(r.h, 40.0 + HANDLE_MARGIN * 2.0),
+            "{r:?}"
+        );
+
+        // A short thumb reaches the minimum along the track.
+        let short = Rect::new(390.0, 100.0, 10.0, 12.0);
+        let r = in_track(short, track, Axis::Vertical);
+        assert!(close(r.h, MIN_TARGET), "{r:?}");
+
+        // At the top of the track the region stops there.
+        let top = Rect::new(390.0, 0.0, 10.0, 40.0);
+        let r = in_track(top, track, Axis::Vertical);
+        assert!(close(r.y, 0.0) && close(r.h, 40.0 + HANDLE_MARGIN), "{r:?}");
+
+        // Horizontal: the same, turned.
+        let track = Rect::new(0.0, 290.0, 300.0, 10.0);
+        let thumb = Rect::new(50.0, 290.0, 30.0, 10.0);
+        let r = in_track(thumb, track, Axis::Horizontal);
+        assert!(close(r.y, 290.0) && close(r.h, 10.0), "{r:?}");
+        assert!(
+            close(r.x, 50.0 - HANDLE_MARGIN) && close(r.w, 30.0 + HANDLE_MARGIN * 2.0),
+            "{r:?}"
+        );
     }
 
     /// Distance is zero inside, straight-line outside, and never NaN.

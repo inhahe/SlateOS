@@ -69,6 +69,8 @@
 use crate::date::Date;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
+use crate::grab;
+use crate::layout::Axis;
 use crate::palette::Palette;
 use crate::pathbar::{CompletionItem, PathBar, PathBarEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -926,14 +928,23 @@ impl FileDialog {
                 DialogAction::None
             }
             Some(DialogTarget::ScrollTrack) => {
-                // A click on the track moves one windowful towards the click,
-                // which is what every scrollbar does and is more predictable
-                // than jumping to the exact spot: the thumb ends up under the
-                // pointer either way if you keep clicking.
+                let thumb = frame.rect_of(|t| *t == DialogTarget::ScrollThumb);
+                // A press on the track just past the thumb's end is aimed at
+                // the thumb, and takes hold of it (`grab::in_track`) rather
+                // than paging -- the grip then keeps it from jumping.
+                if let (Some(thumb), Some(track)) =
+                    (thumb, frame.rect_of(|t| *t == DialogTarget::ScrollTrack))
+                    && grab::in_track(thumb, track, Axis::Vertical).contains(x, y)
+                {
+                    self.thumb_grab = Some(y - thumb.y);
+                    return DialogAction::None;
+                }
+                // Anywhere else on the track moves one windowful towards the
+                // click, which is what every scrollbar does and is more
+                // predictable than jumping to the exact spot: the thumb ends
+                // up under the pointer either way if you keep clicking.
                 let page = usize::try_from(page_step(height)).unwrap_or(1);
-                let above = frame
-                    .rect_of(|t| *t == DialogTarget::ScrollThumb)
-                    .is_some_and(|thumb| y < thumb.y);
+                let above = thumb.is_some_and(|thumb| y < thumb.y);
                 self.scroll_top = self.visible_rows(height).start;
                 self.scroll_top = if above {
                     self.scroll_top.saturating_sub(page)
@@ -3959,6 +3970,37 @@ mod tests {
             0,
             "the pointer merely passing over the scrollbar must not move it"
         );
+    }
+
+    /// A press on the track just past the thumb's end is aimed at the thumb:
+    /// it takes hold of it (`grab::in_track`) instead of paging, and a drag
+    /// from there scrolls.
+    #[test]
+    fn a_press_just_past_the_thumb_takes_hold_of_it() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
+        let thumb = frame
+            .rect_of(|t| *t == DialogTarget::ScrollThumb)
+            .expect("a long listing has a scrollbar");
+        let (x, below) = (thumb.centre().0, thumb.bottom() + 2.0);
+        click_at(&mut dialog, x, below);
+        assert!(
+            dialog.thumb_grab.is_some(),
+            "the press did not take the thumb"
+        );
+        assert_eq!(dialog.visible_rows(H).start, 0, "the press paged instead");
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: below + H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).end, 30, "the drag did not scroll");
     }
 
     #[test]

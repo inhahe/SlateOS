@@ -169079,11 +169079,37 @@ rest matching only generic lines in unrelated files.
 **Where:** `scripts/reintro-palette.py`; the stale entries are listed by
 `python scripts/reintro-palette.py --check`.
 
-**Proper fix:** repair each stale entry to the code as it now reads -- each is
-the proof that a named test catches a named regression, so dropping them
-wholesale loses that proof -- or retire those whose test is gone; then wire
-`--check` (seconds, no build) into the boot test's tooling suites, so the next
-rename that strands an entry fails a gate rather than going unnoticed for weeks.
+**Triaged, 2026-09-27 (later): what the stale entries still prove.** Counted
+per target file and per declared test, against the live entries:
+
+- **Every file but one still has live entries** proving its colour sweep (the
+  `every_colour_..._comes_from_its_palette` test each module carries) catches a
+  colour put back. That sweep checks *every* colour the module draws, so a
+  stale entry whose only declared test is the sweep adds nothing the live ones
+  do not already prove. The exception is `gui/desktop/src/run_dialog.rs`:
+  **five stale, none live**.
+- **31 tests are proven to bite only by stale entries** -- behaviour tests, not
+  sweeps: in `gui/desktop/src/lib.rs` eleven start-menu, power-menu and
+  window-switcher tests; `context_ext.rs`'s
+  `a_hovered_extensions_icon_follows_the_accent`; `osd.rs`'s
+  `every_pair_this_module_uses_to_tell_things_apart_stays_apart` and
+  `volume_icon_levels`; three in `widgets.rs`; three in `run_dialog.rs`; five
+  palette tests in `gui/appearance`; and one or two each in `calendar.rs`,
+  `datetime_settings.rs`, `login_screen.rs`, `startup_settings.rs` and
+  `wallpaper.rs`. Listed by the triage's script; rerun it to regenerate.
+- The work since the first pass added no stale entry: against `main` at
+  `08d0ef08d`, thirteen entries changed status, all from stale to live (the
+  retargets above).
+
+**Proper fix, now concrete:** (1) re-derive one entry for each of the 31 tests
+above -- a defect written against the code as it now reads, run through the
+harness to confirm the named test catches it -- and at least one for
+`run_dialog.rs`'s sweep; (2) retire the remaining ~270 stale entries, each
+leaving a one-line `# RETIRED 2026-..: stale; <file>'s sweep is proven by N
+live entries` in its place, which is the file's own convention and keeps the
+record; (3) wire `--check` (seconds, no build) into the boot test's tooling
+suites, so the next rename that strands an entry fails a gate rather than going
+unnoticed for weeks. (1) is the part with value; (2) and (3) are what keep it.
 
 ## `TD-C-THIRTY-EIGHT-CARD-TESTS-ASK-A-WEAKER-QUESTION-THAN-THEY-READ` (lane C, 2026-09-22)
 

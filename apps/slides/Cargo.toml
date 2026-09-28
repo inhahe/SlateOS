@@ -18,6 +18,8 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
+# The undo history: the toolkit's tree, kept of whole decks (C-Q24).
+statehistory = { path = "../statehistory" }
 
 # A deck is kept as YAML, like everything else here a person might open in an
 # editor, and read back through the same library.

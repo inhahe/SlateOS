@@ -11,6 +11,12 @@ layout put on a slide could be selected, undo and redo had no key, the notes
 could not be written, five of six layouts were unreachable, decks could not be
 saved, and the transitions every slide chose were never played.
 
+The undo history is a tree now (C-Q24): an edit after an undo keeps the undone
+deck as a branch, reached with Alt+Z.  Its rows cover the keys -- and AltGr,
+which arrives as Ctrl+Alt, being taken for no chord and no plain key -- the
+cap, and an opened deck's history starting with it; the tree itself is
+`statehistory`'s and the toolkit's to test.
+
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
 """
@@ -23,6 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+TREE = "an_edit_after_an_undo_keeps_the_undone_deck_reachable_with_alt_z"
+GUARD = "a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -296,8 +305,8 @@ MUTATIONS = [
     ),
     (
         "a change does not mark the deck",
-        "        self.undo_mgr.save(now);\n        self.dirty = true;",
-        "        self.undo_mgr.save(now);",
+        "        self.undo_mgr.begin(now);\n        self.dirty = true;",
+        "        self.undo_mgr.begin(now);",
         ["the_window_bar_marks_unsaved_changes", "open_asks_before_losing_unsaved_changes"],
     ),
     (
@@ -499,6 +508,85 @@ MUTATIONS = [
         'x2=\\"{width}\\" y2=\\"{height}\\" \\',
         'x2=\\"{width}\\" y2=\\"0\\" \\',
         ["the_export_draws_lines_along_their_direction"],
+    ),
+    # -- the history: a tree, walked with Alt+Z (C-Q24) -----------------------------------------------
+    (
+        "a deck the history puts back is not marked",
+        "    fn restore(&mut self, snap: Snapshot) {\n        self.dirty = true;\n",
+        "    fn restore(&mut self, snap: Snapshot) {\n",
+        [TREE],
+    ),
+    (
+        "Alt+Z goes nowhere",
+        "let moved = if shift { self.later() } else { self.earlier() };",
+        "let moved = if shift { self.later() } else { false };",
+        [TREE, "every_advertised_key_does_something"],
+    ),
+    (
+        "Alt+Shift+Z goes back too",
+        "let moved = if shift { self.later() } else { self.earlier() };",
+        "let moved = if shift { self.earlier() } else { self.earlier() };",
+        [TREE],
+    ),
+    (
+        "Alt+Z only undoes",
+        "        let snap = self.undo_mgr.earlier(now);",
+        "        let snap = self.undo_mgr.undo(now);",
+        [TREE],
+    ),
+    (
+        "Alt+Shift+Z only redoes",
+        "        let snap = self.undo_mgr.later(now);",
+        "        let snap = self.undo_mgr.redo(now);",
+        [TREE],
+    ),
+    (
+        "AltGr+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.super_key =>",
+        ["altgr_z_does_not_undo"],
+    ),
+    (
+        "Super+Alt+Z goes back",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key =>",
+        "Key::Z if key.modifiers.alt && !key.modifiers.ctrl =>",
+        ["alt_z_with_the_windows_key_goes_nowhere"],
+    ),
+    (
+        "a key held with Alt is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.super_key => EventResult::Ignored,",
+        ["altgr_z_does_not_undo", GUARD],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,",
+        "            _ if key.modifiers.alt => EventResult::Ignored,",
+        [GUARD],
+    ),
+    (
+        "Ctrl+Shift+Z undoes",
+        "            Key::Z if ctrl && shift => self.redo_if_any(),\n",
+        "",
+        ["undo_and_redo_have_keys"],
+    ),
+    (
+        "redo undoes",
+        "        let snap = self.undo_mgr.redo(now);",
+        "        let snap = self.undo_mgr.undo(now);",
+        ["undo_and_redo_have_keys", "test_undo_redo_integration"],
+    ),
+    (
+        "the history keeps more than a hundred edits",
+        "            undo_mgr: StateHistory::new(UNDO_LIMIT),",
+        "            undo_mgr: StateHistory::new(UNDO_LIMIT.saturating_add(20)),",
+        ["the_history_keeps_the_last_hundred_edits"],
+    ),
+    (
+        "an opened deck keeps the history of the one before",
+        "                self.undo_mgr.clear();\n",
+        "",
+        ["an_opened_deck_cannot_be_undone_into_the_one_before"],
     ),
 ]
 

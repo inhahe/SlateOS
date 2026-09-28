@@ -3304,6 +3304,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "statehistory",
  "unsaved",
  "yamldoc",
 ]

@@ -14,7 +14,8 @@
 //! - Slide numbering
 //! - Export to self-contained HTML slideshow
 //! - Copy/paste/duplicate slides, reorder (move up/down)
-//! - Undo/redo stack
+//! - Undo/redo, kept as a tree: Alt+Z reaches what an edit after an undo
+//!   would have lost
 //! - Keyboard shortcuts (Ctrl+N, Ctrl+D, Ctrl+Z, Ctrl+Y, Ctrl+E, etc.)
 //! - Multi-panel UI: slide thumbnail sidebar, main canvas, properties panel
 //!
@@ -50,11 +51,11 @@ use guitk::style::CornerRadii;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use statehistory::StateHistory;
+use std::num::NonZeroUsize;
 use std::process::ExitCode;
 use std::time::Duration;
 use unsaved::{Choice, Question};
-
-use std::collections::VecDeque;
 
 // ============================================================================
 // Catppuccin Mocha theme constants
@@ -80,6 +81,11 @@ const NOTES_HEIGHT: f32 = 80.0;
 const SLIDE_ASPECT: f32 = 16.0 / 9.0;
 /// Maximum undo/redo steps.
 const MAX_UNDO: usize = 100;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: NonZeroUsize = match NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => NonZeroUsize::MIN,
+};
 /// Corner radius for panels and buttons.
 const CORNER_R: f32 = 4.0;
 /// Default slide width in logical units.
@@ -689,7 +695,8 @@ impl Slide {
 // Undo/Redo
 // ============================================================================
 
-/// A snapshot of the entire slide deck for undo/redo.
+/// The whole deck as it stood at one point in its history: what an undo puts
+/// back.
 ///
 /// The theme is part of it: a theme change restyles every element, and an
 /// undo that brought the old colours back under the new theme would leave the
@@ -699,57 +706,6 @@ struct Snapshot {
     slides: Vec<Slide>,
     current_index: usize,
     theme: SlideTheme,
-}
-
-/// Undo/redo manager using a snapshot stack.
-#[derive(Debug)]
-struct UndoManager {
-    undo_stack: VecDeque<Snapshot>,
-    redo_stack: Vec<Snapshot>,
-    max_depth: usize,
-}
-
-impl UndoManager {
-    fn new(max_depth: usize) -> Self {
-        Self {
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
-            max_depth,
-        }
-    }
-
-    /// Save the current state before a mutation. Clears the redo stack.
-    fn save(&mut self, now: Snapshot) {
-        if self.undo_stack.len() >= self.max_depth {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(now);
-        self.redo_stack.clear();
-    }
-
-    /// Undo: return the previous snapshot, saving the current state to redo.
-    fn undo(&mut self, now: Snapshot) -> Option<Snapshot> {
-        let prev = self.undo_stack.pop_back()?;
-        self.redo_stack.push(now);
-        Some(prev)
-    }
-
-    /// Redo: return the next snapshot, saving the current state to undo.
-    fn redo(&mut self, now: Snapshot) -> Option<Snapshot> {
-        let next = self.redo_stack.pop()?;
-        self.undo_stack.push_back(now);
-        Some(next)
-    }
-
-    /// True if there is something to undo.
-    fn can_undo(&self) -> bool {
-        !self.undo_stack.is_empty()
-    }
-
-    /// True if there is something to redo.
-    fn can_redo(&self) -> bool {
-        !self.redo_stack.is_empty()
-    }
 }
 
 // ============================================================================
@@ -824,11 +780,17 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+D", "Duplicate this slide"),
     ("Ctrl+C / Ctrl+V", "Copy / paste a slide"),
     ("Ctrl+PgUp / Ctrl+PgDn", "Move this slide up / down"),
-    ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / redo; Ctrl+Shift+Z redoes too"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The deck before / after this, on any branch",
+    ),
     ("G", "Next background for this slide"),
     ("Ctrl+R", "Next transition into this slide"),
-    ("Ctrl+T", "Next theme"),
-    ("Ctrl+Shift+T", "Name the deck"),
+    // One row for the two, which leaves the list fitting a 720-pixel
+    // window: past that the card names the rows left over rather than
+    // showing them.
+    ("Ctrl+T / Ctrl+Shift+T", "Next theme / name the deck"),
     ("N / B", "Type / show or hide the speaker notes"),
     ("1 / 2", "Edit view / sorter view"),
     ("F5 / Shift+F5", "Present from the start / from this slide"),
@@ -1079,8 +1041,12 @@ pub struct SlidesApp {
     window_height: f32,
     /// Current view mode.
     view: ViewMode,
-    /// Undo/redo manager.
-    undo_mgr: UndoManager,
+    /// Every deck there has been since this one was begun or opened, as a
+    /// tree: an edit after an undo keeps what was undone as a branch, reached
+    /// with Alt+Z (C-Q24, `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go
+    /// back and forth along the branch the deck is on; Alt+Z and Alt+Shift+Z
+    /// walk every deck there has been, in the order each was made.
+    undo_mgr: StateHistory<Snapshot>,
     /// Clipboard (for slide copy/paste).
     clipboard: Clipboard,
     /// Currently selected element ID on the active slide (if any).
@@ -1163,7 +1129,7 @@ impl SlidesApp {
             window_width: width,
             window_height: height,
             view: ViewMode::Edit,
-            undo_mgr: UndoManager::new(MAX_UNDO),
+            undo_mgr: StateHistory::new(UNDO_LIMIT),
             clipboard: Clipboard::Empty,
             selected_element: None,
             show_notes: true,
@@ -1393,7 +1359,7 @@ impl SlidesApp {
 
     // ---- Undo/Redo ---------------------------------------------------------
 
-    /// The deck as it is, for the undo stack.
+    /// The deck as it is, for the history.
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             slides: self.slides.clone(),
@@ -1406,7 +1372,7 @@ impl SlidesApp {
     /// that it has changed since it was saved.
     fn checkpoint(&mut self) {
         let now = self.snapshot();
-        self.undo_mgr.save(now);
+        self.undo_mgr.begin(now);
         self.dirty = true;
     }
 
@@ -1419,20 +1385,45 @@ impl SlidesApp {
         self.selected_element = None;
     }
 
-    /// Undo the last action.
-    pub fn undo(&mut self) {
+    /// Undo the last action. Returns whether there was one.
+    pub fn undo(&mut self) -> bool {
         let now = self.snapshot();
-        if let Some(snap) = self.undo_mgr.undo(now) {
-            self.restore(snap);
-        }
+        let snap = self.undo_mgr.undo(now);
+        self.put_back(snap)
     }
 
-    /// Redo the last undone action.
-    pub fn redo(&mut self) {
+    /// Redo an action undone, on the branch the deck is on. Returns whether
+    /// there was one.
+    pub fn redo(&mut self) -> bool {
         let now = self.snapshot();
-        if let Some(snap) = self.undo_mgr.redo(now) {
-            self.restore(snap);
-        }
+        let snap = self.undo_mgr.redo(now);
+        self.put_back(snap)
+    }
+
+    /// Go to the deck as it was before this one was first reached, on
+    /// whichever branch -- Alt+Z. Returns whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let snap = self.undo_mgr.earlier(now);
+        self.put_back(snap)
+    }
+
+    /// Go to the deck first reached after this one, on whichever branch --
+    /// Alt+Shift+Z. Returns whether there was one.
+    pub fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let snap = self.undo_mgr.later(now);
+        self.put_back(snap)
+    }
+
+    /// [`restore`](Self::restore) the deck the history handed back, if it
+    /// handed one back.
+    fn put_back(&mut self, snap: Option<Snapshot>) -> bool {
+        let Some(snap) = snap else {
+            return false;
+        };
+        self.restore(snap);
+        true
     }
 
     // ---- Theme -------------------------------------------------------------
@@ -2458,7 +2449,7 @@ impl SlidesApp {
                 self.current_index = 0;
                 self.selected_element = None;
                 self.editing = None;
-                self.undo_mgr = UndoManager::new(MAX_UNDO);
+                self.undo_mgr.clear();
                 self.deck_path = Some(path.to_path_buf());
                 self.dirty = false;
                 self.view = ViewMode::Edit;
@@ -2665,6 +2656,22 @@ impl SlidesApp {
     fn handle_command_key(&mut self, key: &KeyEvent, ctrl: bool, shift: bool) -> EventResult {
         let editing_view = self.view == ViewMode::Edit;
         match key.key {
+            // Alt+Z and Alt+Shift+Z: every deck there has been, in the order
+            // each was made -- the way back to a branch undone out of.
+            Key::Z if key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key => {
+                let moved = if shift { self.later() } else { self.earlier() };
+                if moved {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            // Any other key held with Alt or the Windows key is not this
+            // window's: Windows+ keys are the desktop's, and AltGr -- which
+            // arrives as Ctrl+Alt -- types a letter (Polish AltGr+Z is ż),
+            // which is no chord and must not be taken for the shape on its
+            // plain key either.
+            _ if key.modifiers.alt || key.modifiers.super_key => EventResult::Ignored,
             // The shortcut list. `F1` raises it in every app in this tree,
             // including `apps/spreadsheet`, where `?` is a character the
             // program has to be able to type into a cell -- so somebody who
@@ -6562,76 +6569,142 @@ mod tests {
         assert!(s.remove_element(99999).is_none());
     }
 
-    // ---- UndoManager tests -------------------------------------------------
+    // ---- The history: a tree, walked with Alt+Z (C-Q24) --------------------
 
-    /// A snapshot of `slides` at `current_index`, in the Mocha theme.
-    fn snap(slides: &[Slide], current_index: usize) -> Snapshot {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        Snapshot {
-            slides: slides.to_vec(),
-            current_index,
-            theme: SlideTheme::mocha(&pal),
+    fn with_modifiers(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        })
+    }
+
+    fn alt_z(shift: bool) -> Event {
+        with_modifiers(
+            Key::Z,
+            Modifiers {
+                alt: true,
+                shift,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    /// **An edit made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every deck there has been, in the order each was made, marking it
+    /// changed; Alt+Shift+Z comes forward again.
+    #[test]
+    fn an_edit_after_an_undo_keeps_the_undone_deck_reachable_with_alt_z() {
+        let mut app = fresh();
+        let before = element_count(&app);
+        app.handle_event(&press(Key::T));
+        assert!(app.undo());
+        assert_eq!(element_count(&app), before);
+        app.add_slide(SlideLayout::Blank);
+        assert!(!app.redo(), "redo went onto the branch left");
+        app.dirty = false;
+        assert_eq!(app.handle_event(&alt_z(false)), EventResult::Consumed);
+        assert_eq!(app.slide_count(), 1);
+        assert_eq!(
+            element_count(&app),
+            before + 1,
+            "the undone text box was lost"
+        );
+        assert!(app.dirty, "a journey did not mark the deck changed");
+        app.handle_event(&alt_z(false));
+        assert_eq!(element_count(&app), before);
+        app.handle_event(&alt_z(true));
+        app.handle_event(&alt_z(true));
+        assert_eq!(app.slide_count(), 2);
+        assert_eq!(
+            app.handle_event(&alt_z(true)),
+            EventResult::Ignored,
+            "past the newest deck"
+        );
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt; what it types -- ż on
+    /// a Polish keyboard -- is not a chord, so AltGr+Z undoes nothing.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let with_box = element_count(&app);
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, altgr));
+        assert_eq!(element_count(&app), with_box, "AltGr+Z undid");
+    }
+
+    /// **Alt+Z held with the Windows key is the desktop's**, not a journey.
+    #[test]
+    fn alt_z_with_the_windows_key_goes_nowhere() {
+        let mut app = fresh();
+        app.handle_event(&press(Key::T));
+        let with_box = element_count(&app);
+        let super_alt = Modifiers {
+            alt: true,
+            super_key: true,
+            ..Modifiers::NONE
+        };
+        app.handle_event(&with_modifiers(Key::Z, super_alt));
+        assert_eq!(element_count(&app), with_box, "Super+Alt+Z went back");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is no shortcut
+    /// here.** T adds a text box; AltGr+T (Ctrl+Alt+T, a letter on some
+    /// layouts), Alt+T and Windows+T must not.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_no_shortcut() {
+        for modifiers in [
+            Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ] {
+            let mut app = fresh();
+            let before = element_count(&app);
+            assert_eq!(
+                app.handle_event(&with_modifiers(Key::T, modifiers)),
+                EventResult::Ignored,
+                "{modifiers:?}"
+            );
+            assert_eq!(element_count(&app), before, "{modifiers:?}+T added a box");
         }
     }
 
+    /// **The history keeps the last hundred edits** and drops the oldest:
+    /// each holds a whole deck.
     #[test]
-    fn test_undo_redo_basic() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(700);
-        let s1 = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let s2 = Slide::new(2, SlideLayout::TitleSlide, &theme, &mut id_gen);
-
-        let mut mgr = UndoManager::new(10);
-        assert!(!mgr.can_undo());
-        assert!(!mgr.can_redo());
-
-        // Save state [s1], then mutate to [s1, s2].
-        mgr.save(snap(std::slice::from_ref(&s1), 0));
-        let slides_after = vec![s1.clone(), s2];
-
-        // Undo: should restore [s1].
-        let back = mgr.undo(snap(&slides_after, 1));
-        assert!(back.is_some());
-        let back = back.unwrap();
-        assert_eq!(back.slides.len(), 1);
-        assert_eq!(back.current_index, 0);
-
-        // Can redo now.
-        assert!(mgr.can_redo());
-        let redo_snap = mgr.redo(snap(&back.slides, back.current_index));
-        assert!(redo_snap.is_some());
-        let redo_snap = redo_snap.unwrap();
-        assert_eq!(redo_snap.slides.len(), 2);
-    }
-
-    #[test]
-    fn test_undo_max_depth() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(800);
-        let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let mut mgr = UndoManager::new(3);
-
-        for _ in 0..5 {
-            mgr.save(snap(std::slice::from_ref(&s), 0));
+    fn the_history_keeps_the_last_hundred_edits() {
+        let mut app = fresh();
+        for _ in 0..110 {
+            app.add_slide(SlideLayout::Blank);
         }
-        // Only 3 saved (max depth).
-        assert_eq!(mgr.undo_stack.len(), 3);
-    }
-
-    #[test]
-    fn test_save_clears_redo() {
-        let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        let theme = SlideTheme::mocha(&pal);
-        let mut id_gen = IdGen::new(900);
-        let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
-        let mut mgr = UndoManager::new(10);
-        mgr.save(snap(std::slice::from_ref(&s), 0));
-        let _ = mgr.undo(snap(std::slice::from_ref(&s), 0));
-        assert!(mgr.can_redo());
-        mgr.save(snap(std::slice::from_ref(&s), 0));
-        assert!(!mgr.can_redo());
+        let mut undone = 0;
+        while undone <= MAX_UNDO && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, MAX_UNDO);
+        assert_eq!(
+            app.slide_count(),
+            11,
+            "not the deck before the oldest edit kept"
+        );
     }
 
     // ---- SlidesApp tests ---------------------------------------------------
@@ -7976,6 +8049,30 @@ mod tests {
         assert_eq!(describe(&other), describe(&app));
         assert!(!other.dirty);
         assert_eq!(other.current_index, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An opened deck's history starts with it.** An undo reaching back
+    /// into the deck open before would put that one under the opened file's
+    /// name, for Ctrl+S to write over the file.
+    #[test]
+    fn an_opened_deck_cannot_be_undone_into_the_one_before() {
+        let dir = scratch_dir(line!());
+        let path = dir.join("opened.slides");
+        let said = seeded().write_deck(&path);
+        assert!(said.starts_with("Saved"), "{said}");
+        let mut app = fresh();
+        app.add_slide(SlideLayout::Blank);
+        let said = app.read_deck(&path);
+        assert!(said.starts_with("Opened"), "{said}");
+        let opened = describe(&app);
+        assert!(!app.undo(), "undo reached the deck before");
+        assert_eq!(
+            app.handle_event(&alt_z(false)),
+            EventResult::Ignored,
+            "Alt+Z reached the deck before"
+        );
+        assert_eq!(describe(&app), opened);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

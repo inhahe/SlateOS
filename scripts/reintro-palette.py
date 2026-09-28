@@ -1346,61 +1346,75 @@ DEFECTS = [
         "KKKKKK: the tab content well keeps Mocha crust, which the membership "
         "sweep is structurally unable to see",
         NET_SET,
-        [("            height: content_h,\n            color: p.crust,",
-          "            height: content_h,\n"
-          "            color: Color::from_hex(0x11111B),")],
+        [
+            ('        p.push_surface(\n            &mut cmds,\n            x + 8.0,\n            content_y,\n            width - 16.0,\n            content_h,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x11111B));\n        p.push_paint_radii(\n            &mut cmds,\n            x + 8.0,\n            content_y,\n            width - 16.0,\n            content_h,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
+        ],
         ["desktop"],
-        ["the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The well is a card surface now.
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         # Reachable only with Wi-Fi switched off *and* no networks listed. A
         # state matrix that renders one populated Wi-Fi tab never touches it.
-        "LLLLLL: the \"Wi-Fi is disabled\" caption keeps Mocha overlay0",
+        "LLLLLL: the \"Wi-Fi is disabled\" caption keeps Mocha subtext0",
         NET_SET,
-        [("                    \"Wi-Fi is disabled\".to_string()\n"
-          "                },\n"
-          "                font_size: 12.0,\n                color: p.overlay0,",
-          "                    \"Wi-Fi is disabled\".to_string()\n"
-          "                },\n"
-          "                font_size: 12.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    "Wi-Fi is disabled".to_string()\n                },\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                    "Wi-Fi is disabled".to_string()\n                },\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "MMMMMM: the \"No Ethernet interfaces detected\" caption keeps Mocha "
-        "overlay0",
+        "subtext0",
         NET_SET,
-        [("                text: \"No Ethernet interfaces detected\".to_string(),\n"
-          "                font_size: 14.0,\n                color: p.overlay0,",
-          "                text: \"No Ethernet interfaces detected\".to_string(),\n"
-          "                font_size: 14.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No Ethernet interfaces detected".to_string(),\n                font_size: 14.0,\n                color: p.subtext0,\n',
+             '                text: "No Ethernet interfaces detected".to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "NNNNNN: the \"None configured\" search-domain caption keeps Mocha "
-        "overlay0",
+        "subtext0",
         NET_SET,
-        [("                text: \"None configured\".to_string(),\n"
-          "                font_size: 11.0,\n                color: p.overlay0,",
-          "                text: \"None configured\".to_string(),\n"
-          "                font_size: 11.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "None configured".to_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n',
+             '                text: "None configured".to_string(),\n                font_size: 11.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
-        "OOOOOO: the empty-firewall caption keeps Mocha overlay0",
+        "OOOOOO: the empty-firewall caption keeps Mocha subtext0",
         NET_SET,
-        [("                text: \"No custom rules. Using default policies.\".to_string(),\n"
-          "                font_size: 12.0,\n                color: p.overlay0,",
-          "                text: \"No custom rules. Using default policies.\".to_string(),\n"
-          "                font_size: 12.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No custom rules. Using default policies.".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                text: "No custom rules. Using default policies.".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The colour that never was a constant: Mocha surface0's three channels
@@ -1418,12 +1432,15 @@ DEFECTS = [
     (
         "QQQQQQ: the active tab's label is frozen blue instead of the accent",
         NET_SET,
-        [("                font_size: 13.0,\n"
-          "                color: if is_active { p.accent } else { p.subtext0 },",
-          "                font_size: 13.0,\n"
-          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        [
+            ('                font_size: 13.0,\n                color: if is_active {\n                    p.ink(p.accent)\n',
+             '                font_size: 13.0,\n                color: if is_active {\n                    p.ink(p.blue)\n'),
+        ],
         ["desktop"],
-        ["every_control_that_offers_something_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The label is inked now.
+            'every_control_that_offers_something_follows_the_accent',
+        ],
     ),
     (
         "RRRRRR: the status tab's four quick toggles are frozen blue",
@@ -1962,11 +1979,17 @@ DEFECTS = [
     (
         "GGGGGGGGG: the clock card keeps Mocha's surface0",
         DTS,
-        [("                height: 80.0,\n                color: p.surface0,",
-          "                height: 80.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 80.0, 12.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 80.0, CornerRadii::all(12.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "HHHHHHHHH: the main clock face keeps Mocha's text",
@@ -2013,11 +2036,17 @@ DEFECTS = [
     (
         "LLLLLLLLL: the current-zone card keeps Mocha's surface1",
         DTS,
-        [("                height: 44.0,\n                color: p.surface1,",
-          "                height: 44.0,\n                color: Color::from_hex(0x45475A),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 44.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x45475A));\n            p.push_paint_radii(cmds, x, cy, width, 44.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "MMMMMMMMM: the current-zone card's heading keeps Mocha's text",
@@ -2047,11 +2076,17 @@ DEFECTS = [
     (
         "OOOOOOOOO: the search field keeps Mocha's surface0",
         DTS,
-        [("            height: 30.0,\n            color: p.surface0,",
-          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "PPPPPPPPP: the search placeholder keeps Mocha's overlay0",
@@ -2160,13 +2195,19 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "AAAAAAAAAA: the sync-status card keeps Mocha's surface0",
+        "AAAAAAAAAA: the sync-status well keeps Mocha's surface2",
         DTS,
-        [("            height: 36.0,\n            color: p.surface0,",
-          "            height: 36.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 36.0, 6.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(Color::from_hex(0x585B70));\n        p.push_paint_radii(cmds, x, cy, width, 36.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "BBBBBBBBBB: a disabled clock is reported in the accent, so a fact "
@@ -2223,11 +2264,17 @@ DEFECTS = [
     (
         "HHHHHHHHHH: an NTP server row keeps Mocha's surface0",
         DTS,
-        [("                height: 28.0,\n                color: p.surface0,",
-          "                height: 28.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 28.0, 4.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 28.0, CornerRadii::all(4.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "IIIIIIIIII: an NTP server's name keeps Mocha's text",
@@ -2239,22 +2286,33 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "JJJJJJJJJJ: the empty-clocks caption keeps Mocha's overlay0",
+        "JJJJJJJJJJ: the empty-clocks caption keeps Mocha's subtext0",
         DTS,
-        [("                font_size: 13.0,\n                color: p.overlay0,",
-          "                font_size: 13.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No additional clocks. Add one to track time in another city.".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No additional clocks. Add one to track time in another city.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "KKKKKKKKKK: a world-clock card keeps Mocha's surface0",
         DTS,
-        [("                height: 60.0,\n                color: p.surface0,",
-          "                height: 60.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 60.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 60.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "LLLLLLLLLL: a world-clock face goes back to the blue it shipped in, "
@@ -2294,14 +2352,18 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "PPPPPPPPPP: the Hidden mark on a world clock keeps Mocha's overlay0",
+        "PPPPPPPPPP: the Hidden mark on a world clock keeps Mocha's subtext0",
         DTS,
-        [('text: "Hidden".into(),\n                    font_size: 10.0,\n'
-          "                    color: p.overlay0,",
-          'text: "Hidden".into(),\n                    font_size: 10.0,\n'
-          "                    color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    text: "Hidden".into(),\n                    font_size: 10.0,\n                    color: p.subtext0,\n',
+             '                    text: "Hidden".into(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "QQQQQQQQQQ: a toggle row's label keeps Mocha's text",
@@ -4604,11 +4666,13 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXXXX: an app row is raised like a default device",
         SND,
         [
-            ('height: 48.0,\n                color: p.mantle,',
-             'height: 48.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, y, width, 48.0, 6.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, y, width, 48.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Rows are card surfaces now -- outlined, not filled, since 829 -- so a row "raised" is one that gains a fill.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4628,11 +4692,12 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZ: a muted app's volume stops going red",
         SND,
         [
-            ('color: if entry.muted { p.red } else { p.subtext0 },',
-             'color: if entry.muted { p.subtext0 } else { p.subtext0 },'),
+            ('                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.subtext0\n                },\n',
+             '                color: if entry.muted {\n                    p.subtext0\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4640,11 +4705,12 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAA: an unmuted app's volume is promoted to body text",
         SND,
         [
-            ('color: if entry.muted { p.red } else { p.subtext0 },',
-             'color: if entry.muted { p.red } else { p.text },'),
+            ('                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.subtext0\n                },\n',
+             '                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.text\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4652,11 +4718,13 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBB: a system-sound row is raised off the panel",
         SND,
         [
-            ('height: 28.0,\n                color: p.mantle,',
-             'height: 28.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, y, width, 28.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Rows are card surfaces now -- outlined, not filled, since 829 -- so a row "raised" is one that gains a fill.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4676,11 +4744,12 @@ DEFECTS = [
         "DDDDDDDDDDDDDDDDDDDD: an enabled sound's status follows the accent",
         SND,
         [
-            ('color: if sc.enabled { p.green } else { p.overlay0 },',
-             'color: if sc.enabled { p.accent } else { p.overlay0 },'),
+            ('                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.overlay0\n                },\n',
+             '                color: if sc.enabled {\n                    p.ink(p.accent)\n                } else {\n                    p.overlay0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
             'nothing_that_reports_a_state_follows_the_accent',
         ],
@@ -4689,11 +4758,12 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEE: a disabled sound's status is promoted to secondary text",
         SND,
         [
-            ('color: if sc.enabled { p.green } else { p.overlay0 },',
-             'color: if sc.enabled { p.green } else { p.subtext0 },'),
+            ('                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.overlay0\n                },\n',
+             '                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
             'nothing_that_reports_a_state_follows_the_accent',
         ],
@@ -4789,27 +4859,31 @@ DEFECTS = [
         ],
     ),
     (
-        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface1",
+        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface2",
         SND,
         [
-            ('height: bar_h,\n            color: p.surface1,',
-             'height: bar_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+            ('        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(guitk::color::Color::from_hex(0x585B70));\n        p.push_paint_radii(cmds, x, y, width, bar_h, CornerRadii::all(3.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The groove is `Surface::ControlTrack` now, which is surface2 in both themes.
             'every_colour_the_sound_panel_draws_comes_from_its_palette',
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
     (
-        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface0",
+        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface1",
         SND,
         [
-            ('height: bar_h,\n            color: p.surface1,',
-             'height: bar_h,\n            color: p.surface0,'),
+            ('        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(p.surface1);\n        p.push_paint_radii(cmds, x, y, width, bar_h, CornerRadii::all(3.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The groove is `Surface::ControlTrack` now, which is surface2 in both themes.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -12630,11 +12704,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unchosen rows' icon keeps its own Mocha subtext0",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { Color::from_hex(0xA6ADC8) },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    Color::from_hex(0xA6ADC8)\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_colour_the_module_draws_comes_from_its_palette',
             'every_site_changes_when_the_mode_does',
             'every_site_draws_the_role_it_claims',
@@ -12705,11 +12781,13 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a rule's row keeps its own Mocha surface0",
         FOCUS,
         [
-            ('                    height: 28.0,\n                    color: p.surface0,',
-             '                    height: 28.0,\n                    color: Color::from_hex(0x313244),'),
+            ('                p.push_surface(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    6.0,\n                    Surface::Card,\n                );\n',
+             '                let mut paint = p.surface_paint(Surface::Card);\n                paint.fill = Some(Color::from_hex(0x313244));\n                p.push_paint_radii(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    CornerRadii::all(6.0),\n                    paint,\n                );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A rule's row is a card surface now -- outlined, not filled, since 829.
             'every_colour_the_module_draws_comes_from_its_palette',
             'every_site_changes_when_the_mode_does',
             'every_site_draws_the_role_it_claims',
@@ -12877,11 +12955,13 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen row's icon is blue again, as it was before the split",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.blue } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.blue)\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -12890,11 +12970,13 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen row's icon is body text and marks nothing",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.text\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -12982,11 +13064,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a rule's row sinks to the page behind it",
         FOCUS,
         [
-            ('                    height: 28.0,\n                    color: p.surface0,',
-             '                    height: 28.0,\n                    color: p.mantle,'),
+            ('                p.push_surface(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    6.0,\n                    Surface::Card,\n                );\n',
+             '                let mut paint = p.surface_paint(Surface::Card);\n                paint.fill = Some(p.mantle);\n                p.push_paint_radii(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    CornerRadii::all(6.0),\n                    paint,\n                );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A rule's row is a card surface now -- outlined, not filled, since 829.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -13112,13 +13196,15 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a row's icon and label colours are traded",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
-            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
-             '                font_size: 13.0,\n                color: if selected { p.accent } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.text\n                } else {\n                    p.subtext0\n                },\n'),
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },\n',
+             '                font_size: 13.0,\n                color: if selected { p.ink(p.accent) } else { p.subtext0 },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -13153,11 +13239,13 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the row icon's chosen and unchosen branches are swapped",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.subtext0 } else { p.accent },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.subtext0\n                } else {\n                    p.ink(p.accent)\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],

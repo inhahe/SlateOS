@@ -119,7 +119,7 @@ MUTATIONS = [
     ),
     (
         "a failed save is not said",
-        '                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));',
+        '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
         [FAILING],
     ),
@@ -173,8 +173,8 @@ MUTATIONS = [
     ),
     (
         "what is being written is dropped at a close",
-        "        if let Some(TextEntry::NoteBody(id, body)) = self.text_entry.clone() {",
-        "        if let Some(TextEntry::NoteBody(id, body)) = None::<TextEntry> {",
+        "        self.finish_note_body();\n        self.keep();\n        if !(self.persist",
+        "        self.keep();\n        if !(self.persist",
         ["closing_while_writing_keeps_what_was_written"],
     ),
     (
@@ -188,6 +188,147 @@ MUTATIONS = [
         "        } else if self.notes.is_empty() {",
         "        } else if false {",
         ["the_empty_window_says_how_to_start_and_nothing_else_does", KEPT],
+    ),
+    # The body is the toolkit's multi-line field
+    # (requests/c-e-a-multi-line-text-field-for-the-apps-that-edit-text.md).
+    (
+        "a press elsewhere keeps the writing before it lands",
+        "        let result = self.press_elsewhere(event);\n        if ends_writing {\n"
+        "            self.finish_note_body();\n            return EventResult::Consumed;\n"
+        "        }\n        result\n",
+        "        if ends_writing {\n            self.finish_note_body();\n        }\n"
+        "        self.press_elsewhere(event)\n",
+        ["a_click_elsewhere_keeps_the_writing_and_does_its_own_thing"],
+    ),
+    (
+        "a press elsewhere goes on writing",
+        "        let ends_writing = self.writing().is_some()\n",
+        "        let ends_writing = false && self.writing().is_some()\n",
+        ["a_click_elsewhere_keeps_the_writing_and_does_its_own_thing"],
+    ),
+    (
+        "the version panel ends the writing",
+        "            && !self.on_version_panel(event.x, event.y);",
+        "            && true;",
+        ["a_version_clicked_while_writing_goes_into_the_field"],
+    ),
+    (
+        "a version is restored past the field",
+        "            && if self.writing().is_some() {\n                self.restore_into_body(index)",
+        "            && if false {\n                self.restore_into_body(index)",
+        ["a_version_clicked_while_writing_goes_into_the_field"],
+    ),
+    (
+        "an untouched field is written back",
+        "        if untouched || !self.update_note_content(id, &text) {",
+        "        if !self.update_note_content(id, &text) {",
+        ["opening_a_note_with_other_line_endings_changes_nothing"],
+    ),
+    (
+        "the field is filled again on every event",
+        "            .is_some_and(|held| held.id == note.id && held.source == note.content)",
+        "            .is_some_and(|held| held.id == note.id && held.source == note.content && false)",
+        ["a_long_note_scrolls_and_stays_in_its_panel"],
+    ),
+    (
+        "a note is shown through a field holding its old text",
+        "            .is_some_and(|held| held.id == note.id && held.source == note.content)",
+        "            .is_some_and(|held| held.id == note.id)",
+        ["a_version_restored_while_reading_shows_at_once"],
+    ),
+    (
+        "a click does not put the caret where it lands",
+        "                self.body\n                    .press(event.x - left, event.y - top, clicks, false, &m);",
+        "                let _ = (left, top, clicks, &m);",
+        ["a_click_on_the_text_writes_where_it_lands", "a_drag_selects_the_text_it_passes_over"],
+    ),
+    (
+        "a drag does not select",
+        "                self.body.drag_to(event.x - left, event.y - top, &m);",
+        "                let _ = (left, top, &m);",
+        ["a_drag_selects_the_text_it_passes_over"],
+    ),
+    (
+        "a move with the button up selects",
+        "            MouseEventKind::Release(MouseButton::Left) if self.body_drag => {\n"
+        "                self.body_drag = false;",
+        "            MouseEventKind::Release(MouseButton::Left) if self.body_drag => {\n"
+        "                self.body_drag = true;",
+        ["a_drag_selects_the_text_it_passes_over"],
+    ),
+    (
+        "a double click is one click",
+        "                let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {\n"
+        "                    2",
+        "                let clicks = if matches!(event.kind, MouseEventKind::DoubleClick(_)) {\n"
+        "                    1",
+        ["a_double_click_selects_a_word"],
+    ),
+    (
+        "a click on a Markdown page lands in its source",
+        "                    if markdown {",
+        "                    if false {",
+        ["a_click_on_a_markdown_page_writes_at_its_end"],
+    ),
+    (
+        "Tab types nothing",
+        '                self.body.insert_str("\\t");',
+        "",
+        ["tab_writes_a_tab_in_a_note", KEPT],
+    ),
+    (
+        "Ctrl+Enter does not finish",
+        "            Key::Enter if ctrl => {\n                self.finish_note_body();",
+        "            Key::Enter if false => {\n                self.finish_note_body();",
+        ["ctrl_enter_finishes_writing"],
+    ),
+    (
+        "Ctrl+S in the middle of writing keeps the old text",
+        "            Key::S if ctrl => {\n                self.commit_note_body();",
+        "            Key::S if ctrl => {",
+        ["ctrl_s_while_writing_keeps_what_is_written"],
+    ),
+    (
+        "a checklist is opened as text",
+        "        NoteKind::Checklist => Some(CHECKLIST_NOT_TEXT),",
+        "        NoteKind::Checklist => None,",
+        ["a_checklist_or_a_table_is_not_opened_as_text"],
+    ),
+    (
+        "the counts sit still while writing",
+        "        let (word_count, char_count, link_count) = if self.writing() == Some(note.id) {",
+        "        let (word_count, char_count, link_count) = if false {",
+        ["the_counts_follow_the_writing"],
+    ),
+    (
+        "bytes are counted as characters",
+        "    text.chars().count()\n}",
+        "    text.len()\n}",
+        ["characters_are_counted_not_bytes", "the_counts_follow_the_writing"],
+    ),
+    (
+        "the caret's width setting is ignored",
+        "        self.caret_width = settings.caret_width();",
+        "        let _ = settings;",
+        ["the_caret_is_as_wide_as_the_setting_says"],
+    ),
+    (
+        "a note being read shows a caret",
+        "                focused: writing,",
+        "                focused: true,",
+        ["the_caret_is_as_wide_as_the_setting_says"],
+    ),
+    (
+        "a Markdown note is written through its page",
+        "        if self.writing() == Some(note.id) {\n            // What is written",
+        "        if false {\n            // What is written",
+        ["a_markdown_note_is_written_as_its_source"],
+    ),
+    (
+        "a long page is not kept in its panel",
+        "        cmds.push(RenderCommand::PushClip {\n            x,\n            y: editor_y,",
+        "        drop(RenderCommand::PushClip {\n            x,\n            y: editor_y,",
+        ["a_long_markdown_page_stays_in_its_panel"],
     ),
 ]
 

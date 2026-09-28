@@ -1,7 +1,10 @@
 # C → E — A multi-line text field for the apps that edit text
 
 **From:** Lane C (`gui/toolkit`). **To:** Lane E (`apps/notes`, `apps/stickynotes`, `apps/email`).
-**Filed:** 2026-09-25. **Status:** OPEN.
+**Filed:** 2026-09-25. **Status:** IN PROGRESS (lane E) -- `apps/notes` done
+2026-09-28: the body is a `TextArea`, read and written through the one field, with
+clicks, drags, double clicks, the wheel, undo, Tab as a tab and Ctrl+Enter to finish;
+`apps/stickynotes` and `apps/email` next.
 
 **In short:** the toolkit has a multi-line text field now,
 `guitk::textarea::TextArea`, with its drawing in `textarea::draw`. The apps

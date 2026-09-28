@@ -1711,7 +1711,7 @@ DEFECTS = [
         "WWWWWWW: the boot tab's heading keeps Mocha's lavender",
         STARTUP,
         [('            text: "Boot Performance".into(),\n'
-          "            font_size: 15.0,\n            color: p.lavender,",
+          "            font_size: 15.0,\n            color: p.ink(p.lavender),",
           '            text: "Boot Performance".into(),\n'
           "            font_size: 15.0,\n            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -1977,7 +1977,7 @@ DEFECTS = [
         "KKKKKKKKK: the Taskbar Clock heading keeps Mocha's lavender",
         DTS,
         [('text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -2126,7 +2126,7 @@ DEFECTS = [
         "ZZZZZZZZZ: the Time Synchronization heading keeps Mocha's lavender",
         DTS,
         [('text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -2338,7 +2338,7 @@ DEFECTS = [
         "WWWWWWWWWW: the NTP Servers heading keeps Mocha's lavender",
         DTS,
         [('text: "NTP Servers".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "NTP Servers".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -2348,7 +2348,7 @@ DEFECTS = [
         "XXXXXXXXXX: the Additional Clocks heading keeps Mocha's lavender",
         DTS,
         [('text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],

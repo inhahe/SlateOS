@@ -362,25 +362,32 @@ pub struct ColorScheme {
 }
 
 impl ColorScheme {
-    /// The user's theme for the chrome, and the protocol's colours for the text.
+    /// The user's theme, the sixteen colours programs name by number
+    /// included: the palette's terminal colours (`design-decisions.md` §1410).
     ///
-    /// The split is the whole point. `foreground`, `background`, `cursor` and
-    /// `selection_bg` are this window's furniture, and a terminal that stays
-    /// dark when the desktop goes light is the defect 822 is about. The
-    /// sixteen ANSI entries are *not* furniture: colour 1 is red because the
-    /// escape sequence says so, and a program that prints red expects red on
-    /// every terminal ever made. Retinting those would not theme the terminal,
-    /// it would corrupt what programs print -- the same reason
-    /// `guitk::textview::ansi_color` takes no palette.
+    /// The foreground, the background and the cursor are the theme's, the
+    /// foreground held to the text contrast floor on the background; a
+    /// terminal that stays dark when the desktop goes light is the defect §822
+    /// is about. The selection is the accent, as every selection in the
+    /// desktop is (§839).
+    ///
+    /// **The sixteen keep their meanings, and the theme chooses their
+    /// shades.** Colour 1 is red because the escape sequence says so, and a
+    /// program that prints red expects red -- which the palette's table keeps:
+    /// slot 1 is the theme's red, slot 2 its green, as every terminal's themes
+    /// place them (Catppuccin, Solarized, Gruvbox). These were left at fixed
+    /// xterm-like values whatever the theme, on the reading that a theme could
+    /// only corrupt them; a theme's shade of red is still red, and it is the
+    /// thing a theme is for. They are left as the theme states them, not held
+    /// to a floor: a program is entitled to mean black on black.
     #[must_use]
     pub fn from_palette(palette: &Palette) -> Self {
         Self {
-            foreground: palette.text,
-            background: palette.base,
-            cursor: palette.text,
-            // The accent, as every other selection in the desktop uses (839).
+            foreground: palette.terminal.foreground,
+            background: palette.terminal.background,
+            cursor: palette.terminal.cursor,
             selection_bg: palette.accent,
-            ..Self::default()
+            ansi: palette.terminal.ansi,
         }
     }
 }
@@ -3492,10 +3499,8 @@ fn scale(whole: usize, fraction: f32) -> usize {
 // ============================================================================
 
 impl App for TerminalState {
-    /// Adopt the user's colours (§822).
-    ///
-    /// Only the chrome moves; `ColorScheme::from_palette` says why the ANSI
-    /// table does not.
+    /// Adopt the user's colours (§822), the sixteen too (§1410) -- see
+    /// `ColorScheme::from_palette`.
     fn theme_changed(&mut self, palette: &Palette) {
         self.config.colors = ColorScheme::from_palette(palette);
     }
@@ -3871,8 +3876,11 @@ mod tests {
         );
     }
 
+    /// **The terminal draws in the theme's terminal colours**, the sixteen
+    /// included: they were fixed xterm-like values whatever the theme
+    /// (lane C, c-e-the-terminal-draws-in-the-themes-terminal-colours).
     #[test]
-    fn the_chrome_follows_the_theme_and_the_ansi_table_does_not() {
+    fn the_chrome_and_the_sixteen_follow_the_theme() {
         let dark = ColorScheme::from_palette(&Palette::for_mode(false));
         let light = ColorScheme::from_palette(&Palette::for_mode(true));
 
@@ -3881,19 +3889,41 @@ mod tests {
             "the window's own background must change with the theme"
         );
         assert_ne!(dark.foreground, light.foreground);
-        assert_eq!(
-            dark.ansi, light.ansi,
-            "the sixteen ANSI colours are the protocol's, not the theme's"
-        );
-        assert_eq!(
-            dark.ansi,
-            ColorScheme::default().ansi,
-            "and they are the same ones a default scheme has"
-        );
 
         let p = Palette::for_mode(true);
-        assert_eq!(light.background, p.base);
-        assert_eq!(light.foreground, p.text);
+        assert_eq!(light.background, p.terminal.background);
+        assert_eq!(light.foreground, p.terminal.foreground);
+        assert_eq!(light.cursor, p.terminal.cursor);
+        assert_eq!(
+            light.ansi, p.terminal.ansi,
+            "the sixteen are not the theme's"
+        );
+
+        // A theme's `terminal` section reaches the table, slot for slot.
+        let mut themed = Palette::for_mode(false);
+        themed.terminal.ansi[1] = Color::rgb(170, 20, 30);
+        assert_eq!(
+            ColorScheme::from_palette(&themed).ansi[1],
+            Color::rgb(170, 20, 30)
+        );
+
+        // And the numbers keep their meanings: 1 is a red, 2 a green, 4 a
+        // blue, whatever their shades.
+        for scheme in [&dark, &light] {
+            let [red, green, blue] = [1, 2, 4].map(|i| scheme.ansi[i]);
+            assert!(
+                red.r > red.g && red.r > red.b,
+                "colour 1 is not red: {red:?}"
+            );
+            assert!(
+                green.g > green.r && green.g > green.b,
+                "colour 2 is not green: {green:?}"
+            );
+            assert!(
+                blue.b > blue.r && blue.b > blue.g,
+                "colour 4 is not blue: {blue:?}"
+            );
+        }
         assert_eq!(
             light.selection_bg, p.accent,
             "selection is the accent (839)"

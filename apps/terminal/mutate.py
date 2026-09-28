@@ -754,6 +754,19 @@ MUTATIONS = [
         "        self.flush_to_child();\n        if false {\n            Response::Exit",
         ["a_clean_exit_found_on_a_wake_closes_the_window"],
     ),
+    # requests/c-e-the-terminal-draws-in-the-themes-terminal-colours.md
+    (
+        "the sixteen stay fixed whatever the theme",
+        "            ansi: palette.terminal.ansi,",
+        "            ansi: ColorScheme::default().ansi,",
+        ["the_chrome_and_the_sixteen_follow_the_theme"],
+    ),
+    (
+        "the foreground is drawn in the background's colour",
+        "            foreground: palette.terminal.foreground,",
+        "            foreground: palette.terminal.background,",
+        ["the_chrome_and_the_sixteen_follow_the_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

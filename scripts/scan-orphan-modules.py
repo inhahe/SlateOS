@@ -631,6 +631,21 @@ BASELINE_HEADER = """\
 # and textview.rs), so the count still fell.  Delete the line when an
 # application opens a DirectoryTree.
 #
+# Two more lines were ADDED on 2026-09-27, by lane C, on the same reasoning:
+# gui/toolkit/src/dropdown.rs and gui/toolkit/src/radio.rs, the toolkit's
+# drop-down list and radio group, which landed with its slider, switch and
+# checkbox (design-decisions 1431, 1432).  Their callers were looked for in
+# lane C's own tree first, and none is live: the shell's one-of-several
+# choices are menus (the desktop's View submenu) and lists (the shortcut
+# editor), and the two hand-drawn pickers it has -- the touchpad page's
+# choice boxes and focus assist's mode list -- are drawn only by their own
+# tests, the touchpad page being on this list itself.  The callers are
+# applications (the Settings application's own drop-downs, the unit
+# converter's, the radio groups in undelete, netmanager and podcast), lane
+# E's since the split, asked for in
+# requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md.
+# Delete each line when an application draws one.
+#
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the
 # generated file is deleted by the next run -- silently, because the gate

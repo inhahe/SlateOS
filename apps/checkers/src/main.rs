@@ -40,8 +40,12 @@ use oswindow::app::{self, App, Response};
 
 const RED_PIECE: Color = Color::from_hex(0xF38BA8);
 const RED_PIECE_DARK: Color = Color::from_hex(0xD06080);
-const BLACK_PIECE: Color = Color::from_hex(0x45475A);
-const BLACK_PIECE_DARK: Color = Color::from_hex(0x313244);
+/// Black's pieces: neutral dark greys, not the Mocha surfaces (`45475A`,
+/// `313244`) they were. The palette test matches the game's own colours on
+/// RGB, and a Mocha surface among them would pass that surface left over
+/// anywhere in a light window.
+const BLACK_PIECE: Color = Color::from_hex(0x474747);
+const BLACK_PIECE_DARK: Color = Color::from_hex(0x333333);
 const KING_CROWN: Color = Color::from_hex(0xF9E2AF);
 /// Red's colour as text, `(pale, deep)`: the piece's own red on a dark page,
 /// a deeper red on a light one, where the pale red is 2:1.

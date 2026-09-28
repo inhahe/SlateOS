@@ -906,6 +906,12 @@ MUTATIONS = [
         "                color: kind.text_color(),\n                corner_radii: CornerRadii::all(swatch / 4.0),",
         ["the_legend_swatches_are_little_tiles"],
     ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "            height: h,\n            color: c.chrome.page,",
+        "            height: h,\n            color: Color::from_hex(0x1E1E2E),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

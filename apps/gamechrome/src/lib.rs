@@ -208,7 +208,12 @@ pub mod cards {
     /// The red suits' ink: hearts and diamonds.
     pub const RED: Color = Color::from_hex(0xD20F39);
     /// The black suits' ink: spades and clubs.
-    pub const BLACK: Color = Color::from_hex(0x1E1E2E);
+    ///
+    /// A neutral near-black, not Mocha's base (`1E1E2E`) that it was: a
+    /// game's palette test names this as its own colour and matches it on
+    /// RGB, so Mocha's base here would pass a leftover Mocha page in a light
+    /// window.
+    pub const BLACK: Color = Color::from_hex(0x161616);
 
     /// A suit's ink on a card's face.
     #[must_use]

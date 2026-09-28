@@ -187,7 +187,11 @@ use std::time::Duration;
 
 /// The two inks that may be written on a pad, `(light, dark)`: whichever
 /// reads on its face -- light on a dim pad, dark on a lit one.
-const PAD_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x11111B));
+///
+/// The near-black is a neutral one, not Mocha's crust (`11111B`): the palette
+/// test matches the game's own colours on RGB, and Mocha's crust among them
+/// would pass a leftover Mocha crust anywhere in a light window.
+const PAD_INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 /// The colours this window's chrome draws in, from the user's palette.
 #[derive(Clone, Copy, Debug)]

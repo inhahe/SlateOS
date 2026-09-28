@@ -527,6 +527,12 @@ MUTATIONS = [
         "        let _ = c.veil;",
         ["a_card_the_rules_forbid_is_washed_out"],
     ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

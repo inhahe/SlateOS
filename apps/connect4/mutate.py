@@ -1314,6 +1314,12 @@ MUTATIONS = [
         "            Self::Red => YELLOW_DISC.0,",
         ["a_piece_is_painted_in_the_hole_it_landed_in"],
     ),
+    (
+        "the page is Mocha's crust whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x11111B), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -627,6 +627,12 @@ MUTATIONS = [
         "    fill(f, r, Color::from_hex(0x3B4261), r.w * 0.16);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the page is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.chrome.page, 0.0);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
 ]
 
 if __name__ == "__main__":

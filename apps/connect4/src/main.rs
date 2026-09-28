@@ -144,7 +144,11 @@ const RED_DISC: (Color, Color) = (Color::from_hex(0xF38BA8), Color::from_hex(0xB
 const YELLOW_DISC: (Color, Color) = (Color::from_hex(0xF9E2AF), Color::from_hex(0x8A5A00));
 
 /// The ink of a number written on a disc: both discs are pale.
-const DISC_INK: Color = Color::from_hex(0x11111B);
+///
+/// The near-black is a neutral one, not Mocha's crust (`11111B`): the palette
+/// test matches the game's own colours on RGB, and Mocha's crust among them
+/// would pass a leftover Mocha crust anywhere in a light window.
+const DISC_INK: Color = Color::from_hex(0x161616);
 
 /// The colours this window draws in: the chrome and the frame from the
 /// user's palette, the discs from [`RED_DISC`] and [`YELLOW_DISC`]. It drew

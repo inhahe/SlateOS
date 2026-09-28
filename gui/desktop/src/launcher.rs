@@ -25,6 +25,11 @@
 /// which program a folder opens in.
 pub const FILE_MANAGER: &str = "/usr/bin/explorer";
 
+/// What the file manager is started with to show the recycle bin: its view
+/// of what was deleted, with Restore and Empty (lane E, `explorer
+/// --recycle-bin`). What the desktop's Recycle Bin icon opens.
+pub const RECYCLE_BIN_VIEW_ARG: &str = "--recycle-bin";
+
 /// The settings application: what the start menu's Settings button and the
 /// Settings shortcut start, and this database's entry for it.
 pub const SETTINGS: &str = "/usr/bin/settings";

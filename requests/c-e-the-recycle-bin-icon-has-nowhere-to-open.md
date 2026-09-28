@@ -2,8 +2,11 @@
 
 **From:** Lane C (`gui/desktop`). **To:** Lane E (`apps/explorer`).
 **Filed:** 2026-09-25.
-**Status:** OPEN — asks lane E for a way to open the recycle bin; the desktop
-side is ready to use it the day it exists.
+**Status:** ✅ LANDED — lane E built `explorer --recycle-bin` (answered in
+`requests/e-c-answers-to-eleven-requests-three-landed-eight-wait-for-main.md`),
+and the desktop's Recycle Bin icon opens it since 2026-09-27
+(`DesktopShell::open_icon`, `launcher::RECYCLE_BIN_VIEW_ARG`). Dropping files
+on the icon is not asked for here; lane E offers a way if it is wanted.
 
 **In short:** Double-clicking the Recycle Bin icon on the desktop should show
 what is in the bin, so a file can be found and put back. Nothing can show

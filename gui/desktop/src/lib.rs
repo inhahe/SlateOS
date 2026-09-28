@@ -12423,19 +12423,17 @@ impl DesktopShell {
                 self.open_path(Path::new("/"), &label)
             }
             icons::IconAction::LaunchSystem(what) if what == icons::RECYCLE_BIN => {
-                // The bin exists -- the file manager moves files into it and
-                // restores them -- but nothing can show what is in it: the
-                // file manager has no view of it, and pointing it at the bin's
-                // storage would list internal entry folders named by ids.
-                // Said rather than faked. `requests/c-e-the-recycle-bin-icon-
-                // has-nowhere-to-open.md` asks lane E for the view.
-                self.say_cannot_open(
-                    &label,
-                    "Nothing can show the recycle bin's contents yet. What is \
-                     in it is kept, in the .recycle folder in your home \
-                     folder, until something can.",
-                );
-                ShellAction::Consumed
+                // The file manager's view of the bin: each item under its own
+                // name and the folder it came from, with Restore, Delete
+                // permanently and Empty -- lane E's answer to
+                // `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`.
+                // Until it existed this said the bin could not be shown,
+                // because pointing the file manager at the bin's storage would
+                // have listed internal folders named by ids.
+                ShellAction::Launch(hotkeys::Launch {
+                    program: PathBuf::from(launcher::FILE_MANAGER),
+                    args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                })
             }
             // A destination this build does not know -- a layout written by a
             // newer desktop -- or an application-defined action with no

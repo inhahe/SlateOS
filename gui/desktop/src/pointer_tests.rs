@@ -2726,10 +2726,12 @@ fn this_pc_opens_the_root_in_the_file_manager() {
     });
 }
 
-/// **The Recycle Bin says it cannot show its contents yet**, rather than
-/// opening its storage -- internal folders named by ids -- or nothing at all.
+/// **The Recycle Bin opens the file manager's view of the bin** -- each item
+/// under its own name, with Restore -- not the bin's storage, internal folders
+/// named by ids. Until the file manager had that view (`explorer
+/// --recycle-bin`, lane E) the icon said it could not show the bin.
 #[test]
-fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
+fn the_recycle_bin_opens_the_file_managers_view_of_it() {
     settingsfile::testing::with_scratch_config("icons-open-bin", |_root| {
         let mut shell = shell_with_icons();
         let id = shell
@@ -2744,10 +2746,17 @@ fn the_recycle_bin_says_it_cannot_show_its_contents_yet() {
             })
             .expect("the Recycle Bin is a default icon");
 
-        assert_eq!(double_click_icon(&mut shell, id), ShellAction::Consumed);
-        let notices = cannot_open_notices(&shell);
-        assert_eq!(notices.len(), 1, "{notices:?}");
-        assert_eq!(notices[0].0, "Cannot open Recycle Bin");
+        assert_eq!(
+            double_click_icon(&mut shell, id),
+            ShellAction::Launch(crate::hotkeys::Launch {
+                program: std::path::PathBuf::from(launcher::FILE_MANAGER),
+                args: vec![std::ffi::OsString::from("--recycle-bin")],
+            })
+        );
+        assert!(
+            cannot_open_notices(&shell).is_empty(),
+            "the bin still says it cannot be shown"
+        );
     });
 }
 

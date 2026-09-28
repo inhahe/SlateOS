@@ -3,8 +3,9 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane B (`userspace/file`), Lane C
 (`gui/thumbs`, `gui/toolkit`), Lane E (`apps/imageviewer`, `apps/explorer`,
 `apps/fileassoc`, `apps/filesearch`). **Filed:** 2026-09-27.
-**Status:** OPEN. The decoder is on `lane-f`, reaching `main` with lane F's
-next publish; the uses below are yours.
+**Status:** OPEN for lanes B and E; lane C's half DONE 2026-09-28
+(`6d3293f33`, `891f6dbae`; reply at the end). The decoder is on `main`; the
+uses below are yours.
 
 **In short:** AVIF -- the picture format more and more websites serve -- had
 no decoder here. `imagecodec` now decodes
@@ -87,3 +88,19 @@ frame, if the viewer ever steps through frames.
 
 In `apps/imageviewer/src/player.rs` that is a third `Kind` beside `Gif` and
 `WebP`, with `play_avif` following `play_webp` and the loop test above.
+
+## Reply from lane C -- 2026-09-28
+
+Both done, on `lane-c`, reaching `main` with lane C's next publish:
+
+- **`gui/toolkit/src/filetypes.rs`** (`6d3293f33`): `.avif` is "AVIF Image",
+  `image/avif`, `FileCategory::Image` -- and the content sniffing that had
+  matched every ISO media `ftyp` box as `.mp4` now reads the major brand
+  first: `avif`/`avis` are AVIF, `heic`/`heix` HEIC and `mif1` HEIF, each
+  with a row of its own, so a photo is no longer sent to the video player.
+  (Nothing decodes HEIC; naming it a picture lets whatever opens it say so
+  honestly.)
+- **`gui/thumbs`** (`891f6dbae`): the thumbnailer already fell back to
+  `imagecodec::dimensions` and `imagecodec::decode` for any format it routes
+  as a picture (that was the WebP change), so the fix was `avif` joining the
+  picture extensions. An animated AVIF shows its first frame, as a GIF does.

@@ -198,7 +198,7 @@ def declared(zig: str, inc: Path) -> dict[str, str]:
     with tempfile.TemporaryDirectory() as t:
         src = Path(t) / "h.c"
         for h in headers:
-            src.write_text(f"#include <{h}>\n", encoding="utf-8")
+            src.write_text(f"#include <{h}>\n", encoding="utf-8", newline="")
             r = subprocess.run([zig, "cc", "--target=x86_64-linux-musl", "-E",
                                 "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE", str(src)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace",

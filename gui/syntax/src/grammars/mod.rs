@@ -10,6 +10,8 @@
 pub(crate) mod c;
 pub(crate) mod css;
 pub(crate) mod json;
+pub(crate) mod markdown;
+pub(crate) mod markdown_inline;
 pub(crate) mod python;
 pub(crate) mod rust;
 pub(crate) mod toml;

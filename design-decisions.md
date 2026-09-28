@@ -83877,6 +83877,7 @@ field. The grammars' own colouring tests now run here and pass.
 | A capture whose name has no colour here (`@spell`, `@text.emphasis`) | takes no part; the node keeps what the other patterns said | if it is the node's last, the node is left uncoloured | we colour 22 kinds, not a theme's hundred names; blanking a node because its last name is one we lack (nvim-style `(comment) @comment @spell`) would lose colour the query did give it |
 | `@none` | paints the text plain, over what encloses it | a name like any other (no colour unless a theme has it) | Neovim's meaning, which the Markdown query (from nvim-treesitter) uses to keep a code fence's contents from showing the fence's literal colour |
 | An injected language's span starting where its host's does | the injected one on top | the host's on top, but an injection wins an identical range | an embedded language's colours are the point of injecting it; Neovim draws injected trees over their hosts |
+| What an injection's text leaves out, without `injection.include-children` | the node's *named* children only | every child | Markdown's block grammar lexes a paragraph's backticks and brackets as anonymous tokens of the paragraph's `inline` node; leaving them out handed the inline grammar fragments, and nothing inline was coloured. Named-only is Neovim's reading, whose queries these are (Helix spells it `injection.include-unnamed-children`) |
 
 **How it is known to be right.** Five of the vendored grammars ship
 highlight tests (`test/highlight/`: source files whose comments point at the

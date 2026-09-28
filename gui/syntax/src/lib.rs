@@ -139,11 +139,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 7;
+const VISIBLE: usize = 8;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 7] = [
+static LANGUAGES: [Language; 9] = [
     Language {
         name: "C",
         extensions: &["c", "h"],
@@ -178,6 +178,17 @@ static LANGUAGES: [Language; 7] = [
         index: 2,
     },
     Language {
+        name: "Markdown",
+        extensions: &["md", "markdown", "mdown", "mkd", "mkdn"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["md"],
+        grammar: grammars::markdown::generated::language_fn,
+        highlights: grammars::markdown::HIGHLIGHTS,
+        injections: grammars::markdown::INJECTIONS,
+        index: 3,
+    },
+    Language {
         name: "Python",
         extensions: &["py", "pyw", "pyi"],
         file_names: &["SConstruct", "SConscript"],
@@ -186,7 +197,7 @@ static LANGUAGES: [Language; 7] = [
         grammar: grammars::python::generated::language_fn,
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
-        index: 3,
+        index: 4,
     },
     Language {
         name: "Rust",
@@ -197,7 +208,7 @@ static LANGUAGES: [Language; 7] = [
         grammar: grammars::rust::generated::language_fn,
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
-        index: 4,
+        index: 5,
     },
     Language {
         name: "TOML",
@@ -209,7 +220,7 @@ static LANGUAGES: [Language; 7] = [
         grammar: grammars::toml::generated::language_fn,
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
-        index: 5,
+        index: 6,
     },
     Language {
         name: "YAML",
@@ -220,7 +231,19 @@ static LANGUAGES: [Language; 7] = [
         grammar: grammars::yaml::generated::language_fn,
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
-        index: 6,
+        index: 7,
+    },
+    // Hidden: injected by Markdown into its paragraphs and headings.
+    Language {
+        name: "markdown_inline",
+        extensions: &[],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::markdown_inline::generated::language_fn,
+        highlights: grammars::markdown_inline::HIGHLIGHTS,
+        injections: grammars::markdown_inline::INJECTIONS,
+        index: 8,
     },
 ];
 
@@ -266,7 +289,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 7] = [const { OnceLock::new() }; 7];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 9] = [const { OnceLock::new() }; 9];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -444,10 +467,12 @@ mod tests {
             ("TOML", None, 14, 66, 0),
             ("YAML", None, 14, 301, 2),
             ("JSON", None, 14, 25, 2),
+            ("Markdown", Some("markdown"), 15, 207, 1),
+            ("markdown_inline", Some("markdown_inline"), 15, 153, 0),
             ("Python", Some("python"), 15, 274, 32),
             ("Rust", Some("rust"), 15, 355, 31),
         ] {
-            let l = Language::named(language).unwrap().ts_language();
+            let l = Language::for_injection(language).unwrap().ts_language();
             assert_eq!(l.abi_version(), abi, "{language}");
             assert_eq!(l.name(), name, "{language}");
             assert_eq!(l.node_kind_count(), kinds, "{language}");
@@ -468,10 +493,11 @@ mod tests {
         );
     }
 
-    /// **Every language's highlight query compiles** against its grammar.
+    /// **Every language's highlight query compiles** against its grammar --
+    /// the hidden ones', reached only by injection, too.
     #[test]
     fn every_highlight_query_compiles() {
-        for l in Language::all() {
+        for l in &LANGUAGES {
             let c = l.compiled().unwrap_or_else(|e| panic!("{e}"));
             assert!(c.highlights.capture_names().len() > 3, "{}", l.name);
             assert_eq!(c.paints.len(), c.highlights.capture_names().len());
@@ -499,6 +525,7 @@ mod tests {
         assert_eq!(found("stdio.h"), Some("C"));
         assert_eq!(found("site.css"), Some("CSS"));
         assert_eq!(found("appearance.yaml"), Some("YAML"));
+        assert_eq!(found("README.md"), Some("Markdown"));
         assert_eq!(found(".github/ci.YML"), Some("YAML"));
         assert_eq!(found(".rs"), None);
         assert_eq!(found("notes.txt"), None);

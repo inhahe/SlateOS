@@ -8,6 +8,11 @@
 //! comparison are `tree-sitter test`'s: whitespace is not significant in the
 //! expected tree, field names are compared only when the expected tree has
 //! them, and an example marked `:error` needs only to fail to parse cleanly.
+//!
+//! A few examples test what the grammar as published does not have -- an
+//! opt-in extension its `parser.c` was generated without -- and are named,
+//! with the reason, beside the test that leaves them out; a name that
+//! matches no example fails the test, so the list cannot outlive them.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -152,9 +157,11 @@ fn has_fields(sexp: &str) -> bool {
         .any(|pair| is_field(pair[0]) && pair[1].starts_with('('))
 }
 
-/// Run every example in `grammars/<dir>/corpus/`, answering the failures.
-fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
-    let lang = Language::named(language).expect("a language");
+/// Run every example in `grammars/<dir>/corpus/` but those `not_built`
+/// names (`(file, example)`), answering how many ran and the failures -- a
+/// `not_built` name no example has among them.
+fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<String>) {
+    let lang = Language::for_injection(language).expect("a language");
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&lang.ts_language())
@@ -172,6 +179,7 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
     files.sort();
     let mut ran = 0;
     let mut failures = Vec::new();
+    let mut left_out = vec![false; not_built.len()];
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a corpus file");
         let short = file
@@ -180,6 +188,13 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
             .unwrap_or_default();
         for example in examples(&text) {
             if example.skip {
+                continue;
+            }
+            if let Some(at) = not_built
+                .iter()
+                .position(|&(f, name)| f == short && name == example.name)
+            {
+                left_out[at] = true;
                 continue;
             }
             ran += 1;
@@ -223,11 +238,20 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
             }
         }
     }
+    for (&(file, name), found) in not_built.iter().zip(left_out) {
+        if !found {
+            failures.push(format!(
+                "{file}: {name}: left out as not built, but there is no such example"
+            ));
+        }
+    }
     (ran, failures)
 }
 
-fn check(language: &str, dir: &str, at_least: usize) {
-    let (ran, failures) = run(language, dir);
+/// Every example of `language`'s corpus but those `not_built` parses as
+/// upstream's grammar parses it, and at least `at_least` of them ran.
+fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)]) {
+    let (ran, failures) = run(language, dir, not_built);
     assert!(ran >= at_least, "{language}: only {ran} examples ran");
     assert!(
         failures.is_empty(),
@@ -240,48 +264,89 @@ fn check(language: &str, dir: &str, at_least: usize) {
 /// **The C grammar parses its whole corpus as upstream's does.**
 #[test]
 fn c_passes_its_corpus() {
-    check("C", "c", 85);
+    check("C", "c", 85, &[]);
 }
 
 /// **The CSS grammar -- tables, lexers and ported scanner -- parses its
 /// whole corpus as upstream's does.**
 #[test]
 fn css_passes_its_corpus() {
-    check("CSS", "css", 40);
+    check("CSS", "css", 40, &[]);
 }
 
 /// **The TOML grammar -- tables, lexers and ported scanner -- parses its
 /// whole corpus as upstream's does.**
 #[test]
 fn toml_passes_its_corpus() {
-    check("TOML", "toml", 17);
+    check("TOML", "toml", 17, &[]);
 }
 
 /// **The YAML grammar -- tables, lexers and its large ported scanner --
 /// parses its whole corpus as upstream's does.**
 #[test]
 fn yaml_passes_its_corpus() {
-    check("YAML", "yaml", 95);
+    check("YAML", "yaml", 95, &[]);
+}
+
+/// **Markdown's block grammar -- tables, lexers and its large ported scanner
+/// -- parses its whole corpus as upstream's does.**
+#[test]
+fn markdown_passes_its_corpus() {
+    check("Markdown", "markdown", 322, &[]);
+}
+
+/// **Markdown's inline grammar parses its whole corpus as upstream's does**
+/// -- but for the examples of the two extensions a user must opt into when
+/// generating it, tags (`#tag`) and wiki links (`[[page]]`). Its published
+/// `parser.c`, the one vendored, is generated without them (it has no
+/// `tag` or `wiki_link` node), which is what a README wants: GitHub reads
+/// neither. Upstream runs its corpus against a grammar generated with
+/// `ALL_EXTENSIONS=1`, which is also why two of the spec's examples are
+/// here: their expected trees were written by it, and it reads `&#x;` as
+/// holding the tag `#x`.
+#[test]
+fn markdown_inline_passes_its_corpus() {
+    check(
+        "markdown_inline",
+        "markdown_inline",
+        337,
+        &[
+            ("extension_wikilink.txt", "Basic Wiki-link parsing."),
+            ("extension_wikilink.txt", "Wiki-link to a file"),
+            ("extension_wikilink.txt", "Wiki-link to a heading in a note"),
+            ("extension_wikilink.txt", "Wiki-link with title"),
+            ("extension_wikilink.txt", "Wiki-link version of Example 556"),
+            (
+                "spec.txt",
+                "Example 324 - https://github.github.com/gfm/#example-324",
+            ),
+            (
+                "spec.txt",
+                "Example 638 - https://github.github.com/gfm/#example-638",
+            ),
+            ("tags.txt", "Tags are working"),
+        ],
+    );
 }
 
 /// **The JSON grammar parses its whole corpus as upstream's does.**
 #[test]
 fn json_passes_its_corpus() {
-    check("JSON", "json", 6);
+    check("JSON", "json", 6, &[]);
 }
 
 /// **The Rust grammar -- tables, lexers and ported scanner -- parses its
 /// whole corpus as upstream's does.**
 #[test]
 fn rust_passes_its_corpus() {
-    check("Rust", "rust", 150);
+    check("Rust", "rust", 150, &[]);
 }
 
 /// **The Python grammar -- tables, lexers and ported scanner -- parses its
 /// whole corpus as upstream's does.**
 #[test]
 fn python_passes_its_corpus() {
-    check("Python", "python", 110);
+    check("Python", "python", 110, &[]);
 }
 
 /// **The corpus reader reads the format**: the name, `:error`, the input
@@ -309,4 +374,18 @@ fn the_corpus_format_is_read() {
         ("a\n---\nb", "(d)")
     );
     assert_eq!(without_fields("(a x: (b) (c))"), "(a (b) (c))");
+}
+
+/// **An example left out must exist**: a name in a `not_built` list that no
+/// example of the corpus has is a failure, so the list cannot outlive the
+/// examples it names -- and one that does exist is not run.
+#[test]
+fn a_left_out_example_must_exist() {
+    let (_, failures) = run("JSON", "json", &[("main.txt", "No such example")]);
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("no such example"), "{failures:?}");
+    let (all, _) = run("JSON", "json", &[]);
+    let (fewer, failures) = run("JSON", "json", &[("main.txt", "Arrays")]);
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(fewer, all - 1);
 }

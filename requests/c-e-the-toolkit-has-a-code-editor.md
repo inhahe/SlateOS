@@ -36,8 +36,10 @@ work and gives both of them the rest.
 ## Colouring the code (added 2026-09-28)
 
 Syntax highlighting is there now, and it is tree-sitter's (design-decisions
-§1437): the `syntax` crate (`gui/syntax`) has C, CSS, JSON, Python, Rust, TOML and YAML so far,
-each grammar passing its authors' own test corpus.
+§1437): the `syntax` crate (`gui/syntax`) has C, CSS, JSON, Markdown, Python,
+Rust, TOML and YAML so far, each grammar passing its authors' own test
+corpus. A language inside another is coloured as itself: a Markdown code
+fence in the language its info string names, front matter as YAML.
 
 - Add `syntax = { path = "../../gui/syntax" }` to the editor's `Cargo.toml`.
 - On opening a file: `syntax::Language::for_file(path)`, or for a script
@@ -56,5 +58,5 @@ each grammar passing its authors' own test corpus.
   `guitk::highlight::Highlighter` and plugs into the same view.
 
 What the editors have that the widget does not yet: the markdown editor's
-preview, which is the application's; and languages beyond the three -- ask
+preview, which is the application's; and languages not here yet -- ask
 for the ones the editors need first, and they come next.

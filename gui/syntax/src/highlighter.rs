@@ -485,7 +485,13 @@ fn injections_in(
 }
 
 /// The ranges of `node`'s text an injection covers: all of it with
-/// `injection.include-children`, otherwise the text between its children.
+/// `injection.include-children`, otherwise the text between its named
+/// children. An anonymous child -- punctuation, a keyword -- is the node's
+/// own text, which its grammar split into tokens only to find where the
+/// node ends: Markdown's block grammar lexes a paragraph's backticks and
+/// brackets so, and the inline grammar it injects needs them. Neovim, whose
+/// queries these are, reads the default so; Helix spells it
+/// `injection.include-unnamed-children`.
 fn content_ranges(node: Node<'_>, include_children: bool, out: &mut Vec<tree_sitter::Range>) {
     let range = |start_byte: usize, end_byte: usize, start_point: Point, end_point: Point| {
         tree_sitter::Range {
@@ -495,13 +501,13 @@ fn content_ranges(node: Node<'_>, include_children: bool, out: &mut Vec<tree_sit
             end_point,
         }
     };
-    if include_children || node.child_count() == 0 {
+    if include_children || node.named_child_count() == 0 {
         out.push(node.range());
         return;
     }
     let (mut at, mut at_point) = (node.start_byte(), node.start_position());
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
+    for child in node.named_children(&mut cursor) {
         if child.start_byte() > at {
             out.push(range(
                 at,
@@ -862,6 +868,48 @@ mod tests {
         assert!(parses > 0, "nothing was injected");
         assert_eq!(h.highlights(&buffer, 0..buffer.len()), first);
         assert_eq!(h.injected.borrow().trees.len(), parses);
+    }
+
+    /// **Markdown is coloured block by block, inline, and in the languages
+    /// it holds**: the block grammar colours a heading and a list, the
+    /// inline grammar it injects into each paragraph colours a code span and
+    /// a link -- the paragraph's own backticks and brackets, which the block
+    /// grammar lexed as tokens of its own, handed to it with the rest --
+    /// front matter is YAML, its keys keys (a later pattern than the one
+    /// that makes every scalar a string), and a fenced block is coloured as
+    /// the language its fence names, not as the literal text around it,
+    /// which the query gaps with `@none` for it.
+    #[test]
+    fn markdown_is_coloured_block_inline_and_by_its_fences() {
+        let text = "---\ntitle: Notes\n---\n\n# Title\n\n- see `x` and \
+                    [docs](https://a.b)\n\n```rust\nlet n = 1;\n```\n";
+        let got = spans(text, "markdown");
+        let at = |s: &str| got.iter().find(|(t, _)| t.trim() == s).map(|(_, h)| *h);
+        for (s, want) in [
+            // Front matter, injected as YAML.
+            ("title", Highlight::Property),
+            // The block grammar.
+            ("#", Highlight::Punctuation),
+            ("Title", Highlight::Heading),
+            ("-", Highlight::Punctuation),
+            // The inline grammar, injected into the list item's paragraph.
+            ("x", Highlight::String),
+            ("docs", Highlight::Link),
+            ("https://a.b", Highlight::Link),
+            // The fence, and the Rust inside it.
+            ("```", Highlight::Punctuation),
+            ("let", Highlight::Keyword),
+            ("1", Highlight::Constant),
+        ] {
+            assert_eq!(at(s), Some(want), "{s}: {got:?}");
+        }
+        // What Rust leaves plain in the fence is plain, not the literal
+        // colour of the block around it.
+        assert!(
+            !got.iter()
+                .any(|(t, h)| t.contains('=') && *h == Highlight::String),
+            "{got:?}"
+        );
     }
 
     /// **A language another's text names is found by name or alias**, in

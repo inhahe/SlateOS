@@ -4,6 +4,12 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
+The scroll rows (`MAIN`, 2026-09-27): the listing's viewport was never told
+how many rows fit, and measured the whole pane rather than the listing's part
+of it -- so the first arrow press scrolled its row off the top, the wheel ran
+past the last page, a grid's short last row could not be reached, and with
+the preview open the scrollbar sat over the preview.
+
 The table covers what changed on 2026-09-26: thumbnails were made a few per
 tick on the thread that draws, and are made on `offloop::Queue`'s worker now,
 filed as each arrives.  `offloop`'s own rules are swept by
@@ -59,6 +65,13 @@ BIN_BUTTONS = "the_buttons_say_why_they_are_off"
 BIN_ROW = "a_row_says_where_it_was_deleted_from_and_when"
 BIN_KINDS = "a_folder_and_a_link_say_what_they_are_instead_of_a_size"
 BIN_SUMMARY = "the_summary_counts_the_bin_and_the_choice"
+WHEEL_ENDS = "the_wheel_does_not_scroll_past_either_end"
+ICON_END = "end_in_the_icon_grid_shows_the_last_icon"
+ICON_WALK = "arrowing_through_the_icon_grid_keeps_the_chosen_icon_drawn"
+GRID_FIRST = "a_grid_rounds_its_offset_to_a_row_and_reaches_a_short_last_row"
+BAR_BESIDE = "with_the_preview_open_the_scrollbar_is_the_listings"
+BELOW = "with_the_preview_below_the_arrows_keep_the_selection_above_it"
+HEADER = "the_column_header_is_the_listings_not_the_panes"
 ASKS = "a_paste_onto_a_taken_name_asks_and_waits"
 ANSWERS = "each_answer_to_the_prompt_does_what_it_says"
 REST_WINDOW = "the_same_for_the_rest_is_asked_once"
@@ -88,6 +101,43 @@ EXIF = "a_photographs_exif_is_three_columns"
 LATE = "exif_past_the_head_of_a_webp_is_found"
 
 MAIN = [
+    (
+        "the listing is never told how many rows fit",
+        "        let folder = self.folder_capacity();\n        if self.viewport.height() != folder {\n"
+        "            self.viewport.set_height(folder, self.entries.len());\n        }",
+        "",
+        [WHEEL_ENDS],
+    ),
+    (
+        "the selection is revealed by entries",
+        "        self.reveal_entry(index);\n        true",
+        "        self.viewport.select(Some(index), self.entries.len());\n        true",
+        [ICON_WALK],
+    ),
+    (
+        "the grid always rounds down",
+        "    if at_the_end && down.saturating_add(cells) < len {",
+        "    if at_the_end && false {",
+        [GRID_FIRST, ICON_END],
+    ),
+    (
+        "the scrollbar is at the pane's edge",
+        "        // edge bare.\n        let pane = self.list_rect();",
+        "        // edge bare.\n        let pane = self.pane_rect();",
+        [BAR_BESIDE],
+    ),
+    (
+        "the rows that fit are counted in the whole pane",
+        "    fn folder_capacity(&self) -> usize {\n        let list = self.list_rect();",
+        "    fn folder_capacity(&self) -> usize {\n        let list = self.pane_rect();",
+        [BELOW],
+    ),
+    (
+        "the column header is the pane's",
+        "        // over a column.\n        let pane = self.list_rect();",
+        "        // over a column.\n        let pane = self.pane_rect();",
+        [HEADER],
+    ),
     (
         "a click in the bin's pane is not the bin's",
         "        if self.bin.is_some() && self.pane_rect().contains(x, y) {\n            return self.click_bin(x, y);\n        }",

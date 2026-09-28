@@ -2725,7 +2725,9 @@ impl ExplorerState {
         if self.view_mode != ViewMode::Details || self.bin.is_some() {
             return false;
         }
-        let pane = self.pane_rect();
+        // The listing's header, where it is drawn: over the preview is not
+        // over a column.
+        let pane = self.list_rect();
         x >= pane.x && x < pane.x + pane.w && y >= pane.y && y < pane.y + HEADER_H
     }
 
@@ -3908,7 +3910,7 @@ impl ExplorerState {
     /// flicker off on every frame of a stationary hover.
     pub fn render(&mut self) -> RenderTree {
         self.refresh_preview_text();
-        self.fit_bin();
+        self.fit_scroll();
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -4674,19 +4676,30 @@ impl ExplorerState {
         )
     }
 
-    /// How many rows of the current view fit in the pane.
+    /// How many rows of whatever the pane is showing fit: the recycle bin's,
+    /// or the folder's.
+    fn visible_capacity(&self) -> usize {
+        if self.bin.is_some() {
+            return BinLayout::for_pane(self.list_rect()).capacity();
+        }
+        self.folder_capacity()
+    }
+
+    /// How many rows of the folder's view fit in the listing.
     ///
     /// In the grid a "row" is a row of icons, so this counts *entries* -- the
     /// unit the viewport offset is in -- by multiplying by the column count.
-    fn visible_capacity(&self) -> usize {
-        let pane = self.pane_rect();
-        if self.bin.is_some() {
-            return BinLayout::for_pane(pane).capacity();
-        }
+    ///
+    /// The listing's part of the pane, not the whole of it. This measured the
+    /// pane, so with the preview open below the listing it counted rows the
+    /// preview covers, and a selection kept "in sight" by it sat under the
+    /// preview.
+    fn folder_capacity(&self) -> usize {
+        let list = self.list_rect();
         match self.view_mode {
-            ViewMode::List => scroll_window::capacity(LIST_ROW_H, pane.h),
-            ViewMode::Details => scroll_window::capacity(ROW_H, (pane.h - HEADER_H).max(0.0)),
-            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), pane.h)
+            ViewMode::List => scroll_window::capacity(LIST_ROW_H, list.h),
+            ViewMode::Details => scroll_window::capacity(ROW_H, (list.h - HEADER_H).max(0.0)),
+            ViewMode::Icons => scroll_window::capacity(self.icon_cell_h(), list.h)
                 .saturating_mul(self.icon_columns()),
         }
     }
@@ -4697,7 +4710,11 @@ impl ExplorerState {
         if !scrollbar::needed(self.scroll_len(), capacity) {
             return None;
         }
-        let pane = self.pane_rect();
+        // At the listing's right edge, not the pane's: with the preview open
+        // on the right the pane's edge is the preview's, and the bar was
+        // drawn -- and grabbed -- over the preview, with the listing's own
+        // edge bare.
+        let pane = self.list_rect();
         // The detail view's header is not part of the scrollable region, so the
         // track starts below it -- a thumb that ran up behind the column
         // headings would claim rows that are never drawn there. The bin's
@@ -4909,15 +4926,15 @@ impl ExplorerState {
         // back at the top. The grid rounds it down to a whole row of icons:
         // starting mid-row would put the first cell in the middle of the pane
         // with a gap beside it.
-        let first = self
-            .viewport
-            .first_visible()
-            .checked_div(cols)
-            .unwrap_or(0)
-            .saturating_mul(cols);
         let cell_h = self.icon_cell_h();
         let icon_rows = scroll_window::capacity(cell_h, h);
         let visible_cells = icon_rows.saturating_mul(cols);
+        let first = grid_first(
+            self.viewport.first_visible(),
+            cols,
+            visible_cells,
+            self.entries.len(),
+        );
 
         tree.translate(x, y);
         // The grid is clipped to the pane, not merely truncated to whole rows:
@@ -5340,6 +5357,26 @@ fn format_size(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
 }
 
+/// The first entry a grid of `cols` columns and `cells` cells draws, for a
+/// scroll offset of `offset` entries into a list of `len`.
+///
+/// A whole row, since a grid that started mid-row would put its first cell in
+/// the middle of the pane: rounded down -- except at the end. The offset is
+/// held in entries and clamped to `len - cells`, which falls mid-row whenever
+/// the last row is short, and rounding *that* down drew the page before the
+/// last, so the last row of icons could not be scrolled to. At the end it
+/// rounds up, and the last row is the bottom one.
+fn grid_first(offset: usize, cols: usize, cells: usize, len: usize) -> usize {
+    let cols = cols.max(1);
+    let down = offset.checked_div(cols).unwrap_or(0).saturating_mul(cols);
+    let at_the_end = offset.saturating_add(cells) >= len;
+    if at_the_end && down.saturating_add(cells) < len {
+        down.saturating_add(cols)
+    } else {
+        down
+    }
+}
+
 /// A listing entry's modification time as whole seconds since the epoch, for
 /// use as part of a thumbnail cache key.
 ///
@@ -5733,7 +5770,7 @@ impl ExplorerState {
         }
         // The bin's scroll must know how many rows fit before a key or the
         // wheel moves it; the pane may have been resized since the last frame.
-        self.fit_bin();
+        self.fit_scroll();
         match event {
             Event::Mouse(m) => self.handle_mouse(m),
             Event::Key(k) => k.pressed && self.handle_key(k),
@@ -6140,7 +6177,7 @@ impl ExplorerState {
     /// Show the recycle bin in the pane, over the folder.
     pub fn open_recycle_bin(&mut self) {
         self.bin = Some(BinView::open(&self.recycle));
-        self.fit_bin();
+        self.fit_scroll();
         self.menu = None;
         self.row_drag = None;
         self.hover_hint.clear();
@@ -6165,9 +6202,23 @@ impl ExplorerState {
         }
     }
 
-    /// Tell the bin's scroll how many rows the pane holds now.
-    fn fit_bin(&mut self) {
-        let capacity = BinLayout::for_pane(self.pane_rect()).capacity();
+    /// Tell the scroll how many rows fit now -- the folder's, and the bin's
+    /// when it is showing.
+    ///
+    /// The folder's was never told at all: its viewport was made zero rows
+    /// tall and only the tests ever set it. So its idea of "the last page"
+    /// was the end of the list -- the wheel scrolled on past the last row, and
+    /// scrolling back up spent a notch per row of that overshoot before
+    /// anything moved.
+    ///
+    /// Only when the number has changed: setting it also clamps the scroll,
+    /// and nothing else about the scroll should move on an ordinary event.
+    fn fit_scroll(&mut self) {
+        let folder = self.folder_capacity();
+        if self.viewport.height() != folder {
+            self.viewport.set_height(folder, self.entries.len());
+        }
+        let capacity = BinLayout::for_pane(self.list_rect()).capacity();
         if let Some(bin) = self.bin.as_mut() {
             bin.fit(capacity);
         }
@@ -6748,12 +6799,48 @@ impl ExplorerState {
             return false;
         }
         self.select_single(index);
-        // The viewport follows the cursor row, which is what stops the arrow
+        // The view follows the cursor row, which is what stops the arrow
         // keys walking the selection off the bottom of the window -- the
         // symptom that made this look like a *lost* selection rather than an
         // invisible one.
-        self.viewport.select(Some(index), self.entries.len());
+        self.reveal_entry(index);
         true
+    }
+
+    /// Scroll the folder so entry `index` is on screen.
+    ///
+    /// Measured in rows of the view showing, against what fits in the
+    /// listing. This was the viewport's own `select`, which measures against
+    /// the viewport's height -- zero, since nothing set it -- so the first
+    /// arrow press in a folder longer than the window scrolled the row it had
+    /// just selected off the top. And a grid's offset is drawn rounded to a
+    /// whole row (`grid_first`), so revealing by entries could leave the
+    /// chosen icon one row under the bottom edge.
+    fn reveal_entry(&mut self, index: usize) {
+        let per_row = match self.view_mode {
+            ViewMode::Icons => self.icon_columns(),
+            ViewMode::Details | ViewMode::List => 1,
+        };
+        let rows = self
+            .folder_capacity()
+            .checked_div(per_row)
+            .unwrap_or(0)
+            .max(1);
+        let row = index.checked_div(per_row).unwrap_or(0);
+        let top = self
+            .viewport
+            .first_visible()
+            .checked_div(per_row)
+            .unwrap_or(0);
+        let top = if row < top {
+            row
+        } else if row >= top.saturating_add(rows) {
+            row.saturating_add(1).saturating_sub(rows)
+        } else {
+            top
+        };
+        self.viewport
+            .scroll_to(top.saturating_mul(per_row), self.entries.len());
     }
 }
 
@@ -7440,19 +7527,36 @@ mod tests {
 
     #[test]
     fn the_wheel_does_not_scroll_past_either_end() {
+        // Through the event loop, which is what tells the viewport how many
+        // rows fit: a test that set the height itself passed while the
+        // program never did.
         let dir = crate::guarded_scratch("explorer-wheel-ends");
-        dir_with_files(&dir.path(""), 12);
+        dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
-        state.viewport.set_height(10, state.entries.len());
-
-        state.viewport.scroll_by(1_000, state.entries.len());
+        let notch = |dy: f32| {
+            Event::Mouse(MouseEvent {
+                x: 400.0,
+                y: 300.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            })
+        };
+        for _ in 0..200 {
+            let _ = state.handle_event(&notch(-1.0));
+        }
         let bottom = state.viewport.first_visible();
+        let last_page = state.entries.len().saturating_sub(state.visible_capacity());
+        assert_eq!(bottom, last_page, "the wheel stopped somewhere other than the last page");
+
+        // And the first notch back moves the view: no overshoot to spend.
+        let _ = state.handle_event(&notch(1.0));
         assert!(
-            bottom <= state.entries.len().saturating_sub(10),
-            "scrolled past the last page to {bottom}"
+            state.viewport.first_visible() < bottom,
+            "a notch up from the bottom moved nothing"
         );
 
-        state.viewport.scroll_by(-1_000, state.entries.len());
+        for _ in 0..200 {
+            let _ = state.handle_event(&notch(1.0));
+        }
         assert_eq!(state.viewport.first_visible(), 0, "scrolled above the top");
     }
 
@@ -7464,20 +7568,150 @@ mod tests {
         let dir = crate::guarded_scratch("explorer-follow");
         dir_with_files(&dir.path(""), 60);
         let mut state = state_at(&dir.path(""));
-        state.viewport.set_height(10, state.entries.len());
 
-        for _ in 0..20 {
-            state.move_selection(1);
+        for _ in 0..30 {
+            let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
+            let cursor = state
+                .selected_indices
+                .first()
+                .copied()
+                .expect("a selection");
+            let first = state.viewport.first_visible();
+            let range = first..first.saturating_add(state.visible_capacity());
+            assert!(
+                range.contains(&cursor),
+                "the selected row {cursor} is outside the drawn range {range:?}"
+            );
         }
-        let cursor = state
-            .selected_indices
-            .first()
-            .copied()
-            .expect("a selection");
-        let range = state.viewport.visible_range(state.entries.len());
+    }
+
+    /// The very first press: nothing selected, the first row chosen -- and
+    /// shown. With the viewport zero rows tall it was scrolled off the top.
+    #[test]
+    fn the_first_arrow_press_leaves_the_first_row_in_sight() {
+        let dir = crate::guarded_scratch("explorer-first-press");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
+        assert_eq!(state.selected_indices, [0]);
+        assert_eq!(state.viewport.first_visible(), 0, "row 0 was scrolled away");
+        let drawn = texts(&state.render());
+        assert!(drawn.iter().any(|t| t == "file000.txt"), "{drawn:?}");
+    }
+
+    /// End in a grid whose last row is short shows the last icon.
+    #[test]
+    fn end_in_the_icon_grid_shows_the_last_icon() {
+        let dir = crate::guarded_scratch("explorer-icons-end");
+        dir_with_files(&dir.path(""), 61);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        let cols = state.icon_columns();
+        assert!(cols > 1 && 61 % cols != 0, "{cols} columns leave no short last row");
+        let _ = state.handle_event(&Event::Key(key_press(Key::End)));
+        let _ = state.render();
         assert!(
-            range.contains(&cursor),
-            "the selected row {cursor} is outside the drawn range {range:?}"
+            state.dropzone.file_row_rect(60).is_some(),
+            "the last icon, chosen, is not drawn"
+        );
+        // And Home brings the first back.
+        let _ = state.handle_event(&Event::Key(key_press(Key::Home)));
+        let _ = state.render();
+        assert!(state.dropzone.file_row_rect(0).is_some());
+    }
+
+    #[test]
+    fn a_grid_rounds_its_offset_to_a_row_and_reaches_a_short_last_row() {
+        // Mid-list: down to the row's start.
+        assert_eq!(grid_first(5, 4, 8, 100), 4);
+        assert_eq!(grid_first(8, 4, 8, 100), 8);
+        // At the end of a list whose last row is short: up, so the last row
+        // is drawn.
+        assert_eq!(grid_first(2, 4, 8, 10), 4);
+        // At the end of a list whose rows are all full: already a row start.
+        assert_eq!(grid_first(4, 4, 8, 12), 4);
+        // A list that fits: from the top.
+        assert_eq!(grid_first(0, 4, 8, 5), 0);
+    }
+
+    /// Walking the grid with the arrows keeps the chosen icon drawn: the
+    /// view follows in whole rows, which revealing by entries did not.
+    #[test]
+    fn arrowing_through_the_icon_grid_keeps_the_chosen_icon_drawn() {
+        let dir = crate::guarded_scratch("explorer-icons-walk");
+        dir_with_files(&dir.path(""), 90);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Icons;
+        for _ in 0..70 {
+            let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
+            let _ = state.render();
+            let chosen = state.selected_indices.first().copied().expect("a selection");
+            assert!(
+                state.dropzone.file_row_rect(chosen).is_some(),
+                "icon {chosen} is chosen and not drawn"
+            );
+        }
+    }
+
+    /// With the preview below the listing, fewer rows fit, and the arrows keep
+    /// the selection in the part that is the listing's.
+    #[test]
+    fn with_the_preview_below_the_arrows_keep_the_selection_above_it() {
+        let dir = crate::guarded_scratch("explorer-preview-below");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.preview_open = true;
+        state.preview_side = columnprefs::PreviewSide::Bottom;
+        assert!(state.list_rect().h < state.pane_rect().h, "the preview took no room");
+        for _ in 0..40 {
+            let _ = state.handle_event(&Event::Key(key_press(Key::Down)));
+            let _ = state.render();
+            let chosen = state.selected_indices.first().copied().expect("a selection");
+            let list = state.list_rect();
+            let row = state
+                .dropzone
+                .file_row_rect(chosen)
+                .unwrap_or_else(|| panic!("row {chosen} is chosen and not drawn"));
+            assert!(
+                row.y + row.h <= list.y + list.h + 0.5,
+                "row {chosen} at {row:?} is under the preview, which starts at {}",
+                list.y + list.h
+            );
+        }
+    }
+
+    /// The column menu opens over the listing's header, not over a preview
+    /// beside it.
+    #[test]
+    fn the_column_header_is_the_listings_not_the_panes() {
+        let dir = crate::guarded_scratch("explorer-preview-header");
+        dir_with_files(&dir.path(""), 3);
+        let mut state = state_at(&dir.path(""));
+        state.view_mode = ViewMode::Details;
+        state.preview_open = true;
+        state.preview_side = columnprefs::PreviewSide::Left;
+        let (pane, list) = (state.pane_rect(), state.list_rect());
+        assert!(list.x > pane.x, "the preview is not on the left");
+        assert!(!state.over_column_header(pane.x + 5.0, pane.y + 5.0), "the preview's top opened the column menu");
+        assert!(state.over_column_header(list.x + 5.0, list.y + 5.0));
+    }
+
+    /// With the preview open on the right, the listing's scrollbar is at the
+    /// listing's edge -- not over the preview.
+    #[test]
+    fn with_the_preview_open_the_scrollbar_is_the_listings() {
+        let dir = crate::guarded_scratch("explorer-preview-bar");
+        dir_with_files(&dir.path(""), 60);
+        let mut state = state_at(&dir.path(""));
+        state.preview_open = true;
+        state.preview_side = columnprefs::PreviewSide::Right;
+        let list = state.list_rect();
+        assert!(list.w < state.pane_rect().w, "the preview took no room, so this checks nothing");
+        let track = state.scrollbar_track().expect("sixty files and no scrollbar");
+        assert!(
+            (track.x + track.w - (list.x + list.w)).abs() < 0.5,
+            "the bar is at {track:?}, the listing ends at {}",
+            list.x + list.w
         );
     }
 

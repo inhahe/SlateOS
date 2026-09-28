@@ -62,7 +62,6 @@ const CONTENT_PADDING: f32 = 24.0;
 const ICON_SIZE: f32 = 40.0;
 const ICON_PADDING: f32 = 16.0;
 const INPUT_HEIGHT: f32 = 36.0;
-const INPUT_CORNER_RADIUS: f32 = 6.0;
 const PROGRESS_BAR_HEIGHT: f32 = 8.0;
 const PROGRESS_BAR_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 14.0;
@@ -1322,6 +1321,13 @@ pub struct InputDialog {
     /// `caret_width_scale` sets it with
     /// [`with_caret_width`](Self::with_caret_width). 839.
     caret_width: f32,
+    /// How wide to draw the mark that says what has the keyboard -- the
+    /// field's, and each button's ring -- in pixels.
+    ///
+    /// As [`AlertDialog`]'s: the toolkit's own width until a caller that has
+    /// read the user's `focus_ring_scale` sets it with
+    /// [`with_focus_ring_width`](Self::with_focus_ring_width).
+    focus_ring_width: f32,
     // No `buttons: ButtonSet` here, deliberately. There was one, initialised to
     // `ok_cancel()` and never read: `render` draws the strings "OK" and
     // "Cancel" outright, and `InputPlacement` names its two hit rectangles
@@ -1348,7 +1354,6 @@ enum InputFocus {
 }
 
 impl InputDialog {
-    /// Create a new input dialog.
     /// Draw this dialog's caret at `width` pixels.
     ///
     /// For a caller that has read `caret_width_scale` out of the appearance
@@ -1360,6 +1365,17 @@ impl InputDialog {
         self
     }
 
+    /// Draw this dialog's focus marks at `width` pixels: the field's and the
+    /// buttons'. For a caller that has read `focus_ring_scale` --
+    /// `AppearanceSettings::focus_ring_width` does the multiplication.
+    #[must_use]
+    pub fn with_focus_ring_width(mut self, width: f32) -> Self {
+        self.focus_ring_width = width;
+        self
+    }
+
+    /// Create a new input dialog: `title` over `message`, and a field showing
+    /// `placeholder` until something is typed.
     pub fn prompt(title: &str, message: &str, placeholder: &str) -> Self {
         let mut overlay = ModalOverlay::new();
         overlay.dismiss_on_escape = true;
@@ -1376,6 +1392,7 @@ impl InputDialog {
             validation_error: None,
             has_validator: false,
             caret_width: crate::textedit::CARET_WIDTH,
+            focus_ring_width: crate::style::FOCUS_RING_WIDTH,
             focused_element: InputFocus::TextField,
             result: None,
             overlay,
@@ -1975,32 +1992,22 @@ impl InputDialog {
         // Input field.
         let input_width = width - CONTENT_PADDING * 2.0;
         let field_rect = (x + CONTENT_PADDING, content_y, input_width, INPUT_HEIGHT);
-        let input_border_color = if self.focused_element == InputFocus::TextField {
-            palette.blue
-        } else if self.validation_error.is_some() {
-            palette.red
-        } else {
-            palette.surface2
-        };
-
-        tree.push(RenderCommand::FillRect {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            width: input_width,
-            height: INPUT_HEIGHT,
-            color: palette.surface0,
-            corner_radii: CornerRadii::all(INPUT_CORNER_RADIUS),
-        });
-
-        tree.push(RenderCommand::StrokeRect {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            width: input_width,
-            height: INPUT_HEIGHT,
-            color: input_border_color,
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(INPUT_CORNER_RADIUS),
-        });
+        // The box every field is drawn in (`crate::field`). It used to be a
+        // box of its own whose edge turned *blue* -- not the accent -- when
+        // focused, and whose red "this is wrong" edge was hidden whenever the
+        // field had the keyboard: exactly while someone was fixing it.
+        crate::field::draw(
+            tree,
+            palette,
+            crate::frame::Rect::new(field_rect.0, field_rect.1, field_rect.2, field_rect.3),
+            crate::field::State {
+                hovered: false,
+                focused: self.focused_element == InputFocus::TextField,
+                disabled: false,
+                invalid: self.validation_error.is_some(),
+            },
+            self.focus_ring_width,
+        );
 
         // Input text or placeholder.
         //
@@ -2117,7 +2124,7 @@ impl InputDialog {
                     ..crate::button::State::default()
                 },
                 palette.base,
-                crate::style::FOCUS_RING_WIDTH,
+                self.focus_ring_width,
             );
         }
 
@@ -4400,6 +4407,49 @@ mod tests {
     ///   than a character count does. Masking exists to stop exactly that.
     ///
     /// **A failure here counting more marks than characters is that bug back.**
+    /// **The input dialog's field is the toolkit's field** (`crate::field`):
+    /// its well, the keyboard's mark while it has the keyboard, and a red edge
+    /// while what is in it is wrong -- *even while it has the keyboard*, which
+    /// is when someone is fixing it. The field's own box used to turn blue
+    /// when focused and hide the red. And the focus width is the caller's.
+    #[test]
+    fn the_input_field_shows_an_error_even_while_it_is_being_fixed() {
+        let palette = Palette::for_mode(false);
+        let edges = |dialog: &mut InputDialog| -> Vec<(Color, f32)> {
+            let mut tree = RenderTree::new();
+            dialog.render(&palette, 800.0, 600.0, &mut tree);
+            let field = dialog.placement.as_ref().expect("drawn").field;
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        color,
+                        line_width,
+                        ..
+                    } if *x <= field.0 && *y <= field.1 && *x >= field.0 - 8.0 => {
+                        Some((*color, *line_width))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut dialog = InputDialog::prompt("Rename", "New name:", "")
+            .with_validation()
+            .with_focus_ring_width(3.0);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        // Focused and fine: the accent's edge and its halo, three wide.
+        let fine = edges(&mut dialog);
+        assert_eq!(fine[0].0, palette.accent, "{fine:?}");
+        assert!(fine.iter().any(|(_, w)| *w == 3.0), "{fine:?}");
+
+        dialog.set_validation_error(Some("That name is taken"));
+        let wrong = edges(&mut dialog);
+        assert_eq!(wrong[0].0, palette.red, "the error is hidden: {wrong:?}");
+    }
+
     #[test]
     fn the_mask_has_one_mark_per_character_not_per_byte() {
         let palette = Palette::for_mode(false);

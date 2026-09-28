@@ -1890,27 +1890,22 @@ impl FileDialog {
         // Filename input (save mode only)
         if self.mode == DialogMode::Save {
             let input_width = width - BUTTON_WIDTH * 2.0 - PADDING * 5.0;
-            frame.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: input_y,
-                width: input_width,
-                height: 28.0,
-                color: palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            frame.hit(
-                DialogTarget::FilenameInput,
-                Rect::new(PADDING, input_y, input_width, 28.0),
+            let field = Rect::new(PADDING, input_y, input_width, 28.0);
+            // The box every field is drawn in (`crate::field`), with the
+            // keyboard's mark while what is typed goes to it -- which is
+            // whenever the address bar is not being typed in. It was a box of
+            // its own, outlined in blue whether it had the keyboard or not.
+            crate::field::draw(
+                frame,
+                palette,
+                field,
+                crate::field::State {
+                    focused: !self.address.is_editing(),
+                    ..crate::field::State::default()
+                },
+                crate::style::FOCUS_RING_WIDTH,
             );
-            frame.push(RenderCommand::StrokeRect {
-                x: PADDING,
-                y: input_y,
-                width: input_width,
-                height: 28.0,
-                color: palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            frame.hit(DialogTarget::FilenameInput, field);
 
             let display_text = if self.filename_input.is_empty() {
                 String::from("Enter filename...")
@@ -4189,6 +4184,43 @@ mod tests {
             );
         }
         assert!(frame.is_balanced(), "every clip has to be closed");
+    }
+
+    /// **The Save box is the toolkit's field, marked while typing goes to
+    /// it** -- which is whenever the address bar is not being typed in. It
+    /// was a box of its own, outlined in blue whether typing went to it or
+    /// not.
+    #[test]
+    fn the_save_name_box_is_marked_while_typing_goes_to_it() {
+        let palette = Palette::for_mode(false);
+        let edge = |dialog: &FileDialog| {
+            let frame = dialog.frame(&palette, W, H);
+            let field = frame
+                .rect_of(|t| *t == DialogTarget::FilenameInput)
+                .expect("no name box");
+            frame
+                .into_tree()
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::StrokeRect { x, y, color, .. }
+                        if (*x, *y) == (field.x, field.y) =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("the name box has no edge")
+        };
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        assert_eq!(edge(&dialog), palette.accent, "typing goes to the name");
+        dialog.handle_event(&ctrl(Key::L), H);
+        assert!(dialog.address().is_editing());
+        assert_eq!(
+            edge(&dialog),
+            palette.surface1,
+            "the address bar has the typing now"
+        );
     }
 
     // ---- the address bar ----

@@ -69,7 +69,8 @@ const CHEVRON_STROKE: f32 = 1.3;
 const FIELD_PADDING_LEFT: f32 = 9.0;
 /// The field's inside margin after the last crumb.
 const FIELD_PADDING_RIGHT: f32 = 4.0;
-/// The field's corners, and the dropdown's: the reference's 3px.
+/// The completion list's corners: the reference's 3px. The field's own are
+/// the theme's (`crate::field`).
 const FIELD_RADIUS: f32 = 3.0;
 /// Where typed text starts in edit mode: where the first crumb's name was
 /// drawn, so turning the trail into text leaves the path's first character
@@ -198,6 +199,10 @@ pub struct PathBar {
     /// laid out from the bar's size -- the one click a host hands the bar
     /// that lands outside the bar's own rectangle.
     last_size: (f32, f32),
+    /// How wide the mark is that says the bar has the keyboard: the user's
+    /// focus width, which the host knows and says with
+    /// [`set_focus_ring_width`](PathBar::set_focus_ring_width).
+    focus_ring: f32,
 }
 
 /// Where one crumb was drawn, and which segment of the trail it stands for.
@@ -238,7 +243,16 @@ impl PathBar {
             pending_events: Vec::new(),
             crumb_hits: Vec::new(),
             last_size: (0.0, 0.0),
+            focus_ring: crate::style::FOCUS_RING_WIDTH,
         }
+    }
+
+    /// Draw the mark that says the bar has the keyboard `width` wide: the
+    /// user's focus width (`AppearanceSettings::focus_ring_width`), which a
+    /// host that scales its lines for accessibility passes here. Until told,
+    /// the toolkit's standard width.
+    pub fn set_focus_ring_width(&mut self, width: f32) {
+        self.focus_ring = width;
     }
 
     /// Update the displayed path (resets to breadcrumb mode).
@@ -439,36 +453,27 @@ impl PathBar {
     fn paint(&self, palette: &Palette, w: f32, h: f32) -> (Vec<RenderCommand>, Vec<CrumbHit>) {
         let mut cmds = Vec::new();
 
-        // The field: the well every text input sinks into (`crust`), with a
-        // quiet edge round it -- the reference's white field and its pale
-        // line, in the palette's words. The same field in both modes, because
+        // The field: the box every text input is drawn in (`crate::field`) --
+        // the reference's white field and its pale line, in the palette's
+        // words and the theme's shape. The same field in both modes, because
         // it is one field: clicking the trail turns it into the text it stands
         // for, in place, and a box that changed colour as it did so would read
-        // as a second control appearing over the first.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: w,
-            height: h,
-            color: palette.crust,
-            corner_radii: CornerRadii::all(FIELD_RADIUS),
-        });
-
-        // The edge turns red while a typed path is known not to exist.
-        let border_color = if self.mode == Mode::Edit && self.path_invalid {
-            palette.red
-        } else {
-            palette.surface1
-        };
-        cmds.push(RenderCommand::StrokeRect {
-            x: 0.0,
-            y: 0.0,
-            width: w,
-            height: h,
-            color: border_color,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(FIELD_RADIUS),
-        });
+        // as a second control appearing over the first. What does change is
+        // what any field says when it is typed in: the keyboard's mark, and a
+        // red edge while a typed path is known not to exist.
+        let editing = self.mode == Mode::Edit;
+        crate::field::draw(
+            &mut cmds,
+            palette,
+            crate::frame::Rect::new(0.0, 0.0, w, h),
+            crate::field::State {
+                hovered: false,
+                focused: editing,
+                disabled: false,
+                invalid: editing && self.path_invalid,
+            },
+            self.focus_ring,
+        );
 
         let hits = match self.mode {
             Mode::Breadcrumb => self.render_breadcrumb(palette, &mut cmds, w, h),
@@ -2115,10 +2120,11 @@ mod tests {
         assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.red));
 
         // Correcting it takes the red away: whatever was refused, it was not
-        // the new text.
+        // the new text. The edge is then a field's being typed in -- the
+        // accent, under the built-in theme's glow.
         bar.handle_key_event(&key_press(Key::Backspace));
         assert_eq!(bar.edit_text, "/home/us");
-        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.surface1));
+        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.accent));
 
         // And so does correcting it by completion -- a file's name, which
         // asks for no further completions, as well as a folder's.
@@ -2131,7 +2137,7 @@ mod tests {
         }]);
         bar.handle_key_event(&key_press(Key::Tab));
         assert_eq!(bar.edit_text, "/home/notes.txt");
-        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.surface1));
+        assert_eq!(edge(&bar.render(&palette, 400, 28)), Some(palette.accent));
     }
 
     /// Confirming the path the bar already shows has nothing to wait for.
@@ -2805,8 +2811,9 @@ mod tests {
     }
 
     /// **One field in both modes**: the input's well (`crust`) with a quiet
-    /// edge, whether it shows the trail or the typed path -- and a red edge
-    /// only while a typed path is known not to exist.
+    /// edge, whether it shows the trail or the typed path -- the keyboard's
+    /// mark while it is typed in, as any field shows, and a red edge while a
+    /// typed path is known not to exist.
     #[test]
     fn the_field_is_an_inputs_well_in_both_modes() {
         let palette = Palette::for_mode(false);
@@ -2840,14 +2847,25 @@ mod tests {
         bar.handle_key_event(&key_press_ctrl(Key::L));
         assert!(bar.is_editing());
         let editing = bar.render(&palette, 400, 28);
-        assert_eq!(field(&editing), (palette.crust, palette.surface1));
-        // Nothing but the field is a box the width of the bar -- its fill and
-        // its edge. The inner card edit mode used to draw over the field,
-        // outlined or filled depending on the theme, is gone.
+        // The built-in theme's focus: the edge in the accent, a halo outside.
+        assert_eq!(field(&editing), (palette.crust, palette.accent));
+        assert!(
+            editing.iter().any(|cmd| matches!(
+                cmd,
+                RenderCommand::StrokeRect { x, color, .. }
+                    if *x < 0.0 && (color.r, color.g, color.b)
+                        == (palette.accent.r, palette.accent.g, palette.accent.b)
+            )),
+            "no halo round the field being typed in"
+        );
+        // Nothing but the field is a box the width of the bar inside it -- its
+        // fill and its edge. The inner card edit mode used to draw over the
+        // field, outlined or filled depending on the theme, is gone.
+        // (The halo round it is outside the bar, and wider than these.)
         let boxes = editing
             .iter()
             .filter_map(crate::surface::logical_rect)
-            .filter(|(_, _, width, _)| *width >= 390.0)
+            .filter(|(_, _, width, _)| (390.0..=402.0).contains(width))
             .count();
         assert_eq!(
             boxes, 2,
@@ -2855,6 +2873,14 @@ mod tests {
         );
         bar.set_path_valid(false);
         assert_eq!(field(&bar.render(&palette, 400, 28)).1, palette.red);
+
+        // The mark is as wide as the host says the user's focus is.
+        bar.set_focus_ring_width(5.0);
+        let wide = bar.render(&palette, 400, 28);
+        assert!(wide.iter().any(|cmd| matches!(
+            cmd,
+            RenderCommand::StrokeRect { x, line_width, .. } if *x == -5.0 && *line_width == 5.0
+        )));
     }
 
     /// **A click in the typed path puts the caret where it was aimed.** The

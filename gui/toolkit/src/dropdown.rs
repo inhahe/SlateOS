@@ -13,10 +13,11 @@
 //! # How it looks
 //!
 //! The field is the Aero reference's `aero-srch-select`: 26 pixels tall, eight
-//! pixels in from each side, 12.5-pixel text, three-pixel corners, a light
-//! well with a thin edge -- here the input's well and edge every toolkit field
-//! has (`crust`, `surface1`), so a drop-down and the text field beside it are
-//! one family -- and a chevron at the right that says it opens. The list is
+//! pixels in from each side, 12.5-pixel text, a light well with a thin edge --
+//! here the box every toolkit field is drawn in ([`crate::field`]), so a
+//! drop-down and the text field beside it are one family and take the theme's
+//! corners, edge and focus mark together -- and a chevron at the right that
+//! says it opens. The list is
 //! the toolkit's context menu ([`ContextMenu`]), as wide as the field or
 //! wider, with the current choice ticked and highlighted, so it flips upwards
 //! near the bottom of the screen and scrolls when it is long, as menus do.
@@ -37,7 +38,6 @@ use crate::frame::Rect;
 use crate::menu::{ContextMenu, MenuAction, MenuItem};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
-use crate::style::CornerRadii;
 use crate::surface::CommandSink;
 
 /// A drop-down's height where the caller has no layout of its own: the
@@ -48,14 +48,10 @@ pub const HEIGHT: f32 = 26.0;
 pub const PADDING_H: f32 = 8.0;
 /// The text's size: the reference's 12.5 pixels.
 pub const FONT_SIZE: f32 = 12.5;
-/// The field's corners: the reference's 3.
-const RADIUS: f32 = 3.0;
 /// The chevron's width; its height is half this.
 const CHEVRON: f32 = 8.0;
 /// From the text's end to the chevron.
 const CHEVRON_GAP: f32 = 6.0;
-/// How far the edge is tinted towards the accent under the pointer.
-const HOVER_TINT: f32 = 0.5;
 
 /// What a drop-down did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,28 +396,20 @@ impl Dropdown {
                 c
             }
         };
-        let edge = if (state.hovered || self.list.is_visible()) && !state.disabled {
-            p.surface1.lerp(p.accent, HOVER_TINT)
-        } else {
-            p.surface1
-        };
-        sink.emit(RenderCommand::FillRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: fade(p.crust),
-            corner_radii: CornerRadii::all(RADIUS),
-        });
-        sink.emit(RenderCommand::StrokeRect {
-            x: field.x,
-            y: field.y,
-            width: field.w,
-            height: field.h,
-            color: fade(edge),
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(RADIUS),
-        });
+        // The box every field is drawn in; an open list warms its edge as
+        // the pointer does, since the field is what the list belongs to.
+        crate::field::draw(
+            sink,
+            p,
+            field,
+            crate::field::State {
+                hovered: state.hovered || self.list.is_visible(),
+                focused: state.focused,
+                disabled: state.disabled,
+                invalid: false,
+            },
+            focus_ring,
+        );
         let (text, ink) = match self.selected.and_then(|i| self.options.get(i)) {
             Some(label) => (label.as_str(), p.text),
             None => (self.placeholder.as_str(), p.subtext0),
@@ -453,17 +441,6 @@ impl Dropdown {
                 y2,
                 color: fade(p.subtext0),
                 width: 1.5,
-            });
-        }
-        if state.focused && !state.disabled && focus_ring > 0.0 && focus_ring.is_finite() {
-            sink.emit(RenderCommand::StrokeRect {
-                x: field.x - focus_ring,
-                y: field.y - focus_ring,
-                width: field.w + focus_ring * 2.0,
-                height: field.h + focus_ring * 2.0,
-                color: p.accent,
-                line_width: focus_ring,
-                corner_radii: CornerRadii::all(RADIUS + focus_ring),
             });
         }
     }
@@ -752,8 +729,13 @@ mod tests {
             .filter(|c| matches!(c, RenderCommand::Line { .. }))
             .count();
         assert_eq!(strokes, 2, "the chevron");
+        // The focus is the field's own mark (`crate::field`): in the built-in
+        // style, the edge in the accent and a halo of it.
+        let accent_hue = |c: &Color| (c.r, c.g, c.b) == (p.accent.r, p.accent.g, p.accent.b);
         assert!(
-            matches!(cmds.last(), Some(RenderCommand::StrokeRect { color, .. }) if *color == p.accent)
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if accent_hue(color))),
+            "the keyboard's drop-down shows no focus"
         );
 
         let mut dim = Vec::new();
@@ -769,9 +751,33 @@ mod tests {
             2.0,
         );
         assert!(
-            !dim.iter().any(
-                |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == p.accent)
-            )
+            !dim.iter()
+                .any(|c| matches!(c, RenderCommand::StrokeRect { color, .. } if accent_hue(color))),
+            "a disabled drop-down shows the focus"
+        );
+    }
+
+    /// **An open list warms the field's edge as the pointer does**: the field
+    /// is what the list belongs to.
+    #[test]
+    fn an_open_list_warms_the_fields_edge() {
+        let p = Palette::for_mode(false);
+        let edge = |d: &Dropdown| {
+            let mut cmds = Vec::new();
+            d.draw(&mut cmds, &p, field(), State::default(), 2.0);
+            cmds.iter()
+                .find_map(|c| match c {
+                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("the field has no edge")
+        };
+        let mut d = sizes();
+        assert_eq!(edge(&d), p.surface1);
+        d.handle_key(field(), &key(Key::F4), VIEW);
+        assert_eq!(
+            edge(&d),
+            p.surface1.lerp(p.accent, crate::field::HOVER_TINT)
         );
     }
 

@@ -6,9 +6,10 @@
 # retyped, so the property can be tested in two seconds instead of ninety
 # minutes and cannot drift away from the thing it claims to test.
 #
-# Safe to run while a real boot test is in flight: the leak check below
-# compares the snapshots present before and after, so another run's live
-# snapshot is not mistaken for one this check leaked.
+# Safe to run while a real boot test is in flight: the guarded run takes its
+# snapshot in a temporary directory of its own, and the leak check counts
+# only there, so another run's snapshot is never mistaken for one this check
+# leaked.
 #
 # The control matters as much as the test: without the preamble the same edit
 # must visibly corrupt the run, otherwise the test proves nothing about bash's
@@ -18,10 +19,17 @@ set -uo pipefail
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# Snapshots already in flight belong to somebody else's boot test.  Recorded
-# before anything runs, so the leak check at the end asks "did *we* leave one"
-# rather than "is there one", which would fail whenever a real run overlapped.
-snapshots_before="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
+# The guarded run's own temporary directory, which the preamble's
+# `mktemp -t` honours, so the only snapshots in it are the guarded run's.
+#
+# This counted the shared directory before and after instead, which told a
+# snapshot this check leaked from one that *another* boot test made while it
+# ran only as long as no run started in between. One did: lane E's boot test
+# of 1367b1838 (2026-09-27) was refused with "1 snapshot(s) left behind; the
+# trap did not fire" from a check whose trap had fired -- six lanes start boot
+# tests, and a two-second window is not narrow enough to bet on.
+snapdir="$tmp/tmpdir"
+mkdir -p "$snapdir"
 
 # The payload both variants run: announce, sleep long enough for the editor to
 # land, then announce again.  The second line is the one an edit can corrupt,
@@ -107,7 +115,7 @@ rm -f "$SIGNAL"
 #
 # So: the gate was inert in the one context it was wired into.  Cleared here
 # rather than at the call site, so the checker is correct however it is run.
-guarded_out="$(env -u BOOT_TEST_REEXEC BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
+guarded_out="$(env -u BOOT_TEST_REEXEC TMPDIR="$snapdir" BOOT_TEST_START_EPOCH="$(date +%s)" bash "$tmp/guarded.sh" 2>&1)"
 wait
 
 fails=0
@@ -155,13 +163,9 @@ fi
 
 # --- The snapshot must not be left behind. ----------------------------------
 echo
-snapshots_after="$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
-leaked=$((snapshots_after - snapshots_before))
-if [ "$leaked" -le 0 ]; then
-    echo "ok   no snapshot left in ${TMPDIR:-/tmp} -- the EXIT trap fired"
-    if [ "$snapshots_before" -gt 0 ]; then
-        echo "     ($snapshots_before belonging to another run were ignored)"
-    fi
+leaked="$(find "$snapdir" -maxdepth 1 -name 'boot-test-snapshot.*' 2>/dev/null | wc -l)"
+if [ "$leaked" -eq 0 ]; then
+    echo "ok   no snapshot left behind -- the EXIT trap fired"
 else
     echo "FAIL $leaked snapshot(s) left behind; the trap did not fire"
     fails=$((fails + 1))

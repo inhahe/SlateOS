@@ -527,6 +527,12 @@ MUTATIONS = [
         "            legal: p.surface1,",
         ["the_marks_on_the_board_read_in_either_theme"],
     ),
+    (
+        "the files' letters are the faintest grey",
+        "                r.bottom() + (l.margin - l.label) / 2.0,\n                l.label,\n                FontWeightHint::Regular,\n                c.chrome.dim,",
+        "                r.bottom() + (l.margin - l.label) / 2.0,\n                l.label,\n                FontWeightHint::Regular,\n                c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 

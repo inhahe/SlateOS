@@ -35,6 +35,10 @@ pub enum GrubError {
     EntryAlreadyExists,
     /// No Slate OS entry exists when trying to update or remove one.
     EntryNotFound,
+    /// The custom script's name is taken by a file this installer did not
+    /// write -- it lacks the marker -- which is left alone rather than
+    /// replaced or deleted. Carries the file's path, as shown.
+    NotOurs(String),
     /// Running `update-grub` / `grub2-mkconfig` failed.
     UpdateFailed(String),
     /// A provided path is syntactically or semantically invalid.
@@ -53,6 +57,10 @@ impl fmt::Display for GrubError {
             Self::ConfigNotWritable(p) => write!(f, "GRUB config not writable: {p}"),
             Self::EntryAlreadyExists => write!(f, "Slate OS GRUB entry already exists"),
             Self::EntryNotFound => write!(f, "Slate OS GRUB entry not found"),
+            Self::NotOurs(p) => write!(
+                f,
+                "{p} was not written by the Slate OS installer; leaving it alone"
+            ),
             Self::UpdateFailed(msg) => write!(f, "GRUB update failed: {msg}"),
             Self::InvalidPath(p) => write!(f, "invalid path: {p}"),
             Self::InvalidEntry(msg) => write!(f, "invalid GRUB entry: {msg}"),
@@ -545,6 +553,17 @@ pub fn extract_uuid(text: &str) -> Option<&str> {
 // GrubInstaller — entry lifecycle management
 // ============================================================================
 
+/// What the custom script's place in the scripts directory holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryState {
+    /// Nothing: there is no Slate OS entry.
+    Absent,
+    /// The script this installer writes, marker and all.
+    Ours,
+    /// A file of the same name that this installer did not write.
+    Foreign,
+}
+
 /// Manages the lifecycle of the Slate OS GRUB menu entry.
 ///
 /// All mutations go through a numbered script in `/etc/grub.d/` (default:
@@ -569,19 +588,22 @@ impl GrubInstaller {
 
     /// Install a new GRUB entry for SlateOS.
     ///
-    /// Fails with [`GrubError::EntryAlreadyExists`] if the custom script file
-    /// is already present.
+    /// Fails with [`GrubError::EntryAlreadyExists`] if our script is already
+    /// there, and [`GrubError::NotOurs`] if a file of its name is someone
+    /// else's -- which is not written over.
     pub fn install(&self, entry: &GrubEntry) -> Result<(), GrubError> {
         // Reject an unrenderable entry before touching the filesystem.
         entry.validate()?;
 
-        let path = self.script_path();
-        if path.exists() {
-            return Err(GrubError::EntryAlreadyExists);
-        }
-
         if !self.custom_dir.is_dir() {
             return Err(GrubError::InvalidPath(self.custom_dir.shown().to_string()));
+        }
+
+        let path = self.script_path();
+        match self.state()? {
+            EntryState::Absent => {}
+            EntryState::Ours => return Err(GrubError::EntryAlreadyExists),
+            EntryState::Foreign => return Err(GrubError::NotOurs(path.shown().to_string())),
         }
 
         let script = generate_custom_script(entry)?;
@@ -606,26 +628,27 @@ impl GrubInstaller {
     /// Remove the Slate OS GRUB entry.
     ///
     /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
+    ///
+    /// A file of that name without the marker is someone else's and is not
+    /// deleted ([`GrubError::NotOurs`]).
     pub fn uninstall(&self) -> Result<(), GrubError> {
         let path = self.script_path();
-        if !path.exists() {
-            return Err(GrubError::EntryNotFound);
-        }
+        self.expect_ours(&path)?;
         fs::remove_file(&path)?;
         Ok(())
     }
 
     /// Update an existing Slate OS entry with new parameters.
     ///
-    /// Fails with [`GrubError::EntryNotFound`] if the script does not exist.
+    /// Fails with [`GrubError::EntryNotFound`] if the script does not exist,
+    /// and [`GrubError::NotOurs`] if a file of its name is not ours -- which
+    /// is not overwritten.
     pub fn update(&self, entry: &GrubEntry) -> Result<(), GrubError> {
         // Reject an unrenderable entry before touching the filesystem.
         entry.validate()?;
 
         let path = self.script_path();
-        if !path.exists() {
-            return Err(GrubError::EntryNotFound);
-        }
+        self.expect_ours(&path)?;
 
         let script = generate_custom_script(entry)?;
         // Crash-safe, and more important here than in `install`: this path
@@ -639,12 +662,36 @@ impl GrubInstaller {
     /// Check whether our custom-script file exists and contains the Slate OS
     /// marker.
     pub fn verify(&self) -> Result<bool, GrubError> {
-        let path = self.script_path();
-        if !path.exists() {
-            return Ok(false);
+        Ok(self.state()? == EntryState::Ours)
+    }
+
+    /// What the custom script's place holds: nothing, our script, or a file
+    /// of the same name that is someone else's.
+    ///
+    /// Read as bytes: a file that is not text is not ours, and saying so is
+    /// the answer, not an error.
+    pub fn state(&self) -> Result<EntryState, GrubError> {
+        let bytes = match fs::read(self.script_path()) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(EntryState::Absent),
+            Err(e) => return Err(e.into()),
+        };
+        let marker = SLATEOS_MARKER.as_bytes();
+        Ok(if bytes.windows(marker.len()).any(|w| w == marker) {
+            EntryState::Ours
+        } else {
+            EntryState::Foreign
+        })
+    }
+
+    /// `Ok` when the script at `path` is ours; the error to give when it is
+    /// missing or someone else's.
+    fn expect_ours(&self, path: &Path) -> Result<(), GrubError> {
+        match self.state()? {
+            EntryState::Ours => Ok(()),
+            EntryState::Absent => Err(GrubError::EntryNotFound),
+            EntryState::Foreign => Err(GrubError::NotOurs(path.shown().to_string())),
         }
-        let contents = fs::read_to_string(&path)?;
-        Ok(contents.contains(SLATEOS_MARKER))
     }
 }
 
@@ -658,6 +705,47 @@ const UPDATE_COMMANDS: &[&[&str]] = &[
     &["grub2-mkconfig", "-o", "/boot/grub2/grub.cfg"],
     &["grub-mkconfig", "-o", "/boot/grub/grub.cfg"],
 ];
+
+/// Where `program` is on `PATH`, as a shell would find it.
+///
+/// Searched here rather than by running `which`, which minimal installs of
+/// Fedora and Arch do not ship: asking it there reported GRUB's tools
+/// missing when they were not.
+fn find_program(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    find_in(std::env::split_paths(&path), program)
+}
+
+/// The first of `dirs` holding an executable `program`, searching only the
+/// [`searchable`] ones.
+fn find_in(dirs: impl IntoIterator<Item = PathBuf>, program: &str) -> Option<PathBuf> {
+    dirs.into_iter()
+        .filter(|dir| searchable(dir))
+        .map(|dir| dir.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
+/// Whether a directory on `PATH` is searched for GRUB's tools: only an
+/// absolute one. An empty entry, which POSIX reads as the current directory,
+/// `.`, or any other relative path is passed over: these tools run as root,
+/// and a `PATH` that reaches into wherever the command was started is a
+/// classic way to run someone else's `update-grub` instead.
+fn searchable(dir: &Path) -> bool {
+    dir.is_absolute()
+}
+
+/// A file that can be run: on Unix, a regular file with an execute bit.
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// A file that can be run: elsewhere, a regular file.
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
 
 /// Trigger GRUB configuration regeneration.
 pub struct GrubUpdateRunner {
@@ -680,10 +768,10 @@ impl GrubUpdateRunner {
 
     /// Run the first available GRUB config-generation command.
     ///
-    /// Returns `Ok(())` on success, or [`GrubError::UpdateFailed`] if the
-    /// command exits with a non-zero status, or [`GrubError::GrubNotFound`] if
-    /// no known command could be found.
-    pub fn update_grub(&self) -> Result<(), GrubError> {
+    /// Returns the command's name on success, [`GrubError::UpdateFailed`] if
+    /// it exits with a non-zero status, or [`GrubError::GrubNotFound`] if no
+    /// known command could be found.
+    pub fn update_grub(&self) -> Result<&'static str, GrubError> {
         for cmd_args in UPDATE_COMMANDS {
             // An entry in the table with no program is a table bug, not a
             // system state — skip it rather than reporting a GRUB failure the
@@ -692,17 +780,13 @@ impl GrubUpdateRunner {
                 continue;
             };
 
-            // Check whether the command exists on PATH.
-            let which = Command::new("which").arg(program).output();
-            let found = match which {
-                Ok(out) => out.status.success(),
-                Err(_) => false,
-            };
-            if !found {
+            // Run what was found, by its full path: a second lookup by name
+            // could find something else.
+            let Some(found) = find_program(program) else {
                 continue;
-            }
+            };
 
-            let mut cmd = Command::new(program);
+            let mut cmd = Command::new(found);
             if cmd_args.len() > 1 {
                 if let Some(ref out_path) = self.output_path {
                     // Use the caller-provided output path instead of the
@@ -720,7 +804,7 @@ impl GrubUpdateRunner {
                 .map_err(|e| GrubError::UpdateFailed(format!("failed to run {program}: {e}")))?;
 
             if output.status.success() {
-                return Ok(());
+                return Ok(program);
             }
 
             // A diagnostic, decoded where it is written: what a failing
@@ -744,10 +828,7 @@ impl GrubUpdateRunner {
             let Some(program) = cmd_args.first().copied() else {
                 continue;
             };
-            let which = Command::new("which").arg(program).output();
-            if let Ok(out) = which
-                && out.status.success()
-            {
+            if find_program(program).is_some() {
                 return Some(program);
             }
         }
@@ -1366,6 +1447,134 @@ mod tests {
 
         let installer = GrubInstaller::new(&tmp);
         assert!(!installer.verify().expect("verify should not error"));
+    }
+
+    #[test]
+    fn a_script_of_our_name_that_is_not_ours_is_left_alone() {
+        // `40_slateos` written by something else -- another tool, or a user's
+        // own entry -- has no marker. Replacing it or deleting it would
+        // destroy what someone else put there; adding over it would too.
+        let tmp = tempdir();
+        let installer = GrubInstaller::new(&tmp);
+        let theirs = "#!/bin/sh\necho 'menuentry \"Mine\" {}'\n";
+        fs::write(installer.script_path(), theirs).unwrap();
+
+        assert_eq!(installer.state().unwrap(), EntryState::Foreign);
+        assert!(!installer.verify().unwrap());
+        assert!(matches!(
+            installer.install(&sample_entry_chainload()),
+            Err(GrubError::NotOurs(_))
+        ));
+        assert!(matches!(
+            installer.update(&sample_entry_chainload()),
+            Err(GrubError::NotOurs(_))
+        ));
+        assert!(matches!(installer.uninstall(), Err(GrubError::NotOurs(_))));
+        assert_eq!(fs::read_to_string(installer.script_path()).unwrap(), theirs);
+    }
+
+    #[test]
+    fn a_script_that_is_not_text_is_someone_elses_rather_than_an_error() {
+        let tmp = tempdir();
+        let installer = GrubInstaller::new(&tmp);
+        fs::write(installer.script_path(), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        assert_eq!(installer.state().unwrap(), EntryState::Foreign);
+    }
+
+    #[test]
+    fn the_entrys_state_follows_its_lifecycle() {
+        let tmp = tempdir();
+        let installer = GrubInstaller::new(&tmp);
+        assert_eq!(installer.state().unwrap(), EntryState::Absent);
+        installer.install(&sample_entry_chainload()).unwrap();
+        assert_eq!(installer.state().unwrap(), EntryState::Ours);
+        installer.uninstall().unwrap();
+        assert_eq!(installer.state().unwrap(), EntryState::Absent);
+    }
+
+    // -- finding GRUB's tools -------------------------------------------------
+
+    /// A file that `is_executable` accepts on this host.
+    fn make_program(dir: &Path, name: &str) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn a_program_is_found_in_the_first_directory_that_has_it() {
+        let tmp = tempdir();
+        let (a, b, c) = (tmp.join("a"), tmp.join("b"), tmp.join("c"));
+        fs::create_dir_all(&a).unwrap();
+        let in_b = make_program(&b, "update-grub");
+        make_program(&c, "update-grub");
+        assert_eq!(
+            find_in([a.clone(), b, c], "update-grub"),
+            Some(in_b),
+            "the search runs in PATH's order and stops at the first"
+        );
+        assert_eq!(find_in([a], "update-grub"), None);
+    }
+
+    #[test]
+    fn only_an_absolute_directory_on_path_is_searched() {
+        // An empty PATH entry means the current directory to POSIX, and so
+        // does `.`; running GRUB's tools as root from wherever the command was
+        // started is how someone else's `update-grub` gets run.
+        for relative in ["", ".", "bin", "../sbin"] {
+            assert!(
+                !searchable(Path::new(relative)),
+                "{relative:?} was searched"
+            );
+        }
+        assert!(searchable(&tempdir()));
+    }
+
+    #[test]
+    fn a_directory_on_path_that_is_not_absolute_is_passed_over() {
+        // cargo runs a crate's tests in the crate's own directory, whose
+        // `Cargo.toml` is there to be found through a relative entry -- on a
+        // host where any file can be run -- if the search looked in one.
+        assert!(
+            Path::new("Cargo.toml").is_file(),
+            "the tests run in the crate's directory"
+        );
+        for relative in [PathBuf::new(), PathBuf::from("."), PathBuf::from("src/..")] {
+            assert_eq!(
+                find_in([relative.clone()], "Cargo.toml"),
+                None,
+                "{relative:?}"
+            );
+        }
+        let tmp = tempdir();
+        make_program(&tmp, "update-grub");
+        assert_eq!(
+            find_in([PathBuf::new(), tmp.clone()], "update-grub"),
+            Some(tmp.join("update-grub"))
+        );
+    }
+
+    #[test]
+    fn a_directory_of_the_programs_name_is_not_the_program() {
+        let tmp = tempdir();
+        fs::create_dir_all(tmp.join("update-grub")).unwrap();
+        assert_eq!(find_in([tmp], "update-grub"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_an_execute_bit_is_not_the_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempdir();
+        let path = make_program(&tmp, "update-grub");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(find_in([tmp], "update-grub"), None);
     }
 
     // -- GrubDetector EFI edge cases ------------------------------------------

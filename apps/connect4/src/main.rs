@@ -121,7 +121,7 @@
 //!     failed. The test now asks `ai_best_move` what it would choose, on a
 //!     clone of the board, before letting `ai_turn` play at all.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -129,6 +129,7 @@ use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1522,20 +1523,24 @@ impl Connect4 {
             leftmost = leftmost.min(r.x);
             fill(f, r, c.chrome.raised, (r.h * 0.2).min(8.0));
             let size = (r.h * 0.3).min(l.small);
+            // Both moved only as far as they must be to read on the raised
+            // box: the palette's grey is made for the page, and was 4.1:1
+            // here in a light theme, and a disc's shade 3.8:1.
             centred(
                 f,
                 Rect::new(r.x, r.y, r.w, r.h * 0.5),
                 name,
                 size,
-                c.chrome.dim,
+                Ink::on(c.chrome.dim, &[c.chrome.raised]).at(size, false),
                 FontWeightHint::Regular,
             );
+            let count_size = (r.h * 0.4).min(l.font);
             centred(
                 f,
                 Rect::new(r.x, r.y + r.h * 0.42, r.w, r.h * 0.58),
                 &count.to_string(),
-                (r.h * 0.4).min(l.font),
-                ink,
+                count_size,
+                Ink::on(ink, &[c.chrome.raised]).at(count_size, true),
                 FontWeightHint::Bold,
             );
         }
@@ -1725,7 +1730,21 @@ impl Connect4 {
         if h.is_empty() {
             return;
         }
-        fill(f, h, c.chrome.raised, (h.h * 0.04).min(10.0));
+        // The toolkit's panel, in the theme's look.
+        if h.w >= 1.0 && h.h >= 1.0 {
+            self.palette.push_surface(
+                f,
+                h.x,
+                h.y,
+                h.w,
+                h.h,
+                (h.h * 0.04).min(10.0),
+                Surface::Panel,
+            );
+        }
+        // On the toolkit's panel the chrome's roles read as they are: the
+        // palette inks its text colours for its own panel (`Palette::ink`).
+
         // The hit box is the whole *window*, not the sheet's own rectangle,
         // and the sheet's last line is the reason: it says "click anywhere to
         // close", and anywhere means anywhere. Claiming only its own rectangle
@@ -1979,22 +1998,55 @@ mod tests {
     use guitk::event::Modifiers;
     use guitk::probe;
 
-    /// **The window is drawn in the user's colours**, light or dark -- a game
-    /// in play, a win and the help sheet -- with only the discs' colours not
-    /// the palette's (the operator's C-Q16).
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a game in
+    /// play, won by either side, drawn, the help sheet up, and cramped.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = game();
+        app.theme_changed(p);
+        app.drop_at(2);
+        app.drop_at(3);
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 300.0);
+        app.status = GameStatus::Won(Cell::Red);
+        let red = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.status = GameStatus::Won(Cell::Yellow);
+        let yellow = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.status = GameStatus::Draw;
+        let drawn = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.show_help = true;
+        let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("playing", playing),
+            ("red won", red),
+            ("yellow won", yellow),
+            ("drawn", drawn),
+            ("help", help),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look and every state it shows, with only the discs'
+    /// colours not the palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut app = game();
-            app.theme_changed(&p);
-            app.drop_at(2);
-            app.drop_at(3);
-            let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.status = GameStatus::Won(Cell::Red);
-            let won = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            app.show_help = true;
-            let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 RED_DISC.0,
@@ -2008,15 +2060,66 @@ mod tests {
                 guitk::button::Kind::Plain,
                 c.chrome.page,
             ));
-            for (what, f) in [("playing", playing), ("won", won), ("help", help)] {
+            // Words moved to read on the ground they sit on.
+            for (ink, ground) in [
+                (c.chrome.dim, c.chrome.raised),
+                (
+                    gamechrome::legible_on(RED_DISC, c.chrome.raised),
+                    c.chrome.raised,
+                ),
+                (
+                    gamechrome::legible_on(YELLOW_DISC, c.chrome.raised),
+                    c.chrome.raised,
+                ),
+            ] {
+                let moved = Ink::on(ink, &[ground]);
+                derived.extend([moved.large, moved.small]);
+            }
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("connect4, {what}, light: {light}"),
+                    &format!("connect4, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.page,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "connect4: {bad:#?}");
     }
 
     /// **"You" is counted in the colour the player plays**, and follows a

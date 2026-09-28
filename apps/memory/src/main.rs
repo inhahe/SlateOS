@@ -56,6 +56,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -922,7 +923,7 @@ impl MemoryGame {
             self.draw_footer(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l, &c);
+            draw_help(&mut f, &l, &c, &self.palette);
         }
         f
     }
@@ -1086,7 +1087,15 @@ impl MemoryGame {
         if r.w <= 0.0 || r.h <= 0.0 {
             return;
         }
-        fill(f, r, c.chrome.veil, (r.h * 0.2).min(10.0));
+        // The toolkit's panel, a ground of its own over the board. It was
+        // the chrome's veil, and the palette's inks -- made for the page --
+        // fell to 4.2:1 on it in a light theme. On the panel the chrome's
+        // roles read as they are: the palette inks its text colours for its
+        // own panel (`Palette::ink`).
+        if r.w >= 1.0 && r.h >= 1.0 {
+            self.palette
+                .push_surface(f, r.x, r.y, r.w, r.h, (r.h * 0.2).min(10.0), Surface::Panel);
+        }
         let body = format!("Cleared in {} moves — click for a new deal", self.moves);
         centred_in(
             f,
@@ -1142,12 +1151,18 @@ impl MemoryGame {
 }
 
 /// The help sheet the old code toggled a flag for and never drew.
-fn draw_help(f: &mut Frame, l: &Layout, c: &Colours) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours, palette: &Palette) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the game rather than part of it.
     fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, c.chrome.veil, 10.0);
+    // The toolkit's panel. Under a point either way its border, stroked half
+    // a point in, would reach outside the sheet.
+    if p.w >= 1.0 && p.h >= 1.0 {
+        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
+    }
+    // On the panel the chrome's roles read as they are: the palette inks
+    // its text colours for its own panel (`Palette::ink`).
 
     let pad = (p.w * 0.06).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1422,8 +1437,8 @@ mod tests {
     /// the palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let page = Chrome::of(&p).page;
             let mut derived: Vec<Color> = HUES.iter().flat_map(|&(a, b)| [a, b]).collect();
             for kind in [guitk::button::Kind::Plain, guitk::button::Kind::Primary] {
@@ -1439,33 +1454,137 @@ mod tests {
                 page,
             );
             derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
-            let mut app = MemoryGame::with_seed(7);
-            app.theme_changed(&p);
-            // A found pair and a card up.
-            let face = app.cards[0].face;
-            let twin = (1..app.cards.len())
-                .find(|&i| app.cards[i].face == face)
-                .expect("every face has a twin");
-            app.cards[0].matched = true;
-            app.cards[twin].matched = true;
-            app.first_pick = Some(if twin == 1 { 2 } else { 1 });
-            let playing = app.frame(900.0, 700.0);
-            app.show_help = true;
-            let help = app.frame(900.0, 700.0);
-            app.show_help = false;
-            for card in &mut app.cards {
-                card.matched = true;
-            }
-            let cleared = app.frame(900.0, 700.0);
-            for (what, f) in [("playing", playing), ("help", help), ("cleared", cleared)] {
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("memory, {what}, light: {light}"),
+                    &format!("memory, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = MemoryGame::with_seed(7);
+        app.theme_changed(p);
+        // A found pair and a card up.
+        let face = app.cards[0].face;
+        let twin = (1..app.cards.len())
+            .find(|&i| app.cards[i].face == face)
+            .expect("every face has a twin");
+        app.cards[0].matched = true;
+        app.cards[twin].matched = true;
+        app.first_pick = Some(if twin == 1 { 2 } else { 1 });
+        let playing = app.frame(900.0, 700.0);
+        let cramped = app.frame(320.0, 360.0);
+        app.show_help = true;
+        let help = app.frame(900.0, 700.0);
+        app.show_help = false;
+        for card in &mut app.cards {
+            card.matched = true;
+        }
+        let cleared = app.frame(900.0, 700.0);
+        vec![
+            ("playing", playing),
+            ("help", help),
+            ("cleared", cleared),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **The cleared banner and the help sheet each have a ground of their
+    /// own**, the toolkit's panel, in either look. Under the bordered look a
+    /// plain card has no fill, and their words would sit on the scrimmed
+    /// board -- which reads, so no legibility test can tell.
+    #[test]
+    fn the_banner_and_the_help_sheet_are_grounded() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let panel = p.painted(Surface::Panel);
+            let l = MemoryGame::with_seed(7).layout(900.0, 700.0);
+            for (what, f) in every_look(&p) {
+                let want = match what {
+                    "cleared" => l.banner(),
+                    "help" => l.help,
+                    _ => continue,
+                };
+                let grounded = f.commands().iter().any(|cmd| {
+                    matches!(cmd, RenderCommand::FillRect { x, y, width, height, color, .. }
+                        if *color == panel
+                            && (x - want.x).abs() < 0.01
+                            && (y - want.y).abs() < 0.01
+                            && (width - want.w).abs() < 0.01
+                            && (height - want.h).abs() < 0.01)
+                });
+                assert!(
+                    grounded,
+                    "{what} has no ground of its own (light: {light}, cards: {cards})"
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "memory: {bad:#?}");
     }
 
     /// **Every face's letter reads on its card in either theme**, in its own

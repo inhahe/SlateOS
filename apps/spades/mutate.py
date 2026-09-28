@@ -533,6 +533,24 @@ MUTATIONS = [
         "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "a seat plate's words are the page's inks, 4.1:1 on it",
+        "            let on = c.chrome.on(plate);",
+        "            let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the score panel's words are the page's inks, 4.1:1 on it",
+        "        let on = c.chrome.on(c.chrome.raised);\n        let them",
+        "        let on = c.chrome;\n        let them",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the other partnership's colour is the page's, 3.6:1 on the panel",
+        "        let them = gamechrome::Ink::on(c.them, &[c.chrome.raised]).small;",
+        "        let them = c.them;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

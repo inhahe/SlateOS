@@ -1528,19 +1528,18 @@ impl Hearts {
                 continue;
             }
             let live = self.phase == GamePhase::Playing && self.turn == seat && self.ready();
-            fill(
-                f,
-                label,
-                if live { c.chrome.lit } else { c.chrome.raised },
-                l.pad * 0.4,
-            );
+            let plate = if live { c.chrome.lit } else { c.chrome.raised };
+            fill(f, label, plate, l.pad * 0.4);
+            // Written for the plate, which is raised off the page: the page's
+            // grey was 4.1:1 on it in a light theme.
+            let on = c.chrome.on(plate);
             let inset = l.pad * 0.4;
             text_at(
                 f,
                 label.x + inset,
                 label.y + l.small * 0.2,
                 name(seat),
-                if live { c.chrome.even } else { c.chrome.text },
+                if live { on.even } else { on.text },
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1552,7 +1551,7 @@ impl Hearts {
                 y: label.y + l.small * 1.3,
                 text: line,
                 font_size: l.small * 0.9,
-                color: c.chrome.dim,
+                color: on.dim,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((label.w - inset * 2.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
@@ -2154,8 +2153,8 @@ mod tests {
     /// in not the palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 cards::FACE,
@@ -2181,25 +2180,90 @@ mod tests {
                 );
                 derived.extend([paint.upper, paint.lower, paint.edge, paint.ink]);
             }
-            let mut passing = game();
-            passing.theme_changed(&p);
-            passing.chosen = vec![0, 1];
-            let mut trick = playing();
-            trick.theme_changed(&p);
-            fill_a_trick(&mut trick);
-            let mut help = game();
-            help.theme_changed(&p);
-            help.show_help = true;
-            for (what, g) in [("passing", &passing), ("trick", &trick), ("help", &help)] {
-                let f = g.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            // The seat plates' words, written for the plates.
+            derived.extend(c.chrome.on(c.chrome.raised).inks());
+            derived.extend(c.chrome.on(c.chrome.lit).inks());
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("hearts, {what}, light: {light}"),
+                    &format!("hearts, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: passing with
+    /// two cards chosen, a trick on the table, the help sheet up, and a
+    /// cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut passing = game();
+        passing.theme_changed(p);
+        passing.chosen = vec![0, 1];
+        let mut trick = playing();
+        trick.theme_changed(p);
+        fill_a_trick(&mut trick);
+        let mut help = game();
+        help.theme_changed(p);
+        help.show_help = true;
+        vec![
+            ("passing", passing.frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("trick", trick.frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("help", help.frame(WINDOW_WIDTH, WINDOW_HEIGHT)),
+            ("cramped", trick.frame(420.0, 380.0)),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.band,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "hearts: {bad:#?}");
     }
     use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized};
 

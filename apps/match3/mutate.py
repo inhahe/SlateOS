@@ -54,6 +54,18 @@ MUTATIONS = [
         "        let _ = palette;",
         ["a_new_game_keeps_the_users_colours"],
     ),
+    (
+        "the header's words are the page's inks, 3.6:1 on its band",
+        "        let on = c.chrome.on(c.chrome.raised);",
+        "        let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the game-over words have no panel of their own",
+        "            200.0,\n            140.0,\n            8.0,\n            Surface::Panel,",
+        "            200.0,\n            140.0,\n            8.0,\n            Surface::Card,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ use guitk::palette::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1124,12 +1125,17 @@ impl Match3 {
             corner_radii: CornerRadii::all(8.0),
         });
 
+        // Every word here is written for the raised band, not the page: the
+        // page's inks were 3.6:1 (the mode, the best score) and 4.1:1 (the
+        // grey) on it in a light theme.
+        let on = c.chrome.on(c.chrome.raised);
+
         // Mode label.
         cmds.push(RenderCommand::Text {
             x: PADDING + 12.0,
             y: PADDING / 2.0 + 8.0,
             text: format!("Mode: {}", self.mode.label()),
-            color: c.chrome.title,
+            color: on.title,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1141,7 +1147,7 @@ impl Match3 {
             x: PADDING + 12.0,
             y: PADDING / 2.0 + 30.0,
             text: format!("Score: {}", self.score),
-            color: c.chrome.text,
+            color: on.text,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1154,7 +1160,7 @@ impl Match3 {
             x: PADDING + header_w / 2.0 - 20.0,
             y: PADDING / 2.0 + 8.0,
             text: format!("Best: {high}"),
-            color: c.chrome.even,
+            color: on.even,
             font_size: HEADER_FONT_SIZE - 2.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1165,11 +1171,7 @@ impl Match3 {
         match self.mode {
             GameMode::Timed => {
                 let secs = self.time_remaining_ms / 1000;
-                let color = if secs <= 10 {
-                    c.chrome.bad
-                } else {
-                    c.chrome.good
-                };
+                let color = if secs <= 10 { on.bad } else { on.good };
                 cmds.push(RenderCommand::Text {
                     x: PADDING + header_w - 120.0,
                     y: PADDING / 2.0 + 8.0,
@@ -1183,9 +1185,9 @@ impl Match3 {
             }
             GameMode::Moves => {
                 let color = if self.moves_remaining <= 5 {
-                    c.chrome.bad
+                    on.bad
                 } else {
-                    c.chrome.key
+                    on.key
                 };
                 cmds.push(RenderCommand::Text {
                     x: PADDING + header_w - 120.0,
@@ -1203,7 +1205,7 @@ impl Match3 {
                     x: PADDING + header_w - 120.0,
                     y: PADDING / 2.0 + 8.0,
                     text: String::from("No limit"),
-                    color: c.chrome.dim,
+                    color: on.dim,
                     font_size: HEADER_FONT_SIZE - 2.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1424,6 +1426,23 @@ impl Match3 {
         // Game Over text.
         let center_x = ox + gw / 2.0;
         let center_y = oy + gh / 2.0;
+
+        // A ground of its own under the words: over the veil alone they sat
+        // on whichever gem was beneath -- the best score at 4.1:1 over a
+        // teal one in a light theme. Sized to the words, which stand at
+        // fixed offsets from the centre, as this game's whole layout still
+        // does (known-issues.md: it draws at one size whatever the window).
+        self.palette.push_surface(
+            cmds,
+            center_x - 100.0,
+            center_y - 62.0,
+            200.0,
+            140.0,
+            8.0,
+            Surface::Panel,
+        );
+        // On the panel the chrome's roles read as they are: the palette inks
+        // its text colours for its own panel (`Palette::ink`).
 
         cmds.push(RenderCommand::Text {
             x: center_x - 80.0,
@@ -1875,25 +1894,73 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         let mut derived: Vec<Color> = GEM_COLORS.to_vec();
         derived.push(GEM_INK);
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut game = Match3::with_seed(7);
-            game.theme_changed(&p);
-            game.selected = Some(Pos::new(2, 2));
-            game.hint = Some((Pos::new(3, 3), Pos::new(3, 4)));
-            game.hint_visible = true;
-            let playing = game.render_commands();
-            game.state = GameState::GameOver;
-            let over = game.render_commands();
-            for (what, cmds) in [("playing", playing), ("over", over)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The header's words, written for it.
+            let chrome = gamechrome::Chrome::of(&p);
+            let mut derived = derived.clone();
+            derived.extend(chrome.on(chrome.raised).inks());
+            for (what, cmds) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     &cmds,
                     &derived,
-                    &format!("match3, {what}, light: {light}"),
+                    &format!("match3, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a gem picked up
+    /// and a hint shown, and the game over. (One size: match-3 draws at one
+    /// size whatever the window is -- known-issues.md.)
+    fn every_look(p: &Palette) -> Vec<(&'static str, Vec<RenderCommand>)> {
+        let mut game = Match3::with_seed(7);
+        game.theme_changed(p);
+        game.selected = Some(Pos::new(2, 2));
+        game.hint = Some((Pos::new(3, 3), Pos::new(3, 4)));
+        game.hint_visible = true;
+        let playing = game.render_commands();
+        game.state = GameState::GameOver;
+        let over = game.render_commands();
+        vec![("playing", playing), ("over", over)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, cmds) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(&cmds, p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "match3: {bad:#?}");
     }
 
     /// **A new game keeps the user's colours**, as it keeps the scores.

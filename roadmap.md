@@ -2545,7 +2545,8 @@ word; text inside them that says "lane C" is history.
   gomoku, checkers, chess, tetris, solitaire, freecell, hearts, spades,
   mahjong, memory, match3, battleship, towers, breakout, pacman, yahtzee,
   sudoku, crossword, nonogram, wordsearch, asteroids, pong, snake, maze,
-  nim, lights out, hangman, pinball, pipes -- each swept. On the way: chess drew black's pieces light in a dark
+  nim, lights out, hangman, pinball, pipes, sokoban, dots, flood, sliding,
+  klotski, rush -- each swept. On the way: chess drew black's pieces light in a dark
   theme; solitaire's and freecell's red suits were 1.6:1 on their faces;
   gomoku's cursor was 1.04:1 on its wood; a new game in minesweeper, reversi,
   chess and tetris dropped the user's colours; eleven colours games kept as
@@ -2566,9 +2567,35 @@ word; text inside them that says "lane C" is history.
   cursor at 1.1:1, word search's anchor letter at 1.1:1, a small asteroid
   at 1.8:1 -- and it found gamechrome's button promising its label more
   room than the button has.
-  **Next:** sokoban, dots, flood, sliding, klotski, rush, one commit each;
-  then the legibility test over the games themed before it existed, and
-  the fixed-size boards (match-3, pinball; known-issues).
+  Then sokoban, dots, flood, sliding, klotski and rush (2026-09-28): all
+  42 games follow the theme. Flood keeps its six colours (they are the
+  game, as simon's pads are); rush's cars carry their place in the
+  colours rather than a colour, so a theme that changes repaints every
+  car, and peach left the blockers -- the palette's own `hard_to_tell_apart`
+  cannot tell it from the red car under Mocha, which was true before the
+  theme too. Flood and tic-tac-toe had no mutation tables; each has its
+  first, and writing them found eight tests narrower than their names.
+  The sweeps also found the tile and block tests blind to a hue drawn
+  without the palette's ink: the stock light palette's hues are dark
+  already, so the tests now read a light palette with a dark theme's
+  pastels too.
+  The legibility test covers the games themed before it existed too
+  (2026-09-28): tic-tac-toe, minesweeper, 2048, connect four, wordle,
+  simon, reversi, gomoku, checkers, chess, tetris, solitaire, freecell,
+  hearts, spades, mahjong, memory, match-3, battleship, towers, breakout,
+  pac-man and yahtzee. Its finds were one fault in many places: the
+  palette's inks are made for the page, and a ground a game fills itself
+  (a score box, a side panel, a seat plate, a board, a well) is darker
+  than the page in a light theme, so secondary text there read at 4.1:1
+  and a side's colour at 3.6:1. Sheets and banners became the toolkit's
+  panel, on which the palette's roles read as they are, and words on a
+  ground the game fills itself are moved only as far as they must be
+  (`gamechrome::Ink`, `Chrome::on(ground)`). Wordle's help is the
+  toolkit's shortcut card, still see-through under the bordered look
+  (lane C's, `requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`).
+  **Next:** the same test under themes that leave no room -- soft text,
+  pale and deep hues (todo.txt) -- then the fixed-size boards (match-3,
+  pinball; known-issues).
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task
@@ -9350,7 +9377,7 @@ echo "$a" > /hd-out.txt'` now runs end-to-end in ring 3. dash materialises the h
 - [x] Swap file sizing — swap_mib field in PartitionPlan (None = file-based via fs::swapcfg)
 - [x] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice — FirstBoot phase in InstallSession with all fields
 - [x] Unattended install via YAML configuration file (apps/installer: InstallConfig, YAML parser, validation, InstallPlan, CLI)
-- [x] GRUB integration for dual-boot (grub.rs: GrubDetector, entry generation, /etc/grub.d/40_slateos lifecycle, UUID validation)
+- [x] GRUB integration for dual-boot (grub.rs: GrubDetector, entry generation, /etc/grub.d/40_slateos lifecycle, UUID validation) — reachable since 2026-09-28 (C-Q17): the config's `bootloader:` section (Limine, or a GRUB entry the plan adds after Limine), and `installer --grub-detect/--grub-add/--grub-update/--grub-remove` (grubcmd.rs), which rebuild the running system's menu and read it back; a script of that name the installer did not write is left alone. The entry chainloads Limine: loading the kernel directly needs a multiboot2 header (known-issues `[E] GRUB cannot load the kernel itself`)
 
 ---
 

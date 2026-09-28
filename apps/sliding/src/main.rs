@@ -73,38 +73,71 @@
 //! is not the same puzzle as one that lands sixty — so the board also shows
 //! the floor it started from, which is the only honest way to read a score.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ────────────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): the chrome through
+// `gamechrome::Chrome`, and the tiles in the palette's hues -- decoration, which
+// nothing reads to decide anything, so nothing here keeps a colour of its own.
+// It was all a copy of Catppuccin Mocha, dark on a light desktop.
 
-/// The tile palette, cycled by value. Purely decorative — nothing reads a
-/// tile's colour to decide anything.
-const TILE_COLORS: [Color; 8] = [BLUE, GREEN, PEACH, MAUVE, TEAL, YELLOW, RED, LAVENDER];
+/// The colours this window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The tiles, cycled by value: the palette's hues, each inked to stand
+    /// off the page (and so off the board's well) in a light theme as in a
+    /// dark one.
+    tiles: [Color; 8],
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            tiles: [
+                p.blue, p.green, p.peach, p.mauve, p.teal, p.yellow, p.red, p.lavender,
+            ]
+            .map(|hue| p.ink(hue)),
+        }
+    }
+
+    /// The colour of tile `value`; the gap (0) is the board's hole.
+    fn tile(&self, value: u8) -> Color {
+        if value == 0 {
+            return self.chrome.band;
+        }
+        let i = usize::from(value)
+            .saturating_sub(1)
+            .checked_rem(self.tiles.len())
+            .unwrap_or(0);
+        self.tiles.get(i).copied().unwrap_or(self.chrome.raised)
+    }
+}
+
+/// The two inks a tile's number and its "home" outline may be drawn in,
+/// `(light, dark)`: whichever reads on the tile.
+///
+/// The near-black is a neutral one rather than Mocha's crust (`11111B`),
+/// which it used to be: the palette test matches the game's own colours on
+/// RGB, and Mocha's crust among them would pass a leftover Mocha crust
+/// anywhere in a light window.
+const INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 const WINDOW_WIDTH: f32 = 720.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -667,6 +700,12 @@ pub struct SlidingPuzzle {
     show_help: bool,
     status: String,
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl SlidingPuzzle {
@@ -690,6 +729,8 @@ impl SlidingPuzzle {
             show_help: false,
             status: String::new(),
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         game.new_game();
         game
@@ -949,7 +990,7 @@ impl SlidingPuzzle {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height);
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.chrome.page, 0.0);
         self.draw_header(&mut f, &l);
         self.draw_info(&mut f, &l);
         self.draw_board(&mut f, &l);
@@ -979,7 +1020,7 @@ impl SlidingPuzzle {
             l.header.y + (l.header.h - text::line_height(l.big, FontWeightHint::Bold)) / 2.0,
             self.title(),
             l.big.min(l.header.h * 0.8),
-            LAVENDER,
+            self.colours.chrome.title,
             FontWeightHint::Bold,
             Some((l.header.w - l.pad * 2.0).max(0.0)),
         );
@@ -990,9 +1031,9 @@ impl SlidingPuzzle {
             return;
         }
         let colour = if self.state == GameState::Won {
-            GREEN
+            self.colours.chrome.good
         } else {
-            SUBTEXT0
+            self.colours.chrome.dim
         };
         label(
             f,
@@ -1013,7 +1054,12 @@ impl SlidingPuzzle {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
-        fill(f, l.board, CRUST, (l.board.w * 0.02).min(10.0));
+        fill(
+            f,
+            l.board,
+            self.colours.chrome.well,
+            (l.board.w * 0.02).min(10.0),
+        );
         let cell = l.cell(self.size);
         let inset = (cell * 0.06).clamp(0.5, 5.0);
         for (index, &value) in self.board.tiles().iter().enumerate() {
@@ -1026,16 +1072,21 @@ impl SlidingPuzzle {
             );
             let radius = (inner.w * 0.12).min(8.0);
             if value == 0 {
-                fill(f, inner, MANTLE, radius);
+                fill(f, inner, self.colours.tile(0), radius);
             } else {
                 let home = usize::from(value).saturating_sub(1) == index;
-                fill(f, inner, tile_color(value), radius);
+                let colour = self.colours.tile(value);
+                fill(f, inner, colour, radius);
+                // The number and the outline in whichever ink reads on the
+                // tile: dark on a dark theme's pale hues, and on a light
+                // theme's deep ones whichever of the two stands off it.
+                let ink = gamechrome::legible_on(INKS, colour);
                 if home {
                     // A tile already home gets an outline rather than a
                     // different fill: the fill is what tells tiles apart, and
                     // recolouring it would make "home" and "seven" the same
                     // signal.
-                    stroke(f, inner, CRUST, (inner.w * 0.05).clamp(1.0, 3.0), radius);
+                    stroke(f, inner, ink, (inner.w * 0.05).clamp(1.0, 3.0), radius);
                 }
                 if self.show_numbers && inner.w > 8.0 {
                     let size = (inner.h * 0.42).clamp(7.0, 34.0);
@@ -1044,7 +1095,7 @@ impl SlidingPuzzle {
                         inner,
                         &value.to_string(),
                         size,
-                        CRUST,
+                        ink,
                         FontWeightHint::Bold,
                     );
                 }
@@ -1064,24 +1115,28 @@ impl SlidingPuzzle {
         let count = SIZES.len().saturating_add(3);
         for (slot, &size) in SIZES.iter().enumerate() {
             let r = l.button(l.controls, slot, count);
+            // The size in play is the chosen one.
             let active = size == self.size;
             button(
                 f,
+                &self.palette,
                 l,
                 r,
                 &format!("{size}x{size}"),
-                if active { SURFACE1 } else { SURFACE0 },
-                if active { LAVENDER } else { SUBTEXT0 },
+                if active { Kind::Primary } else { Kind::Plain },
             );
             f.hit(Target::Size(slot), r);
         }
         let new_r = l.button(l.controls, SIZES.len(), count);
-        button(f, l, new_r, "New", SURFACE0, TEAL);
+        button(f, &self.palette, l, new_r, "New", Kind::Plain);
         f.hit(Target::NewGame, new_r);
 
         let num_r = l.button(l.controls, SIZES.len().saturating_add(1), count);
+        // A switch: on is the chosen look, off the plain one -- off is a
+        // setting, not a control that cannot be used.
         button(
             f,
+            &self.palette,
             l,
             num_r,
             if self.show_numbers {
@@ -1090,16 +1145,15 @@ impl SlidingPuzzle {
                 "\u{2014}\u{2014}\u{2014}"
             },
             if self.show_numbers {
-                SURFACE1
+                Kind::Primary
             } else {
-                SURFACE0
+                Kind::Plain
             },
-            if self.show_numbers { PEACH } else { OVERLAY0 },
         );
         f.hit(Target::ToggleNumbers, num_r);
 
         let help_r = l.button(l.controls, SIZES.len().saturating_add(2), count);
-        button(f, l, help_r, "?", SURFACE0, YELLOW);
+        button(f, &self.palette, l, help_r, "?", Kind::Plain);
         f.hit(Target::ToggleHelp, help_r);
     }
 
@@ -1113,13 +1167,37 @@ impl SlidingPuzzle {
                 Some(m) => format!("{size}x{size}: {m}"),
                 None => format!("{size}x{size}: \u{2014}"),
             };
-            button(
+            // Under a point the toolkit's border, stroked half a point in,
+            // would reach outside the row.
+            if r.w < 1.0 || r.h < 1.0 {
+                continue;
+            }
+            // The toolkit's rows: the size in play is the selected one.
+            let chosen = size == self.size;
+            self.palette.push_surface(
                 f,
-                l,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                (r.h * 0.25).min(8.0),
+                if chosen {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            centred_in(
+                f,
                 r,
                 &text,
-                SURFACE0,
-                if size == self.size { YELLOW } else { SUBTEXT0 },
+                (r.h * 0.5).clamp(6.0, l.font),
+                if chosen {
+                    self.colours.chrome.text
+                } else {
+                    self.colours.chrome.dim
+                },
+                FontWeightHint::Bold,
             );
             f.hit(Target::Score(i), r);
         }
@@ -1127,7 +1205,9 @@ impl SlidingPuzzle {
 
     fn draw_help(&self, f: &mut Frame, l: &Layout) {
         let sheet = l.help;
-        if sheet.w <= 0.0 || sheet.h <= 0.0 {
+        // Under a point the toolkit's border, stroked half a point in, would
+        // reach outside the sheet.
+        if sheet.w < 1.0 || sheet.h < 1.0 {
             return;
         }
         // One hit box over the *whole window*, recorded after every control the
@@ -1144,8 +1224,18 @@ impl SlidingPuzzle {
         // frame lying *and* left this hit box unreachable — a control wired to
         // nothing, which is the fault this rewrite exists to remove.
         f.hit(Target::ToggleHelp, l.window);
-        fill(f, sheet, SURFACE0, (sheet.w * 0.03).min(12.0));
-        stroke(f, sheet, LAVENDER, 1.5, (sheet.w * 0.03).min(12.0));
+        // The window it covers dimmed behind it, and the sheet the toolkit's
+        // panel, in the theme's look.
+        fill(f, l.window, self.colours.chrome.scrim, 0.0);
+        self.palette.push_surface(
+            f,
+            sheet.x,
+            sheet.y,
+            sheet.w,
+            sheet.h,
+            (sheet.w * 0.03).min(12.0),
+            Surface::Panel,
+        );
 
         let pad = l.pad;
         let line = (sheet.h - pad * 3.0) / (HELP_ROWS.len().saturating_add(1)) as f32;
@@ -1159,7 +1249,7 @@ impl SlidingPuzzle {
             sheet.y + pad,
             HELP_TITLE,
             (line * 0.7).clamp(7.0, l.big),
-            YELLOW,
+            self.colours.chrome.even,
             FontWeightHint::Bold,
             Some((sheet.w - pad * 2.0).max(0.0)),
         );
@@ -1175,7 +1265,7 @@ impl SlidingPuzzle {
                 y,
                 key,
                 size,
-                BLUE,
+                self.colours.chrome.key,
                 FontWeightHint::Bold,
                 Some(key_w),
             );
@@ -1185,7 +1275,7 @@ impl SlidingPuzzle {
                 y,
                 what,
                 size,
-                TEXT_COLOR,
+                self.colours.chrome.text,
                 FontWeightHint::Regular,
                 Some((sheet.w - pad * 2.0 - key_w).max(0.0)),
             );
@@ -1197,17 +1287,6 @@ impl Default for SlidingPuzzle {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn tile_color(value: u8) -> Color {
-    if value == 0 {
-        return MANTLE;
-    }
-    let i = usize::from(value)
-        .saturating_sub(1)
-        .checked_rem(TILE_COLORS.len())
-        .unwrap_or(0);
-    TILE_COLORS.get(i).copied().unwrap_or(BLUE)
 }
 
 // ── Drawing helpers ────────────────────────────────────────────────────────
@@ -1286,14 +1365,22 @@ fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: 
     );
 }
 
-/// A filled, labelled control.
-fn button(f: &mut Frame, l: &Layout, r: Rect, text_str: &str, back: Color, fore: Color) {
+/// A labelled control: the toolkit's button, on the page.
+fn button(f: &mut Frame, p: &Palette, l: &Layout, r: Rect, text_str: &str, kind: Kind) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    fill(f, r, back, (r.h * 0.25).min(8.0));
     let size = (r.h * 0.5).clamp(6.0, l.font);
-    centred_in(f, r, text_str, size, fore, FontWeightHint::Bold);
+    gamechrome::button(
+        f,
+        p,
+        (r.x, r.y, r.w, r.h),
+        text_str,
+        size,
+        kind,
+        State::default(),
+        p.base,
+    );
 }
 
 // ── Window ─────────────────────────────────────────────────────────────────
@@ -1313,6 +1400,11 @@ pub fn handle_event(game: &mut SlidingPuzzle, event: &Event) -> EventResult {
 }
 
 impl App for SlidingPuzzle {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Sliding Puzzle".to_string()
     }
@@ -1415,6 +1507,379 @@ mod tests {
 
     fn game() -> SlidingPuzzle {
         SlidingPuzzle::with_seed(SEED)
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state in `p`'s colours: a scramble in play with records kept, a
+    /// solved board, the numbers off, the help sheet up, the largest board,
+    /// and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, SlidingPuzzle)> {
+        let playing = || {
+            let mut g = game();
+            g.best = [Some(21), None, Some(140)];
+            g
+        };
+        let mut solved = at_size(3);
+        solved.board = Board::new(3);
+        solved.state = GameState::Won;
+        let mut plain = playing();
+        plain.show_numbers = false;
+        let mut help = playing();
+        help.show_help = true;
+        let mut cramped = playing();
+        cramped.resize(320.0, 240.0);
+        let mut looks = vec![
+            ("playing", playing()),
+            ("solved", solved),
+            ("numbers off", plain),
+            ("help", help),
+            ("5x5", at_size(5)),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// The frame `g` shows, at the size it was last drawn at.
+    fn shown(g: &SlidingPuzzle) -> Frame {
+        g.frame(g.size_drawn.0, g.size_drawn.1)
+    }
+
+    /// Every filled box in a frame, with its colour, in the order painted.
+    fn fills(f: &Frame) -> Vec<(Rect, Color)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether `a` and `b` are the same box, to a hundredth of a point.
+    fn same(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() < 0.01
+            && (a.y - b.y).abs() < 0.01
+            && (a.w - b.w).abs() < 0.01
+            && (a.h - b.h).abs() < 0.01
+    }
+
+    // ── The theme ───────────────────────────────────────────────────────────
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look: every colour is the palette's, the toolkit's
+    /// buttons', or one of the two inks a tile's number is written in (the
+    /// operator's C-Q16). It drew in its own copy of Catppuccin Mocha, dark
+    /// on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.base);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.base));
+            derived.extend([INKS.0, INKS.1]);
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    shown(&g).commands(),
+                    &derived,
+                    &format!("sliding, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it** -- every tile's number
+    /// among them -- in either theme and either surface look
+    /// (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, g) in every_look(&p) {
+                let f = shown(&g);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "sliding: {bad:#?}");
+    }
+
+    /// A light palette whose hues are the dark theme's pastels: a theme a
+    /// user can put together, and the one a hue drawn without the palette's
+    /// ink would vanish on.
+    fn pale_light() -> Palette {
+        let mut p = Palette::for_mode(true);
+        let dark = Palette::for_mode(false);
+        p.blue = dark.blue;
+        p.green = dark.green;
+        p.red = dark.red;
+        p.yellow = dark.yellow;
+        p.peach = dark.peach;
+        p.mauve = dark.mauve;
+        p.teal = dark.teal;
+        p.lavender = dark.lavender;
+        p
+    }
+
+    /// **The tiles are told apart and stand off the board**, in either theme:
+    /// eight colours, none the same, each at least 3:1 on the well (WCAG
+    /// 1.4.11) -- a light theme's pale hues would vanish into a light well.
+    #[test]
+    fn the_tiles_are_told_apart_and_stand_off_the_board_in_either_theme() {
+        // The stock light palette's hues are dark already, so on it a hue
+        // the game forgot to ink is still seen. A user's own light theme
+        // may carry a dark theme's pastels -- `pale_light` -- and on that
+        // one only the palette's inks keep the tiles off the well.
+        for (light, p) in [
+            (false, palette(false, false)),
+            (true, palette(true, false)),
+            (true, pale_light()),
+        ] {
+            let c = Colours::of(&p);
+            for (i, a) in c.tiles.iter().enumerate() {
+                let ratio = guitk::theme::contrast_ratio(*a, c.chrome.well);
+                assert!(
+                    ratio >= 3.0,
+                    "tile colour {i} is {ratio:.2}:1 on the well (light: {light})"
+                );
+                for (j, b) in c.tiles.iter().enumerate().skip(i + 1) {
+                    assert_ne!(a, b, "tiles {i} and {j} share a colour (light: {light})");
+                }
+            }
+        }
+    }
+
+    /// **A tile already home is outlined in an ink that stands off it**
+    /// (3:1), in either theme: an outline in a colour near the tile's own is
+    /// no outline.
+    #[test]
+    fn a_home_tiles_outline_stands_off_it_in_either_theme() {
+        for light in [false, true] {
+            let mut g = at_size(3);
+            g.board = Board::new(3);
+            g.theme_changed(&palette(light, false));
+            let f = shown(&g);
+            let drawn = fills(&f);
+            // The board's: a toolkit button outlines its own face too.
+            let board = g.layout().board;
+            let mut seen = 0;
+            for c in f.commands() {
+                let RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                let r = Rect::new(*x, *y, *width, *height);
+                if !board.contains(r.x + 1.0, r.y + 1.0) {
+                    continue;
+                }
+                let Some((_, tile)) = drawn.iter().find(|(t, _)| same(*t, r)) else {
+                    continue;
+                };
+                seen += 1;
+                let ratio = guitk::theme::contrast_ratio(*color, *tile);
+                assert!(
+                    ratio >= 3.0,
+                    "a home tile's outline is {ratio:.2}:1 on it (light: {light})"
+                );
+            }
+            assert_eq!(seen, 8, "{seen} home tiles outlined (light: {light})");
+        }
+    }
+
+    /// **The chosen controls look chosen**: the size in play is the
+    /// toolkit's primary button and the others its plain one; the numbers
+    /// switch is primary when on and plain when off; and the size in play's
+    /// record is the toolkit's selected row.
+    #[test]
+    fn the_chosen_controls_look_chosen() {
+        let p = palette(false, true);
+        for size in SIZES {
+            for numbers in [true, false] {
+                let mut g = at_size(size);
+                g.show_numbers = numbers;
+                g.theme_changed(&p);
+                let f = shown(&g);
+                let drawn = fills(&f);
+                // A toolkit button is its face and then the gloss on its
+                // upper half: the same box, half as tall.
+                let buttons: Vec<(Rect, Color)> = drawn
+                    .windows(2)
+                    .filter_map(|pair| {
+                        let [(face, colour), (gloss, _)] = pair else {
+                            return None;
+                        };
+                        ((gloss.x - face.x).abs() < 0.01
+                            && (gloss.y - face.y).abs() < 0.01
+                            && (gloss.w - face.w).abs() < 0.01
+                            && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                            .then_some((*face, *colour))
+                    })
+                    .collect();
+                let face_of = |label: &str| {
+                    f.commands()
+                        .iter()
+                        .filter_map(|c| match c {
+                            RenderCommand::Text { text, x, y, .. } if text == label => {
+                                Some((*x, *y))
+                            }
+                            _ => None,
+                        })
+                        .find_map(|(tx, ty)| {
+                            buttons
+                                .iter()
+                                .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                                .map(|(_, colour)| *colour)
+                        })
+                        .unwrap_or_else(|| panic!("{label} is on no button"))
+                };
+                let paint = |kind| guitk::button::paint(&p, kind, State::default(), p.base).lower;
+                let kind = |on: bool| if on { Kind::Primary } else { Kind::Plain };
+                for other in SIZES {
+                    assert_eq!(
+                        face_of(&format!("{other}x{other}")),
+                        paint(kind(other == size)),
+                        "playing {size}: the {other}x{other} button looks wrong"
+                    );
+                }
+                let switch = if numbers {
+                    "123"
+                } else {
+                    "\u{2014}\u{2014}\u{2014}"
+                };
+                assert_eq!(
+                    face_of(switch),
+                    paint(kind(numbers)),
+                    "the numbers switch looks wrong with the numbers {}",
+                    if numbers { "on" } else { "off" }
+                );
+                let l = g.layout();
+                for (i, other) in SIZES.iter().enumerate() {
+                    let row = l.button(l.scores, i, SIZES.len());
+                    let want = p.painted(if *other == size {
+                        Surface::Selected
+                    } else {
+                        Surface::Card
+                    });
+                    assert!(
+                        drawn.iter().any(|(r, c)| same(*r, row) && *c == want),
+                        "playing {size}: the {other}x{other} record is not drawn as it should be"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **The help sheet has a ground of its own, and the window behind it is
+    /// dimmed**, in either look: the toolkit's panel over the chrome's scrim.
+    #[test]
+    fn the_help_sheet_is_grounded_over_a_dimmed_window() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut g = game();
+            g.show_help = true;
+            g.theme_changed(&p);
+            let l = g.layout();
+            let drawn = fills(&shown(&g));
+            let scrim = drawn
+                .iter()
+                .position(|(r, c)| same(*r, l.window) && *c == Chrome::of(&p).scrim)
+                .unwrap_or_else(|| panic!("nothing dims the window (light: {light})"));
+            assert!(
+                drawn
+                    .iter()
+                    .skip(scrim + 1)
+                    .any(|(r, c)| same(*r, l.help) && *c == p.painted(Surface::Panel)),
+                "the sheet has no ground of its own (light: {light}, cards: {cards})"
+            );
+        }
+    }
+
+    /// **A solved board is told in the palette's colour for a win**, and a
+    /// board in play in secondary text, in either theme.
+    #[test]
+    fn a_solved_board_is_told_in_the_colour_for_a_win() {
+        for light in [false, true] {
+            let p = palette(light, false);
+            let c = Chrome::of(&p);
+            for won in [false, true] {
+                let mut g = at_size(3);
+                if won {
+                    g.board = Board::new(3);
+                    g.state = GameState::Won;
+                }
+                g.theme_changed(&p);
+                let colour = shown(&g)
+                    .commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::Text { text, color, .. } if text.contains(" moves ") => {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no line counts the moves (light: {light})"));
+                assert_eq!(
+                    colour,
+                    if won { c.good } else { c.dim },
+                    "won: {won}, light: {light}"
+                );
+            }
+        }
+    }
+
+    /// **A new game keeps the user's colours**, as a new size does.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = palette(true, false);
+        let mut g = game();
+        g.theme_changed(&light);
+        for action in [Action::NewGame, Action::SetSize(3)] {
+            g.apply(action);
+            assert_eq!(g.palette, light, "{action:?} dropped the user's palette");
+            assert_eq!(
+                fills(&shown(&g)).first().map(|(_, c)| *c),
+                Some(light.base),
+                "after {action:?} the page is not the user's"
+            );
+        }
     }
 
     fn sized(size: (f32, f32)) -> SlidingPuzzle {
@@ -2820,17 +3285,23 @@ mod tests {
         // signal from "seven" or the board says two things with one colour.
         let mut g = at_size(3);
         g.board = Board::new(3);
+        // The board's outlines: the toolkit's buttons and rows draw edges of
+        // their own round the controls.
+        let board = g.layout().board;
         let outlines = g
             .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
             .commands()
             .iter()
-            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .filter(|c| {
+                matches!(c, RenderCommand::StrokeRect { x, y, .. }
+                    if board.contains(*x + 1.0, *y + 1.0))
+            })
             .count();
         assert_eq!(
             outlines, 8,
             "a solved 3x3 outlined {outlines} of its 8 tiles"
         );
-        let colours: Vec<Color> = (1..=8_u8).map(tile_color).collect();
+        let colours: Vec<Color> = (1..=8_u8).map(|v| g.colours.tile(v)).collect();
         for (i, a) in colours.iter().enumerate() {
             for b in colours.iter().skip(i + 1) {
                 assert_ne!(a, b, "two tiles of a 3x3 share a colour");

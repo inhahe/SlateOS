@@ -1238,6 +1238,10 @@ impl GomokuApp {
         if gap < l.label * 1.1 {
             return;
         }
+        // The coordinates are written on the board, a raised shade of the
+        // page: the page's grey, which the palette makes for the page, was
+        // 4.1:1 on it in a light theme.
+        let label_ink = c.chrome.on(c.board).dim;
         for i in 0..BOARD_SIZE as i32 {
             let letter = char::from(b'A'.saturating_add(i as u8)).to_string();
             let number = (BOARD_SIZE as i32).saturating_sub(i).to_string();
@@ -1256,7 +1260,7 @@ impl GomokuApp {
                     ly,
                     l.label,
                     FontWeightHint::Regular,
-                    c.chrome.dim,
+                    label_ink,
                     None,
                 );
             }
@@ -1271,7 +1275,7 @@ impl GomokuApp {
                     y - l.label / 2.0,
                     l.label,
                     FontWeightHint::Regular,
-                    c.chrome.dim,
+                    label_ink,
                     None,
                 );
             }
@@ -1660,8 +1664,8 @@ mod tests {
     /// Catppuccin Mocha, dark on a light desktop (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
             let c = Colours::of(&p);
             let mut derived = vec![
                 BLACK_STONE,
@@ -1677,27 +1681,90 @@ mod tests {
                 guitk::button::Kind::Plain,
                 c.chrome.band,
             ));
-            let mut app = GomokuApp::new();
-            app.theme_changed(&p);
-            let fresh = app.frame(W.0, W.1);
-            // Undo is switched off with no history, New game on: both of a
-            // button's looks are in every frame.
-            assert!(app.board.set(7, 7, Cell::Black));
-            assert!(app.board.set(7, 8, Cell::White));
-            app.last_move = Some((7, 8));
-            let playing = app.frame(W.0, W.1);
-            app.phase = GamePhase::Won;
-            app.winner = Cell::Black;
-            let won = app.frame(W.0, W.1);
-            for (what, f) in [("fresh", fresh), ("playing", playing), ("won", won)] {
+            derived.push(c.chrome.on(c.board).dim);
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
                     &derived,
-                    &format!("gomoku, {what}, light: {light}"),
+                    &format!("gomoku, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: fresh (Undo
+    /// switched off, New game on -- both of a button's looks), in play with
+    /// stones down and the cursor showing, won, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = GomokuApp::new();
+        app.theme_changed(p);
+        let fresh = app.frame(W.0, W.1);
+        assert!(app.board.set(7, 7, Cell::Black));
+        assert!(app.board.set(7, 8, Cell::White));
+        app.last_move = Some((7, 8));
+        let playing = app.frame(W.0, W.1);
+        let cramped = app.frame(320.0, 360.0);
+        app.phase = GamePhase::Won;
+        app.winner = Cell::Black;
+        let won = app.frame(W.0, W.1);
+        vec![
+            ("fresh", fresh),
+            ("playing", playing),
+            ("won", won),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled: true,
+                    ..guitk::button::State::default()
+                },
+                Colours::of(&p).chrome.band,
+            );
+            let exempt = |r: &gamechrome::legibility::Read| {
+                r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "gomoku: {bad:#?}");
     }
 
     /// **The last-move dot reads on either stone.** It was the pale red,

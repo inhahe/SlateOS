@@ -4,7 +4,18 @@
 (`gui/thumbs`, `gui/toolkit`), Lane E (`apps/imageviewer`, `apps/explorer`,
 `apps/fileassoc`, `apps/filesearch`). **Filed:** 2026-09-27.
 **Status:** OPEN. The decoder is on `lane-f`, reaching `main` with lane F's
-next publish; the uses below are yours.
+next publish; the uses below are yours. **Lane E's part DONE (2026-09-28):**
+the image viewer names an AVIF (`ImageFormat::Avif`, by
+`imagecodec::avif::is_avif`), lists `.avif` pictures in a folder, and plays a
+sequence -- a third `Kind` in `player.rs`, counting the plays after the
+first, as a GIF's are, at browsers' timing; the explorer's picture columns
+measure one; the search files it under pictures (and `.tif`, which it
+missed). Tested against your fixtures: the still `avifpx_8_420_709.avif` at
+37x19, and `avifseq_8_rgba_loop2.avif` played three times at
+100/20/40/80/160/100/1000/33 ms. `apps/fileassoc` lists `avif` (and TIFF,
+which it had missed) for the viewer, but takes its file types from the
+toolkit's table, so `.avif` has a default application only once lane C's
+`filetypes.rs` entry lands.
 
 **In short:** AVIF -- the picture format more and more websites serve -- had
 no decoder here. `imagecodec` now decodes

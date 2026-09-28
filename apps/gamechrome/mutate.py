@@ -76,6 +76,18 @@ LIB_MUTATIONS = [
         "        if true {\n            self.large",
         ["an_ink_is_picked_by_the_size_it_is_drawn_at"],
     ),
+    (
+        "on leaves the secondary grey as the page's",
+        "            dim: read(self.dim),",
+        "            dim: self.dim,",
+        ["the_chrome_on_a_ground_reads_there"],
+    ),
+    (
+        "on moves the inks only as far as large text needs",
+        "        let read = |ink: Color| Ink::on(ink, &[ground]).small;",
+        "        let read = |ink: Color| Ink::on(ink, &[ground]).large;",
+        ["the_chrome_on_a_ground_reads_there"],
+    ),
 ]
 
 LEGIBILITY_MUTATIONS = [

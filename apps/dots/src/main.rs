@@ -23,36 +23,90 @@
 //! most of the canvas empty, and in the second it ran off the right edge.
 //! The spacing is now what the smaller of the two free dimensions can pay for.
 
+use gamechrome::Ink;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-// ── Player colors ───────────────────────────────────────────────────
-const PLAYER1_COLOR: Color = BLUE;
-const PLAYER2_COLOR: Color = RED;
-const PLAYER1_BOX_COLOR: Color = Color::from_hex(0x2A3A5E);
-const PLAYER2_BOX_COLOR: Color = Color::from_hex(0x5E2A3A);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+
+    /// The two players: the accent, and a hue that cannot be mistaken for it.
+    one: Color,
+    two: Color,
+    /// A box each has taken: a tint of their colour over the page.
+    one_box: Color,
+    two_box: Color,
+    /// The initial written in a box: its owner's colour, moved to read on
+    /// the box's tint.
+    one_initial: Ink,
+    two_initial: Ink,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let (one, two) = (p.ink(p.accent), gamechrome::apart_from_accent(p));
+        let (one_box, two_box) = (
+            with_alpha(one, BOX_ALPHA).over(p.base),
+            with_alpha(two, BOX_ALPHA).over(p.base),
+        );
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            text: p.text,
+            subtext0: p.subtext0,
+            yellow: p.ink(p.yellow),
+            lavender: p.ink(p.lavender),
+            one,
+            two,
+            one_box,
+            two_box,
+            one_initial: Ink::on(one, &[one_box]),
+            two_initial: Ink::on(two, &[two_box]),
+        }
+    }
+}
+
+/// How much of a player's colour tints the boxes they take, out of 255.
+const BOX_ALPHA: u8 = 64;
 
 // ── The window ──────────────────────────────────────────────────────
 /// The size the window opens at. Nothing is measured from it: every
@@ -313,17 +367,26 @@ impl Player {
         }
     }
 
-    fn color(self) -> Color {
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Player::One => PLAYER1_COLOR,
-            Player::Two => PLAYER2_COLOR,
+            Player::One => c.one,
+            Player::Two => c.two,
         }
     }
 
-    fn box_color(self) -> Color {
+    fn box_color(self, c: &Colours) -> Color {
         match self {
-            Player::One => PLAYER1_BOX_COLOR,
-            Player::Two => PLAYER2_BOX_COLOR,
+            Player::One => c.one_box,
+            Player::Two => c.two_box,
+        }
+    }
+
+    /// The initial written in a box this player took: their colour, moved to
+    /// read on the box's tint.
+    fn initial_ink(self, c: &Colours) -> Ink {
+        match self {
+            Player::One => c.one_initial,
+            Player::Two => c.two_initial,
         }
     }
 
@@ -699,6 +762,12 @@ struct DotsAndBoxes {
     ai_delay_ms: u64,
     /// Whether the AI is "thinking" (short delay before move).
     ai_pending: bool,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 /// AI thinking delay in milliseconds.
@@ -725,6 +794,8 @@ impl DotsAndBoxes {
             rng: SeededRng::new(seed),
             ai_delay_ms: 0,
             ai_pending: false,
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         }
     }
 
@@ -745,8 +816,11 @@ impl DotsAndBoxes {
         let mode = self.mode;
         let seed = self.rng.next_u64();
         let window = self.size;
+        let palette = self.palette;
         *self = Self::with_config(grid_size, mode, seed);
         self.size = window;
+        self.palette = palette;
+        self.colours = Colours::of(&palette);
     }
 
     /// Grid size (number of dots per side).
@@ -1058,7 +1132,7 @@ impl DotsAndBoxes {
         let l = Layout::solve(w, h, self.grid_size());
         let mut f = Frame::new(w, h);
 
-        fill(&mut f, l.window, BASE, 6.0);
+        fill(&mut f, l.window, self.colours.base, 6.0);
         self.draw_header(&mut f, &l);
         self.draw_boxes(&mut f, &l);
         self.draw_lines(&mut f, &l);
@@ -1074,7 +1148,7 @@ impl DotsAndBoxes {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, 0.0);
+        fill(f, l.header, self.colours.mantle, 0.0);
         if l.header.is_empty() {
             return;
         }
@@ -1084,7 +1158,7 @@ impl DotsAndBoxes {
             l.pad,
             l.pad * 0.4,
             TITLE,
-            LAVENDER,
+            self.colours.lavender,
             l.title,
             FontWeightHint::Bold,
         );
@@ -1099,7 +1173,7 @@ impl DotsAndBoxes {
             l.pad,
             l.pad.mul_add(0.4, l.title),
             &mode_text,
-            SUBTEXT0,
+            self.colours.subtext0,
             l.small,
             FontWeightHint::Regular,
         );
@@ -1113,8 +1187,8 @@ impl DotsAndBoxes {
         let turn = self.turn_text();
         let turn_w = text::measure(&turn, l.small, FontWeightHint::Bold);
         let scores = [
-            (self.player_one_label(), PLAYER1_COLOR),
-            (self.player_two_label(), PLAYER2_COLOR),
+            (self.player_one_label(), self.colours.one),
+            (self.player_two_label(), self.colours.two),
         ];
         let score_w = scores.iter().fold(0.0f32, |acc, (s, _)| {
             acc.max(text::measure(s, l.small, FontWeightHint::Bold))
@@ -1133,7 +1207,7 @@ impl DotsAndBoxes {
                 turn_x,
                 (l.header.h - l.small) / 2.0,
                 &turn,
-                self.current_player.color(),
+                self.current_player.color(&self.colours),
                 l.small,
                 FontWeightHint::Bold,
             );
@@ -1217,19 +1291,21 @@ impl DotsAndBoxes {
                     (x2 - x1 - margin * 2.0).max(0.0),
                     (y2 - y1 - margin * 2.0).max(0.0),
                 );
-                fill(f, cell, player.box_color(), l.spacing * 0.06);
+                fill(f, cell, player.box_color(&self.colours), l.spacing * 0.06);
 
                 // The initial was centred by subtracting 5 and 8 -- half of
                 // one glyph at one font size. It is measured now.
                 let label = self.box_initial(player);
                 let size = (l.spacing * 0.28).clamp(6.0, 18.0);
                 let (cx, cy) = cell.centre();
+                // Centred on the line's height, not the font size, which is
+                // the smaller number and left the initial a sixth of a line low.
                 text_at(
                     f,
                     cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
-                    cy - size / 2.0,
+                    cy - text::line_height(size, FontWeightHint::Bold) / 2.0,
                     label,
-                    player.color(),
+                    player.initial_ink(&self.colours).at(size, true),
                     size,
                     FontWeightHint::Bold,
                 );
@@ -1251,7 +1327,11 @@ impl DotsAndBoxes {
                 y1,
                 x2,
                 y2,
-                color: if drawn { LAVENDER } else { SURFACE0 },
+                color: if drawn {
+                    self.colours.lavender
+                } else {
+                    self.colours.surface0
+                },
                 width: if drawn {
                     l.line_w
                 } else {
@@ -1275,7 +1355,7 @@ impl DotsAndBoxes {
             y1,
             x2,
             y2,
-            color: self.current_player.color(),
+            color: self.current_player.color(&self.colours),
             width: l.cursor_w,
         });
     }
@@ -1286,7 +1366,12 @@ impl DotsAndBoxes {
         for row in 0..gs {
             for col in 0..gs {
                 let (x, y) = l.dot_pos(row, col);
-                fill(f, Rect::new(x - r, y - r, r * 2.0, r * 2.0), TEXT_COLOR, r);
+                fill(
+                    f,
+                    Rect::new(x - r, y - r, r * 2.0, r * 2.0),
+                    self.colours.text,
+                    r,
+                );
             }
         }
     }
@@ -1299,7 +1384,7 @@ impl DotsAndBoxes {
     /// decided on rather than the one it was given. Every verb is a button
     /// now, and the bar sits at the bottom of the actual window.
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, 0.0);
+        fill(f, l.footer, self.colours.mantle, 0.0);
         if l.footer.is_empty() {
             return;
         }
@@ -1320,21 +1405,21 @@ impl DotsAndBoxes {
         let h = (l.footer.h - gap).max(0.0);
         let y = l.footer.y + (l.footer.h - h) / 2.0;
         for (label, target, on) in &buttons {
-            let w = text::measure(label, size, FontWeightHint::Bold) + l.pad;
+            let w = gamechrome::button_width(label, size, h);
             if x + w > l.footer.right() - l.pad {
                 break;
             }
             let r = Rect::new(x, y, w, h);
-            fill(f, r, if *on { SURFACE1 } else { SURFACE0 }, h * 0.25);
-            let (cx, cy) = r.centre();
-            text_at(
+            // The board size in play is the toolkit's primary button.
+            gamechrome::button(
                 f,
-                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
-                cy - size / 2.0,
+                &self.palette,
+                (r.x, r.y, r.w, r.h),
                 label,
-                if *on { TEXT_COLOR } else { SUBTEXT0 },
                 size,
-                FontWeightHint::Bold,
+                if *on { Kind::Primary } else { Kind::Plain },
+                State::default(),
+                self.colours.mantle,
             );
             f.hit(*target, r);
             x += w + gap;
@@ -1346,9 +1431,11 @@ impl DotsAndBoxes {
             text_at(
                 f,
                 l.footer.right() - l.pad - help_w,
-                y + (h - size * 0.9) / 2.0,
+                y + (h - text::line_height(size * 0.9, FontWeightHint::Regular)) / 2.0,
                 FOOTER_HELP,
-                OVERLAY0,
+                // Secondary text: the keys are read, and the palette's
+                // faintest grey is 2.3:1 on a light band.
+                self.colours.subtext0,
                 size * 0.9,
                 FontWeightHint::Regular,
             );
@@ -1362,7 +1449,7 @@ impl DotsAndBoxes {
     /// short one it hung off the bottom. It is sized from the lines it holds
     /// and clamped to the window now.
     fn draw_game_over(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.window, CRUST, 0.0);
+        fill(f, l.window, self.colours.crust, 0.0);
 
         let result = match self.winner() {
             Some(Player::One) if self.mode == GameMode::VsAi => String::from("You win!"),
@@ -1377,13 +1464,23 @@ impl DotsAndBoxes {
             self.score(Player::Two)
         );
         let lines: [(&str, f32, Color, FontWeightHint); 4] = [
-            ("Game Over!", l.title, YELLOW, FontWeightHint::Bold),
-            (&result, l.font, TEXT_COLOR, FontWeightHint::Regular),
-            (&score, l.small, SUBTEXT0, FontWeightHint::Regular),
+            (
+                "Game Over!",
+                l.title,
+                self.colours.yellow,
+                FontWeightHint::Bold,
+            ),
+            (&result, l.font, self.colours.text, FontWeightHint::Regular),
+            (
+                &score,
+                l.small,
+                self.colours.subtext0,
+                FontWeightHint::Regular,
+            ),
             (
                 "Press N or the New button",
                 l.small,
-                OVERLAY0,
+                self.colours.subtext0,
                 FontWeightHint::Regular,
             ),
         ];
@@ -1402,7 +1499,15 @@ impl DotsAndBoxes {
             card_w,
             card_h,
         );
-        fill(f, card, SURFACE0, l.pad * 0.4);
+        self.palette.push_surface(
+            f,
+            card.x,
+            card.y,
+            card.w,
+            card.h,
+            l.pad * 0.4,
+            Surface::Panel,
+        );
 
         let mut y = card.y + l.pad;
         for (s, size, colour, weight) in lines {
@@ -1472,6 +1577,11 @@ fn text_at(
 // ── The app ─────────────────────────────────────────────────────────
 
 impl App for DotsAndBoxes {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         String::from(TITLE)
     }
@@ -1557,6 +1667,228 @@ mod tests {
     )]
 
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a game with boxes taken by both players,
+    /// the end of a game, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, DotsAndBoxes)> {
+        let busy = || {
+            let mut a = two_player_app();
+            a.board.boxes[0][0] = Some(Player::One);
+            a.board.boxes[0][1] = Some(Player::Two);
+            a
+        };
+        let mut over = busy();
+        over.phase = GamePhase::GameOver;
+        let mut cramped = busy();
+        cramped.size = (300.0, 360.0);
+        // Wide enough for the footer's list of keys, which a narrower window
+        // leaves out.
+        let mut wide = busy();
+        wide.size = (1000.0, 620.0);
+        assert!(
+            wide.draw(wide.size)
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == FOOTER_HELP)),
+            "the wide window does not show the keys, so nothing reads them"
+        );
+        let mut looks = vec![
+            ("playing", busy()),
+            ("over", over),
+            ("cramped", cramped),
+            ("wide", wide),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or a player's tinted box and its initial (the operator's
+    /// C-Q16). It drew in its own copy of Catppuccin Mocha, dark on a light
+    /// desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            derived.extend(gamechrome::button_colours(&p, Kind::Primary, p.mantle));
+            let c = Colours::of(&p);
+            derived.extend([c.one_box, c.two_box]);
+            for ink in [c.one_initial, c.two_initial] {
+                derived.extend([ink.large, ink.small]);
+            }
+            for (what, a) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.draw(a.size).commands(),
+                    &derived,
+                    &format!("dots, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            for (what, a) in every_look(&p) {
+                let f = a.draw(a.size);
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "dots: {bad:#?}");
+    }
+
+    /// **The two players are told apart and seen, whatever the accent**:
+    /// their colours not hard to tell apart, each standing off the page, and
+    /// each box's tint told from the page.
+    #[test]
+    fn the_two_players_are_told_apart_and_seen() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            assert!(
+                !guitk::palette::hard_to_tell_apart(c.one, c.two),
+                "the players look alike (light: {light})"
+            );
+            for (who, colour) in [("one", c.one), ("two", c.two)] {
+                let ratio = guitk::theme::contrast_ratio(colour, c.base);
+                assert!(
+                    ratio >= 3.0,
+                    "player {who} is {ratio:.2}:1 on the page (light: {light})"
+                );
+            }
+            assert_ne!(c.one_box, c.base);
+            assert_ne!(c.two_box, c.base);
+            assert_ne!(
+                c.one_box, c.two_box,
+                "the boxes look alike (light: {light})"
+            );
+        }
+    }
+
+    /// **The board size in play looks chosen** among the footer's buttons,
+    /// as the toolkit's primary button; and **the end-of-game card has a
+    /// ground of its own**, the toolkit's panel.
+    #[test]
+    fn the_size_in_play_looks_chosen_and_the_card_is_grounded() {
+        let a = test_app();
+        let f = a.draw(a.size);
+        let fills: Vec<(Rect, Color)> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                _ => None,
+            })
+            .collect();
+        let buttons: Vec<(Rect, Color)> = fills
+            .windows(2)
+            .filter_map(|pair| {
+                let [(face, colour), (gloss, _)] = pair else {
+                    return None;
+                };
+                ((gloss.x - face.x).abs() < 0.01
+                    && (gloss.y - face.y).abs() < 0.01
+                    && (gloss.w - face.w).abs() < 0.01
+                    && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                    .then_some((*face, *colour))
+            })
+            .collect();
+        let face_of = |label: &str| {
+            f.commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == label => Some((*x, *y)),
+                    _ => None,
+                })
+                .find_map(|(tx, ty)| {
+                    buttons
+                        .iter()
+                        .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .unwrap_or_else(|| panic!("{label} is on no button"))
+        };
+        let paint =
+            |kind| guitk::button::paint(&a.palette, kind, State::default(), a.colours.mantle).lower;
+        for n in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let want = if n == a.grid_size() {
+                Kind::Primary
+            } else {
+                Kind::Plain
+            };
+            assert_eq!(
+                face_of(&format!("{n}x{n}")),
+                paint(want),
+                "{n}x{n} looks wrong"
+            );
+        }
+
+        // The card is filled after the well laid over the whole window: under
+        // the bordered look a plain card has no fill, and its words would sit
+        // on the well.
+        let mut over = test_app();
+        over.phase = GamePhase::GameOver;
+        let frame = over.draw(over.size);
+        let cmds = frame.commands();
+        let well = cmds
+            .iter()
+            .rposition(|c| {
+                matches!(c, RenderCommand::FillRect { color, .. } if *color == over.palette.crust)
+            })
+            .unwrap_or_else(|| panic!("the end of a game lays no well over the window"));
+        let grounded = cmds.iter().skip(well + 1).any(
+            |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == over.palette.base),
+        );
+        assert!(grounded, "the end-of-game card has no ground of its own");
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the window.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut a = test_app();
+        a.theme_changed(&light);
+        a.new_game();
+        assert_eq!(
+            a.palette, light,
+            "a new game went back to the default palette"
+        );
+        assert_eq!(a.colours, Colours::of(&light));
+    }
     use guitk::probe::{click_sized, is_visible_sized, press, rect_of_sized};
 
     // ── Fixtures ───────────────────────────────────────────────────
@@ -2910,8 +3242,9 @@ mod tests {
 
     #[test]
     fn the_two_players_are_told_apart_by_colour() {
-        assert_ne!(Player::One.color(), Player::Two.color());
-        assert_ne!(Player::One.box_color(), Player::Two.box_color());
+        let c = Colours::of(&Palette::for_mode(false));
+        assert_ne!(Player::One.color(&c), Player::Two.color(&c));
+        assert_ne!(Player::One.box_color(&c), Player::Two.box_color(&c));
         assert_eq!(Player::One.other(), Player::Two);
         assert_eq!(Player::Two.other(), Player::One);
     }

@@ -204,6 +204,13 @@ MUTATIONS = [
         ["the_playfield_is_on_screen_and_inside_the_body"],
     ),
     (
+        # Moved, not deleted. Written as a deletion this row did fail tests --
+        # but the ones that fail when the field has no hit box at all
+        # (`a_click_during_play_does_nothing`, which clicks it), not the one
+        # that owns the *ordering*. The name is a claim about order, so the
+        # mutation has to be a reordering: the hit goes to the end, after the
+        # asteroids and the ship, where `hit_test`'s reverse search finds it
+        # first and it swallows everything drawn inside it.
         "the playfield's hit box is recorded last and swallows everything",
         "        f.hit(Target::Field, field.rect);\n\n        draw_stars(&mut f, &field, &self.colours);\n        self.draw_particles(&mut f, &field);\n        self.draw_asteroids(&mut f, &field);\n        self.draw_bullets(&mut f, &field);\n        if self.ship_alive {\n            self.draw_ship(&mut f, &field);\n        }",
         "        draw_stars(&mut f, &field, &self.colours);\n        self.draw_particles(&mut f, &field);\n        self.draw_asteroids(&mut f, &field);\n        self.draw_bullets(&mut f, &field);\n        if self.ship_alive {\n            self.draw_ship(&mut f, &field);\n        }\n        f.hit(Target::Field, field.rect);",

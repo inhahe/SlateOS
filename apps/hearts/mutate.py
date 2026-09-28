@@ -633,6 +633,12 @@ MUTATIONS = [
         "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), 0.0);",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "a seat plate's words are the page's inks, 4.1:1 on it",
+        "            let on = c.chrome.on(plate);",
+        "            let on = c.chrome;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

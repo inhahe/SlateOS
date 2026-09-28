@@ -658,6 +658,18 @@ MUTATIONS = [
         "            let fg = if !live {\n                Color::from_hex(0x6C7086)\n",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        "the footer's statistics are the faintest grey",
+        "                text: &stats,\n                size: l.small,\n                weight,\n                color: c.chrome.dim,",
+        "                text: &stats,\n                size: l.small,\n                weight,\n                color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the end panel's way on is the faintest grey",
+        "                text: \"Press N or Esc for a new word\",\n                size: l.small,\n                weight: FontWeightHint::Regular,\n                color: c.chrome.dim,",
+        "                text: \"Press N or Esc for a new word\",\n                size: l.small,\n                weight: FontWeightHint::Regular,\n                color: c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

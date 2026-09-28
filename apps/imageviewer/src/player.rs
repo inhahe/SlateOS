@@ -1,8 +1,9 @@
-//! Playing an animated GIF or WebP, frame by frame, off the window's thread.
+//! Playing an animated GIF, WebP or AVIF, frame by frame, off the window's thread.
 //!
 //! `imagecodec` decodes an animation one composited frame at a time
-//! (`gif::Animation`, `webp::Animation`; lane F's
-//! `requests/f-ce-gif-decodes-and-animates.md`), lending each frame from one
+//! (`gif::Animation`, `webp::Animation`, `avif::Animation`; lane F's
+//! `requests/f-ce-gif-decodes-and-animates.md` and
+//! `requests/f-bce-avif-pictures-open-and-animate.md`), lending each frame from one
 //! canvas it keeps. A [`Player`] runs that on a thread of its own and hands
 //! the frames over through a channel one deep: the thread is never more than
 //! a frame ahead, so a 500-frame animation costs two frames of memory, not
@@ -15,7 +16,9 @@
 //!
 //! An animation plays as its file says: forever, or a number of times -- a
 //! GIF's loop count is the number of plays *after* the first, as browsers
-//! read it; a WebP's is the number of plays in all. When it ends, the last
+//! read it, and so is an AVIF's; a WebP's is the number of plays in all. An
+//! AVIF's frames are whole pictures, already cropped and turned by its
+//! container, so there is no canvas to build them on. When it ends, the last
 //! frame stays up. A frame that will not decode ends it there too (libwebp's
 //! behaviour; a GIF's broken frame draws what it has, inside `imagecodec`).
 
@@ -60,6 +63,8 @@ fn kind(bytes: &[u8]) -> Option<Kind> {
         Some(Kind::Gif)
     } else if imagecodec::webp::is_webp(bytes) {
         Some(Kind::WebP)
+    } else if imagecodec::avif::is_avif(bytes) {
+        Some(Kind::Avif)
     } else {
         None
     }
@@ -69,10 +74,11 @@ fn kind(bytes: &[u8]) -> Option<Kind> {
 enum Kind {
     Gif,
     WebP,
+    Avif,
 }
 
-/// Whether `bytes` are an animation -- a GIF or a WebP of more than one
-/// frame -- read from its structure alone.
+/// Whether `bytes` are an animation -- a GIF, a WebP or an AVIF of more than
+/// one frame -- read from its structure alone.
 #[must_use]
 pub fn is_animation(bytes: &[u8]) -> bool {
     let limits = imagecodec::Limits::default();
@@ -82,6 +88,9 @@ pub fn is_animation(bytes: &[u8]) -> bool {
         }
         Some(Kind::WebP) => {
             imagecodec::webp::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 1)
+        }
+        Some(Kind::Avif) => {
+            imagecodec::avif::Animation::new(bytes, limits).is_ok_and(|a| a.frame_count() > 1)
         }
         None => false,
     }
@@ -101,6 +110,7 @@ impl Player {
             .spawn(move || match kind(&bytes) {
                 Some(Kind::Gif) => play_gif(&bytes, turn, &send),
                 Some(Kind::WebP) => play_webp(&bytes, turn, &send),
+                Some(Kind::Avif) => play_avif(&bytes, turn, &send),
                 None => {}
             })?;
         Ok(Self { frames })
@@ -193,6 +203,43 @@ fn play_webp(bytes: &[u8], turn: Orientation, to: &SyncSender<Frame>) {
             // The count is the plays in all, the first included.
             Repeat::Times(all) if plays < u32::from(all) => {}
             Repeat::Times(_) => return,
+        }
+        animation.rewind();
+    }
+}
+
+fn play_avif(bytes: &[u8], turn: Orientation, to: &SyncSender<Frame>) {
+    use imagecodec::avif::{Animation, Repeat};
+    let Ok(mut animation) = Animation::new(bytes, imagecodec::Limits::default()) else {
+        return;
+    };
+    let mut plays: u32 = 0;
+    loop {
+        let mut index: usize = 0;
+        loop {
+            let frame = match animation.next_frame() {
+                Ok(Some(frame)) => frame,
+                // The end of a play -- and of one whose alpha track ran out
+                // before its colour track did, where libavif stops too.
+                Ok(None) => break,
+                // A broken frame ends the animation where it is.
+                Err(_) => return,
+            };
+            let first = plays == 0 && index == 0;
+            if !send(to, frame.image, frame.display_duration_ms(), first, turn) {
+                return;
+            }
+            index = index.saturating_add(1);
+        }
+        if index == 0 {
+            return;
+        }
+        plays = plays.saturating_add(1);
+        match animation.repeat() {
+            Repeat::Forever => {}
+            // The count is the plays after the first, as a GIF's is.
+            Repeat::Count(more) if plays <= more => {}
+            Repeat::Count(_) => return,
         }
         animation.rewind();
     }

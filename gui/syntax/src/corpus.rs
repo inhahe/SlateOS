@@ -234,6 +234,26 @@ fn check(language: &str, dir: &str, at_least: usize) {
     );
 }
 
+/// **The C grammar parses its whole corpus as upstream's does.**
+#[test]
+fn c_passes_its_corpus() {
+    check("C", "c", 85);
+}
+
+/// **The CSS grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does.**
+#[test]
+fn css_passes_its_corpus() {
+    check("CSS", "css", 40);
+}
+
+/// **The TOML grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does.**
+#[test]
+fn toml_passes_its_corpus() {
+    check("TOML", "toml", 17);
+}
+
 /// **The JSON grammar parses its whole corpus as upstream's does.**
 #[test]
 fn json_passes_its_corpus() {

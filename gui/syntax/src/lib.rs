@@ -119,7 +119,25 @@ impl PartialEq for Language {
 impl Eq for Language {}
 
 /// Every language, by name.
-static LANGUAGES: [Language; 3] = [
+static LANGUAGES: [Language; 6] = [
+    Language {
+        name: "C",
+        extensions: &["c", "h"],
+        file_names: &[],
+        interpreters: &[],
+        grammar: grammars::c::generated::language_fn,
+        highlights: grammars::c::HIGHLIGHTS,
+        index: 0,
+    },
+    Language {
+        name: "CSS",
+        extensions: &["css"],
+        file_names: &[],
+        interpreters: &[],
+        grammar: grammars::css::generated::language_fn,
+        highlights: grammars::css::HIGHLIGHTS,
+        index: 1,
+    },
     Language {
         name: "JSON",
         extensions: &["json", "jsonc", "jsonl", "geojson", "webmanifest"],
@@ -127,7 +145,7 @@ static LANGUAGES: [Language; 3] = [
         interpreters: &[],
         grammar: grammars::json::generated::language_fn,
         highlights: grammars::json::HIGHLIGHTS,
-        index: 0,
+        index: 2,
     },
     Language {
         name: "Python",
@@ -136,7 +154,7 @@ static LANGUAGES: [Language; 3] = [
         interpreters: &["python", "python2", "python3", "pypy", "pypy3"],
         grammar: grammars::python::generated::language_fn,
         highlights: grammars::python::HIGHLIGHTS,
-        index: 1,
+        index: 3,
     },
     Language {
         name: "Rust",
@@ -145,13 +163,23 @@ static LANGUAGES: [Language; 3] = [
         interpreters: &[],
         grammar: grammars::rust::generated::language_fn,
         highlights: grammars::rust::HIGHLIGHTS,
-        index: 2,
+        index: 4,
+    },
+    Language {
+        name: "TOML",
+        extensions: &["toml"],
+        // TOML under names of their own: Cargo's lock file, pipenv's.
+        file_names: &["Cargo.lock", "Pipfile"],
+        interpreters: &[],
+        grammar: grammars::toml::generated::language_fn,
+        highlights: grammars::toml::HIGHLIGHTS,
+        index: 5,
     },
 ];
 
 /// Each language's compiled highlight query, made the first time it is
 /// asked for.
-static QUERIES: [OnceLock<Result<tree_sitter::Query, Error>>; 3] = [const { OnceLock::new() }; 3];
+static QUERIES: [OnceLock<Result<tree_sitter::Query, Error>>; 6] = [const { OnceLock::new() }; 6];
 
 impl Language {
     /// Every language the highlighter knows.
@@ -282,6 +310,9 @@ mod tests {
     #[test]
     fn the_runtime_reads_each_grammar_as_it_was_written() {
         for (language, name, abi, kinds, fields) in [
+            ("C", Some("c"), 15, 363, 39),
+            ("CSS", Some("css"), 15, 151, 0),
+            ("TOML", None, 14, 66, 0),
             ("JSON", None, 14, 25, 2),
             ("Python", Some("python"), 15, 274, 32),
             ("Rust", Some("rust"), 15, 355, 31),
@@ -325,6 +356,10 @@ mod tests {
         assert_eq!(found("A.PY"), Some("Python"));
         assert_eq!(found("/etc/x/config.JSON"), Some("JSON"));
         assert_eq!(found("SConstruct"), Some("Python"));
+        assert_eq!(found("Cargo.lock"), Some("TOML"));
+        assert_eq!(found("gui/syntax/Cargo.toml"), Some("TOML"));
+        assert_eq!(found("stdio.h"), Some("C"));
+        assert_eq!(found("site.css"), Some("CSS"));
         assert_eq!(found(".rs"), None);
         assert_eq!(found("notes.txt"), None);
         assert_eq!(found("rs"), None);

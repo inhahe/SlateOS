@@ -28,6 +28,18 @@ tree-sitter-c2rust:
   texts:
     - tree-sitter-LICENSE
 
+tree-sitter-c:
+  version: 0.24.2
+  licence: MIT
+  texts:
+    - tree-sitter-c-LICENSE
+
+tree-sitter-css:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-css-LICENSE
+
 tree-sitter-json:
   version: 0.24.8
   licence: MIT
@@ -45,3 +57,9 @@ tree-sitter-rust:
   licence: MIT
   texts:
     - tree-sitter-rust-LICENSE
+
+tree-sitter-toml:
+  version: 0.7.0
+  licence: MIT
+  texts:
+    - tree-sitter-toml-LICENSE

@@ -312,10 +312,10 @@ fn process_block_comment(lexer: &mut Lexer<'_>, valid: &dyn Fn(Token) -> bool) -
             let current = lexer.lookahead();
             match processing.state {
                 BlockCommentState::LeftForwardSlash => {
-                    process_left_forward_slash(&mut processing, current)
+                    process_left_forward_slash(&mut processing, current);
                 }
                 BlockCommentState::LeftAsterisk => {
-                    process_left_asterisk(&mut processing, current, lexer)
+                    process_left_asterisk(&mut processing, current, lexer);
                 }
                 BlockCommentState::Continuing => {
                     lexer.mark_end();

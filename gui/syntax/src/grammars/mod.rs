@@ -7,9 +7,12 @@
 //! a converted state machine nobody edits, and its shape is the generator's.
 //! The hand-ported scanner beside it is held to every lint the crate is.
 
+pub(crate) mod c;
+pub(crate) mod css;
 pub(crate) mod json;
 pub(crate) mod python;
 pub(crate) mod rust;
+pub(crate) mod toml;
 
 /// The generated file for a grammar, in a module of its own. `$scanner`,
 /// when given, is the type the generated code calls `Scanner`.

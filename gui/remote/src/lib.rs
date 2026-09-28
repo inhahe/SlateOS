@@ -89,7 +89,8 @@ use guitk::style::CornerRadii;
 
 pub mod scene;
 pub use scene::{
-    SceneFrame, SceneSession, SceneWindow, WindowSnapshot, apply_scene_frame, decode_scene_frame,
+    ImageSnapshot, PatchMark, SceneError, SceneFrame, SceneImage, SceneSession, SceneViewer,
+    SceneWindow, ViewerImage, ViewerWindow, WindowSnapshot, apply_scene_frame, decode_scene_frame,
     encode_scene_frame, try_decode_scene_frame,
 };
 
@@ -420,6 +421,9 @@ pub enum DecodeError {
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
     TooManyWindows(u32),
+    /// A scene frame's window carries more picture changes than
+    /// [`scene::MAX_IMAGE_CHANGES_PER_WINDOW`].
+    TooManyImageChanges(u32),
 
     /// A `TRAY` frame claimed more icons than `tray::MAX_TRAY_ICONS`.
     TooManyTrayIcons(u32),
@@ -500,6 +504,13 @@ impl core::fmt::Display for DecodeError {
             Self::BadFontFamily(b) => write!(f, "unknown font-family tag {b:#04x}"),
             Self::BadTextOverflow(b) => write!(f, "unknown text-overflow tag {b:#04x}"),
             Self::BadUtf8 => write!(f, "string field was not valid UTF-8"),
+            Self::TooManyImageChanges(n) => {
+                write!(
+                    f,
+                    "scene picture-change count {n} exceeds limit {}",
+                    scene::MAX_IMAGE_CHANGES_PER_WINDOW
+                )
+            }
             Self::TooManyWindows(n) => {
                 write!(
                     f,

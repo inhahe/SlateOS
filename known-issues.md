@@ -171559,9 +171559,16 @@ that seeking restarts from a key frame. libavif's `avifDecoderNextImage` and
 
 ### [F] The scene stream forwards no pictures, so a remote viewer would show blanks where windows draw images -- 2026-09-28
 
-**Status:** OPEN (lane F). Found while scoping the video-encoded capture
-fallback; nothing is broken for anyone today, because nothing yet serves the
-scene stream to a viewer.
+**Status:** FIXED on `lane-f` 2026-09-28, as sketched below: scene version 2
+(`SceneImage` whole / patch / drop per window), `ImageAsset` revisions and a
+32-entry patch log stamped by the compositor, `SceneSession` sending each
+viewer only what it lacks, and `SceneViewer` applying it all or nothing.
+Tests: `guiremote`'s scene unit tests and `tests/scene_session.rs` (400 steps
+of random uploads, patches and drops, a viewer joining late),
+`compositor::tests::test_stream_forwards_pictures_to_the_viewer`. Moves to
+`known-issues-resolved.md` once on `main` through a boot test. Found while
+scoping the video-encoded capture fallback; nothing was broken for anyone,
+because nothing yet serves the scene stream to a viewer.
 
 **In short:** native remote desktop streams each window's draw commands (a
 `SceneFrame`, `gui/remote/src/scene.rs`) for the viewer to replay. A picture

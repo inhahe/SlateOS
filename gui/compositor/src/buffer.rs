@@ -45,6 +45,8 @@
 //! mapping of the shared pages named by `handle`); the validation, format
 //! conversion, blit, and release logic stay exactly the same.
 
+use guiremote::scene::PatchMark;
+
 use crate::{CompositorError, CompositorResult, MAX_FB_HEIGHT, MAX_FB_WIDTH};
 
 /// Pixel layout of a client-supplied buffer.
@@ -363,7 +365,22 @@ pub struct ImageAsset {
     /// when this is zero, as [`all_opaque`] would find, without a patch of a
     /// few pixels looking at the millions it did not touch.
     translucent: usize,
+    /// Which version of the pixels these are, for a remote viewer's copy:
+    /// stamped by the compositor on every upload and every patch from one
+    /// counter, so a number is never repeated (`Compositor::register_image`).
+    revision: u64,
+    /// The oldest revision `patch_log` can bring a viewer's copy up from.
+    patch_base: u64,
+    /// The rectangles patched since `patch_base`, oldest first -- what a
+    /// remote viewer a few patches behind is sent instead of the picture
+    /// (`guiremote::scene`). At most [`PATCH_LOG_LEN`]; emptied by an upload.
+    patch_log: Vec<PatchMark>,
 }
+
+/// The most patches an image remembers for remote viewers. One further
+/// behind is sent the picture whole, which by then costs no more than the
+/// patches would.
+pub const PATCH_LOG_LEN: usize = 32;
 
 /// How many of `pixels` are not fully opaque. Zero for a format without alpha,
 /// whose pixels `normalize` has made opaque.
@@ -398,7 +415,53 @@ impl ImageAsset {
             src_format: format,
             pixels,
             translucent,
+            revision: 0,
+            patch_base: 0,
+            patch_log: Vec::new(),
         })
+    }
+
+    /// Stamp a fresh upload with `revision`: a remote viewer holding any
+    /// earlier revision of this id needs the whole picture.
+    pub fn stamp_upload(&mut self, revision: u64) {
+        self.revision = revision;
+        self.patch_base = revision;
+        self.patch_log.clear();
+    }
+
+    /// Record that a patch of this rectangle, which [`Self::patch`] has just
+    /// written, produced `revision`.
+    pub fn stamp_patch(&mut self, revision: u64, (x, y): (u32, u32), (width, height): (u32, u32)) {
+        self.revision = revision;
+        self.patch_log.push(PatchMark {
+            revision,
+            x,
+            y,
+            width,
+            height,
+        });
+        if self.patch_log.len() > PATCH_LOG_LEN {
+            let dropped = self.patch_log.remove(0);
+            self.patch_base = dropped.revision;
+        }
+    }
+
+    /// This version of the pixels ([`Self::stamp_upload`]).
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The oldest revision [`Self::patch_log`] can bring up to date.
+    #[must_use]
+    pub const fn patch_base(&self) -> u64 {
+        self.patch_base
+    }
+
+    /// The rectangles patched since [`Self::patch_base`], oldest first.
+    #[must_use]
+    pub fn patch_log(&self) -> &[PatchMark] {
+        &self.patch_log
     }
 
     /// Write a `width` by `height` rectangle of a client's pixels at `(x, y)`,

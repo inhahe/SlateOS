@@ -1672,7 +1672,7 @@ DEFECTS = [
     (
         "RRRRRRR: the filter field's placeholder keeps Mocha's overlay0",
         STARTUP,
-        [("            color: if self.filter.is_empty() {\n                p.overlay0",
+        [("            color: if self.filter.is_empty() {\n                p.subtext0",
           "            color: if self.filter.is_empty() {\n"
           "                Color::from_hex(0x6C7086)")],
         ["desktop"],
@@ -1689,7 +1689,7 @@ DEFECTS = [
     (
         "TTTTTTT: a delayed entry's delay line keeps Mocha's overlay0",
         STARTUP,
-        [("                    font_size: 10.0,\n                    color: p.overlay0,",
+        [("                    font_size: 10.0,\n                    color: p.subtext0,",
           "                    font_size: 10.0,\n"
           "                    color: Color::from_hex(0x6C7086),")],
         ["desktop"],
@@ -2029,7 +2029,7 @@ DEFECTS = [
     (
         "PPPPPPPPP: the search placeholder keeps Mocha's overlay0",
         DTS,
-        [("            color: if self.tz_search.is_empty() {\n                p.overlay0",
+        [("            color: if self.tz_search.is_empty() {\n                p.subtext0",
           "            color: if self.tz_search.is_empty() {\n"
           "                Color::from_hex(0x6C7086)")],
         ["desktop"],
@@ -3367,7 +3367,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGG: a shortcut hint keeps Mocha's overlay0",
         CTX,
         [
-            ('                        font_size: 11.0,\n                        color: p.overlay0,\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {',
+            ('                        font_size: 11.0,\n                        color: p.subtext0,\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {',
              '                        font_size: 11.0,\n                        color: guitk::color::Color::from_hex(0x6C7086),\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {'),
         ],
         ["desktop"],
@@ -3392,7 +3392,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIII: a slow extension's label keeps Mocha's overlay0",
         CTX,
         [
-            ('                    color: if *slow {\n                        p.overlay0',
+            ('                    color: if *slow {\n                        p.subtext0',
              '                    color: if *slow {\n                        guitk::color::Color::from_hex(0x6C7086)'),
         ],
         ["desktop"],
@@ -4220,7 +4220,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQ: the picker's size hints keep Mocha's overlay0",
         WID,
         [
-            ('font_size: 10.0,\n                color: p.overlay0,',
+            ('font_size: 10.0,\n                color: p.subtext0,',
              'font_size: 10.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -4424,18 +4424,11 @@ DEFECTS = [
             'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
         ],
     ),
-    (
-        "LLLLLLLLLLLLLLLLLLL: the empty-output line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-output line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "MMMMMMMMMMMMMMMMMMM: the default output device stops being raised",
         SND,
@@ -4486,18 +4479,11 @@ DEFECTS = [
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
-    (
-        "QQQQQQQQQQQQQQQQQQQ: the empty-input line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-input line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "RRRRRRRRRRRRRRRRRRR: the default input device stops being raised",
         SND,
@@ -4561,18 +4547,11 @@ DEFECTS = [
             'nothing_that_reports_a_state_follows_the_accent',
         ],
     ),
-    (
-        "WWWWWWWWWWWWWWWWWWW: the empty-app line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-app line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "XXXXXXXXXXXXXXXXXXX: an app row is raised like a default device",
         SND,
@@ -7703,7 +7682,7 @@ DEFECTS = [
         'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the account type is frozen back to Mocha overlay0',
         LOGIN,
         [
-            ('                font_size: 11.0,\n                color: p.overlay0,',
+            ('                font_size: 11.0,\n                color: p.subtext0,',
              '                font_size: 11.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -7717,7 +7696,7 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the account type is promoted to primary text',
         LOGIN,
         [
-            ('                font_size: 11.0,\n                color: p.overlay0,',
+            ('                font_size: 11.0,\n                color: p.subtext0,',
              '                font_size: 11.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -7841,7 +7820,7 @@ DEFECTS = [
         'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the placeholder is frozen back to Mocha overlay0',
         LOGIN,
         [
-            ('                color: if self.password_input.is_empty() {\n                    p.overlay0',
+            ('                color: if self.password_input.is_empty() {\n                    p.subtext0',
              '                color: if self.password_input.is_empty() {\n                    Color::from_hex(0x6C7086)'),
         ],
         ["desktop"],
@@ -9366,7 +9345,7 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the placeholder is as bright as a query the user typed',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
              '            color: p.text,'),
         ],
         ["desktop"],
@@ -9378,8 +9357,8 @@ DEFECTS = [
         'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the placeholder and the typed-query rungs are exchanged',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
-             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [
@@ -9390,8 +9369,8 @@ DEFECTS = [
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the typed query is frozen to Mocha text',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
-             '            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
         ],
         ["desktop"],
         [
@@ -9607,7 +9586,7 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the count line is frozen to Mocha overlay0',
         LANG,
         [
-            ('            font_size: 11.0,\n            color: p.overlay0,',
+            ('            font_size: 11.0,\n            color: p.subtext0,',
              '            font_size: 11.0,\n            color: guitk::color::Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -9621,7 +9600,7 @@ DEFECTS = [
         'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the count line is promoted to the primary text rung',
         LANG,
         [
-            ('            font_size: 11.0,\n            color: p.overlay0,',
+            ('            font_size: 11.0,\n            color: p.subtext0,',
              '            font_size: 11.0,\n            color: p.text,'),
         ],
         ["desktop"],
@@ -12483,7 +12462,7 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the suppressed-count line keeps its own Mocha overlay0',
         FOCUS,
         [
-            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12561,7 +12540,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a row's description keeps its own Mocha overlay0",
         FOCUS,
         [
-            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,',
              '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12591,7 +12570,7 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the empty-state line keeps its own Mocha overlay0',
         FOCUS,
         [
-            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12635,7 +12614,7 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a rule's mode keeps its own Mocha overlay0",
         FOCUS,
         [
-            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,',
              '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12824,23 +12803,16 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a row's description climbs above its rung",
-        FOCUS,
-        [
-            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
-             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: a row's description climbs above its rung.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the suppressed-count line is as loud as the title',
         FOCUS,
         [
-            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -12877,7 +12849,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a rule's mode is as loud as its label",
         FOCUS,
         [
-            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,',
              '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.text,'),
         ],
         ["desktop"],
@@ -12927,7 +12899,7 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the empty-state line is as loud as the heading above it',
         FOCUS,
         [
-            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.text,'),
         ],
         ["desktop"],

@@ -99,7 +99,14 @@ def fill_re(name: str) -> re.Pattern[str]:
 
 
 def read_re(name: str) -> re.Pattern[str]:
-    return re.compile(r"\.%s\b" % re.escape(name))
+    """A use of the field that is not an assignment to it.
+
+    `self.name = None` mentions the field without reading it, and counting
+    it as a read reported `apps/whiteboard`'s `Selection::marquee` -- a field
+    nothing read at all, whose only mentions were two clearings. That is dead
+    state, not an unreachable feature, and not this finder's.
+    """
+    return re.compile(r"\.%s\b(?!\s*=(?!=))" % re.escape(name))
 
 
 def split(src: str) -> tuple[str, str]:
@@ -169,6 +176,8 @@ KNOWN = {
     "only when there is a reading",
     ("apps/vpnmanager", "last_connected_id"): "no tunnel can come up, so nothing is ever "
     "connected to reconnect to; Reconnect says so",
+    ("apps/magnifier", "picked"): "nothing can capture the screen, so picking refuses and says "
+    "so rather than name a colour it never read; the swatch is tested with one set by hand",
     ("apps/videoplayer", "album"): "mediaprobe reads no tags yet; the rows show only when present",
     ("apps/videoplayer", "artist"): "as album",
     ("apps/videoplayer", "encoder"): "as album",
@@ -236,6 +245,12 @@ def self_test() -> int:
             [("chosen", False)],
         ),
         ("a comparison is not an assignment", _app(extra_fn="fn same(&self) -> bool { self.chosen == None }"), "", [("chosen", False)]),
+        (
+            "a field only ever cleared is dead, not unreachable",
+            _app(extra="cleared: Option<u32>,", extra_init="cleared: None", extra_fn="fn c(&mut self) { self.cleared = None; }"),
+            "",
+            [("chosen", False)],
+        ),
         ("no App, no population", "struct X { chosen: Option<u32> } fn f(x: &mut X) { x.chosen = None; let _ = x.chosen; }", "", []),
     ]
     # Through the file split, as a crate is read: the test module's fill must

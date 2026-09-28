@@ -18,5 +18,9 @@ oswindow = { path = "../../gui/window" }
 safeio = { path = "../safeio" }
 diffcore = { path = "../diffcore" }
 
+[dev-dependencies]
+# A private folder per test, for comparing two real folders.
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

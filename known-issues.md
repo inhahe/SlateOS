@@ -171495,8 +171495,8 @@ that link where it was. The target OS makes links like any unix.
 
 ### [E] Thirteen fields in nine applications are read and never filled, so the features behind them cannot be reached -- 2026-09-27
 
-**Status:** OPEN for filediff, screenrecorder and videoplayer's language;
-the rest were fixed or answered the same day -- see the last column.
+**Status:** OPEN for screenrecorder and videoplayer's language; the rest
+were fixed or answered the same day -- see the last column.
 Found by `scripts/find-options-only-emptied.py`; a row fixed stops being
 reported, and one answered goes into the script's `KNOWN` table.
 
@@ -171509,7 +171509,7 @@ unreachable; here the losses are smaller and more scattered.
 | App | Field | What cannot happen | Now |
 |---|---|---|---|
 | `diagram` | `rect_select_start`, `rect_select_end` | dragging a box to select several shapes: the rectangle is drawn from these and nothing starts one | FIXED: a drag on empty canvas draws the box and selects what it touches; dragging one of them moves them all |
-| `filediff` | `dir_compare` | comparing two folders: the view draws a result nothing produces | OPEN |
+| `filediff` | `dir_compare` | comparing two folders: the view draws a result nothing produces | FIXED: Ctrl+D asks for two folders and compares them on disk -- byte for byte within a 256 MiB budget, past which a pair is `NotCompared`, and a pair one side cannot read is `Unreadable`, never guessed; Enter opens a pair, Escape goes back |
 | `filesearch` | `extension_filter` (the tests set it), `path_contains` | filtering results by extension or by a folder in the path | FIXED: `ext:pdf` and `in:Documents` in the query set them, and the status line says so |
 | `ircclient` | `password` | joining a server that wants a password (`PASS`) | FIXED: `/connect server [port] [password]`; the history keeps stars |
 | `magnifier` | `picked` (the tests set it) | picking a colour: the swatch and its values are drawn from it | ANSWERED: nothing can capture the screen, and picking refuses and says so |

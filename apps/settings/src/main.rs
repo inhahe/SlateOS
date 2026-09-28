@@ -2193,6 +2193,10 @@ enum ToggleId {
     /// is saved to `appearance.yaml` and announced to the running desktop by
     /// `handle_event`'s before/after comparison -- no extra plumbing.
     TaskbarAutohide,
+    /// Draw each window on the taskbar as its picture and its title, or as
+    /// its picture alone. `appearance.yaml`'s `taskbar.labels`, beside
+    /// auto-hide's key; the desktop watches the file and redraws the bar.
+    TaskbarLabels,
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -4005,6 +4009,11 @@ impl SettingsState {
             "Automatically hide the taskbar",
             ToggleId::TaskbarAutohide,
             self.appearance.settings.taskbar_autohide,
+        );
+        s.toggle_row(
+            "Show window titles on the taskbar",
+            ToggleId::TaskbarLabels,
+            self.appearance.settings.taskbar_labels,
         );
     }
 
@@ -6156,6 +6165,7 @@ impl SettingsState {
             ToggleId::ReduceAnimations => &mut self.reduce_animations,
             ToggleId::ReduceTransparency => &mut self.reduce_transparency,
             ToggleId::TaskbarAutohide => &mut self.appearance.settings.taskbar_autohide,
+            ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,
             ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
             ToggleId::LockClockDate => &mut self.lock_clock_date,
         })
@@ -9664,6 +9674,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The window-titles switch is beside auto-hide and reaches the file**
+    /// the desktop reads -- on by default, as the reference labels every
+    /// running window, and off after one click.
+    #[test]
+    fn test_the_taskbar_labels_toggle_is_on_the_themes_page_and_reaches_the_file() {
+        appearance::config::testing::with_scratch_config("settings-labels", |root| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Themes;
+            assert!(
+                state.appearance.settings.taskbar_labels,
+                "window titles should start on"
+            );
+            let (cx, cy) = center_of(&state, RowHit::Toggle(ToggleId::TaskbarLabels))
+                .expect("the toggle should be on the Themes page");
+            let (_, below) = center_of(&state, RowHit::Toggle(ToggleId::TaskbarAutohide))
+                .expect("auto-hide should be on the Themes page too");
+            assert!(cy > below, "the switch should come after auto-hide");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            assert!(
+                !state.appearance.settings.taskbar_labels,
+                "the click did not take"
+            );
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "the click should have written {path:?}");
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert!(
+                !saved.taskbar_labels,
+                "the setting did not survive the round trip to disk"
+            );
+        });
     }
 
     #[test]

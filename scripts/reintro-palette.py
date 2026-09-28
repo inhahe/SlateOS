@@ -7680,26 +7680,30 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the selected avatar is frozen back to Mocha blue',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: if selected { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                Color::from_hex(0x89B4FA)\n            } else {\n                p.subtext0\n            };\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
     (
         'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: no avatar is accented, so nothing marks which row you are on',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: p.subtext0,'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                p.subtext0\n            } else {\n                p.subtext0\n            };\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7708,11 +7712,13 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every avatar is accented, so the accent marks nothing',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: if selected { p.accent } else { p.accent },'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.ink(p.accent)\n            };\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7774,14 +7780,15 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the signing-in user's avatar is frozen back to Mocha blue",
         LOGIN,
         [
-            ('                    font_size: 48.0,\n                    color: p.accent,',
-             '                    font_size: 48.0,\n                    color: Color::from_hex(0x89B4FA),'),
+            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
+             '                    48.0,\n                    AVATAR_ICON,\n                    Color::from_hex(0x89B4FA),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
     ),
@@ -7789,14 +7796,16 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the signing-in user's avatar loses the accent it carried in the list",
         LOGIN,
         [
-            ('                    font_size: 48.0,\n                    color: p.accent,',
-             '                    font_size: 48.0,\n                    color: p.on_wallpaper(),'),
+            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
+             '                    48.0,\n                    AVATAR_ICON,\n                    p.on_wallpaper(),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'exactly_two_things_in_the_password_panel_carry_the_accent',
             'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
     ),
     (
@@ -7831,13 +7840,15 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the rejected-password border is frozen back to Mocha red',
         LOGIN,
         [
-            ('            let border_color = if self.error_message.is_some() {\n                p.red',
-             '            let border_color = if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)'),
+            ('            paint.border = Some(if self.error_message.is_some() {\n                p.red\n',
+             '            paint.border = Some(if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -7845,11 +7856,13 @@ DEFECTS = [
         'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the rejected-password border takes the accent, so a refusal is decoration',
         LOGIN,
         [
-            ('            let border_color = if self.error_message.is_some() {\n                p.red',
-             '            let border_color = if self.error_message.is_some() {\n                p.accent'),
+            ('            paint.border = Some(if self.error_message.is_some() {\n                p.red\n',
+             '            paint.border = Some(if self.error_message.is_some() {\n                p.accent\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7858,13 +7871,15 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the border at rest is frozen back to Mocha surface1',
         LOGIN,
         [
-            ('            } else {\n                p.surface1\n            };',
-             '            } else {\n                Color::from_hex(0x45475A)\n            };'),
+            ('                paint.border.unwrap_or(p.surface1)\n',
+             '                Color::from_hex(0x45475A)\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -7872,13 +7887,15 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the password field is frozen back to Mocha surface0',
         LOGIN,
         [
-            ('                height: field_h,\n                color: p.surface0,',
-             '                height: field_h,\n                color: Color::from_hex(0x313244),'),
+            ('            let mut paint = p.surface_paint(Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -7926,14 +7943,15 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the reveal toggle is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                }\n                .to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
-             '                }\n                .to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                    "view-conceal"\n                },\n                p.subtext0,\n',
+             '                    "view-conceal"\n                },\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -8139,25 +8157,28 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar's power button is frozen back to Mocha subtext0",
         LOGIN,
         [
-            ('                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                "system-shutdown",\n                p.subtext0,\n',
+             '                "system-shutdown",\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
         'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the accessibility button takes the accent',
         LOGIN,
         [
-            ('                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.accent,'),
+            ('                "preferences-desktop-accessibility",\n                p.subtext0,\n',
+             '                "preferences-desktop-accessibility",\n                p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -8166,27 +8187,30 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the on-screen-keyboard button is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                "input-keyboard",\n                p.subtext0,\n',
+             '                "input-keyboard",\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the power menu is frozen back to Mocha mantle',
         LOGIN,
         [
-            ('            width: menu_w,\n            height: menu_h,\n            color: p.mantle,',
-             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x181825),'),
+            ('        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);\n',
+             '        let mut paint = p.surface_paint(Surface::Panel);\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(commands, mx, my, menu_w, menu_h, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -8194,13 +8218,15 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the power menu's border is frozen back to Mocha surface1",
         LOGIN,
         [
-            ('            width: menu_w,\n            height: menu_h,\n            color: p.surface1,',
-             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x45475A),'),
+            ('        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);\n',
+             '        let mut paint = p.surface_paint(Surface::Panel);\n        paint.border = Some(Color::from_hex(0x45475A));\n        p.push_paint_radii(commands, mx, my, menu_w, menu_h, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -8208,14 +8234,15 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a power-menu icon is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                text: icon.to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
-             '                text: icon.to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, p.subtext0);\n',
+             '            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, Color::from_hex(0xA6ADC8));\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -10602,17 +10629,19 @@ DEFECTS = [
         ],
     ),
     (
-        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own overlay0",
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own subtext0",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: guitk::color::Color::from_hex(0x6C7086),'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: guitk::color::Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
             'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -10647,15 +10676,17 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a key badge's lettering keeps Catppuccin Mocha's own subtext0",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: guitk::color::Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -10738,13 +10769,15 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the app name is lettered as loudly as the action it qualifies",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: p.subtext1,'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: p.subtext1,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
@@ -10789,13 +10822,15 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a key badge is lettered as loudly as the heading",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: p.text,'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.text,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
@@ -10896,14 +10931,16 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a key badge's lettering is repainted with the accent",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: p.accent,'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
+            'a_key_badge_stands_off_the_panel_it_sits_on',
             'every_site_draws_the_role_it_claims',
             'nothing_in_this_panel_is_accented',
-            'a_key_badge_stands_off_the_panel_it_sits_on',
         ],
     ),
     (
@@ -10938,14 +10975,16 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the app name beside an action is repainted with the accent",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: p.accent,'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
+            'a_key_badge_stands_off_the_panel_it_sits_on',
             'every_site_draws_the_role_it_claims',
             'nothing_in_this_panel_is_accented',
-            'a_key_badge_stands_off_the_panel_it_sits_on',
         ],
     ),
     (
@@ -11042,35 +11081,34 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a key badge's border and lettering trade roles",
         HOTKEYS,
         [
-            ('                color: p.surface1,\n                line_width: 1.0,',
-             '                color: p.subtext0,\n                line_width: 1.0,'),
-            # Anchored on the line *below* as well, because the edit above has
-            # just manufactured a second `color: p.subtext0,` at a lower file
-            # offset. A one-line pattern would land on that copy, revert the
-            # first edit, and leave the file untouched — the defect would be a
-            # no-op reported as `NO TEST FAILED`. See `check()`'s NO-OP branch.
-            ('                color: p.subtext0,\n                font_size: KEY_FONT_SIZE,',
-             '                color: p.surface1,\n                font_size: KEY_FONT_SIZE,'),
+            ('                color: p.surface1,\n                line_width: 1.0,\n',
+             '                color: p.subtext0,\n                line_width: 1.0,\n'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.surface1,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the header and a key badge trade lettering",
         HOTKEYS,
         [
-            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
-             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
-            ('                color: p.subtext0,',
-             '                color: p.text,'),
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,\n',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,\n'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.text,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (

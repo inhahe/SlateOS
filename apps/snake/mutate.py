@@ -656,8 +656,8 @@ MUTATIONS += [
     ),
     (
         "a restart forgets the size the window is",
-        "        self.size = size;\n    }",
-        "    }",
+        "        self.wrap_mode = wrap;\n        self.size = size;\n",
+        "        self.wrap_mode = wrap;\n",
         ["a_resize_moves_the_switches_and_the_clicks_follow_them"],
     ),
     (
@@ -1315,8 +1315,8 @@ MUTATIONS += [
     ),
     (
         "the board's own squares are not drawn",
-        "                fill(f, r, SURFACE0, radius);",
-        "                fill(f, Rect::EMPTY, SURFACE0, radius);",
+        "                fill(f, r, self.colours.surface0, radius);",
+        "                fill(f, Rect::EMPTY, self.colours.surface0, radius);",
         ["every_square_of_the_board_is_drawn"],
     ),
     (
@@ -1339,8 +1339,8 @@ MUTATIONS += [
     ),
     (
         "the head is the same colour as the rest of the snake",
-        "            fill(f, r, if head { GREEN } else { TEAL }, radius);",
-        "            fill(f, r, TEAL, radius);",
+        "                if head {\n                    self.colours.green\n                } else {\n                    self.colours.teal\n                },",
+        "                self.colours.teal,",
         ["the_snake_is_drawn_where_the_snake_is"],
     ),
     (
@@ -1587,6 +1587,42 @@ MUTATIONS += [
         "        self.resize(width, height);\n",
         "",
         ["the_size_a_frame_is_drawn_at_is_the_size_the_next_click_is_read_against"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a restart drops the user's colours",
+        "        self.palette = palette;\n        self.colours = Colours::of(&palette);",
+        "        let _ = palette;",
+        ["a_restart_keeps_the_users_colours"],
+    ),
+    (
+        "the hint line is the faintest grey",
+        "                // faintest grey is 2.3:1 on a light band.\n                color: self.colours.subtext0,",
+        "                // faintest grey is 2.3:1 on a light band.\n                color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the message has no ground of its own",
+        "            .push_surface(f, panel.x, panel.y, panel.w, panel.h, l.pad, Surface::Panel);",
+        "            .push_surface(f, panel.x, panel.y, panel.w, panel.h, l.pad, Surface::Card);",
+        ["the_message_sits_on_a_panel_of_its_own"],
+    ),
+    (
+        "a switch that is on looks off",
+        "                if on { Kind::Primary } else { Kind::Plain },",
+        "                Kind::Plain,",
+        ["a_switch_shows_when_it_is_on"],
     ),
 ]
 

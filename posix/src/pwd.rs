@@ -565,12 +565,98 @@ pub extern "C" fn getgrouplist(
     if total > room { -1 } else { count }
 }
 
-/// Initialize the supplementary group access list.
+/// Set the calling process's supplementary groups to the ones `user`
+/// belongs to -- `group`, then each group `/etc/group` names `user` in:
+/// [`getgrouplist`]'s list, handed to
+/// [`setgroups`](crate::unistd::setgroups), as glibc's `initgroups` does.
 ///
-/// Stub: always succeeds (the kernel keeps no supplementary groups yet).
+/// Until 2026-09-27 this returned 0 and set nothing, on the premise that "the
+/// kernel keeps no supplementary groups yet" -- no longer so once
+/// `SYS_PROCESS_SETGROUPS` existed and `setgroups` reached it.  `login`,
+/// `su` and every daemon that drops from root call `initgroups` and then
+/// `setuid`; with the stub they kept root's supplementary groups while the
+/// return value they checked said the new ones were in place -- the false
+/// success `setgroups`'s own documentation calls the one that breaks worst.
+///
+/// glibc's loop is kept: when the kernel refuses the list as too long
+/// (`EINVAL`), it is tried one group shorter, until a length is taken or none
+/// is left.  Returns 0, or -1 with `setgroups`'s errno -- `EPERM` without
+/// `CAP_SETGID` -- or with `ENOMEM` if the list cannot be held.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn initgroups(_user: *const u8, _group: GidT) -> i32 {
-    0
+pub extern "C" fn initgroups(user: *const u8, group: GidT) -> i32 {
+    initgroups_with(user, group, |list| {
+        crate::unistd::setgroups(list.len(), list.as_ptr())
+    })
+}
+
+/// [`initgroups`] with the call that installs the list passed in, so the
+/// tests can see the list and play the kernel's refusals.
+fn initgroups_with(user: *const u8, group: GidT, mut set: impl FnMut(&[GidT]) -> i32) -> i32 {
+    let Some(list) = GroupList::of(user, group) else {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
+    };
+    let groups = list.as_slice();
+    let mut len = groups.len();
+    loop {
+        let r = set(groups.get(..len).unwrap_or(groups));
+        // glibc: `while (result == -1 && errno == EINVAL && --ngroups > 0)`.
+        if r == -1 && errno::get_errno() == errno::EINVAL && len > 1 {
+            len = len.saturating_sub(1);
+            continue;
+        }
+        return r;
+    }
+}
+
+/// The groups [`getgrouplist`] finds for a user, in a block of their own.
+struct GroupList {
+    ptr: *mut GidT,
+    len: usize,
+}
+
+impl GroupList {
+    /// The whole list, however long: asked for its length, then filled, and
+    /// asked again if `/etc/group` grew in between.  `None` when memory runs
+    /// out, or the file keeps growing faster than it can be read.
+    fn of(user: *const u8, group: GidT) -> Option<Self> {
+        let mut n: i32 = 0;
+        // The count query: no room, a NULL vector; -1 with the count.
+        let _ = getgrouplist(user, group, core::ptr::null_mut(), &mut n);
+        for _ in 0..8 {
+            let room = usize::try_from(n).ok()?.max(1);
+            let bytes = room.checked_mul(core::mem::size_of::<GidT>())?;
+            let ptr = crate::malloc::malloc(bytes).cast::<GidT>();
+            if ptr.is_null() {
+                return None;
+            }
+            // Owned from here: every way out of this iteration frees it,
+            // except the one that returns it.
+            let mut block = Self { ptr, len: 0 };
+            let mut got = i32::try_from(room).ok()?;
+            if getgrouplist(user, group, block.ptr, &mut got) >= 0 {
+                block.len = usize::try_from(got).ok()?.min(room);
+                return Some(block);
+            }
+            // It grew between the two reads: `got` is the new count, and
+            // `block` is freed as the loop goes round.
+            n = got;
+        }
+        None
+    }
+
+    fn as_slice(&self) -> &[GidT] {
+        // SAFETY: `ptr` is this list's own block, and its first `len`
+        // entries were written by `getgrouplist`.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for GroupList {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` is this list's own `malloc` block.
+        unsafe { crate::malloc::free(self.ptr.cast()) };
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1272,78 @@ staff:x:50:bob,alice
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
+    // -- initgroups --
+
+    /// `initgroups` installs [`getgrouplist`]'s list: the primary group, then
+    /// each group naming the user, in the file's order.
+    #[test]
+    fn initgroups_installs_the_users_groups() {
+        with_group(GROUP);
+        let mut seen: Vec<Vec<GidT>> = Vec::new();
+        let r = initgroups_with(c"alice".as_ptr().cast(), 1000, |g| {
+            seen.push(g.to_vec());
+            0
+        });
+        assert_eq!(r, 0);
+        assert_eq!(seen, [std::vec![1000, 10, 100, 50]]);
+        // No group file: the primary alone.
+        set_test_text(Which::Group, None);
+        seen.clear();
+        assert_eq!(
+            initgroups_with(c"alice".as_ptr().cast(), 7, |g| {
+                seen.push(g.to_vec());
+                0
+            }),
+            0
+        );
+        assert_eq!(seen, [std::vec![7]]);
+    }
+
+    /// glibc's loop: a list the kernel calls too long is tried one group
+    /// shorter, down to one; any other refusal is the answer at once.
+    #[test]
+    fn initgroups_shortens_a_list_the_kernel_calls_too_long() {
+        with_group(GROUP);
+        let mut lens = Vec::new();
+        let r = initgroups_with(c"alice".as_ptr().cast(), 1000, |g| {
+            lens.push(g.len());
+            if g.len() > 2 {
+                errno::set_errno(errno::EINVAL);
+                -1
+            } else {
+                0
+            }
+        });
+        assert_eq!((r, lens.as_slice()), (0, [4, 3, 2].as_slice()));
+        lens.clear();
+        let r = initgroups_with(c"alice".as_ptr().cast(), 1000, |g| {
+            lens.push(g.len());
+            errno::set_errno(errno::EINVAL);
+            -1
+        });
+        assert_eq!((r, errno::get_errno()), (-1, errno::EINVAL));
+        assert_eq!(lens, [4, 3, 2, 1], "never an empty list");
+        lens.clear();
+        let r = initgroups_with(c"alice".as_ptr().cast(), 1000, |g| {
+            lens.push(g.len());
+            errno::set_errno(errno::EPERM);
+            -1
+        });
+        assert_eq!((r, errno::get_errno(), lens.len()), (-1, errno::EPERM, 1));
+    }
+
+    /// The real call reaches `setgroups` -- on the host that is its `ENOSYS`,
+    /// or `EPERM` while another test holds `CAP_SETGID` dropped -- where it
+    /// used to return 0 having done nothing.
+    #[test]
+    fn initgroups_is_no_longer_a_silent_success() {
+        with_group(GROUP);
+        errno::set_errno(0);
+        assert_eq!(initgroups(c"alice".as_ptr().cast(), 1000), -1);
+        let e = errno::get_errno();
+        assert!(e == errno::ENOSYS || e == errno::EPERM, "errno {e}");
+    }
+
     #[test]
     fn getgrouplist_with_no_group_file_is_the_primary_alone() {
         set_test_text(Which::Group, None);
@@ -1210,11 +1368,6 @@ staff:x:50:bob,alice
     fn passwd_and_group_are_the_c_structures() {
         assert_eq!(size_of::<Passwd>(), 48);
         assert_eq!(size_of::<Group>(), 32);
-    }
-
-    #[test]
-    fn test_initgroups_succeeds() {
-        assert_eq!(initgroups(c"root".as_ptr().cast(), 0), 0);
     }
 
     #[test]

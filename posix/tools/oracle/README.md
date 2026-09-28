@@ -24,6 +24,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `conv_harness.py` | `posix/src/conv_oracle.txt` | `printf.rs` and `stdlib.rs`, through `decfloat::CONV_ORACLE` (`printf` and `strto*` of `double`, `float` and `long double`, and `wcstold`, every rounding mode) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
+| `strptime_harness.py` | `posix/src/strptime_oracle.txt` | `time.rs`, `include_str!` (`strptime`) |
 | `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
 | `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |

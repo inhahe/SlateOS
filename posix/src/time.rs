@@ -2116,448 +2116,557 @@ pub extern "C" fn clock() -> i64 {
 mod gnu_strptime {
     use super::*;
 
-    /// Parse a time string according to a format.
+    /// Parse a time string according to a format -- the inverse of
+    /// `strftime`, as glibc 2.39's does it in the C locale.
     ///
-    /// Inverse of `strftime`.  Reads from `buf` according to `format`,
-    /// filling fields in `tm`.  Returns a pointer to the first character
-    /// not consumed, or NULL if the input doesn't match.
+    /// Every conversion glibc knows, with its rules: a number skips white
+    /// space first and reads at most its field's digits, stopping early
+    /// once one more digit would pass the field's maximum (`%m` of "23" is
+    /// 2, "3" left over), and must land in range; names (`%a %A %b %B %h`)
+    /// match whole or abbreviated, in any case, with no space skipped; white
+    /// space in the format matches any run of it, none included; `%c %D %F
+    /// %r %R %T %x %X` parse their C-locale expansions all or nothing;
+    /// strftime's flags and field widths are accepted and mean nothing.
     ///
-    /// Supports: `%Y`, `%C`, `%y`, `%m`, `%d`, `%e`, `%H`, `%I`, `%M`,
-    /// `%S`, `%j`, `%w`, `%u`, `%p`, `%n`, `%t`, `%%`.
+    /// Fields are stored as they parse, so a call that fails part-way leaves
+    /// the earlier ones written, as glibc's does. After a whole match, what
+    /// the parse implies is filled in: `%I` with `%p` makes a 24-hour hour,
+    /// `%C` sets the century of a `%y` year (or makes the year on its own),
+    /// a date sets `tm_wday` and `tm_yday`, a day of the year sets the month
+    /// and day, and a week number (`%U` or `%W`) with a weekday sets the
+    /// date. `%s` reads seconds since the epoch into local time.
+    ///
+    /// The `E` and `O` modifiers change nothing in the C locale, which has no
+    /// eras and no alternative digits, and here they do not. glibc's do:
+    /// its `%Ey` reads a second number after the first, and every `%O`
+    /// conversion after the first in a format fails
+    /// (`posix/tools/oracle/strptime_harness.py`, and the test that replays
+    /// it).
     ///
     /// # Safety
     ///
     /// `buf` and `format` must be valid null-terminated strings.
     /// `tm` must point to a valid `Tm`.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
     pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
         if buf.is_null() || format.is_null() || tm.is_null() {
             return core::ptr::null();
         }
-
-        let mut bi: usize = 0; // Index into buf.
-        let mut fi: usize = 0; // Index into format.
-
-        loop {
-            let fc = unsafe { *format.add(fi) };
-            if fc == 0 {
-                // End of format — success. Return pointer to remaining input.
-                return unsafe { buf.add(bi) };
-            }
-
-            if fc == b'%' {
-                fi = fi.wrapping_add(1);
-                let spec = unsafe { *format.add(fi) };
-                if spec == 0 {
-                    return core::ptr::null();
-                }
-                fi = fi.wrapping_add(1);
-
-                match spec {
-                    b'Y' => {
-                        // 4-digit year.
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_year = val - 1900;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'C' => {
-                        // Century (2 digits).  Sets year = century*100 + (year%100).
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
-                            (*tm).tm_year = val
-                                .wrapping_mul(100)
-                                .wrapping_add(cur_y2)
-                                .wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'y' => {
-                        // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        let full_year = if val >= 69 {
-                            val.wrapping_add(1900)
-                        } else {
-                            val.wrapping_add(2000)
-                        };
-                        unsafe {
-                            (*tm).tm_year = full_year.wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'm' => {
-                        // Month 01-12.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_mon = val - 1;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'd' | b'e' => {
-                        // Day 01-31 (or space-padded for %e).
-                        // Skip leading space for %e.
-                        if spec == b'e' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_mday = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'H' | b'k' => {
-                        // Hour 00-23 (%k allows space-padded).
-                        if spec == b'k' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_hour = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'I' | b'l' => {
-                        // Hour 01-12 (12-hour clock).
-                        if spec == b'l' {
-                            while (unsafe { *buf.add(bi) }) == b' ' {
-                                bi = bi.wrapping_add(1);
-                            }
-                        }
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        // Store as-is; %p adjusts for AM/PM later.
-                        unsafe {
-                            (*tm).tm_hour = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'M' => {
-                        // Minute 00-59.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_min = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'S' => {
-                        // Second 00-60.
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_sec = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'j' => {
-                        // Day of year 001-366.
-                        let (val, consumed) = parse_int(buf, bi, 3);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_yday = val - 1;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'w' => {
-                        // Weekday 0-6 (Sunday=0).
-                        let (val, consumed) = parse_int(buf, bi, 1);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_wday = val;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'u' => {
-                        // ISO weekday 1-7 (Monday=1).
-                        let (val, consumed) = parse_int(buf, bi, 1);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_wday = if val == 7 { 0 } else { val };
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'p' | b'P' => {
-                        // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
-                        let c1 = unsafe { *buf.add(bi) };
-                        let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
-                        let afternoon = (c1 == b'P' || c1 == b'p') && (c2 == b'M' || c2 == b'm');
-                        let morning = (c1 == b'A' || c1 == b'a') && (c2 == b'M' || c2 == b'm');
-                        if !afternoon && !morning {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            if afternoon && (*tm).tm_hour < 12 {
-                                (*tm).tm_hour = (*tm).tm_hour.wrapping_add(12);
-                            } else if morning && (*tm).tm_hour == 12 {
-                                (*tm).tm_hour = 0;
-                            }
-                        }
-                        bi = bi.wrapping_add(2);
-                    }
-                    b'b' | b'B' | b'h' => {
-                        // Month name (abbreviated or full).
-                        if let Some((mon, consumed)) = match_month_name(buf, bi) {
-                            unsafe {
-                                (*tm).tm_mon = mon;
-                            }
-                            bi = bi.wrapping_add(consumed);
-                        } else {
-                            return core::ptr::null();
-                        }
-                    }
-                    b'a' | b'A' => {
-                        // Weekday name (abbreviated or full).
-                        if let Some((wday, consumed)) = match_wday_name(buf, bi) {
-                            unsafe {
-                                (*tm).tm_wday = wday;
-                            }
-                            bi = bi.wrapping_add(consumed);
-                        } else {
-                            return core::ptr::null();
-                        }
-                    }
-                    b'V' => {
-                        // ISO 8601 week number (01-53) — informational only,
-                        // we parse the digits but don't derive date fields from
-                        // the week number alone (would need %G too).
-                        let (_, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'G' => {
-                        // ISO 8601 week-based year — treat as regular year.
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        unsafe {
-                            (*tm).tm_year = val - 1900;
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'g' => {
-                        // ISO 8601 week-based year (2-digit).
-                        let (val, consumed) = parse_int(buf, bi, 2);
-                        if consumed == 0 {
-                            return core::ptr::null();
-                        }
-                        let full_year = if val >= 69 {
-                            val.wrapping_add(1900)
-                        } else {
-                            val.wrapping_add(2000)
-                        };
-                        unsafe {
-                            (*tm).tm_year = full_year.wrapping_sub(1900);
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'z' => {
-                        // Timezone offset (`+HHMM` or `-HHMM`), recorded in
-                        // `tm_gmtoff` the way glibc's strptime does — discarding
-                        // it would silently drop the one piece of zone
-                        // information the input actually carried.
-                        let sign = unsafe { *buf.add(bi) };
-                        if sign != b'+' && sign != b'-' {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(1);
-                        let (val, consumed) = parse_int(buf, bi, 4);
-                        if consumed < 2 {
-                            return core::ptr::null();
-                        }
-                        // Two digits mean whole hours; four mean `hhmm`.
-                        let secs = if consumed >= 4 {
-                            i64::from(val / 100) * 3600 + i64::from(val % 100) * 60
-                        } else {
-                            i64::from(val) * 3600
-                        };
-                        unsafe {
-                            (*tm).tm_gmtoff = if sign == b'-' { -secs } else { secs };
-                        }
-                        bi = bi.wrapping_add(consumed);
-                    }
-                    b'Z' => {
-                        // Timezone abbreviation — skip alphabetic chars.
-                        while (unsafe { *buf.add(bi) }).is_ascii_alphabetic() {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    b'n' | b't' => {
-                        // Skip any whitespace.
-                        while (unsafe { *buf.add(bi) }) == b' '
-                            || (unsafe { *buf.add(bi) }) == b'\t'
-                        {
-                            bi = bi.wrapping_add(1);
-                        }
-                    }
-                    b'%' => {
-                        // Literal %.
-                        if unsafe { *buf.add(bi) } != b'%' {
-                            return core::ptr::null();
-                        }
-                        bi = bi.wrapping_add(1);
-                    }
-                    _ => {
-                        // Unknown specifier — fail.
-                        return core::ptr::null();
-                    }
-                }
-            } else if fc == b' ' || fc == b'\t' {
-                // Whitespace in format matches any amount of whitespace in buf.
-                while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
-                    bi = bi.wrapping_add(1);
-                }
-                fi = fi.wrapping_add(1);
-            } else {
-                // Literal character — must match.
-                if unsafe { *buf.add(bi) } != fc {
-                    return core::ptr::null();
-                }
-                bi = bi.wrapping_add(1);
-                fi = fi.wrapping_add(1);
-            }
-        }
+        // SAFETY: the caller's NUL-terminated format.
+        let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
+        // SAFETY: the caller's `struct tm`, checked non-null.
+        let t = unsafe { &mut *tm };
+        let input = Input(buf);
+        let mut state = Parse::default();
+        let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
+            return core::ptr::null();
+        };
+        state.finish(t);
+        // SAFETY: `end` is within the input: the parse only moves past bytes
+        // it has read, and never past the terminator.
+        unsafe { buf.add(end) }
     }
 }
 pub use gnu_strptime::strptime;
 
-/// Parse up to `max_digits` decimal digits from `buf` starting at offset `off`.
-///
-/// Returns (value, number_of_digits_consumed).
+/// The input of a `strptime` parse: a NUL-terminated string, read a byte
+/// at a time and never past its terminator -- every step forward is over a
+/// byte already read and found not to be NUL.
+struct Input(*const u8);
+
+impl Input {
+    /// The byte at `i`, which must not be past the terminator.
+    fn at(&self, i: usize) -> u8 {
+        // SAFETY: the invariant above: `i` is at most the terminator's index.
+        unsafe { *self.0.add(i) }
+    }
+
+    /// Past any white space at `pos`.
+    fn skip_space(&self, mut pos: usize) -> usize {
+        while is_c_space(self.at(pos)) {
+            pos = pos.wrapping_add(1);
+        }
+        pos
+    }
+
+    /// Whether `word` is at `pos`, in any case.
+    fn has_word(&self, pos: usize, word: &[u8]) -> bool {
+        word.iter()
+            .enumerate()
+            .all(|(k, w)| self.at(pos.wrapping_add(k)).eq_ignore_ascii_case(w))
+    }
+}
+
+/// C's `isspace` in the C locale.
+const fn is_c_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// What a `strptime` parse has learnt besides the fields it stored: what
+/// decides the fields filled in after it ([`Parse::finish`]).
+#[derive(Clone, Copy, Default)]
+struct Parse {
+    /// The hour came from the 12-hour clock (`%I`), and `%p` said PM.
+    have_i: bool,
+    is_pm: bool,
+    /// `%C`'s century.
+    century: Option<i32>,
+    /// The year came from `%y`, two digits, which `%C` completes.
+    want_century: bool,
+    /// Something named the date: compute the weekday and day of the year.
+    want_xday: bool,
+    have_wday: bool,
+    have_yday: bool,
+    have_mon: bool,
+    have_mday: bool,
+    /// A week number (`%U` or `%W`), and which.
+    have_uweek: bool,
+    have_wweek: bool,
+    week_no: i32,
+}
+
+/// Cumulative days before each month, in a common year and a leap year,
+/// the thirteenth entry the year's length.
+const MON_YDAY: [[i32; 13]; 2] = [
+    [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365],
+    [0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335, 366],
+];
+
+/// `MON_YDAY` for `tm_year`'s year and month `mon` -- 0 for a month out of
+/// range, which only an input that never named its month can reach.
+fn mon_yday(tm_year: i32, mon: i32) -> i32 {
+    let leap = usize::from(is_leap(tm_year.wrapping_add(1900)));
+    usize::try_from(mon)
+        .ok()
+        .and_then(|m| MON_YDAY.get(leap).and_then(|row| row.get(m)))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Leap days from year 0 through year `y`, as the weekday arithmetic below
+/// counts them: `y/4 - y/100 + y/400` for a year from 0 on, grouped so
+/// that for a negative year the hundreds round the other way, as glibc's
+/// do.
 #[allow(clippy::arithmetic_side_effects)]
-fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
-    let mut val: i32 = 0;
-    let mut count: usize = 0;
-    while count < max_digits {
-        let c = unsafe { *buf.add(off.wrapping_add(count)) };
-        if !c.is_ascii_digit() {
+fn leap_days(y: i32) -> i32 {
+    let quads = y / 4;
+    let centuries = quads / 25;
+    // Divisions by nonzero constants, and a sum of values each under
+    // `|y| / 4`: nothing here can overflow.
+    quads - centuries + i32::from(quads % 25 < 0) + centuries / 4
+}
+
+/// The weekday of `tm`'s date, as glibc computes it after a parse: whole
+/// days from 1970-01-01, the months counted as in a common year and the
+/// leap days up to the year before -- or up to this year, from March on.
+/// In C's `int` arithmetic exactly, wrapping and all, because `getdate`
+/// hands `strptime` a `struct tm` whose unset fields are `INT_MIN` and uses
+/// the weekday that comes out: a 0th or a 32nd of the month is a day
+/// either side, and year 0's January and February are a day off, as in
+/// glibc.
+fn weekday_of(tm: &Tm) -> i32 {
+    let corr = 1900i32
+        .wrapping_add(tm.tm_year)
+        .wrapping_sub(i32::from(tm.tm_mon < 2));
+    let month_days = usize::try_from(tm.tm_mon)
+        .ok()
+        .and_then(|m| MON_YDAY[0].get(m))
+        .copied()
+        .unwrap_or(0);
+    // January 1st 1970 was a Thursday: 4, less the leap days to 1969.
+    let days = 4i32
+        .wrapping_sub(leap_days(1969))
+        .wrapping_add(tm.tm_year.wrapping_sub(70).wrapping_mul(365))
+        .wrapping_add(leap_days(corr))
+        .wrapping_add(month_days)
+        .wrapping_add(tm.tm_mday)
+        .wrapping_sub(1);
+    // C's `((days % 7) + 7) % 7`: the remainder into 0..7.
+    days.rem_euclid(7)
+}
+
+impl Parse {
+    /// Fill in what a whole match implies (see `strptime`), in C's `int`
+    /// arithmetic, wrapping as glibc's does on `getdate`'s `INT_MIN`s.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn finish(&self, tm: &mut Tm) {
+        if self.have_i && self.is_pm {
+            tm.tm_hour = tm.tm_hour.wrapping_add(12);
+        }
+        if let Some(c) = self.century {
+            // `c` is 0..=99, so `(c - 19) * 100` cannot overflow.
+            tm.tm_year = if self.want_century {
+                (tm.tm_year % 100).wrapping_add((c - 19) * 100)
+            } else {
+                (c - 19) * 100
+            };
+        }
+        let mut have_mon = self.have_mon;
+        let mut have_mday = self.have_mday;
+        // The weekday and the day of the year are worked out only for a
+        // month that is one -- whatever the year and the day hold, as
+        // glibc's are (`getdate` leaves unset fields `INT_MIN`).
+        if self.want_xday && !self.have_wday {
+            if !(have_mon && have_mday) && self.have_yday {
+                date_of_yday(tm, have_mon, have_mday);
+                have_mon = true;
+                have_mday = true;
+            }
+            if (0..12).contains(&tm.tm_mon) {
+                tm.tm_wday = weekday_of(tm);
+            }
+        }
+        if self.want_xday && !self.have_yday && (0..12).contains(&tm.tm_mon) {
+            tm.tm_yday = mon_yday(tm.tm_year, tm.tm_mon)
+                .wrapping_add(tm.tm_mday)
+                .wrapping_sub(1);
+        }
+        if (self.have_uweek || self.have_wweek) && self.have_wday {
+            let wday = tm.tm_wday;
+            let (mday, mon) = (tm.tm_mday, tm.tm_mon);
+            let offset = i32::from(!self.have_uweek);
+            // The weekday of the year's first day.
+            tm.tm_mday = 1;
+            tm.tm_mon = 0;
+            let jan1 = weekday_of(tm);
+            if have_mday {
+                tm.tm_mday = mday;
+            }
+            if have_mon {
+                tm.tm_mon = mon;
+            }
+            if !self.have_yday {
+                tm.tm_yday =
+                    (7 - (jan1 - offset)) % 7 + (self.week_no - 1) * 7 + (wday - offset + 7) % 7;
+            }
+            if !have_mday || !have_mon {
+                date_of_yday(tm, have_mon, have_mday);
+            }
+            tm.tm_wday = wday;
+        }
+    }
+}
+
+/// `tm_mon` and `tm_mday` -- whichever the parse did not name -- from
+/// `tm_yday`: the last month starting on or before it, December at the
+/// latest, so a day of the year past the year's end is a day of December
+/// past its 31st, as glibc has it.
+fn date_of_yday(tm: &mut Tm, have_mon: bool, have_mday: bool) {
+    let started = (0..12)
+        .take_while(|&m| mon_yday(tm.tm_year, m) <= tm.tm_yday)
+        .count();
+    // The last month started, or -1 for a day before the year's first: the
+    // day then counts from the year's start, as glibc's does.
+    let mon = started
+        .checked_sub(1)
+        .and_then(|m| i32::try_from(m).ok())
+        .unwrap_or(-1);
+    if !have_mon {
+        tm.tm_mon = mon;
+    }
+    if !have_mday {
+        let start = if mon < 0 {
+            0
+        } else {
+            mon_yday(tm.tm_year, mon)
+        };
+        tm.tm_mday = tm.tm_yday.wrapping_sub(start).wrapping_add(1);
+    }
+}
+
+/// A number of at most `digits` digits in `from..=to`, after any white
+/// space: the digits stop early when one more would take the value past
+/// `to`, as glibc's do. `None` if there is no digit or the value is out of
+/// range.
+#[allow(clippy::arithmetic_side_effects)]
+fn number(input: &Input, pos: &mut usize, from: i32, to: i32, digits: usize) -> Option<i32> {
+    *pos = input.skip_space(*pos);
+    if !input.at(*pos).is_ascii_digit() {
+        return None;
+    }
+    let mut val = 0i32;
+    let mut left = digits;
+    loop {
+        val = val * 10 + i32::from(input.at(*pos) - b'0');
+        *pos += 1;
+        left -= 1;
+        if left == 0 || val * 10 > to || !input.at(*pos).is_ascii_digit() {
             break;
         }
-        val = val * 10 + i32::from(c.wrapping_sub(b'0'));
-        count = count.wrapping_add(1);
     }
-    (val, count)
+    (from..=to).contains(&val).then_some(val)
 }
 
-/// Match a month name (abbreviated or full) at position `off` in `buf`.
-///
-/// Returns `(month_0_indexed, chars_consumed)` or `None` if no match.
-///
-/// # Safety
-///
-/// `buf` must be valid for at least `off + 9` bytes (longest month name).
-fn match_month_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
-    // Try full names first (longer match wins), then abbreviated.
-    static MONTHS: [(&[u8], &[u8]); 12] = [
-        (b"January", b"Jan"),
-        (b"February", b"Feb"),
-        (b"March", b"Mar"),
-        (b"April", b"Apr"),
-        (b"May", b"May"),
-        (b"June", b"Jun"),
-        (b"July", b"Jul"),
-        (b"August", b"Aug"),
-        (b"September", b"Sep"),
-        (b"October", b"Oct"),
-        (b"November", b"Nov"),
-        (b"December", b"Dec"),
-    ];
-
-    for (i, (full, abbr)) in MONTHS.iter().enumerate() {
-        // Try full name first.
-        if ci_match(buf, off, full) {
-            return Some((i as i32, full.len()));
-        }
-        // Then abbreviated.
-        if ci_match(buf, off, abbr) {
-            return Some((i as i32, abbr.len()));
-        }
-    }
-    None
+/// The weekday or month named at `pos`, whole or abbreviated: `(index,
+/// length)`.
+fn name(
+    input: &Input,
+    pos: usize,
+    count: i32,
+    full: fn(i32) -> &'static [u8],
+    abbr: fn(i32) -> &'static [u8],
+) -> Option<(i32, usize)> {
+    (0..count).find_map(|i| {
+        [full(i), abbr(i)]
+            .into_iter()
+            .find(|w| input.has_word(pos, w))
+            .map(|w| (i, w.len()))
+    })
 }
 
-/// Match a weekday name (abbreviated or full) at position `off` in `buf`.
-///
-/// Returns `(wday_sunday_0, chars_consumed)` or `None` if no match.
-///
-/// # Safety
-///
-/// `buf` must be valid for at least `off + 9` bytes (longest weekday name).
-fn match_wday_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
-    static WDAYS: [(&[u8], &[u8]); 7] = [
-        (b"Sunday", b"Sun"),
-        (b"Monday", b"Mon"),
-        (b"Tuesday", b"Tue"),
-        (b"Wednesday", b"Wed"),
-        (b"Thursday", b"Thu"),
-        (b"Friday", b"Fri"),
-        (b"Saturday", b"Sat"),
-    ];
-
-    for (i, (full, abbr)) in WDAYS.iter().enumerate() {
-        if ci_match(buf, off, full) {
-            return Some((i as i32, full.len()));
+/// Parse `input` from `pos` against `fmt`, storing into `tm` and `state`:
+/// the position after the last byte matched, or `None`.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse(
+    input: &Input,
+    mut pos: usize,
+    fmt: &[u8],
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    let mut fi = 0;
+    while let Some(&c) = fmt.get(fi) {
+        fi += 1;
+        if is_c_space(c) {
+            pos = input.skip_space(pos);
+            continue;
         }
-        if ci_match(buf, off, abbr) {
-            return Some((i as i32, abbr.len()));
+        if c != b'%' {
+            if input.at(pos) != c {
+                return None;
+            }
+            pos += 1;
+            continue;
         }
+        // strftime's flags and field width mean nothing here.
+        while matches!(fmt.get(fi), Some(b'-' | b'_' | b'0' | b'^' | b'#')) {
+            fi += 1;
+        }
+        while fmt.get(fi).is_some_and(u8::is_ascii_digit) {
+            fi += 1;
+        }
+        let mut conv = *fmt.get(fi)?;
+        fi += 1;
+        // The C locale's alternative forms are the plain ones; a modifier on
+        // a conversion that has none is no match.
+        if conv == b'E' || conv == b'O' {
+            let next = *fmt.get(fi)?;
+            fi += 1;
+            let allowed: &[u8] = if conv == b'E' {
+                b"cCxXyY"
+            } else {
+                b"bBhdeHImMSUVWwy"
+            };
+            if !allowed.contains(&next) {
+                return None;
+            }
+            conv = next;
+        }
+        pos = conversion(input, pos, conv, tm, state)?;
     }
-    None
+    Some(pos)
 }
 
-/// Case-insensitive match of `pattern` against `buf[off..]`.
-///
-/// # Safety
-///
-/// `buf` must be valid for at least `off + pattern.len()` bytes.
-fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
-    for (j, &p) in pattern.iter().enumerate() {
-        // SAFETY: Caller guarantees buf is valid for off + pattern.len() bytes.
-        let c = unsafe { *buf.add(off.wrapping_add(j)) };
-        if !c.eq_ignore_ascii_case(&p) {
-            return false;
+/// `sub`, a C-locale expansion, parsed into copies of `tm` and `state` that
+/// replace them only if it matches whole -- glibc's composite conversions
+/// are all or nothing.
+fn composite(
+    input: &Input,
+    pos: usize,
+    sub: &[u8],
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    let mut t = *tm;
+    let mut s = *state;
+    let end = parse(input, pos, sub, &mut t, &mut s)?;
+    *tm = t;
+    *state = s;
+    Some(end)
+}
+
+/// One conversion, `conv`, at `pos`: the position after it.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+fn conversion(
+    input: &Input,
+    mut pos: usize,
+    conv: u8,
+    tm: &mut Tm,
+    state: &mut Parse,
+) -> Option<usize> {
+    match conv {
+        b'%' => {
+            if input.at(pos) != b'%' {
+                return None;
+            }
+            pos += 1;
         }
+        b'a' | b'A' => {
+            let (wday, len) = name(input, pos, 7, wday_full, wday_abbr)?;
+            tm.tm_wday = wday;
+            state.have_wday = true;
+            pos += len;
+        }
+        b'b' | b'B' | b'h' => {
+            let (mon, len) = name(input, pos, 12, mon_full, mon_abbr)?;
+            tm.tm_mon = mon;
+            state.have_mon = true;
+            state.want_xday = true;
+            pos += len;
+        }
+        b'c' => {
+            pos = composite(input, pos, b"%a %b %e %H:%M:%S %Y", tm, state)?;
+            state.want_xday = true;
+        }
+        b'C' => {
+            state.century = Some(number(input, &mut pos, 0, 99, 2)?);
+            state.want_xday = true;
+        }
+        b'd' | b'e' => {
+            tm.tm_mday = number(input, &mut pos, 1, 31, 2)?;
+            state.have_mday = true;
+            state.want_xday = true;
+        }
+        b'F' => {
+            pos = composite(input, pos, b"%Y-%m-%d", tm, state)?;
+            state.want_xday = true;
+        }
+        b'x' | b'D' => {
+            pos = composite(input, pos, b"%m/%d/%y", tm, state)?;
+            state.want_xday = true;
+        }
+        b'k' | b'H' => {
+            tm.tm_hour = number(input, &mut pos, 0, 23, 2)?;
+            state.have_i = false;
+        }
+        b'l' | b'I' => {
+            tm.tm_hour = number(input, &mut pos, 1, 12, 2)? % 12;
+            state.have_i = true;
+        }
+        b'j' => {
+            tm.tm_yday = number(input, &mut pos, 1, 366, 3)? - 1;
+            state.have_yday = true;
+        }
+        b'm' => {
+            tm.tm_mon = number(input, &mut pos, 1, 12, 2)? - 1;
+            state.have_mon = true;
+            state.want_xday = true;
+        }
+        b'M' => tm.tm_min = number(input, &mut pos, 0, 59, 2)?,
+        b'n' | b't' => pos = input.skip_space(pos),
+        b'p' => {
+            if input.has_word(pos, b"AM") {
+                state.is_pm = false;
+            } else if input.has_word(pos, b"PM") {
+                state.is_pm = true;
+            } else {
+                return None;
+            }
+            pos += 2;
+        }
+        b'r' => pos = composite(input, pos, b"%I:%M:%S %p", tm, state)?,
+        b'R' => pos = composite(input, pos, b"%H:%M", tm, state)?,
+        b's' => {
+            // Seconds since the epoch, any number of digits; one past
+            // `time_t` is no match (glibc's wraps).
+            if !input.at(pos).is_ascii_digit() {
+                return None;
+            }
+            let mut secs: TimeT = 0;
+            while input.at(pos).is_ascii_digit() {
+                secs = secs
+                    .checked_mul(10)?
+                    .checked_add(TimeT::from(input.at(pos) - b'0'))?;
+                pos += 1;
+            }
+            if !secs_to_local_tm(secs, tm) {
+                return None;
+            }
+        }
+        b'S' => tm.tm_sec = number(input, &mut pos, 0, 61, 2)?,
+        b'X' | b'T' => pos = composite(input, pos, b"%H:%M:%S", tm, state)?,
+        b'u' => {
+            tm.tm_wday = number(input, &mut pos, 1, 7, 1)? % 7;
+            state.have_wday = true;
+        }
+        // The ISO 8601 week-based year and week: read, and not used -- they
+        // cannot name a date without the rest of the ISO week date.
+        b'g' => {
+            number(input, &mut pos, 0, 99, 2)?;
+        }
+        b'G' => {
+            if !input.at(pos).is_ascii_digit() {
+                return None;
+            }
+            while input.at(pos).is_ascii_digit() {
+                pos += 1;
+            }
+        }
+        b'V' => {
+            number(input, &mut pos, 0, 53, 2)?;
+        }
+        b'U' | b'W' => {
+            state.week_no = number(input, &mut pos, 0, 53, 2)?;
+            state.have_uweek = conv == b'U';
+            state.have_wweek = conv == b'W';
+        }
+        b'w' => {
+            tm.tm_wday = number(input, &mut pos, 0, 6, 1)?;
+            state.have_wday = true;
+        }
+        b'y' => {
+            let yy = number(input, &mut pos, 0, 99, 2)?;
+            tm.tm_year = if yy >= 69 { yy } else { yy + 100 };
+            state.want_century = true;
+            state.want_xday = true;
+        }
+        b'Y' => {
+            tm.tm_year = number(input, &mut pos, 0, 9999, 4)? - 1900;
+            state.want_century = false;
+            state.want_xday = true;
+        }
+        b'Z' => {
+            // A zone name: read and not used.
+            pos = input.skip_space(pos);
+            while input.at(pos) != 0 && !is_c_space(input.at(pos)) {
+                pos += 1;
+            }
+        }
+        b'z' => {
+            pos = input.skip_space(pos);
+            if input.at(pos) == b'Z' {
+                pos += 1;
+                tm.tm_gmtoff = 0;
+            } else {
+                let negative = match input.at(pos) {
+                    b'+' => false,
+                    b'-' => true,
+                    _ => return None,
+                };
+                pos += 1;
+                // `hh`, `hhmm` or `hh:mm`.
+                let mut val = 0i64;
+                let mut n = 0;
+                while n < 4 && input.at(pos).is_ascii_digit() {
+                    val = val * 10 + i64::from(input.at(pos) - b'0');
+                    pos += 1;
+                    n += 1;
+                    if n == 2 && input.at(pos) == b':' && input.at(pos + 1).is_ascii_digit() {
+                        pos += 1;
+                    }
+                }
+                match n {
+                    2 => val *= 100,
+                    4 if val % 100 < 60 => {}
+                    _ => return None,
+                }
+                let secs = val / 100 * 3600 + val % 100 * 60;
+                tm.tm_gmtoff = if negative { -secs } else { secs };
+            }
+        }
+        _ => return None,
     }
-    true
+    Some(pos)
 }
 
 // ---------------------------------------------------------------------------
@@ -10882,5 +10991,137 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&h[i..i + 2], 16).unwrap())
             .collect()
+    }
+
+    // -- strptime, against glibc --
+
+    /// glibc 2.39's `strptime` (`posix/tools/oracle/strptime_harness.py`).
+    const STRPTIME_ORACLE: &str = include_str!("strptime_oracle.txt");
+
+    /// `fmt` without its `E` and `O` modifiers -- those on a conversion
+    /// that takes one -- if it had any.
+    fn without_modifiers(fmt: &[u8]) -> Option<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut changed = false;
+        let mut i = 0;
+        while let Some(&c) = fmt.get(i) {
+            out.push(c);
+            i += 1;
+            if c != b'%' {
+                continue;
+            }
+            while let Some(&f) = fmt.get(i).filter(|f| b"-_0^#123456789".contains(f)) {
+                out.push(f);
+                i += 1;
+            }
+            let pair = (fmt.get(i).copied(), fmt.get(i + 1).copied());
+            let takes = match pair {
+                (Some(b'E'), Some(n)) => b"cCxXyY".contains(&n),
+                (Some(b'O'), Some(n)) => b"bBhdeHImMSUVWwy".contains(&n),
+                _ => false,
+            };
+            if takes {
+                i += 1;
+                changed = true;
+            }
+            if let Some(&n) = fmt.get(i) {
+                out.push(n);
+                i += 1;
+            }
+        }
+        changed.then_some(out)
+    }
+
+    /// The `struct tm` an oracle row starts from.
+    fn strptime_start(kind: &str) -> Tm {
+        match kind {
+            "s" => Tm {
+                tm_zone: core::ptr::null(),
+                ..sentinel_tm()
+            },
+            _ => Tm::ZERO,
+        }
+    }
+
+    /// glibc 2.39's `strptime` for every conversion, alone and in the
+    /// combinations programs use, from two starting `struct tm`s: the
+    /// bytes it took, or NULL, and every field -- those a failing call had
+    /// already stored included.
+    ///
+    /// Two kinds of row are held to another answer than glibc's:
+    ///
+    /// - A format with an `E` or `O` modifier answers as the same format
+    ///   without it, which is what the modifiers mean in the C locale. glibc
+    ///   parts from that in three ways: its `%Ey` reads a second number
+    ///   after the year, every `%O` conversion after a format's first is no
+    ///   match, and its `%Oy` does not take `%C`'s century.
+    /// - Where `%s`'s number or its year is too big and the call is NULL,
+    ///   glibc has stored some of the fields `localtime` was part-way
+    ///   through; this library has stored none. Only the NULL is compared.
+    #[test]
+    fn strptime_answers_as_glibc_does() {
+        let _tz = TzGuard::utc();
+        let mut answers = std::collections::HashMap::new();
+        for line in STRPTIME_ORACLE.lines() {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            answers.insert((unhex(w[0]), unhex(w[1]), w[2]), want);
+        }
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in STRPTIME_ORACLE.lines() {
+            let (lhs, glibc) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let (fmt, input) = (unhex(w[0]), unhex(w[1]));
+            let mut want = match without_modifiers(&fmt) {
+                Some(plain) => (*answers.get(&(plain, input.clone(), w[2])).unwrap()).to_owned(),
+                None => glibc.to_owned(),
+            };
+            let mut t = strptime_start(w[2]);
+            let (mut f, mut i) = (fmt.clone(), input.clone());
+            f.push(0);
+            i.push(0);
+            // SAFETY: NUL-terminated format and input, and a local `Tm`.
+            let r = unsafe { strptime(i.as_ptr(), f.as_ptr(), &raw mut t) };
+            let consumed = if r.is_null() {
+                -1
+            } else {
+                // SAFETY: a non-NULL result points into `i`.
+                unsafe { r.offset_from(i.as_ptr()) }
+            };
+            let mut got = format!(
+                "{consumed} {} {} {} {} {} {} {} {} {} {}",
+                t.tm_sec,
+                t.tm_min,
+                t.tm_hour,
+                t.tm_mday,
+                t.tm_mon,
+                t.tm_year,
+                t.tm_wday,
+                t.tm_yday,
+                t.tm_isdst,
+                t.tm_gmtoff
+            );
+            if fmt.windows(2).any(|p| p == b"%s") && want.starts_with("-1 ") {
+                want.truncate(2);
+                got.truncate(got.find(' ').unwrap_or(got.len()));
+            }
+            calls += 1;
+            if got != want {
+                bad.push(format!(
+                    "\"{}\" \"{}\" {} = {want}\n    ours {got}",
+                    fmt.escape_ascii(),
+                    input.escape_ascii(),
+                    w[2]
+                ));
+            }
+        }
+        assert!(calls > 7000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
     }
 }

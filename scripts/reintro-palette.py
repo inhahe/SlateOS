@@ -20501,6 +20501,20 @@ def run_tests(pkg):
     return failed, out
 
 
+def snapshot(files, missing_ok=False):
+    """`{path: bytes}` for `files`, as they are on disk now.
+
+    `missing_ok` reads a file that is not there as empty. Only `--check` asks
+    for that: it writes nothing, so there is nothing to restore, and a defect
+    whose file has gone is exactly what it reports. A run that patches files
+    must not, because it would "restore" the missing file as an empty one.
+    """
+    return {
+        f: (ROOT / f).read_bytes() if (ROOT / f).exists() or not missing_ok else b""
+        for f in files
+    }
+
+
 def source(snap, path):
     """The snapshotted file as LF-only text, whatever it is on disk.
 
@@ -20874,15 +20888,21 @@ def main():
         sys.exit(coverage())
 
     files = sorted({d[1] for d in DEFECTS})
-    snap = {f: (ROOT / f).read_bytes() for f in files}
+    # Before the banner, and tolerant of a missing file, for the same reason:
+    # `--check` writes nothing, and a file a defect names having been deleted
+    # or moved is precisely the rot it exists to report. Reading such a file
+    # as empty reports every defect aimed at it as PATTERN NOT FOUND, by name;
+    # the strict read below would die on the first one instead, with a
+    # traceback that names a file and no defect.
+    if sys.argv[1:2] == ["--check"]:
+        sys.exit(check(snapshot(files, missing_ok=True)))
+
+    snap = snapshot(files)
     digest = {f: hashlib.sha256(b).hexdigest() for f, b in snap.items()}
     print("snapshot:")
     for f in files:
         print(f"  {digest[f][:16]}  {f}")
     print()
-
-    if sys.argv[1:2] == ["--check"]:
-        sys.exit(check(snap))
 
     if sys.argv[1:2] == ["--compile"]:
         # Its own `finally`: `compile_check` writes to the tree, so a Ctrl-C

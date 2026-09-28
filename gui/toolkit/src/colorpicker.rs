@@ -584,12 +584,11 @@ impl ColorPicker {
             match event.key {
                 Key::Backspace => {
                     self.hex_input.pop();
-                    self.try_apply_hex();
+                    self.apply_typed_hex();
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
                 Key::Enter => {
-                    self.try_apply_hex();
-                    self.hex_focused = false;
+                    self.commit_hex();
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
                 Key::Escape => {
@@ -609,7 +608,7 @@ impl ColorPicker {
                         took_any = true;
                     }
                     if took_any {
-                        self.try_apply_hex();
+                        self.apply_typed_hex();
                         return Some(ColorPickerEvent::Changed(self.current_color()));
                     }
                 }
@@ -917,6 +916,31 @@ impl ColorPicker {
         self.hex_input = format!("{:02X}{:02X}{:02X}", r, g, b);
     }
 
+    /// Apply the hex being typed if it is a whole code -- six digits, or eight
+    /// with the alpha -- and change nothing otherwise.
+    ///
+    /// Not the three-digit shorthand, which is also the first three digits of
+    /// every longer code: typing `FF0000` would flash yellow (`FF0`) on the way
+    /// to red, and deleting `00FF00` a digit at a time would leave the colour
+    /// blue (`00F`) once the field was empty. The shorthand is applied when
+    /// the entry is finished ([`commit_hex`](Self::commit_hex)).
+    fn apply_typed_hex(&mut self) {
+        if matches!(self.hex_input.len(), 6 | 8) {
+            self.try_apply_hex();
+        }
+    }
+
+    /// Finish typing in the hex field -- Enter, or the pointer taking the
+    /// keyboard elsewhere: apply what was typed if it is a colour in any form
+    /// the field accepts, leave the field, and show the colour in force in its
+    /// full form, so a shorthand `F00` reads `FF0000` and a half-typed code is
+    /// replaced by the colour it did not change.
+    fn commit_hex(&mut self) {
+        self.try_apply_hex();
+        self.hex_focused = false;
+        self.sync_hex_from_hsv();
+    }
+
     /// Try to apply the hex input buffer to the color. If invalid, no change.
     fn try_apply_hex(&mut self) {
         if let Some(color) = parse_hex_color(&self.hex_input) {
@@ -1036,8 +1060,8 @@ impl ColorPickerDialog {
         }
     }
 
-    /// Handle a mouse event (coordinates relative to the dialog origin).
-    /// Handle a mouse event against a dialog of this size.
+    /// Handle a mouse event against a dialog of this size, at coordinates
+    /// relative to the dialog's origin.
     ///
     /// The size is required because the layout depends on it — the preset
     /// palette's column count is a function of the width — and a widget that
@@ -1059,6 +1083,18 @@ impl ColorPickerDialog {
 
         if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             let (x, y) = (event.x, event.y);
+
+            // The hex field takes the keyboard when it is clicked, and gives
+            // it up -- finishing the entry, as Enter does -- when anything
+            // else is. Nothing used to give the field the keyboard at all, so
+            // it was drawn and could never be typed in.
+            if hex_field_rect(layout.right_x, layout.hex_y, layout.right_width).contains(x, y) {
+                self.picker.hex_focused = true;
+                return None;
+            }
+            if self.picker.hex_focused {
+                self.picker.commit_hex();
+            }
 
             if let Some(color) = self
                 .hit_test_presets(&layout, x, y)
@@ -1310,32 +1346,21 @@ impl ColorPickerDialog {
             overflow: TextOverflow::Clip,
         });
 
-        // Input field
-        let input_x = x + 32.0;
-        let input_width = width - 32.0;
-        let border_color = if self.picker.hex_focused {
-            palette.blue
-        } else {
-            palette.surface2
-        };
-
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: y - 2.0,
-            width: input_width,
-            height: 22.0,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x: input_x,
-            y: y - 2.0,
-            width: input_width,
-            height: 22.0,
-            color: border_color,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        // Input field: the box every field is drawn in (`crate::field`), with
+        // the keyboard's mark while the hex digits are being typed. It was a
+        // box of its own whose focused edge was blue, not the accent.
+        let field = hex_field_rect(x, y, width);
+        let (input_x, input_width) = (field.x, field.w);
+        crate::field::draw(
+            cmds,
+            palette,
+            field,
+            crate::field::State {
+                focused: self.picker.hex_focused,
+                ..crate::field::State::default()
+            },
+            crate::style::FOCUS_RING_WIDTH,
+        );
 
         // "#" prefix
         cmds.push(RenderCommand::Text {
@@ -1359,6 +1384,13 @@ impl ColorPickerDialog {
             max_width: Some(input_width - 20.0),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+
+    /// Whether the hex field has the keyboard: typing goes into it, and Enter
+    /// applies what was typed rather than closing the dialog.
+    #[must_use]
+    pub fn hex_is_focused(&self) -> bool {
+        self.picker.hex_focused
     }
 
     fn render_eyedropper_button(
@@ -1966,6 +1998,23 @@ impl ColorPickerDialog {
 /// so storing a copy earned nothing. Found by removing this file's
 /// `#![allow(dead_code)]`, which had been suppressing the "never read"
 /// warning.
+/// Where the hex field is, for a hex row whose label starts at `(x, y)` in a
+/// column `width` wide: after the "Hex:" label, to the column's end. One
+/// rectangle for the drawing and the click.
+fn hex_field_rect(x: f32, y: f32, width: f32) -> crate::frame::Rect {
+    crate::frame::Rect::new(
+        x + HEX_LABEL_WIDTH,
+        y - 2.0,
+        (width - HEX_LABEL_WIDTH).max(0.0),
+        HEX_FIELD_HEIGHT,
+    )
+}
+
+/// The room the hex row's "Hex:" label takes before its field.
+const HEX_LABEL_WIDTH: f32 = 32.0;
+/// The hex field's height.
+const HEX_FIELD_HEIGHT: f32 = 22.0;
+
 struct DialogLayout {
     width: f32,
     /// Top-left corner of the saturation/value square, and its side.
@@ -2709,6 +2758,131 @@ mod tests {
         let result = dialog.handle_key(&event);
         assert!(matches!(result, Some(ColorPickerEvent::Confirmed(_))));
         assert!(dialog.is_confirmed());
+    }
+
+    /// **The hex field can be typed in.** A click on it gives it the keyboard
+    /// -- its focus mark shows, the digits typed go into it, and Enter applies
+    /// them instead of closing the dialog -- and a click anywhere else applies
+    /// what was typed and takes the keyboard back. Nothing gave the field the
+    /// keyboard before, so it was drawn and could never be typed in.
+    #[test]
+    fn the_hex_field_is_clicked_into_and_typed_in() {
+        let palette = Palette::for_mode(false);
+        let key = |key: Key, text: &str| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: text.to_string(),
+        };
+        let mut dialog = ColorPickerDialog::new(Color::rgb(100, 150, 200));
+        let layout = dialog.layout(400.0, 600.0);
+        let field = hex_field_rect(layout.right_x, layout.hex_y, layout.right_width);
+        let focus_edge = |dialog: &ColorPickerDialog| {
+            dialog.render(&palette, 400.0, 600.0).iter().any(|c| {
+                matches!(c, RenderCommand::StrokeRect { x, y, color, .. }
+                    if (*x, *y) == (field.x, field.y) && *color == palette.accent)
+            })
+        };
+        assert!(!dialog.hex_is_focused());
+        assert!(!focus_edge(&dialog));
+
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        assert!(
+            dialog.hex_is_focused(),
+            "a click did not give it the keyboard"
+        );
+        assert!(
+            focus_edge(&dialog),
+            "the field does not show it has the keyboard"
+        );
+
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "ff0000"));
+        let applied = dialog.handle_key(&key(Key::Enter, ""));
+        assert!(
+            !dialog.is_confirmed(),
+            "Enter in the field closed the dialog"
+        );
+        assert!(
+            matches!(applied, Some(ColorPickerEvent::Changed(c)) if (c.r, c.g, c.b) == (255, 0, 0))
+        );
+        assert!(
+            !dialog.hex_is_focused(),
+            "Enter applies and leaves the field"
+        );
+
+        // Typing, then clicking elsewhere, keeps what was typed.
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "00ff00"));
+        dialog.handle_mouse(&press(1.0, 1.0), 400.0, 600.0);
+        assert!(
+            !dialog.hex_is_focused(),
+            "a click elsewhere kept the keyboard"
+        );
+        let now = dialog.picker.current_color();
+        assert_eq!((now.r, now.g, now.b), (0, 255, 0));
+
+        // A half-typed code is not a colour: leaving the field shows the
+        // colour in force again rather than the fragment.
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "12"));
+        dialog.handle_mouse(&press(1.0, 1.0), 400.0, 600.0);
+        assert_eq!(dialog.picker.hex_input(), "00FF00");
+    }
+
+    /// **Only a whole code applies while typing.** The three-digit shorthand
+    /// is also the start of every longer code, so applying it as it was typed
+    /// flashed `FF0000` yellow at its third digit, and deleting a code a digit
+    /// at a time left the colour blue (`00F`). Typed, the shorthand waits for
+    /// Enter -- and then reads in full.
+    #[test]
+    fn only_a_whole_hex_code_applies_while_typing() {
+        let key = |key: Key, text: &str| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: text.to_string(),
+        };
+        let rgb = |p: &ColorPicker| {
+            let c = p.current_color();
+            (c.r, c.g, c.b)
+        };
+        let mut picker = ColorPicker::new(Color::rgb(0, 255, 0));
+        picker.hex_focused = true;
+        for _ in 0..6 {
+            picker.handle_key(&key(Key::Backspace, ""));
+            assert_eq!(rgb(&picker), (0, 255, 0), "deleting changed the colour");
+        }
+        for (typed, expect) in [
+            ("F", (0, 255, 0)),
+            ("F", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (255, 0, 0)),
+        ] {
+            picker.handle_key(&key(Key::A, typed));
+            assert_eq!(rgb(&picker), expect, "after {:?}", picker.hex_input());
+        }
+
+        // The shorthand, finished with Enter.
+        for _ in 0..6 {
+            picker.handle_key(&key(Key::Backspace, ""));
+        }
+        picker.handle_key(&key(Key::A, "00F"));
+        assert_eq!(rgb(&picker), (255, 0, 0), "a shorthand applied mid-entry");
+        picker.handle_key(&key(Key::Enter, ""));
+        assert_eq!(rgb(&picker), (0, 0, 255));
+        assert_eq!(picker.hex_input(), "0000FF", "the shorthand reads in full");
+        assert!(!picker.hex_focused);
     }
 
     #[test]

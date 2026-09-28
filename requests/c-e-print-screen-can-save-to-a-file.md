@@ -1,8 +1,19 @@
 # C -> E -- Print Screen can save to a file: the screenshot tool learns `--save`
 
 **From:** Lane C. **To:** Lane E (`apps/screenshot`).
-**Filed:** 2026-09-27. **Status:** OPEN -- the shell already sends the flag;
-the tool ignores it.
+**Filed:** 2026-09-27. **Status:** DONE (lane E, 2026-09-28) -- `screenshot
+<mode> --save` captures as the mode says, then puts up the Save dialog in the
+folder the tool saves to, under the name it would have used; the capture is
+written where the user chooses, and cancelling discards it and says so. Only
+that capture asks: the next takes the default action. A third word, `--save`
+first, or a mistyped mode is refused by name, exit 2.
+
+Found on the way, and worse: **none of the four chords opened the tool at
+all.** `main` handed `--fullscreen` to `app::launch`, which refuses every
+argument it does not take itself, so each Print Screen printed an error and
+exited. `main` parses with `ArgsOs` and calls `launch_with` now, as Settings
+does. (`apps/diskanalyzer <folder>` had the same fault and is fixed with it.)
+The capture itself still cannot happen (`CANNOT_CAPTURE`).
 
 **In short:** the operator asked for Print Screen shortcuts that save the
 capture as a file, asking where -- one for the whole screen, one for the

@@ -26,7 +26,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::container::{self, Av1Config, Clap, Colr, File, FourCc, Item, Meta, Property};
-use super::movie::{Repetition, Sample, Track};
+use super::movie::{Repetition, Sample, SampleTable, Track};
 use super::stream::Stream;
 use super::{Error, IMAGE_COUNT_LIMIT, obu, too_large};
 use crate::{ImageError, ImageResult, Limits};
@@ -167,9 +167,10 @@ pub(crate) struct Picture<'a> {
         expect(dead_code, reason = "only decoding reads it")
     )]
     pub(crate) frame_count: u32,
-    #[expect(
-        dead_code,
-        reason = "read by the animation that follows the first frame"
+    /// A sequence's timing; `None` for a still picture.
+    #[cfg_attr(
+        not(feature = "avif"),
+        expect(dead_code, reason = "only the animation reads it")
     )]
     pub(crate) timing: Option<Timing>,
 }
@@ -260,13 +261,20 @@ impl<'a> Picture<'a> {
     }
 }
 
-/// The sample `frame` of track `track`.
-fn track_sample(file: &File<'_>, track: usize, frame: u32) -> Result<Sample, Error> {
-    let table = file
-        .tracks
+/// The sample table of track `track`.
+pub(super) fn track_table<'f, 'a>(
+    file: &'f File<'a>,
+    track: usize,
+) -> Result<&'f SampleTable<'a>, Error> {
+    file.tracks
         .get(track)
         .and_then(|t| t.sample_table.as_ref())
-        .ok_or(Error::NoContent("AVIF track without samples"))?;
+        .ok_or(Error::NoContent("AVIF track without samples"))
+}
+
+/// The sample `frame` of track `track`.
+fn track_sample(file: &File<'_>, track: usize, frame: u32) -> Result<Sample, Error> {
+    let table = track_table(file, track)?;
     let mut found = None;
     let mut index = 0u32;
     table.samples(IMAGE_COUNT_LIMIT, file_size(file.bytes), |sample| {
@@ -280,13 +288,13 @@ fn track_sample(file: &File<'_>, track: usize, frame: u32) -> Result<Sample, Err
     found.ok_or(Error::NoContent("AVIF frame past the last"))
 }
 
-fn file_size(bytes: &[u8]) -> u64 {
+pub(super) fn file_size(bytes: &[u8]) -> u64 {
     u64::try_from(bytes.len()).unwrap_or(u64::MAX)
 }
 
 /// The memory reader's read of `size` bytes at `offset`, which the caller has
 /// checked lie in the file: `avifIOMemoryReaderRead`.
-fn read_file(bytes: &[u8], offset: u64, size: usize) -> Result<Cow<'_, [u8]>, Error> {
+pub(super) fn read_file(bytes: &[u8], offset: u64, size: usize) -> Result<Cow<'_, [u8]>, Error> {
     let start = usize::try_from(offset).map_err(|_| Error::Parse("AVIF offset"))?;
     let end = start.checked_add(size).ok_or(Error::Truncated)?;
     bytes

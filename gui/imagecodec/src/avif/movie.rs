@@ -157,33 +157,9 @@ impl<'a> SampleTable<'a> {
             .map(|d| d.properties.as_slice())
     }
 
-    /// `avifGetSampleCountOfChunk` for every chunk in turn: the samples in each,
-    /// by the last `stsc` entry (in the table's order) whose first chunk is at
-    /// or before it. libavif searches the entries afresh for each chunk; with
-    /// the entries sorted once, a table of a million of each is a million
-    /// steps rather than a trillion, and the answers are the same.
-    fn chunk_sample_counts(&self) -> impl Iterator<Item = u32> + '_ {
-        let mut order: Vec<(u32, usize)> = self
-            .sample_to_chunks
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.first_chunk, index))
-            .collect();
-        order.sort_unstable();
-        let mut next = 0usize;
-        let mut last: Option<usize> = None;
-        (0..self.chunks.len()).map(move |chunk| {
-            let number = u64::try_from(chunk).unwrap_or(u64::MAX).saturating_add(1);
-            while let Some(&(first, index)) = order.get(next) {
-                if u64::from(first) > number {
-                    break;
-                }
-                last = Some(last.map_or(index, |last| last.max(index)));
-                next = next.saturating_add(1);
-            }
-            last.and_then(|index| self.sample_to_chunks.get(index))
-                .map_or(0, |entry| entry.samples_per_chunk)
-        })
+    /// `avifGetSampleCountOfChunk` for every chunk in turn (see [`ChunkCounts`]).
+    fn chunk_sample_counts(&self) -> ChunkCounts {
+        ChunkCounts::new(self)
     }
 
     /// `avifCodecDecodeInputFillFromSampleTable`'s checks and walk: every
@@ -199,7 +175,8 @@ impl<'a> SampleTable<'a> {
     ) -> Result<u32, Error> {
         if image_count_limit > 0 {
             let mut left = image_count_limit;
-            for count in self.chunk_sample_counts() {
+            let mut counts = self.chunk_sample_counts();
+            while let Some(count) = counts.next(self) {
                 if count == 0 {
                     return Err(Error::Parse("AVIF chunk of no samples"));
                 }
@@ -209,37 +186,227 @@ impl<'a> SampleTable<'a> {
                 left = left.saturating_sub(count);
             }
         }
-        let mut size_index = 0usize;
+        let mut cursor = SampleCursor::new(self);
         let mut total = 0u32;
         let mut visiting = true;
-        for (&chunk_offset, count) in self.chunks.iter().zip(self.chunk_sample_counts()) {
+        while let Some(sample) = cursor.next(self, size_hint)? {
+            if visiting {
+                visiting = visit(sample);
+            }
+            total = total.saturating_add(1);
+        }
+        Ok(total)
+    }
+
+    /// The samples libavif marks as sync -- decodable without any frame before
+    /// them -- among the first `count`, as indices from 0, ascending: each
+    /// `stss` entry that names one of them (it numbers from 1), and frame 0,
+    /// which libavif takes to be one whatever `stss` says. A track without
+    /// `stss` therefore has frame 0 alone, although the format would call
+    /// every sample of such a track a sync sample: libavif reads it so, and
+    /// seeks from frame 0, which decodes the same frames only more slowly.
+    #[cfg(any(feature = "avif", test))] // the animation, and tests
+    pub(super) fn sync_frames(&self, count: u32) -> Vec<u32> {
+        let mut frames: Vec<u32> = self
+            .sync_samples
+            .iter()
+            .map(|&number| number.wrapping_sub(1))
+            .filter(|&frame| frame < count)
+            .collect();
+        if count > 0 {
+            frames.push(0);
+        }
+        frames.sort_unstable();
+        frames.dedup();
+        frames
+    }
+}
+
+/// The samples in each chunk in turn: `avifGetSampleCountOfChunk` for chunk 1,
+/// 2, ... -- by the last `stsc` entry (in the table's order) whose first chunk
+/// is at or before it. libavif searches the entries afresh for each chunk; with
+/// the entries sorted once, a table of a million of each is a million steps
+/// rather than a trillion, and the answers are the same.
+///
+/// It holds no borrow of its table, so that a cursor built on it can live
+/// beside the table in one owner; every call must be given the table it was
+/// made from.
+#[derive(Clone, Debug)]
+struct ChunkCounts {
+    /// The `stsc` entries' first chunks and positions, sorted.
+    order: Vec<(u32, usize)>,
+    /// The next entry of `order` not yet reached.
+    next_entry: usize,
+    /// The latest-in-table-order entry reached so far.
+    last: Option<usize>,
+    /// The next chunk's index.
+    chunk: usize,
+}
+
+impl ChunkCounts {
+    fn new(table: &SampleTable<'_>) -> Self {
+        let mut order: Vec<(u32, usize)> = table
+            .sample_to_chunks
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.first_chunk, index))
+            .collect();
+        order.sort_unstable();
+        Self {
+            order,
+            next_entry: 0,
+            last: None,
+            chunk: 0,
+        }
+    }
+
+    /// The next chunk's sample count, or `None` after the last chunk.
+    fn next(&mut self, table: &SampleTable<'_>) -> Option<u32> {
+        if self.chunk >= table.chunks.len() {
+            return None;
+        }
+        let number = u64::try_from(self.chunk)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        while let Some(&(first, index)) = self.order.get(self.next_entry) {
+            if u64::from(first) > number {
+                break;
+            }
+            self.last = Some(self.last.map_or(index, |last| last.max(index)));
+            self.next_entry = self.next_entry.saturating_add(1);
+        }
+        self.chunk = self.chunk.saturating_add(1);
+        Some(
+            self.last
+                .and_then(|index| table.sample_to_chunks.get(index))
+                .map_or(0, |entry| entry.samples_per_chunk),
+        )
+    }
+}
+
+/// A walk through a table's samples in order, a sample at a time: the walk
+/// [`SampleTable::samples`] makes, for a caller that takes each frame's bytes
+/// as it comes to it -- a sequence played from its start costs one step a
+/// frame, where finding frame *n* afresh costs *n*.
+///
+/// Like [`ChunkCounts`] it holds no borrow of its table, and must be given the
+/// same table at every step.
+#[derive(Clone, Debug)]
+pub(super) struct SampleCursor {
+    counts: ChunkCounts,
+    /// Samples left in the chunk being walked.
+    left: u32,
+    /// Where the next sample starts.
+    offset: u64,
+    /// The next sample's entry in `stsz`.
+    size_index: usize,
+    /// How many samples have been walked.
+    walked: u32,
+}
+
+impl SampleCursor {
+    pub(super) fn new(table: &SampleTable<'_>) -> Self {
+        Self {
+            counts: ChunkCounts::new(table),
+            left: 0,
+            offset: 0,
+            size_index: 0,
+            walked: 0,
+        }
+    }
+
+    /// How many samples this has walked: the index of the next.
+    #[cfg(any(feature = "avif", test))] // the animation, and tests
+    pub(super) const fn position(&self) -> u32 {
+        self.walked
+    }
+
+    /// The next sample, or `None` after the last -- or the reason libavif
+    /// refuses the table there, with the file `size_hint` bytes long (0: not
+    /// known).
+    pub(super) fn next(
+        &mut self,
+        table: &SampleTable<'_>,
+        size_hint: u64,
+    ) -> Result<Option<Sample>, Error> {
+        while self.left == 0 {
+            let chunk = self.counts.chunk;
+            let Some(count) = self.counts.next(table) else {
+                return Ok(None);
+            };
             if count == 0 {
                 return Err(Error::Parse("AVIF chunk of no samples"));
             }
-            let mut offset = chunk_offset;
-            for _ in 0..count {
-                let mut size = self.all_samples_size;
-                if size == 0 {
-                    size = *self
-                        .sample_sizes
-                        .get(size_index)
-                        .ok_or(Error::Parse("AVIF sample table cut short"))?;
-                }
-                let end = offset
-                    .checked_add(u64::from(size))
-                    .ok_or(Error::Parse("AVIF sample offset"))?;
-                if size_hint > 0 && end > size_hint {
-                    return Err(Error::Parse("AVIF sample past the end of the file"));
-                }
-                if visiting {
-                    visiting = visit(Sample { offset, size });
-                }
-                total = total.saturating_add(1);
-                offset = end;
-                size_index = size_index.saturating_add(1);
-            }
+            self.left = count;
+            self.offset = *table
+                .chunks
+                .get(chunk)
+                .ok_or(Error::Parse("AVIF sample table cut short"))?;
         }
-        Ok(total)
+        let mut size = table.all_samples_size;
+        if size == 0 {
+            size = *table
+                .sample_sizes
+                .get(self.size_index)
+                .ok_or(Error::Parse("AVIF sample table cut short"))?;
+        }
+        let offset = self.offset;
+        let end = offset
+            .checked_add(u64::from(size))
+            .ok_or(Error::Parse("AVIF sample offset"))?;
+        if size_hint > 0 && end > size_hint {
+            return Err(Error::Parse("AVIF sample past the end of the file"));
+        }
+        self.left = self.left.saturating_sub(1);
+        self.offset = end;
+        self.size_index = self.size_index.saturating_add(1);
+        self.walked = self.walked.saturating_add(1);
+        Ok(Some(Sample { offset, size }))
+    }
+}
+
+/// `avifSampleTableGetImageDelta` -- how long a frame lasts, in the track's
+/// timescale: the `stts` entry holding it, or the last entry for a frame past
+/// them all, or 1 for a table without entries, with libavif's running count
+/// kept in 32 bits and wrapping as it wraps.
+///
+/// libavif walks the entries from the first for every frame. For frames asked
+/// for in increasing order this resumes where the last frame left off, and the
+/// answers are the same: the first entry that holds a frame never comes before
+/// the one that held the frame before it (libavif's test is `index < running
+/// count`, and a larger index fails it wherever a smaller one did), wrapping
+/// included.
+#[cfg(any(feature = "avif", test))] // the animation, and tests
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Timeline {
+    /// The `stts` entry the last frame was found in.
+    entry: usize,
+    /// libavif's running count through the entries before `entry`.
+    before: u32,
+    /// The last frame asked about, which the next must not precede.
+    last: u32,
+}
+
+#[cfg(any(feature = "avif", test))] // the animation, and tests
+impl Timeline {
+    /// How long frame `index` lasts. A frame before the last one asked about
+    /// restarts the walk from the first entry.
+    pub(super) fn delta(&mut self, table: &SampleTable<'_>, index: u32) -> u32 {
+        if index < self.last {
+            *self = Self::default();
+        }
+        self.last = index;
+        let entries = &table.time_to_samples;
+        let count = entries.len();
+        while let Some(entry) = entries.get(self.entry) {
+            let through = self.before.wrapping_add(entry.sample_count);
+            if index < through || self.entry.saturating_add(1) == count {
+                return entry.sample_delta;
+            }
+            self.before = through;
+            self.entry = self.entry.saturating_add(1);
+        }
+        1
     }
 }
 
@@ -785,6 +952,119 @@ mod tests {
         parse_tref(&mut track, &tref).unwrap();
         assert_eq!((track.aux_for, track.prem_by), (3, 9));
         assert!(parse_tref(&mut Track::new(), &boxed(b"auxl", &[0, 0])).is_err());
+    }
+
+    fn timed(entries: &[(u32, u32)]) -> SampleTable<'static> {
+        SampleTable {
+            time_to_samples: entries
+                .iter()
+                .map(|&(sample_count, sample_delta)| TimeToSample {
+                    sample_count,
+                    sample_delta,
+                })
+                .collect(),
+            ..SampleTable::default()
+        }
+    }
+
+    /// libavif's `avifSampleTableGetImageDelta`, transcribed: the reference
+    /// the resuming walk is held to.
+    fn libavif_delta(table: &SampleTable<'_>, index: u32) -> u32 {
+        let mut max_sample_index = 0u32;
+        let count = table.time_to_samples.len();
+        for (i, entry) in table.time_to_samples.iter().enumerate() {
+            max_sample_index = max_sample_index.wrapping_add(entry.sample_count);
+            if index < max_sample_index || i == count - 1 {
+                return entry.sample_delta;
+            }
+        }
+        1
+    }
+
+    #[test]
+    fn a_frame_lasts_its_stts_entry_s_delta_as_libavif_finds_it() {
+        let fresh = |t: &SampleTable<'_>, i| Timeline::default().delta(t, i);
+        // No entries: one tick.
+        assert_eq!(fresh(&timed(&[]), 0), 1);
+        // Two frames of 10, three of 20, and past them the last entry's.
+        let t = timed(&[(2, 10), (3, 20)]);
+        assert_eq!(
+            [0, 1, 2, 4, 5, 99].map(|i| fresh(&t, i)),
+            [10, 10, 20, 20, 20, 20]
+        );
+        // libavif's running count is 32 bits and wraps: frame 3 is not in the
+        // entry whose count carries it past 2^32, but in the next.
+        let t = timed(&[(1, 10), (u32::MAX, 20), (5, 30), (1, 40)]);
+        assert_eq!(fresh(&t, 0), 10);
+        assert_eq!(fresh(&t, 3), 30);
+        assert_eq!(libavif_delta(&t, 3), 30);
+    }
+
+    #[test]
+    fn resuming_the_walk_answers_as_walking_afresh_in_any_order() {
+        let tables = [
+            timed(&[(2, 10), (3, 20), (1, 5)]),
+            timed(&[(1, 10), (u32::MAX, 20), (5, 30), (1, 40)]),
+            timed(&[(0, 7), (0, 8), (4, 9)]),
+            timed(&[(3, 1)]),
+        ];
+        let orders: [&[u32]; 3] = [
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8],
+            &[8, 0, 4, 4, 2, 7, 1, 1, 0, 6],
+            &[3, 3, 3, 5, 0, 9, 2],
+        ];
+        for table in &tables {
+            for order in orders {
+                let mut timeline = Timeline::default();
+                for &index in order {
+                    assert_eq!(
+                        timeline.delta(table, index),
+                        libavif_delta(table, index),
+                        "frame {index} of {:?}",
+                        table.time_to_samples
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_sync_frames_are_stss_s_from_one_and_frame_0() {
+        let table = |numbers: &[u32]| SampleTable {
+            sync_samples: numbers.to_vec(),
+            ..SampleTable::default()
+        };
+        // 3 and 1 name frames 2 and 0; 0 wraps to a frame past the end, and 9
+        // is past it too, so both are passed over as libavif passes them.
+        assert_eq!(table(&[3, 1, 3, 0, 9]).sync_frames(5), [0, 2]);
+        // Without stss, frame 0 alone.
+        assert_eq!(table(&[]).sync_frames(5), [0]);
+        assert!(table(&[1]).sync_frames(0).is_empty());
+    }
+
+    #[test]
+    fn a_cursor_walks_the_samples_the_whole_walk_visits() {
+        let t = table(
+            &[100, 500, 900],
+            &[(1, 2), (3, 1)],
+            &[10, 20, 30, 40, 50],
+            0,
+        );
+        let mut cursor = SampleCursor::new(&t);
+        let mut stepped = Vec::new();
+        while let Some(sample) = cursor.next(&t, 0).unwrap() {
+            stepped.push(sample);
+            assert_eq!(cursor.position() as usize, stepped.len());
+        }
+        assert_eq!(stepped, walk(&t, 0, 0).unwrap());
+        // Once done, it stays done.
+        assert_eq!(cursor.next(&t, 0).unwrap(), None);
+        // A table libavif refuses is refused where the walk reaches the fault.
+        let t = table(&[0], &[(1, 3)], &[1, 2], 0);
+        let mut cursor = SampleCursor::new(&t);
+        assert!(cursor.next(&t, 0).unwrap().is_some());
+        assert!(cursor.next(&t, 0).unwrap().is_some());
+        assert!(cursor.next(&t, 0).is_err());
     }
 
     #[test]

@@ -114,9 +114,11 @@
 //! parser; the AV1 frames decoded by rav1d (dav1d in Rust) as libavif drives
 //! dav1d; and the YUV converted to pixels by ports of libavif's and libyuv's
 //! arithmetic, so that a picture comes out as Chrome and Pillow show it, to
-//! the last bit. A sequence decodes to its first frame. Built without the
-//! default `avif` feature, the container is still read and [`decode`] refuses
-//! the picture by name. See [`avif`].
+//! the last bit. For a sequence [`decode`] gives the first frame, and
+//! `avif::Animation` plays every frame in turn -- in order, or from the
+//! nearest key frame to any one asked for -- as libavif decodes them. Built
+//! without the default `avif` feature, the container is still read and
+//! [`decode`] refuses the picture by name. See [`avif`].
 //!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],

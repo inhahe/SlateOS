@@ -14,7 +14,9 @@
 //! drained, exactly as libavif does, so a sample holding more than one frame
 //! behaves as it does there. Where libavif would reuse one decoder for all
 //! of a grid's tiles it does here too; the pictures are the same either way,
-//! since every tile is a key frame.
+//! since every tile is a key frame. A sequence's decoders are kept from one
+//! frame to the next in a [`Codecs`], which the animation (`animation.rs`)
+//! holds for as long as it plays.
 //!
 //! After decoding, Chrome's checks apply: a frame whose size, depth or chroma
 //! layout is not the container's is refused, as Chrome refuses it (libavif
@@ -324,23 +326,89 @@ struct DecodedTile<T> {
     planes: [Option<Plane<T>>; 3],
 }
 
-/// Decode frame `frame` of `picture`: `avifDecoderNextImage`.
+/// The picture's layers in libavif's order: colour, then alpha if there is
+/// one; `true` marks alpha.
+pub(crate) fn layers<'p>(picture: &'p Picture<'_>) -> Vec<(&'p Layer, bool)> {
+    core::iter::once((&picture.color, false))
+        .chain(picture.alpha.iter().map(|a| (a, true)))
+        .collect()
+}
+
+/// The AV1 decoders of a picture, as libavif makes its codecs
+/// (`avifDecoderCreateCodecs`): one for every tile, or one for them all when
+/// libavif shares one (`avifTilesCanBeDecodedWithSameCodecInstance`). Each is
+/// opened with its tile's settings when its first frame is decoded.
+///
+/// Those that must outlive a frame are kept here: the shared one, and each of
+/// a sequence's, whose frames after a key frame are predicted from the frames
+/// before -- so a sequence is decoded frame after frame through one `Codecs`,
+/// and dropping it (libavif's `avifDecoderFlush`) is how decoding restarts at a
+/// key frame. A still picture's unshared tiles are each decoded once, so each
+/// of their decoders is dropped when its tile is done, where libavif keeps
+/// them all until the picture is: a grid may have 65,536 tiles, and a decoder
+/// apiece at once would be a great deal of memory to spend for no difference
+/// in the pixels.
+pub(crate) struct Codecs {
+    shared: bool,
+    /// The shared decoder at 0, or each sequence tile's at its position
+    /// (colour tiles first, then alpha); empty for a still picture's
+    /// unshared tiles.
+    kept: Vec<Option<Decoder>>,
+}
+
+impl Codecs {
+    pub(crate) fn new(picture: &Picture<'_>) -> Self {
+        let layers = layers(picture);
+        let shared = one_decoder(picture, &layers);
+        let tiles = || layers.iter().flat_map(|(l, _)| l.tiles.iter());
+        let kept = if shared {
+            1
+        } else if tiles().any(|t| matches!(t.input, TileInput::Track { .. })) {
+            tiles().count()
+        } else {
+            0
+        };
+        Self {
+            shared,
+            kept: (0..kept).map(|_| None).collect(),
+        }
+    }
+
+    /// Where the decoder of tile `index` (counting colour tiles, then alpha)
+    /// is kept, if it is kept.
+    fn slot(&mut self, index: usize) -> Option<&mut Option<Decoder>> {
+        let index = if self.shared { 0 } else { index };
+        self.kept.get_mut(index)
+    }
+}
+
+/// Decode frame `frame` of `picture` with decoders of its own:
+/// `avifDecoderNextImage` for a picture's only frame, or a sequence's first.
 pub(crate) fn decode(picture: &Picture<'_>, frame: u32) -> Result<Decoded, Error> {
     // avifDecoderPrepareTiles: every tile's bytes, colour then alpha, before
     // anything is decoded.
-    let layers: Vec<(&Layer, bool)> = core::iter::once((&picture.color, false))
-        .chain(picture.alpha.iter().map(|a| (a, true)))
-        .collect();
     let mut samples = Vec::new();
-    for (layer, _) in &layers {
+    for (layer, _) in layers(picture) {
         for tile in &layer.tiles {
             samples.push(picture.sample(tile, frame, 0)?);
         }
     }
+    decode_samples(picture, &samples, &mut Codecs::new(picture))
+}
+
+/// Decode one frame from its tiles' `samples` (colour tiles, then alpha, as
+/// [`layers`] orders them) with `codecs`: the part of `avifDecoderNextImage`
+/// after the samples are prepared.
+pub(crate) fn decode_samples(
+    picture: &Picture<'_>,
+    samples: &[alloc::borrow::Cow<'_, [u8]>],
+    codecs: &mut Codecs,
+) -> Result<Decoded, Error> {
+    let layers = layers(picture);
     if picture.depth > 8 {
-        decode_as::<u16>(picture, &layers, &samples).map(Decoded::Deep)
+        decode_as::<u16>(picture, &layers, samples, codecs).map(Decoded::Deep)
     } else {
-        decode_as::<u8>(picture, &layers, &samples).map(Decoded::Eight)
+        decode_as::<u8>(picture, &layers, samples, codecs).map(Decoded::Eight)
     }
 }
 
@@ -376,17 +444,11 @@ fn decode_as<T: Sample>(
     picture: &Picture<'_>,
     layers: &[(&Layer, bool)],
     samples: &[alloc::borrow::Cow<'_, [u8]>],
+    codecs: &mut Codecs,
 ) -> Result<Yuv<T>, Error> {
-    let shared = one_decoder(picture, layers);
-    let first_tile = layers
-        .first()
-        .and_then(|(l, _)| l.tiles.first())
-        .ok_or(Error::MissingImage)?;
-    let mut shared_decoder = if shared {
-        Some(Decoder::new(&settings(first_tile)).map_err(|_| decode_failed(false))?)
-    } else {
-        None
-    };
+    if layers.first().and_then(|(l, _)| l.tiles.first()).is_none() {
+        return Err(Error::MissingImage);
+    }
 
     let mut image = Yuv::<T> {
         width: picture.width,
@@ -407,14 +469,21 @@ fn decode_as<T: Sample>(
         let mut first: Option<TileProps> = None;
         for (tile_index, tile) in layer.tiles.iter().enumerate() {
             let sample = samples.get(sample_index).ok_or(Error::MissingImage)?;
-            sample_index = sample_index.saturating_add(1);
-            // Otherwise one decoder per tile, as libavif makes them.
+            // The shared decoder, or this tile's -- kept for the next frame
+            // if it is a sequence's, and otherwise dropped with the tile.
             let mut own_decoder = None;
-            let decoder = match shared_decoder.as_mut() {
-                Some(decoder) => decoder,
+            let decoder = match codecs.slot(sample_index) {
+                Some(slot) => {
+                    if slot.is_none() {
+                        *slot =
+                            Some(Decoder::new(&settings(tile)).map_err(|_| decode_failed(alpha))?);
+                    }
+                    slot.as_mut().ok_or_else(|| decode_failed(alpha))?
+                }
                 None => own_decoder
                     .insert(Decoder::new(&settings(tile)).map_err(|_| decode_failed(alpha))?),
             };
+            sample_index = sample_index.saturating_add(1);
             let spatial_id = match tile.input {
                 TileInput::Item { spatial_id, .. } => spatial_id,
                 TileInput::Track { .. } => None,

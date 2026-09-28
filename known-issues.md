@@ -171521,7 +171521,10 @@ rewritten after encoding (the way `generate_avif_pixels.py` rewrites `colr`).
 
 ### [F] An AVIF sequence decodes to its first frame only -- 2026-09-27
 
-**Status:** OPEN (lane F).
+**Status:** FIXED on `lane-f` 2026-09-27 (`imagecodec::avif::Animation`,
+`src/avif/animation.rs`); moves to `known-issues-resolved.md` once on `main`
+through a boot test. The viewer playing it is lane E's
+(`requests/f-bce-avif-pictures-open-and-animate.md`).
 
 **In short:** an animated AVIF shows as a still picture -- its first frame.
 GIF and WebP animate, through `gif::Animation` and `webp::Animation`.

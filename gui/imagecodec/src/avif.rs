@@ -46,9 +46,13 @@
 //! every 8-bit colour one (without alpha, Pillow asks libavif for 24-bit RGB,
 //! which libyuv converts from deep or grey pictures by other routes).
 //!
-//! Not yet: a sequence decodes to its first frame only, and a frame coded at
-//! another size than its item's `ispe` -- which libavif rescales with libyuv's
-//! box filter -- is refused as unsupported.
+//! [`decode`] gives a sequence's first frame, which is what a thumbnail or a
+//! still viewer shows; [`Animation`] plays every frame, as libavif's
+//! `avifDecoderNextImage` and `avifDecoderNthImage` decode them
+//! (`avif/animation.rs`).
+//!
+//! Not yet: a frame coded at another size than its item's `ispe` -- which
+//! libavif rescales with libyuv's box filter -- is refused as unsupported.
 //!
 //! # Hostile input
 //!
@@ -66,6 +70,8 @@
 use crate::orientation::Orientation;
 use crate::{ColourModel, Image, ImageError, ImageResult, Limits, PixelFormat};
 
+#[cfg(feature = "avif")]
+mod animation;
 mod container;
 #[cfg(feature = "avif")]
 mod convert;
@@ -77,6 +83,9 @@ mod movie;
 mod obu;
 mod setup;
 mod stream;
+
+#[cfg(feature = "avif")]
+pub use animation::{Animation, Frame, Repeat};
 
 /// libavif's `avifResult`, as far as reading a file can produce one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,7 +222,13 @@ pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
 pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     let picture = setup::Picture::read(bytes)?;
     picture.check(limits)?;
-    let frame = decode::decode(&picture, 0)?;
+    shown(&picture, decode::decode(&picture, 0)?)
+}
+
+/// A decoded frame as it is shown: cropped as Chrome crops it, converted to
+/// pixels as Chrome has libavif convert them, and turned.
+#[cfg(feature = "avif")]
+fn shown(picture: &setup::Picture<'_>, frame: decode::Decoded) -> ImageResult<Image> {
     let frame = match picture.crop() {
         Some(rect) => frame
             .view(rect.x, rect.y, rect.width, rect.height)

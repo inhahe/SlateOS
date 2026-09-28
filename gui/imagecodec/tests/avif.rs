@@ -12,6 +12,11 @@
 //! The pixel fixtures (`avifpx_*`, from `tests/data/generate_avif_pixels.py`)
 //! are made here, one for each way libavif converts a decoded picture to RGB,
 //! and each is held to Pillow's pixels byte for byte.
+//!
+//! The sequences -- libavif's four `avif_colors_animated_*`, and the
+//! `avifseq_*` made by `tests/data/generate_avif_frames.py` -- are played
+//! through `avif::Animation`, in order and out of it, and every frame is held
+//! to Pillow's pixels and duration.
 
 #![allow(
     clippy::unwrap_used,
@@ -289,6 +294,199 @@ fn a_damaged_file_decodes_or_is_refused_but_never_panics() {
             check(&bytes[..len], &format!("cut at {len}"));
         }
     }
+}
+
+/// One sequence's answers, from `avif_frames.txt`
+/// (`tests/data/generate_avif_frames.py`).
+#[cfg(feature = "avif")]
+struct Sequence {
+    name: String,
+    alpha: bool,
+    size: (u32, u32),
+    frames: usize,
+    repeat: avif::Repeat,
+    /// Each frame's duration and CRC-32, or `None` where libavif has no image.
+    each: Vec<Option<(u32, u32)>>,
+}
+
+#[cfg(feature = "avif")]
+fn sequences() -> Vec<Sequence> {
+    let path = format!("{}/tests/data/avif_frames.txt", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    text.lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let words: Vec<&str> = line.split('\t').collect();
+            let (width, height) = words[2].split_once('x').unwrap();
+            let repeat = match words[4] {
+                "forever" => avif::Repeat::Forever,
+                count => {
+                    avif::Repeat::Count(count.strip_prefix("count ").unwrap().parse().unwrap())
+                }
+            };
+            let each = words[5]
+                .split(' ')
+                .map(|frame| {
+                    (frame != "end").then(|| {
+                        let (ms, crc) = frame.split_once(':').unwrap();
+                        (ms.parse().unwrap(), u32::from_str_radix(crc, 16).unwrap())
+                    })
+                })
+                .collect();
+            Sequence {
+                name: words[0].trim_end_matches(".avif").to_owned(),
+                alpha: words[1] == "RGBA",
+                size: (width.parse().unwrap(), height.parse().unwrap()),
+                frames: words[3].parse().unwrap(),
+                repeat,
+                each,
+            }
+        })
+        .collect()
+}
+
+/// `frame` against Pillow's answer for it.
+#[cfg(feature = "avif")]
+fn check_frame(seq: &Sequence, index: usize, frame: Option<avif::Frame<'_>>) {
+    let name = &seq.name;
+    match seq.each[index] {
+        Some((ms, crc)) => {
+            let frame = frame.unwrap_or_else(|| panic!("{name}: frame {index} missing"));
+            assert_eq!(frame.index, index, "{name}");
+            assert_eq!(frame.duration_ms, ms, "{name}: frame {index}'s duration");
+            assert_eq!((frame.image.width, frame.image.height), seq.size, "{name}");
+            let ours = crc32::crc32(&pillow_bytes(&frame.image.pixels, seq.alpha));
+            assert_eq!(ours, crc, "{name}: frame {index} differs from Pillow's");
+        }
+        None => assert!(
+            frame.is_none(),
+            "{name}: frame {index} has no alpha to decode"
+        ),
+    }
+}
+
+/// Every frame of every sequence -- libavif's own four and the three made
+/// here -- decoded in order, twice over with a rewind between (which drops
+/// the decoders and starts them again), each held to Pillow's pixels and
+/// duration; the structure to Pillow's and to libavif's rule for repetition;
+/// and the first frame to what `decode` gives a still viewer.
+#[cfg(feature = "avif")]
+#[test]
+fn every_sequence_plays_frame_by_frame_as_pillow_decodes_it() {
+    let all = sequences();
+    assert_eq!(all.len(), 7);
+    for seq in &all {
+        let name = &seq.name;
+        let bytes = read(name);
+        let mut animation = avif::Animation::new(&bytes, Limits::default()).unwrap();
+        assert_eq!(animation.frame_count(), seq.frames, "{name}");
+        assert_eq!(animation.size(), seq.size, "{name}");
+        assert_eq!(animation.has_alpha(), seq.alpha, "{name}");
+        assert_eq!(animation.repeat(), seq.repeat, "{name}");
+        let still = decode(&bytes, Limits::default()).unwrap();
+        for play in 0..2 {
+            for index in 0..seq.frames {
+                let frame = animation
+                    .next_frame()
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                if index == 0 {
+                    assert_eq!(frame.map(|f| f.image), Some(&still), "{name}");
+                }
+                let ended = frame.is_none();
+                check_frame(seq, index, frame);
+                if ended {
+                    break;
+                }
+            }
+            assert!(
+                animation.next_frame().unwrap().is_none(),
+                "{name}: play {play}"
+            );
+            animation.rewind();
+        }
+    }
+}
+
+/// Frames asked for out of order -- `avifDecoderNthImage`'s every case: the
+/// next frame, the current one again, a frame behind (restart at its key
+/// frame), a frame ahead past a key frame (restart there), a frame ahead with
+/// no key frame between (decode on) -- are the frames played in order. The
+/// 12-bit sequence's key frames are 0, 2 and 3, so frames 1 and 4 can only be
+/// reached through the one before.
+#[cfg(feature = "avif")]
+#[test]
+fn a_sequence_s_frames_are_the_same_in_any_order() {
+    for seq in &sequences() {
+        let name = &seq.name;
+        let bytes = read(name);
+        let mut animation = avif::Animation::new(&bytes, Limits::default()).unwrap();
+        let last = seq.frames - 1;
+        let order = [last, 1, last - 1, last - 1, 0, last, 2, 1, 3.min(last), 0];
+        for &index in &order {
+            let frame = animation
+                .seek(index)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            check_frame(seq, index, frame);
+        }
+        // Playing on from a frame sought continues with the frame after.
+        animation.seek(1).unwrap();
+        check_frame(seq, 2, animation.next_frame().unwrap());
+        // And past the last frame there is none.
+        assert!(animation.seek(seq.frames).unwrap().is_none(), "{name}");
+    }
+}
+
+/// Damage to a sequence's boxes and to its AV1 data -- every byte inverted in
+/// turn, and the file cut short at every length -- is refused or played, but
+/// never panics, and never yields a frame of another size than it says.
+#[cfg(feature = "avif")]
+#[test]
+fn a_damaged_sequence_plays_or_is_refused_but_never_panics() {
+    let bytes = read("avifseq_8_rgba_short_alpha");
+    let check = |data: &[u8], what: &str| {
+        let Ok(mut animation) = avif::Animation::new(data, Limits::default()) else {
+            return;
+        };
+        let size = animation.size();
+        for _ in 0..animation.frame_count() {
+            match animation.next_frame() {
+                Ok(Some(frame)) => {
+                    let image = frame.image;
+                    assert_eq!((image.width, image.height), size, "{what}");
+                    assert_eq!(
+                        image.pixels.len(),
+                        size.0 as usize * size.1 as usize,
+                        "{what}"
+                    );
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+        // Seeking back after whatever happened must not panic either.
+        let _ = animation.seek(0);
+    };
+    let mut damaged = bytes.clone();
+    for at in 0..bytes.len() {
+        damaged[at] ^= 0xff;
+        check(&damaged, &format!("byte {at} inverted"));
+        damaged[at] ^= 0xff;
+    }
+    for len in 0..bytes.len() {
+        check(&bytes[..len], &format!("cut at {len}"));
+    }
+}
+
+#[cfg(feature = "avif")]
+#[test]
+fn a_sequence_past_the_caller_s_limit_is_refused_before_decoding() {
+    let limits = Limits {
+        max_pixels: 150 * 150 - 1,
+        ..Limits::default()
+    };
+    assert!(matches!(
+        avif::Animation::new(&read("avif_colors_animated_8bpc"), limits),
+        Err(ImageError::TooLarge { .. })
+    ));
 }
 
 #[test]

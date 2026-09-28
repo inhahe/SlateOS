@@ -2525,8 +2525,14 @@ lane C's `guitk`.
     ports of libyuv's fixed point and libavif's floating point. Bit-exact
     against Pillow on 39 generated fixtures covering every conversion path,
     and on every file of the 224-file corpus where Pillow takes the same path.
-  - `[ ]` Sequences as an `Animation` (known-issues.md, "[F] An AVIF sequence
-    decodes to its first frame only").
+  - `[x]` Sequences as an `Animation` (`src/avif/animation.rs`): each track's
+    decoder kept from frame to frame, its samples walked in order, frames
+    reached out of order from the nearest key frame as `avifDecoderNthImage`
+    reaches them, durations and repetition as libavif reports them. Every
+    frame of seven sequences (libavif's four, and three made here for
+    durations, a finite loop and an alpha track that ends early), in order and
+    out of it, bit-exact against Pillow. Playing them in the viewer is lane
+    E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
   - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
     rescales them (known-issues.md, "[F] An AVIF frame coded at another
     size").

@@ -52,6 +52,7 @@
 //! approximations and neither is exact.
 
 use crate::errno;
+use core::sync::atomic::{AtomicI32, Ordering};
 
 #[inline]
 fn set(e: i32) {
@@ -1232,11 +1233,15 @@ pub extern "C" fn erfcf(x: f32) -> f32 {
 /// The sign of Γ(x) the last [`lgamma`] found, as C declares it: `int
 /// signgam`, which glibc exports (the symbol was missing until 2026-09-27).
 ///
-/// A plain global, as glibc's is: `lgamma` is not thread-safe for exactly
-/// this reason, and `lgamma_r` exists so that callers who care need not read
-/// it.
+/// One global, as glibc's is: `lgamma` is not thread-safe for exactly this
+/// reason, and `lgamma_r` exists so that callers who care need not read it.
+/// An `AtomicI32` rather than a `static mut` all the same: it has C's `int`
+/// layout, so a C program reads and assigns it as the `int` it declares, but
+/// two threads calling `lgamma` at once -- a C program's race, which C
+/// permits it to have -- are then not undefined behaviour inside this
+/// library. Relaxed: the value is one call's result, ordered with nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut signgam: i32 = 0;
+pub static signgam: AtomicI32 = AtomicI32::new(0);
 
 /// glibc's `w_lgamma_template.c`: `ERANGE` when a finite argument gives an
 /// infinity -- the poles at 0 and the negative integers, or overflow.
@@ -1250,10 +1255,7 @@ fn lgamma_errno(x: f64, y: f64) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgamma(x: f64) -> f64 {
     let (y, sign) = libm::lgamma_r(x);
-    // SAFETY: `signgam` is C's unsynchronised global, written by this call
-    // as glibc's `lgamma` writes it; a program that calls `lgamma` from two
-    // threads races on it in glibc too, and `lgamma_r` is the remedy.
-    unsafe { (&raw mut signgam).write(sign) };
+    signgam.store(sign, Ordering::Relaxed);
     lgamma_errno(x, y);
     y
 }
@@ -1262,8 +1264,7 @@ pub extern "C" fn lgamma(x: f64) -> f64 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf(x: f32) -> f32 {
     let (y, sign) = libm::lgammaf_r(x);
-    // SAFETY: as in `lgamma`.
-    unsafe { (&raw mut signgam).write(sign) };
+    signgam.store(sign, Ordering::Relaxed);
     lgamma_errno(f64::from(x), f64::from(y));
     y
 }
@@ -2746,8 +2747,41 @@ mod tests {
     // Gamma functions
     // -----------------------------------------------------------------------
 
+    /// `signgam` is one process-wide `int` by C's definition, and every
+    /// `lgamma`, `lgammaf`, `gamma` and `gammaf` call writes it: each test
+    /// that makes one -- directly, or through the oracle's table -- takes
+    /// this first, so [`lgamma_sets_signgam`] reads the sign its own call
+    /// left. Poison is recovered so that one real failure reports once.
+    static SIGNGAM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn signgam_lock() -> std::sync::MutexGuard<'static, ()> {
+        SIGNGAM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `lgamma` leaves the sign of Γ(x) in `signgam`: Γ is negative between
+    /// -1 and 0 and positive between -2 and -1, and positive for every
+    /// positive x.
+    #[test]
+    fn lgamma_sets_signgam() {
+        let _g = signgam_lock();
+        let sign = || signgam.load(Ordering::Relaxed);
+        let _ = lgamma(-0.5);
+        assert_eq!(sign(), -1, "gamma(-0.5) is -3.54");
+        let _ = lgamma(-1.5);
+        assert_eq!(sign(), 1, "gamma(-1.5) is 2.36");
+        let _ = lgamma(0.5);
+        assert_eq!(sign(), 1);
+        let _ = lgammaf(-0.5);
+        assert_eq!(sign(), -1, "and lgammaf writes the same global");
+        let _ = gamma(-2.5);
+        assert_eq!(sign(), -1, "gamma(-2.5) is -0.945; gamma is lgamma");
+    }
+
     #[test]
     fn test_lgamma_values() {
+        let _g = signgam_lock();
         // lgamma(1) = ln(0!) = ln(1) = 0.
         assert_approx(lgamma(1.0), 0.0, 1e-8, "lgamma(1)");
         // lgamma(2) = ln(1!) = ln(1) = 0.
@@ -2758,6 +2792,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_poles() {
+        let _g = signgam_lock();
         assert_eq!(lgamma(0.0), f64::INFINITY, "lgamma(0) = inf");
         assert_eq!(lgamma(-1.0), f64::INFINITY, "lgamma(-1) = inf");
     }
@@ -2877,6 +2912,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_r_sign() {
+        let _g = signgam_lock();
         let mut sign: i32 = 0;
         let val = lgamma_r(5.0, &mut sign);
         assert_approx(val, lgamma(5.0), EPS, "lgamma_r(5) value");
@@ -3904,6 +3940,7 @@ mod tests {
 
     #[test]
     fn lgammaf_values() {
+        let _g = signgam_lock();
         // lgamma(1) = ln(Γ(1)) = ln(1) = 0
         assert_approx(f64::from(lgammaf(1.0)), 0.0, 1e-5, "lgammaf(1)");
         // lgamma(2) = ln(Γ(2)) = ln(1) = 0
@@ -3914,6 +3951,7 @@ mod tests {
 
     #[test]
     fn lgammaf_poles() {
+        let _g = signgam_lock();
         // lgamma at non-positive integers → +inf.
         assert_eq!(lgammaf(0.0), f32::INFINITY, "lgammaf(0) = inf");
         assert_eq!(lgammaf(-1.0), f32::INFINITY, "lgammaf(-1) = inf");
@@ -4172,6 +4210,7 @@ mod tests {
 
     #[test]
     fn gammaf_is_lgammaf() {
+        let _g = signgam_lock();
         // gamma is a deprecated alias for lgamma.
         let vals = [1.0f32, 2.0, 5.0, 0.5];
         for &x in &vals {
@@ -4361,6 +4400,7 @@ mod tests {
 
     #[test]
     fn test_gamma_is_lgamma() {
+        let _g = signgam_lock();
         let vals = [1.0, 2.0, 5.0, 0.5, 10.0];
         for &x in &vals {
             #[allow(clippy::float_cmp)]
@@ -4909,6 +4949,7 @@ mod tests {
     /// rest.
     #[test]
     fn every_answer_is_glibcs_or_within_its_error() {
+        let _g = signgam_lock();
         let mut failures = Vec::new();
         let mut calls = 0usize;
         for line in ORACLE

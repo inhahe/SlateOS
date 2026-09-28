@@ -24,5 +24,8 @@ yamldoc = { path = "../../yamldoc" }
 # "Unsaved changes -- save them?", asked the way every editor here asks it.
 unsaved = { path = "../unsaved" }
 
+# The undo history: the toolkit's tree, kept of whole diagrams (C-Q24).
+statehistory = { path = "../statehistory" }
+
 [lints]
 workspace = true

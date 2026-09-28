@@ -2034,6 +2034,8 @@ dependencies = [
 name = "match3"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

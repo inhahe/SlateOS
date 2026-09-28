@@ -83126,6 +83126,31 @@ claim every lane can see at once (the same shared store the halts use); the
 change to `CLAUDE.md` that would make it a rule is put to the operator directly,
 because `CLAUDE.md` changes on the operator's own word, not on a relay.
 
+**As built (lane C, 2026-09-27): steps 1 and 2, and the shell's half of 3.**
+
+- **The inventory** is `gui/programs/INVENTORY.md`. There were fourteen sources,
+  not four: besides the four the question named, the kernel had eight more
+  modules with program or file-type data (`fs::defaultapps`,
+  `fs::associations`, `fs::mime`, `fs::filetype`, `fs::pinnedapps`,
+  `fs::startmenu`, `fs::applaunch`, and the empty `fs::openwith`/`fs::appstore`),
+  and the toolkit's file types and `gui/associations` hold the rest. Every item
+  is listed with where it now lives or why it does not; `tests/inventory.rs`
+  holds that to the code.
+- **The library** is `gui/programs` (the format is §1429): fifteen programs as
+  desktop entries, fifty type defaults, fourteen roles.
+- **Carried elsewhere:** 23 file extensions and nine kinds of content signature
+  into `guitk::filetypes`; the kernel's default pins into the shell's first
+  start. **Held back:** `.oga`, until lane E's File Associations test counts
+  audio types from the table (their 3275adc99), and nine file types the toolkit
+  had already decided to wait on.
+- **Read by the shell:** `launcher::builtin_app_database` is the library's list.
+  Found on the way: the shell's System Info row started `userspace/sysinfo`, the
+  command-line tool, rather than the window (`sysinfo-app`).
+- **Still to do:** lane E's programs read the library
+  (`requests/c-e-read-the-one-list-of-programs.md`), then lane A removes the
+  kernel's lists (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`
+  item 1).
+
 ## 1426. A daily backup runs at its time whether or not anyone is signed in, and a missed one runs as soon as the machine is on again
 
 **Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A, with a prompt for missed backups; the operator chose A without the prompt) &middot; **Lane:** C (the question), with D (the service), B (starting it) and E (the backup program)

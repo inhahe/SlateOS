@@ -1906,13 +1906,16 @@ live.
   **Lane E:** Settings changes the look through `set_surface_style` rather than
   assigning the field (`requests/c-e-the-operators-answers-c-q15-c-q16-c-q17-c-q19-c-q21.md` §5).
 
-- `[C]` **One list of the installed programs, in userspace** -- open (C-Q20,
-  §1425). First an inventory of all four lists -- the kernel's
-  `fs::appregistry`, the shell's database, `apps/fileassoc`, and the per-role
-  defaults of the deleted `default_apps.rs` (git history) -- into one table,
-  nothing dropped; then a library under `gui/` holding all of it, read by the
-  shell; then Settings, the file manager and file associations (lane E); only
-  then does lane A remove the kernel's registry.
+- `[C]` **One list of the installed programs, in userspace** -- **lane C's
+  steps done 2026-09-27** (C-Q20, §1425, §1429). The inventory
+  (`gui/programs/INVENTORY.md`: fourteen sources, every item and where it went),
+  the library (`gui/programs`: fifteen programs as desktop entries, fifty type
+  defaults, fourteen roles), the file types carried into `guitk::filetypes`, the
+  kernel's default pins as the shell's first start, and the shell reading the
+  library. **Waiting on others:** lane E's Settings, file manager, File
+  Associations and launcher read it (`requests/c-e-read-the-one-list-of-programs.md`);
+  then lane A removes the kernel's lists. **Lane C, when lane E's 3275adc99 is
+  on `main`:** add `.oga` to the toolkit's table and to the inventory test.
 
 - `[C]` **Automatic sign-in, with a key held at start-up to choose** --
   **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:

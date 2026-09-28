@@ -1012,6 +1012,12 @@ MUTATIONS = [
         "                Surface::Card,\n",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a score's value is the page's text on its box",
+        "            Ink::on(c.chrome.text, &[c.chrome.raised]).at(value_size, true),",
+        "            c.chrome.text,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -2080,13 +2080,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let mut p = Palette::for_mode(light);
-            p.set_surface_style(if cards {
-                guitk::palette::SurfaceStyle::Cards
-            } else {
-                guitk::palette::SurfaceStyle::Borders
-            });
+        for (look, p) in gamechrome::legibility::looks() {
             let c = Colours::of(&p);
             let off = guitk::button::paint(
                 &p,
@@ -2110,7 +2104,7 @@ mod tests {
                     let f = app.frame(size.0, size.1);
                     for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                         bad.push(format!(
-                            "{what}{how}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                            "{what}{how}, {look}: {:?} {:.2}:1 on {:?}",
                             r.text,
                             r.ratio(),
                             r.ground

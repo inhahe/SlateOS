@@ -2617,8 +2617,7 @@ mod tests {
     /// exempt, as WCAG exempts an inactive control.
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off key's label on a switched-off key's face: the
             // ink and the ground both, so a text that merely shares the
             // disabled grey -- the footer's, say -- is still held to the floor.
@@ -2666,7 +2665,7 @@ mod tests {
                 });
                 assert!(
                     bad.is_empty(),
-                    "sudoku, {what}, light: {light}: {:?}",
+                    "sudoku, {what}, {look}: {:?}",
                     bad.iter()
                         .map(|r| format!("{:?} {:.2}:1", r.text, r.ratio()))
                         .collect::<Vec<_>>()

@@ -1170,7 +1170,14 @@ impl BattleshipApp {
             corner_radii: CornerRadii::all(3.0),
         });
         let band = inset(l.message, l.pad);
-        let ink = Ink::new(l.font, FontWeightHint::Regular, c.chrome.text);
+        // Written for the bar, which is raised off the page: under a theme
+        // whose text is only as dark as the page needs, the page's text was
+        // 3.6:1 on it.
+        let ink = Ink::new(
+            l.font,
+            FontWeightHint::Regular,
+            c.chrome.on(c.chrome.raised).text,
+        );
         label_in(f, band, &self.message, ink);
         // The box a click is answered by is the whole bar, not the glyphs: the
         // message is what the bar is *for*, and an empty message would
@@ -1846,8 +1853,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let chrome = gamechrome::Chrome::of(&p);
             let off: Vec<_> = [chrome.band, chrome.page]
                 .into_iter()
@@ -1870,7 +1876,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground

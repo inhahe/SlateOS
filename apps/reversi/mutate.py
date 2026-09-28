@@ -728,6 +728,12 @@ MUTATIONS = [
         "        let read = |ink: Color| ink;",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "the score bar's counts are the page's text on its track",
+        "c.chrome.on(c.chrome.lit).text",
+        "c.chrome.text",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -1227,12 +1227,15 @@ impl Game2048 {
             Ink::on(c.chrome.dim, &[c.chrome.raised]).at(l.small.min(cap_h * 0.8), false),
             FontWeightHint::Regular,
         );
+        // The value too: under a theme whose text is only as dark as the
+        // page needs, the page's text was 3.6:1 on the box, drawn small.
+        let value_size = (l.font * 1.1).min((r.h - cap_h) * 0.8);
         centred(
             f,
             Rect::new(r.x, r.y + cap_h, r.w, r.h - cap_h),
             &value.to_string(),
-            (l.font * 1.1).min((r.h - cap_h) * 0.8),
-            c.chrome.text,
+            value_size,
+            Ink::on(c.chrome.text, &[c.chrome.raised]).at(value_size, true),
             FontWeightHint::Bold,
         );
     }
@@ -1681,8 +1684,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in LOOKS {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             // A switched-off button's label is exempt, as WCAG exempts an
             // inactive control: the pad once the game is over, Undo with
             // nothing to take back. They sit on the page.
@@ -1701,7 +1703,7 @@ mod tests {
             for (what, f) in every_look(&p) {
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground

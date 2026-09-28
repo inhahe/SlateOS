@@ -73,6 +73,10 @@ struct Colours {
     /// whichever of the text and the page stands off it.
     on_right: Color,
     on_wrong: Color,
+    /// A key's letter before it is guessed, on the key's raised face: the
+    /// text moved only as far as it must be to read there. Under a theme
+    /// whose text is only as dark as the page needs it was 3.6:1.
+    on_key: Color,
 }
 
 impl Colours {
@@ -93,6 +97,7 @@ impl Colours {
             lavender: p.ink(p.lavender),
             on_right: gamechrome::legible_on((p.text, p.base), p.ink(p.green)),
             on_wrong: gamechrome::legible_on((p.text, p.base), p.ink(p.red)),
+            on_key: gamechrome::Ink::on(p.text, &[p.surface0]).small,
         }
     }
 }
@@ -1761,7 +1766,7 @@ impl HangmanApp {
                         (self.colours.red, self.colours.on_wrong)
                     }
                 } else {
-                    (self.colours.surface0, self.colours.text)
+                    (self.colours.surface0, self.colours.on_key)
                 };
                 fill(f, r, bg, CornerRadii::all(4.0));
                 run_in(
@@ -2523,8 +2528,7 @@ mod tests {
     #[test]
     fn every_text_reads_on_what_is_under_it_in_either_theme() {
         let mut bad = Vec::new();
-        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
-            let p = palette(light, cards);
+        for (look, p) in gamechrome::legibility::looks() {
             let offs: Vec<_> = [p.base, p.mantle]
                 .into_iter()
                 .map(|ground| {
@@ -2547,7 +2551,7 @@ mod tests {
                 };
                 for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
                     bad.push(format!(
-                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        "{what}, {look}: {:?} {:.2}:1 on {:?}",
                         r.text,
                         r.ratio(),
                         r.ground

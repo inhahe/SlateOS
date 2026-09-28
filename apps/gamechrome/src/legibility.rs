@@ -13,8 +13,12 @@
 //! the middle of its line over the window's page. [`illegible`] holds each to
 //! the WCAG floor for its size (1.4.3: 4.5:1, or 3:1 for large text) and
 //! returns what falls short.
+//!
+//! [`looks`] is the palettes to read a game under: the stock ones, and the
+//! themes a user can put together that leave the stock ones' room out.
 
 use guitk::color::Color;
+use guitk::palette::{Palette, SurfaceStyle, ThemeColors};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::text;
 use guitk::theme::contrast_ratio;
@@ -258,9 +262,89 @@ pub fn illegible(cmds: &[RenderCommand], page: Color, exempt: impl Fn(&Read) -> 
         .collect()
 }
 
+/// The palettes a game's words are read under: each mode in each surface
+/// look, and the themes a user can put together that leave no room --
+/// named, for a test's messages.
+///
+/// The stock palettes' text and hues read on every ground a game fills
+/// itself -- a raised panel, a well, a board -- with room to spare, so a word
+/// the game forgot to move for such a ground passes under them. The palette
+/// holds a theme's text colours to 4.5:1 on its own text grounds
+/// ([`Palette::ink`]) and no further. These themes sit at that floor, so on a
+/// ground the game fills itself a word not moved for it falls short:
+///
+/// * **soft text**, light and dark: the text a mid grey -- Solarized's
+///   `#657b83` on light, `#839496` on dark -- which the palette moves only as
+///   far as the page needs, if at all;
+/// * **pale hues**, light: a light palette carrying a dark theme's pastels,
+///   which the palette's inks take down only as far as the page needs;
+/// * **deep hues**, dark: a dark palette carrying a light theme's deep
+///   shades, taken up only as far.
+#[must_use]
+pub fn looks() -> Vec<(String, Palette)> {
+    let mut out = Vec::new();
+    for cards in [false, true] {
+        let look = if cards { "cards" } else { "borders" };
+        for (name, mut p) in [
+            ("dark", Palette::for_mode(false)),
+            ("light", Palette::for_mode(true)),
+            (
+                "soft text, light",
+                soft_text(true, Color::from_hex(0x65_7B_83)),
+            ),
+            (
+                "soft text, dark",
+                soft_text(false, Color::from_hex(0x83_94_96)),
+            ),
+            ("pale hues, light", hues_of(true, &Palette::for_mode(false))),
+            ("deep hues, dark", hues_of(false, &Palette::for_mode(true))),
+        ] {
+            p.set_surface_style(if cards {
+                SurfaceStyle::Cards
+            } else {
+                SurfaceStyle::Borders
+            });
+            out.push((format!("{name}, {look}"), p));
+        }
+    }
+    out
+}
+
+/// A theme whose only change is its text colour, in one mode.
+fn soft_text(light: bool, text: Color) -> Palette {
+    let mut theme = ThemeColors::default();
+    let roles = if light {
+        &mut theme.light
+    } else {
+        &mut theme.dark
+    };
+    roles.insert("text".to_string(), text);
+    Palette::for_theme(light, &theme)
+}
+
+/// A palette for one mode carrying another palette's hues.
+fn hues_of(light: bool, from: &Palette) -> Palette {
+    let mut p = Palette::for_mode(light);
+    p.blue = from.blue;
+    p.green = from.green;
+    p.red = from.red;
+    p.yellow = from.yellow;
+    p.peach = from.peach;
+    p.lavender = from.lavender;
+    p.mauve = from.mauve;
+    p.sapphire = from.sapphire;
+    p.teal = from.teal;
+    p.sky = from.sky;
+    p.pink = from.pink;
+    p.rosewater = from.rosewater;
+    p.flamingo = from.flamingo;
+    p.maroon = from.maroon;
+    p
+}
+
 #[cfg(test)]
 // A test that panics on bad data is a test reporting a fault.
-#[allow(clippy::indexing_slicing, clippy::panic)]
+#[allow(clippy::indexing_slicing, clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
     use guitk::render::TextOverflow;
@@ -409,5 +493,79 @@ mod tests {
         let large = [text(4.0, 4.0, "large", mid, 30.0)];
         assert_eq!(illegible(&small, PAGE, |_| false).len(), 1);
         assert!(illegible(&large, PAGE, |_| false).is_empty());
+    }
+
+    #[test]
+    fn the_looks_are_each_palette_in_either_surface_look() {
+        let looks = looks();
+        let names: Vec<&str> = looks.iter().map(|(name, _)| name.as_str()).collect();
+        for palette in [
+            "dark",
+            "light",
+            "soft text, light",
+            "soft text, dark",
+            "pale hues, light",
+            "deep hues, dark",
+        ] {
+            for look in ["borders", "cards"] {
+                let want = format!("{palette}, {look}");
+                assert!(names.contains(&want.as_str()), "no {want:?} in {names:?}");
+            }
+        }
+        assert_eq!(looks.len(), 12, "{names:?}");
+        for (name, p) in &looks {
+            let cards = p.surface_style() == SurfaceStyle::Cards;
+            assert_eq!(
+                name.ends_with("cards"),
+                cards,
+                "{name} is drawn in the other look"
+            );
+        }
+        // The stock ones are the stock palettes.
+        for (name, light) in [("dark, borders", false), ("light, cards", true)] {
+            let p = &looks
+                .iter()
+                .find(|(n, _)| n == name)
+                .expect("named above")
+                .1;
+            let stock = Palette::for_mode(light);
+            assert_eq!(
+                (p.base, p.text, p.green, p.light),
+                (stock.base, stock.text, stock.green, light),
+                "{name}"
+            );
+        }
+    }
+
+    /// The point of the themes without room: a word in a role read as it is
+    /// on a ground a game fills itself -- a raised panel, under the bordered
+    /// look -- falls short under them, where under the stock palette it has
+    /// room to spare. Soft text leaves the text none; the hue themes leave
+    /// none to a good result's green.
+    #[test]
+    fn a_theme_without_room_leaves_a_raised_ground_none() {
+        for (name, p) in looks() {
+            if !name.ends_with("borders") {
+                continue;
+            }
+            let c = crate::Chrome::of(&p);
+            let role = if name.starts_with("soft text") {
+                c.text
+            } else if name.starts_with("pale hues") || name.starts_with("deep hues") {
+                c.good
+            } else {
+                // A stock palette's text has the room the others take away.
+                let raised = contrast_ratio(c.text, c.raised);
+                assert!(raised >= TEXT_FLOOR, "{name}: text at {raised:.2}:1 raised");
+                continue;
+            };
+            let page = contrast_ratio(role, c.page);
+            let raised = contrast_ratio(role, c.raised);
+            assert!(page >= TEXT_FLOOR, "{name}: {page:.2}:1 on the page");
+            assert!(
+                raised < TEXT_FLOOR,
+                "{name}: {raised:.2}:1 raised leaves room"
+            );
+        }
     }
 }

@@ -145,6 +145,30 @@ LEGIBILITY_MUTATIONS = [
         "    size >= 24.0 || (bold && size >= 24.0)",
         ["an_ink_is_picked_by_the_size_it_is_drawn_at"],
     ),
+    (
+        "the looks leave out the soft-text themes",
+        "            (\n                \"soft text, light\",\n                soft_text(true, Color::from_hex(0x65_7B_83)),\n            ),\n            (\n                \"soft text, dark\",\n                soft_text(false, Color::from_hex(0x83_94_96)),\n            ),\n",
+        "",
+        ["the_looks_are_each_palette_in_either_surface_look"],
+    ),
+    (
+        "a soft-text theme keeps the palette's text",
+        "    roles.insert(\"text\".to_string(), text);",
+        "    let _ = (roles, text);",
+        ["a_theme_without_room_leaves_a_raised_ground_none"],
+    ),
+    (
+        "a theme's hues are its own",
+        "    p.green = from.green;",
+        "",
+        ["a_theme_without_room_leaves_a_raised_ground_none"],
+    ),
+    (
+        "every look is bordered",
+        "            p.set_surface_style(if cards {\n                SurfaceStyle::Cards\n",
+        "            p.set_surface_style(if false {\n                SurfaceStyle::Cards\n",
+        ["the_looks_are_each_palette_in_either_surface_look"],
+    ),
 ]
 
 if __name__ == "__main__":

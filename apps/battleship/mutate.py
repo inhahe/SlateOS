@@ -451,6 +451,12 @@ MUTATIONS = [
         "        let ink = Ink::new(l.small, FontWeightHint::Bold, c.chrome.off);\n        let caption = side.caption();",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "the message is the page's text on its bar",
+        "            FontWeightHint::Regular,\n            c.chrome.on(c.chrome.raised).text,\n        );",
+        "            FontWeightHint::Regular,\n            c.chrome.text,\n        );",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
 ]
 
 if __name__ == "__main__":

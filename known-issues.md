@@ -169051,9 +169051,35 @@ the module names them; or, if the shell should have a launcher dialog after
 all, wire this one and delete lane E's copy -- a question for the operator, not
 a cleanup. Deleting is the default, since the start menu's search does the job.
 
-## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27)
+## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27) -- **FIXED 2026-09-27**
 
-**Status:** OPEN.
+**Status:** FIXED 2026-09-27, all three parts of the proper fix below.
+`--check` reports **1,451 defects, 0 stale, 0 ambiguous, 0 no-op**. (1) Every
+test that only stale entries proved is proven by a live one again. (2) Rather
+than retiring the remaining ~270 stale entries, each was **re-derived** at the
+site that now makes the same decision: most had rotted through a handful of
+tree-wide changes -- boxes became surfaces (`push_surface`; since §829 a card
+is outlined, not filled, so a frozen fill is the same call with that member of
+its paint replaced), glyphs became themed icons, hue text became inked
+(§837), captions moved from overlay0 to subtext0, the palette moved into the
+toolkit (§838), and the default shortcuts were cut back (§1416). Seven were
+retired instead, each leaving a `# RETIRED` record: duplicates of an edit
+another entry makes, or no-ops the design had since absorbed. Retiring was
+the cheaper option and the plan below chose it; re-deriving keeps what those
+entries uniquely proved, which is that a fixture reaches a branch (a
+hover-only button, an empty-list caption, a switcher edge case) -- retirement
+would have dropped exactly that. (3) `scripts/test-reintro-palette.py` holds
+the invariant on every boot (the boot test runs every `scripts/test-*.py`):
+the tree must check clean, and six controls prove `check()` still reports each
+kind of rot. Mutation-tested: a blind `check()`, a real rename in the tree
+and a crash on a deleted file each fail it.
+
+**Still to do, and tracked here until done:** a re-derived defect is checked
+to *apply*, not yet to be *caught*. Each batch is being run through the
+harness itself (`python scripts/reintro-palette.py <labels>`, ~3.5 min a
+defect, in a scratch worktree); a declaration a run shows to be wrong
+(`MISSING` or `UNDECLARED`) is corrected in the same pass. First results: the
+Run dialog's five and the widget layer's and the OSD's first batches.
 
 **In short:** `scripts/reintro-palette.py` proves the palette-conversion tests
 are real by putting each old colour back and checking a test fails. No gate

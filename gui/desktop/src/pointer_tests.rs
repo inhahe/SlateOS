@@ -190,6 +190,11 @@ fn the_start_button_opens_and_closes_the_menu() {
 
 /// The point of the whole exercise: the Settings entry a user sees in the start
 /// menu has to actually start the Settings application.
+///
+/// Scrolled to as a user would, a wheel detent at a time: the menu lists every
+/// program SlateOS has (fifteen since 2026-09-27, from `gui/programs`), and
+/// Settings is not in the first screenful. The test asserted it was, which was
+/// true of a ten-program table and says nothing about the click.
 #[test]
 fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
     let mut shell = shell();
@@ -202,12 +207,18 @@ fn clicking_settings_in_the_start_menu_asks_for_the_settings_program() {
             |row| matches!(row, crate::StartRow::Program { entry, .. } if entry.name == "Settings"),
         )
         .expect("the start menu must offer Settings");
-    assert!(
-        row < shell.start_menu_visible_rows(),
-        "Settings must be reachable without scrolling first"
-    );
+    let visible = shell.start_menu_visible_rows();
+    let (x, y) = centre(shell.start_menu_row_rect(0));
+    while row >= shell.start_menu_scroll + visible {
+        let before = shell.start_menu_scroll;
+        shell.handle_mouse(&scroll(x, y, -1.0));
+        assert!(
+            shell.start_menu_scroll > before,
+            "the list would not scroll as far as Settings"
+        );
+    }
 
-    let rect = shell.start_menu_row_rect(row);
+    let rect = shell.start_menu_row_rect(row - shell.start_menu_scroll);
     let action = choose_at(&mut shell, rect);
     assert_eq!(
         action,

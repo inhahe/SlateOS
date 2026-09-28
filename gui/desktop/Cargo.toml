@@ -103,6 +103,9 @@ appearance = { path = "../appearance" }
 # The installed programs' desktop entries: what the start menu lists, under
 # which folder, with which picture, and how each starts.
 desktopentry = { path = "../desktopentry" }
+# SlateOS's own programs, as desktop entries: the one list of programs
+# (design-decisions 1425), which replaced the table the shell kept itself.
+programs = { path = "../programs" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the

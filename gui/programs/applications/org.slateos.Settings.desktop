@@ -12,4 +12,21 @@ Exec=/usr/bin/settings
 TryExec=/usr/bin/settings
 Icon=preferences-system
 Categories=Settings;
+Actions=display;network;sound;
 Keywords=preferences;config;control;options;display;monitor;resolution;dpi;network;wifi;ethernet;vpn;internet;sound;audio;volume;speaker;microphone;
+
+# The three pages the shell's old table offered as rows of their own until
+# 2026-09-17, when they were folded into Settings because Settings could not
+# be asked for a page. `settings --page <name>` exists since lane E's
+# 3fc93a617, so they return as the entry's jump list.
+[Desktop Action display]
+Name=Display settings
+Exec=/usr/bin/settings --page display
+
+[Desktop Action network]
+Name=Network settings
+Exec=/usr/bin/settings --page network-status
+
+[Desktop Action sound]
+Name=Sound settings
+Exec=/usr/bin/settings --page sound

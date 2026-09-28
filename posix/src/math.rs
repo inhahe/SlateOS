@@ -1684,6 +1684,22 @@ fn lgammaf_ranged(x: f32) -> (f32, i32) {
     (y, sign.get())
 }
 
+/// For the tests: `signgam` is one process-wide `int` by C's definition, and
+/// every `lgamma`, `lgammaf`, `gamma`, `gammaf` and `lgammal` call writes it
+/// -- `mathl.rs`'s `lgammal` stores to this same global. Each test that makes
+/// one, in this module or in `mathl.rs`, directly or through an oracle's
+/// table, takes this first, so that `lgamma_sets_signgam` reads the sign its
+/// own call left. (Until 2026-09-28 the lock was `math.rs`'s tests' alone,
+/// and `mathl.rs`'s tests wrote `signgam` beside it -- a race the pre-push
+/// gate's shuffled orders could lose.) Poison is recovered so that one real
+/// failure reports once.
+#[cfg(test)]
+pub(crate) fn signgam_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// `log|Γ(x)|`, correctly rounded (CORE-MATH's: `lgamma.rs`), its sign
 /// stored in [`signgam`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -3197,17 +3213,10 @@ mod tests {
     // Gamma functions
     // -----------------------------------------------------------------------
 
-    /// `signgam` is one process-wide `int` by C's definition, and every
-    /// `lgamma`, `lgammaf`, `gamma` and `gammaf` call writes it: each test
-    /// that makes one -- directly, or through the oracle's table -- takes
-    /// this first, so [`lgamma_sets_signgam`] reads the sign its own call
-    /// left. Poison is recovered so that one real failure reports once.
-    static SIGNGAM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// [`super::signgam_test_lock`], which every test that calls `lgamma`
+    /// or one of its kin takes first.
     fn signgam_lock() -> std::sync::MutexGuard<'static, ()> {
-        SIGNGAM_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        super::signgam_test_lock()
     }
 
     /// `lgamma` leaves the sign of Γ(x) in `signgam`: Γ is negative between
@@ -4862,12 +4871,14 @@ mod tests {
 
     #[test]
     fn test_gamma_one() {
+        let _g = signgam_lock();
         // gamma(1) = lgamma(1) = ln(0!) = 0.
         assert_approx(gamma(1.0), 0.0, 1e-6, "gamma(1) ≈ 0");
     }
 
     #[test]
     fn test_gamma_two() {
+        let _g = signgam_lock();
         // gamma(2) = lgamma(2) = ln(1!) = 0.
         assert_approx(gamma(2.0), 0.0, 1e-6, "gamma(2) ≈ 0");
     }

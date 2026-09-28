@@ -5395,6 +5395,8 @@ mod tests {
     /// their leading digits; now all are within 3 ulps, most exact.
     #[test]
     fn lgammal_keeps_its_digits_near_the_zeros_below_minus_two() {
+        // lgammal writes signgam, which math.rs's tests read.
+        let _g = crate::math::signgam_test_lock();
         extended();
         let oracle = include_str!("lgammal_zero_oracle.txt");
         let line =
@@ -5584,6 +5586,8 @@ mod tests {
     /// with glibc's `errno`.
     #[test]
     fn every_call_answers_as_glibc_does() {
+        // lgammal writes signgam, which math.rs's tests read.
+        let _g = crate::math::signgam_test_lock();
         extended();
         let mut bad = Vec::new();
         let mut n = 0usize;
@@ -5641,6 +5645,8 @@ mod tests {
     /// rounding downward 6.
     #[test]
     fn computed_to_nearest_in_every_direction() {
+        // lgammal writes signgam, which math.rs's tests read.
+        let _g = crate::math::signgam_test_lock();
         let xs = [
             L::from_bits(0x3FFF, 0xC90F_DAA2_2168_C000),
             ld(core::f64::consts::PI),
@@ -5731,6 +5737,8 @@ mod tests {
     /// an infinity.
     #[test]
     fn exact_answers_in_every_direction() {
+        // lgammal writes signgam, which math.rs's tests read.
+        let _g = crate::math::signgam_test_lock();
         let max = L::from_bits(0x7FFE, u64::MAX);
         extended();
         let log1p_max = log1pl(max);
@@ -5823,6 +5831,8 @@ mod tests {
     /// the bound to nearest and one ulp more otherwise.
     #[test]
     fn every_call_answers_in_every_rounding_direction() {
+        // lgammal writes signgam, which math.rs's tests read.
+        let _g = crate::math::signgam_test_lock();
         let mut directed = std::collections::HashMap::new();
         for line in MODES_ORACLE.lines().filter(|l| !l.is_empty()) {
             let (mode, call) = line.split_once(' ').expect("a mode");

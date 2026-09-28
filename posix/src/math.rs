@@ -1405,10 +1405,11 @@ fn lgamma_errno(x: f64, y: f64) {
     }
 }
 
-/// `log|Γ(x)|`, its sign stored in [`signgam`].
+/// `log|Γ(x)|`, correctly rounded (CORE-MATH's: `lgamma.rs`), its sign
+/// stored in [`signgam`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgamma(x: f64) -> f64 {
-    let (y, sign) = libm::lgamma_r(x);
+    let (y, sign) = crate::lgamma::lgamma_cr(x);
     signgam.store(sign, Ordering::Relaxed);
     lgamma_errno(x, y);
     y
@@ -1417,7 +1418,7 @@ pub extern "C" fn lgamma(x: f64) -> f64 {
 /// [`lgamma`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf(x: f32) -> f32 {
-    let (y, sign) = libm::lgammaf_r(x);
+    let (y, sign) = crate::lgamma::lgammaf_cr(x);
     signgam.store(sign, Ordering::Relaxed);
     lgamma_errno(f64::from(x), f64::from(y));
     y
@@ -1427,7 +1428,7 @@ pub extern "C" fn lgammaf(x: f32) -> f32 {
 /// not written.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgamma_r(x: f64, sign: *mut i32) -> f64 {
-    let (y, s) = libm::lgamma_r(x);
+    let (y, s) = crate::lgamma::lgamma_cr(x);
     if !sign.is_null() {
         // SAFETY: non-null, and the caller's `int *`.
         unsafe { sign.write(s) };
@@ -1439,7 +1440,7 @@ pub extern "C" fn lgamma_r(x: f64, sign: *mut i32) -> f64 {
 /// [`lgamma_r`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf_r(x: f32, sign: *mut i32) -> f32 {
-    let (y, s) = libm::lgammaf_r(x);
+    let (y, s) = crate::lgamma::lgammaf_cr(x);
     if !sign.is_null() {
         // SAFETY: non-null, and the caller's `int *`.
         unsafe { sign.write(s) };
@@ -4734,16 +4735,14 @@ mod tests {
     /// Where a relative comparison says nothing: near a root of the
     /// function, a result of 1e-17 carrying an absolute error of 1e-17 is
     /// "a million ulps" off and as good as musl's formula can do. That is
-    /// every call of `lgamma` (roots where the gamma function is 1 or -1,
-    /// which glibc's `lgamma_neg.c` treats specially and musl does not, so
-    /// glibc is right there and we are not: known-issues.md,
-    /// D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS) and of the Bessel
-    /// functions (infinitely many roots), and the trigonometric functions
-    /// only at |x| >= 2^20, where a result near zero depends on the last bits
-    /// of the argument reduction.
+    /// every call of the Bessel functions (infinitely many roots), and of the
+    /// trigonometric functions only at |x| >= 2^20, where a result near zero
+    /// depends on the last bits of the argument reduction. (`lgamma` was here
+    /// until 2026-09-28, when CORE-MATH's correctly rounded one replaced
+    /// musl's; see lgamma.rs.)
     fn near_root(name: &str, x: f64) -> bool {
         match double_name(name) {
-            "lgamma" | "lgamma_r" | "gamma" | "j0" | "j1" | "y0" | "y1" | "jn" | "yn" => true,
+            "j0" | "j1" | "y0" | "y1" | "jn" | "yn" => true,
             "sin" | "cos" | "tan" | "sincos" => x.abs() >= 1_048_576.0,
             _ => false,
         }

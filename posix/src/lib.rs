@@ -396,6 +396,7 @@ pub mod langinfo;
 pub mod ld80;
 /// The C calling convention for `long double` (`ld_c!`).
 mod ld_abi;
+pub(crate) mod lgamma;
 pub mod libgen;
 pub mod libintl;
 pub mod limits;

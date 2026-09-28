@@ -18,7 +18,10 @@ tzrules = { path = "../tzrules" }
 # vendored exactly as crates.io publishes it (posix/vendor/README.md,
 # design-decisions.md section 1132). math.rs is the C ABI and glibc's errno
 # over it. Default features: "arch" lets it use SSE2's sqrt, which is exact.
-libm = { path = "vendor/libm" }
+# "unstable-public-internals" exports `support::hf64`/`hf32`, the const
+# hex-float parsers lgamma.rs spells CORE-MATH's constants with, as its C
+# does; it changes no code, only what is visible.
+libm = { path = "vendor/libm", features = ["unstable-public-internals"] }
 
 [lints]
 workspace = true

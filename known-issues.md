@@ -175437,7 +175437,9 @@ whole image again. A window leaving the stream takes its images with it.
 Tests: capture, encode, decode and `apply_scene_frame` end to end, with an
 upload, a patch, a drop and a late-joining viewer.
 
-## D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS — `lgamma`, `lgammaf` and `lgammal` are only absolutely accurate where the gamma function is +-1 below -2 (lane D, 2026-09-28) — **Status: OPEN**
+## D-POSIX-LGAMMA-LOSES-DIGITS-NEAR-NEGATIVE-ROOTS — `lgamma`, `lgammaf` and `lgammal` are only absolutely accurate where the gamma function is +-1 below -2 (lane D, 2026-09-28) — **Status: OPEN for `lgammal` only (`lgamma` and `lgammaf` FIXED 2026-09-28: CORE-MATH's, correctly rounded, `posix/src/lgamma.rs`)**
+
+**Status (2026-09-28):** `lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r`, `gamma` and `gammaf` are CORE-MATH's correctly rounded functions now (MIT, ported in `posix/src/lgamma.rs`), checked bit for bit against its C on every float and on 1.6 million hard and 2 billion random doubles in all four rounding directions; `math.rs`'s glibc replay no longer excuses them (`near_root`). The first row of the table below is 5.619192358950097e-17 now, 0.17 ulp from mpmath's value. What is left is `lgammal`: CORE-MATH has no 80-bit `lgamma`, so `mathl.rs` still has musl's, and `mathl.rs`'s replay still compares it by absolute error near the zeros. The proper fix below stands for it.
 
 **In short:** `lgamma(x)` is the logarithm of |gamma(x)|. Below -2 the
 gamma function passes through 1 or -1 twice in every unit interval, so

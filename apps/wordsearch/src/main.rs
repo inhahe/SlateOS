@@ -37,15 +37,19 @@
 //! [`Frame::hit`](guitk::frame::Frame::hit), which is what lets a test click a
 //! button by name and what lets the pointer find a cell.
 
+use gamechrome::Ink;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seed_from_system};
 use std::cmp::Ordering;
@@ -55,22 +59,86 @@ use std::time::Duration;
 /// The frame this program draws into, with its own control identifiers.
 pub type Frame = guitk::frame::Frame<Target>;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// How much of the palette's green tints a found word's squares, and of its
+// blue the squares being marked, out of 255: shared by the drawing and by
+// `Colours::of`, which reads the letters against the tinted squares.
+const FOUND_ALPHA: u8 = 40;
+const MARK_ALPHA: u8 = 60;
+
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+
+    /// A letter, by the ground it sits on: the hint's yellow, a found word's
+    /// green tint, the anchor's mauve, the marking's blue tint, or a plain
+    /// square. The palette's inks are made for the page; each is moved only
+    /// as far as it must be to read on its own ground (`gamechrome::Ink`).
+    on_hint: Ink,
+    found: Ink,
+    on_anchor: Ink,
+    marking: Ink,
+    letter: Ink,
+    /// A found word in the list, on its row.
+    done: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        // A square's tints are laid over the page.
+        let found = with_alpha(p.green, FOUND_ALPHA).over(p.base);
+        let marking = with_alpha(p.blue, MARK_ALPHA).over(p.base);
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            yellow: p.ink(p.yellow),
+            mauve: p.ink(p.mauve),
+            lavender: p.ink(p.lavender),
+            on_hint: Ink::on(p.base, &[p.ink(p.yellow)]),
+            found: Ink::on(p.ink(p.green), &[found]),
+            on_anchor: Ink::on(p.base, &[p.ink(p.mauve)]),
+            marking: Ink::on(p.ink(p.blue), &[marking]),
+            letter: Ink::on(p.text, &[p.surface0]),
+            done: Ink::on(p.subtext0, &[p.surface1]).small,
+        }
+    }
+}
 
 // ── Window and clock ───────────────────────────────────────────────────────
 
@@ -219,18 +287,6 @@ impl Category {
         }
     }
 
-    /// The accent the category chip is drawn in.
-    #[must_use]
-    pub fn color(self) -> Color {
-        match self {
-            Self::Animals => GREEN,
-            Self::Colors => MAUVE,
-            Self::Food => PEACH,
-            Self::Science => TEAL,
-            Self::Geography => YELLOW,
-        }
-    }
-
     /// The words a puzzle in this category is drawn from.
     ///
     /// Every entry is capital ASCII, which is what lets the grid be a `Vec<u8>`
@@ -326,16 +382,6 @@ impl Difficulty {
             Self::Easy => "Easy",
             Self::Medium => "Medium",
             Self::Hard => "Hard",
-        }
-    }
-
-    /// The accent the difficulty chip is drawn in.
-    #[must_use]
-    pub fn color(self) -> Color {
-        match self {
-            Self::Easy => GREEN,
-            Self::Medium => YELLOW,
-            Self::Hard => RED,
         }
     }
 
@@ -488,6 +534,12 @@ pub struct WordSearchApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl WordSearchApp {
@@ -517,6 +569,8 @@ impl WordSearchApp {
             hint: None,
             seed,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.generate_puzzle();
         app
@@ -1527,27 +1581,41 @@ fn left_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: Fon
     );
 }
 
-/// A chip: a rounded box, a caption, and a hit box the size of the box.
-///
-/// The hit box is recorded only when the chip has room to be drawn. A hit box
-/// on a control the renderer skipped is a control a test can find and a player
-/// cannot, which is the wrong way round.
-fn chip(f: &mut Frame, r: Rect, target: Target, s: &str, size: f32, accent: Color) {
-    if r.is_empty() {
-        return;
-    }
-    fill(f, r, SURFACE0, 5.0);
-    f.hit(target, r);
-    centred_in(f, r, s, size, accent, FontWeightHint::Bold);
-}
-
 impl WordSearchApp {
+    /// A chip: the toolkit's push button at this game's size, on the header,
+    /// and a hit box the size of the button. `live` false draws the
+    /// switched-off look; the hit box is still recorded, so a press on a spent
+    /// chip is refused there rather than reaching what is under it.
+    ///
+    /// The hit box is recorded only when the chip has room to be drawn. A hit
+    /// box on a control the renderer skipped is a control a test can find and
+    /// a player cannot, which is the wrong way round.
+    fn chip(&self, f: &mut Frame, r: Rect, target: Target, s: &str, size: f32, live: bool) {
+        if r.is_empty() {
+            return;
+        }
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            s,
+            size,
+            Kind::Plain,
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            self.colours.mantle,
+        );
+        f.hit(target, r);
+    }
+
     /// The whole window, and every hit box in it.
     #[must_use]
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height, self.grid_size, self.placed_words.len());
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.colours.base, 0.0);
 
         self.draw_header(&mut f, &l);
         self.draw_board(&mut f, &l);
@@ -1560,7 +1628,7 @@ impl WordSearchApp {
         if !l.shows(l.header) {
             return;
         }
-        fill(f, l.header, MANTLE, 0.0);
+        fill(f, l.header, self.colours.mantle, 0.0);
 
         let inset = l.pad;
         let left = Rect::new(
@@ -1572,7 +1640,14 @@ impl WordSearchApp {
         if !left.is_empty() {
             let top = Rect::new(left.x, left.y, left.w, left.h / 2.0);
             let bottom = Rect::new(left.x, left.y + left.h / 2.0, left.w, left.h / 2.0);
-            left_in(f, top, "Word Search", l.big, BLUE, FontWeightHint::Bold);
+            left_in(
+                f,
+                top,
+                "Word Search",
+                l.big,
+                self.colours.blue,
+                FontWeightHint::Bold,
+            );
             let clock = format_time(self.elapsed_secs());
             let found = format!(
                 "{}  {}/{} found",
@@ -1581,42 +1656,40 @@ impl WordSearchApp {
                 self.total_words()
             );
             let color = if self.status == GameStatus::Won {
-                GREEN
+                self.colours.green
             } else {
-                LAVENDER
+                self.colours.lavender
             };
             left_in(f, bottom, &found, l.font, color, FontWeightHint::Regular);
         }
 
-        chip(
+        self.chip(
             f,
             l.chip(0),
             Target::Difficulty,
             self.difficulty.label(),
             l.font,
-            self.difficulty.color(),
+            true,
         );
-        chip(
+        self.chip(
             f,
             l.chip(1),
             Target::Category,
             self.category.label(),
             l.font,
-            self.category.color(),
+            true,
         );
-        chip(
+        // A hint needs one left and a word left to light: switched off
+        // otherwise, as the program refuses it.
+        self.chip(
             f,
             l.chip(2),
             Target::HintButton,
             &format!("Hint {}", self.hints_remaining),
             l.font,
-            if self.hints_remaining > 0 {
-                PEACH
-            } else {
-                OVERLAY0
-            },
+            self.hints_remaining > 0 && self.status == GameStatus::Playing,
         );
-        chip(f, l.chip(3), Target::NewGame, "New", l.font, TEAL);
+        self.chip(f, l.chip(3), Target::NewGame, "New", l.font, true);
     }
 
     fn draw_board(&self, f: &mut Frame, l: &Layout) {
@@ -1634,15 +1707,15 @@ impl WordSearchApp {
                 let anchored = self.selection == Selection::From(row, col);
 
                 let bg = if lit {
-                    YELLOW
+                    self.colours.yellow
                 } else if found {
-                    Color::rgba(166, 227, 161, 40)
+                    with_alpha(self.palette.green, FOUND_ALPHA)
                 } else if anchored {
-                    MAUVE
+                    self.colours.mauve
                 } else if marking {
-                    Color::rgba(137, 180, 250, 60)
+                    with_alpha(self.palette.blue, MARK_ALPHA)
                 } else {
-                    SURFACE0
+                    self.colours.surface0
                 };
                 fill(f, r, bg, (l.cell * 0.12).min(4.0));
                 f.hit(Target::Cell(row, col), r);
@@ -1651,7 +1724,7 @@ impl WordSearchApp {
                     stroke(
                         f,
                         r,
-                        BLUE,
+                        self.colours.blue,
                         (l.cell * 0.06).clamp(1.0, 2.5),
                         (l.cell * 0.12).min(4.0),
                     );
@@ -1663,26 +1736,33 @@ impl WordSearchApp {
                 if ch == 0 {
                     continue;
                 }
-                let color = if lit {
-                    BASE
+                // Each ground's own ink, in the strength for the size drawn:
+                // the anchor's letter was the marking blue on the anchor's
+                // mauve, 1.1:1 -- the square a selection starts from had no
+                // letter anyone could read.
+                let ink = if lit {
+                    self.colours.on_hint
                 } else if found {
-                    GREEN
+                    self.colours.found
+                } else if anchored {
+                    self.colours.on_anchor
                 } else if marking {
-                    BLUE
+                    self.colours.marking
                 } else {
-                    TEXT_COLOR
+                    self.colours.letter
                 };
                 let weight = if lit || found || marking {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 };
+                let size = (l.cell * 0.56).max(1.0);
                 centred_in(
                     f,
                     r,
                     &String::from(char::from(ch)),
-                    (l.cell * 0.56).max(1.0),
-                    color,
+                    size,
+                    ink.at(size, weight == FontWeightHint::Bold),
                     weight,
                 );
             }
@@ -1704,7 +1784,7 @@ impl WordSearchApp {
             head,
             "Words to find",
             l.font,
-            SUBTEXT0,
+            self.colours.subtext0,
             FontWeightHint::Bold,
         );
 
@@ -1714,12 +1794,12 @@ impl WordSearchApp {
                 continue;
             }
             let (color, weight) = if placed.found {
-                (OVERLAY0, FontWeightHint::Light)
+                (self.colours.done, FontWeightHint::Light)
             } else {
-                (TEXT_COLOR, FontWeightHint::Regular)
+                (self.colours.text, FontWeightHint::Regular)
             };
             if placed.found {
-                fill(f, r, SURFACE1, 3.0);
+                fill(f, r, self.colours.surface1, 3.0);
             }
             f.hit(Target::Word(i), r);
             left_in(f, r, &placed.word, l.font, color, weight);
@@ -1737,7 +1817,7 @@ impl WordSearchApp {
                     y1: mid,
                     x2: r.x + drawn,
                     y2: mid,
-                    color: GREEN,
+                    color: self.colours.green,
                     width: (l.font * 0.1).clamp(1.0, 2.0),
                 });
             }
@@ -1748,7 +1828,7 @@ impl WordSearchApp {
         if !l.shows(l.footer) {
             return;
         }
-        fill(f, l.footer, MANTLE, 0.0);
+        fill(f, l.footer, self.colours.mantle, 0.0);
         let table = if self.selection == Selection::None {
             SHORTCUTS
         } else {
@@ -1770,7 +1850,9 @@ impl WordSearchApp {
             inner,
             &text_line,
             l.font,
-            OVERLAY0,
+            // Secondary text: the keys are read, and the palette's faintest
+            // grey is 2.3:1 on a light band.
+            self.colours.subtext0,
             FontWeightHint::Regular,
         );
     }
@@ -1801,6 +1883,11 @@ pub fn handle_event(app: &mut WordSearchApp, event: &Event) -> EventResult {
 }
 
 impl App for WordSearchApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Word Search".to_string()
     }
@@ -1898,6 +1985,115 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: a fresh game; one with a word found, a
+    /// hint lit and a selection under way (an anchor and marked squares);
+    /// the same cramped; a won board.
+    fn every_look(p: &Palette) -> Vec<(&'static str, WordSearchApp)> {
+        let busy = || {
+            let mut a = game(7);
+            a.mark_found(0);
+            let _ = a.hint_for(1);
+            let (r, c) = a.placed_words.get(2).map_or((0, 0), |w| w.start);
+            a.selection = Selection::From(r, c);
+            a.cursor = (r, c.saturating_add(2).min(a.grid_size.saturating_sub(1)));
+            a
+        };
+        let mut cramped = busy();
+        cramped.resize(420.0, 360.0);
+        let mut won = game(7);
+        for i in 0..won.placed_words.len() {
+            won.mark_found(i);
+        }
+        let mut looks = vec![
+            ("fresh", game(7)),
+            ("busy", busy()),
+            ("cramped", cramped),
+            ("won", won),
+        ];
+        for (_, a) in &mut looks {
+            a.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or an ink moved to read on its square (the operator's C-Q16).
+    /// It drew in its own copy of Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let mut derived = gamechrome::button_colours(&p, Kind::Plain, p.mantle);
+            let c = Colours::of(&p);
+            for ink in [c.on_hint, c.found, c.on_anchor, c.marking, c.letter] {
+                derived.extend([ink.large, ink.small]);
+            }
+            derived.push(c.done);
+            for (what, a) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    a.frame(a.size().0, a.size().1).commands(),
+                    &derived,
+                    &format!("wordsearch, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look, held to WCAG's floor for its size
+    /// (`gamechrome::legibility`). A switched-off chip's label is exempt, as
+    /// WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                p.mantle,
+            );
+            for (what, a) in every_look(&p) {
+                let f = a.frame(a.size().0, a.size().1);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "wordsearch: {bad:#?}");
+    }
     use guitk::probe::{self, ctrl, press, press_with};
     use guitk::shortcut::keystrokes;
 
@@ -2163,14 +2359,13 @@ mod tests {
     }
 
     #[test]
-    fn every_category_has_its_own_name_and_its_own_accent() {
+    fn every_category_has_its_own_name_and_its_own_words() {
         for a in Category::ALL {
             for b in Category::ALL {
                 if a == b {
                     continue;
                 }
                 assert_ne!(a.label(), b.label(), "two categories share a name");
-                assert_ne!(a.color(), b.color(), "two categories share an accent");
                 assert_ne!(a.words(), b.words(), "two categories share a word list");
             }
             assert!(!a.label().is_empty());
@@ -2247,7 +2442,6 @@ mod tests {
             for other in Difficulty::ALL {
                 if other != difficulty {
                     assert_ne!(difficulty.label(), other.label());
-                    assert_ne!(difficulty.color(), other.color());
                 }
             }
         }
@@ -2895,6 +3089,77 @@ mod tests {
             a.hint().unwrap().remaining_ms,
             "ten small ticks and one big one left different amounts of hint"
         );
+    }
+
+    /// The face of the chip whose label starts with `label`.
+    fn chip_face(a: &WordSearchApp, label: &str) -> Color {
+        let f = a.frame(SIZE.0, SIZE.1);
+        let (tx, ty) = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } if text.starts_with(label) => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} is not drawn"));
+        let l = layout_of(a);
+        f.commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                    && *width <= l.chip(2).w + 0.01 =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} has no face"))
+    }
+
+    /// **The Hint chip is switched off with nothing to give** -- no hints
+    /// left, or no word left to light once the board is won -- as the program
+    /// refuses it then; live while it would give one.
+    #[test]
+    fn the_hint_chip_is_switched_off_with_nothing_to_give() {
+        let mut a = game(31);
+        let paint = |disabled| {
+            guitk::button::paint(
+                &a.palette,
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                a.colours.mantle,
+            )
+            .lower
+        };
+        let (live, off) = (paint(false), paint(true));
+        assert_eq!(
+            chip_face(&a, "Hint"),
+            live,
+            "the chip looks spent with hints left"
+        );
+        a.hints_remaining = 0;
+        assert_eq!(
+            chip_face(&a, "Hint"),
+            off,
+            "the chip looks live with none left"
+        );
+        let mut won = game(31);
+        for i in 0..won.placed_words.len() {
+            won.mark_found(i);
+        }
+        assert_eq!(won.status, GameStatus::Won);
+        assert!(won.hints_remaining > 0, "the fixture has spent its hints");
+        assert_eq!(chip_face(&won, "Hint"), off, "a won board offers a hint");
     }
 
     #[test]
@@ -3590,7 +3855,9 @@ mod tests {
             before, after,
             "finding {word} changed nothing about the list"
         );
-        assert_eq!(after, OVERLAY0);
+        // Dimmed, and still read: secondary text on its row, not the
+        // palette's faintest grey, which was 2.3:1 on a light row.
+        assert_eq!(after, colours().done);
         for &(r, c) in &cells {
             assert!(a.is_found_cell(r, c));
         }
@@ -3602,7 +3869,7 @@ mod tests {
             g.frame(SIZE.0, SIZE.1)
                 .commands()
                 .iter()
-                .filter(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == YELLOW))
+                .filter(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == colours().yellow))
                 .count()
         };
         let mut a = game(71);
@@ -3770,14 +4037,14 @@ mod tests {
     fn winning_turns_the_header_line_green() {
         let mut a = game(71);
         let playing = colour_of(&a, SIZE, "found").expect("no count in the header");
-        assert_eq!(playing, LAVENDER);
+        assert_eq!(playing, colours().lavender);
         let all: Vec<Vec<(usize, usize)>> = a.words().iter().map(PlacedWord::cells).collect();
         for cells in &all {
             spell_out(&mut a, cells);
         }
         assert_eq!(
             colour_of(&a, SIZE, "found"),
-            Some(GREEN),
+            Some(colours().green),
             "the win is not announced"
         );
     }
@@ -3796,7 +4063,15 @@ mod tests {
             );
             assert_eq!(
                 colour_of(&a, SIZE, a.difficulty().label()),
-                Some(a.difficulty().color())
+                Some(
+                    guitk::button::paint(
+                        &a.palette,
+                        Kind::Plain,
+                        State::default(),
+                        a.colours.mantle
+                    )
+                    .ink
+                )
             );
             key(&mut a, Key::D);
         }

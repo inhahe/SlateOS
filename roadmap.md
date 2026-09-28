@@ -2013,17 +2013,27 @@ live.
   E:** the Settings picker for the axis and its applications' own fields and
   scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
-- `[-]` `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
-  *Code-Aware TextEdit Widget*) -- done 2026-09-28 but for syntax
-  highlighting: `guitk::textbuffer` (a chunked buffer with a line index, any
-  file size), `guitk::codeedit` (several carets, auto-indent, tab stops,
-  indent/dedent, block/word/line selection, bracket matching, find and
-  replace with regular expressions -- the `regex` crate, §1436 -- and the
-  undo tree) and `guitk::codeview` (gutter, wrapping or sideways scrolling,
-  the find bar, keys and pointer). **Lane E:** the two editors onto it
-  (`requests/c-e-the-toolkit-has-a-code-editor.md`). **Open:** highlighting
-  waits on a tree-sitter port, or a highlighter hook when an application
-  asks for one.
+- `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
+  *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
+  chunked buffer with a line index, any file size), `guitk::codeedit`
+  (several carets, auto-indent, tab stops, indent/dedent, block/word/line
+  selection, bracket matching, find and replace with regular expressions --
+  the `regex` crate, §1436 -- and the undo tree) and `guitk::codeview`
+  (gutter, wrapping or sideways scrolling, the find bar, keys and pointer,
+  and a syntax highlighter's colours: `guitk::highlight`, the theme's
+  `syntax` section). **Lane E:** the two editors onto it
+  (`requests/c-e-the-toolkit-has-a-code-editor.md`).
+
+- `[-]` `[C]` **Syntax highlighting, tree-sitter's** (§1437) -- the
+  machinery done 2026-09-28: `gui/syntax`, the tree-sitter runtime as Rust
+  (`tree-sitter-c2rust`) and each grammar's `parser.c` converted to Rust at
+  build time (`gui/tsgrammar`), external scanners ported by hand; parsing a
+  few milliseconds at a time, re-parsing only what an edit touched; colours
+  from the grammars' own highlight queries through the theme. **Grammars:**
+  JSON, Python and Rust, each passing its authors' test corpus. **Next:** the
+  languages the OS's own files are written in -- YAML (every settings file),
+  TOML, Markdown, shell, C -- then JavaScript, HTML and CSS; and injections
+  (a language inside another: code blocks in Markdown, doc comments).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

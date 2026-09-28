@@ -33,7 +33,28 @@ work and gives both of them the rest.
 - A file with `\r\n` line endings keeps its `\r`s as text; convert on open and
   back on save if the editor offers a line-ending setting.
 
-What the editors have that the widget does not yet: syntax highlighting (a
-tree-sitter port is its own task; the view has no highlighter hook yet --
-ask, and it will get one shaped to what you need), and the markdown
-editor's preview, which is the application's.
+## Colouring the code (added 2026-09-28)
+
+Syntax highlighting is there now, and it is tree-sitter's (design-decisions
+§1437): the `syntax` crate (`gui/syntax`) has JSON, Python and Rust so far,
+each grammar passing its authors' own test corpus.
+
+- Add `syntax = { path = "../../gui/syntax" }` to the editor's `Cargo.toml`.
+- On opening a file: `syntax::Language::for_file(path)`, or for a script
+  with no telling extension `syntax::Language::for_first_line(first_line)`;
+  then `view.set_highlighter(Some(Box::new(language.highlighter()?)))`.
+  `syntax::Language::all()` lists the languages for a "Language" menu.
+- In the event loop: while `view.has_work()`, call `view.work()` and draw
+  again. That is only ever the first parse of a large file -- an edit's
+  re-parse happens inside the key press -- and it arrives a frame at a time,
+  never freezing the window.
+- The colours are the theme's (`syntax` / `syntax-light` in `theme.yaml`,
+  one per kind: keyword, string, comment, function, type, ...), held to the
+  text contrast floor. Drop the editors' own highlight colours for these, so
+  a theme colours code everywhere at once.
+- A highlighter of your own (a log viewer colouring levels) implements
+  `guitk::highlight::Highlighter` and plugs into the same view.
+
+What the editors have that the widget does not yet: the markdown editor's
+preview, which is the application's; and languages beyond the three -- ask
+for the ones the editors need first, and they come next.

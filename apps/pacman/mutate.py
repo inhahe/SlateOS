@@ -103,20 +103,15 @@ MUTATIONS = [
     # -- The frame's clips ---------------------------------------------
     (
         "the window's clip is never popped",
-        "        self.draw_sheet(&mut f, &l);\n        f.unclip();",
-        "        self.draw_sheet(&mut f, &l);",
+        "        self.draw_sheet(&mut f, &l, &c);\n        f.unclip();",
+        "        self.draw_sheet(&mut f, &l, &c);",
         ["the_frame_is_balanced_in_every_state_at_every_size"],
     ),
     (
         "nothing is clipped to the window",
-        "        f.clip(l.window);\n        fill(&mut f, l.window, BASE, CornerRadii::ZERO);",
-        "        fill(&mut f, l.window, BASE, CornerRadii::ZERO);",
-        # Popping a clip that was never pushed would also unbalance the frame,
-        # so the balance test fails alongside the one that owns the fault.
-        [
-            "a_zero_sized_window_draws_nothing_that_can_be_clicked",
-            "the_frame_is_balanced_in_every_state_at_every_size",
-        ],
+        "        f.clip(l.window);\n        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);",
+        ["a_zero_sized_window_draws_nothing_that_can_be_clicked", "the_frame_is_balanced_in_every_state_at_every_size"],
     ),
     (
         "a header reading is written across the maze below it",
@@ -328,6 +323,36 @@ MUTATIONS = [
             "clicking_new_game_after_a_loss_restarts_and_keeps_the_high_score",
             "test_high_score_preserved_on_new_game",
         ],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a ghost is always its pale shade",
+        "        GHOST_HUES.get(i).map_or(self.chrome.high, |&pair| {\n            gamechrome::legible_on(pair, self.chrome.page)\n        })",
+        "        GHOST_HUES.get(i).map_or(self.chrome.high, |&(pale, _)| pale)",
+        ["every_ghost_and_pacman_stand_off_the_page_in_either_theme"],
+    ),
+    (
+        "pac-man is always the pale yellow",
+        "            pacman: gamechrome::legible_on(PACMAN_HUE, chrome.page),",
+        "            pacman: PACMAN_HUE.0,",
+        ["every_ghost_and_pacman_stand_off_the_page_in_either_theme"],
+    ),
+    (
+        "the sheet's wash is Mocha's whatever the theme",
+        "            with_alpha(c.chrome.page, dim),",
+        "            Color::rgba(30, 30, 46, dim),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        self.palette = palette;",
+        "        let _ = palette;",
+        ["a_new_game_keeps_the_users_colours"],
     ),
 ]
 

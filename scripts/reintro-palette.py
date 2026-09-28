@@ -5032,27 +5032,31 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHH: the slider's icon is frozen back to Mocha blue",
         OSD,
         [
-            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: icon_size,\n            color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+            ('            icon,\n            p.ink(accent),\n            text_alpha,\n',
+             '            icon,\n            Color::from_hex(0x89B4FA),\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
         "IIIIIIIIIIIIIIIIIIIIII: the slider's icon stops saying which kind of slider it is",
         OSD,
         [
-            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: icon_size,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            icon,\n            p.ink(accent),\n            text_alpha,\n',
+             '            icon,\n            p.text,\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5153,12 +5157,14 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
         OSD,
         [
-            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
-             'font_size: 28.0,\n            color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha),'),
+            ('            "audio-x-generic",\n            p.ink(p.lavender),\n',
+             '            "audio-x-generic",\n            Color::from_hex(0xB4BEFE),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -5166,11 +5172,13 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUU: the music note stops being a music note and becomes text',
         OSD,
         [
-            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
-             'font_size: 28.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            "audio-x-generic",\n            p.ink(p.lavender),\n',
+             '            "audio-x-generic",\n            p.text,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -5318,27 +5326,31 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGG: the notice icon is frozen back to Mocha red',
         OSD,
         [
-            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: 20.0,\n            color: Color::rgba(0xF3, 0x8B, 0xA8, text_alpha),'),
+            ('            icon,\n            accent,\n            text_alpha,\n',
+             '            icon,\n            Color::from_hex(0xF38BA8),\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
         'HHHHHHHHHHHHHHHHHHHHHHH: the notice icon stops saying what kind of notice it is',
         OSD,
         [
-            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: 20.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            icon,\n            accent,\n            text_alpha,\n',
+             '            icon,\n            p.text,\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5485,12 +5497,14 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTT: the screenshot notice is frozen back to Mocha green',
         OSD,
         [
-            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
-             '"\\u{1F4F7}",\n                    &label,\n                    Color::from_hex(0xA6E3A1),'),
+            ('                    "camera-photo",\n                    &label,\n                    p.green,\n',
+             '                    "camera-photo",\n                    &label,\n                    Color::from_hex(0xA6E3A1),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5498,13 +5512,15 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUUU: the screenshot notice follows the accent',
         OSD,
         [
-            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
-             '"\\u{1F4F7}",\n                    &label,\n                    p.accent,'),
+            ('                    "camera-photo",\n                    &label,\n                    p.green,\n',
+             '                    "camera-photo",\n                    &label,\n                    p.accent,\n'),
         ],
         ["desktop"],
         [
-            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
         ],
     ),
     (
@@ -5559,11 +5575,13 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZZZZZZZZZ: a low battery stops being a warning and becomes a caution',
         OSD,
         [
-            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
-             '"\\u{1F50B}",\n                    &label,\n                    p.peach,'),
+            ('                    "battery-caution",\n                    &label,\n                    p.red,\n',
+             '                    "battery-caution",\n                    &label,\n                    p.peach,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5572,12 +5590,14 @@ DEFECTS = [
         'AAAAAAAAAAAAAAAAAAAAAAAA: a low battery is frozen back to Mocha red',
         OSD,
         [
-            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
-             '"\\u{1F50B}",\n                    &label,\n                    Color::from_hex(0xF38BA8),'),
+            ('                    "battery-caution",\n                    &label,\n                    p.red,\n',
+             '                    "battery-caution",\n                    &label,\n                    Color::from_hex(0xF38BA8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5586,11 +5606,12 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBB: the Info icon stops being informational and turns into a success',
         OSD,
         [
-            ('OsdIcon::Info => ("\\u{2139}", p.blue),',
-             'OsdIcon::Info => ("\\u{2139}", p.green),'),
+            ('OsdIcon::Info => ("dialog-information", p.ink(p.blue)),',
+             'OsdIcon::Info => ("dialog-information", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5599,11 +5620,12 @@ DEFECTS = [
         'CCCCCCCCCCCCCCCCCCCCCCCC: the Success icon stops being green',
         OSD,
         [
-            ('OsdIcon::Success => ("\\u{2705}", p.green),',
-             'OsdIcon::Success => ("\\u{2705}", p.blue),'),
+            ('OsdIcon::Success => ("emblem-ok", p.ink(p.green)),',
+             'OsdIcon::Success => ("emblem-ok", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5612,12 +5634,12 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDD: the Warning icon is frozen back to Mocha yellow',
         OSD,
         [
-            ('OsdIcon::Warning => ("\\u{26A0}", p.yellow),',
-             'OsdIcon::Warning => ("\\u{26A0}", Color::from_hex(0xF9E2AF)),'),
+            ('OsdIcon::Warning => ("dialog-warning", p.ink(p.yellow)),',
+             'OsdIcon::Warning => ("dialog-warning", Color::from_hex(0xF9E2AF)),'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5625,11 +5647,12 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEE: the Error icon collides with the battery warning',
         OSD,
         [
-            ('OsdIcon::Error => ("\\u{274C}", p.red),',
-             'OsdIcon::Error => ("\\u{274C}", p.peach),'),
+            ('OsdIcon::Error => ("dialog-error", p.ink(p.red)),',
+             'OsdIcon::Error => ("dialog-error", p.ink(p.peach)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5638,11 +5661,12 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFF: the Speaker icon stops sharing the volume overlay's blue",
         OSD,
         [
-            ('OsdIcon::Speaker => ("\\u{1F50A}", p.blue),',
-             'OsdIcon::Speaker => ("\\u{1F50A}", p.text),'),
+            ('OsdIcon::Speaker => ("audio-volume-high", p.ink(p.blue)),',
+             'OsdIcon::Speaker => ("audio-volume-high", p.text),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5650,11 +5674,12 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGG: the Brightness icon stops sharing the brightness overlay's yellow",
         OSD,
         [
-            ('OsdIcon::Brightness => ("\\u{2600}", p.yellow),',
-             'OsdIcon::Brightness => ("\\u{2600}", p.green),'),
+            ('OsdIcon::Brightness => ("display-brightness", p.ink(p.yellow)),',
+             'OsdIcon::Brightness => ("display-brightness", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5662,11 +5687,12 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHH: the Network icon turns into an error',
         OSD,
         [
-            ('OsdIcon::Network => ("\\u{1F310}", p.green),',
-             'OsdIcon::Network => ("\\u{1F310}", p.red),'),
+            ('OsdIcon::Network => ("network-idle", p.ink(p.green)),',
+             'OsdIcon::Network => ("network-idle", p.ink(p.red)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5674,11 +5700,12 @@ DEFECTS = [
         'IIIIIIIIIIIIIIIIIIIIIIII: the Battery icon loses its peach and collides with the error red',
         OSD,
         [
-            ('OsdIcon::Battery => ("\\u{1F50B}", p.peach),',
-             'OsdIcon::Battery => ("\\u{1F50B}", p.red),'),
+            ('OsdIcon::Battery => ("battery", p.ink(p.peach)),',
+             'OsdIcon::Battery => ("battery", p.ink(p.red)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5687,11 +5714,12 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJ: the Lock icon loses its lavender and collides with the info blue',
         OSD,
         [
-            ('OsdIcon::Lock => ("\\u{1F512}", p.lavender),',
-             'OsdIcon::Lock => ("\\u{1F512}", p.blue),'),
+            ('OsdIcon::Lock => ("system-lock-screen", p.ink(p.lavender)),',
+             'OsdIcon::Lock => ("system-lock-screen", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5700,11 +5728,12 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKK: the Camera icon stops confirming anything',
         OSD,
         [
-            ('OsdIcon::Camera => ("\\u{1F4F7}", p.green),',
-             'OsdIcon::Camera => ("\\u{1F4F7}", p.subtext0),'),
+            ('OsdIcon::Camera => ("camera-photo", p.ink(p.green)),',
+             'OsdIcon::Camera => ("camera-photo", p.subtext0),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5712,11 +5741,12 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLL: the medium volume icon collapses into the low one',
         OSD,
         [
-            ('} else if level < 66 {\n        "\\u{1F509}" // medium',
-             '} else if level < 66 {\n        "\\u{1F508}" // medium'),
+            ('    } else if level < 66 {\n        "audio-volume-medium"\n',
+             '    } else if level < 66 {\n        "audio-volume-low"\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The icons are named from the theme now.
             'the_fixtures_take_every_branch_the_osd_has',
             'volume_icon_levels',
         ],
@@ -5921,14 +5951,16 @@ DEFECTS = [
         ],
     ),
     (
-        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface0",
+        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface2",
         OSD,
         [
-            ('height: 4.0,\n            color: p.surface0,',
-             'height: 4.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            track_w,\n            4.0,\n            2.0,\n            Surface::ControlTrack,\n        );\n',
+             '        commands.push(RenderCommand::FillRect {\n            x: x + padding,\n            y: cy,\n            width: track_w,\n            height: 4.0,\n            color: Color::from_hex(0x585B70),\n            corner_radii: CornerRadii::all(2.0),\n        });\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The track is `Surface::ControlTrack` now,
+            # surface2 in both themes, so the frozen value is Mocha's surface2.
             'every_colour_the_osd_draws_comes_from_its_palette',
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5937,13 +5969,14 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEE: the timeout slider's track takes the accent too, so the fill vanishes into it",
         OSD,
         [
-            ('height: 4.0,\n            color: p.surface0,',
-             'height: 4.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            track_w,\n            4.0,\n            2.0,\n            Surface::ControlTrack,\n        );\n',
+             '        commands.push(RenderCommand::FillRect {\n            x: x + padding,\n            y: cy,\n            width: track_w,\n            height: 4.0,\n            color: p.accent,\n            corner_radii: CornerRadii::all(2.0),\n        });\n'),
         ],
         ["desktop"],
         [
-            'the_settings_panel_has_exactly_three_accent_sites',
+            # Re-derived 2026-09-27 against the code as it now reads. The track is `Surface::ControlTrack` now.
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_settings_panel_has_exactly_three_accent_sites',
         ],
     ),
     (

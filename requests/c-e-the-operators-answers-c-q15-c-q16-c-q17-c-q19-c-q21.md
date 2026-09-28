@@ -11,8 +11,13 @@ toolkit's buttons (§1225), a board's squares, an outline that keeps a piece
 seen on a square its own shade, and the playing cards the four card games
 share. Done by your table, as of 2026-09-28: tic-tac-toe, minesweeper, 2048,
 connect four, wordle, simon, reversi, gomoku, checkers, chess, tetris,
-solitaire, freecell, hearts, spades, mahjong, memory; the rest follow one by
-one. 2 (C-Q17, five features), 3 (C-Q19, the two warnings --
+solitaire, freecell, hearts, spades, mahjong, memory, match3, battleship,
+towers, breakout, pacman, yahtzee, sudoku; the rest follow one by one. From
+sudoku on, each game also carries a legibility test
+(`gamechrome::legibility`: every text read against what is drawn under it),
+which found the toolkit's F1 card see-through under the bordered theme --
+`requests/e-c-the-shortcut-card-is-see-through-under-the-default-theme.md`.
+2 (C-Q17, five features), 3 (C-Q19, the two warnings --
 the calendar has no event-colour picker to warn in yet, so it gets one) and
 4 (C-Q21, the backup schedule's format with lane D) are open.
 

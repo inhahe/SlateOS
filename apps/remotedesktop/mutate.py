@@ -56,6 +56,8 @@ PRESET_SAYS = "a_quality_preset_changed_under_a_live_session_says_when_it_applie
 SCALE = "a_profiles_scale_is_how_the_screen_is_shown"
 BARS = "the_bars_pan_the_screen_and_the_pointer_follows"
 Z_SCALE = "z_chooses_the_scale_and_q_leaves_it_alone"
+WHEEL = "the_wheel_over_the_screen_scrolls_the_remote_machine"
+WHEEL_CARRY = "the_wheel_keeps_what_is_not_yet_a_notch"
 
 MAIN = [
     (
@@ -224,6 +226,31 @@ MAIN = [
         "                    profile.display.scaling = next;",
         "",
         [Z_SCALE],
+    ),
+    # The wheel (2026-09-27).
+    (
+        "the wheel over the screen is not forwarded",
+        "            // on this view, and the remote machine never saw a wheel at all.\n            MouseEventKind::Scroll { dx, dy } => {",
+        "            // on this view, and the remote machine never saw a wheel at all.\n            MouseEventKind::Scroll { dx, dy } if dx.is_nan() => {",
+        [WHEEL],
+    ),
+    (
+        "a wheel click is a press without its release",
+        "                    for mask in [live.buttons | button, live.buttons] {",
+        "                    for mask in [live.buttons | button] {",
+        [WHEEL],
+    ),
+    (
+        "up is sent as down",
+        "        out.push(8);",
+        "        out.push(16);",
+        [WHEEL, WHEEL_CARRY],
+    ),
+    (
+        "half a notch is thrown away",
+        "    carry.1 = (carry.1 + dy).clamp(-MOST, MOST);",
+        "    carry.1 = dy.clamp(-MOST, MOST);",
+        [WHEEL, WHEEL_CARRY],
     ),
     (
         "a quality preset puts the scale back to fitted",

@@ -754,6 +754,38 @@ struct LiveScreen {
     /// Keys held, with the keysym each was sent as: a release carries no
     /// text to derive one from.
     held: Vec<(Key, u32)>,
+    /// Wheel turned and not yet sent, across and down: a trackpad sends a
+    /// notch in pieces, and RFB's wheel is whole clicks.
+    wheel: (f32, f32),
+}
+
+/// The wheel's whole notches in `carry` after adding `dx` and `dy`, as RFB's
+/// buttons (up 8, down 16, left 32, right 64), the fractions kept for next
+/// time. `dy` is positive away from the user -- up -- as `guitk::wheel` says;
+/// `dx` positive is right.
+fn wheel_clicks(carry: &mut (f32, f32), dx: f32, dy: f32) -> Vec<u8> {
+    // Past this many in one event is a device misreporting, not a user.
+    const MOST: f32 = 64.0;
+    let mut out = Vec::new();
+    carry.0 = (carry.0 + dx).clamp(-MOST, MOST);
+    carry.1 = (carry.1 + dy).clamp(-MOST, MOST);
+    while carry.1 >= 1.0 {
+        out.push(8);
+        carry.1 -= 1.0;
+    }
+    while carry.1 <= -1.0 {
+        out.push(16);
+        carry.1 += 1.0;
+    }
+    while carry.0 <= -1.0 {
+        out.push(32);
+        carry.0 += 1.0;
+    }
+    while carry.0 >= 1.0 {
+        out.push(64);
+        carry.0 -= 1.0;
+    }
+    out
 }
 
 /// A rectangle as the render commands take one: x, y, width, height.
@@ -1475,6 +1507,7 @@ impl RemoteDesktopApp {
             ready: false,
             buttons: 0,
             held: Vec::new(),
+            wheel: (0.0, 0.0),
         });
         self.selected_session = Some(self.sessions.len().saturating_sub(1));
         self.current_view = MainView::ActiveSessions;
@@ -1929,6 +1962,22 @@ impl RemoteDesktopApp {
             MouseEventKind::Press(b) => live.buttons |= bit(b),
             MouseEventKind::Release(b) => live.buttons &= !bit(b),
             MouseEventKind::Move => {}
+            // The wheel is buttons in RFB, as in X: 4 and 5 up and down, 6
+            // and 7 left and right, each notch a press and a release. It fell
+            // through to the window's own list scrolling, which moved nothing
+            // on this view, and the remote machine never saw a wheel at all.
+            MouseEventKind::Scroll { dx, dy } => {
+                let clicks = wheel_clicks(&mut live.wheel, *dx, *dy);
+                for button in clicks {
+                    for mask in [live.buttons | button, live.buttons] {
+                        if let Err(why) = live.rfb.pointer(mask, rx, ry) {
+                            self.status_message = Some(format!("The wheel was not sent: {why}"));
+                            return Some(EventResult::Consumed);
+                        }
+                    }
+                }
+                return Some(EventResult::Consumed);
+            }
             _ => return None,
         }
         if let Err(why) = live.rfb.pointer(live.buttons, rx, ry) {
@@ -6991,6 +7040,69 @@ mod tests {
             app.profiles[0].display.scaling,
             ScalingMode::Fixed100,
             "a quality preset put the scale back"
+        );
+    }
+
+    /// **The wheel over the remote screen scrolls the remote machine**, as
+    /// RFB's buttons 4 and 5: each notch a press and a release where the
+    /// pointer is, and half a notch kept until the rest arrives.
+    #[test]
+    fn the_wheel_over_the_screen_scrolls_the_remote_machine() {
+        let mut script = handshake_none();
+        for _ in 0..4 {
+            script.push(Step::Hear(6));
+        }
+        let (port, heard) = server(script);
+        let mut app = vnc_app(port);
+        app.connect_vnc(0, "").expect("a session");
+        pump_until(&mut app, |a| a.live.iter().any(|l| l.ready));
+        app.current_view = MainView::ActiveSessions;
+        for _ in 0..6 {
+            heard
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the handshake");
+        }
+        let (x, y, w, h) = app.screen_view().expect("the screen is shown").placed;
+        let at = (x + w - 0.5, y + h - 0.5);
+        for dy in [0.5, 0.5, -1.0] {
+            app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
+                x: at.0,
+                y: at.1,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }));
+        }
+        let heard: Vec<Vec<u8>> = (0..4)
+            .map(|_| {
+                heard
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("a wheel click")
+            })
+            .collect();
+        assert_eq!(
+            heard,
+            [
+                vec![5, 8, 0, 3, 0, 1],
+                vec![5, 0, 0, 3, 0, 1],
+                vec![5, 16, 0, 3, 0, 1],
+                vec![5, 0, 0, 3, 0, 1],
+            ],
+            "up once from two half notches, then down once, each a press and a release"
+        );
+    }
+
+    #[test]
+    fn the_wheel_keeps_what_is_not_yet_a_notch() {
+        let mut carry = (0.0, 0.0);
+        assert!(wheel_clicks(&mut carry, 0.0, 0.4).is_empty());
+        assert_eq!(wheel_clicks(&mut carry, 0.0, 0.7), [8]);
+        assert!((carry.1 - 0.1).abs() < 1e-6);
+        assert_eq!(wheel_clicks(&mut carry, -2.0, 0.0), [32, 32]);
+        assert_eq!(wheel_clicks(&mut carry, 1.0, -1.1), [16, 64]);
+        let mut wild = (0.0, 0.0);
+        assert_eq!(
+            wheel_clicks(&mut wild, 0.0, 1e9).len(),
+            64,
+            "a misreport is bounded"
         );
     }
 

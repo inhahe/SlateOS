@@ -628,6 +628,17 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         is_text: false,
         is_executable: false,
     },
+    // Ogg's audio-only extension (RFC 5334): the same container as `.ogg`,
+    // named for audio whatever the codec inside -- Vorbis, Opus, FLAC.
+    FileTypeInfo {
+        extension: ".oga",
+        description: "Ogg Audio",
+        mime_type: "audio/ogg",
+        category: FileCategory::Audio,
+        icon_glyph: '\u{266A}',
+        is_text: false,
+        is_executable: false,
+    },
     FileTypeInfo {
         extension: ".opus",
         description: "Opus Audio",
@@ -1141,9 +1152,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     // Carried from the kernel's `fs::mime` and `fs::filetype` when the
     // program lists became one (gui/programs/INVENTORY.md section 5).
     // The ones that are waiting on a decision are not here; see the test
-    // `the_kernels_types_this_table_waits_to_decide_are_still_absent`. `.oga`
-    // waits on `apps/fileassoc`, whose group test counts this table's audio
-    // types by hand (requests/c-e-a-test-that-counts-the-toolkits-audio-types.md).
+    // `the_kernels_types_this_table_waits_to_decide_are_still_absent`.
     FileTypeInfo {
         extension: ".bat",
         description: "Windows Batch File",
@@ -1801,9 +1810,24 @@ mod tests {
         }
     }
 
+    /// **An `.oga` is Ogg audio**, as the kernel's table had it
+    /// (`audio/ogg`); it waited on `apps/fileassoc` counting the audio group
+    /// from this table rather than by hand, which lane E's 3275adc99 did.
+    #[test]
+    fn an_oga_is_ogg_audio() {
+        let info = detect_from_extension(".oga");
+        assert_eq!(
+            (info.mime_type, info.category),
+            ("audio/ogg", FileCategory::Audio)
+        );
+        assert_eq!(category_from_extension("oga"), FileCategory::Audio);
+    }
+
     #[test]
     fn detect_audio_extensions() {
-        for ext in &[".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma", ".m4a"] {
+        for ext in &[
+            ".mp3", ".wav", ".flac", ".ogg", ".oga", ".aac", ".wma", ".m4a",
+        ] {
             assert_eq!(
                 detect_from_extension(ext).category,
                 FileCategory::Audio,

@@ -94,6 +94,10 @@ pub struct PerThread {
     /// fully overwrites it first.
     pub tm: crate::time::Tm,
 
+    /// Result buffer for `getdate`: its own, as glibc's is, so a
+    /// `localtime` between a `getdate` and its use does not overwrite it.
+    pub getdate: crate::time::Tm,
+
     /// Result buffer for `asctime`/`ctime`.
     ///
     /// Big enough for every `struct tm`, as glibc's is: `asctime` formats
@@ -191,6 +195,7 @@ impl PerThread {
         errno: 0,
         h_errno: 0,
         tm: crate::time::Tm::ZERO,
+        getdate: crate::time::Tm::ZERO,
         asctime: [0; crate::time::ASCTIME_MAX],
         inet_ntoa: [0; 16],
         ether_aton: crate::inet::EtherAddr::ZERO,
@@ -326,6 +331,8 @@ mod tests {
         assert_eq!(zeroed.tm.tm_sec, PerThread::ZERO.tm.tm_sec);
         assert_eq!(zeroed.tm.tm_year, PerThread::ZERO.tm.tm_year);
         assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);
+        assert_eq!(zeroed.getdate.tm_year, PerThread::ZERO.getdate.tm_year);
+        assert!(zeroed.getdate.tm_zone.is_null());
         assert_eq!(zeroed.cancel_state, PerThread::ZERO.cancel_state);
         assert_eq!(zeroed.cancel_type, PerThread::ZERO.cancel_type);
         assert_eq!(zeroed.thread_slot, PerThread::ZERO.thread_slot);

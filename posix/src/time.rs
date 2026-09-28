@@ -1055,14 +1055,18 @@ pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
         return -1;
     }
     let t = unsafe { &mut *tm };
-    publish_tz_globals();
-    let utc = resolve_local(&crate::tz::current(), wall_secs(t), t.tm_isdst);
-    if secs_to_local_tm(utc, t) {
-        utc
-    } else {
+    mktime_tm(t).unwrap_or_else(|| {
         crate::errno::set_errno(crate::errno::EOVERFLOW);
         -1
-    }
+    })
+}
+
+/// `mktime`'s work: `t` normalised as local time, and the instant it names;
+/// `None`, with `t` untouched, when the year does not fit `tm_year`.
+fn mktime_tm(t: &mut Tm) -> Option<TimeT> {
+    publish_tz_globals();
+    let utc = resolve_local(&crate::tz::current(), wall_secs(t), t.tm_isdst);
+    secs_to_local_tm(utc, t).then_some(utc)
 }
 
 /// The UTC instant for wall time `local` (seconds since the epoch as if the
@@ -2667,6 +2671,316 @@ fn conversion(
         _ => return None,
     }
     Some(pos)
+}
+
+// ---------------------------------------------------------------------------
+// getdate — a date by the templates a file lists
+// ---------------------------------------------------------------------------
+
+/// Why the last `getdate` failed, numbered as POSIX numbers it: 1 `DATEMSK`
+/// unset or empty; 2 its file cannot be opened for reading; 3 its status
+/// cannot be read; 4 it is not a regular file; 5 reading it failed; 6 no
+/// memory; 7 no template matches the input; 8 the input names no valid
+/// date.
+///
+/// C declares it `extern int getdate_err`: one process-wide `int`, as
+/// glibc's is -- an `AtomicI32` for the reason `signgam` is one
+/// ([`crate::math::signgam`]): C's layout, and no undefined behaviour here
+/// when two threads fail at once.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static getdate_err: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
+
+/// `getdate(string)`: the date `string` names, by the first template in the
+/// file `DATEMSK` names that matches it whole ([`getdate_r`]); NULL, with
+/// [`getdate_err`] set, when there is none or the date is not one. The
+/// result is this thread's own storage, overwritten by its next `getdate`.
+///
+/// # Safety
+///
+/// `string` must be a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdate(string: *const u8) -> *mut Tm {
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    let tm = unsafe { &raw mut (*crate::perthread::current()).getdate };
+    // SAFETY: this function's contract; `tm` is this thread's own `Tm`.
+    match unsafe { getdate_r(string, tm) } {
+        0 => tm,
+        err => {
+            getdate_err.store(err, core::sync::atomic::Ordering::Relaxed);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// `getdate_r(string, tp)`: [`getdate`] into the caller's `*tp`, returning
+/// its error number -- 0 for a date -- rather than setting `getdate_err`.
+/// A GNU extension, glibc's.
+///
+/// `DATEMSK` names a text file of `strptime` formats, one per line; the
+/// input, less leading and trailing white space, is tried against each in
+/// turn, and the first that consumes all of it is the match. What the
+/// match left out comes from the present, as POSIX's `getdate` says
+/// ([`getdate_fill`]). On a failure `*tp` holds what the last attempt left
+/// there, as glibc's does.
+///
+/// # Safety
+///
+/// `string` must be a NUL-terminated string, and `tp` a valid `Tm`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdate_r(string: *const u8, tp: *mut Tm) -> i32 {
+    if string.is_null() || tp.is_null() {
+        return 7;
+    }
+    // SAFETY: the name is a NUL-terminated literal.
+    let path = unsafe { crate::environ::getenv(c"DATEMSK".as_ptr().cast()) };
+    // SAFETY: `getenv` returns NULL or a NUL-terminated value.
+    if path.is_null() || unsafe { *path } == 0 {
+        return 1;
+    }
+    let mut st = crate::stat::Stat::zeroed();
+    if crate::file::stat(path, &raw mut st) != 0 {
+        return 3;
+    }
+    if !st.is_file() {
+        return 4;
+    }
+    if crate::file::access(path, crate::fcntl::R_OK) != 0 {
+        return 2;
+    }
+    // SAFETY: a NUL-terminated path and mode.
+    let file = unsafe { crate::stdio::fopen(path, c"rce".as_ptr().cast()) };
+    if file.is_null() {
+        return 2;
+    }
+    // SAFETY: an open stream, and the caller's `Tm`.
+    let rc = unsafe { getdate_stream(string, file, &mut *tp, time(core::ptr::null_mut())) };
+    // The stream was only read; closing it cannot lose anything.
+    let _ = crate::stdio::fclose(file);
+    rc
+}
+
+/// `getdate_r` once its template file is open: `string` against each line
+/// of `file`, then [`getdate_fill`] from `now`.
+///
+/// # Safety
+///
+/// `string` is NUL-terminated and `file` an open stream.
+unsafe fn getdate_stream(string: *const u8, file: *mut u8, tp: &mut Tm, now: TimeT) -> i32 {
+    // SAFETY: this function's contract.
+    let Some(input) = (unsafe { GetdateInput::new(string) }) else {
+        return 6;
+    };
+    let mut line: *mut u8 = core::ptr::null_mut();
+    let mut cap = 0usize;
+    let mut found = false;
+    loop {
+        // SAFETY: a `getline` pair of this function's, and an open stream.
+        let n = unsafe { crate::stdio::getline(&raw mut line, &raw mut cap, file) };
+        let Ok(n) = usize::try_from(n) else {
+            break;
+        };
+        // One template, its newline cut.
+        if let Some(i) = n.checked_sub(1) {
+            // SAFETY: `getline` wrote `n` bytes and a NUL at `line`, and
+            // `i < n`.
+            let last = unsafe { line.add(i) };
+            // SAFETY: as above; the byte is within the line.
+            if unsafe { *last } == b'\n' {
+                // SAFETY: as above.
+                unsafe { *last = 0 };
+            }
+        }
+        if getdate_try(input.ptr(), line, tp) {
+            found = true;
+            break;
+        }
+        if crate::stdio::feof(file) != 0 {
+            break;
+        }
+    }
+    // SAFETY: `line` is NULL or `getline`'s `malloc` block.
+    unsafe { crate::malloc::free(line.cast()) };
+    if crate::stdio::ferror(file) != 0 {
+        return 5;
+    }
+    if !found {
+        return 7;
+    }
+    getdate_fill(tp, now)
+}
+
+/// The input as `getdate` matches it: past its leading white space, and --
+/// when it has trailing white space -- a copy without it, as glibc makes.
+struct GetdateInput {
+    start: *const u8,
+    copy: Option<crate::decfloat::MallocBuf<u8>>,
+}
+
+impl GetdateInput {
+    /// `None` when the copy cannot be allocated (`getdate`'s 6).
+    ///
+    /// # Safety
+    ///
+    /// `string` is NUL-terminated.
+    #[allow(clippy::arithmetic_side_effects)]
+    unsafe fn new(string: *const u8) -> Option<Self> {
+        let mut start = string;
+        // SAFETY: within the string, stopping at its NUL.
+        while is_c_space(unsafe { *start }) {
+            // SAFETY: as above.
+            start = unsafe { start.add(1) };
+        }
+        // SAFETY: `start` is within the NUL-terminated string.
+        let bytes = unsafe { core::ffi::CStr::from_ptr(start.cast()) }.to_bytes();
+        let kept = bytes
+            .iter()
+            .rposition(|&b| !is_c_space(b))
+            .map_or(0, |i| i + 1);
+        if kept == bytes.len() {
+            return Some(Self { start, copy: None });
+        }
+        let mut copy = crate::decfloat::MallocBuf::<u8>::zeroed(kept + 1)?;
+        if let (Some(dst), Some(src)) = (copy.as_mut().get_mut(..kept), bytes.get(..kept)) {
+            dst.copy_from_slice(src);
+        }
+        Some(Self {
+            start,
+            copy: Some(copy),
+        })
+    }
+
+    /// The NUL-terminated input.
+    fn ptr(&self) -> *const u8 {
+        self.copy
+            .as_ref()
+            .map_or(self.start, |c| c.as_ref().as_ptr())
+    }
+}
+
+/// `getdate`'s marker for a field no template set.
+const GETDATE_UNSET: i32 = i32::MIN;
+
+/// One template: `tp` marked unset in every field a template can set, then
+/// `strptime`; whether it consumed the whole input.
+fn getdate_try(input: *const u8, template: *const u8, tp: &mut Tm) -> bool {
+    tp.tm_year = GETDATE_UNSET;
+    tp.tm_mon = GETDATE_UNSET;
+    tp.tm_mday = GETDATE_UNSET;
+    tp.tm_wday = GETDATE_UNSET;
+    tp.tm_hour = GETDATE_UNSET;
+    tp.tm_min = GETDATE_UNSET;
+    tp.tm_sec = GETDATE_UNSET;
+    tp.tm_isdst = -1;
+    tp.tm_gmtoff = 0;
+    tp.tm_zone = core::ptr::null();
+    // SAFETY: both are NUL-terminated (the callers' contracts).
+    let end = unsafe { strptime(input, template, tp) };
+    // SAFETY: a non-NULL result points into the NUL-terminated input.
+    !end.is_null() && unsafe { *end } == 0
+}
+
+/// What the matching template left out, filled in as POSIX's `getdate`
+/// says, from `now` in local time -- and then the whole normalised by
+/// `mktime`. 0, or 8 when the date is not one.
+///
+/// - A weekday alone is the next such day, today included.
+/// - A month without a day is the next such month, this one included, at
+///   its first day -- or its first such weekday, when one was matched.
+/// - No hour, minute or second: now's; any one missing: 0.
+/// - An hour without a date is the next such hour, the current one
+///   included, judged by the hour alone -- 13:45 at 13:50 is today's, as
+///   in glibc.
+/// - A missing year or month is the present one.
+#[allow(clippy::arithmetic_side_effects)]
+fn getdate_fill(tp: &mut Tm, now: TimeT) -> i32 {
+    let mut here = Tm::ZERO;
+    if !secs_to_local_tm(now, &mut here) {
+        return 8;
+    }
+    let unset = GETDATE_UNSET;
+    let mut mday_ok = false;
+    // The present's fields are all in range, so none of the sums below can
+    // overflow.
+    if (0..=6).contains(&tp.tm_wday)
+        && tp.tm_year == unset
+        && tp.tm_mon == unset
+        && tp.tm_mday == unset
+    {
+        tp.tm_year = here.tm_year;
+        tp.tm_mon = here.tm_mon;
+        tp.tm_mday = here.tm_mday + (tp.tm_wday - here.tm_wday + 7) % 7;
+        mday_ok = true;
+    }
+    if (0..=11).contains(&tp.tm_mon) && tp.tm_mday == unset {
+        if tp.tm_year == unset {
+            tp.tm_year = here.tm_year + i32::from(tp.tm_mon < here.tm_mon);
+        }
+        tp.tm_mday = first_weekday(tp.tm_year, tp.tm_mon, tp.tm_wday);
+        mday_ok = true;
+    }
+    if tp.tm_hour == unset && tp.tm_min == unset && tp.tm_sec == unset {
+        tp.tm_hour = here.tm_hour;
+        tp.tm_min = here.tm_min;
+        tp.tm_sec = here.tm_sec;
+    }
+    for field in [&mut tp.tm_hour, &mut tp.tm_min, &mut tp.tm_sec] {
+        if *field == unset {
+            *field = 0;
+        }
+    }
+    if (0..=23).contains(&tp.tm_hour)
+        && tp.tm_mon == unset
+        && tp.tm_mday == unset
+        && tp.tm_wday == unset
+    {
+        tp.tm_mon = here.tm_mon;
+        tp.tm_mday = here.tm_mday + i32::from(tp.tm_hour < here.tm_hour);
+        mday_ok = true;
+    }
+    if tp.tm_year == unset {
+        tp.tm_year = here.tm_year;
+    }
+    if tp.tm_mon == unset {
+        tp.tm_mon = here.tm_mon;
+    }
+    if !mday_ok && !day_in_month(tp.tm_year, tp.tm_mon, tp.tm_mday) {
+        return 8;
+    }
+    if mktime_tm(tp).is_none() {
+        return 8;
+    }
+    0
+}
+
+/// Whether `mday` is a day of month `mon` (0-based) of `tm_year`'s year.
+fn day_in_month(tm_year: i32, mon: i32, mday: i32) -> bool {
+    let Some(month) = u32::try_from(mon).ok().filter(|m| *m < 12) else {
+        return false;
+    };
+    let days = tzrules::days_in_month(month.wrapping_add(1), i64::from(tm_year).wrapping_add(1900));
+    u32::try_from(mday).is_ok_and(|d| (1..=days).contains(&d))
+}
+
+/// The first day of month `mon` of `tm_year`'s year that falls on weekday
+/// `wday`, found through `mktime` in local time; the 1st when no weekday
+/// was matched.
+#[allow(clippy::arithmetic_side_effects)]
+fn first_weekday(tm_year: i32, mon: i32, wday: i32) -> i32 {
+    if wday == GETDATE_UNSET {
+        return 1;
+    }
+    let mut first = Tm {
+        tm_year,
+        tm_mon: mon,
+        tm_mday: 1,
+        ..Tm::ZERO
+    };
+    // A year past `tm_year` leaves the weekday 0, as glibc's unchecked
+    // `mktime` does.
+    let _ = mktime_tm(&mut first);
+    // `wday` is 0..=6 from `strptime`, and `tm_wday` 0..=6.
+    1 + (wday - first.tm_wday + 7) % 7
 }
 
 // ---------------------------------------------------------------------------
@@ -11122,6 +11436,150 @@ mod tests {
             "{} of {calls} differ:\n{}",
             bad.len(),
             bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    // -- getdate, against glibc --
+
+    /// glibc 2.39's `getdate` and `getdate_r`
+    /// (`posix/tools/oracle/getdate_harness.py`).
+    const GETDATE_ORACLE: &str = include_str!("getdate_oracle.txt");
+
+    /// `getdate_r`'s matching and filling, over templates held in memory
+    /// rather than read from `DATEMSK`'s file: `getdate_stream`'s loop, for
+    /// the host, where no file system answers.
+    fn getdate_lines(string: *const u8, templates: &[Vec<u8>], tp: &mut Tm, now: TimeT) -> i32 {
+        // SAFETY: the callers pass NUL-terminated input.
+        let Some(input) = (unsafe { GetdateInput::new(string) }) else {
+            return 6;
+        };
+        if !templates
+            .iter()
+            .any(|t| getdate_try(input.ptr(), t.as_ptr(), tp))
+        {
+            return 7;
+        }
+        getdate_fill(tp, now)
+    }
+
+    /// A `Tm` as the getdate oracle prints one.
+    fn getdate_fields(t: &Tm) -> String {
+        format!(
+            "{} {} {} {} {} {} {} {} {}",
+            t.tm_sec,
+            t.tm_min,
+            t.tm_hour,
+            t.tm_mday,
+            t.tm_mon,
+            t.tm_year,
+            t.tm_wday,
+            t.tm_yday,
+            t.tm_isdst
+        )
+    }
+
+    /// glibc 2.39's `getdate` and `getdate_r`: 49 inputs against 21
+    /// templates in two zones, each replayed at the second glibc's call ran
+    /// in -- weekdays, months and times alone resolved from it -- with the
+    /// result, the error number and every field, those a failure leaves
+    /// included; and the errors of `DATEMSK` itself that this host can
+    /// reach (unset, empty, naming no file). The other two, a directory and
+    /// an empty file, need a file system.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn getdate_answers_as_glibc_does() {
+        let _tz = TzGuard::utc();
+        let mut lines = GETDATE_ORACLE.lines();
+        let templates: Vec<Vec<u8>> = lines
+            .next()
+            .unwrap()
+            .strip_prefix("T ")
+            .unwrap()
+            .split(' ')
+            .map(|h| {
+                let mut t = unhex(h);
+                t.push(0);
+                t
+            })
+            .collect();
+        let mut zone = usize::MAX;
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        let mut file_errors = std::collections::HashMap::new();
+        for line in lines {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[0] == "E" {
+                file_errors.insert(w[1].to_owned(), want.to_owned());
+                continue;
+            }
+            let z: usize = w[1].parse().unwrap();
+            // A date before 1970 in the zone with daylight time: glibc
+            // applies a `TZ` string's rule only from 1970, `tzrules` in
+            // every year ([`glibc_tz_rule_differs`]); `tm_isdst` differs.
+            let year = want.split(' ').nth(if w[0] == "g" { 7 } else { 6 });
+            if z == 1
+                && year
+                    .and_then(|y| y.parse::<i32>().ok())
+                    .is_some_and(|y| y < 70)
+            {
+                continue;
+            }
+            if z != zone {
+                TzGuard::put(ORACLE_ZONES[z]);
+                zone = z;
+            }
+            let now: TimeT = w[2].parse().unwrap();
+            let mut input = unhex(w[3]);
+            input.push(0);
+            let mut t = Tm::ZERO;
+            let rc = getdate_lines(input.as_ptr(), &templates, &mut t, now);
+            let got = match (w[0], rc) {
+                ("g", 0) => format!("1 0 {}", getdate_fields(&t)),
+                ("g", _) => format!("0 {rc} -"),
+                _ => format!("{rc} {}", getdate_fields(&t)),
+            };
+            calls += 1;
+            if got != want {
+                bad.push(format!("{line}\n    ours {got}"));
+            }
+        }
+        assert!(calls > 150, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.iter().take(60).cloned().collect::<Vec<_>>().join("\n")
+        );
+
+        for (case, setting) in [
+            ("unset", None),
+            ("empty", Some(&b"\0"[..])),
+            ("missing", Some(&b"/nonexistent/templates\0"[..])),
+        ] {
+            // SAFETY: NUL-terminated name and value; the test holds the
+            // environment's lock (`TzGuard`).
+            let rc = unsafe {
+                match setting {
+                    None => crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()),
+                    Some(v) => crate::environ::setenv(c"DATEMSK".as_ptr().cast(), v.as_ptr(), 1),
+                }
+            };
+            assert_eq!(rc, 0);
+            getdate_err.store(0, core::sync::atomic::Ordering::Relaxed);
+            // SAFETY: a NUL-terminated input.
+            let r = unsafe { getdate(c"2026-09-28".as_ptr().cast()) };
+            let got = format!(
+                "{} {}",
+                u8::from(!r.is_null()),
+                getdate_err.load(core::sync::atomic::Ordering::Relaxed)
+            );
+            assert_eq!(&got, file_errors.get(case).unwrap(), "DATEMSK {case}");
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()) },
+            0
         );
     }
 }

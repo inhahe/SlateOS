@@ -24,11 +24,11 @@ use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use pathtext::ShowPath;
 
-use std::collections::VecDeque;
 use std::process::ExitCode;
 use std::time::Duration;
 use unsaved::{Choice, Question};
@@ -73,6 +73,11 @@ const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
 const GRID_SIZE: f32 = 20.0;
 const MAX_UNDO_STEPS: usize = 200;
+/// [`MAX_UNDO_STEPS`] as a page's history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO_STEPS) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 const MAX_THICKNESS: u8 = 20;
 /// A window smaller than this has no canvas left between the panels.
 const MIN_WINDOW_WIDTH: f32 = 480.0;
@@ -609,22 +614,25 @@ pub enum Action {
 // ============================================================================
 
 /// A single whiteboard page containing shapes and layers.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Page {
     pub name: String,
     pub shapes: Vec<Shape>,
     pub layers: Vec<Layer>,
     pub next_shape_id: ShapeId,
     pub next_layer_id: LayerId,
-    /// What can be undone on this page, oldest first.
+    /// What has been done on this page, kept as a tree: an action done after
+    /// undoing starts a branch beside what was undone, rather than throwing
+    /// it away (C-Q24, `design-decisions.md` §1416). Ctrl+Z and Ctrl+Y go
+    /// back and forth along the branch the page is on; Alt+Z and Alt+Shift+Z
+    /// walk every version it has been, in the order each was made.
     ///
     /// One history per page. It was one for the whole window, replayed onto
     /// whichever page was showing: undo after switching pages took a shape
     /// off the wrong page -- ids are per page, so another page's shape of the
     /// same number -- and a deleted page's history went on acting on the
     /// page that replaced it.
-    pub undo_stack: VecDeque<Action>,
-    pub redo_stack: Vec<Action>,
+    pub history: UndoHistory<Action>,
 }
 
 impl Page {
@@ -636,8 +644,7 @@ impl Page {
             layers: vec![first_layer],
             next_shape_id: 1,
             next_layer_id: 2,
-            undo_stack: VecDeque::new(),
-            redo_stack: Vec::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
         }
     }
 
@@ -789,6 +796,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+Z", "Undo"),
     ("Ctrl+Shift+Z", "Redo"),
     ("Ctrl+Y", "Redo"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The page before / after this, on any branch",
+    ),
     ("Ctrl+A", "Select everything on the page"),
     ("Ctrl+S / Ctrl+Shift+S", "Save / save as a new file"),
     ("Ctrl+O", "Open a board"),
@@ -1089,31 +1100,61 @@ impl WhiteboardApp {
     /// Record a change on the current page, for undo -- and note that the
     /// board has changed since it was saved. Every change comes through here.
     pub fn push_action(&mut self, action: Action) {
-        let page = self.current_page_mut();
-        page.redo_stack.clear();
-        if page.undo_stack.len() >= MAX_UNDO_STEPS {
-            page.undo_stack.pop_front();
-        }
-        page.undo_stack.push_back(action);
+        // One done after undoing starts a branch, and what was undone stays
+        // in the page's history.
+        self.current_page_mut().history.record(action);
         self.dirty = true;
     }
 
     pub fn undo(&mut self) {
-        if let Some(action) = self.current_page_mut().undo_stack.pop_back() {
-            let reverse = self.reverse_action(&action);
-            self.apply_action_silent(&reverse);
-            self.current_page_mut().redo_stack.push(action);
+        if let Some(action) = self.current_page_mut().history.undo() {
+            self.revert(&action);
             // Undoing past a save leaves a board the file does not hold.
             self.dirty = true;
         }
     }
 
+    /// Redo the last undone action on the branch the page is on -- the one
+    /// undone out of, or the one done since.
     pub fn redo(&mut self) {
-        if let Some(action) = self.current_page_mut().redo_stack.pop() {
+        if let Some(action) = self.current_page_mut().history.redo() {
             self.apply_action_silent(&action);
-            self.current_page_mut().undo_stack.push_back(action);
             self.dirty = true;
         }
+    }
+
+    /// Go to the page as it was before this version was first reached, on
+    /// whichever branch -- Alt+Z. Answers whether there was one.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.current_page_mut().history.earlier();
+        self.travel(steps)
+    }
+
+    /// Go to the version of the page first reached after this one, on
+    /// whichever branch -- Alt+Shift+Z. Answers whether there was one.
+    pub fn later(&mut self) -> bool {
+        let steps = self.current_page_mut().history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the page's history hands back, in
+    /// order.
+    fn travel(&mut self, steps: Vec<Travel<Action>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(action) => self.revert(&action),
+                Travel::Redo(action) => self.apply_action_silent(&action),
+            }
+        }
+        self.dirty |= moved;
+        moved
+    }
+
+    /// Take `action` back.
+    fn revert(&mut self, action: &Action) {
+        let reverse = self.reverse_action(action);
+        self.apply_action_silent(&reverse);
     }
 
     /// Apply an action without recording it in the undo stack.
@@ -2647,7 +2688,25 @@ impl WhiteboardApp {
             return true;
         }
 
-        if event.modifiers.ctrl {
+        // Alt+Z and Alt+Shift+Z: every version of the page there has been,
+        // in the order each was made -- the way back to a branch undone out
+        // of. Alt without Ctrl: Ctrl+Alt is AltGr.
+        if event.key == Key::Z
+            && event.modifiers.alt
+            && !event.modifiers.ctrl
+            && !event.modifiers.super_key
+        {
+            if event.modifiers.shift {
+                self.later();
+            } else {
+                self.earlier();
+            }
+            return true;
+        }
+
+        // Ctrl without Alt: Ctrl+Alt is AltGr, which types a letter on
+        // several layouts -- AltGr+Z is Polish's ż, which undid.
+        if event.modifiers.ctrl && !event.modifiers.alt {
             return match event.key {
                 Key::Z => {
                     if event.modifiers.shift {
@@ -3850,10 +3909,21 @@ impl WhiteboardApp {
         cmds.push(RenderCommand::Text {
             x: 500.0,
             y: y + 6.0,
+            // Whether each can go, not how far: the history is a tree and
+            // does not count its line yet
+            // (`requests/e-c-undohistory-could-say-how-far-undo-and-redo-go.md`).
             text: format!(
-                "Undo:{} Redo:{}",
-                self.current_page().undo_stack.len(),
-                self.current_page().redo_stack.len()
+                "Undo: {} Redo: {}",
+                if self.current_page().history.can_undo() {
+                    "yes"
+                } else {
+                    "no"
+                },
+                if self.current_page().history.can_redo() {
+                    "yes"
+                } else {
+                    "no"
+                }
             ),
             color: self.palette.subtext0,
             font_size: 11.0,
@@ -5392,20 +5462,80 @@ mod tests {
         assert!(app.current_page().shapes.is_empty());
     }
 
+    /// **An action after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every version of the page, in the order each was made; Alt+Shift+Z
+    /// comes forward again.
     #[test]
-    fn test_undo_clears_redo_on_new_action() {
+    fn an_action_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
         let mut app = WhiteboardApp::new(800.0, 600.0);
         app.add_shape(ShapeKind::Line {
             start: Point::new(0.0, 0.0),
             end: Point::new(10.0, 10.0),
         });
         app.undo();
-        assert!(!app.current_page().redo_stack.is_empty());
-        // New action should clear redo
+        assert!(app.current_page().history.can_redo());
         app.add_shape(ShapeKind::Rectangle {
             bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
         });
-        assert!(app.current_page().redo_stack.is_empty());
+        assert!(
+            !app.current_page().history.can_redo(),
+            "redo would go onto the branch left"
+        );
+        let kinds = |app: &WhiteboardApp| -> Vec<&'static str> {
+            app.current_page()
+                .shapes
+                .iter()
+                .map(|s| match s.kind {
+                    ShapeKind::Line { .. } => "line",
+                    ShapeKind::Rectangle { .. } => "rectangle",
+                    _ => "other",
+                })
+                .collect()
+        };
+        let alt_z = |shift: bool| KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                alt: true,
+                shift,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        };
+        // As a save leaves it: a journey away from what was saved is a change.
+        app.dirty = false;
+        app.handle_key(&alt_z(false));
+        assert!(app.dirty, "a journey did not mark the board changed");
+        assert_eq!(kinds(&app), ["line"], "the undone line was lost");
+        app.handle_key(&alt_z(false));
+        assert!(kinds(&app).is_empty());
+        app.handle_key(&alt_z(true));
+        app.handle_key(&alt_z(true));
+        assert_eq!(kinds(&app), ["rectangle"]);
+        assert!(!app.later(), "past the newest version");
+    }
+
+    /// **AltGr is not Ctrl.** It arrives as Ctrl+Alt, and AltGr+Z --
+    /// Polish's ż -- undid the last shape.
+    #[test]
+    fn altgr_z_does_not_undo() {
+        let mut app = WhiteboardApp::new(800.0, 600.0);
+        app.add_shape(ShapeKind::Line {
+            start: Point::new(0.0, 0.0),
+            end: Point::new(10.0, 10.0),
+        });
+        app.handle_key(&KeyEvent {
+            key: Key::Z,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                alt: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: "\u{17c}".to_string(),
+        });
+        assert_eq!(app.current_page().shapes.len(), 1, "AltGr+Z undid");
     }
 
     #[test]
@@ -5417,7 +5547,13 @@ mod tests {
                 end: Point::new(10.0, i as f32),
             });
         }
-        assert!(app.current_page().undo_stack.len() <= MAX_UNDO_STEPS);
+        // The history keeps no count; counted by taking it all back.
+        let mut kept = 0;
+        while app.current_page().history.can_undo() && kept <= MAX_UNDO_STEPS {
+            app.undo();
+            kept += 1;
+        }
+        assert_eq!(kept, MAX_UNDO_STEPS);
     }
 
     // ---- Delete selected ----

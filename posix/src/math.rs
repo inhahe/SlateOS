@@ -399,17 +399,18 @@ pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
     r
 }
 
-/// `x * y + z`, rounded once: fused, as C requires, in software where the
-/// processor has no FMA instruction.
+/// `x * y + z`, rounded once: fused, as C requires -- by the processor's
+/// FMA instruction where it has one and the OS saves its registers, in
+/// software where not (`fmadd.rs`); the same answer either way.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
-    libm::fma(x, y, z)
+    crate::fmadd::fma(x, y, z)
 }
 
 /// [`fma`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
-    libm::fmaf(x, y, z)
+    crate::fmadd::fmaf(x, y, z)
 }
 
 /// The square root, correctly rounded (`EDOM` for `x < 0`, glibc's

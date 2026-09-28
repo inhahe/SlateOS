@@ -373,6 +373,7 @@ pub mod fcntl_ops;
 pub mod fdtable;
 pub mod fenv;
 pub mod file;
+pub(crate) mod fmadd;
 pub mod fmtmsg;
 pub mod fnmatch;
 pub mod fortify;

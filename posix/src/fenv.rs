@@ -534,6 +534,92 @@ mod tests {
         assert_eq!(fegetround(), FE_TONEAREST, "and nothing changed");
     }
 
+    /// `rint` follows the rounding direction; `roundeven`, `round`, `trunc`,
+    /// `floor` and `ceil` each name their own and must ignore it. The vendored
+    /// libm's `roundeven` and `round` did not: each rounded a sum in the
+    /// current direction, so under `FE_UPWARD` `roundeven(2.3)` was 3 and
+    /// `round(-2.5)` -2 (and `lround`, `llround` with it).
+    #[test]
+    fn the_named_roundings_ignore_the_rounding_direction() {
+        use crate::math::{
+            ceil, ceilf, floor, floorf, llround, lround, round, roundeven, roundevenf, roundf,
+            trunc, truncf,
+        };
+        let _r = Restore::take();
+        //  x      roundeven round  trunc floor ceil
+        let cases: [(f64, f64, f64, f64, f64, f64); 12] = [
+            (2.3, 2.0, 2.0, 2.0, 2.0, 3.0),
+            (2.5, 2.0, 3.0, 2.0, 2.0, 3.0),
+            (2.7, 3.0, 3.0, 2.0, 2.0, 3.0),
+            (3.5, 4.0, 4.0, 3.0, 3.0, 4.0),
+            (-2.3, -2.0, -2.0, -2.0, -3.0, -2.0),
+            (-2.5, -2.0, -3.0, -2.0, -3.0, -2.0),
+            (-3.5, -4.0, -4.0, -3.0, -4.0, -3.0),
+            (0.5, 0.0, 1.0, 0.0, 0.0, 1.0),
+            (-0.5, -0.0, -1.0, -0.0, -1.0, -0.0),
+            (0.3, 0.0, 0.0, 0.0, 0.0, 1.0),
+            (
+                4_503_599_627_370_495.5,
+                4_503_599_627_370_496.0,
+                4_503_599_627_370_496.0,
+                4_503_599_627_370_495.0,
+                4_503_599_627_370_495.0,
+                4_503_599_627_370_496.0,
+            ),
+            (1e300, 1e300, 1e300, 1e300, 1e300, 1e300),
+        ];
+        for mode in [FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO] {
+            assert_eq!(fesetround(mode), 0);
+            for (x, even, away, tr, fl, ce) in cases {
+                let x = core::hint::black_box(x);
+                let got = [roundeven(x), round(x), trunc(x), floor(x), ceil(x)];
+                for (name, g, want) in [
+                    ("roundeven", got[0], even),
+                    ("round", got[1], away),
+                    ("trunc", got[2], tr),
+                    ("floor", got[3], fl),
+                    ("ceil", got[4], ce),
+                ] {
+                    assert_eq!(g.to_bits(), want.to_bits(), "{name}({x}) in {mode:#x}: {g}");
+                }
+                // lround and llround are round, as integers, where it fits.
+                if away.abs() < 1e18 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let want = away as i64;
+                    assert_eq!(lround(x), want, "lround({x}) in {mode:#x}");
+                    assert_eq!(llround(x), want, "llround({x}) in {mode:#x}");
+                }
+                // The float functions, where the case is a float.
+                #[allow(clippy::cast_possible_truncation)]
+                let xf = x as f32;
+                if f64::from(xf) == x {
+                    let gotf = [
+                        roundevenf(xf),
+                        roundf(xf),
+                        truncf(xf),
+                        floorf(xf),
+                        ceilf(xf),
+                    ];
+                    for (name, g, want) in [
+                        ("roundevenf", gotf[0], even),
+                        ("roundf", gotf[1], away),
+                        ("truncf", gotf[2], tr),
+                        ("floorf", gotf[3], fl),
+                        ("ceilf", gotf[4], ce),
+                    ] {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let want = want as f32;
+                        assert_eq!(
+                            g.to_bits(),
+                            want.to_bits(),
+                            "{name}({xf}) in {mode:#x}: {g}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// `nearbyint` rounds as `rint` does and leaves the flags as it found
     /// them; `rint` raises inexact for a fraction.
     #[test]

@@ -129,28 +129,76 @@ pub extern "C" fn truncf(x: f32) -> f32 {
     libm::truncf(x)
 }
 
-/// The nearest integer, a tie away from zero.
+/// The nearest integer, a tie away from zero, whatever the rounding
+/// direction.
+///
+/// Not `libm::round`, `trunc(x + copysign(0.5 - 2^-54, x))`: that sum rounds
+/// in the current direction, so under `FE_UPWARD` `round(-2.5)` was -2. As
+/// [`roundeven`]: the integer part from the bits, the exact fraction, a
+/// comparison, and an exact step away from zero.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn round(x: f64) -> f64 {
-    libm::round(x)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::trunc(x);
+    if (x - t).abs() >= 0.5 {
+        t + 1.0_f64.copysign(x)
+    } else {
+        t
+    }
 }
 
-/// The nearest integer, a tie away from zero (float).
+/// [`round`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn roundf(x: f32) -> f32 {
-    libm::roundf(x)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::truncf(x);
+    if (x - t).abs() >= 0.5 {
+        t + 1.0_f32.copysign(x)
+    } else {
+        t
+    }
 }
 
-/// The nearest integer, a tie to even (C23).
+/// The nearest integer, a tie to even, whatever the rounding direction (C23;
+/// IEEE 754's roundToIntegralTiesToEven).
+///
+/// Not `libm::roundeven`, which adds and subtracts 2^52 and so rounds in the
+/// *current* direction: under `FE_UPWARD` it made `roundeven(2.3)` 3. Here
+/// the integer part comes from the bits (`trunc`), the fraction `x - t` is
+/// exact, and a comparison decides; `t +- 1` is exact too, below 2^52 where
+/// there is a fraction at all. No flag is raised but invalid, for a
+/// signalling NaN.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn roundeven(x: f64) -> f64 {
-    libm::roundeven(x)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::trunc(x);
+    let d = (x - t).abs();
+    if d > 0.5 || (d == 0.5 && libm::fmod(t, 2.0) != 0.0) {
+        t + 1.0_f64.copysign(x)
+    } else {
+        t
+    }
 }
 
-/// The nearest integer, a tie to even (float, C23).
+/// [`roundeven`] (float, C23).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn roundevenf(x: f32) -> f32 {
-    libm::roundevenf(x)
+    if x.is_nan() {
+        return x + x;
+    }
+    let t = libm::truncf(x);
+    let d = (x - t).abs();
+    if d > 0.5 || (d == 0.5 && libm::fmodf(t, 2.0) != 0.0) {
+        t + 1.0_f32.copysign(x)
+    } else {
+        t
+    }
 }
 
 /// The integer nearest `x` in the current rounding direction
@@ -222,25 +270,25 @@ fn to_long_f(r: f32) -> i64 {
 /// [`round`] as a `long`; `LONG_MIN` when it is not one.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lround(x: f64) -> i64 {
-    to_long(libm::round(x))
+    to_long(round(x))
 }
 
 /// [`roundf`] as a `long`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lroundf(x: f32) -> i64 {
-    to_long_f(libm::roundf(x))
+    to_long_f(roundf(x))
 }
 
 /// [`round`] as a `long long` (the same width here).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llround(x: f64) -> i64 {
-    to_long(libm::round(x))
+    to_long(round(x))
 }
 
 /// [`roundf`] as a `long long`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llroundf(x: f32) -> i64 {
-    to_long_f(libm::roundf(x))
+    to_long_f(roundf(x))
 }
 
 /// [`rint`] as a `long`.

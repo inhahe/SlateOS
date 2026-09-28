@@ -45,7 +45,7 @@
 //! [`Frame::hit`](guitk::frame::Frame::hit), which is what lets a test click a
 //! cell by name and what lets the pointer find one.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -113,9 +113,12 @@ struct Colours {
     open: Color,
     /// The tile whose mine ended the game.
     lost: Color,
-    /// A mine shown when the game is lost, and the flag's letter.
+    /// A mine shown when the game is lost.
     mine: Color,
-    flag: Color,
+    /// The flag's letter: the palette's peach, moved only as far as it must
+    /// be to read on a flagged tile -- as the page's ink it was 2.5:1 there
+    /// in a light theme.
+    flag: Ink,
     /// The star on the losing tile, on its red.
     mine_on_lost: Color,
 }
@@ -130,17 +133,20 @@ impl Colours {
             open: p.mantle,
             lost: p.red,
             mine: p.ink(p.red),
-            flag: p.ink(p.peach),
+            flag: Ink::on(p.ink(p.peach), &[p.surface2]),
             mine_on_lost: p.ink_on(p.base, p.red),
         }
     }
 
-    /// Digit `n`'s colour on an open tile.
-    fn digit(&self, n: u8) -> Color {
+    /// Digit `n`'s colour on an open tile, drawn at `size`: its own colour
+    /// (the players' convention, C-Q16), the dark or the light one for the
+    /// tile, and moved only as far as it must be for the size -- a small `2`
+    /// in its light green was 4.2:1 on an open tile in a cramped window.
+    fn digit(&self, n: u8, size: f32) -> Color {
         DIGITS
             .get(usize::from(n).saturating_sub(1))
             .map_or(self.chrome.text, |&pair| {
-                gamechrome::legible_on(pair, self.open)
+                Ink::on(gamechrome::legible_on(pair, self.open), &[self.open]).at(size, true)
             })
     }
 }
@@ -301,16 +307,6 @@ impl Difficulty {
             Self::Beginner => "Beginner",
             Self::Intermediate => "Intermediate",
             Self::Expert => "Expert",
-        }
-    }
-
-    /// The colour the difficulty chip's label is drawn in.
-    #[must_use]
-    fn color(self, c: &Chrome) -> Color {
-        match self {
-            Self::Beginner => c.good,
-            Self::Intermediate => c.even,
-            Self::Expert => c.bad,
         }
     }
 
@@ -1105,6 +1101,13 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The size a tile's flag, star or count is written at: a share of the
+    /// tile, with a ceiling so a huge window does not shout.
+    #[must_use]
+    pub fn glyph(&self) -> f32 {
+        (self.cell * 0.55).clamp(0.0, 22.0)
+    }
+
     /// The layout for a window of the given size holding a `rows` x `cols`
     /// board.
     #[must_use]
@@ -1353,13 +1356,25 @@ fn left_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: Fon
     );
 }
 
-fn chip(f: &mut Frame, r: Rect, target: Target, s: &str, size: f32, accent: Color, face: Color) {
+/// A header control: the toolkit's push button on the band, and its hit box.
+///
+/// It was a slab of the raised surface with its word in a page ink, which
+/// read at 3.6:1 on it in a light theme.
+fn chip(f: &mut Frame, p: &Palette, r: Rect, target: Target, s: &str, size: f32, ground: Color) {
     if r.is_empty() {
         return;
     }
-    fill(f, r, face, 5.0);
+    gamechrome::button(
+        f,
+        p,
+        (r.x, r.y, r.w, r.h),
+        s,
+        size,
+        guitk::button::Kind::Plain,
+        guitk::button::State::default(),
+        ground,
+    );
     f.hit(target, r);
-    centred_in(f, r, s, size, accent, FontWeightHint::Bold);
 }
 
 impl MinesweeperApp {
@@ -1422,21 +1437,21 @@ impl MinesweeperApp {
 
         chip(
             f,
+            &self.palette,
             l.chip(1),
             Target::Difficulty,
             self.difficulty.label(),
             l.font,
-            self.difficulty.color(&c.chrome),
-            c.chrome.raised,
+            c.chrome.band,
         );
         chip(
             f,
+            &self.palette,
             l.chip(0),
             Target::NewGame,
             "New",
             l.font,
-            c.chrome.title,
-            c.chrome.raised,
+            c.chrome.band,
         );
     }
 
@@ -1471,17 +1486,17 @@ impl MinesweeperApp {
         // click on a number.
         f.hit(Target::Cell(row, col), r);
 
-        let size = (l.cell * 0.55).clamp(0.0, 22.0);
+        let size = l.glyph();
         match cell.state {
             CellState::Flagged => {
-                centred_in(f, r, "F", size, c.flag, FontWeightHint::Bold);
+                centred_in(f, r, "F", size, c.flag.at(size, true), FontWeightHint::Bold);
             }
             CellState::Revealed if cell.is_mine => {
                 let ink = if lost_here { c.mine_on_lost } else { c.mine };
                 centred_in(f, r, "*", size, ink, FontWeightHint::Bold);
             }
             CellState::Revealed if cell.adjacent > 0 => {
-                let ink = c.digit(cell.adjacent);
+                let ink = c.digit(cell.adjacent, size);
                 centred_in(
                     f,
                     r,
@@ -1940,19 +1955,17 @@ mod tests {
     }
 
     #[test]
-    fn every_difficulty_has_its_own_name_and_its_own_colour() {
+    fn every_difficulty_has_its_own_name() {
+        // It had its own colour too, on the level chip. The chips are the
+        // toolkit's buttons now (C-Q16's polish), which write their labels in
+        // the toolkit's ink -- and a level's colour on the old chip read at
+        // 3.6:1 in a light theme. The level is named on its button and in the
+        // header's line, which is what a player reads it by.
         let names: HashSet<&str> = Difficulty::ALL.iter().map(|d| d.label()).collect();
         assert_eq!(
             names.len(),
             Difficulty::ALL.len(),
             "two levels share a name"
-        );
-        let chrome = Chrome::of(&Palette::for_mode(false));
-        let colors: HashSet<Color> = Difficulty::ALL.iter().map(|d| d.color(&chrome)).collect();
-        assert_eq!(
-            colors.len(),
-            Difficulty::ALL.len(),
-            "two levels share a colour"
         );
         assert!(
             Difficulty::ALL.iter().all(|d| !d.label().is_empty()),
@@ -3732,26 +3745,34 @@ mod tests {
         assert_eq!(DIGITS.len(), 8, "there are eight possible counts");
         for light in [false, true] {
             let c = Colours::of(&Palette::for_mode(light));
-            let set: HashSet<Color> = (1..=8).map(|n| c.digit(n)).collect();
+            let set: HashSet<Color> = (1..=8).map(|n| c.digit(n, 22.0)).collect();
             assert_eq!(set.len(), 8, "two counts share a colour (light: {light})");
         }
     }
 
     /// **A digit reads on its tile in either theme** -- the dark theme's
-    /// pale yellow 7 vanished on a light tile -- and keeps its hue: the
-    /// same digit is the same colour family in both.
+    /// pale yellow 7 vanished on a light tile -- and keeps its hue: drawn
+    /// large, the same digit is exactly its own colour in both. Drawn small
+    /// it needs 4.5:1 rather than 3, and is moved only as far as that needs:
+    /// a small `2` in its light green was 4.2:1 in a cramped window.
     #[test]
     fn every_digit_reads_on_an_open_tile_in_either_theme() {
         for light in [false, true] {
             let c = Colours::of(&Palette::for_mode(light));
             for n in 1..=8u8 {
-                let ink = c.digit(n);
+                let ink = c.digit(n, 22.0);
                 assert!(
                     guitk::theme::contrast_ratio(ink, c.open) >= 3.0,
                     "{n} is hard to read on an open tile (light: {light})"
                 );
                 let (dark, pale) = DIGITS[usize::from(n) - 1];
                 assert!(ink == dark || ink == pale, "{n} is not its own hue");
+                let small = c.digit(n, 9.0);
+                let ratio = guitk::theme::contrast_ratio(small, c.open);
+                assert!(
+                    ratio >= 4.5,
+                    "{n} drawn small is {ratio:.2}:1 on an open tile (light: {light})"
+                );
             }
         }
     }
@@ -3795,28 +3816,112 @@ mod tests {
         }
     }
 
-    /// **The window is drawn in the user's colours**, light or dark, playing,
-    /// lost and won: only the digits' own hues are not the palette's.
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: a game in play
+    /// with a flag planted, lost, won, the expert board, and a cramped
+    /// window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut a = started(108);
+        a.theme_changed(p);
+        let mines = mines_of(&a);
+        if let Some(&(r, c)) = mines.last() {
+            a.apply(Action::Flag(r, c));
+        }
+        let playing = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = a.frame(320.0, 300.0);
+        let (r, c) = *mines.first().expect("a mine");
+        if a.is_flagged(r, c) {
+            // A flag toggles; a flagged square cannot be uncovered.
+            a.apply(Action::Flag(r, c));
+        }
+        a.apply(Action::Reveal(r, c));
+        let lost = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut w = started(29);
+        w.theme_changed(p);
+        clear_the_board(&mut w);
+        assert_eq!(w.status(), GameStatus::Won, "the fixture did not win");
+        let won = w.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut e = game(31);
+        e.theme_changed(p);
+        e.apply(Action::SetDifficulty(Difficulty::Expert));
+        reveal(&mut e, 0, 0);
+        let expert = e.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("playing", playing),
+            ("lost", lost),
+            ("won", won),
+            ("expert", expert),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// every state it shows: only the digits' own hues are not the palette's.
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        let digits: Vec<Color> = DIGITS.iter().flat_map(|&(d, l)| [d, l]).collect();
-        for light in [false, true] {
-            let p = Palette::for_mode(light);
-            let mut a = started(108);
-            a.theme_changed(&p);
-            let playing = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            let (r, c) = *mines_of(&a).first().expect("a mine");
-            a.apply(Action::Reveal(r, c));
-            let lost = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-            for (what, f) in [("playing", playing), ("lost", lost)] {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived: Vec<Color> = DIGITS
+                .iter()
+                .flat_map(|&pair| {
+                    let own = gamechrome::legible_on(pair, c.open);
+                    let moved = Ink::on(own, &[c.open]);
+                    [pair.0, pair.1, moved.small]
+                })
+                .collect();
+            derived.extend([c.flag.large, c.flag.small]);
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                c.chrome.band,
+            ));
+            for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,
                     f.commands(),
-                    &digits,
-                    &format!("minesweeper, {what}, light: {light}"),
+                    &derived,
+                    &format!("minesweeper, {what}, light: {light}, cards: {cards}"),
                 );
             }
         }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it) -- every
+    /// count on its square among them.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "minesweeper: {bad:#?}");
     }
 
     #[test]
@@ -3825,7 +3930,8 @@ mod tests {
         for n in 1..=8u8 {
             if let Some((r, c)) = a_number(&a, n) {
                 let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-                let want = Some(Colours::of(&Palette::for_mode(false)).digit(n));
+                let size = layout_of(&a).glyph();
+                let want = Some(Colours::of(&Palette::for_mode(false)).digit(n, size));
                 assert_eq!(
                     text_color(&f, &n.to_string()),
                     want,
@@ -3858,7 +3964,12 @@ mod tests {
         key(&mut a, Key::Down);
         let l = layout_of(&a);
         let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
-        let boxes = strokes(&f);
+        // The board's outlines: the header's buttons are the toolkit's, and
+        // a toolkit button draws an edge round its own face.
+        let boxes: Vec<Rect> = strokes(&f)
+            .into_iter()
+            .filter(|b| l.board.contains(b.x + 0.5, b.y + 0.5))
+            .collect();
         assert_eq!(boxes.len(), 1, "{} things are outlined", boxes.len());
         assert_eq!(
             boxes.first().copied(),

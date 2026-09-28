@@ -1067,28 +1067,38 @@ fn export_plain_text(note: &Note) -> String {
     out
 }
 
+/// A note as Markdown: the title as its heading, the tags, and the body --
+/// a checklist as a task list and a table as a table, since neither is in
+/// `content`. Ends in one newline, as a text file does, and a note with
+/// nothing in it is its heading alone.
 fn export_markdown(note: &Note) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("# {}\n\n", note.title));
+    let mut out = format!("# {}\n", note.title);
     if !note.tags.is_empty() {
-        out.push_str("**Tags:** ");
+        out.push_str("\n**Tags:** ");
         out.push_str(&note.tags.join(", "));
-        out.push_str("\n\n");
+        out.push('\n');
     }
-    match &note.kind {
+    let body = match &note.kind {
         NoteKind::Checklist => {
+            let mut items = String::new();
             for item in &note.checklist {
-                let marker = if item.checked { "[x]" } else { "[ ]" };
-                out.push_str(&format!("- {marker} {}\n", item.text));
+                items.push_str(if item.checked { "- [x] " } else { "- [ ] " });
+                items.push_str(&item.text);
+                items.push('\n');
             }
+            items
         }
-        NoteKind::Table => {
-            if let Some(table) = &note.table {
-                out.push_str(&table.to_markdown());
-            }
-        }
-        _ => {
-            out.push_str(&note.content);
+        NoteKind::Table => note
+            .table
+            .as_ref()
+            .map_or_else(String::new, TableData::to_markdown),
+        NoteKind::PlainText | NoteKind::Markdown => note.content.clone(),
+    };
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(&body);
+        if !body.ends_with('\n') {
+            out.push('\n');
         }
     }
     out
@@ -2811,15 +2821,15 @@ impl NotesApp {
     /// because it is for other programs: the library (`library_text`) is this
     /// one's own. An export is not a save -- every change is kept as it is
     /// made -- so this was Ctrl+S until the library existed, and is Ctrl+E.
+    ///
+    /// Through [`export_markdown`], which knows a note's kinds. This wrote
+    /// the title and `content`, and a checklist's items and a table's rows
+    /// are not in `content`: either exported as its title and nothing else.
     pub fn export_selected_note(&mut self, path: &std::path::Path) -> String {
         let Some(note) = self.selected_note.and_then(|id| self.find_note(id)) else {
             return String::from("Select a note first -- nothing to write");
         };
-        let body = if note.content.is_empty() {
-            format!("# {}\n", note.title)
-        } else {
-            format!("# {}\n\n{}\n", note.title, note.content)
-        };
+        let body = export_markdown(note);
         match safeio::write_str_atomically(path, &body) {
             Ok(()) => format!("Wrote {}", path.shown()),
             // Named, not swallowed. The user needs to know which of the two
@@ -5892,6 +5902,61 @@ mod tests {
 
         let body = std::fs::read_to_string(&path).expect("the note was written");
         assert_eq!(body, "# Release checklist\n\none\ntwo\n");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// **A checklist exports its items and a table its rows**, where they
+    /// exported as the title and nothing else; and a note's tags go with it.
+    #[test]
+    fn an_export_holds_a_checklists_items_a_tables_rows_and_the_tags() {
+        let dir = std::env::temp_dir().join("slateos-notes-export-kinds");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("note.md");
+        let mut app = NotesApp::new();
+        let nb = app.create_notebook("Work");
+
+        let list = app.create_note("Errands", nb);
+        if let Some(note) = app.find_note_mut(list) {
+            note.kind = NoteKind::Checklist;
+            note.add_checklist_item("post");
+            note.add_checklist_item("bank");
+            note.toggle_checklist_item(1);
+        }
+        app.add_tag_to_note(list, "home");
+        app.selected_note = Some(list);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written"),
+            "# Errands\n\n**Tags:** home\n\n- [ ] post\n- [x] bank\n"
+        );
+
+        let grid = app.create_note("Sizes", nb);
+        if let Some(note) = app.find_note_mut(grid) {
+            note.kind = NoteKind::Table;
+            let mut table = TableData::new(vec!["Size".to_owned(), "Count".to_owned()]);
+            table.add_row(vec!["S".to_owned(), "3".to_owned()]);
+            note.table = Some(table);
+        }
+        app.selected_note = Some(grid);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        let written = std::fs::read_to_string(&path).expect("written");
+        assert!(
+            written.starts_with("# Sizes\n\n| Size | Count |"),
+            "{written:?}"
+        );
+        assert!(written.contains("| S | 3 |"), "{written:?}");
+        assert!(
+            written.ends_with('\n') && !written.ends_with("\n\n"),
+            "{written:?}"
+        );
+
+        let empty = app.create_note("Blank", nb);
+        app.selected_note = Some(empty);
+        assert!(app.export_selected_note(&path).starts_with("Wrote"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("written"),
+            "# Blank\n"
+        );
         std::fs::remove_file(&path).ok();
     }
 

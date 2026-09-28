@@ -330,6 +330,24 @@ MUTATIONS = [
         "        drop(RenderCommand::PushClip {\n            x,\n            y: editor_y,",
         ["a_long_markdown_page_stays_in_its_panel"],
     ),
+    (
+        "an export is the title and the content",
+        "        let body = export_markdown(note);",
+        '        let body = format!("# {}\\n\\n{}\\n", note.title, note.content);',
+        ["an_export_holds_a_checklists_items_a_tables_rows_and_the_tags"],
+    ),
+    (
+        "a checklist exports no items",
+        "                items.push_str(&item.text);",
+        "                let _ = &item.text;",
+        ["an_export_holds_a_checklists_items_a_tables_rows_and_the_tags"],
+    ),
+    (
+        "an empty note exports a blank body",
+        "    if !body.is_empty() {\n        out.push('\\n');",
+        "    if true {\n        out.push('\\n');",
+        ["an_export_holds_a_checklists_items_a_tables_rows_and_the_tags"],
+    ),
 ]
 
 if __name__ == "__main__":

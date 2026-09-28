@@ -3760,6 +3760,8 @@ dependencies = [
  "mediaprobe",
  "oswindow",
  "pathtext",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]

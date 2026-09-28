@@ -2495,6 +2495,133 @@ impl SettingRow {
 }
 
 // ============================================================================
+// The settings file
+// ============================================================================
+
+/// The player's own settings file, `<config>/videoplayer.yaml` -- one file per
+/// program (C-Q26, option A).
+///
+/// Nothing was kept before: every row of the Settings tab went back to its
+/// default when the window closed, so a choice lasted exactly as long as the
+/// window it was made in.
+const CONFIG_NAME: &str = "videoplayer";
+
+settingsfile::yaml_enum!(OnFinishAction {
+    DoNothing => "nothing",
+    PlayNext => "play_next",
+    RepeatFile => "repeat_file",
+    ExitFullscreen => "exit_fullscreen",
+    Quit => "quit",
+});
+
+settingsfile::yaml_enum!(DeinterlaceMode {
+    Off => "off",
+    Blend => "blend",
+    Bob => "bob",
+    Yadif => "yadif",
+    Auto => "auto",
+});
+
+/// The switches the file keeps, by the key it keeps each under.
+fn switches(prefs: &mut PlayerPreferences) -> [(&'static str, &mut bool); 4] {
+    [
+        ("resume_playback", &mut prefs.resume_playback),
+        ("remember_volume", &mut prefs.remember_volume),
+        ("hardware_decode", &mut prefs.hardware_decode),
+        ("subtitle_auto_load", &mut prefs.subtitle_auto_load),
+    ]
+}
+
+/// The languages the file keeps, likewise.
+fn languages(prefs: &mut PlayerPreferences) -> [(&'static str, &mut Option<Language>); 2] {
+    [
+        ("audio_language", &mut prefs.audio_preferred_lang),
+        ("subtitle_language", &mut prefs.subtitle_preferred_lang),
+    ]
+}
+
+/// Take what `doc` keeps into `prefs`. Returns a sentence for each thing
+/// in it that is not a setting this player knows, which leaves that
+/// setting as it was.
+fn read_preferences(doc: &yamldoc::Document, prefs: &mut PlayerPreferences) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut unknown = |key: &str, value: &str, what: &str, kept: &str| {
+        problems.push(format!(
+            "{CONFIG_NAME}.yaml: {key} is {value:?}, which is not {what}, so {kept} is kept"
+        ));
+    };
+    for (key, flag) in switches(prefs) {
+        match (doc.get_bool(&[key]), doc.get_str(&[key])) {
+            (Some(on), _) => *flag = on,
+            (None, Some(value)) => {
+                unknown(
+                    key,
+                    &value,
+                    "true or false",
+                    if *flag { "On" } else { "Off" },
+                );
+            }
+            (None, None) => {}
+        }
+    }
+    for (key, language) in languages(prefs) {
+        if let Some(value) = doc.get_str(&[key]) {
+            match LANGUAGES.iter().find(|l| l.tags(&value)) {
+                Some(found) => *language = Some(*found),
+                None => unknown(
+                    key,
+                    &value,
+                    "a language this player offers",
+                    language_label(*language),
+                ),
+            }
+        }
+    }
+    if let Some(value) = doc.get_str(&["on_finish"]) {
+        match OnFinishAction::from_yaml_name(&value) {
+            Some(action) => prefs.on_finish = action,
+            None => unknown(
+                "on_finish",
+                &value,
+                "one this player knows",
+                prefs.on_finish.label(),
+            ),
+        }
+    }
+    if let Some(value) = doc.get_str(&["deinterlace"]) {
+        match DeinterlaceMode::from_yaml_name(&value) {
+            Some(mode) => prefs.deinterlace = mode,
+            None => unknown(
+                "deinterlace",
+                &value,
+                "one this player knows",
+                prefs.deinterlace.label(),
+            ),
+        }
+    }
+    problems
+}
+
+/// Write `prefs` into `doc`. The file's other lines, and whatever comments a
+/// user wrote in it, stay as they were.
+fn write_preferences(doc: &mut yamldoc::Document, prefs: &PlayerPreferences) {
+    let mut prefs = prefs.clone();
+    for (key, flag) in switches(&mut prefs) {
+        doc.set_bool(&[key], *flag);
+    }
+    for (key, language) in languages(&mut prefs) {
+        match language {
+            Some(language) => doc.set_str(&[key], language.code),
+            // Absent is the file's own choice; whether there was a line to
+            // remove makes no difference to what the file now says.
+            None => drop(doc.remove(&[key])),
+        }
+    }
+    doc.set_str(&["on_finish"], prefs.on_finish.yaml_name());
+    doc.set_str(&["deinterlace"], prefs.deinterlace.yaml_name());
+}
+
+// ============================================================================
 // Utility functions
 // ============================================================================
 
@@ -2608,6 +2735,10 @@ pub struct VideoPlayerApp {
     /// then `play` says why it will not, rather than running a clock over a
     /// black picture and calling that playing.
     pub decodes: bool,
+    /// Whether a change on the Settings tab is written to the settings file.
+    /// Only in the window [`keep_settings`](Self::keep_settings) was called
+    /// on -- the one `main` opens -- so no test writes the developer's own.
+    keeps_settings: bool,
     /// The picker Ctrl+O puts up.
     pub picker: FilePicker,
 }
@@ -2693,6 +2824,7 @@ impl VideoPlayerApp {
             osd_message: None,
             osd_remaining_ms: 0,
             decodes: false,
+            keeps_settings: false,
             picker: FilePicker::default(),
         }
     }
@@ -3020,6 +3152,34 @@ impl VideoPlayerApp {
         self.external_subtitles.clear();
     }
 
+    /// Take the settings kept in the settings file, and keep every change
+    /// made from now on. Returns what in the file is not a setting this
+    /// player knows -- the last of which is also said on screen.
+    pub fn keep_settings(&mut self) -> Vec<String> {
+        self.keeps_settings = true;
+        let problems = read_preferences(&settingsfile::load(CONFIG_NAME), &mut self.preferences);
+        if let Some(last) = problems.last() {
+            self.show_osd(last);
+        }
+        problems
+    }
+
+    /// Write the settings to their file, when this window keeps them -- and
+    /// say so when that fails, since the change then lasts only as long as
+    /// the window.
+    fn save_settings(&mut self) {
+        if !self.keeps_settings {
+            return;
+        }
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        write_preferences(&mut doc, &self.preferences);
+        if let Err(e) = settingsfile::store(CONFIG_NAME, &doc) {
+            self.show_osd(&format!(
+                "Changed until the window closes -- it was not saved: {e}"
+            ));
+        }
+    }
+
     /// Read the video at `path` into the playlist, after what is there.
     ///
     /// # Errors
@@ -3257,6 +3417,7 @@ impl VideoPlayerApp {
                             row.label(),
                             row.value(&self.preferences)
                         ));
+                        self.save_settings();
                     }
                 }
             }
@@ -5491,6 +5652,10 @@ fn main() -> ExitCode {
         }
     };
     let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    // Before the files: the languages kept choose their tracks.
+    for why in app.keep_settings() {
+        eprintln!("videoplayer: {why}");
+    }
     for why in open_arguments(&mut app, &args.rest) {
         eprintln!("videoplayer: {why}");
     }
@@ -8421,5 +8586,124 @@ as many times as before",
         );
         app.show_file(coded_file());
         assert_eq!(app.selected_audio_track, Some(3));
+    }
+
+    // == The settings are kept (2026-09-27) ======================================
+
+    /// Move the settings cursor to `row` and press Enter `times` times.
+    fn change_setting(app: &mut VideoPlayerApp, row: SettingRow, times: usize) {
+        app.active_tab = PlayerTab::Settings;
+        app.settings_row = SettingRow::ALL
+            .iter()
+            .position(|r| *r == row)
+            .expect("the row is listed");
+        for _ in 0..times {
+            app.handle_event(&press(Key::Enter));
+        }
+    }
+
+    #[test]
+    fn a_setting_changed_is_the_next_windows() {
+        settingsfile::testing::with_scratch_config("videoplayer-kept", |dir| {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(app.keep_settings().is_empty());
+            change_setting(&mut app, SettingRow::OnFinish, 1);
+            change_setting(&mut app, SettingRow::AudioLanguage, 2);
+            change_setting(&mut app, SettingRow::HardwareDecode, 1);
+            let chosen = app.preferences.clone();
+
+            let mut next = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(next.keep_settings().is_empty());
+            assert_eq!(next.preferences.on_finish, chosen.on_finish);
+            assert_eq!(
+                next.preferences.audio_preferred_lang,
+                chosen.audio_preferred_lang
+            );
+            assert_eq!(next.preferences.hardware_decode, chosen.hardware_decode);
+            assert_ne!(
+                next.preferences.on_finish,
+                PlayerPreferences::default().on_finish,
+                "control: the change must differ from the default"
+            );
+
+            let text =
+                std::fs::read_to_string(settingsfile::testing::scratch_path(dir, CONFIG_NAME))
+                    .unwrap_or_default();
+            assert!(text.contains("on_finish: repeat_file"), "{text:?}");
+            assert!(text.contains("audio_language: spa"), "{text:?}");
+            assert!(text.contains("hardware_decode: false"), "{text:?}");
+        });
+    }
+
+    #[test]
+    fn a_player_a_test_builds_keeps_nothing() {
+        settingsfile::testing::with_scratch_config("videoplayer-quiet", |dir| {
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            change_setting(&mut app, SettingRow::OnFinish, 1);
+            assert!(
+                !settingsfile::testing::scratch_path(dir, CONFIG_NAME).exists(),
+                "a player that keeps nothing wrote its settings"
+            );
+        });
+    }
+
+    #[test]
+    fn a_language_back_to_the_files_own_leaves_the_file() {
+        let mut prefs = PlayerPreferences::default();
+        let mut doc = yamldoc::Document::new();
+        prefs.subtitle_preferred_lang = Some(language("jpn"));
+        write_preferences(&mut doc, &prefs);
+        assert_eq!(doc.get_str(&["subtitle_language"]).as_deref(), Some("jpn"));
+        prefs.subtitle_preferred_lang = None;
+        write_preferences(&mut doc, &prefs);
+        assert_eq!(doc.get_str(&["subtitle_language"]), None);
+        let mut read = PlayerPreferences {
+            subtitle_preferred_lang: Some(language("eng")),
+            ..PlayerPreferences::default()
+        };
+        assert!(read_preferences(&doc, &mut read).is_empty());
+        assert_eq!(
+            read.subtitle_preferred_lang,
+            Some(language("eng")),
+            "absent is not a choice to take"
+        );
+    }
+
+    #[test]
+    fn what_the_file_holds_that_is_not_a_setting_is_said_and_the_setting_kept() {
+        let doc = yamldoc::Document::parse(
+            "on_finish: explode\nhardware_decode: maybe\naudio_language: klingon\n\
+             deinterlace: bob\nsubtitle_language: fre\nremember_volume: false\n",
+        );
+        let mut prefs = PlayerPreferences::default();
+        let problems = read_preferences(&doc, &mut prefs);
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        for (word, said) in [("explode", 0), ("maybe", 1), ("klingon", 2)] {
+            assert!(
+                problems.iter().any(|p| p.contains(word)),
+                "{word} was not said: {problems:?} ({said})"
+            );
+        }
+        assert_eq!(prefs.on_finish, PlayerPreferences::default().on_finish);
+        assert!(prefs.hardware_decode, "an unreadable switch changed");
+        assert_eq!(prefs.audio_preferred_lang, None);
+        // And what is readable is taken, in any spelling a language has.
+        assert_eq!(prefs.deinterlace, DeinterlaceMode::Bob);
+        assert_eq!(prefs.subtitle_preferred_lang, Some(language("fra")));
+        assert!(!prefs.remember_volume);
+    }
+
+    #[test]
+    fn a_setting_that_cannot_be_saved_says_so() {
+        settingsfile::testing::with_scratch_config("videoplayer-unsaved", |dir| {
+            // A file where the settings folder would be: nothing can be
+            // written under it.
+            std::fs::write(dir.join("slateos"), b"").expect("a file in the way");
+            let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(app.keep_settings().is_empty());
+            change_setting(&mut app, SettingRow::OnFinish, 1);
+            let said = app.osd_message.clone().unwrap_or_default();
+            assert!(said.contains("not saved"), "{said:?}");
+        });
     }
 }

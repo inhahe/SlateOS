@@ -8,6 +8,11 @@
 //! row the data does not finish, or a run overfills, fails the strip, the
 //! rest of the row zeroed first. There is no tile decoder, as libtiff has
 //! none.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_thunder.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997
+//! Silicon Graphics, Inc.), and changed for this project; used under
+//! libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 use crate::{ImageError, ImageResult};
 

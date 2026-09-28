@@ -14,6 +14,13 @@
 //! produces. libwebp computes them in C `int`, where the overflow is undefined
 //! and in practice wraps; this module wraps explicitly, so a hostile stream
 //! decodes to the same garbage libwebp shows and never panics.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `dec.c` (copyright 2010-2025 Google Inc.) and from RFC 6386's reference
+//! decoder (copyright 2010, 2011 Google Inc.), and changed for this project;
+//! used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`) and the RFC's
+//! (`licenses/rfc6386-LICENSE.txt`).
 
 /// `x * sqrt(2) * cos(pi/8)` in the RFC's fixed point: `x + (x * 20091 >> 16)`.
 const fn mul1(x: i32) -> i32 {

@@ -31,6 +31,14 @@
 //! Only the 8-bit interface is here, as for lossy JPEG: samples of 2 to 8
 //! bits, handed out as they are, so a 6-bit image's samples run from 0 to 63,
 //! as in every program built on libjpeg.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdlhuff.c` (copyright (C) 1991-1997 Thomas G. Lane; (C) 1999 Ken
+//! Murchison; (C) 2022 D. R. Commander), `jddiffct.c` (copyright (C)
+//! 1994-1997 Thomas G. Lane; (C) 1999 Ken Murchison; (C) 2022, 2024 D. R.
+//! Commander) and `jdlossls.c` (copyright (C) 1998 Thomas G. Lane; (C) 1999
+//! Ken Murchison; (C) 2022, 2024 D. R. Commander), and changed for this
+//! project; used under the IJG License (`licenses/README.md` says how).
 
 use alloc::vec;
 use alloc::vec::Vec;

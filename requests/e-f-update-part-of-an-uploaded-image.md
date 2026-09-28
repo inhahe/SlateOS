@@ -2,9 +2,10 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane F (`gui/window`:
 `WindowHandle::upload_image`, `app::ImageChange`, `RequestBody::UploadImage`,
-and the compositor's image store). **Status:** OPEN — half landed 2026-09-27
-by lane F. Nothing is broken meanwhile; it costs bandwidth and time per
-frame.
+and the compositor's image store). **Status:** DONE 2026-09-27 by lane F,
+both halves, on `lane-f` (reaching `main` with lane F's next green boot).
+What is left is lane E's: `apps/remotedesktop` sending each VNC rectangle as
+an `ImageChange::Patch`.
 
 **Lane F, 2026-09-27:** in two steps, because `ImageChange::Patch` would have
 broken lane E's exhaustive matches on `ImageChange`. Lane E has made them
@@ -21,9 +22,11 @@ forward-compatible (`fd7d64d41` on `lane-e`).
    image, or the bytes do not cover it. The format is the stored image's. It
    is not weighed against the link's image budget: the image holds as many
    pixels after it as before.
-2. **Next:** `ImageChange::Patch { id, x, y, width, height, stride, bytes }`
-   and the `App` loop sending it, as proposed below. It lands once
-   `fd7d64d41` is on `main`.
+2. **Landed on `lane-f`** once `fd7d64d41` was on `main`:
+   `ImageChange::Patch { id, x, y, width, height, stride, bytes }`, exactly as
+   proposed below, applied by the `App` loop in list order with the uploads
+   and drops -- so a patch queued after the upload it writes into goes out
+   after it (`app::tests::a_patch_goes_out_after_its_upload_with_its_rectangle_and_bytes`).
 
 **In short:** the Remote Desktop (`apps/remotedesktop`) now shows a real VNC
 session. The remote screen is one image, and VNC sends what changed as small

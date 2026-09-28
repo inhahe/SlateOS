@@ -199,7 +199,7 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 | **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
 | **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
 | **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
-| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**` |
+| **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` |
 
 **Never writes** is simply everything another row owns. Where two rows
 overlap, the **longer path wins**: `gui/compositor/` is lane F's although
@@ -338,8 +338,10 @@ systematic audit; bug-hunt sweeps over it are standing work between features.
 
 **Owns:** the compositor (`gui/compositor`), the display protocol
 (`gui/remote`), the window library every application links (`gui/window`),
-text shaping and rendering (`gui/font`), image decoding (`gui/imagecodec`) and
-the Vulkan loader (`gui/vulkan`).
+text shaping and rendering (`gui/font`), image decoding (`gui/imagecodec`),
+the video codecs (`gui/video/`, one crate each; added 2026-09-27 with the
+first of them, rav1d, when the directory was new) and the Vulkan loader
+(`gui/vulkan`).
 
 **And the GPU userspace:** Mesa, Vello, HarfBuzz, GPU acceleration of the
 compositor, video-encoded capture, and remote desktop (FreeRDP). The kernel
@@ -3231,10 +3233,48 @@ lane C's `guitk`.
   GPU stack exists. The encoder films buffer-backed windows for the
   compositor's capture stream; the decoder serves SlateOS's remote viewer.
 
-- `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
+- `[-]` `[F]` **AVIF pictures**, decided 2026-09-27 (§1333): a HEIF container reader
   and a port of rav1d (dav1d in Rust, BSD) in `gui/imagecodec`, so AVIF opens
   and gets thumbnails wherever a picture does. HEIC waits on
   `open-questions.md` F-Q1 (a patent question), and would reuse the container.
+  - `[x]` The container, as libavif 1.3.0 reads it (`src/avif/`): items, grids,
+    alpha, gain maps, sequences; `dimensions` and `pixel_format` match
+    Pillow's libavif on all 224 files of the AOM and libavif corpora.
+  - `[x]` Decoding: rav1d 1.1.0 vendored in `gui/video/rav1d` (with a safe
+    interface), driven as libavif drives dav1d; grids, alpha, and crops and
+    turns as Chrome applies them; YUV to RGB as libavif converts it, through
+    ports of libyuv's fixed point and libavif's floating point. Bit-exact
+    against Pillow on 39 generated fixtures covering every conversion path,
+    and on every file of the 224-file corpus where Pillow takes the same path.
+  - `[x]` Sequences as an `Animation` (`src/avif/animation.rs`): each track's
+    decoder kept from frame to frame, its samples walked in order, frames
+    reached out of order from the nearest key frame as `avifDecoderNthImage`
+    reaches them, durations and repetition as libavif reports them. Every
+    frame of seven sequences (libavif's four, and three made here for
+    durations, a finite loop and an alpha track that ends early), in order and
+    out of it, bit-exact against Pillow. Playing them in the viewer is lane
+    E's (`requests/f-bce-avif-pictures-open-and-animate.md`).
+  - `[ ]` Frames coded at another size than their `ispe`, rescaled as libavif
+    rescales them (known-issues.md, "[F] An AVIF frame coded at another
+    size").
+  - `[-]` Speed: the committed benchmark is in (`bench_avif_decode`: about
+    twice dav1d's time, one thread); making rav1d faster waits on
+    `open-questions.md` F-Q4 -- dav1d's assembly, or SIMD in Rust
+    (known-issues.md, "[F] AVIF decoding has no committed benchmark").
+
+- `[F]` **A display transport over channel IPC** for local clients, beside
+  the TCP one (`gui/remote/src/socket.rs` planned it "when SlateOS's own
+  channel IPC becomes reachable from a userspace application", which it now
+  is). The point is the peer's identity: the kernel attests a channel's peer
+  (`SYS_CHANNEL_PEER_CRED`), a TCP peer cannot say what process it is, and
+  today's `client_pid` is a per-connection number. Unblocks the process
+  explorer's window picker (`requests/e-adf-what-the-process-explorer-still-cannot-ask.md`,
+  part 3), `open-questions.md` F-Q3's option B, and per-program (rather than
+  per-connection) grouping on the taskbar. **Blocked on lane A**
+  (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`):
+  a Linux-ABI program -- every Rust `std` one, the compositor included --
+  cannot reach channels at all; nothing can wait on channels beside sockets;
+  and until channel handles are unforgeable the peer's pid proves nothing.
 
 - `[F]` Port FreeRDP (line ~5058)
 

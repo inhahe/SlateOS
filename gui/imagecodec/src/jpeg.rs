@@ -62,6 +62,13 @@
 //! decodes it through the same 8-bit interface, samples of 2 to 8 bits; wider
 //! ones, and arithmetic-coded ones, it refuses, and so does this. And
 //! [`Limits`] can refuse a file libjpeg would try to allocate for.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdapimin.c` (copyright (C) 1994-1998 Thomas G. Lane; (C) 1999 Ken
+//! Murchison; (C) 2016, 2022, 2024 D. R. Commander) and `jdapistd.c`
+//! (copyright (C) 1994-1996 Thomas G. Lane; (C) 2010, 2015-2020, 2022-2024 D.
+//! R. Commander; (C) 2015 Google, Inc.), and changed for this project; used
+//! under the IJG License (`licenses/README.md` says how).
 
 use crate::orientation::Orientation;
 use crate::{Image, ImageError, ImageResult, Limits};

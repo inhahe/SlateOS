@@ -58,6 +58,11 @@
 //! - A table offset past 2^63, which only BigTIFF can hold, is a failed seek
 //!   in libtiff, which then reads the table from wherever its file position
 //!   was. Here there is no table and the image is refused.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_ojpeg.c` (copyright (c) Joris Van Damme; (c) AWare Systems), and
+//! changed for this project; used under libtiff's licence,
+//! `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec;
 use alloc::vec::Vec;

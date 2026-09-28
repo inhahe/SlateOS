@@ -35,6 +35,12 @@
 //! the one allocation a file could inflate cheaply: each group is parsed and
 //! checked, but only the groups some block actually uses are kept, and their
 //! tables are counted against the byte budget.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `vp8l_dec.c`, `bit_reader_utils.c`, `huffman_utils.c`,
+//! `color_cache_utils.c`, `lossless.c` (copyright 2010-2025 Google Inc.), and
+//! changed for this project; used under libwebp's BSD licence and patent
+//! grant (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`).
 
 use alloc::vec;
 use alloc::vec::Vec;

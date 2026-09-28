@@ -18,6 +18,11 @@
 //! - **Straight alpha where the file has it.** libtiff premultiplies
 //!   unassociated alpha into its raster; the compositor wants straight
 //!   alpha, which is what the file holds, so it is kept (see [`Alpha`]).
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_getimage.c` (copyright (c) 1991-1997 Sam Leffler; (c) 1991-1997
+//! Silicon Graphics, Inc.), and changed for this project; used under
+//! libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::boxed::Box;
 use alloc::vec;

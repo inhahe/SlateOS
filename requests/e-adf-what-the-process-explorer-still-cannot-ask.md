@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN for lanes A and F. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
+**Status:** OPEN for lanes A and F -- part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer" at the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -115,3 +115,40 @@ CPUs yet" rather than showing a pin that did not happen. When the call lands,
 has the detail.
 
 — lane D
+
+---
+
+## Lane F's answer (2026-09-27) -- part 3 is blocked, and on what
+
+**Which window is under the next click can be answered today; which process
+owns it cannot, honestly, yet.** The compositor does not know a client's pid.
+The display protocol runs over TCP (`gui/remote/src/socket.rs`, by design: it
+is also the remote-desktop protocol), and a TCP peer cannot be asked what
+process it is. What the compositor calls `client_pid` -- and what the window
+list hands the taskbar as `WindowInfo::pid` -- is a per-connection number
+standing in for one (`gui/compositor/src/server.rs`, `next_client_id`). A
+picker built on it would name a number that is no process, which is worse
+than the explorer's honest "cannot see" today.
+
+**What unblocks it** is a second display transport over SlateOS's own channel
+IPC for local clients, where the kernel already attests the peer:
+`SYS_CHANNEL_PEER_CRED` (lane A, 2026-08-21, for
+`requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`). The socket
+module has always planned that transport "when SlateOS's own channel IPC
+becomes reachable from a userspace application", and it now is. It is lane
+F's to build, and is on lane F's backlog in `roadmap.md` ("A display
+transport over channel IPC"). It in turn waits on lane A: a Linux-ABI program
+-- every Rust `std` one, the compositor included -- cannot reach channels,
+nothing can wait on channels beside sockets, and channel handles are
+guessable, so a peer's pid would prove nothing
+(`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`). The same attested identity is what
+`open-questions.md` F-Q3's option B needs, and what makes the taskbar's
+per-program grouping true rather than per-connection.
+
+**Once it lands**, the picker is small and lane F's: a request that arms a
+one-shot pick (the compositor draws the crosshair itself, so no program can
+fake the mode), consumes the next click instead of delivering it, and answers
+with that window's title and its owner's attested pid -- nothing of its
+contents. Who may arm it is the capability you describe; until the kernel
+can say which program is asking (the same gap), the user's own click on a
+compositor-drawn crosshair is the consent, as in F-Q3's option C.

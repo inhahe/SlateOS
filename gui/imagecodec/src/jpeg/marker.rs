@@ -14,6 +14,11 @@
 //! reads fake end-of-image bytes once the data runs out ([`Source`]), so a
 //! segment cut short is parsed to its end all the same and fails -- or, now
 //! and then, does not -- on the values the fake bytes make. That is kept too.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jdmarker.c` (copyright (C) 1991-1998 Thomas G. Lane; (C) 1999 Ken
+//! Murchison; (C) 2012, 2015, 2022, 2024 D. R. Commander), and changed for
+//! this project; used under the IJG License (`licenses/README.md` says how).
 
 use alloc::vec::Vec;
 

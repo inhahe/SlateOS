@@ -208,6 +208,12 @@ MUTATIONS = [
         "        if event.modifiers.ctrl {",
         ["altgr_z_does_not_undo"],
     ),
+    (
+        "the history keeps ten actions more",
+        "const MAX_UNDO_STEPS: usize = 200;",
+        "const MAX_UNDO_STEPS: usize = 210;",
+        ["test_undo_stack_limit"],
+    ),
 ]
 
 if __name__ == "__main__":

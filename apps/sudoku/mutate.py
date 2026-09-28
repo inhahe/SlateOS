@@ -1349,6 +1349,12 @@ MUTATIONS = [
         "        let color = ink.large;",
         ["every_digit_reads_on_the_square_under_it_in_either_theme"],
     ),
+    (
+        "the history keeps ten changes more",
+        "pub const MAX_UNDO: usize = 500;",
+        "pub const MAX_UNDO: usize = 510;",
+        ["the_history_forgets_its_oldest_move_rather_than_growing_for_ever"],
+    ),
 ]
 
 if __name__ == "__main__":

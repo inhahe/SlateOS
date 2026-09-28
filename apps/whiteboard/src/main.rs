@@ -5541,7 +5541,11 @@ mod tests {
     #[test]
     fn test_undo_stack_limit() {
         let mut app = WhiteboardApp::new(800.0, 600.0);
-        for i in 0..MAX_UNDO_STEPS + 50 {
+        // Written out, not read from `MAX_UNDO_STEPS`: a test that counts to
+        // the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 200;
+        for i in 0..CAP + 50 {
             app.add_shape(ShapeKind::Line {
                 start: Point::new(0.0, i as f32),
                 end: Point::new(10.0, i as f32),
@@ -5549,11 +5553,11 @@ mod tests {
         }
         // The history keeps no count; counted by taking it all back.
         let mut kept = 0;
-        while app.current_page().history.can_undo() && kept <= MAX_UNDO_STEPS {
+        while app.current_page().history.can_undo() && kept <= CAP {
             app.undo();
             kept += 1;
         }
-        assert_eq!(kept, MAX_UNDO_STEPS);
+        assert_eq!(kept, CAP);
     }
 
     // ---- Delete selected ----

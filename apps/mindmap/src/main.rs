@@ -6003,14 +6003,18 @@ mod tests {
     #[test]
     fn test_app_undo_stack_limit() {
         let mut app = MindMapApp::new();
-        for i in 0..MAX_UNDO + 50 {
+        // Written out, not read from `MAX_UNDO`: a test that counts to the
+        // constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 200;
+        for i in 0..CAP + 50 {
             app.add_child_to_selected(format!("Node {i}"));
         }
         let mut undone = 0;
-        while undone <= MAX_UNDO && app.undo() {
+        while undone <= CAP && app.undo() {
             undone += 1;
         }
-        assert_eq!(undone, MAX_UNDO);
+        assert_eq!(undone, CAP);
         assert_eq!(
             app.active_map_ref().nodes.len(),
             51,

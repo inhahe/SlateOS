@@ -479,6 +479,12 @@ MUTATIONS = [
         "            Some(_) => counts.clone(),",
         [STATUS],
     ),
+    (
+        "the history keeps ten changes more",
+        "const MAX_UNDO: usize = 200;",
+        "const MAX_UNDO: usize = 210;",
+        ["test_app_undo_stack_limit"],
+    ),
 ]
 
 if __name__ == "__main__":

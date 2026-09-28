@@ -4307,13 +4307,18 @@ mod tests {
         // left the symmetry alone (`known-issues.md` lesson 59). So: one
         // toggle of mark 1, which is the change that has to fall off the end,
         // and then a full history's worth of toggles of mark 2 to push it off.
+        //
+        // The cap is written out, not read from `MAX_UNDO`: a test that counts
+        // to the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 500;
         a.apply(Intent::Digit(1));
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             a.apply(Intent::Digit(2));
         }
         assert_eq!(
             undo_depth(&mut a),
-            MAX_UNDO,
+            CAP,
             "the history grew past the cap it is supposed to keep"
         );
 
@@ -4322,7 +4327,7 @@ mod tests {
         // mark 2 comes off. A history that dropped its newest move instead has
         // kept mark 1's toggle and lost one of mark 2's, and both marks come
         // out the other way round.
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             a.apply(Intent::Undo);
         }
         assert_eq!(undo_depth(&mut a), 0, "the history would not empty");

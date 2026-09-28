@@ -229,10 +229,16 @@ DEFECTS = [
     ),
     (
         "G: the transparency level never reaches the palette",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();\n", "")],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             ''),
+        ],
         ["appearance"],
-        ["transparency_reaches_panels_and_nothing_behind_them"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'transparency_reaches_panels_and_nothing_behind_them',
+        ],
     ),
     (
         "H: a panel is drawn opaque however transparent the user asked for",
@@ -246,12 +252,16 @@ DEFECTS = [
     ),
     (
         "I: the alpha meant for panels is applied to the base itself",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();",
-          "        palette.panel_alpha = settings.transparency.panel_alpha();\n"
-          "        palette.base = with_alpha(palette.base, palette.panel_alpha);")],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             '        palette.panel_alpha = settings.panel_alpha();\n        palette.base = Color::rgba(palette.base.r, palette.base.g, palette.base.b, palette.panel_alpha);\n'),
+        ],
         ["appearance"],
-        ["transparency_reaches_panels_and_nothing_behind_them"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'transparency_reaches_panels_and_nothing_behind_them',
+        ],
     ),
     (
         "J: the scrim dims with the palette's own base, as the shell used to",
@@ -386,12 +396,15 @@ DEFECTS = [
         # Behind the details disclosure, so only an expanded render sees it.
         "W: the details panel keeps its own Mocha mantle",
         SEC,
-        [("                height: panel_h,\n"
-          "                color: p.mantle,",
-          "                height: panel_h,\n"
-          "                color: guitk::Color::from_hex(0x181825),")],
+        [
+            ('            let mut paint = p.surface_paint(Surface::Card);\n            paint.border = Some(paint.border.unwrap_or(p.surface1));\n            p.push_paint_radii(\n                &mut cmds,\n                dx + PADDING,\n                panel_y,\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.border = Some(paint.border.unwrap_or(p.surface1));\n            paint.fill = Some(guitk::color::Color::from_hex(0x181825));\n            p.push_paint_radii(\n                &mut cmds,\n                dx + PADDING,\n                panel_y,\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The details panel is a card surface now.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn while the pointer is over Allow: a state the sweep has to
@@ -726,11 +739,18 @@ DEFECTS = [
     (
         # Behind a tab *and* behind an empty activity log -- the branch a
         # populated fixture alone would never reach.
-        "WW: the empty activity-log caption goes back to Mocha overlay0",
+        "WW: the empty activity-log caption goes back to Mocha subtext0",
         ACCT,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No activity recorded.".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                text: "No activity recorded.".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The last slot of the avatar table, which only an account whose stored
@@ -761,10 +781,16 @@ DEFECTS = [
         # accent entirely.
         "ZZ: the active tab's label stops following the accent",
         ACCT,
-        [("                color: if is_active { p.accent } else { p.subtext0 },",
-          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        [
+            ('                text: tab.display_name().to_string(),\n                font_size: 12.0,\n                color: if is_active {\n                    p.ink(p.accent)\n',
+             '                text: tab.display_name().to_string(),\n                font_size: 12.0,\n                color: if is_active {\n                    p.ink(p.blue)\n'),
+        ],
         ["desktop"],
-        ["a_users_identity_colours_do_not_follow_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'a_users_identity_colours_do_not_follow_the_accent',
+        ],
     ),
     # --- bluetooth.rs (module 8) -------------------------------------------
     (
@@ -775,12 +801,18 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "BBB: the \"n more\" line goes back to Mocha overlay0",
+        "BBB: the \"n more\" line goes back to Mocha subtext0",
         BT,
-        [("                font_size: 10.0,\n                color: p.overlay0,",
-          "                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: format!("{hidden} more - scroll to see the rest"),\n                font_size: 10.0,\n                color: p.subtext0,\n',
+             '                text: format!("{hidden} more - scroll to see the rest"),\n                font_size: 10.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "CCC: the device icon circle goes back to Mocha lavender",
@@ -933,11 +965,18 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "TTT: the filesystem caption goes back to Mocha overlay0",
+        "TTT: the filesystem caption goes back to Mocha subtext0",
         STOR,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    if drive.removable { " (removable)" } else { "" }\n                ),\n                font_size: 10.0,\n                color: p.subtext0,\n',
+             '                    if drive.removable { " (removable)" } else { "" }\n                ),\n                font_size: 10.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "UUU: the recycle bin's slice is made to follow the accent",
@@ -993,9 +1032,16 @@ DEFECTS = [
     (
         "ZZZ: the no-battery caption keeps its own grey",
         POW,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No battery detected — running on AC power.".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No battery detected — running on AC power.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "AAAA: the charge bar's track keeps its own grey",
@@ -1170,12 +1216,16 @@ DEFECTS = [
     (
         "OOOO: the network you are on stops following the accent",
         NET,
-        [(
-            "color: if net.connected { p.accent } else { p.text },",
-            "color: if net.connected { p.blue } else { p.text },",
-        )],
+        [
+            ('                    color: if net.connected {\n                        p.ink(p.accent)\n                    } else {\n                        p.text\n',
+             '                    color: if net.connected {\n                        p.ink(p.blue)\n                    } else {\n                        p.text\n'),
+        ],
         ["desktop"],
-        ["only_the_network_you_are_on_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'only_the_network_you_are_on_follows_the_accent',
+        ],
     ),
     (
         "PPPP: airplane mode is repainted the user's accent",
@@ -1292,12 +1342,16 @@ DEFECTS = [
     (
         "AAAAA: the destructive \"Clear All\" is repainted the user's accent",
         CLIP,
-        [(
-            '            text: "Clear All".to_string(),\n            color: p.red,',
-            '            text: "Clear All".to_string(),\n            color: p.accent,',
-        )],
+        [
+            ('            text: "Clear All".to_string(),\n            color: p.ink(p.red),\n',
+             '            text: "Clear All".to_string(),\n            color: p.ink(p.accent),\n'),
+        ],
         ["desktop"],
-        ["only_the_active_filter_tab_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'only_the_active_filter_tab_follows_the_accent',
+        ],
     ),
     (
         "BBBBB: a faint underlay is pushed beneath the search field, where the "

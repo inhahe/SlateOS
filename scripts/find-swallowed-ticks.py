@@ -64,14 +64,16 @@ and `gui/` the same day (8 dispatchers, 2 reported, both correct:
 root is `apps` alone, which is the narrowing that hid `explorer` in the first
 place** -- pass `--roots=apps,gui` unless you have a reason not to.
 
-THE FOURTEEN IT STILL REPORTS, so nobody investigates them twice. All fourteen
-are correct code, read against the source on 2026-09-17, and twelve of them for
-one reason:
+THE TWENTY IT STILL REPORTS, so nobody investigates them twice. All twenty
+are correct code -- fourteen read against the source on 2026-09-17, six more on
+2026-09-28 -- and eighteen of them for one reason:
 
-  * Twelve route the event through the shared `FilePicker` and return early on
-    `Picked::Handled | Picked::Cancelled`: automator, benchmark, calendar,
-    clipmanager, flashcards, markdowneditor, musicplayer, photomanager,
-    podcast, reminders, sysinfo, torrent. That return cannot swallow a tick,
+  * Eighteen route the event through the shared `FilePicker` and return early
+    on `Picked::Handled | Picked::Cancelled`: automator, benchmark, calendar,
+    clipmanager, flashcards, imageviewer (through `picker_took`), logviewer,
+    markdowneditor (through `picker_took`), mediaconvert, musicplayer,
+    photomanager, podcast, reminders, slides, soundrecorder, sysinfo, torrent,
+    videoplayer. That return cannot swallow a tick,
     because `FilePicker::handle` never takes one. `gui/toolkit/src/dialog.rs`
     says so in as many words -- "Time and geometry -- `Tick` and `Resize` --
     are NOT taken" -- and pins it with
@@ -83,6 +85,15 @@ one reason:
   * `apps/diskimager` returns early only for `Key` and `Mouse`, the model the
     banner already names.
   * `apps/explorer` returns early only for `CloseRequested`.
+
+Four of the eighteen also return early for a close or delete question --
+calendar, markdowneditor, reminders and slides -- and each guards that return
+with `matches!(event, Event::Key(_) | Event::Mouse(_))`, diskimager's shape.
+
+(The six read on 2026-09-28 had been reported without a word from this note
+for eleven days: the note said FOURTEEN and `_COUNT_WORDS` stopped at TWELVE,
+so the count read as no count at all and the drift warning below never fired.
+An unreadable count word is now said, not treated as silence.)
 
 `calendar`, `photomanager` and `reminders` still carry comments describing the
 version that *was* wrong. Calendar's is worth keeping: a save dialog left up
@@ -113,18 +124,39 @@ from rustlex import live_code, strip_noise  # noqa: E402
 # that if it covers everything reported. The gap is the finding, so the tool
 # says so rather than leaving it to be spotted.
 _COUNT_WORDS = {
-    "ZERO": 0, "ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5,
-    "SIX": 6, "SEVEN": 7, "EIGHT": 8, "NINE": 9, "TEN": 10, "ELEVEN": 11,
-    "TWELVE": 12,
+    word: n
+    for n, word in enumerate(
+        "ZERO ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE "
+        "THIRTEEN FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN TWENTY".split()
+    )
 }
+for _tens, _base in (("TWENTY", 20), ("THIRTY", 30), ("FORTY", 40)):
+    _COUNT_WORDS[_tens] = _base
+    for _n, _unit in enumerate("ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE".split(), 1):
+        _COUNT_WORDS[f"{_tens}-{_unit}"] = _base + _n
+
+
+class UnreadableCount(ValueError):
+    """The note names its count in a word `_COUNT_WORDS` does not know."""
 
 
 def documented_count():
-    """How many findings this file's own note says it covers, or None."""
-    match = re.search(r"THE ([A-Z]+) IT STILL REPORTS", __doc__ or "")
+    """How many findings this file's own note says it covers, or None when
+    there is no note.
+
+    A note whose count word is not in `_COUNT_WORDS` raises rather than
+    answering None: None means "no note", and a note read as no note is how
+    FOURTEEN went unread for eleven days while the scan reported twenty.
+    """
+    match = re.search(r"THE ([A-Z-]+) IT STILL REPORTS", __doc__ or "")
     if match is None:
         return None
-    return _COUNT_WORDS.get(match.group(1))
+    word = match.group(1)
+    if word not in _COUNT_WORDS:
+        raise UnreadableCount(
+            f"this file's note says {word!r} and _COUNT_WORDS cannot read it"
+        )
+    return _COUNT_WORDS[word]
 
 
 def report_drift(found, out=sys.stdout):
@@ -136,7 +168,12 @@ def report_drift(found, out=sys.stdout):
     believes is worse than no checker. The dangerous direction is the other
     one, where something is reported that nobody has ever read.
     """
-    documented = documented_count()
+    try:
+        documented = documented_count()
+    except UnreadableCount as why:
+        print("", file=out)
+        print(f"  NOTE UNREADABLE: {why}; the scan reports {found}.", file=out)
+        return True
     if documented is None or found <= documented:
         return False
     missing = found - documented

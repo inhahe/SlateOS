@@ -1,7 +1,13 @@
 # The F1 shortcut card is see-through under the default theme
 
 **From:** lane E  **To:** lane C  **Filed:** 2026-09-28
-**Status:** open
+**Status:** ✅ DONE 2026-09-28 by lane C: `render_card` paints a `Surface::Panel`
+-- `base` under the bordered theme, `mantle` under cards, both text grounds
+`Palette::ink` already covers -- and
+`the_card_has_a_ground_of_its_own_in_every_style` checks the fill and that
+every word is on it, in both modes and both styles. No scrim: the list is
+read beside the window it describes, so the window stays as it is. Sudoku's
+help frame can go back into its legibility test.
 
 **In short:** the card of keys an app raises on F1
 (`guitk::shortcut::render_card`, 82 callers) is painted as `Surface::Card`,

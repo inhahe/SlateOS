@@ -83868,6 +83868,118 @@ then the published `tree-sitter` crate drops into `gui/syntax/Cargo.toml` (the
 dependency is already renamed to it) and the grammars can be compiled as
 upstream compiles them -- the converter and the scanner ports retire.
 
+## 1438. The highlighter settles a query's captures as tree-sitter's own highlighter does
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A language's colouring rules (its *highlight query*: patterns
+that pick out pieces of the parsed code and name what they are) often say
+two things about the same text -- "every name is a variable", then "a name
+being called is a function". Which one wins decides whether code comes out
+coloured as the rules' authors meant. The code editor now settles this the
+way tree-sitter's own highlighter does, which is what those authors test
+their rules against: the later rule wins, and rules that start at the same
+place stack in the order they are written. The editor had kept the *first*
+rule, so every YAML key came out as a string and a Rust method call as a
+field. The grammars' own colouring tests now run here and pass.
+
+**The rules, each as tree-sitter-highlight 0.25 has them:**
+
+1. **Of one node's captures, the last pattern's wins.** A query lists the
+   general before the specific: Rust's has `(field_identifier) @property`
+   long before the method-call pattern that calls the same node
+   `@function.method`; YAML's makes every scalar `@string` before it makes a
+   key `@property`. (Tree-sitter's highlighter once kept the first; the
+   vendored queries are written for the last.)
+2. **Captures stack in the order they come**, by start and then by pattern:
+   a later pattern's capture that starts where an earlier one does goes on
+   top for its whole length, longer or shorter, and what is under it stays
+   hidden until it closes. TOML's query relies on it: `(pair (bare_key))
+   @property` -- the whole pair -- over `(bare_key) @type`, to make a key a
+   property. Flattening by containment instead (the shorter on top, which
+   the editor did) coloured every TOML key as a type.
+
+**Where it departs from tree-sitter's highlighter, on purpose:**
+
+| Question | Chosen | tree-sitter-highlight | Why |
+|---|---|---|---|
+| A capture whose name has no colour here (`@spell`, `@text.emphasis`) | takes no part; the node keeps what the other patterns said | if it is the node's last, the node is left uncoloured | we colour 22 kinds, not a theme's hundred names; blanking a node because its last name is one we lack (nvim-style `(comment) @comment @spell`) would lose colour the query did give it |
+| `@none` | paints the text plain, over what encloses it | a name like any other (no colour unless a theme has it) | Neovim's meaning, which the Markdown query (from nvim-treesitter) uses to keep a code fence's contents from showing the fence's literal colour |
+| An injected language's span starting where its host's does | the injected one on top | the host's on top, but an injection wins an identical range | an embedded language's colours are the point of injecting it; Neovim draws injected trees over their hosts |
+| What an injection's text leaves out, without `injection.include-children` | the node's *named* children only | every child | Markdown's block grammar lexes a paragraph's backticks and brackets as anonymous tokens of the paragraph's `inline` node; leaving them out handed the inline grammar fragments, and nothing inline was coloured. Named-only is Neovim's reading, whose queries these are (Helix spells it `injection.include-unnamed-children`) |
+
+**How it is known to be right.** Five of the vendored grammars ship
+highlight tests (`test/highlight/`: source files whose comments point at the
+line above -- `// ^ function` -- and name its capture), which upstream runs
+with `tree-sitter test` against tree-sitter-highlight. They are vendored
+under `gui/syntax/grammars/<name>/highlight/` and run against this
+highlighter (`gui/syntax/src/highlight_tests.rs`), their assertions read as
+`tree-sitter test` reads them and compared as the kinds the names paint: C,
+CSS, Python, TOML and YAML, 135 assertions, all passing. The
+first-pattern rule fails seven of them, in four of the five languages;
+flattening by containment fails TOML's key.
+
+**Revisit if** tree-sitter's highlighter changes its rule again (its source
+says what it does in the loop after "Once a highlighting pattern is found
+for the current node"), or if the toolkit gains a theme with capture names
+of its own, when the second table's first row should follow upstream.
+
+## 1439. A parse is given up for the work it has done, not the time it has taken
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The code editor colours a file by parsing it a few milliseconds
+per frame. A grammar with a mistake in it could keep that going forever, so
+a parse that has gone on far too long is given up and the file stays in the
+colours it had. "Too long" was five seconds of wall-clock time -- and on a
+busy machine a perfectly ordinary file took that long, because the clock kept
+running while the editor waited its turn for the processor. Two of the
+highlighter's own tests failed that way while a boot test ran beside them.
+Now "too long" is counted in the parser's own work -- its steps and the
+characters its lexers read -- which a busy machine cannot inflate. Ordinary
+files never come near the limit; a runaway grammar still hits it.
+
+**What was measured** (`cargo test`, debug build, 2026-09-28): the
+runtime's steps (its progress callback fires once per hundred) and the
+characters every lexer stepped over (counted in `ffi::Lexer::advance_with`,
+which generated lexers and hand-ported scanners both go through), per byte of
+input:
+
+| Input | Steps / byte | Characters / byte |
+|---|---|---|
+| Real files: Rust (212 KB), Python (937 KB), C, TOML (`Cargo.lock`), YAML, CSS, JSON (199 KB), Markdown (`roadmap.md`, 2 MB) | 0.2 -- 1.4 | 1.0 -- 4.3 |
+| Each language fed another's file (Markdown as Rust, C, Python, CSS, TOML, YAML, JSON; Rust as Python, YAML, TOML, JSON, CSS, Markdown; ...) and 100 KB of random printable bytes | 0 -- 2.1 | 0 -- 3.4 |
+| 50,000 `(` as Rust, `{` as C, `"` as Python | 1.0 | 1.0 |
+| **10,000 `*` as Markdown** | 3.0 | **5,001** |
+
+The last is a scanner that reads the rest of the line again for every token
+of it: quadratic, 22 seconds in a debug build for 10 KB, and invisible to the
+runtime's step count. The limit is two million units, plus two hundred a
+byte -- more than twenty-five times the most any ordinary input needed -- so
+that line is given up after a fraction of a second, and every file above
+finishes.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Work: runtime steps + characters lexed** (chosen) | the same on any machine, however busy; tests of it are exact | counts what the runtime reports and what our lexers do, not everything the runtime does: error recovery spends time it does not count (TOML fed 200 KB of Markdown: 33 s in a debug build on 118,000 steps). That time is finite, so it ends -- it is only never *given up* |
+| Wall-clock time, as before, but longer | one number; bounds everything | still wrong under load, only less often; a long enough limit to be safe lets a quadratic scanner run for minutes |
+| The thread's CPU time | not stretched by waiting | no portable way to read it (`GetThreadTimes` ticks at 15.6 ms, `CLOCK_THREAD_CPUTIME_ID` is POSIX, SlateOS's is unknown); per-slice sums of coarse ticks drift |
+| Both work and a wall-clock backstop | bounds the uncounted too | the backstop brings the load problem back, for a case -- slow but finite error recovery -- where finishing is better than giving up |
+
+**Why no time limit at all is safe.** A loop that goes through the parser's
+steps reaches the progress callback, and is counted. A loop that never does
+-- inside one scanner call, or in runtime code between checks -- cannot be
+stopped by any limit checked in that callback, the clock included; the
+frame budget cannot stop it either. So a time limit adds nothing against a
+true runaway; it only gives up on slow finite parses, which are better
+finished.
+
+**Revisit if** a grammar is found whose ordinary files need more than two
+hundred units a byte (raise the rate, with the file as a test), or the
+runtime starts reporting more of its work (then count that too).
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

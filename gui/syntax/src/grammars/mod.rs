@@ -10,9 +10,12 @@
 pub(crate) mod c;
 pub(crate) mod css;
 pub(crate) mod json;
+pub(crate) mod markdown;
+pub(crate) mod markdown_inline;
 pub(crate) mod python;
 pub(crate) mod rust;
 pub(crate) mod toml;
+pub(crate) mod yaml;
 
 /// The generated file for a grammar, in a module of its own. `$scanner`,
 /// when given, is the type the generated code calls `Scanner`.

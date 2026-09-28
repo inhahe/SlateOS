@@ -285,11 +285,15 @@ impl CodeView {
     }
 
     /// Whether [`work`](Self::work) has anything to do: the highlighter has
-    /// not finished, or has not yet been told of a change.
+    /// not finished, has not yet been told of a change, or found more to do
+    /// while the view drew ([`Highlighter::has_work`]).
     #[must_use]
     pub fn has_work(&self) -> bool {
-        self.highlighter.is_some()
-            && (self.highlight_pending || self.highlighted != Some(self.editor.revision()))
+        self.highlighter.as_ref().is_some_and(|h| {
+            self.highlight_pending
+                || self.highlighted != Some(self.editor.revision())
+                || h.has_work()
+        })
     }
 
     /// Tell the highlighter about every change since it was last told -- or,
@@ -1938,6 +1942,62 @@ mod tests {
         // A view without one has nothing to do.
         let mut plain = view("fn");
         assert!(!plain.has_work() && !plain.work());
+    }
+
+    /// **Work that drawing finds keeps the view asking**: a highlighter
+    /// whose drawing starts work it cannot finish at once -- a language
+    /// inside another -- says so through `has_work`, and the view has work
+    /// until it is done, then draws its colours.
+    #[test]
+    fn work_that_drawing_finds_keeps_the_view_working() {
+        use crate::highlight::Highlight;
+        use core::cell::Cell;
+        /// Colours everything once `work` has run after a draw found it.
+        #[derive(Debug, Default)]
+        struct Found {
+            pending: Cell<bool>,
+            done: bool,
+        }
+        impl Highlighter for Found {
+            fn reset(&mut self, _text: &crate::textbuffer::TextBuffer) {}
+            fn edited(
+                &mut self,
+                _text: &crate::textbuffer::TextBuffer,
+                _splices: &[crate::textbuffer::Splice],
+            ) {
+            }
+            fn work(&mut self, _text: &crate::textbuffer::TextBuffer, _b: Duration) -> bool {
+                if self.pending.replace(false) {
+                    self.done = true;
+                }
+                false
+            }
+            fn has_work(&self) -> bool {
+                self.pending.get()
+            }
+            fn highlights(
+                &self,
+                _text: &crate::textbuffer::TextBuffer,
+                range: Range<usize>,
+            ) -> Vec<HighlightSpan> {
+                if self.done {
+                    return vec![HighlightSpan {
+                        range,
+                        highlight: Highlight::Keyword,
+                    }];
+                }
+                self.pending.set(true);
+                Vec::new()
+            }
+        }
+        let mut v = view("fn");
+        v.set_highlighter(Some(Box::new(Found::default())));
+        assert!(!v.has_work(), "nothing is found before a draw");
+        assert!(row_spans(&drawn(&v), "fn").is_empty());
+        assert!(v.has_work(), "the work the draw found was not asked for");
+        assert!(!v.work());
+        assert!(!v.has_work());
+        assert!(!row_spans(&drawn(&v), "fn").is_empty());
     }
 
     /// **Colour runs**: the selection's ink wins, then the highlighter's,

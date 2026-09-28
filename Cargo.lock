@@ -1235,6 +1235,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamechrome"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+]
+
+[[package]]
 name = "gdb"
 version = "0.1.0"
 
@@ -2094,6 +2102,8 @@ dependencies = [
 name = "minesweeper"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3560,6 +3570,8 @@ dependencies = [
 name = "tictactoe"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]

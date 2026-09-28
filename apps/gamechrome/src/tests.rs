@@ -1,0 +1,210 @@
+// A test that panics on bad data is a test reporting a fault.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::float_cmp
+)]
+
+use super::*;
+use appearance::{AccentColor, AppearanceSettings, ThemeMode};
+
+/// The palette for `accent` in the light or the dark mode.
+fn palette(accent: AccentColor, light: bool) -> Palette {
+    Palette::from_settings(&AppearanceSettings {
+        accent_color: accent,
+        theme_mode: if light {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        },
+        ..AppearanceSettings::default()
+    })
+}
+
+/// Every role is the palette's -- an entry, its ink, or an entry made
+/// translucent -- in a light theme as in a dark one.
+#[test]
+fn the_chrome_is_the_palettes_in_either_mode() {
+    for light in [false, true] {
+        let p = Palette::for_mode(light);
+        let c = Chrome::of(&p);
+        appearance::palette_check::assert_colours_from(
+            &p,
+            &[
+                ("page", c.page),
+                ("band", c.band),
+                ("well", c.well),
+                ("raised", c.raised),
+                ("lit", c.lit),
+                ("high", c.high),
+                ("text", c.text),
+                ("dim", c.dim),
+                ("off", c.off),
+                ("good", c.good),
+                ("bad", c.bad),
+                ("even", c.even),
+                ("title", c.title),
+                ("ring", c.ring),
+                ("key", c.key),
+                ("scrim", c.scrim),
+                ("veil", c.veil),
+            ],
+            &[],
+            "gamechrome",
+        );
+    }
+    assert_ne!(
+        Chrome::of(&Palette::for_mode(false)).page,
+        Chrome::of(&Palette::for_mode(true)).page,
+        "the page did not follow the mode"
+    );
+}
+
+/// **The second side is never mistaken for the first**, whatever accent the
+/// user picks, in either mode.
+#[test]
+fn the_second_side_is_never_mistaken_for_the_accent() {
+    for &accent in AccentColor::presets() {
+        for light in [false, true] {
+            let p = palette(accent, light);
+            let second = apart_from_accent(&p);
+            assert!(
+                !hard_to_tell_apart(second, p.ink(p.accent)),
+                "{accent:?} (light: {light}): the second side looks like the first"
+            );
+        }
+    }
+    // A red accent does not get a red second side.
+    let p = palette(AccentColor::Red, false);
+    assert_ne!(apart_from_accent(&p), p.ink(p.red));
+}
+
+/// A button is the toolkit's colours for its kind and state, with the game's
+/// label size -- and a label too long for it is cut, not run over the edge.
+#[test]
+fn a_button_is_the_toolkits_paint_at_the_games_size() {
+    let p = Palette::for_mode(false);
+    let ground = p.crust;
+    for state in [
+        State::default(),
+        State {
+            disabled: true,
+            ..State::default()
+        },
+        State {
+            hovered: true,
+            ..State::default()
+        },
+    ] {
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        button(
+            &mut cmds,
+            &p,
+            (10.0, 20.0, 120.0, 30.0),
+            "New game",
+            18.0,
+            Kind::Plain,
+            state,
+            ground,
+        );
+        let paint = tk_button::paint(&p, Kind::Plain, state, ground);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                RenderCommand::FillRect { color, .. } if *color == paint.lower
+            )),
+            "{state:?}: the face is not the toolkit's"
+        );
+        let label = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    max_width,
+                    ..
+                } => Some((text.clone(), *color, *font_size, *max_width)),
+                _ => None,
+            })
+            .expect("a label");
+        assert_eq!(label.0, "New game");
+        assert_eq!(label.1, paint.ink, "{state:?}: the label's ink");
+        assert_eq!(label.2, 18.0, "the game's size, not the toolkit's 13");
+        assert!(
+            label.3.is_some_and(|w| w <= 120.0),
+            "the label may run over the edge"
+        );
+    }
+}
+
+/// The keyboard's ring is drawn round a focused button, in the accent, and
+/// not round a disabled one.
+#[test]
+fn a_focused_button_has_the_accents_ring() {
+    let p = Palette::for_mode(true);
+    let ring = |state: State| {
+        let mut cmds: Vec<RenderCommand> = Vec::new();
+        button(
+            &mut cmds,
+            &p,
+            (0.0, 0.0, 90.0, 28.0),
+            "Help",
+            13.0,
+            Kind::Plain,
+            state,
+            p.base,
+        );
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                RenderCommand::StrokeRect { color, .. } if *color == p.accent
+            )
+        })
+    };
+    let focused = State {
+        focused: true,
+        ..State::default()
+    };
+    assert!(ring(focused));
+    assert!(!ring(State::default()));
+    assert!(!ring(State {
+        disabled: true,
+        ..focused
+    }));
+}
+
+/// A colour a player reads is drawn in the shade that reads on its tile: the
+/// dark theme's on a dark tile, the light theme's on a light one.
+#[test]
+fn a_read_colour_takes_the_shade_that_reads_on_its_tile() {
+    let yellow = (Color::from_hex(0xF9E2AF), Color::from_hex(0xDF8E1D));
+    let dark_tile = Palette::for_mode(false).mantle;
+    let light_tile = Palette::for_mode(true).mantle;
+    assert_eq!(legible_on(yellow, dark_tile), yellow.0);
+    assert_eq!(legible_on(yellow, light_tile), yellow.1);
+    assert!(
+        contrast_ratio(legible_on(yellow, light_tile), light_tile)
+            > contrast_ratio(yellow.0, light_tile)
+    );
+}
+
+/// Nothing is drawn for a button with no room.
+#[test]
+fn a_button_with_no_room_draws_nothing() {
+    let p = Palette::for_mode(false);
+    let mut cmds: Vec<RenderCommand> = Vec::new();
+    button(
+        &mut cmds,
+        &p,
+        (0.0, 0.0, 0.0, 28.0),
+        "X",
+        13.0,
+        Kind::Plain,
+        State::default(),
+        p.base,
+    );
+    assert!(cmds.is_empty());
+}

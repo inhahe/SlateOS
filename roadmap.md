@@ -196,7 +196,7 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 |------|------|------|----------------------|
 | **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` |
 | **B** | `Lane B` | **Userland** | `userspace/**`, `init/**` |
-| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
+| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's crates (`gui/compositor`, `window`, `remote`, `font`, `imagecodec`, `vulkan`, `video`) |
 | **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
 | **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
 | **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` |

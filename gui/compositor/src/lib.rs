@@ -53,7 +53,7 @@ use guitk::color::Color;
 use guitk::event::{
     Event as ClientEvent, Key, KeyEvent as ClientKeyEvent, Modifiers,
     MouseButton as ClientMouseButton, MouseEvent as ClientMouseEvent,
-    MouseEventKind as ClientMouseKind, SettingsGroup,
+    MouseEventKind as ClientMouseKind, SettingsGroup, SettingsName,
 };
 #[allow(unused_imports)]
 use guitk::render::{
@@ -3479,6 +3479,13 @@ pub enum CompositorRequest {
     ///
     /// See [`guiremote::control::RequestBody::ReloadSession`].
     ReloadSession,
+    /// Announce that settings file `name` changed: any program's own file,
+    /// or -- by its name rather than its verb -- one of the four above, which
+    /// is then treated exactly as that verb treats it.
+    ///
+    /// See [`guiremote::control::RequestBody::AnnounceSettings`] and
+    /// [`Compositor::settings_rewritten`].
+    AnnounceSettings { name: SettingsName },
     /// Recover the display: the full redraw the Ctrl+Super+R chord asks for.
     ///
     /// See [`guiremote::control::RequestBody::RecoverDisplay`] and
@@ -6143,6 +6150,32 @@ impl Compositor {
             self.pending_notifications
                 .push_back(EventNotification::SettingsChanged { window_id, group });
         }
+    }
+
+    /// A settings group's file was rewritten: adopt it, if this compositor
+    /// reads it, and then tell every window's program.
+    ///
+    /// What every settings request comes to, the four verbs and the
+    /// announcement by name alike, so a file announced by name is treated
+    /// exactly as its verb treats it.
+    ///
+    /// Telling everyone else is the point of these requests being
+    /// *notifications* rather than writes: the sender has already rewritten
+    /// the file, and every other program holding a copy of what it said is now
+    /// stale. Before the announcement, the compositor re-read `appearance.yaml`
+    /// and no one else ever learned it had changed -- so a theme change reached
+    /// the window decorations and nothing inside them until the next login.
+    pub fn settings_rewritten(&mut self, group: SettingsGroup) {
+        match group {
+            SettingsGroup::Appearance => self.reload_appearance(),
+            SettingsGroup::Input => self.reload_input(),
+            // Announced and not adopted, and not an omission: this compositor
+            // keeps no copy of the notification rules or the lock delay (the
+            // shell reads both, and holds the idle claim), nor of any
+            // program's own settings.
+            SettingsGroup::Notifications | SettingsGroup::Session | SettingsGroup::Program(_) => {}
+        }
+        self.announce_settings_change(group);
     }
 
     /// Re-read the user's `input.yaml` and adopt whatever it now says.
@@ -10460,15 +10493,7 @@ impl Compositor {
                 }
             }
             CompositorRequest::ReloadAppearance => {
-                self.reload_appearance();
-                // And tell everyone else, which is the point of the request
-                // being a *notification* rather than a write: the sender has
-                // already rewritten the file, and every other program holding
-                // a copy of what it said is now stale. Before this, the
-                // compositor re-read the file and no one else ever learned it
-                // had changed -- so a theme change reached the window
-                // decorations and nothing inside them until the next login.
-                self.announce_settings_change(SettingsGroup::Appearance);
+                self.settings_rewritten(SettingsGroup::Appearance);
                 // `Ok` whether or not anything changed. The client is being
                 // told the compositor has re-read the file, which is true
                 // either way, and a reply that differed would leak the state of
@@ -10476,17 +10501,18 @@ impl Compositor {
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadNotifications => {
-                // No `self.reload_*` beside it, and that is not an omission:
-                // this compositor keeps no copy of the notification rules to
-                // refresh. It is announcing, not adopting.
-                self.announce_settings_change(SettingsGroup::Notifications);
+                self.settings_rewritten(SettingsGroup::Notifications);
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadSession => {
-                // Announcing, not adopting -- as with the notification rules,
-                // this compositor keeps no copy of the lock delay. The shell
-                // holds the idle claim and is the only thing that acts on it.
-                self.announce_settings_change(SettingsGroup::Session);
+                self.settings_rewritten(SettingsGroup::Session);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::AnnounceSettings { name } => {
+                // The four desktop files by name are their verbs; any other
+                // name is a program's own file, announced and not read.
+                self.settings_rewritten(guiremote::settings_group(name));
+                // `Ok` whatever the file says, as for the verbs.
                 CompositorResponse::Ok
             }
             CompositorRequest::RecoverDisplay => {
@@ -10494,8 +10520,7 @@ impl Compositor {
                 CompositorResponse::Ok
             }
             CompositorRequest::ReloadInput => {
-                self.reload_input();
-                self.announce_settings_change(SettingsGroup::Input);
+                self.settings_rewritten(SettingsGroup::Input);
                 // `Ok` whether or not anything changed, on the same terms as
                 // the appearance reload above: a reply that differed would let
                 // anyone allowed to ask for a reload read back the user's

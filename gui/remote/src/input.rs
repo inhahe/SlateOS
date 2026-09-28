@@ -46,9 +46,13 @@
 
 use guitk::event::{
     Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
+    SettingsName,
 };
 
-use crate::{DecodeError, Reader, capacity_hint, write_f32, write_u32, write_u64};
+use crate::{
+    DecodeError, Reader, capacity_hint, read_settings_name, write_f32, write_settings_name,
+    write_u32, write_u64,
+};
 
 /// Input-frame magic: `b"INPT"`.
 pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
@@ -86,7 +90,14 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// ([`InputEvent::time`]), between its window id and its tag. A layout change
 /// in the plainest sense: a version-6 peer would read the stamp's presence
 /// byte as the event's tag.
-pub const INPUT_VERSION: u8 = 7;
+///
+/// **8** — [`SettingsGroup::Program`] (group code `0x05`, followed by the
+/// program's settings-file name: a length byte and up to 32 bytes), so a
+/// change to any program's own settings file reaches its open windows, not
+/// only a change to the four files the desktop reads (`design-decisions.md`
+/// §1418). Incompatible on 3's terms and on 7's: a version-7 peer refuses the
+/// group code, and would have read the name as the next event.
+pub const INPUT_VERSION: u8 = 8;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -228,6 +239,27 @@ const GROUP_APPEARANCE: u8 = 0x01;
 const GROUP_INPUT: u8 = 0x02;
 const GROUP_NOTIFICATIONS: u8 = 0x03;
 const GROUP_SESSION: u8 = 0x04;
+/// [`SettingsGroup::Program`]: the code, then the name (`write_settings_name`).
+const GROUP_PROGRAM: u8 = 0x05;
+
+/// The group a change to settings file `name` is announced as: one of the
+/// four the desktop reads, named by variant, or [`SettingsGroup::Program`]
+/// for any other program's file.
+///
+/// The one mapping between a file's name and its group. The compositor
+/// announces through it, and the decoder refuses a `Program` group that it
+/// would not have produced -- `Program("appearance")` -- so a receiver has
+/// exactly one thing to match for each file.
+#[must_use]
+pub fn settings_group(name: SettingsName) -> SettingsGroup {
+    match name.as_bytes() {
+        b"appearance" => SettingsGroup::Appearance,
+        b"input" => SettingsGroup::Input,
+        b"notifications" => SettingsGroup::Notifications,
+        b"session" => SettingsGroup::Session,
+        _ => SettingsGroup::Program(name),
+    }
+}
 
 const MOUSE_PRESS: u8 = 0x01;
 const MOUSE_RELEASE: u8 = 0x02;
@@ -430,12 +462,16 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
         }
         Event::SettingsChanged { group } => {
             out.push(EventTag::SettingsChanged as u8);
-            out.push(match group {
-                SettingsGroup::Appearance => GROUP_APPEARANCE,
-                SettingsGroup::Input => GROUP_INPUT,
-                SettingsGroup::Notifications => GROUP_NOTIFICATIONS,
-                SettingsGroup::Session => GROUP_SESSION,
-            });
+            match group {
+                SettingsGroup::Appearance => out.push(GROUP_APPEARANCE),
+                SettingsGroup::Input => out.push(GROUP_INPUT),
+                SettingsGroup::Notifications => out.push(GROUP_NOTIFICATIONS),
+                SettingsGroup::Session => out.push(GROUP_SESSION),
+                SettingsGroup::Program(name) => {
+                    out.push(GROUP_PROGRAM);
+                    write_settings_name(out, *name);
+                }
+            }
         }
         Event::ModifierChord { modifiers } => {
             out.push(EventTag::ModifierChord as u8);
@@ -667,6 +703,16 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
                 GROUP_INPUT => SettingsGroup::Input,
                 GROUP_NOTIFICATIONS => SettingsGroup::Notifications,
                 GROUP_SESSION => SettingsGroup::Session,
+                GROUP_PROGRAM => {
+                    let name = read_settings_name(r)?;
+                    // One of the four files named as a program's is a group
+                    // no compositor sends (`settings_group`), and a receiver
+                    // matching `Appearance` would never see it.
+                    match settings_group(name) {
+                        group @ SettingsGroup::Program(_) => group,
+                        _ => return Err(DecodeError::BadSettingsName),
+                    }
+                }
                 other => return Err(DecodeError::BadSettingsGroup(other)),
             };
             (Event::SettingsChanged { group }, None)
@@ -948,6 +994,103 @@ mod tests {
             decode_input_frame(&bytes).err(),
             Some(DecodeError::BadSettingsGroup(0x7F)),
             "an unknown group must be refused, naming the byte"
+        );
+    }
+
+    /// `name` as a [`SettingsName`], which the tests below only build from
+    /// names they know are valid.
+    fn name(text: &str) -> SettingsName {
+        SettingsName::new(text.as_bytes()).unwrap()
+    }
+
+    /// A settings-changed event for program `text`'s file, as one frame.
+    fn program_frame(text: &str) -> Vec<u8> {
+        encode_input_frame(&[InputEvent::new(
+            1,
+            Event::SettingsChanged {
+                group: SettingsGroup::Program(name(text)),
+            },
+        )])
+    }
+
+    #[test]
+    fn a_program_s_settings_group_round_trips_with_its_name() {
+        // Three programs in one frame, of different lengths, so a name read
+        // one byte short or long would misalign the event after it.
+        let events: Vec<InputEvent> = ["calendar", "a", "markdowneditor"]
+            .iter()
+            .map(|text| {
+                InputEvent::new(
+                    7,
+                    Event::SettingsChanged {
+                        group: SettingsGroup::Program(name(text)),
+                    },
+                )
+            })
+            .chain(core::iter::once(InputEvent::new(7, Event::FocusIn)))
+            .collect();
+        assert_eq!(roundtrip(&events), events);
+    }
+
+    #[test]
+    fn a_program_s_name_is_refused_unless_a_program_could_have_made_it() {
+        // The name is the last thing in the frame: its length byte, then its
+        // bytes. Rewritten in place to each thing SettingsName refuses.
+        let good = program_frame("calendar");
+        let at = good.len() - "calendar".len();
+        for bad in [
+            &b"Calendar"[..],
+            b"cal/ndar",
+            b"calendr.",
+            b"..\0\0\0\0\0\0",
+        ] {
+            let mut bytes = good.clone();
+            bytes[at..].copy_from_slice(bad);
+            assert_eq!(
+                decode_input_frame(&bytes).err(),
+                Some(DecodeError::BadSettingsName),
+                "{bad:?}"
+            );
+        }
+        // A length of 0, or past the 32 a name may have, is refused too...
+        for len in [0u8, 33] {
+            let mut bytes = good[..at - 1].to_vec();
+            bytes.push(len);
+            bytes.extend(core::iter::repeat_n(b'a', usize::from(len)));
+            assert_eq!(
+                decode_input_frame(&bytes).err(),
+                Some(DecodeError::BadSettingsName),
+                "length {len}"
+            );
+        }
+        // ...and one that runs past the end of the frame is the frame cut
+        // short, not a shorter name.
+        let mut bytes = good.clone();
+        bytes[at - 1] = 9;
+        assert_eq!(
+            decode_input_frame(&bytes).err(),
+            Some(DecodeError::UnexpectedEof)
+        );
+    }
+
+    #[test]
+    fn a_desktop_file_named_as_a_program_s_is_refused() {
+        // `settings_group` never makes Program("appearance"), and a receiver
+        // matching `Appearance` would not see one, so it must not decode.
+        for text in ["appearance", "input", "notifications", "session"] {
+            assert_eq!(
+                decode_input_frame(&program_frame(text)).err(),
+                Some(DecodeError::BadSettingsName),
+                "{text}"
+            );
+            assert!(
+                !matches!(settings_group(name(text)), SettingsGroup::Program(_)),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            settings_group(name("calendar")),
+            SettingsGroup::Program(name("calendar"))
         );
     }
 

@@ -96,7 +96,10 @@ pub use guiremote::window_list::{WindowInfo, WindowList};
 // application synthetically does, which is what [`testing`] is for.
 pub use guiremote::input::InputEvent;
 pub use guiremote::{Pipe, pipe};
-pub use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+pub use guitk::event::{
+    Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind, SettingsGroup,
+    SettingsName,
+};
 pub use guitk::render::{RenderCommand, RenderTree};
 
 // ---------------------------------------------------------------------------
@@ -1485,6 +1488,28 @@ impl<T: Transport> EventLoop<T> {
         self.conn.confirm(RequestBody::ReloadSession)
     }
 
+    /// Tell everyone that settings file `name` (`<name>.yaml` in the settings
+    /// folder) changed, so that the program it belongs to re-reads it and its
+    /// open windows show the change at once (`design-decisions.md` §1418).
+    ///
+    /// For any program's own file, where the four calls above are for the four
+    /// files the desktop reads -- though naming one of those does exactly what
+    /// its own call does, so a caller that knows only a file's name need not
+    /// know which kind it is. That caller is the settings watcher, which
+    /// announces every file it sees rewritten; a program saving its own
+    /// settings does not have to call this itself.
+    ///
+    /// Each open window receives
+    /// `Event::SettingsChanged { group: SettingsGroup::Program(name) }`; the
+    /// program whose name it is re-reads its file, and every other ignores it.
+    ///
+    /// # Errors
+    ///
+    /// As [`notifications_changed`](Self::notifications_changed).
+    pub fn settings_file_changed(&mut self, name: SettingsName) -> Result<(), Error<T>> {
+        self.conn.confirm(RequestBody::AnnounceSettings { name })
+    }
+
     /// Ask the compositor to recover the display: the same full redraw as its
     /// own Ctrl+Super+R.
     ///
@@ -2402,6 +2427,7 @@ pub mod testing {
                 RequestBody::CreateWindow(_) => "CreateWindow",
                 RequestBody::WatchIdle { .. } => "WatchIdle",
                 RequestBody::ReloadSession => "ReloadSession",
+                RequestBody::AnnounceSettings { .. } => "AnnounceSettings",
                 RequestBody::RecoverDisplay => "RecoverDisplay",
                 RequestBody::DestroyWindow { .. } => "DestroyWindow",
                 RequestBody::SetTitle { .. } => "SetTitle",
@@ -3448,6 +3474,22 @@ mod tests {
         // does not, and which is not incidental: the application that has cause
         // to send it is a settings dialog, and requiring it to have opened a
         // window first would be requiring it for no reason the protocol has.
+        assert_eq!(events.window_count(), 0);
+    }
+
+    #[test]
+    fn a_settings_file_is_announced_by_its_name_from_a_loop_with_no_window() {
+        // The settings watcher owns no window; the announcement must reach the
+        // wire carrying the name it was given, not a reload of some other file.
+        let (mut events, server) = wired();
+        let calendar = SettingsName::new(b"calendar").unwrap();
+        events.settings_file_changed(calendar).unwrap();
+        assert!(
+            server.borrow().seen.iter().any(
+                |r| matches!(r.body, RequestBody::AnnounceSettings { name } if name == calendar)
+            ),
+            "settings_file_changed should have announced calendar.yaml by name"
+        );
         assert_eq!(events.window_count(), 0);
     }
 

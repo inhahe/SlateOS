@@ -96,7 +96,7 @@ pub use scene::{
 pub mod input;
 pub use input::{
     INPUT_MAGIC, INPUT_VERSION, InputEvent, decode_input_frame, encode_input_frame,
-    encode_input_frame_into, try_decode_input_frame,
+    encode_input_frame_into, settings_group, try_decode_input_frame,
 };
 
 pub mod control;
@@ -435,6 +435,12 @@ pub enum DecodeError {
     /// tag here: an input frame is decoded whole or not at all, so silently
     /// dropping one event would leave the rest of the batch misaligned.
     BadSettingsGroup(u8),
+    /// A program's settings-file name that
+    /// [`SettingsName::new`](guitk::event::SettingsName::new) refuses: empty,
+    /// longer than 32 bytes, or holding a byte outside `a`-`z`, `0`-`9`, `_`
+    /// and `-` -- anything that could name more than a file in the settings
+    /// folder.
+    BadSettingsName,
     /// A [`MouseButton`](guitk::event::MouseButton) code byte was unknown.
     BadMouseButton(u8),
     /// A [`MouseEventKind`](guitk::event::MouseEventKind) tag byte was unknown.
@@ -518,6 +524,7 @@ impl core::fmt::Display for DecodeError {
             }
             Self::BadKey(b) => write!(f, "unknown key code {b:#04x}"),
             Self::BadSettingsGroup(b) => write!(f, "unknown settings group {b:#04x}"),
+            Self::BadSettingsName => write!(f, "not a settings file name"),
             Self::BadMouseButton(b) => write!(f, "unknown mouse button {b:#04x}"),
             Self::BadMouseKind(b) => write!(f, "unknown mouse event kind {b:#04x}"),
             Self::TooManyMessages(n) => {
@@ -881,6 +888,30 @@ fn write_i32(out: &mut Vec<u8>, v: i32) {
 
 fn write_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// A program's settings-file name: its length in one byte, then its bytes.
+///
+/// Here rather than beside a caller because two codecs carry it -- the
+/// announcement a program sends (`control`) and the event the compositor
+/// relays (`input`) -- and two spellings of one field is how the two ends of a
+/// wire come to disagree about it.
+fn write_settings_name(out: &mut Vec<u8>, name: guitk::event::SettingsName) {
+    let bytes = name.as_bytes();
+    // A name is at most `SettingsName::MAX_LEN`, 32, bytes, so its length
+    // always fits the byte; the fallback is unreachable, and a length it wrote
+    // would be refused by the reader rather than misread.
+    out.push(u8::try_from(bytes.len()).unwrap_or(u8::MAX));
+    out.extend_from_slice(bytes);
+}
+
+/// [`write_settings_name`]'s reader: the length, the bytes, and
+/// `SettingsName::new`'s verdict on them -- the one validation, so a name
+/// that crossed the wire is a name a program could have made.
+fn read_settings_name(r: &mut Reader<'_>) -> Result<guitk::event::SettingsName, DecodeError> {
+    let len = r.read_u8()?;
+    let bytes = r.take(usize::from(len))?;
+    guitk::event::SettingsName::new(bytes).ok_or(DecodeError::BadSettingsName)
 }
 
 fn write_color(out: &mut Vec<u8>, c: Color) {

@@ -1129,7 +1129,7 @@ impl TextArea {
             return KeyEdit::Unhandled;
         }
         let shift = key.modifiers.shift;
-        let ctrl = key.modifiers.ctrl && !key.modifiers.alt;
+        let ctrl = key.modifiers.is_ctrl_chord();
         // Alt without Ctrl: Ctrl+Alt is AltGr, which types letters.
         let alt = key.modifiers.alt && !key.modifiers.ctrl && !key.modifiers.super_key;
         let before = self.revision;

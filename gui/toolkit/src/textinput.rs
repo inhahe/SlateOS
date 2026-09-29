@@ -475,7 +475,7 @@ impl TextInput {
             return KeyEdit::Unhandled;
         }
         let shift = key.modifiers.shift;
-        let chord = key.modifiers.ctrl && !key.modifiers.alt;
+        let chord = key.modifiers.is_ctrl_chord();
         match key.key {
             Key::A if chord => {
                 self.select_all();
@@ -941,6 +941,51 @@ mod tests {
         let mut input = TextInput::new();
         assert_eq!(edit(&mut input, Key::X, false, "\u{b4}x"), KeyEdit::Changed);
         assert_eq!(input.text(), "\u{b4}x");
+    }
+
+    /// **A shortcut the field does not know is the owner's, not a letter**:
+    /// Ctrl+K, Alt+F and Windows+E, each handed its letter by the
+    /// compositor, leave the field as it was and come back unhandled.
+    #[test]
+    fn a_shortcut_the_field_does_not_know_types_nothing() {
+        use crate::event::{Key, Modifiers};
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            let mut input = TextInput::new();
+            input.set_text("x");
+            let event = KeyEvent {
+                key: k,
+                pressed: true,
+                modifiers,
+                text: text.to_string(),
+            };
+            assert_eq!(
+                input.edit_key(&event, FONT_SIZE, FontWeightHint::Regular),
+                KeyEdit::Unhandled,
+                "{modifiers:?}"
+            );
+            assert_eq!(input.text(), "x", "{modifiers:?} typed its letter");
+        }
+        // Ctrl+Windows+A is the desktop's, not select-all.
+        let mut input = TextInput::new();
+        input.set_text("x");
+        let super_a = KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            text: "a".to_string(),
+        };
+        assert_eq!(
+            input.edit_key(&super_a, FONT_SIZE, FontWeightHint::Regular),
+            KeyEdit::Unhandled
+        );
     }
 
     #[test]

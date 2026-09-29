@@ -85,6 +85,36 @@ fn shift(k: Key) -> KeyEvent {
     )
 }
 
+/// **A shortcut the area does not know is the owner's, not a letter**:
+/// Ctrl+K, Alt+F and Windows+E, each handed its letter by the compositor,
+/// leave the text as it was and come back unhandled; AltGr types.
+#[test]
+fn a_shortcut_the_area_does_not_know_types_nothing() {
+    let m = wide(3);
+    for (k, modifiers, text) in [
+        (Key::K, Modifiers::ctrl(), "k"),
+        (Key::F, Modifiers::alt(), "f"),
+        (Key::E, Modifiers::super_key(), "e"),
+    ] {
+        let mut area = TextArea::new();
+        type_text(&mut area, "x", &m);
+        assert_eq!(
+            area.edit_key(&key_with(k, modifiers, text), &m),
+            KeyEdit::Unhandled,
+            "{modifiers:?}"
+        );
+        assert_eq!(area.text(), "x", "{modifiers:?} typed its letter");
+    }
+    let mut area = TextArea::new();
+    let altgr = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::NONE
+    };
+    area.edit_key(&key_with(Key::E, altgr, "€"), &m);
+    assert_eq!(area.text(), "€");
+}
+
 /// Type `text` a character at a time, as a keyboard delivers it.
 fn type_text(area: &mut TextArea, text: &str, m: &Metrics) {
     for ch in text.chars() {

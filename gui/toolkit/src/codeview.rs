@@ -1075,7 +1075,7 @@ impl CodeView {
         }
         let m = key.modifiers;
         let shift = m.shift;
-        let ctrl = m.ctrl && !m.alt;
+        let ctrl = m.is_ctrl_chord();
         match key.key {
             Key::F if ctrl => {
                 self.open_find(false);

@@ -2270,11 +2270,6 @@ impl<T: Transport> ShellSession<T> {
         self.arm_next_frame();
     }
 
-    /// Turn animations off, or back on, for accessibility.
-    ///
-    /// Turning them off cancels what is already running rather than letting it
-    /// finish: a user who has just asked for less motion is asking about the
-    /// motion on screen now, not about the next one.
     /// Read the user's saved appearance settings and adopt them, animation
     /// speed included.
     ///
@@ -2486,12 +2481,6 @@ impl<T: Transport> ShellSession<T> {
         self.save_errors.insert(what, message);
     }
 
-    /// Push the shell's animation speed into the manager that obeys it.
-    ///
-    /// `AnimationSpeed::multiplier()` is a *duration* multiplier -- 0.75 for
-    /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
-    /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
-    /// here and there is no second definition of what "slow" means.
     /// Tell auto-hide where the pointer is.
     ///
     /// Tested against the *drawn* rectangle and the trigger strip, both of
@@ -2736,11 +2725,22 @@ impl<T: Transport> ShellSession<T> {
         out
     }
 
+    /// Push the shell's animation speed into the manager that obeys it.
+    ///
+    /// `AnimationSpeed::multiplier()` is a *duration* multiplier -- 0.75 for
+    /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
+    /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
+    /// here and there is no second definition of what "slow" means.
     fn sync_animation_speed(&mut self) {
         self.animations
             .set_duration_scale(self.shell.appearance.animation_speed.multiplier());
     }
 
+    /// Turn animations off, or back on, for accessibility.
+    ///
+    /// Turning them off cancels what is already running rather than letting it
+    /// finish: a user who has just asked for less motion is asking about the
+    /// motion on screen now, not about the next one.
     pub fn set_reduced_motion(&mut self, reduced: bool) {
         self.animations.reduced_motion = reduced;
         if reduced {

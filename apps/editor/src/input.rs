@@ -201,7 +201,7 @@ impl Command {
             Self::Open => "Ctrl+O",
             Self::Save => "Ctrl+S",
             Self::SaveAs => "Ctrl+Shift+S",
-            Self::CloseTab => "Ctrl+W",
+            Self::CloseTab => "Ctrl+W / Ctrl+F4",
             Self::Undo => "Ctrl+Z",
             Self::Redo => "Ctrl+Y",
             Self::Earlier => "Alt+Z",
@@ -1445,6 +1445,7 @@ mod tests {
             "X" => Key::X,
             "Y" => Key::Y,
             "Z" => Key::Z,
+            "F4" => Key::F4,
             other => panic!("no key is named {other}"),
         }
     }
@@ -1465,190 +1466,193 @@ mod tests {
     #[test]
     fn every_shortcut_a_menu_advertises_is_really_bound() {
         for command in Command::ALL {
-            let event = keystroke(command.shortcut());
-            match command {
-                // Adding the variant forces this arm to be *written*, but
-                // `Command::ALL` above decides whether it is ever *run* -- a
-                // variant left out of that array would compile with an arm
-                // that never executes, which is the "passes by accident"
-                // failure in its purest form. Both were changed together.
-                Command::ToggleIndentStyle => {
-                    let mut editor = editor_with("ab");
-                    let before = editor.active_document().use_spaces;
-                    editor.handle_event(&event);
-                    assert_ne!(
-                        editor.active_document().use_spaces,
-                        before,
-                        "Ctrl+T did not change the indent style"
-                    );
-                }
-                Command::New => {
-                    let mut editor = editor_with("ab");
-                    let before = editor.tabs.count();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
-                    assert!(
-                        editor.active_document().lines.iter().all(String::is_empty),
-                        "the new tab is not empty"
-                    );
-                    assert!(editor.dialog.is_none(), "New should ask nothing");
-                }
-                Command::Open => {
-                    let mut editor = editor_with("ab");
-                    assert!(editor.dialog.is_none());
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.dialog.is_some(),
-                        "Ctrl+O did not put up a file dialog"
-                    );
-                }
-                Command::SaveAs => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.dialog.is_some(),
-                        "Ctrl+Shift+S did not put up a file dialog"
-                    );
-                    assert_eq!(
-                        editor.dialog_purpose,
-                        crate::DialogPurpose::SaveAs,
-                        "the dialog is up but asking the wrong question"
-                    );
-                }
-                Command::Save => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    // A document with no path cannot be saved without asking
-                    // where, so Ctrl+S puts up Save As. It used to answer "No
-                    // file name -- Save As needs a file dialog", which was true
-                    // until 2026-09-14. The property is unchanged and only its
-                    // evidence moved: the assertion is still "Ctrl+S reached
-                    // Save", now witnessed by the dialog rather than by a
-                    // refusal.
-                    assert!(
-                        editor.dialog.is_some(),
-                        "{} did not reach Save: {:?}",
-                        command.shortcut(),
-                        editor.status
-                    );
-                }
-                Command::CloseTab => {
-                    let mut editor = editor_with("ab");
-                    editor.tabs.open(Document::new());
-                    assert_eq!(editor.tabs.count(), 2);
-                    editor.handle_event(&event);
-                    assert_eq!(editor.tabs.count(), 1, "Ctrl+W did not reach Close Tab");
-                }
-                Command::Undo => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "ab",
-                        "Ctrl+Z did not reach Undo"
-                    );
-                }
-                Command::Redo => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&ctrl(Key::Z));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "cab",
-                        "Ctrl+Y did not reach Redo"
-                    );
-                }
-                Command::Earlier => {
-                    // "cab", undone, then "dab": the version made before
-                    // "dab" is the "cab" undone out of, on the other branch.
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&ctrl(Key::Z));
-                    editor.handle_event(&typed('d'));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "cab",
-                        "Alt+Z did not reach Earlier Version"
-                    );
-                }
-                Command::Later => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&typed('c'));
-                    editor.handle_event(&keystroke("Alt+Z"));
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "cab",
-                        "Alt+Shift+Z did not reach Later Version"
-                    );
-                }
-                Command::Cut => {
-                    let mut editor = editor_with("ab");
-                    editor.active_document_mut().select_all();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.clipboard, "ab", "Ctrl+X did not copy");
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "",
-                        "Ctrl+X copied but did not cut"
-                    );
-                }
-                Command::Copy => {
-                    let mut editor = editor_with("ab");
-                    editor.active_document_mut().select_all();
-                    editor.handle_event(&event);
-                    assert_eq!(editor.clipboard, "ab", "Ctrl+C did not reach Copy");
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "ab",
-                        "Ctrl+C deleted what it copied"
-                    );
-                }
-                Command::Paste => {
-                    let mut editor = editor_with("ab");
-                    editor.clipboard = "zz".to_string();
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().lines[0],
-                        "zzab",
-                        "Ctrl+V did not reach Paste"
-                    );
-                }
-                Command::SelectAll => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(
-                        editor.active_document().has_selection(),
-                        "Ctrl+A did not reach Select All"
-                    );
-                }
-                Command::SelectWord => {
-                    let mut editor = editor_with("hello world");
-                    editor.handle_event(&event);
-                    assert_eq!(
-                        editor.active_document().selected_text(),
-                        "hello",
-                        "Ctrl+D did not reach Select Word"
-                    );
-                }
-                Command::Find => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(editor.find_visible, "Ctrl+F did not open the find bar");
-                    assert_eq!(editor.find_field, FindField::Query);
-                }
-                Command::Replace => {
-                    let mut editor = editor_with("ab");
-                    editor.handle_event(&event);
-                    assert!(editor.find_visible, "Ctrl+H did not open the find bar");
-                    assert_eq!(
-                        editor.find_field,
-                        FindField::Replace,
-                        "Ctrl+H opened the find bar on the wrong field"
-                    );
+            // Every spelling the row names: Close Tab's is two.
+            for spelling in command.shortcut().split(" / ") {
+                let event = keystroke(spelling);
+                match command {
+                    // Adding the variant forces this arm to be *written*, but
+                    // `Command::ALL` above decides whether it is ever *run* -- a
+                    // variant left out of that array would compile with an arm
+                    // that never executes, which is the "passes by accident"
+                    // failure in its purest form. Both were changed together.
+                    Command::ToggleIndentStyle => {
+                        let mut editor = editor_with("ab");
+                        let before = editor.active_document().use_spaces;
+                        editor.handle_event(&event);
+                        assert_ne!(
+                            editor.active_document().use_spaces,
+                            before,
+                            "Ctrl+T did not change the indent style"
+                        );
+                    }
+                    Command::New => {
+                        let mut editor = editor_with("ab");
+                        let before = editor.tabs.count();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
+                        assert!(
+                            editor.active_document().lines.iter().all(String::is_empty),
+                            "the new tab is not empty"
+                        );
+                        assert!(editor.dialog.is_none(), "New should ask nothing");
+                    }
+                    Command::Open => {
+                        let mut editor = editor_with("ab");
+                        assert!(editor.dialog.is_none());
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.dialog.is_some(),
+                            "Ctrl+O did not put up a file dialog"
+                        );
+                    }
+                    Command::SaveAs => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.dialog.is_some(),
+                            "Ctrl+Shift+S did not put up a file dialog"
+                        );
+                        assert_eq!(
+                            editor.dialog_purpose,
+                            crate::DialogPurpose::SaveAs,
+                            "the dialog is up but asking the wrong question"
+                        );
+                    }
+                    Command::Save => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        // A document with no path cannot be saved without asking
+                        // where, so Ctrl+S puts up Save As. It used to answer "No
+                        // file name -- Save As needs a file dialog", which was true
+                        // until 2026-09-14. The property is unchanged and only its
+                        // evidence moved: the assertion is still "Ctrl+S reached
+                        // Save", now witnessed by the dialog rather than by a
+                        // refusal.
+                        assert!(
+                            editor.dialog.is_some(),
+                            "{} did not reach Save: {:?}",
+                            command.shortcut(),
+                            editor.status
+                        );
+                    }
+                    Command::CloseTab => {
+                        let mut editor = editor_with("ab");
+                        editor.tabs.open(Document::new());
+                        assert_eq!(editor.tabs.count(), 2);
+                        editor.handle_event(&event);
+                        assert_eq!(editor.tabs.count(), 1, "{spelling} did not reach Close Tab");
+                    }
+                    Command::Undo => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "ab",
+                            "Ctrl+Z did not reach Undo"
+                        );
+                    }
+                    Command::Redo => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&ctrl(Key::Z));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Ctrl+Y did not reach Redo"
+                        );
+                    }
+                    Command::Earlier => {
+                        // "cab", undone, then "dab": the version made before
+                        // "dab" is the "cab" undone out of, on the other branch.
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&ctrl(Key::Z));
+                        editor.handle_event(&typed('d'));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Alt+Z did not reach Earlier Version"
+                        );
+                    }
+                    Command::Later => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&typed('c'));
+                        editor.handle_event(&keystroke("Alt+Z"));
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "cab",
+                            "Alt+Shift+Z did not reach Later Version"
+                        );
+                    }
+                    Command::Cut => {
+                        let mut editor = editor_with("ab");
+                        editor.active_document_mut().select_all();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.clipboard, "ab", "Ctrl+X did not copy");
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "",
+                            "Ctrl+X copied but did not cut"
+                        );
+                    }
+                    Command::Copy => {
+                        let mut editor = editor_with("ab");
+                        editor.active_document_mut().select_all();
+                        editor.handle_event(&event);
+                        assert_eq!(editor.clipboard, "ab", "Ctrl+C did not reach Copy");
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "ab",
+                            "Ctrl+C deleted what it copied"
+                        );
+                    }
+                    Command::Paste => {
+                        let mut editor = editor_with("ab");
+                        editor.clipboard = "zz".to_string();
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().lines[0],
+                            "zzab",
+                            "Ctrl+V did not reach Paste"
+                        );
+                    }
+                    Command::SelectAll => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(
+                            editor.active_document().has_selection(),
+                            "Ctrl+A did not reach Select All"
+                        );
+                    }
+                    Command::SelectWord => {
+                        let mut editor = editor_with("hello world");
+                        editor.handle_event(&event);
+                        assert_eq!(
+                            editor.active_document().selected_text(),
+                            "hello",
+                            "Ctrl+D did not reach Select Word"
+                        );
+                    }
+                    Command::Find => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(editor.find_visible, "Ctrl+F did not open the find bar");
+                        assert_eq!(editor.find_field, FindField::Query);
+                    }
+                    Command::Replace => {
+                        let mut editor = editor_with("ab");
+                        editor.handle_event(&event);
+                        assert!(editor.find_visible, "Ctrl+H did not open the find bar");
+                        assert_eq!(
+                            editor.find_field,
+                            FindField::Replace,
+                            "Ctrl+H opened the find bar on the wrong field"
+                        );
+                    }
                 }
             }
         }
@@ -2705,7 +2709,9 @@ mod tests {
         assert!(!editor.menu_bar.is_open(), "AltGr+E opened a menu");
     }
 
-    /// **Ctrl+F4 closes the current document**, as Ctrl+W does.
+    /// **Ctrl+F4 closes the current document**, as Ctrl+W does -- and the
+    /// menu says so, where Close Tab is: a key nothing names is a key a user
+    /// cannot find.
     #[test]
     fn ctrl_f4_closes_the_current_document() {
         let mut editor = editor_with("ab");
@@ -2713,6 +2719,14 @@ mod tests {
         assert_eq!(editor.tabs.count(), 2);
         editor.handle_event(&ctrl(Key::F4));
         assert_eq!(editor.tabs.count(), 1, "Ctrl+F4 did not close the tab");
+        assert!(
+            Command::CloseTab
+                .shortcut()
+                .split(" / ")
+                .any(|spelling| spelling == "Ctrl+F4"),
+            "the menu does not name Ctrl+F4: {:?}",
+            Command::CloseTab.shortcut()
+        );
     }
 
     /// **Ctrl+Shift+Z redoes**, as Ctrl+Y does.

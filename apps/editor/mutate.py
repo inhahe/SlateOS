@@ -163,6 +163,21 @@ INPUT_MUTATIONS = [
         "",
         ["the_ends_of_the_history_are_said"],
     ),
+    (
+        "the menu does not name Ctrl+F4",
+        "            Self::CloseTab => \"Ctrl+W / Ctrl+F4\",",
+        "            Self::CloseTab => \"Ctrl+W\",",
+        ["ctrl_f4_closes_the_current_document"],
+    ),
+    (
+        "Ctrl+F4 does not close the document",
+        "            Key::W | Key::F4 => self.run(Command::CloseTab),",
+        "            Key::W => self.run(Command::CloseTab),",
+        [
+            "ctrl_f4_closes_the_current_document",
+            "every_shortcut_a_menu_advertises_is_really_bound",
+        ],
+    ),
 ]
 
 if __name__ == "__main__":

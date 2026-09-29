@@ -252,6 +252,90 @@ VAULTFILE = [
         "            if let Some(f) = folder_id\n                && false\n",
         [REFUSED_WHOLE],
     ),
+    (
+        "a command's letter is typed into an entry",
+        '    if textline::types_into_field(key) {\n        let typed: String = key.typed().collect();',
+        '    if key.types_text() {\n        let typed: String = key.typed().collect();',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a chord works the entry form's keys",
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n    match key.key {\n        Key::Escape => {',
+        '    match key.key {\n        Key::Escape => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into a new master password",
+        '            Gate::Create(form) if textline::types_into_field(key) => {',
+        '            Gate::Create(form) if key.types_text() => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the new-vault form',
+        '            Gate::Create(_) if !textline::is_plain(key.modifiers) => {',
+        '            Gate::Create(_) if false => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into the master password",
+        '        if textline::types_into_field(key) {\n            state.master_input.extend(key.typed());',
+        '        if key.types_text() {\n            state.master_input.extend(key.typed());',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the lock screen',
+        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        '        match key.key {\n            Key::Enter => attempt_unlock(state),',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the vault',
+        '    let chord = textline::is_ctrl_chord(key.modifiers);',
+        '    let chord = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        _ if textline::types_into_field(key) => {',
+        '        _ if key.types_text() => {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the list',
+        '        _ if !textline::is_plain(key.modifiers) => EventResult::Ignored,\n',
+        '',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl in the generator',
+        '    let ctrl = textline::is_ctrl_chord(key.modifiers);',
+        '    let ctrl = key.modifiers.ctrl;',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a chord moves the generator's length",
+        '    if textline::is_plain(key.modifiers) && matches!(key.key, Key::Left | Key::Right) {',
+        '    if !key.modifiers.ctrl && matches!(key.key, Key::Left | Key::Right) {',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed into a backup's password",
+        '            if textline::types_into_field(key) =>',
+        '            if key.types_text() =>',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord answers a vault dialog',
+        '        _ if !textline::is_plain(key.modifiers) => Then::Nothing,\n',
+        '',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr+Q closes the window',
+        '            && textline::is_ctrl_chord(key.modifiers)',
+        '            && key.modifiers.ctrl',
+        ['a_chord_is_neither_a_vault_key_nor_typing_and_altgr_types'],
+    ),
 ]
 
 TABLES = {

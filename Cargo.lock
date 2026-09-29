@@ -686,6 +686,7 @@ dependencies = [
  "settingsfile",
  "sha2",
  "textfmt",
+ "textline",
 ]
 
 [[package]]

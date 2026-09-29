@@ -270,6 +270,14 @@ fn bash_passes_its_corpus() {
     check("Bash", "bash", 100, &[]);
 }
 
+/// **The HTML grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**: end tags left out, raw text, custom
+/// elements.
+#[test]
+fn html_passes_its_corpus() {
+    check("HTML", "html", 20, &[]);
+}
+
 /// **The JavaScript grammar -- tables, lexers and ported scanner -- parses
 /// its whole corpus as upstream's does**: the semicolons a line leaves out,
 /// template strings, regular expressions, JSX.

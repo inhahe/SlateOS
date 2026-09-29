@@ -2397,4 +2397,35 @@ mod tests {
         assert_eq!(colour_at(&spans, text, "x", 0), Some(Highlight::Variable));
         assert_eq!(colour_at(&spans, text, "x", 1), Some(Highlight::Variable));
     }
+
+    /// **HTML is coloured with its scripts and styles in their own
+    /// languages**: a `<script>`'s JavaScript -- its names by where each was
+    /// declared too -- and a `<style>`'s CSS, among HTML's tags and
+    /// attributes.
+    #[test]
+    fn html_is_coloured_with_its_scripts_and_styles_in_their_languages() {
+        let text = "<p class=\"x\">Hi</p>\n<script>\nfunction f(alpha) { return alpha; }\n</script>\n<style>\nb { color: red; }\n</style>\n";
+        let spans = highlighted(text, "html");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("p class", 0), Some(Highlight::Tag), "{spans:?}");
+        assert_eq!(at("class", 0), Some(Highlight::Attribute));
+        // The value, inside its quotes, which are the attribute's own.
+        assert_eq!(at("x\"", 0), Some(Highlight::String));
+        assert_eq!(at("script>", 0), Some(Highlight::Tag));
+        assert_eq!(at("function", 0), Some(Highlight::Keyword));
+        assert_eq!(at("alpha", 1), Some(Highlight::Parameter));
+        assert_eq!(at("color", 0), Some(Highlight::Property));
+    }
+
+    /// **A JavaScript template tagged `html` is coloured as HTML**, the
+    /// template's substitutions as JavaScript.
+    #[test]
+    fn a_template_tagged_html_is_coloured_as_html() {
+        let text = "const t = html`<b class=\"x\">${name}</b>`;\n";
+        let spans = highlighted(text, "javascript");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("b class", 0), Some(Highlight::Tag), "{spans:?}");
+        assert_eq!(at("class", 0), Some(Highlight::Attribute));
+        assert_eq!(at("name", 0), Some(Highlight::Variable));
+    }
 }

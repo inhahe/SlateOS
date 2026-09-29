@@ -2033,14 +2033,15 @@ live.
   tree-sitter's own highlighter reads them (§1438, held to upstream's
   highlight tests), a name coloured as its declaration is where the
   grammar says where names are declared (§1440: a parameter wherever it is
-  used). **Grammars:** Bash (every shell script), C, CSS,
+  used). **Grammars:** Bash (every shell script), C, CSS, HTML,
   JavaScript (JSX included), JSON, Markdown (block and inline), Python,
   Rust, TOML and YAML (every settings file), each passing its authors' test
   corpus. **Injections** (a language inside another): a Markdown code fence
   in the language it names, front matter as YAML or TOML, every paragraph
   in Markdown's inline grammar, a Rust macro's body, a JavaScript tagged
-  template (`` css`...` ``) in the language its tag names.
-  **Next:** HTML.
+  template (`` html`...` ``, `` css`...` ``) in the language its tag names,
+  an HTML page's scripts and styles.
+  **Next:** TypeScript (TSX with it), whose queries build on JavaScript's.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

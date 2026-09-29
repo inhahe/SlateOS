@@ -289,6 +289,13 @@ fn css_is_coloured_as_its_tests_say() {
     check("CSS", "css", 37, &[]);
 }
 
+/// **HTML is coloured as its grammar's highlight tests say**, the end tag
+/// that closes nothing among them.
+#[test]
+fn html_is_coloured_as_its_tests_say() {
+    check("HTML", "html", 38, &[]);
+}
+
 /// **JavaScript is coloured as its grammar's highlight tests say** --
 /// tagged templates in the language their tag names, and names by where
 /// each was declared (`variables.js`), among them.

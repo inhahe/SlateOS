@@ -143,11 +143,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 10;
+const VISIBLE: usize = 11;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 11] = [
+static LANGUAGES: [Language; 12] = [
     Language {
         name: "Bash",
         extensions: &["sh", "bash", "ksh", "zsh"],
@@ -198,6 +198,18 @@ static LANGUAGES: [Language; 11] = [
         index: 2,
     },
     Language {
+        name: "HTML",
+        extensions: &["html", "htm", "xhtml", "shtml"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["htm", "xhtml"],
+        grammar: grammars::html::generated::language_fn,
+        highlights: grammars::html::HIGHLIGHTS,
+        injections: grammars::html::INJECTIONS,
+        locals: "",
+        index: 3,
+    },
+    Language {
         name: "JavaScript",
         extensions: &["js", "mjs", "cjs", "jsx"],
         file_names: &[],
@@ -207,7 +219,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::javascript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::javascript::LOCALS,
-        index: 3,
+        index: 4,
     },
     Language {
         name: "JSON",
@@ -219,7 +231,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 4,
+        index: 5,
     },
     Language {
         name: "Markdown",
@@ -231,7 +243,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 5,
+        index: 6,
     },
     Language {
         name: "Python",
@@ -243,7 +255,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 6,
+        index: 7,
     },
     Language {
         name: "Rust",
@@ -255,7 +267,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 7,
+        index: 8,
     },
     Language {
         name: "TOML",
@@ -268,7 +280,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 8,
+        index: 9,
     },
     Language {
         name: "YAML",
@@ -280,7 +292,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 9,
+        index: 10,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -293,7 +305,7 @@ static LANGUAGES: [Language; 11] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 10,
+        index: 11,
     },
 ];
 
@@ -426,7 +438,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 11] = [const { OnceLock::new() }; 11];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 12] = [const { OnceLock::new() }; 12];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -626,6 +638,7 @@ mod tests {
             ("Bash", Some("bash"), 15, 280, 19),
             ("C", Some("c"), 15, 363, 39),
             ("CSS", Some("css"), 15, 151, 0),
+            ("HTML", None, 14, 41, 0),
             ("JavaScript", Some("javascript"), 15, 265, 36),
             ("TOML", None, 14, 66, 0),
             ("YAML", None, 14, 301, 2),
@@ -701,6 +714,8 @@ mod tests {
         assert_eq!(found("stdio.h"), Some("C"));
         assert_eq!(found("site.css"), Some("CSS"));
         assert_eq!(found("app.js"), Some("JavaScript"));
+        assert_eq!(found("index.html"), Some("HTML"));
+        assert_eq!(found("OLD.HTM"), Some("HTML"));
         assert_eq!(found("rollup.config.MJS"), Some("JavaScript"));
         assert_eq!(found("Button.jsx"), Some("JavaScript"));
         assert_eq!(found("appearance.yaml"), Some("YAML"));

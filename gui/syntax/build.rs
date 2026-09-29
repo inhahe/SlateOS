@@ -16,6 +16,7 @@ const GRAMMARS: &[&str] = &[
     "bash",
     "c",
     "css",
+    "html",
     "javascript",
     "json",
     "markdown",

@@ -23,6 +23,11 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_make_a_move_again"
+HELD = "a_key_held_with_ctrl_alt_or_the_windows_key_is_not_the_games"
+WON_AGAIN = "a_won_game_undone_and_redone_is_won_again"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- The bands -----------------------------------------------------
@@ -476,16 +481,16 @@ MUTATIONS = [
     ),
     (
         "an undone pair is put back but the move is still counted",
-        "            self.moves = self.moves.saturating_sub(1);",
+        "        self.moves = s.moves;\n",
         "",
         ["z_undoes_the_last_pair_and_says_so_when_there_is_none"],
     ),
     (
         "undo with an empty stack says nothing",
-        '            let changed = self.message != Some("Nothing to undo");\n'
-        '            self.message = Some("Nothing to undo");\n'
-        "            changed",
-        "            false",
+        "            let changed = self.message != Some(nothing);\n"
+        "            self.message = Some(nothing);\n"
+        "            return changed;",
+        "            return false;",
         ["z_undoes_the_last_pair_and_says_so_when_there_is_none"],
     ),
     (
@@ -923,6 +928,85 @@ MUTATIONS = [
         "            text: LEGEND_NOTE.into(),\n            color: c.chrome.dim,",
         "            text: LEGEND_NOTE.into(),\n            color: c.chrome.off,",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    # -- The history: a tree of whole boards, walked with Alt+Z (C-Q24) --
+    (
+        "a pair taken is not recorded",
+        "                    self.board.remove_pair(prev, idx);\n                    self.history.begin(before);\n",
+        "                    self.board.remove_pair(prev, idx);\n",
+        ["clicking_a_matching_pair_takes_both_off_the_board"],
+    ),
+    (
+        "a shuffle is not recorded",
+        "        self.board.shuffle_remaining(&mut self.rng);\n        self.history.begin(before);\n",
+        "        self.board.shuffle_remaining(&mut self.rng);\n",
+        ["a_shuffle_can_be_undone"],
+    ),
+    (
+        "undo leaves the tiles",
+        "        self.board.tiles = s.tiles;\n",
+        "",
+        ["undoing_a_pair_puts_both_tiles_back_where_they_were"],
+    ),
+    (
+        "a journey's win or loss is not read off the tiles",
+        "        self.status = GameStatus::Playing;\n        self.update_status();\n        // The cursor",
+        "        self.status = GameStatus::Playing;\n        // The cursor",
+        [WON_AGAIN],
+    ),
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let then = self.history.redo(now);",
+        "        let then = self.history.undo(now);",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z only undoes",
+        "        let then = self.history.earlier(now);",
+        "        let then = self.history.undo(now);",
+        [TREE, "a_pair_taken_again_after_a_shuffle_still_matches"],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let then = self.history.later(now);",
+        "        let then = self.history.redo(now);",
+        [TREE],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
     ),
 ]
 

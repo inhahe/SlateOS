@@ -121,7 +121,7 @@
 //!     failed. The test now asks `ai_best_move` what it would choose, on a
 //!     clone of the board, before letting `ai_turn` play at all.
 
-use gamechrome::{Chrome, HistoryKey, Ink};
+use gamechrome::{Chrome, HistoryKey, Ink, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -1090,7 +1090,7 @@ const HELP_ROWS: [(&str, &str); 9] = [
     ),
     ("N", "start a new game"),
     ("S", "play the other colour, and start again"),
-    ("H", "show or hide this sheet"),
+    ("F1 / ? / H", "show or hide this sheet"),
 ];
 
 // ── The program ─────────────────────────────────────────────────────────────
@@ -1933,6 +1933,11 @@ pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
     // Ctrl+Left the desktop cannot have, and Windows+D no less.
     if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {
         return None;
+    }
+    // F1 and `?` raise the sheet, as in every program; H, which this game
+    // had first, still does.
+    if help::raises(ev) {
+        return Some(Intent::ToggleHelp);
     }
     match ev.key {
         Key::Left | Key::A => Some(Intent::CursorLeft),
@@ -4386,6 +4391,31 @@ mod tests {
         key(&mut app, &held(true, false, false, Key::Z));
         key(&mut app, &held(true, false, true, Key::Z));
         assert_eq!(app.board, played, "Ctrl+Shift+Z did not play it again");
+    }
+
+    /// **F1 and `?` raise the sheet**, as they do in every program, beside
+    /// the H this game had first; not with Alt or the Windows key held.
+    #[test]
+    fn f1_and_a_question_mark_raise_the_sheet_as_h_does() {
+        for stroke in [
+            probe::press(Key::F1),
+            probe::press_with(Key::Slash, Modifiers::shift()),
+            probe::press(Key::H),
+        ] {
+            assert_eq!(
+                key_intent(&stroke),
+                Some(Intent::ToggleHelp),
+                "{stroke:?} does not raise the sheet"
+            );
+        }
+        assert_eq!(
+            key_intent(&probe::press_with(Key::F1, Modifiers::alt())),
+            None
+        );
+        assert_eq!(
+            key_intent(&probe::press_with(Key::F1, Modifiers::super_key())),
+            None
+        );
     }
 
     /// **AltGr and the Windows key are not the board's.** AltGr arrives as

@@ -1414,6 +1414,12 @@ MUTATIONS = [
     # The cap has no row: a game is at most 21 turns deep, so what it drops
     # are branches, which nothing can count yet (requests/e-c-undohistory-
     # could-say-how-far-undo-and-redo-go.md).
+    (
+        'F1 and ? do not raise the sheet',
+        '    if help::raises(ev) {\n        return Some(Intent::ToggleHelp);',
+        '    if false {\n        return Some(Intent::ToggleHelp);',
+        ['f1_and_a_question_mark_raise_the_sheet_as_h_does'],
+    ),
 ]
 
 if __name__ == "__main__":

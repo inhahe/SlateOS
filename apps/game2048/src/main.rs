@@ -71,7 +71,7 @@
 //!    `#![allow(dead_code)]` and nine more crate-wide allows. All ten are
 //!    gone, and with them `spawn_tile_at` and `is_full`, which nothing called.
 
-use gamechrome::{Chrome, HistoryKey, Ink};
+use gamechrome::{Chrome, HistoryKey, Ink, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -211,7 +211,7 @@ const HELP_ROWS: [(&str, &str); 10] = [
     ),
     ("N / R", "Start a new game"),
     ("C / Enter", "Keep playing after winning"),
-    ("H / Esc", "Show or hide this sheet"),
+    ("F1 / ? / H / Esc", "Show or hide this sheet"),
     ("", ""),
     ("Two tiles alike", "merge into one of twice the value"),
 ];
@@ -1552,6 +1552,11 @@ pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
     if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {
         return None;
     }
+    // F1 and `?` raise the sheet, as in every program; H, which this game
+    // had first, still does.
+    if help::raises(ev) {
+        return Some(Intent::ToggleHelp);
+    }
     match ev.key {
         Key::Up | Key::W => Some(Intent::Move(Direction::Up)),
         Key::Down | Key::S => Some(Intent::Move(Direction::Down)),
@@ -2789,6 +2794,7 @@ mod tests {
             (Key::R, Intent::NewGame),
             (Key::C, Intent::Continue),
             (Key::Enter, Intent::Continue),
+            (Key::F1, Intent::ToggleHelp),
             (Key::H, Intent::ToggleHelp),
             (Key::Escape, Intent::CloseHelp),
         ];
@@ -2799,6 +2805,26 @@ mod tests {
                 "{key:?} does not do what the help sheet says"
             );
         }
+    }
+
+    /// **F1 and `?` raise the sheet**, as they do in every program, beside
+    /// the H this game had first; not with Alt or the Windows key held.
+    #[test]
+    fn f1_and_a_question_mark_raise_the_sheet_as_h_does() {
+        let shift = guitk::event::Modifiers::shift();
+        let alt = guitk::event::Modifiers::alt();
+        assert_eq!(
+            key_intent(&probe::press_with(Key::Slash, shift)),
+            Some(Intent::ToggleHelp)
+        );
+        assert_eq!(key_intent(&probe::press_with(Key::F1, alt)), None);
+        assert_eq!(
+            key_intent(&probe::press_with(
+                Key::F1,
+                guitk::event::Modifiers::super_key()
+            )),
+            None
+        );
     }
 
     #[test]

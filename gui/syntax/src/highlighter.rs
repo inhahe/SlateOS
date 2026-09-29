@@ -35,7 +35,9 @@
 //! [`DRAW_BUDGET`] together; one that does not finish in it is carried on
 //! by [`work`](Highlighter::work) a slice at a time -- the view keeps asking
 //! while [`has_work`](Highlighter::has_work) says so -- and is coloured when
-//! it is done. The parses are kept until the text changes, so drawing the
+//! it is done. The parses are kept -- across an edit that does not touch
+//! them, moved with the text as the host's tree is, so a keystroke re-parses
+//! only the stretch it was typed in -- and drawing the
 //! same screen again costs nothing; a stretch past its work limit
 //! ([`parse_limit`]) stays in its host's colours.
 //!
@@ -117,6 +119,9 @@ enum Stretch {
         tree: Tree,
         locals: Option<Arc<Locals>>,
         pass: Option<LocalsPass>,
+        /// Its language's queries: a pass the text moved under is begun
+        /// again with them.
+        compiled: &'static Compiled,
     },
     /// Being parsed a slice at a time by `work`: the parser, holding the
     /// parse where it stopped, the work done so far and the most allowed,
@@ -151,6 +156,71 @@ impl InjectionCache {
                 parser.reset();
                 self.parsers.entry(key.0).or_default().push(parser);
             }
+        }
+    }
+
+    /// Move with an edit, as the host's tree moves: a stretch the edit did
+    /// not touch keeps its parse and its locals -- its text is the same --
+    /// moved along with the text; one it touched is forgotten, and so is one
+    /// being parsed, whose parse read the text before (its parser kept for
+    /// the next).
+    fn edit(&mut self, s: &Splice) {
+        let touched = |&(start, end): &(usize, usize)| end >= s.start && start <= s.old_end;
+        let shift = |p: usize| {
+            if p > s.old_end {
+                p.saturating_sub(s.old_end).saturating_add(s.new_end)
+            } else {
+                p
+            }
+        };
+        for ((language, ranges), stretch) in core::mem::take(&mut self.stretches) {
+            let stretch = match stretch {
+                Stretch::Pending { mut parser, .. } => {
+                    parser.reset();
+                    self.parsers.entry(language).or_default().push(parser);
+                    continue;
+                }
+                kept => kept,
+            };
+            if ranges.iter().any(touched) {
+                continue;
+            }
+            let moved = match stretch {
+                Stretch::Done {
+                    mut tree,
+                    locals,
+                    compiled,
+                    ..
+                } => {
+                    tree.edit(&input_edit(s));
+                    let locals = locals.map(|mut locals| {
+                        Arc::make_mut(&mut locals).edit(s);
+                        locals
+                    });
+                    // A pass being made read the tree before the edit:
+                    // begin it again.
+                    let pass = if locals.is_none() {
+                        compiled
+                            .locals
+                            .as_ref()
+                            .map(|query| LocalsPass::new(tree.clone(), compiled, query))
+                    } else {
+                        None
+                    };
+                    Stretch::Done {
+                        tree,
+                        locals,
+                        pass,
+                        compiled,
+                    }
+                }
+                failed => failed,
+            };
+            let ranges = ranges
+                .into_iter()
+                .map(|(start, end)| (shift(start), shift(end)))
+                .collect();
+            self.stretches.insert((language, ranges), moved);
         }
     }
 
@@ -274,6 +344,7 @@ enum Local {
 /// Where a language's names are declared and used in one tree, as its
 /// locals query says: the index drawing colours names by (see the module
 /// docs).
+#[derive(Clone)]
 pub(crate) struct Locals {
     /// The language's queries, which say a declaration's colour.
     compiled: &'static Compiled,
@@ -848,7 +919,7 @@ impl Highlighter for SyntaxHighlighter {
         self.abandoned = false;
     }
 
-    fn edited(&mut self, _text: &TextBuffer, splices: &[Splice]) {
+    fn edited(&mut self, text: &TextBuffer, splices: &[Splice]) {
         if let Some(tree) = self.tree.as_mut() {
             for splice in splices {
                 tree.edit(&input_edit(splice));
@@ -862,12 +933,17 @@ impl Highlighter for SyntaxHighlighter {
         // A pass over the tree before these edits read the text before them.
         self.pass = None;
         // A parse stopped part-way was of the text before these edits: start
-        // it again, from the moved tree. So were the injected stretches.
+        // it again, from the moved tree. The injected stretches move with
+        // the text, but for those the edits touched.
         if self.halted {
             self.parser.reset();
             self.halted = false;
         }
-        self.injected.get_mut().forget();
+        let cache = self.injected.get_mut();
+        for splice in splices {
+            cache.edit(splice);
+        }
+        cache.revision = text.revision();
         self.stale = true;
         self.used = 0;
         self.abandoned = false;
@@ -1109,6 +1185,7 @@ impl SyntaxHighlighter {
                         tree: tree.clone(),
                         locals: locals.clone(),
                         pass,
+                        compiled,
                     },
                 );
                 Some((tree, locals))
@@ -1182,7 +1259,12 @@ impl SyntaxHighlighter {
                         Slice::Done(tree) => {
                             let (locals, pass) = begin_locals(&tree, compiled, text, deadline);
                             left |= pass.is_some();
-                            Stretch::Done { tree, locals, pass }
+                            Stretch::Done {
+                                tree,
+                                locals,
+                                pass,
+                                compiled,
+                            }
                         }
                         Slice::Late => {
                             left = true;
@@ -2531,5 +2613,64 @@ mod tests {
         assert_eq!(at("\\d", 0), Some(Highlight::Escape));
         assert_eq!(at("+x", 0), Some(Highlight::Operator));
         assert_eq!(at("?/", 0), Some(Highlight::Operator));
+    }
+
+    /// The ranges of the stretches parsed and kept in `h`'s cache, sorted.
+    fn kept_stretches(h: &SyntaxHighlighter) -> Vec<Vec<(usize, usize)>> {
+        let mut kept: Vec<Vec<(usize, usize)>> = h
+            .injected
+            .borrow()
+            .stretches
+            .iter()
+            .filter(|(_, s)| matches!(s, Stretch::Done { .. }))
+            .map(|((_, ranges), _)| ranges.clone())
+            .collect();
+        kept.sort();
+        kept
+    }
+
+    /// **An edit keeps the stretches it did not touch**: typing in one code
+    /// fence forgets that fence's parse alone -- the other keeps its parse
+    /// and its locals, moved with the text, and is coloured at once, the
+    /// JavaScript parameter's use as the parameter, before any work.
+    #[test]
+    fn an_edit_keeps_the_stretches_it_did_not_touch() {
+        let original =
+            "```rust\nfn a() {}\n```\n\n```js\nfunction f(alpha) { return alpha; }\n```\n";
+        let mut buffer = TextBuffer::from_text(original);
+        let mut h = Language::named("markdown").unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        let _ = settled(&mut h, &buffer);
+        let before = kept_stretches(&h);
+        assert_eq!(before.len(), 2, "{before:?}");
+        let _ = buffer.take_changes();
+        let at = original.find("a()").unwrap();
+        buffer.insert(at, "x").unwrap();
+        let changes = buffer.take_changes();
+        h.edited(&buffer, &changes.splices.unwrap());
+        // The Rust fence was typed in; the JavaScript one moved one byte on.
+        let moved: Vec<(usize, usize)> = before[1].iter().map(|&(a, b)| (a + 1, b + 1)).collect();
+        assert_eq!(kept_stretches(&h), [moved]);
+        let text = buffer.text();
+        h.draw_budget = Duration::ZERO;
+        let spans = h.highlights(&buffer, 0..buffer.len());
+        // Exactly where the words now are: a tree kept but not moved would
+        // colour a byte early.
+        let word = |needle: &str, nth: usize| {
+            let at = text.match_indices(needle).nth(nth).unwrap().0;
+            at..at + needle.len()
+        };
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.range == word("function", 0) && s.highlight == Highlight::Keyword),
+            "{spans:?}"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|s| s.range == word("alpha", 1) && s.highlight == Highlight::Parameter),
+            "{spans:?}"
+        );
     }
 }

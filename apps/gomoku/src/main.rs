@@ -3051,7 +3051,12 @@ mod tests {
         assert!(!says(&frame(&app), help::CLOSES), "up before anybody asked");
         // And the status line says how to raise it: a list nobody can find
         // is no better than none.
-        assert!(says(&frame(&app), "F1"), "nothing on the window says F1");
+        // In the status band itself: the list, once up, says F1 too.
+        let status = Layout::solve(app.width, app.height).status;
+        assert!(
+            says_in(&frame(&app), "F1", status),
+            "the status line does not say F1"
+        );
         assert_eq!(app.handle_key(&key_of(Key::F1)), EventResult::Consumed);
         let shown = frame(&app);
         for (keys, what) in SHORTCUTS {

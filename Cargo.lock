@@ -132,6 +132,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "textline",
 ]
 
 [[package]]

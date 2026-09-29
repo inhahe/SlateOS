@@ -48,11 +48,11 @@ def run(root, text):
     crate = root / "crate"
     (crate / "src").mkdir(parents=True, exist_ok=True)
     (crate / "tests").mkdir(parents=True, exist_ok=True)
-    (crate / "src" / "main.rs").write_text(SOURCE, encoding="utf-8")
+    (crate / "src" / "main.rs").write_text(SOURCE, encoding="utf-8", newline="")
     (crate / "tests" / "outside.rs").write_text(
-        "#[test]\nfn an_integration_test() {}\n", encoding="utf-8"
+        "#[test]\nfn an_integration_test() {}\n", encoding="utf-8", newline=""
     )
-    (crate / "mutate.py").write_text(text, encoding="utf-8")
+    (crate / "mutate.py").write_text(text, encoding="utf-8", newline="")
     return subprocess.run(
         [sys.executable, str(VERIFY), str(crate)],
         capture_output=True,

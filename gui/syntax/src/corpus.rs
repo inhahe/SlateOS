@@ -180,12 +180,7 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
         .join("grammars")
         .join(dir)
         .join("corpus");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
-        .expect("the corpus")
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "txt"))
-        .collect();
+    let mut files = corpus_files(&root);
     files.sort();
     // A parser for the examples that name another language.
     let mut other = tree_sitter::Parser::new();
@@ -194,9 +189,10 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
     let mut left_out = vec![false; not_built.len()];
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a corpus file");
-        // Kept as it is: compared as a name, rendered only in messages. A
-        // file's name need not be text.
-        let name = file.file_name().unwrap_or_default();
+        // Its path under the corpus, `c/types.txt` -- kept as it is:
+        // compared as a path, rendered only in messages. A file's name need
+        // not be text.
+        let name = file.strip_prefix(&root).unwrap_or(&file);
         let short = name.display();
         for example in examples(&text) {
             if example.skip {
@@ -204,7 +200,7 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
             }
             if let Some(at) = not_built
                 .iter()
-                .position(|&(f, title)| name == f && title == example.name)
+                .position(|&(f, title)| name == std::path::Path::new(f) && title == example.name)
             {
                 left_out[at] = true;
                 continue;
@@ -276,6 +272,24 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
     (ran, failures)
 }
 
+/// Every `.txt` file under `dir`, its subdirectories' too -- as
+/// `tree-sitter test` reads a corpus: C++'s holds C's in `c/`.
+fn corpus_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .expect("the corpus")
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(corpus_files(&path));
+        } else if path.extension().is_some_and(|e| e == "txt") {
+            out.push(path);
+        }
+    }
+    out
+}
+
 /// Every example of `language`'s corpus but those `not_built` parses as
 /// upstream's grammar parses it, and at least `at_least` of them ran.
 fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)]) {
@@ -320,6 +334,13 @@ fn javascript_passes_its_corpus() {
 #[test]
 fn typescript_passes_its_corpus() {
     check("TypeScript", "typescript", 110, &[]);
+}
+
+/// **The C++ grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**, C's own examples among it.
+#[test]
+fn cpp_passes_its_corpus() {
+    check("C++", "cpp", 179, &[]);
 }
 
 /// **The C grammar parses its whole corpus as upstream's does.**

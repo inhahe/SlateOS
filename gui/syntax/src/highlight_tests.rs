@@ -283,6 +283,13 @@ fn c_is_coloured_as_its_tests_say() {
     check("C", "c", 23, &[]);
 }
 
+/// **C++ is coloured as its grammar's highlight tests say**, C's query
+/// under its own.
+#[test]
+fn cpp_is_coloured_as_its_tests_say() {
+    check("C++", "cpp", 23, &[]);
+}
+
 /// **CSS is coloured as its grammar's highlight tests say.**
 #[test]
 fn css_is_coloured_as_its_tests_say() {

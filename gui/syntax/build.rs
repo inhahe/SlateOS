@@ -15,6 +15,7 @@ use std::path::PathBuf;
 const GRAMMARS: &[&str] = &[
     "bash",
     "c",
+    "cpp",
     "css",
     "html",
     "javascript",

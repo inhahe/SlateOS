@@ -40,6 +40,12 @@ tree-sitter-c:
   texts:
     - tree-sitter-c-LICENSE
 
+tree-sitter-cpp:
+  version: 0.23.4
+  licence: MIT
+  texts:
+    - tree-sitter-cpp-LICENSE
+
 tree-sitter-css:
   version: 0.25.0
   licence: MIT

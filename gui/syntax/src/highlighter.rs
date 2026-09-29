@@ -2479,4 +2479,18 @@ mod tests {
         assert_eq!(at("props", 1), Some(Highlight::Parameter));
         assert_eq!(at("Props", 0), Some(Highlight::Type));
     }
+
+    /// **A C++ raw string is coloured in the language its delimiter names**
+    /// -- `R"js(...)js"` as JavaScript -- and C++ as C's query and its own
+    /// say.
+    #[test]
+    fn a_cpp_raw_string_is_coloured_as_its_delimiter_says() {
+        let text = "class Foo {\npublic:\n  const char *s = R\"js(let alpha = 1;)js\";\n};\n";
+        let spans = highlighted(text, "c++");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("class", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("public", 0), Some(Highlight::Keyword));
+        assert_eq!(at("let", 0), Some(Highlight::Keyword));
+        assert_eq!(at("1;", 0), Some(Highlight::Number));
+    }
 }

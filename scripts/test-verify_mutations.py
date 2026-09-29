@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Self-test for check-mutation-needles.py: a harness whose rows all match
-passes, and one row gone stale is named and fails the run.
+"""Self-test for verify_mutations.py: a harness whose rows all hold passes;
+a dead or ambiguous anchor, a test that is not there, or a duplicate row
+name is named and fails the run; a source named as a directory is read file
+by file, and a test in the crate's `tests/` counts.
 
-usage: python scripts/test-check-mutation-needles.py
+usage: python scripts/test-verify_mutations.py
 """
 import pathlib
 import subprocess
@@ -10,12 +12,15 @@ import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-CHECK = HERE / "check-mutation-needles.py"
+VERIFY = HERE / "verify_mutations.py"
 
 SOURCE = """fn main() {
     let x = 1;
     println!("{x}");
 }
+
+#[test]
+fn a_test() {}
 """
 
 HARNESS = """from pathlib import Path
@@ -31,7 +36,7 @@ if __name__ == "__main__":
 DIRECTORY_HARNESS = """from pathlib import Path
 SRC = Path(__file__).parent / "src"
 MAIN = [
-    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test"]),
+    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test", "an_integration_test"]),
 ]
 TABLES = {"main.rs": MAIN}
 if __name__ == "__main__":
@@ -42,10 +47,14 @@ if __name__ == "__main__":
 def run(root, text):
     crate = root / "crate"
     (crate / "src").mkdir(parents=True, exist_ok=True)
+    (crate / "tests").mkdir(parents=True, exist_ok=True)
     (crate / "src" / "main.rs").write_text(SOURCE, encoding="utf-8")
+    (crate / "tests" / "outside.rs").write_text(
+        "#[test]\nfn an_integration_test() {}\n", encoding="utf-8"
+    )
     (crate / "mutate.py").write_text(text, encoding="utf-8")
     return subprocess.run(
-        [sys.executable, str(CHECK), str(crate)],
+        [sys.executable, str(VERIFY), str(crate)],
         capture_output=True,
         text=True,
         check=False,
@@ -69,26 +78,44 @@ def case(name, text, want_code, want_in_output=None):
 def main():
     results = [
         case(
-            "every row matches",
+            "every row holds",
             HARNESS.format(second='("y", "    println!(\\"{x}\\");", "", ["a_test"]),'),
             0,
         ),
         case(
-            "a row whose needle matches nothing is named and fails",
+            "an anchor that matches nothing is named and fails",
             HARNESS.format(second='("gone", "    let y = 3;", "", ["a_test"]),'),
             1,
-            "'gone'",
+            "ANCHOR main.rs x0: gone",
         ),
         case(
-            "a row whose needle matches twice is named and fails",
+            "an anchor that matches twice is named and fails",
             HARNESS.format(second='("twice", "x", "", ["a_test"]),'),
             1,
-            "'twice'",
+            ": twice",
         ),
         case(
-            "a source named as a directory is read file by file",
+            "a test that is not there is named and fails",
+            HARNESS.format(second='("y", "    println!(\\"{x}\\");", "", ["no_such"]),'),
+            1,
+            "NO SUCH TEST no_such",
+        ),
+        case(
+            "a row name used twice in a table is named and fails",
+            HARNESS.format(second='("x is two", "    println!(\\"{x}\\");", "", ["a_test"]),'),
+            1,
+            "DUPLICATE ROW NAME: x is two",
+        ),
+        case(
+            "a directory source is read file by file, and tests/ counts",
             DIRECTORY_HARNESS,
             0,
+        ),
+        case(
+            "a harness that will not import is unreadable",
+            "this is not python\n",
+            2,
+            "cannot be read",
         ),
     ]
     failed = results.count(False)

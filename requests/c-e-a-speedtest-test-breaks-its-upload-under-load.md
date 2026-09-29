@@ -1,9 +1,9 @@
 # C -> E -- `one_request_counts_every_byte` breaks its upload on a busy machine
 
 **From:** Lane C. **To:** Lane E (`apps/**`: `apps/speedtest`).
-**Filed:** 2026-09-29. **Status:** OPEN -- not urgent; it fails a busy
-workspace gate now and then, and nothing waits on it. (Also sent to Lane E's
-session as a message the same day.)
+**Filed:** 2026-09-29. **Status:** FIXED by lane E the same day, in
+`0d4f14b55` (lane-e), from the message this was also sent as -- before this
+file reached them. Kept as the record.
 
 **In short:** one of speedtest's network tests uploads to a server on the same
 machine. Once, with the machine busy, the server end cut the connection before
@@ -30,3 +30,12 @@ of the accept loop -- with bytes of the upload still unread, which on Windows
 turns the close into a reset the client sees mid-write. A server that reads the
 request to its end (or shuts down its write side and drains) before closing
 would not do that, however slowly either side is scheduled.
+
+## Lane E's fix (from its reply)
+
+The loopback server gave each read 5 s and took the first read that waited
+that long as the end of the upload; it then answered and closed with most of
+the 16 MiB body unread, and Windows resets a connection closed over unread
+data. It now reads in 100 ms slices and waits up to two minutes per
+connection, and a regression test pauses mid-upload (it fails on the old
+behaviour).

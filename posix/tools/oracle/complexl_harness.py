@@ -138,6 +138,11 @@ def cases():
         e = tuple(F(Fraction(rng.randint(-4 * 2 ** 40, 4 * 2 ** 40), 2 ** 40)) for _ in range(2))
         pairs.append((b, e))
     table.append(("cpowl", pairs))
+    # clog10l (a GNU extension) last, from a stream of its own, so every row
+    # before it stays what it was: clogl's points, |z| near 1 among them.
+    r10 = random.Random(1012)
+    pts = list(grid) + random_points(r10, 120, 80) + hard_points(r10, "clogl")
+    table.append(("clog10l", pts))
     return table
 
 

@@ -1914,8 +1914,10 @@ fn split32(a: L) -> (L, L) {
     (hi, a - hi)
 }
 
-/// `a * b` as `(p, e)`, `p = rn(a b)`, `p + e = a b` exactly (Dekker).
-fn two_prod(a: L, b: L) -> (L, L) {
+/// `a * b` as `(p, e)`, `p = rn(a b)`, `p + e = a b` exactly (Dekker) --
+/// glibc's `mul_splitl` step for step, which `complexl.rs`'s `clog10l`
+/// relies on.
+pub(crate) fn two_prod(a: L, b: L) -> (L, L) {
     let p = a * b;
     let (ah, al) = split32(a);
     let (bh, bl) = split32(b);

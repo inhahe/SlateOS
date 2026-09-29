@@ -824,6 +824,204 @@ pub extern "C" fn clogf(z: Complex32) -> Complex32 {
     c32(libm::log1pf(ay2l + t + sh) / 2.0, v)
 }
 
+// ---------------------------------------------------------------------------
+// clog10: glibc's, a GNU extension
+// ---------------------------------------------------------------------------
+
+/// `x * y` as `(hi, lo)`, `hi = rn(x y)`, `hi + lo = x y` exactly: glibc's
+/// `mul_split`, by an FMA (which, rounding to nearest as its caller makes
+/// sure, is Dekker's answer).
+fn mul_split(x: f64, y: f64) -> (f64, f64) {
+    let hi = x * y;
+    (hi, crate::fmadd::fma(x, y, -hi))
+}
+
+/// `x + y` as `(hi, lo)` exactly, for `|x| >= |y|` (Dekker; glibc's
+/// `add_split`).
+fn add_split(x: f64, y: f64) -> (f64, f64) {
+    let hi = x + y;
+    (hi, (x - hi) + y)
+}
+
+/// `x^2 + y^2 - 1` without cancellation, for `1 > x >= y >= epsilon/2` and
+/// `x^2 + y^2 >= 1/2`: glibc's dbl-64 `__x2y2m1`. The squares' exact halves
+/// and -1, sorted by magnitude and summed exactly pairwise from the smallest,
+/// re-sorting as it goes, so each element is at most the last set bit of the
+/// next; then an ordinary sum, whose error is then small. To nearest, as
+/// glibc's `SET_RESTORE_ROUND` makes it.
+fn x2y2m1(x: f64, y: f64) -> f64 {
+    crate::fenv::in_nearest((x, y), |(x, y)| {
+        let by_magnitude = |a: &f64, b: &f64| {
+            a.abs()
+                .partial_cmp(&b.abs())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        };
+        let (xx_hi, xx_lo) = mul_split(x, x);
+        let (yy_hi, yy_lo) = mul_split(y, y);
+        let mut vals = [xx_lo, xx_hi, yy_lo, yy_hi, -1.0];
+        vals.sort_unstable_by(by_magnitude);
+        for (i, j) in [(0, 1), (1, 2), (2, 3), (3, 4)] {
+            if let (Some(&lo_in), Some(&hi_in)) = (vals.get(i), vals.get(j)) {
+                let (hi, lo) = add_split(hi_in, lo_in);
+                if let Some(slot) = vals.get_mut(i) {
+                    *slot = lo;
+                }
+                if let Some(slot) = vals.get_mut(j) {
+                    *slot = hi;
+                }
+            }
+            if let Some(rest) = vals.get_mut(j..) {
+                rest.sort_unstable_by(by_magnitude);
+            }
+        }
+        let [a, b, c, d, e] = vals;
+        e + d + c + b + a
+    })
+}
+
+/// glibc's `x2y2m1f`: in double, where the float operands' squares are
+/// exact.
+fn x2y2m1f(x: f32, y: f32) -> f32 {
+    let (dx, dy) = (f64::from(x), f64::from(y));
+    ((dx - 1.0) * (dx + 1.0) + dy * dy) as f32
+}
+
+/// The base-10 logarithm, `log10|z| + i arg(z)/ln 10` (a GNU extension):
+/// glibc's `s_clog10_template.c`, case for case -- `|z|` near 1 through
+/// `log1p` of `|z|^2 - 1`, computed exactly where it cancels ([`x2y2m1`]);
+/// elsewhere `log10(hypot)`, scaled first where `hypot` would overflow or
+/// lose the subnormals; a zero `z` `-inf` with divide-by-zero.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clog10(z: Complex64) -> Complex64 {
+    /// log10(2) and pi log10(e), glibc's `LOG10_2` and `PI_LOG10E` rounded
+    /// once.
+    const LOG10_2: f64 = f64::from_bits(0x3FD3_4413_509F_79FF);
+    const PI_LOG10E: f64 = f64::from_bits(0x3FF5_D47C_4CB2_FBA1);
+    const LOG10E: f64 = core::f64::consts::LOG10_E;
+    let (re, im) = (z.re, z.im);
+    if re == 0.0 && im == 0.0 {
+        let arg = if re.is_sign_negative() {
+            PI_LOG10E
+        } else {
+            0.0
+        };
+        // The division raises divide-by-zero, as it does in glibc's.
+        return c64(-1.0 / core::hint::black_box(re.abs()), arg.copysign(im));
+    }
+    if re.is_nan() || im.is_nan() {
+        let real = if re.is_infinite() || im.is_infinite() {
+            f64::INFINITY
+        } else {
+            f64::NAN
+        };
+        return c64(real, f64::NAN);
+    }
+    let (mut ax, mut ay) = (re.abs(), im.abs());
+    if ax < ay {
+        core::mem::swap(&mut ax, &mut ay);
+    }
+    let mut scale = 0;
+    if ax > f64::MAX / 2.0 {
+        scale = -1;
+        ax = libm::scalbn(ax, scale);
+        ay = if ay >= f64::MIN_POSITIVE * 2.0 {
+            libm::scalbn(ay, scale)
+        } else {
+            0.0
+        };
+    } else if ax < f64::MIN_POSITIVE && ay < f64::MIN_POSITIVE {
+        scale = 53;
+        ax = libm::scalbn(ax, scale);
+        ay = libm::scalbn(ay, scale);
+    }
+    let real = if ax == 1.0 && scale == 0 {
+        let r = libm::log1p(ay * ay) * (LOG10E / 2.0);
+        if r < f64::MIN_POSITIVE {
+            // glibc's `math_check_force_underflow_nonneg`.
+            let _ = core::hint::black_box(r * r);
+        }
+        r
+    } else if ax > 1.0 && ax < 2.0 && ay < 1.0 && scale == 0 {
+        let mut d2m1 = (ax - 1.0) * (ax + 1.0);
+        if ay >= f64::EPSILON {
+            d2m1 += ay * ay;
+        }
+        libm::log1p(d2m1) * (LOG10E / 2.0)
+    } else if ax < 1.0 && ax >= 0.5 && ay < f64::EPSILON / 2.0 && scale == 0 {
+        libm::log1p((ax - 1.0) * (ax + 1.0)) * (LOG10E / 2.0)
+    } else if ax < 1.0 && ax >= 0.5 && scale == 0 && ax * ax + ay * ay >= 0.5 {
+        libm::log1p(x2y2m1(ax, ay)) * (LOG10E / 2.0)
+    } else {
+        libm::log10(libm::hypot(ax, ay)) - f64::from(scale) * LOG10_2
+    };
+    c64(real, LOG10E * libm::atan2(im, re))
+}
+
+/// [`clog10`] (float): glibc's template at float, `x2y2m1` in double.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clog10f(z: Complex32) -> Complex32 {
+    const LOG10_2: f32 = f32::from_bits(0x3E9A_209B);
+    const PI_LOG10E: f32 = f32::from_bits(0x3FAE_A3E2);
+    const LOG10E: f32 = core::f32::consts::LOG10_E;
+    let (re, im) = (z.re, z.im);
+    if re == 0.0 && im == 0.0 {
+        let arg = if re.is_sign_negative() {
+            PI_LOG10E
+        } else {
+            0.0
+        };
+        return c32(-1.0 / core::hint::black_box(re.abs()), arg.copysign(im));
+    }
+    if re.is_nan() || im.is_nan() {
+        let real = if re.is_infinite() || im.is_infinite() {
+            f32::INFINITY
+        } else {
+            f32::NAN
+        };
+        return c32(real, f32::NAN);
+    }
+    let (mut ax, mut ay) = (re.abs(), im.abs());
+    if ax < ay {
+        core::mem::swap(&mut ax, &mut ay);
+    }
+    let mut scale = 0;
+    if ax > f32::MAX / 2.0 {
+        scale = -1;
+        ax = libm::scalbnf(ax, scale);
+        ay = if ay >= f32::MIN_POSITIVE * 2.0 {
+            libm::scalbnf(ay, scale)
+        } else {
+            0.0
+        };
+    } else if ax < f32::MIN_POSITIVE && ay < f32::MIN_POSITIVE {
+        scale = 24;
+        ax = libm::scalbnf(ax, scale);
+        ay = libm::scalbnf(ay, scale);
+    }
+    let real = if ax == 1.0 && scale == 0 {
+        let r = libm::log1pf(ay * ay) * (LOG10E / 2.0);
+        if r < f32::MIN_POSITIVE {
+            let _ = core::hint::black_box(r * r);
+        }
+        r
+    } else if ax > 1.0 && ax < 2.0 && ay < 1.0 && scale == 0 {
+        let mut d2m1 = (ax - 1.0) * (ax + 1.0);
+        if ay >= f32::EPSILON {
+            d2m1 += ay * ay;
+        }
+        libm::log1pf(d2m1) * (LOG10E / 2.0)
+    } else if ax < 1.0 && ax >= 0.5 && ay < f32::EPSILON / 2.0 && scale == 0 {
+        libm::log1pf((ax - 1.0) * (ax + 1.0)) * (LOG10E / 2.0)
+    } else if ax < 1.0 && ax >= 0.5 && scale == 0 && ax * ax + ay * ay >= 0.5 {
+        libm::log1pf(x2y2m1f(ax, ay)) * (LOG10E / 2.0)
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let s = scale as f32;
+        libm::log10f(libm::hypotf(ax, ay)) - s * LOG10_2
+    };
+    c32(real, LOG10E * libm::atan2f(im, re))
+}
+
 // ===========================================================================
 // cpow -- glibc's definition
 // ===========================================================================
@@ -2203,7 +2401,7 @@ mod tests {
             "creal" | "cimag" | "conj" | "cproj" => 0,
             "cabs" | "carg" => 2,
             "cexp" | "csin" | "ccos" | "csinh" | "ccosh" | "csqrt" => 4,
-            "clog" | "ctan" | "ctanh" => 6,
+            "clog" | "clog10" | "ctan" | "ctanh" => 6,
             "casin" | "cacos" | "casinh" | "cacosh" | "catan" | "catanh" => 8,
             other => panic!("no tolerance for {other}"),
         };
@@ -2369,6 +2567,7 @@ mod tests {
                         "csqrtf" => csqrtf,
                         "cexpf" => cexpf,
                         "clogf" => clogf,
+                        "clog10f" => clog10f,
                         "csinf" => csinf,
                         "ccosf" => ccosf,
                         "ctanf" => ctanf,
@@ -2416,6 +2615,7 @@ mod tests {
                         "csqrt" => csqrt,
                         "cexp" => cexp,
                         "clog" => clog,
+                        "clog10" => clog10,
                         "csin" => csin,
                         "ccos" => ccos,
                         "ctan" => ctan,
@@ -2476,10 +2676,10 @@ mod tests {
     /// precisions -- so a function cannot be added without its oracle rows.
     #[test]
     fn the_table_covers_every_function() {
-        const ALL: [&str; 22] = [
-            "cabs", "carg", "creal", "cimag", "conj", "cproj", "csqrt", "cexp", "clog", "cpow",
-            "csin", "ccos", "ctan", "csinh", "ccosh", "ctanh", "casin", "cacos", "catan", "casinh",
-            "cacosh", "catanh",
+        const ALL: [&str; 23] = [
+            "cabs", "carg", "creal", "cimag", "conj", "cproj", "csqrt", "cexp", "clog", "clog10",
+            "cpow", "csin", "ccos", "ctan", "csinh", "ccosh", "ctanh", "casin", "cacos", "catan",
+            "casinh", "cacosh", "catanh",
         ];
         for base in ALL {
             for name in [base.to_owned(), format!("{base}f")] {

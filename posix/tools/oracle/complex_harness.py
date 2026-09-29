@@ -132,6 +132,13 @@ def cases(single):
     if single:
         pairs = [((f32(b[0]), f32(b[1])), (f32(e[0]), f32(e[1]))) for b, e in pairs]
     table.append(("cpow" + ("f" if single else ""), pairs))
+    # clog10 (a GNU extension) last, from a stream of its own, so every row
+    # before it stays what it was: clog's points, |z| near 1 among them.
+    r10 = random.Random(1010 if single else 1011)
+    pts = list(grid) + random_points(r10, single, 120, 80) + hard_points(r10, "clog", single)
+    if single:
+        pts = [(f32(a), f32(b)) for a, b in pts]
+    table.append(("clog10" + ("f" if single else ""), pts))
     return table
 
 

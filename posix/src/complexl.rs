@@ -758,6 +758,130 @@ pub fn csinhl(z: LdComplex) -> LdComplex {
     cl((x + x) * (y - y), (x * x) * (y - y))
 }
 
+// ---------------------------------------------------------------------------
+// clog10l: glibc's, a GNU extension
+// ---------------------------------------------------------------------------
+
+/// `x + y` as `(hi, lo)` exactly, for `|x| >= |y|` (Dekker; glibc's
+/// `add_split`).
+fn add_split_l(x: L, y: L) -> (L, L) {
+    let hi = x + y;
+    (hi, (x - hi) + y)
+}
+
+/// `x^2 + y^2 - 1` without cancellation, for `1 > x >= y >= epsilon/2` and
+/// `x^2 + y^2 >= 1/2`: glibc's ldbl-96 `__x2y2m1l`, to nearest as its
+/// `SET_RESTORE_ROUNDL` makes it. The squares' exact halves (Dekker's
+/// product, which is glibc's `mul_splitl` step for step) and -1, sorted by
+/// magnitude and summed exactly pairwise from the smallest, re-sorting as it
+/// goes; then an ordinary sum, whose error is then small.
+fn x2y2m1l(x: L, y: L) -> L {
+    crate::fenv::in_nearest_x87((x, y), |(x, y)| {
+        let by_magnitude = |a: &L, b: &L| {
+            a.abs()
+                .compare(b.abs())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        };
+        let (xx_hi, xx_lo) = crate::mathl::two_prod(x, x);
+        let (yy_hi, yy_lo) = crate::mathl::two_prod(y, y);
+        let mut vals = [xx_lo, xx_hi, yy_lo, yy_hi, -ld(1.0)];
+        vals.sort_unstable_by(by_magnitude);
+        for (i, j) in [(0, 1), (1, 2), (2, 3), (3, 4)] {
+            if let (Some(&lo_in), Some(&hi_in)) = (vals.get(i), vals.get(j)) {
+                let (hi, lo) = add_split_l(hi_in, lo_in);
+                if let Some(slot) = vals.get_mut(i) {
+                    *slot = lo;
+                }
+                if let Some(slot) = vals.get_mut(j) {
+                    *slot = hi;
+                }
+            }
+            if let Some(rest) = vals.get_mut(j..) {
+                rest.sort_unstable_by(by_magnitude);
+            }
+        }
+        let [a, b, c, d, e] = vals;
+        e + d + c + b + a
+    })
+}
+
+/// The base-10 logarithm, `log10|z| + i arg(z)/ln 10` (a GNU extension):
+/// glibc's `s_clog10_template.c` at long double, case for case -- `|z|` near
+/// 1 through `log1pl` of `|z|^2 - 1`, computed exactly where it cancels
+/// ([`x2y2m1l`]); elsewhere `log10l(hypotl)`, scaled first where `hypotl`
+/// would overflow or lose the subnormals; a zero `z` `-inf` with
+/// divide-by-zero. `errno` stays as it was, as [`clogl`] keeps it.
+#[must_use]
+pub fn clog10l(z: LdComplex) -> LdComplex {
+    let _keep = KeepErrno::new();
+    // glibc's LOG10_2, PI_LOG10E and M_LOG10El, each rounded once.
+    let log10_2 = L::from_bits(0x3FFD, 0x9A20_9A84_FBCF_F799);
+    let pi_log10e = L::from_bits(0x3FFF, 0xAEA3_E265_97DD_0587);
+    let log10e = L::from_bits(0x3FFD, 0xDE5B_D8A9_3728_7195);
+    let (one, two, half) = (ld(1.0), ld(2.0), ld(0.5));
+    let (re, im) = (z.re, z.im);
+    if re.is_zero() && im.is_zero() {
+        let arg = if re.is_sign_negative() {
+            pi_log10e
+        } else {
+            L::POS_ZERO
+        };
+        return cl(-one / re.abs(), arg.copysign(im));
+    }
+    if re.is_nan() || im.is_nan() {
+        let real = if re.is_infinite() || im.is_infinite() {
+            L::from_bits(0x7FFF, 1 << 63)
+        } else {
+            L::from_bits(0x7FFF, 0xC000_0000_0000_0000)
+        };
+        return cl(real, L::from_bits(0x7FFF, 0xC000_0000_0000_0000));
+    }
+    let (mut ax, mut ay) = (re.abs(), im.abs());
+    if ax < ay {
+        core::mem::swap(&mut ax, &mut ay);
+    }
+    // LDBL_MAX / 2, LDBL_MIN, LDBL_EPSILON.
+    let half_max = L::from_bits(0x7FFD, u64::MAX);
+    let min = L::from_bits(0x0001, 1 << 63);
+    let epsilon = L::from_bits(0x3FFF - 63, 1 << 63);
+    let mut scale = 0;
+    if ax > half_max {
+        scale = -1;
+        ax = crate::mathl::scalbnl(ax, scale);
+        ay = if ay >= min * two {
+            crate::mathl::scalbnl(ay, scale)
+        } else {
+            L::POS_ZERO
+        };
+    } else if ax < min && ay < min {
+        scale = 64;
+        ax = crate::mathl::scalbnl(ax, scale);
+        ay = crate::mathl::scalbnl(ay, scale);
+    }
+    let half_log10e = log10e / two;
+    let real = if ax == one && scale == 0 {
+        let r = crate::mathl::log1pl(ay * ay) * half_log10e;
+        if r < min {
+            // glibc's `math_check_force_underflow_nonneg`.
+            let _ = core::hint::black_box(r * r);
+        }
+        r
+    } else if ax > one && ax < two && ay < one && scale == 0 {
+        let mut d2m1 = (ax - one) * (ax + one);
+        if ay >= epsilon {
+            d2m1 = d2m1 + ay * ay;
+        }
+        crate::mathl::log1pl(d2m1) * half_log10e
+    } else if ax < one && ax >= half && ay < epsilon / two && scale == 0 {
+        crate::mathl::log1pl((ax - one) * (ax + one)) * half_log10e
+    } else if ax < one && ax >= half && scale == 0 && ax * ax + ay * ay >= half {
+        crate::mathl::log1pl(x2y2m1l(ax, ay)) * half_log10e
+    } else {
+        crate::mathl::log10l(crate::mathl::hypotl(ax, ay)) - L::from_i64(i64::from(scale)) * log10_2
+    };
+    cl(real, log10e * crate::mathl::atan2l(im, re))
+}
+
 /// The sine: `-i csinhl(i z)`.
 #[must_use]
 pub fn csinl(z: LdComplex) -> LdComplex {
@@ -1250,6 +1374,7 @@ export_cl_cl! {
     "csqrtl" __slate_ld_csqrtl csqrtl;
     "cexpl" __slate_ld_cexpl cexpl;
     "clogl" __slate_ld_clogl clogl;
+    "clog10l" __slate_ld_clog10l clog10l;
     "ccoshl" __slate_ld_ccoshl ccoshl;
     "ccosl" __slate_ld_ccosl ccosl;
     "csinhl" __slate_ld_csinhl csinhl;
@@ -1537,7 +1662,7 @@ mod tests {
             "creal" | "cimag" | "conj" | "cproj" => 0,
             "cabs" | "carg" => 2,
             "cexp" | "csin" | "ccos" | "csinh" | "ccosh" | "csqrt" => 4,
-            "clog" => 6,
+            "clog" | "clog10" => 6,
             // Kahan's formula, which this uses, rounds at every step: the
             // worst row of the table is 5 ulp from the true value (mpmath, 200
             // bits), where glibc's is 2.
@@ -1662,6 +1787,7 @@ mod tests {
                     "csqrtl" => csqrtl,
                     "cexpl" => cexpl,
                     "clogl" => clogl,
+                    "clog10l" => clog10l,
                     "csinl" => csinl,
                     "ccosl" => ccosl,
                     "ctanl" => ctanl,

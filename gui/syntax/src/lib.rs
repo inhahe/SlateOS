@@ -143,11 +143,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 11;
+const VISIBLE: usize = 13;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 12] = [
+static LANGUAGES: [Language; 14] = [
     Language {
         name: "Bash",
         extensions: &["sh", "bash", "ksh", "zsh"],
@@ -283,6 +283,30 @@ static LANGUAGES: [Language; 12] = [
         index: 9,
     },
     Language {
+        name: "TSX",
+        extensions: &["tsx"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::tsx::generated::language_fn,
+        highlights: grammars::tsx::HIGHLIGHTS,
+        injections: grammars::javascript::INJECTIONS,
+        locals: grammars::tsx::LOCALS,
+        index: 10,
+    },
+    Language {
+        name: "TypeScript",
+        extensions: &["ts", "mts", "cts"],
+        file_names: &[],
+        interpreters: &["ts-node"],
+        aliases: &["ts"],
+        grammar: grammars::typescript::generated::language_fn,
+        highlights: grammars::typescript::HIGHLIGHTS,
+        injections: grammars::javascript::INJECTIONS,
+        locals: grammars::typescript::LOCALS,
+        index: 11,
+    },
+    Language {
         name: "YAML",
         extensions: &["yaml", "yml"],
         file_names: &[],
@@ -292,7 +316,7 @@ static LANGUAGES: [Language; 12] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 10,
+        index: 12,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -305,7 +329,7 @@ static LANGUAGES: [Language; 12] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 11,
+        index: 13,
     },
 ];
 
@@ -438,7 +462,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 12] = [const { OnceLock::new() }; 12];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 14] = [const { OnceLock::new() }; 14];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -641,6 +665,8 @@ mod tests {
             ("HTML", None, 14, 41, 0),
             ("JavaScript", Some("javascript"), 15, 265, 36),
             ("TOML", None, 14, 66, 0),
+            ("TSX", None, 14, 400, 43),
+            ("TypeScript", None, 14, 383, 40),
             ("YAML", None, 14, 301, 2),
             ("JSON", None, 14, 25, 2),
             ("Markdown", Some("markdown"), 15, 207, 1),
@@ -715,6 +741,9 @@ mod tests {
         assert_eq!(found("site.css"), Some("CSS"));
         assert_eq!(found("app.js"), Some("JavaScript"));
         assert_eq!(found("index.html"), Some("HTML"));
+        assert_eq!(found("main.ts"), Some("TypeScript"));
+        assert_eq!(found("vite.config.MTS"), Some("TypeScript"));
+        assert_eq!(found("App.tsx"), Some("TSX"));
         assert_eq!(found("OLD.HTM"), Some("HTML"));
         assert_eq!(found("rollup.config.MJS"), Some("JavaScript"));
         assert_eq!(found("Button.jsx"), Some("JavaScript"));
@@ -754,6 +783,7 @@ mod tests {
         assert_eq!(found("#!/usr/bin/env bash"), Some("Bash"));
         assert_eq!(found("#!/bin/zsh -f"), Some("Bash"));
         assert_eq!(found("#!/usr/bin/env node"), Some("JavaScript"));
+        assert_eq!(found("#!/usr/bin/env ts-node"), Some("TypeScript"));
         assert_eq!(found("#!/usr/bin/perl"), None);
         assert_eq!(found("import os"), None);
         assert_eq!(found("#!"), None);

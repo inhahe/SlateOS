@@ -24,6 +24,8 @@ const GRAMMARS: &[&str] = &[
     "python",
     "rust",
     "toml",
+    "tsx",
+    "typescript",
     "yaml",
 ];
 

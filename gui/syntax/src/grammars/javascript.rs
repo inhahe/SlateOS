@@ -105,7 +105,7 @@ pub(crate) struct Scanner;
 /// `grammar.js`, `[\s\p{Zs}\uFEFF\u2028\u2029\u2060\u200B]` -- as its
 /// generated lexer has them (`extras_character_set_1`, which a test holds
 /// this to).
-const BLANKS: &[(i32, i32)] = &[
+pub(super) const BLANKS: &[(i32, i32)] = &[
     (0x09, 0x0d),
     (0x20, 0x20),
     (0xa0, 0xa0),
@@ -123,7 +123,7 @@ const BLANKS: &[(i32, i32)] = &[
 /// holds this to): anything but ASCII's punctuation, controls and the
 /// grammar's blanks -- so a letter or digit in any script, `_`, `$`, and the
 /// `\` that begins a `\u` escape.
-const NAME: &[(i32, i32)] = &[
+pub(super) const NAME: &[(i32, i32)] = &[
     (0x24, 0x24),
     (0x30, 0x39),
     (0x41, 0x5a),
@@ -142,29 +142,29 @@ const NAME: &[(i32, i32)] = &[
 ];
 
 /// Whether `c` is the character `ch`.
-fn is(c: i32, ch: char) -> bool {
+pub(super) fn is(c: i32, ch: char) -> bool {
     c == ch as i32
 }
 
 /// Whether `c` is one of the grammar's blanks ([`BLANKS`]).
-fn is_blank(c: i32) -> bool {
+pub(super) fn is_blank(c: i32) -> bool {
     set_contains(BLANKS, c)
 }
 
 /// Whether `c` ends a line: JavaScript's line terminators -- line feed,
 /// carriage return, and the line and paragraph separators.
-fn ends_line(c: i32) -> bool {
+pub(super) fn ends_line(c: i32) -> bool {
     is(c, '\n') || is(c, '\r') || c == 0x2028 || c == 0x2029
 }
 
 /// Whether `c` is a decimal digit: `iswdigit`, which is ASCII's in every
 /// locale.
-fn is_digit(c: i32) -> bool {
+pub(super) fn is_digit(c: i32) -> bool {
     (0x30..=0x39).contains(&c)
 }
 
 /// Whether a name goes on with `c` ([`NAME`]).
-fn goes_on_with_name(c: i32) -> bool {
+pub(super) fn goes_on_with_name(c: i32) -> bool {
     set_contains(NAME, c)
 }
 
@@ -177,7 +177,7 @@ fn is_jsx_blank(c: i32) -> bool {
 
 /// What the blanks and comments ahead say about a semicolon before them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Ahead {
+pub(super) enum Ahead {
     /// A `/` that begins no comment -- a division, or a regular
     /// expression: no semicolon. (`REJECT`)
     Reject,
@@ -195,7 +195,7 @@ enum Ahead {
 }
 
 /// A template string's text, up to its end, a `${` or an escape.
-fn scan_template_chars(lexer: &mut Lexer<'_>) -> bool {
+pub(super) fn scan_template_chars(lexer: &mut Lexer<'_>) -> bool {
     lexer.set_result(Token::TemplateChars.symbol());
     let mut has_content = false;
     loop {
@@ -219,7 +219,11 @@ fn scan_template_chars(lexer: &mut Lexer<'_>) -> bool {
 /// semicolon before them; `scanned_comment` is set when there was a
 /// comment. Unless `consume`, a block comment is looked past only as far as
 /// needed to tell whether it held a line break.
-fn blanks_and_comments(lexer: &mut Lexer<'_>, scanned_comment: &mut bool, consume: bool) -> Ahead {
+pub(super) fn blanks_and_comments(
+    lexer: &mut Lexer<'_>,
+    scanned_comment: &mut bool,
+    consume: bool,
+) -> Ahead {
     let mut saw_block_newline = false;
     loop {
         while is_blank(lexer.lookahead()) {
@@ -404,7 +408,7 @@ fn scan_ternary_qmark(lexer: &mut Lexer<'_>) -> bool {
 
 /// An HTML comment, as a script may still hide itself from a browser that
 /// does not run scripts: `<!--` or `-->`, to the end of the line.
-fn scan_html_comment(lexer: &mut Lexer<'_>) -> bool {
+pub(super) fn scan_html_comment(lexer: &mut Lexer<'_>) -> bool {
     while is_blank(lexer.lookahead()) {
         lexer.skip();
     }
@@ -432,7 +436,7 @@ fn scan_html_comment(lexer: &mut Lexer<'_>) -> bool {
 /// Text between JSX tags, up to a tag, an expression or an entity: a token
 /// only if there is text in it -- not if it is only blanks with a line
 /// break among them, which JSX drops.
-fn scan_jsx_text(lexer: &mut Lexer<'_>) -> bool {
+pub(super) fn scan_jsx_text(lexer: &mut Lexer<'_>) -> bool {
     // Anything but blanks, or a blank on a line before its break.
     let mut saw_text = false;
     // At a line break, or at a blank after one.
@@ -520,7 +524,7 @@ impl ExternalScanner for Scanner {
     clippy::arithmetic_side_effects,
     reason = "a test: a parse that fails, or a table that cannot be read, is the failure"
 )]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// The grammar.
@@ -538,9 +542,22 @@ mod tests {
     /// The character ranges the generated lexer calls `name`, read out of
     /// the vendored `parser.c`: `{'\t', '\r'}, {' ', ' '}, {0xa0, 0xa0}`.
     fn character_set(name: &str) -> Vec<(i32, i32)> {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/grammars/javascript/parser.c");
+        character_set_in("javascript", name)
+    }
+
+    /// The character ranges the generated lexer of grammar `dir` calls
+    /// `name`, read out of its vendored `parser.c` -- declared `const` or,
+    /// by older generators, not.
+    pub(in crate::grammars) fn character_set_in(dir: &str, name: &str) -> Vec<(i32, i32)> {
+        let path = format!("{}/grammars/{dir}/parser.c", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(path).expect("the vendored parser.c");
-        let head = format!("static const TSCharacterRange {name}[] = {{");
+        let head = [
+            format!("static const TSCharacterRange {name}[] = {{"),
+            format!("static TSCharacterRange {name}[] = {{"),
+        ]
+        .into_iter()
+        .find(|h| source.contains(h.as_str()))
+        .expect("the set");
         let start = source.find(&head).expect("the set") + head.len();
         let body = &source[start..start + source[start..].find("};").expect("its end")];
         let value = |item: &str| -> i32 {

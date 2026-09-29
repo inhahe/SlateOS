@@ -2160,7 +2160,13 @@ mod tests {
     /// JavaScript's highlighter, with `highlights` and `locals` for its
     /// queries in place of its own: for what its own do not try.
     fn with_queries(highlights: &str, locals: &str) -> SyntaxHighlighter {
-        let language = Language::named("javascript").unwrap();
+        with_queries_for("javascript", highlights, locals)
+    }
+
+    /// `language`'s highlighter, with `highlights` and `locals` for its
+    /// queries in place of its own.
+    fn with_queries_for(language: &str, highlights: &str, locals: &str) -> SyntaxHighlighter {
+        let language = Language::named(language).unwrap();
         let grammar = language.ts_language();
         let highlights_source = highlights;
         let highlights = tree_sitter::Query::new(&grammar, highlights).unwrap();
@@ -2427,5 +2433,50 @@ mod tests {
         assert_eq!(at("b class", 0), Some(Highlight::Tag), "{spans:?}");
         assert_eq!(at("class", 0), Some(Highlight::Attribute));
         assert_eq!(at("name", 0), Some(Highlight::Variable));
+    }
+
+    /// **TypeScript's parameters are coloured as parameters, and a type's
+    /// `<...>` as brackets** -- its query after JavaScript's, the specific
+    /// after the general. In the order `tree-sitter.json` lists them,
+    /// TypeScript's first, JavaScript's patterns win on the same nodes:
+    /// every parameter a variable, and the `<` an operator (§1441).
+    #[test]
+    fn typescripts_query_goes_after_javascripts() {
+        let text = "function f(alpha: Map<string, number>): number {\n  return alpha.size;\n}\n";
+        let spans = highlighted(text, "typescript");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("alpha", 0), Some(Highlight::Parameter), "{spans:?}");
+        assert_eq!(at("alpha", 1), Some(Highlight::Parameter), "a use");
+        assert_eq!(at("<", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("Map", 0), Some(Highlight::Type));
+        assert_eq!(at("string", 0), Some(Highlight::Type));
+        assert_eq!(at("function", 0), Some(Highlight::Keyword));
+        let upstream = format!(
+            "{}\n{}",
+            include_str!("../grammars/typescript/highlights.scm"),
+            include_str!("../grammars/javascript/highlights.scm")
+        );
+        let mut h = with_queries_for("typescript", &upstream, crate::grammars::typescript::LOCALS);
+        let buffer = TextBuffer::from_text(text);
+        h.reset(&buffer);
+        let spans = settled(&mut h, &buffer);
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("alpha", 0), Some(Highlight::Variable));
+        assert_eq!(at("<", 0), Some(Highlight::Operator));
+    }
+
+    /// **TSX is TypeScript with JSX's tags and attributes**, and its
+    /// parameters are parameters too.
+    #[test]
+    fn tsx_is_coloured_with_jsx_and_types() {
+        let text =
+            "function App(props: Props) {\n  return <div className=\"x\">{props.name}</div>;\n}\n";
+        let spans = highlighted(text, "tsx");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("div", 0), Some(Highlight::Tag), "{spans:?}");
+        assert_eq!(at("className", 0), Some(Highlight::Attribute));
+        assert_eq!(at("props", 0), Some(Highlight::Parameter));
+        assert_eq!(at("props", 1), Some(Highlight::Parameter));
+        assert_eq!(at("Props", 0), Some(Highlight::Type));
     }
 }

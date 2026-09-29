@@ -7,7 +7,9 @@
 //! and hand-ported scanner -- and parses as the C one does. The format and the
 //! comparison are `tree-sitter test`'s: whitespace is not significant in the
 //! expected tree, field names are compared only when the expected tree has
-//! them, and an example marked `:error` needs only to fail to parse cleanly.
+//! them, an example marked `:error` needs only to fail to parse cleanly, and
+//! one marked `:language(name)` is parsed with that language -- TSX's
+//! examples in the corpus it shares with TypeScript.
 //!
 //! A few examples test what the grammar as published does not have -- an
 //! opt-in extension its `parser.c` was generated without -- and are named,
@@ -35,6 +37,9 @@ struct Example {
     error: bool,
     /// `:skip`.
     skip: bool,
+    /// `:language(name)`: the language to parse it with, if not the
+    /// corpus's own.
+    language: Option<String>,
 }
 
 /// Whether `line` is a header's `===` line -- in a file with CRLF endings,
@@ -67,11 +72,15 @@ fn examples(text: &str) -> Vec<Example> {
         let mut name = String::new();
         let mut error = false;
         let mut skip = false;
+        let mut language = None;
         i += 1;
         while i < lines.len() && !is_equals(lines[i]) {
             match lines[i].trim() {
                 ":error" => error = true,
                 ":skip" => skip = true,
+                attribute if attribute.starts_with(":language(") && attribute.ends_with(')') => {
+                    language = Some(attribute[":language(".len()..attribute.len() - 1].to_owned());
+                }
                 attribute if attribute.starts_with(':') => {}
                 title => {
                     if !name.is_empty() {
@@ -113,6 +122,7 @@ fn examples(text: &str) -> Vec<Example> {
             expected,
             error,
             skip,
+            language,
         });
     }
     out
@@ -177,6 +187,8 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
         .filter(|p| p.extension().is_some_and(|e| e == "txt"))
         .collect();
     files.sort();
+    // A parser for the examples that name another language.
+    let mut other = tree_sitter::Parser::new();
     let mut ran = 0;
     let mut failures = Vec::new();
     let mut left_out = vec![false; not_built.len()];
@@ -198,6 +210,22 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
                 continue;
             }
             ran += 1;
+            let parser = match example.language.as_deref() {
+                Some(name) => {
+                    let Some(named) = Language::for_injection(name) else {
+                        failures.push(format!(
+                            "{short}: {}: no language {name} to parse it with",
+                            example.name
+                        ));
+                        continue;
+                    };
+                    other
+                        .set_language(&named.ts_language())
+                        .expect("the grammar loads");
+                    &mut other
+                }
+                None => &mut parser,
+            };
             let deadline = Instant::now() + EXAMPLE_LIMIT;
             let mut too_long = |_: &tree_sitter::ParseState| Instant::now() >= deadline;
             let input = example.input.as_bytes();
@@ -284,6 +312,14 @@ fn html_passes_its_corpus() {
 #[test]
 fn javascript_passes_its_corpus() {
     check("JavaScript", "javascript", 115, &[]);
+}
+
+/// **The TypeScript grammar -- tables, lexers and ported scanner -- parses
+/// its whole corpus as upstream's does**, and TSX the examples marked for
+/// it: types, declarations, the semicolons a line leaves out.
+#[test]
+fn typescript_passes_its_corpus() {
+    check("TypeScript", "typescript", 110, &[]);
 }
 
 /// **The C grammar parses its whole corpus as upstream's does.**
@@ -393,6 +429,11 @@ fn the_corpus_format_is_read() {
     );
     assert_eq!(normalize("(a\n  x: (b)\n  (c)\n)"), "(a x: (b) (c))");
     assert!(has_fields("(a x: (b))") && !has_fields("(a (b))"));
+    let e = examples("=====\nT\n:language(tsx)\n=====\nx\n---\n(e)\n");
+    assert_eq!(
+        (e[0].name.as_str(), e[0].language.as_deref()),
+        ("T", Some("tsx"))
+    );
     let e = examples("=====\nD\n=====\na\n---\nb\n------\n(d)\n; a note\n");
     assert_eq!(
         (e[0].input.as_str(), normalize(&e[0].expected).as_str()),

@@ -88,6 +88,12 @@ tree-sitter-toml:
   texts:
     - tree-sitter-toml-LICENSE
 
+tree-sitter-typescript:
+  version: 0.23.2
+  licence: MIT
+  texts:
+    - tree-sitter-typescript-LICENSE
+
 tree-sitter-yaml:
   version: 0.7.2
   licence: MIT

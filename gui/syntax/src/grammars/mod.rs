@@ -18,6 +18,8 @@ pub(crate) mod markdown_inline;
 pub(crate) mod python;
 pub(crate) mod rust;
 pub(crate) mod toml;
+pub(crate) mod tsx;
+pub(crate) mod typescript;
 pub(crate) mod yaml;
 
 /// The generated file for a grammar, in a module of its own. `$scanner`,

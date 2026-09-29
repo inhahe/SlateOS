@@ -3764,6 +3764,7 @@ version = "0.1.0"
 dependencies = [
  "deflate",
  "guitk",
+ "regex",
  "tree-sitter-c2rust",
  "tree-sitter-language",
  "tsgrammar",

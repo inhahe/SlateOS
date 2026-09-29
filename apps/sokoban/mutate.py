@@ -669,15 +669,15 @@ MUTATIONS = [
         ["a_warehouse_shortcut_with_a_modifier_held_is_handed_on"],
     ),
     (
-        "the menu cursor runs off the bottom of the list",
-        "            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1).min(last),",
-        "            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1),",
-        ["up_and_down_walk_the_menu_and_stop_at_the_ends"],
+        "S runs the menu cursor off the bottom of the list",
+        "            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),",
+        "            Key::S => self.cursor = self.cursor.saturating_add(1),",
+        ["the_page_keys_move_the_menu_a_page_at_a_time"],
     ),
     (
         "End does not reach the last level",
-        "            Key::End => self.cursor = last,",
-        "            Key::End => self.cursor = 0,",
+        "movement.target(Some(self.cursor), self.level_count(), page)",
+        "movement.target(Some(self.cursor), self.level_count().saturating_sub(1), page)",
         ["home_and_end_jump_to_the_ends_of_the_list"],
     ),
     (
@@ -1091,6 +1091,30 @@ MUTATIONS = [
         '    "Arrows/WASD: move   Z: undo   R: restart   F1: all keys",',
         '    "Arrows/WASD: move   Z: undo   Ctrl+Y: redo   R: restart",',
         ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'the level menu reads no list key',
+        '        if let Some(movement) = ListKey::of(ev) {',
+        '        if let Some(movement) = ListKey::of(ev).filter(|_| false) {',
+        ['the_page_keys_move_the_menu_a_page_at_a_time', 'the_menu_scrolls_the_cursor_into_view'],
+    ),
+    (
+        'a page of the level menu is one row',
+        '            let page = self.layout().list_rows();',
+        '            let page = 1;',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
+    ),
+    (
+        'W does not step the level menu up',
+        '            Key::W => self.cursor = self.cursor.saturating_sub(1),\n',
+        '',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
+    ),
+    (
+        'S does not step the level menu down',
+        '            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),\n',
+        '',
+        ['the_page_keys_move_the_menu_a_page_at_a_time'],
     ),
 ]
 

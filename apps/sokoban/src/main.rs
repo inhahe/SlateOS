@@ -109,6 +109,7 @@ use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::listview::ListKey;
 use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -937,6 +938,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
         "Play the chosen level, or the next once solved",
     ),
     ("Home / End", "The first / last level on the list"),
+    ("Page Up / Page Down", "A page up / down the list of levels"),
     ("1-9", "Choose level 1 to 9 on the list"),
     ("F1 / ?", "This list"),
 ];
@@ -2170,11 +2172,20 @@ impl Sokoban {
 
     fn key_select(&mut self, ev: &KeyEvent, plain: bool) -> EventResult {
         let last = self.level_count().saturating_sub(1);
+        // Up and Down, Home and End, and Page Up and Down a menu's height
+        // at a time, as every list in the shell reads them
+        // (`guitk::listview::ListKey`). The page keys went nowhere.
+        if let Some(movement) = ListKey::of(ev) {
+            let page = self.layout().list_rows();
+            if let Some(to) = movement.target(Some(self.cursor), self.level_count(), page) {
+                self.cursor = to;
+            }
+            return EventResult::Consumed;
+        }
         match ev.key {
-            Key::Up | Key::W => self.cursor = self.cursor.saturating_sub(1),
-            Key::Down | Key::S => self.cursor = self.cursor.saturating_add(1).min(last),
-            Key::Home => self.cursor = 0,
-            Key::End => self.cursor = last,
+            // The game's own keys for up and down, in its menu too.
+            Key::W => self.cursor = self.cursor.saturating_sub(1),
+            Key::S => self.cursor = self.cursor.saturating_add(1).min(last),
             Key::Enter | Key::Space => self.start_level(self.cursor),
             Key::Num1
             | Key::Num2
@@ -5545,6 +5556,41 @@ mod tests {
             row_is_visible(&g, 0),
             "Home did not scroll the first row back into view"
         );
+    }
+
+    /// **Page Up and Page Down move the menu a page at a time** -- a page
+    /// being the rows it shows -- and stop at the ends, as every list in the
+    /// shell does. They went nowhere.
+    #[test]
+    fn the_page_keys_move_the_menu_a_page_at_a_time() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::Home));
+        let page = g.layout().list_rows();
+        let last = LEVELS.len().saturating_sub(1);
+        assert!(
+            page > 1 && page < last,
+            "{page} rows of {}: nothing to page",
+            LEVELS.len()
+        );
+        probe::key(&mut g, &probe::press(Key::PageDown));
+        assert_eq!(g.cursor(), page, "Page Down did not move a page");
+        for _ in 0..LEVELS.len() {
+            probe::key(&mut g, &probe::press(Key::PageDown));
+        }
+        assert_eq!(g.cursor(), last, "Page Down ran past the last level");
+        probe::key(&mut g, &probe::press(Key::S));
+        assert_eq!(g.cursor(), last, "S ran past the last level");
+        probe::key(&mut g, &probe::press(Key::PageUp));
+        assert_eq!(g.cursor(), last - page, "Page Up did not move a page");
+        for _ in 0..LEVELS.len() {
+            probe::key(&mut g, &probe::press(Key::PageUp));
+        }
+        assert_eq!(g.cursor(), 0, "Page Up ran past the first level");
+        // The game's own W and S still step it.
+        probe::key(&mut g, &probe::press(Key::S));
+        assert_eq!(g.cursor(), 1);
+        probe::key(&mut g, &probe::press(Key::W));
+        assert_eq!(g.cursor(), 0);
     }
 
     #[test]

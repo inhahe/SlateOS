@@ -27,6 +27,7 @@ pub(crate) mod lua;
 pub(crate) mod make;
 pub(crate) mod markdown;
 pub(crate) mod markdown_inline;
+pub(crate) mod powershell;
 pub(crate) mod python;
 pub(crate) mod regex;
 pub(crate) mod rust;
@@ -94,7 +95,7 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 28] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 29] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
@@ -118,6 +119,7 @@ mod tests {
                 "markdown_inline",
                 &super::markdown_inline::generated::TABLES,
             ),
+            ("powershell", &super::powershell::generated::TABLES),
             ("python", &super::python::generated::TABLES),
             ("regex", &super::regex::generated::TABLES),
             ("rust", &super::rust::generated::TABLES),

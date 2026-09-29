@@ -407,6 +407,13 @@ fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
 }
 
+/// **The PowerShell grammar -- tables, lexers and its ported
+/// statement-end scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn powershell_passes_its_corpus() {
+    check("PowerShell", "powershell", 139, &[]);
+}
+
 /// **The Lua grammar -- tables, lexers and its ported long-bracket
 /// scanner -- parses its whole corpus as upstream's does.**
 #[test]

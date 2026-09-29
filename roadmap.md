@@ -2038,7 +2038,7 @@ live.
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, linker scripts
-  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), Python,
+  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), PowerShell, Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
@@ -2056,7 +2056,7 @@ live.
   A bracket's partner is found in the tree, a language inside another's
   in its own (`Highlighter::brackets`): a bracket in a string or a comment
   is none. **Next:** more languages as the editor meets them (SQL for the
-  database viewer, PowerShell).
+  database viewer).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

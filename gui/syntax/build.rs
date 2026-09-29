@@ -33,6 +33,7 @@ const GRAMMARS: &[&str] = &[
     "make",
     "markdown",
     "markdown_inline",
+    "powershell",
     "python",
     "regex",
     "rust",

@@ -343,7 +343,7 @@ def c_declarations(zig: str, inc: Path, overlay: Path | None) -> dict[str, tuple
             out.setdefault(name, sig + (h,))
     try:
         CACHE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE.write_text(json.dumps({"key": digest, "decls": out}), encoding="utf-8")
+        CACHE.write_text(json.dumps({"key": digest, "decls": out}), encoding="utf-8", newline="")
     except OSError:
         pass  # a cache that cannot be written is a slower next run, nothing more
     return out
@@ -755,7 +755,7 @@ def self_test() -> int:
         '  crate::ld_c!(x_ll $c => $shim);\n)* }; }\n'
         'export_ll! { "faddl" __s_faddl faddl f32; "daddl" __s_daddl daddl f64; }\n')
     with tempfile.TemporaryDirectory() as t:
-        (Path(t) / "m.rs").write_text(macros, encoding="utf-8")
+        (Path(t) / "m.rs").write_text(macros, encoding="utf-8", newline="")
         mdefs, _ = rust_definitions(Path(t))
     check("a positional macro's function is found", mdefs.get("nextup", ())[:2] == (("f64",), "f64"))
     check("its repetition's functions are found",

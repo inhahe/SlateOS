@@ -339,7 +339,7 @@ def self_test() -> int:
         (d / "a.h").write_text(
             "/* comment(x) */\n#define M(x) x\nint f(int);\nextern int v;\n"
             "extern void (*hook)(void);\nstruct s { int (*g)(void); };\nint _r(void);\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="")
         c = candidates(d)
         check("a function is a candidate", "f" in c)
         check("an extern object is a candidate", "v" in c)
@@ -347,10 +347,10 @@ def self_test() -> int:
         check("a comment's words are not", "comment" not in c)
         check("a macro is not", "M" not in c)
         check("a reserved name is not", "_r" not in c)
-        (d / "r.txt").write_text("# x\nf\ta.h\tgnu,c17\tint (int)\n", encoding="utf-8")
+        (d / "r.txt").write_text("# x\nf\ta.h\tgnu,c17\tint (int)\n", encoding="utf-8", newline="")
         ref = read_reference(d / "r.txt")
         check("the reference is read", ref == {"f": ("a.h", frozenset({"gnu", "c17"}), "int (int)")})
-        (d / "bad.txt").write_text("f\ta.h\tnonesuch\tint (int)\n", encoding="utf-8")
+        (d / "bad.txt").write_text("f\ta.h\tnonesuch\tint (int)\n", encoding="utf-8", newline="")
         try:
             read_reference(d / "bad.txt")
             check("an unknown configuration is refused", False)
@@ -362,7 +362,7 @@ def self_test() -> int:
             d = Path(t)
             (d / "stdio.h").write_text(
                 "#include_next <stdio.h>\n#ifdef _GNU_SOURCE\nint fcloseall(void);\n#endif\n",
-                encoding="utf-8")
+                encoding="utf-8", newline="")
             v = visible(zig, "stdio.h", ["fcloseall", "printf"], CONFIGS["gnu"], d)
             check("the probe sees an overlay declaration", v == {"fcloseall", "printf"})
             v = visible(zig, "stdio.h", ["fcloseall", "printf"], CONFIGS["c17"], d)

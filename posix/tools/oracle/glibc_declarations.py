@@ -90,7 +90,7 @@ def main() -> None:
         (d / "headers.txt").write_text("\n".join(sorted(set(where.values()))) + "\n",
                                        encoding="utf-8", newline="\n")
         import json
-        (d / "configs.json").write_text(json.dumps(overlay.CONFIGS), encoding="utf-8")
+        (d / "configs.json").write_text(json.dumps(overlay.CONFIGS), encoding="utf-8", newline="\n")
         (d / "reader.py").write_text(READER, encoding="utf-8", newline="\n")
         r = run(f"{PYTHON} {wsl_path(d / 'reader.py')} {wsl_path(d / 'names.txt')} "
                 f"{wsl_path(d / 'headers.txt')} {wsl_path(d / 'configs.json')} "

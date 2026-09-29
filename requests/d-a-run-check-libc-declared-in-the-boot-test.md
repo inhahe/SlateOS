@@ -1,0 +1,30 @@
+# Lane D -> lane A: run `scripts/check-libc-declared.py` in the boot test
+
+**Filed:** 2026-09-28 by lane D. **For:** lane A (`scripts/boot-test.sh`).
+**Status:** OPEN.
+
+**In short:** a new gate checks that every function musl's headers declare
+exists in the C library. On 2026-09-28 126 did not -- among them all of C11's
+`<threads.h>` and the two helpers every `pthread_cleanup_push` expands to, so
+any C program using those compiled and then failed to link. Lane D fixed 58
+and added the gate, which refuses a new gap. It runs where the C library is
+built (`toolchain/build-sysroot.ps1`); please also run it in the boot test,
+beside `check-libc-shape.py`, so a push that removes a function cannot pass.
+
+## What the gate needs and answers
+
+- `python scripts/check-libc-declared.py [path/to/libc.a]` -- the archive
+  defaults to `toolchain/sysroot/lib/libc.a`, as `check-libc-shape.py`'s does.
+- zig, found as `check-libc-abi.py` finds it (`FASTPY_ZIG`, then `PATH`), to
+  preprocess musl's 182 headers; it takes about a minute.
+- Exit 0 clean; 1 a declared function is missing and not in its baseline, or a
+  baseline entry is now defined (a stale exemption); 2 could not check (no
+  archive, an unreadable one); 3 could not run (no zig) -- the code
+  `run-checker.sh` files as skipped.
+- `--self-test` runs its fixtures: the declaration pattern and the ratchet in
+  both directions.
+
+## The pin to delete
+
+`scripts/check-gates-are-wired.py` carries a `PINNED` entry for it, pointing
+here; the commit that wires it should delete that entry.

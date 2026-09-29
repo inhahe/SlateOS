@@ -177,76 +177,85 @@ pub extern "C" fn mmap(
 
 /// Unmap a region of memory.
 ///
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error.  In the order of Linux 6.6's
+/// `do_vmi_munmap` (mm/mmap.c):
+///
+/// ```text
+///   start not page-aligned, past TASK_SIZE, or
+///   length past what is left of user space   -> EINVAL
+///   length 0                                 -> EINVAL
+///   then [start, start + length) is unmapped; nothing mapped there is 0
+/// ```
+///
+/// NULL is an address like any other.  Until 2026-09-26 it was refused
+/// with `EINVAL` where Linux unmaps `[0, length)` and answers 0 -- and the
+/// range check was missing, so a kernel-half address reached the kernel.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munmap(addr: *mut core::ffi::c_void, length: SizeT) -> i32 {
-    if addr.is_null() || length == 0 {
+    let start = addr.addr();
+    if !is_page_aligned(addr.cast_const())
+        || start > TASK_SIZE
+        || length > TASK_SIZE.saturating_sub(start)
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-
+    if length == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     let ret = syscall2(SYS_MUNMAP, addr as u64, length as u64);
     errno::translate(ret) as i32
 }
 
 /// Set protection on a memory region.
 ///
-/// Argument-domain validation (Linux-matching, performed at the libc
-/// surface before issuing the syscall so buggy callers get a clean
-/// EINVAL regardless of kernel state):
-/// * `prot` containing any bit outside `PROT_VALID_MASK` → `EINVAL`.
-///   Linux's `mm/mprotect.c::do_mprotect_pkey` rejects unknown bits
-///   before resolving the VMA.
-/// * `prot` containing both `PROT_GROWSDOWN` and `PROT_GROWSUP` →
-///   `EINVAL`.  The two flags select mutually exclusive growth
-///   directions and Linux rejects the combination outright.
-/// * `addr` not aligned to our page size (16 KiB) → `EINVAL`.  Linux
-///   tests alignment against the kernel `PAGE_SIZE`; we match.
-/// * `addr + len` overflows the address space → `EINVAL`.  Linux's
-///   `access_ok` covers this; we surface it as EINVAL to match the
-///   `mprotect` man page, since the kernel's internal check fires
-///   before any VMA work.
+/// Returns 0 on success, -1 on error.  In the order of Linux 6.6's
+/// `do_mprotect_pkey` (mm/mprotect.c):
 ///
-/// The legacy checks `addr == NULL` and `len == 0` remain because our
-/// kernel's `SYS_MPROTECT` currently does not handle either form, and
-/// callers relying on either get a bounded error rather than reaching
-/// the syscall.  Linux returns 0 for `len == 0` and accepts NULL when
-/// page-aligned, so this is a known intentional deviation tracked
-/// alongside the wider mmap reworks.
+/// ```text
+///   PROT_GROWSDOWN and PROT_GROWSUP together      -> EINVAL
+///   start not page-aligned                        -> EINVAL
+///   length 0                                      -> 0, nothing asked
+///   start + length rounded up wraps, or leaves
+///   user space                                    -> ENOMEM
+///   a prot bit other than READ/WRITE/EXEC/SEM
+///   (arch_validate_prot, the GROWS bits removed)  -> EINVAL
+///   then the kernel: a hole in the range          -> ENOMEM
+/// ```
 ///
-/// Returns 0 on success, -1 on error.
+/// NULL is an address like any other: nothing is mapped there, so the
+/// kernel answers `ENOMEM`.  Until 2026-09-26 NULL and a zero length were
+/// `EINVAL` before anything else, an unknown bit was judged before the
+/// alignment, and a wrapping range was `EINVAL` where Linux says `ENOMEM`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) -> i32 {
-    if addr.is_null() || len == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    const GROWS: i32 = PROT_GROWSDOWN | PROT_GROWSUP;
+    let fail = |e: i32| -> i32 {
+        errno::set_errno(e);
+        -1
+    };
+    if prot & GROWS == GROWS {
+        return fail(errno::EINVAL);
     }
-    // Reject unknown prot bits before the syscall — Linux validates
-    // this in do_mprotect_pkey() before touching any VMA.
-    if prot & !PROT_VALID_MASK != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // PROT_GROWSDOWN and PROT_GROWSUP request opposite growth
-    // directions; their combination is meaningless.
-    if (prot & PROT_GROWSDOWN) != 0 && (prot & PROT_GROWSUP) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // Address alignment is required by every kernel that backs
-    // mprotect; report EINVAL here so the test surface is stable
-    // regardless of which path the kernel takes.
     if !is_page_aligned(addr.cast_const()) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+        return fail(errno::EINVAL);
     }
-    // Range overflow: addr + len wrapping past usize::MAX is never a
-    // legitimate request.
-    if range_overflows(addr.cast_const(), len) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    if len == 0 {
+        return 0;
     }
-
+    // `len = PAGE_ALIGN(len); end = start + len; if (end <= start) -ENOMEM`,
+    // and a range past user space has no VMA, which is ENOMEM too.
+    let page = crate::unistd::PAGE_SIZE;
+    let end = len
+        .checked_next_multiple_of(page)
+        .and_then(|l| addr.addr().checked_add(l));
+    if end.is_none_or(|e| e > TASK_SIZE) {
+        return fail(errno::ENOMEM);
+    }
+    if prot & !GROWS & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM) != 0 {
+        return fail(errno::EINVAL);
+    }
     let ret = syscall3(SYS_MPROTECT, addr as u64, len as u64, prot as u64);
     errno::translate(ret) as i32
 }
@@ -290,6 +299,10 @@ const MMAN_PAGE_SIZE: u64 = crate::unistd::PAGE_SIZE as u64;
 fn is_page_aligned(addr: *const core::ffi::c_void) -> bool {
     (addr as u64) & (MMAN_PAGE_SIZE - 1) == 0
 }
+
+/// The top of user space, as Linux's x86-64 `TASK_SIZE` is: the lower
+/// canonical half less one page.
+const TASK_SIZE: usize = 0x0000_8000_0000_0000 - crate::unistd::PAGE_SIZE;
 
 /// Check whether `addr + len` would overflow the address space.  Linux
 /// returns EINVAL when this happens; otherwise the kernel may misinterpret
@@ -1091,10 +1104,16 @@ mod tests {
     // -- munmap validates inputs --
 
     #[test]
-    fn test_munmap_null_addr() {
+    fn test_munmap_null_addr_reaches_the_kernel() {
+        // Address 0 is page-aligned and inside the user half, so Linux's
+        // `do_vmi_munmap` accepts it (and, with nothing mapped there,
+        // returns 0).  It was refused here as EINVAL.  On the host the
+        // system call is a stub whose answer `errno::translate` maps to EIO
+        // (see ioctl.rs's `test_posix_openpt_fails_on_host`), which says the
+        // call got that far.
         crate::errno::set_errno(0);
         assert_eq!(munmap(core::ptr::null_mut(), 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
@@ -1107,10 +1126,13 @@ mod tests {
     // -- mprotect validates inputs --
 
     #[test]
-    fn test_mprotect_null_addr() {
+    fn test_mprotect_null_addr_reaches_the_kernel() {
+        // As for munmap: 0 is aligned, so `do_mprotect_pkey` goes on to look
+        // for a mapping (and, finding none, answers ENOMEM).  On the host,
+        // the stub's EIO, as for munmap.
         crate::errno::set_errno(0);
         assert_eq!(mprotect(core::ptr::null_mut(), 4096, PROT_READ), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
     }
 
     #[test]
@@ -1176,14 +1198,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mprotect_range_overflow_einval() {
-        // addr + len that wraps past usize::MAX is never valid.
-        // Pick an aligned address near the top of the address space
-        // and a length that pushes past it.
+    fn test_mprotect_range_overflow_enomem() {
+        // addr + len that wraps past usize::MAX is never valid, and Linux
+        // says so with ENOMEM (`end <= start`), not EINVAL.  Pick an aligned
+        // address near the top of the address space and a length that
+        // pushes past it.
         crate::errno::set_errno(0);
         let near_top = (usize::MAX - 0x3FFF) as *mut core::ffi::c_void; // page-aligned
         assert_eq!(mprotect(near_top, 0x1_0000, PROT_READ), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
     }
 
     // -- Per-error-class ordering: prot bits checked before alignment --
@@ -2138,15 +2161,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mincore_zero_length_reaches_enosys() {
-        // Linux: length==0 is allowed and returns 0 (no work).  Our
-        // stub doesn't yet implement the read-page-table path, so it
-        // still reports ENOSYS — but validation passes.
+    fn test_mincore_zero_length_returns_zero() {
+        // Linux: a length of 0 covers no pages, so there is nothing to ask
+        // and nothing to write -- 0, whatever `vec` is.
         let mut vec = [0u8; 16];
         crate::errno::set_errno(0);
         let ret = mincore(0x4000 as *mut core::ffi::c_void, 0, vec.as_mut_ptr());
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(ret, 0);
+        let ret = mincore(0x4000 as *mut core::ffi::c_void, 0, core::ptr::null_mut());
+        assert_eq!(ret, 0, "not even a NULL vec is looked at");
     }
 
     // ---- Real-world workflows ----
@@ -3670,19 +3693,15 @@ pub extern "C" fn posix_madvise(addr: *mut core::ffi::c_void, len: SizeT, advice
 // memfd_create (Linux extension)
 // ---------------------------------------------------------------------------
 
-/// Maximum length of the user-supplied `memfd_create` name (Linux's
-/// limit, minus the prefix we add).  The Linux kernel allows names up
-/// to 249 bytes total; we reserve a few bytes for our `.memfd_<n>_`
-/// prefix so the on-disk path still fits in `/dev/shm/<prefix><name>`
-/// without exceeding the underlying filesystem's per-component limit.
-const MEMFD_NAME_MAX: usize = 200;
+/// `MFD_NAME_MAX_LEN`: `NAME_MAX` less the `memfd:` prefix Linux gives the
+/// name -- 249 bytes.
+const MEMFD_NAME_MAX: usize = 249;
 
-/// Monotonic counter used to make on-disk `/dev/shm/.memfd_<n>_<name>`
-/// paths unique within a process.  Each call to `memfd_create` consumes
-/// one value.  Even after the process exits, leftover files in
-/// `/dev/shm` will be reaped by the boot cleanup pass; collisions across
-/// process restarts would only matter if the cleanup pass is skipped,
-/// and the unlink-after-open below makes the file anonymous anyway.
+/// Counter making the file behind each memfd, `/dev/shm/.memfd_<pid>_<n>`,
+/// unique: the process id separates processes, the counter calls.  Each
+/// call consumes one value per attempt.  Leftover files in `/dev/shm` are
+/// reaped by the boot cleanup pass, and the unlink-after-open below makes
+/// the file anonymous anyway.
 static MEMFD_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Recognised flag bits for `memfd_create`.  Anything outside this set
@@ -3697,10 +3716,15 @@ const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
 ///
 /// The `name` parameter is purely for debugging/proc display: it doesn't
 /// place the file in any namespace and two memfds with the same name
-/// don't share storage.  Internally we route the request through
-/// `/dev/shm/.memfd_<counter>_<name>`, open it with `O_CREAT | O_RDWR
-/// | O_EXCL`, then `unlink()` the path immediately so the file becomes
-/// truly anonymous (only the returned fd keeps it alive).
+/// don't share storage -- and, as on Linux, it may hold any bytes, `/`
+/// included.  Internally we route the request through
+/// `/dev/shm/.memfd_<pid>_<counter>`, open it with `O_CREAT | O_RDWR |
+/// O_EXCL` (retrying past a name another process left), then `unlink()` the
+/// path immediately so the file becomes truly anonymous (only the returned
+/// fd keeps it alive).  Until 2026-09-26 the name was part of that path, so
+/// a `/` in it was refused with `EINVAL` and it was limited to 200 bytes of
+/// Linux's 249; and the counter alone named the file, so two processes could
+/// collide.
 ///
 /// Supported flags:
 /// - `MFD_CLOEXEC` — set close-on-exec on the returned fd.
@@ -3724,7 +3748,7 @@ const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
 /// - `EINVAL` — both `MFD_EXEC` and `MFD_NOEXEC_SEAL` are set (they
 ///   are mutually exclusive since Linux 6.3 — see Phase 138).
 /// - `EFAULT` — `name` is NULL (checked after flags).
-/// - `EINVAL` — `name` is too long.
+/// - `EINVAL` — `name` is longer than 249 bytes.
 /// - Plus any error reported by the underlying `open()` / `unlink()`.
 ///
 /// Validation order matches Linux's `SYSCALL_DEFINE2(memfd_create)`
@@ -3759,23 +3783,20 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if name.is_null() {
+    // `strnlen_user(uname, MFD_NAME_MAX_LEN + 1)`: a name that cannot be
+    // read is EFAULT, one longer than 249 bytes EINVAL.  It is measured and
+    // otherwise unused: the file behind the descriptor is named by the
+    // process and a counter.
+    if name.is_null() || !crate::uio::access_ok(name.addr(), 1) {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    // Measure user name length with a bound.
     let mut name_len: usize = 0;
     while name_len <= MEMFD_NAME_MAX {
-        // SAFETY: caller contract — `name` is a valid NUL-terminated C string.
-        let b = unsafe { *name.add(name_len) };
-        if b == 0 {
+        // SAFETY: caller contract — `name` is a valid NUL-terminated C
+        // string, read no further than its NUL.
+        if unsafe { *name.add(name_len) } == 0 {
             break;
-        }
-        // Reject embedded '/' in the user name: it would split the path.
-        if b == b'/' {
-            errno::set_errno(errno::EINVAL);
-            return -1;
         }
         name_len = name_len.wrapping_add(1);
     }
@@ -3784,75 +3805,55 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
         return -1;
     }
 
-    // Build "/dev/shm/.memfd_<counter>_<name>" into a stack buffer.
-    let mut path = [0u8; crate::unistd::PATH_MAX];
-    let mut pos: usize = 0;
-    // Helper: append a byte slice; returns false if it would overflow.
-    let put = |buf: &mut [u8], p: &mut usize, src: &[u8]| -> bool {
-        if p.wrapping_add(src.len()) >= buf.len() {
-            return false;
-        }
-        if let Some(dst) = buf.get_mut(*p..p.wrapping_add(src.len())) {
-            dst.copy_from_slice(src);
-        }
-        *p = p.wrapping_add(src.len());
-        true
-    };
-    if !put(&mut path, &mut pos, SHM_DIR) {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    if !put(&mut path, &mut pos, b"/.memfd_") {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    let counter = MEMFD_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    // Format the counter as decimal into a small buffer.
-    let mut num_buf = [0u8; 20];
-    let num_len = format_u64(counter, &mut num_buf);
-    // `format_u64` returns a length within its 20-byte buffer (a u64
-    // is at most 20 decimal digits), so the slice is in bounds.
-    #[allow(clippy::indexing_slicing)]
-    let num_slice = &num_buf[..num_len];
-    if !put(&mut path, &mut pos, num_slice) {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    if !put(&mut path, &mut pos, b"_") {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    // Append the user-supplied name (sanitized: NUL-free, /-free above).
-    // SAFETY: name_len bytes are readable before the NUL.
-    let user_name = unsafe { core::slice::from_raw_parts(name, name_len) };
-    if !put(&mut path, &mut pos, user_name) {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    // NUL-terminate.
-    if pos >= path.len() {
-        errno::set_errno(errno::ENAMETOOLONG);
-        return -1;
-    }
-    if let Some(slot) = path.get_mut(pos) {
-        *slot = 0;
-    }
-
-    // Open with O_CREAT | O_RDWR | O_EXCL.  Honor MFD_CLOEXEC.
     let mut oflag = crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR;
     if flags & crate::linux_memfd::MFD_CLOEXEC != 0 {
         oflag |= crate::fcntl::O_CLOEXEC;
     }
-    let fd = crate::file::open(path.as_ptr(), oflag, 0o600);
-    if fd < 0 {
-        return -1;
+    let pid = u64::try_from(crate::process::getpid()).unwrap_or(0);
+    // A file of this name that exists was left by a process whose id this
+    // one reused, or is another thread's this instant: take the next name.
+    for _ in 0..16 {
+        let counter = MEMFD_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let mut path = [0u8; 64];
+        if memfd_path(pid, counter, &mut path).is_none() {
+            errno::set_errno(errno::ENAMETOOLONG);
+            return -1;
+        }
+        let fd = crate::file::open(path.as_ptr(), oflag, 0o600);
+        if fd >= 0 {
+            // Unlink the path immediately so the fd becomes anonymous.
+            // Failure here is non-fatal: the fd still works, the file just
+            // sticks around in /dev/shm until the boot cleanup pass.
+            let _ = crate::file::unlink(path.as_ptr());
+            return fd;
+        }
+        if errno::get_errno() != errno::EEXIST {
+            return -1;
+        }
     }
-    // Unlink the path immediately so the fd becomes anonymous.  Failure
-    // here is non-fatal: the fd still works, the file just sticks around
-    // in /dev/shm until the boot cleanup pass.
-    let _ = crate::file::unlink(path.as_ptr());
+    -1
+}
 
-    fd
+/// `/dev/shm/.memfd_<pid>_<counter>`, NUL-terminated, into `out`; the
+/// length without the NUL, or `None` if it does not fit.
+fn memfd_path(pid: u64, counter: u64, out: &mut [u8; 64]) -> Option<usize> {
+    let mut pos = 0usize;
+    let mut put = |src: &[u8]| -> Option<()> {
+        let end = pos.checked_add(src.len())?;
+        out.get_mut(pos..end)?.copy_from_slice(src);
+        pos = end;
+        Some(())
+    };
+    let mut num = [0u8; 20];
+    put(SHM_DIR)?;
+    put(b"/.memfd_")?;
+    let n = format_u64(pid, &mut num);
+    put(num.get(..n)?)?;
+    put(b"_")?;
+    let n = format_u64(counter, &mut num);
+    put(num.get(..n)?)?;
+    put(b"\0")?;
+    pos.checked_sub(1)
 }
 
 /// Format a `u64` as decimal into `buf`, returning the number of bytes
@@ -3913,6 +3914,22 @@ pub extern "C" fn mmap64(
     offset: OffT,
 ) -> *mut core::ffi::c_void {
     mmap(addr, length, prot, flags, fd, offset)
+}
+
+/// Rearrange the pages of a shared file mapping (Linux, deprecated since
+/// 3.16, where the kernel emulates it with separate mappings). The memory
+/// manager here has no non-linear mappings to make, so `ENOSYS`; a caller
+/// gets the same effect by mapping each range with `mmap(MAP_FIXED)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remap_file_pages(
+    _addr: *mut core::ffi::c_void,
+    _size: SizeT,
+    _prot: i32,
+    _pgoff: SizeT,
+    _flags: i32,
+) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
 }
 
 /// Remap a virtual memory region.
@@ -4021,28 +4038,38 @@ pub extern "C" fn mlock2(addr: *const core::ffi::c_void, len: SizeT, flags: i32)
 
 /// Determine whether pages are resident in memory.
 ///
-/// Stub: validates arguments per Linux `mm/mincore.c::do_mincore`, then
-/// returns `-1` with `ENOSYS`.  A real implementation would query the
-/// page table to determine which pages in the range are physically
-/// resident.
+/// Stub: validates arguments in the order of Linux 6.6's `mincore`
+/// (mm/mincore.c), then returns `-1` with `ENOSYS`.  A real implementation
+/// would query the page table to determine which pages in the range are
+/// physically resident.
 ///
-/// Errors (Linux-matching priority order):
-/// * `EINVAL` — `addr` is not page-aligned.
-/// * `ENOMEM` — `addr + length` overflows the address space (Linux's
-///   `access_ok` rejects this as "address range past end of memory").
-/// * `EFAULT` — `vec` is NULL.  The kernel writes one byte per page
-///   into `vec`; a NULL pointer faults on the first store.
+/// ```text
+///   addr not page-aligned                         -> EINVAL
+///   [addr, addr + length) not user memory         -> ENOMEM  (access_ok)
+///   length 0                                      -> 0: no pages, nothing copied
+///   the vector's range not user memory, or NULL   -> EFAULT
+/// ```
+///
+/// Upstream's `access_ok` of the vector admits NULL; its fault comes when the
+/// first byte is copied out, which with pages to report it always is.  With
+/// no pages to report nothing is copied, so a NULL vector is 0 -- it was
+/// `EFAULT` until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mincore(addr: *mut core::ffi::c_void, length: SizeT, vec: *mut u8) -> i32 {
     if !is_page_aligned(addr) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if range_overflows(addr, length) {
+    if !crate::uio::access_ok(addr.addr(), length) {
         errno::set_errno(errno::ENOMEM);
         return -1;
     }
-    if vec.is_null() {
+    // `pages = len >> PAGE_SHIFT`, plus one for a partial page.
+    let pages = length.div_ceil(crate::unistd::PAGE_SIZE);
+    if pages == 0 {
+        return 0;
+    }
+    if vec.is_null() || !crate::uio::access_ok(vec.addr(), pages) {
         errno::set_errno(errno::EFAULT);
         return -1;
     }

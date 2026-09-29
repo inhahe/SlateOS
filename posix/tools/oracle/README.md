@@ -1,0 +1,76 @@
+# glibc as the oracle
+
+Much of `posix`'s behaviour is specified as "what glibc 2.39 does": the maths
+functions' results and `errno`, what `iconv` makes of a malformed byte, how
+`getaddrinfo` sorts, which spellings `strtod` accepts. The tests check that
+by replaying glibc's own answers, and the programs here are where those
+answers come from. Each one builds a C program with gcc under WSL -- whose C
+library is the oracle -- runs it, and records what glibc said.
+
+Everything here needs WSL with the `Ubuntu` distribution (24.04, glibc 2.39)
+and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs`) use
+`unshare -r`, which needs no root. Build products go in a temporary directory
+(`_wsl.workdir`); a run changes nothing in the tree but its own output.
+
+## Which program feeds which test
+
+| Program | Writes | Read by |
+|---|---|---|
+| `math_harness.py` (cases: `math_cases.py`) | `posix/src/math_oracle.txt` | `math.rs`, `include_str!` |
+| `math_modes_harness.py` (the same cases, in the three directed rounding modes) | `posix/src/math_modes_oracle.txt` (the answers that differ from nearest) | `math.rs`, `include_str!` |
+| `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
+| `mathl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/mathl_modes_oracle.txt` (the answers that differ from nearest) | `mathl.rs`, `include_str!` |
+| `c23math_harness.py` | `posix/src/c23math_oracle.txt` (C23's exact functions -- `nextup` ... `fminimum_mag_num` -- in all three precisions, and `scalbl`, `ilogbl`, `logbl`: value, flags raised and `errno`) | `c23math.rs`, `include_str!` |
+| `narrow_harness.py` | `posix/src/narrow_oracle.txt` (C23's narrowing functions, `fadd` ... `dfmal`, each call in all four rounding directions: value, flags raised and `errno`) | `narrow.rs`, `include_str!` |
+| `complex_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complex_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complex.rs`, `include_str!` |
+| `complexl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complexl_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complexl.rs`, `include_str!` |
+| `lgammal_zeros.py table 30` (mpmath, not glibc) | the `LGAMMAL_ZEROS` table, pasted | `mathl.rs` (`lgammal_near_zero`) |
+| `lgammal_zeros.py oracle` (mpmath, not glibc) | `posix/src/lgammal_zero_oracle.txt` | `mathl.rs`, `include_str!` |
+| `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
+| `complex_harness.py` | `posix/src/complex_oracle.txt` | `complex.rs`, `include_str!` |
+| `complexl_harness.py` | `posix/src/complexl_oracle.txt` | `complexl.rs`, `include_str!` |
+| `accounts_harness.py` | `posix/src/accounts_oracle.txt` | `accounts_oracle.rs`, `include_str!` (`fgetpwent` & co., `put*ent`, `sgetspent`, `getusershell`, `getpass`) |
+| `conv_harness.py` | `posix/src/conv_oracle.txt` | `printf.rs` and `stdlib.rs`, through `decfloat::CONV_ORACLE` (`printf` and `strto*` of `double`, `float` and `long double`, and `wcstold`, every rounding mode) |
+| `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
+| `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
+| `getdate_harness.py` | `posix/src/getdate_oracle.txt` | `time.rs`, `include_str!` (`getdate`, `getdate_r`) |
+| `strptime_harness.py` | `posix/src/strptime_oracle.txt` | `time.rs`, `include_str!` (`strptime`) |
+| `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |
+| `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
+| `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |
+| `iconv_hand_harness.py` | `posix/src/iconv_hand_oracle.txt` (every byte and every encoder of the 80 single-byte sets not generated from a charmap: the 25 hand-written ones and the 55 with table headers of their own) | `iconv.rs`, `include_str!` |
+| `tcvn_harness.py` (cases: `tcvn_cases.py`) | a table, pasted as `GLIBC_TCVN` | `iconv.rs` |
+| `prefix_harness.py` (cases: `prefix_cases.py`) | a table, pasted as `GLIBC_PREFIX` | `iconv.rs` |
+| `tscii_harness.py` (cases: `tscii_cases.py`) | a table, pasted as `GLIBC_TSCII` | `iconv.rs` |
+| `wscanf_harness.py` | a table, pasted as `GLIBC_WSCANF` | `scanf.rs` |
+| `wscanf_stream_oracle.c` | eight lines, quoted in its header | `scanf.rs`, asserted by hand |
+| `addr_harness.py` (`addr_cases.py`, `addr_oracle.c`) | a table, pasted as `GLIBC` | `inet.rs` |
+| `gai_harness.py` (`gai_oracle.c`) | a table, pasted | `gai.rs` |
+| `hosts_harness.py` (`hosts_oracle.c`) | a table, pasted | `hosts.rs` |
+| `netdb_harness.py` (`netdb_oracle.c`) | a table, pasted | `netdb.rs` |
+| `ifaddrs_run.sh` (`ifaddrs_oracle.c`) | its output, pasted by hand as `GLIBC_UP` ... | `socket.rs` |
+
+The four `*_modes_harness.py` share `_modes.py`, which runs a harness's own
+program once per rounding mode and checks its to-nearest pass against the
+harness's table before writing anything.
+
+## Running one
+
+    python posix/tools/oracle/math_harness.py            # rewrites posix/src/math_oracle.txt
+    python posix/tools/oracle/gai_harness.py             # prints the table
+    python posix/tools/oracle/gai_harness.py --check     # is gai.rs's copy still glibc's?
+    wsl -d Ubuntu -- bash posix/tools/oracle/ifaddrs_run.sh
+
+A table a test carries pasted is updated by pasting the harness's output over
+the block that starts with the same `// Generated by` line and running
+`cargo fmt`, which reflows it; `--check` compares ignoring that layout. The
+`.txt` oracles are regenerated in place; every harness draws its cases from a
+fixed list or a seeded generator, so a rerun against the same glibc writes the
+same bytes, and `git diff` shows exactly what a new glibc changed.
+
+## History
+
+Until 2026-09-28 these lived in lane D's scratch directory, outside the
+repository, and the tests cited them there (`dlm/oracle/...`). Each was
+moved here only after it had regenerated, from glibc, exactly the data the
+tests carried.

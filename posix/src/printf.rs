@@ -77,6 +77,8 @@
 // un-prefixed `printf`/`fprintf`/...).
 #![allow(clippy::used_underscore_items)]
 
+use crate::decfloat::{Decimal, DigitBuf, MallocBuf, Rounding};
+
 /// Emit a variadic trampoline that performs a real `va_start` and tail-calls
 /// the corresponding `v*` implementation.
 ///
@@ -168,6 +170,12 @@ va_trampoline!("sprintf", "vsprintf", "16", "rdx");
 // `snprintf`, so it takes the same `gp_offset` and the same register.
 #[cfg(target_os = "none")]
 va_trampoline!("swprintf", "vswprintf", "24", "rcx");
+// `fwprintf(stream, fmt, ...)` and `wprintf(fmt, ...)` have `fprintf`'s and
+// `printf`'s named parameters, so they take theirs.
+#[cfg(target_os = "none")]
+va_trampoline!("fwprintf", "vfwprintf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("wprintf", "vwprintf", "8", "rsi");
 
 /// `asprintf` gets its own inline module, and therefore its own object file
 /// inside `libc.a`, because gnulib ships a replacement for it and every GNU
@@ -204,32 +212,47 @@ mod gnu_asprintf {
 // Rust entry points (called by the fortified `__*_chk` trampolines)
 // ---------------------------------------------------------------------------
 
-/// Stack buffer size for printf/fprintf (format to buffer, then write).
+/// Stack buffer size for printf/fprintf/dprintf.  Output streams through it
+/// to the stream or descriptor a buffer at a time, so it bounds memory, not
+/// output.
 const PRINTF_BUF_SIZE: usize = 4096;
+
+/// Format to `sink` through a [`PRINTF_BUF_SIZE`] stack buffer, handing the
+/// sink each full buffer and then the tail.  Returns the number of bytes
+/// formatted, or -1 (with `errno` from the write) if the sink refused one.
+///
+/// Until 2026-09-26 `printf`, `fprintf` and `dprintf` formatted into the
+/// buffer and wrote *at most one buffer's worth*, while returning the full
+/// count: every output over 4096 bytes was cut at 4096, silently, and the
+/// return value said it had all been written.
+fn format_to_sink(sink: Sink, fmt: *const u8, args: &mut Args) -> i32 {
+    // A stream is held for the whole call, as glibc's `vfprintf` holds it, so
+    // another thread's output cannot land in the middle of this one's; and a
+    // wide stream is refused, as glibc refuses it (-1, `errno` untouched).
+    let _held = if let Sink::Stream(stream) = &sink {
+        match crate::stdio::lock_byte_stream(*stream) {
+            Some(guard) => Some(guard),
+            None => return -1,
+        }
+    } else {
+        None
+    };
+    let mut buf = [0u8; PRINTF_BUF_SIZE];
+    let mut dst = FmtOutput::streaming(buf.as_mut_ptr(), PRINTF_BUF_SIZE, sink);
+    let n = format_into(&mut dst, fmt, args);
+    if n < 0 {
+        return n;
+    }
+    dst.drain(); // the tail
+    if dst.failed { -1 } else { n }
+}
 
 /// `printf(fmt, ...)` — write formatted output to stdout.
 ///
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
 pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
-    // Use STDOUT_SENTINEL (1) explicitly — dangling_mut::<u8>() happens to
-    // return the same value today but is not guaranteed to.
-    let ret = crate::stdio::write_stream(
-        crate::stdio::STDOUT_SENTINEL as *mut u8,
-        buf.as_ptr(),
-        write_len,
-    );
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(Sink::Stream(crate::stdio::stdout_stream()), fmt, args)
 }
 
 /// `fprintf(stream, fmt, ...)` — write formatted output to a stream.
@@ -237,18 +260,7 @@ pub(crate) fn _printf_impl(fmt: *const u8, args: &mut Args) -> i32 {
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
 pub(crate) fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
-    let ret = crate::stdio::write_stream(stream, buf.as_ptr(), write_len);
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(Sink::Stream(stream), fmt, args)
 }
 
 /// `dprintf(fd, fmt, ...)` — write formatted output to a file descriptor.
@@ -256,18 +268,7 @@ pub(crate) fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: &mut Args) ->
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
 pub(crate) fn _dprintf_impl(fd: i32, fmt: *const u8, args: &mut Args) -> i32 {
-    let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
-    if n <= 0 {
-        return n;
-    }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
-        n as usize
-    } else {
-        PRINTF_BUF_SIZE
-    };
-    let ret = crate::file::write(fd, buf.as_ptr(), write_len);
-    if ret < 0 { ret as i32 } else { n }
+    format_to_sink(Sink::Fd(fd), fmt, args)
 }
 
 /// `snprintf(buf, size, fmt, ...)` — write formatted output to a buffer.
@@ -461,8 +462,8 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
     }
 }
 
-/// Pull the next `long double` (x87 80-bit) argument from a `va_list`,
-/// returning it narrowed to the bit pattern of an `f64`.
+/// Pull the next `long double` (x87 80-bit) argument from a `va_list`, all
+/// 80 bits of it.
 ///
 /// `long double` classifies as X87/X87UP, which the SysV ABI resolves to
 /// MEMORY: it is *never* passed in a register, so this touches neither
@@ -471,15 +472,15 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
 /// why skipping the `L` and treating the value as a `double` did not merely
 /// lose precision, it desynchronised every argument after it.
 ///
-/// The narrowing to `f64` is the sysroot's documented `long double`
-/// limitation; see [`crate::x87`] and `TD-POSIX-LONG-DOUBLE-PRECISION`.
+/// Until 2026-09-28 it was narrowed to a `double` here, and printed at a
+/// `double`'s precision (`TD-POSIX-LONG-DOUBLE-PRECISION`).
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`], except the argument occupies 16 bytes.
-unsafe fn va_arg_long_double(va: &mut VaList) -> u64 {
+unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
     let area = va.overflow_arg_area;
     if area.is_null() {
-        return 0;
+        return crate::x87::LongDouble::from_bits(0, 0);
     }
     // Round the cursor up to the ABI's 16-byte alignment for this argument.
     let aligned = (area as usize).wrapping_add(15) & !15usize;
@@ -490,12 +491,7 @@ unsafe fn va_arg_long_double(va: &mut VaList) -> u64 {
     let significand = unsafe { p.cast::<u64>().read_unaligned() };
     // SAFETY: as above; bytes 8..10 of the same 16-byte slot.
     let sign_exp = unsafe { p.add(8).cast::<u16>().read_unaligned() };
-    crate::x87::to_f64(crate::x87::LongDouble {
-        significand,
-        sign_exp,
-        pad: [0; 6],
-    })
-    .to_bits()
+    crate::x87::LongDouble::from_bits(sign_exp, significand)
 }
 
 /// Consume the length modifier at `*fpos`, reporting whether it was `L`.
@@ -608,11 +604,11 @@ impl<'a> Args<'a> {
     }
 
     /// Next `long double` argument, narrowed to `f64` bits.
-    fn long_double(&mut self) -> u64 {
+    fn long_double(&mut self) -> crate::x87::LongDouble {
         match self.va.as_deref_mut() {
             // SAFETY: the va_list contract is upheld by `Args::new`.
             Some(va) => unsafe { va_arg_long_double(va) },
-            None => 0,
+            None => crate::x87::LongDouble::from_bits(0, 0),
         }
     }
 }
@@ -696,6 +692,124 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
     _sprintf_impl(buf, fmt, &mut args)
 }
 
+/// A wide format string as the narrow engine reads it: the same text in
+/// UTF-8, in a buffer from `malloc` that the caller frees.  Sized exactly --
+/// this is the wide family's one allocation, and `dirent.rs` sets the
+/// precedent for libc internals owning a short-lived one.  `None`, with
+/// `errno` set, for a format with an unencodable character (`EILSEQ`) or no
+/// memory (`ENOMEM`).
+///
+/// # Safety
+///
+/// `fmt` must be a valid NUL-terminated wide string.
+unsafe fn narrow_wide_format(fmt: *const crate::wchar::WcharT) -> Option<*mut u8> {
+    // SAFETY: caller contract; a null destination with size 0 asks
+    // `wcstombs` only to measure.
+    let fmt_len = unsafe { crate::wchar::wcstombs(core::ptr::null_mut(), fmt, 0) };
+    if fmt_len == usize::MAX {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return None;
+    }
+    // One name for the size, so the allocation and the conversion cannot
+    // disagree about it.
+    let fmt_cap = fmt_len.saturating_add(1);
+    let narrow_fmt = crate::malloc::malloc(fmt_cap);
+    if narrow_fmt.is_null() {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return None;
+    }
+    // SAFETY: `narrow_fmt` has `fmt_cap` bytes, which is what `wcstombs` was
+    // just told the conversion needs.
+    unsafe { crate::wchar::wcstombs(narrow_fmt, fmt, fmt_cap) };
+    Some(narrow_fmt)
+}
+
+/// `vfwprintf(stream, fmt, ap)` — `fwprintf` with a `va_list`.
+///
+/// Built the way [`vswprintf`] is, on the narrow engine: the format is
+/// narrowed, formatted (into a buffer sized by a measuring pass, as
+/// `vasprintf` does), checked as UTF-8 and counted in wide characters, and
+/// the bytes written to the stream.  A stream holds the multibyte form of
+/// what a wide function writes, so those bytes are exactly what `fputws` of
+/// the wide result would produce.  The return value is in **wide
+/// characters**, as C says, and output that is not valid UTF-8 -- a `%s`
+/// argument with a broken sequence -- is `EILSEQ` with nothing written, as it
+/// would be when glibc converts it to a wide string.
+///
+/// The stream is held for the call and claimed wide, as glibc's `ORIENT`
+/// claims it: on a byte stream -- one `printf` or `fputs` has written -- this
+/// fails with -1, and a later byte call on this one fails in turn.  A NULL
+/// stream is `EBADF` (§1120).
+///
+/// # Safety
+///
+/// `stream` must be a valid `FILE *`, `fmt` a valid NUL-terminated wide
+/// string, and `ap` a valid `va_list` matching it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vfwprintf(
+    stream: *mut u8,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    if fmt.is_null() || ap.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    let Some(ws) = crate::stdio::lock_wide_stream(stream) else {
+        return -1;
+    };
+    // SAFETY: `fmt` is a valid wide string (caller contract).
+    let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
+        return -1;
+    };
+    let mut out: *mut u8 = core::ptr::null_mut();
+    // SAFETY: `ap` is a valid `va_list` (caller contract); `_asprintf_impl`
+    // replays a copy of it for its second pass, as `vasprintf` does.
+    let bytes = unsafe { _asprintf_impl(&raw mut out, narrow_fmt, Some(*ap)) };
+    // SAFETY: `narrow_fmt` came from `malloc` and is not used again.
+    unsafe { crate::malloc::free(narrow_fmt) };
+    if bytes < 0 || out.is_null() {
+        return -1;
+    }
+    // SAFETY: `out` is the NUL-terminated string `_asprintf_impl` built; a
+    // null destination asks only for the count.
+    let wide = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), out, 0) };
+    let result = match i32::try_from(wide) {
+        _ if wide == usize::MAX => {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            -1
+        }
+        Ok(count) => {
+            #[allow(clippy::cast_sign_loss)]
+            let len = bytes as usize;
+            let written = crate::stdio::write_stream(ws.stream(), out, len);
+            if usize::try_from(written).is_ok_and(|w| w == len) {
+                count
+            } else {
+                -1
+            }
+        }
+        Err(_) => {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            -1
+        }
+    };
+    // SAFETY: `out` came from `malloc` inside `_asprintf_impl`.
+    unsafe { crate::malloc::free(out) };
+    result
+}
+
+/// `vwprintf(fmt, ap)` — [`vfwprintf`] to standard output.
+///
+/// # Safety
+///
+/// As [`vfwprintf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vwprintf(fmt: *const crate::wchar::WcharT, ap: *mut VaList) -> i32 {
+    // SAFETY: caller contract; `stdout_stream` is standard output.
+    unsafe { vfwprintf(crate::stdio::stdout_stream(), fmt, ap) }
+}
+
 /// `vswprintf(ws, n, fmt, ap)` — `swprintf` with a `va_list`.
 ///
 /// The wide-character `snprintf`. It exists because libc++'s `<locale>` calls
@@ -751,27 +865,11 @@ pub unsafe extern "C" fn vswprintf(
         return -1;
     };
 
-    // 1. Narrow the format. Sized exactly, then freed on every exit below --
-    //    this is the one allocation, and `dirent.rs` sets the precedent for
-    //    libc internals owning a short-lived one.
-    // SAFETY: `fmt` is a valid wide string (caller contract); a null
-    // destination with size 0 asks `wcstombs` only to measure.
-    let fmt_len = unsafe { crate::wchar::wcstombs(core::ptr::null_mut(), fmt, 0) };
-    if fmt_len == usize::MAX {
-        crate::errno::set_errno(crate::errno::EILSEQ);
+    // 1. Narrow the format.
+    // SAFETY: `fmt` is a valid wide string (caller contract).
+    let Some(narrow_fmt) = (unsafe { narrow_wide_format(fmt) }) else {
         return -1;
-    }
-    // One name for the size, so the allocation and the conversion cannot
-    // disagree about it.
-    let fmt_cap = fmt_len.saturating_add(1);
-    let narrow_fmt = crate::malloc::malloc(fmt_cap);
-    if narrow_fmt.is_null() {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return -1;
-    }
-    // SAFETY: `narrow_fmt` has `fmt_cap` bytes, which is what `wcstombs` was
-    // just told the conversion needs.
-    unsafe { crate::wchar::wcstombs(narrow_fmt, fmt, fmt_cap) };
+    };
 
     // 2. Format narrow, into the caller's buffer viewed as bytes.
     let base = ws.cast::<u8>();
@@ -790,10 +888,17 @@ pub unsafe extern "C" fn vswprintf(
         // recovered. `swprintf` says negative rather than a length.
         return -1;
     }
+    // `format_core` does not terminate what it writes -- `_snprintf_impl`
+    // does that for the narrow family -- so terminate it here, before step 3
+    // reads it as a string. Until 2026-09-26 this was missing and step 3 read
+    // on into whatever the caller's buffer held: a zeroed buffer hid it, an
+    // uninitialised one (the usual kind) made `swprintf` miscount or fail.
+    // SAFETY: `byte_len < capacity`, the buffer's size in bytes.
+    unsafe { *base.add(byte_len) = 0 };
 
     // 3. How many wide characters is that?
-    // SAFETY: `base` now holds a null-terminated narrow string that
-    // `format_core` wrote; a null destination asks only for the count.
+    // SAFETY: `base` now holds the null-terminated narrow string just
+    // written; a null destination asks only for the count.
     let wide_len = unsafe { crate::wchar::mbstowcs(core::ptr::null_mut(), base, 0) };
     if wide_len == usize::MAX {
         crate::errno::set_errno(crate::errno::EILSEQ);
@@ -876,16 +981,102 @@ const NUM_BUF_SIZE: usize = 32;
 ///
 /// Bundles buffer pointer, size, and write position so they don't need
 /// to be threaded through every function individually.
+/// Where a [`FmtOutput`] sends its buffer when it fills.
+#[derive(Clone, Copy)]
+enum Sink {
+    /// A bounded buffer (`snprintf` and friends): what does not fit is
+    /// counted, for the return value, and dropped.
+    Bounded,
+    /// A stdio stream: each full buffer is written to it.
+    Stream(*mut u8),
+    /// A file descriptor (`dprintf`): each full buffer is written to it.
+    Fd(i32),
+    /// Host tests: each full buffer is appended to this vector.
+    #[cfg(test)]
+    Capture(*mut std::vec::Vec<u8>),
+}
+
 struct FmtOutput {
     buf: *mut u8,
     size: usize,
+    /// Bytes emitted so far: the count `printf` returns and `%n` stores.
     pos: usize,
+    /// How many of `pos` have been handed to the sink (always 0 when it is
+    /// [`Sink::Bounded`]).  The buffer holds bytes `flushed..pos`.
+    flushed: usize,
+    sink: Sink,
+    /// The sink refused a write; nothing more is written, and the call
+    /// fails.
+    failed: bool,
 }
 
 impl FmtOutput {
     const fn new(buf: *mut u8, size: usize) -> Self {
-        Self { buf, size, pos: 0 }
+        Self {
+            buf,
+            size,
+            pos: 0,
+            flushed: 0,
+            sink: Sink::Bounded,
+            failed: false,
+        }
     }
+
+    const fn streaming(buf: *mut u8, size: usize, sink: Sink) -> Self {
+        Self {
+            buf,
+            size,
+            pos: 0,
+            flushed: 0,
+            sink,
+            failed: false,
+        }
+    }
+
+    /// Hand the buffered bytes to the sink and empty the buffer.  `false`
+    /// for a bounded buffer, which has no sink and is never emptied.
+    fn drain(&mut self) -> bool {
+        let pending = self.pos.wrapping_sub(self.flushed).min(self.size);
+        let written = match self.sink {
+            Sink::Bounded => return false,
+            _ if pending == 0 || self.failed => true,
+            Sink::Stream(stream) => {
+                let r = crate::stdio::write_stream(stream, self.buf, pending);
+                usize::try_from(r).is_ok_and(|r| r == pending)
+            }
+            Sink::Fd(fd) => write_all(fd, self.buf, pending),
+            #[cfg(test)]
+            Sink::Capture(out) => {
+                // SAFETY: the test owns `out` for the call, and `buf` holds
+                // `pending` bytes.
+                unsafe {
+                    (*out).extend_from_slice(core::slice::from_raw_parts(self.buf, pending));
+                }
+                true
+            }
+        };
+        if !written {
+            self.failed = true;
+        }
+        self.flushed = self.pos;
+        true
+    }
+}
+
+/// Write all `len` bytes at `data` to `fd`, retrying short writes.  `false`
+/// if a write fails (with `errno` set by it) or makes no progress.
+fn write_all(fd: i32, data: *const u8, len: usize) -> bool {
+    let mut done = 0usize;
+    while done < len {
+        // SAFETY: `done < len`, and `data` holds `len` bytes.
+        // `done < len` here, so the subtraction is exact.
+        let r = crate::file::write(fd, unsafe { data.add(done) }, len.saturating_sub(done));
+        match usize::try_from(r) {
+            Ok(n) if n > 0 => done = done.saturating_add(n),
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Parsed format specifier state.
@@ -1080,54 +1271,50 @@ fn dispatch_spec(
         // Floating-point specifiers.  `%Lf` fetches 16 bytes from the overflow
         // area (X87/X87UP is MEMORY-class), not a `double` from %xmm.
         b'f' | b'F' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
-            format_float_fixed(dst, val, ch == b'F', &spec.flags, spec.width, prec);
+            format_float_fixed(dst, arg, ch == b'F', &spec.flags, spec.width, prec);
         }
 
         b'e' | b'E' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = spec.precision.unwrap_or(6);
-            format_float_sci(dst, val, ch == b'E', &spec.flags, spec.width, prec);
+            format_float_sci(dst, arg, ch == b'E', &spec.flags, spec.width, prec);
         }
 
         b'g' | b'G' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             let prec = if spec.precision == Some(0) {
                 1
             } else {
                 spec.precision.unwrap_or(6)
             };
-            format_float_general(dst, val, ch == b'G', &spec.flags, spec.width, prec);
+            format_float_general(dst, arg, ch == b'G', &spec.flags, spec.width, prec);
         }
 
         b'a' | b'A' => {
-            let bits = if spec.long_double {
-                args.long_double()
+            let arg = if spec.long_double {
+                FloatArg::Long(args.long_double())
             } else {
-                args.double()
+                FloatArg::Double(f64::from_bits(args.double()))
             };
-            let val = f64::from_bits(bits);
             // No default precision: C99 says an absent one means "as many
             // digits as it takes to be exact", which is not any fixed number.
             format_float_hex(
                 dst,
-                val,
+                arg,
                 ch == b'A',
                 &spec.flags,
                 spec.width,
@@ -1155,11 +1342,17 @@ fn dispatch_spec(
 /// (not counting null), even if `out_size` was too small (snprintf
 /// semantics).
 fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
+    let mut dst = FmtOutput::new(out, out_size);
+    format_into(&mut dst, fmt, args)
+}
+
+/// The engine behind [`format_core`] and [`format_to_sink`]: format `fmt`
+/// into `dst`, returning the number of bytes emitted.
+fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
     if fmt.is_null() {
         return -1;
     }
 
-    let mut dst = FmtOutput::new(out, out_size);
     let mut fpos: usize = 0;
 
     loop {
@@ -1169,7 +1362,7 @@ fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -
         }
 
         if ch != b'%' {
-            emit_byte(&mut dst, ch);
+            emit_byte(dst, ch);
             fpos = fpos.wrapping_add(1);
             continue;
         }
@@ -1183,7 +1376,7 @@ fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -
 
         let spec_start = fpos;
         let spec = parse_spec(fmt, &mut fpos, args);
-        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args);
+        fpos = dispatch_spec(dst, fmt, fpos, spec_start, &spec, args);
     }
 
     dst.pos as i32
@@ -1216,12 +1409,19 @@ impl FormatFlags {
     }
 }
 
-/// Emit a single byte to the output buffer.
+/// Emit a single byte to the output buffer, handing a full buffer to its
+/// sink first if it has one.
 fn emit_byte(dst: &mut FmtOutput, byte: u8) {
-    if !dst.buf.is_null() && dst.pos < dst.size {
-        // SAFETY: dst.pos < dst.size, so buf.add(dst.pos) is valid.
-        unsafe {
-            *dst.buf.add(dst.pos) = byte;
+    if !dst.buf.is_null() {
+        let mut at = dst.pos.wrapping_sub(dst.flushed);
+        if at >= dst.size && dst.size > 0 && dst.drain() {
+            at = 0;
+        }
+        if at < dst.size && !dst.failed {
+            // SAFETY: `at < dst.size`, so `buf.add(at)` is inside the buffer.
+            unsafe {
+                *dst.buf.add(at) = byte;
+            }
         }
     }
     dst.pos = dst.pos.wrapping_add(1);
@@ -1548,108 +1748,279 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
 // Floating-point formatting
 // ---------------------------------------------------------------------------
 
+/// A floating-point conversion's argument: a `double`, or a `long double`
+/// kept in its own 80 bits (`%L`), which glibc prints at full precision --
+/// every digit of it, where this printed the value's nearest `double`
+/// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
+#[derive(Clone, Copy)]
+enum FloatArg {
+    /// A `double` (and a `float`, promoted to one).
+    Double(f64),
+    /// A `long double`: x87's 80-bit format, integer bit explicit.
+    Long(crate::x87::LongDouble),
+}
+
+impl FloatArg {
+    /// A NaN -- for a `long double`, any encoding the x87 unit rejects too,
+    /// which glibc prints as `nan` as well.
+    fn is_nan(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_nan(),
+            Self::Long(l) => l.is_nan(),
+        }
+    }
+
+    fn is_infinite(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_infinite(),
+            Self::Long(l) => l.is_infinite(),
+        }
+    }
+
+    fn is_sign_negative(self) -> bool {
+        match self {
+            Self::Double(v) => v.is_sign_negative(),
+            Self::Long(l) => l.is_sign_negative(),
+        }
+    }
+}
+
+/// The exact expansion of a finite `long double`'s magnitude: its
+/// significand times `2^(exponent - 16383 - 63)`, an exponent field of 0
+/// reading as 1 (the subnormals, and the pseudo-denormals the unit reads as
+/// their value). On the stack for a value within about a `double`'s range;
+/// `None` when the blocks one far outside it needs cannot be allocated.
+fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
+    // A 15-bit field less the bias and the significand's 63 places: no wrap.
+    let e = i32::from(l.biased_exponent().max(1)).wrapping_sub(16383 + 63);
+    Decimal::of_parts(l.significand, e)
+}
+
+/// A conversion that cannot get the memory its digits need fails, as
+/// glibc's does: the call returns -1 with `errno` `ENOMEM`.
+fn fail_no_memory(dst: &mut FmtOutput) {
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    dst.failed = true;
+}
+
+/// Run `f` with a buffer of at least `need` bytes for a float's text: on the
+/// stack when it fits `FLOAT_BUF`, as every `double`'s does, else in a block
+/// of its own -- a `long double` can have eleven thousand digits.
+fn with_float_buf(dst: &mut FmtOutput, need: usize, f: impl FnOnce(&mut FmtOutput, &mut [u8])) {
+    if need <= FLOAT_BUF {
+        let mut buf = [0u8; FLOAT_BUF];
+        f(dst, &mut buf);
+    } else if let Some(mut heap) = MallocBuf::<u8>::zeroed(need) {
+        f(dst, heap.as_mut());
+    } else {
+        fail_no_memory(dst);
+    }
+}
+
+/// Emit `nan` or `inf` -- upper-cased for `%F %E %G %A` -- signed and
+/// padded, if the argument is one; whether it was.
+fn emit_nonfinite(
+    dst: &mut FmtOutput,
+    arg: FloatArg,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+) -> bool {
+    let text: &[u8] = if arg.is_nan() {
+        if upper { b"NAN" } else { b"nan" }
+    } else if arg.is_infinite() {
+        if upper { b"INF" } else { b"inf" }
+    } else {
+        return false;
+    };
+    // glibc writes a NaN's sign too: "-nan".
+    format_float_special(dst, text, arg.is_sign_negative(), flags, width);
+    true
+}
+
+/// Bytes [`render_fixed`] writes for `dec` at `precision`, with one to spare
+/// for the point `#` may add.
+fn fixed_len<D: AsRef<[u8]> + AsMut<[u8]>>(dec: &Decimal<D>, precision: usize) -> usize {
+    let int = usize::try_from(dec.decpt()).unwrap_or(0).max(1);
+    let avail = usize::try_from(
+        i64::try_from(dec.len())
+            .unwrap_or(i64::MAX)
+            .saturating_sub(i64::from(dec.decpt())),
+    )
+    .unwrap_or(0);
+    int.saturating_add(precision.min(avail)).saturating_add(2)
+}
+
+/// Bytes [`render_scientific`] writes for `dec` at `precision` -- a digit, a
+/// point, the fraction's digits the expansion holds, and an exponent of up
+/// to five digits with its `e` and sign -- with one to spare for `#`'s point.
+fn sci_len<D: AsRef<[u8]> + AsMut<[u8]>>(dec: &Decimal<D>, precision: usize) -> usize {
+    precision
+        .min(dec.len().saturating_sub(1))
+        .saturating_add(10)
+}
+
 /// Format a floating-point value in fixed notation (%f/%F).
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn format_float_fixed(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: usize,
 ) {
-    // Handle special values.
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => fixed_from(
+            dst,
+            Decimal::new(v.abs()),
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => fixed_from(dst, dec, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
     }
+}
 
-    let abs_val = if negative { -val } else { val };
-
-    // Format into a temporary buffer.
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_fixed(abs_val, precision, &mut buf);
-
-    // C99 '#' flag: always include a decimal point, even when precision is 0.
-    if flags.alt_form && precision == 0 {
-        put(&mut buf, &mut text.len, b'.');
-        text.zeros_at = text.len;
-    }
-
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+/// `%f` of an expansion: rounded to `precision` places in the current
+/// direction, for a value of sign `negative`.
+fn fixed_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
+    dec.round_to_place_in(
+        i32::try_from(precision).unwrap_or(i32::MAX),
+        Rounding::current(),
+        negative,
+    );
+    with_float_buf(dst, fixed_len(&dec, precision), |dst, buf| {
+        let mut text = render_fixed(&dec, precision, buf);
+        // C99 '#' flag: always include a decimal point, even when precision is 0.
+        if flags.alt_form && precision == 0 {
+            put(buf, &mut text.len, b'.');
+            text.zeros_at = text.len;
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
 }
 
 /// Format a floating-point value in scientific notation (%e/%E).
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn format_float_sci(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: usize,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => sci_from(
+            dst,
+            Decimal::new(v.abs()),
+            upper,
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => sci_from(dst, dec, upper, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
     }
+}
 
-    let abs_val = if negative { -val } else { val };
-
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = fmt_scientific(abs_val, precision, upper, &mut buf);
-
-    // C99 '#' flag: always include a decimal point, even when precision is 0.
-    // Insert '.' before the 'e'/'E' exponent marker.  Precision 0 means no
-    // fraction digits were omitted, so there is nothing to keep in step.
-    if flags.alt_form && precision == 0 {
-        insert_point_before_exponent(&mut buf, &mut text);
-    }
-
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+/// `%e` of an expansion: rounded to `precision + 1` significant digits in the
+/// current direction, for a value of sign `negative`.
+#[allow(clippy::too_many_arguments)] // a conversion's four, the value's two
+fn sci_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
+    // `precision` digits after the point plus the one before it.
+    dec.round_to_significant_in(
+        i32::try_from(precision)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1),
+        Rounding::current(),
+        negative,
+    );
+    with_float_buf(dst, sci_len(&dec, precision), |dst, buf| {
+        let mut text = render_scientific(&dec, precision, upper, buf);
+        // C99 '#' flag: always include a decimal point, even when precision
+        // is 0 -- before the exponent marker.  Precision 0 means no fraction
+        // digits were omitted, so there is nothing to keep in step.
+        if flags.alt_form && precision == 0 {
+            insert_point_before_exponent(buf, &mut text);
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
 }
 
 /// Format a floating-point value in %g/%G notation.
 ///
 /// Uses %e if exponent < -4 or >= precision, else %f.
 /// Trailing zeros are removed unless `#` flag is set.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
 fn format_float_general(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: usize,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
+    let negative = arg.is_sign_negative();
+    match arg {
+        FloatArg::Double(v) => general_from(
+            dst,
+            Decimal::new(v.abs()),
+            upper,
+            flags,
+            width,
+            precision,
+            negative,
+        ),
+        FloatArg::Long(l) => match long_expansion(l) {
+            Some(dec) => general_from(dst, dec, upper, flags, width, precision, negative),
+            None => fail_no_memory(dst),
+        },
     }
+}
 
-    let abs_val = if negative { -val } else { val };
-
+/// `%g` of an expansion, for a value of sign `negative`.
+#[allow(clippy::too_many_arguments)] // a conversion's four, the value's two
+fn general_from<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dst: &mut FmtOutput,
+    mut dec: Decimal<D>,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+    negative: bool,
+) {
     // C99 7.21.6.1p8: let P be the precision, or 1 if the precision is zero.
     // The style is chosen from X, the exponent a %e conversion *would* produce
     // — that is, the exponent after rounding to P significant digits, which is
@@ -1658,144 +2029,189 @@ fn format_float_general(
     // nor the exact powers of ten.
     let p = if precision == 0 { 1 } else { precision };
     let pi = i32::try_from(p).unwrap_or(i32::MAX);
-    let mut dec = crate::decfloat::Decimal::new(abs_val);
-    dec.round_to_significant(pi);
+    dec.round_to_significant_in(pi, Rounding::current(), negative);
     let exp = if dec.is_zero() {
         0
     } else {
         dec.decpt().wrapping_sub(1)
     };
-
-    let mut buf = [0u8; FLOAT_BUF];
-    let mut text = if exp < -4 || exp >= pi {
-        // Scientific, with P-1 digits after the point.
-        render_scientific(&dec, p.wrapping_sub(1), upper, &mut buf)
+    let scientific = exp < -4 || exp >= pi;
+    // Fixed, with P-1-X digits after the point.  `dec` is already rounded to
+    // P significant digits, and `decpt + (P-1-X) == P`, so that is the same
+    // place: no second rounding is needed or wanted.
+    let fix_prec = usize::try_from(pi.saturating_sub(1).saturating_sub(exp)).unwrap_or(0);
+    let need = if scientific {
+        sci_len(&dec, p.saturating_sub(1))
     } else {
-        // Fixed, with P-1-X digits after the point.  `dec` is already rounded
-        // to P significant digits, and `decpt + (P-1-X) == P`, so that is the
-        // same place: no second rounding is needed or wanted.
-        let fix_prec = usize::try_from(pi.saturating_sub(1).saturating_sub(exp)).unwrap_or(0);
-        render_fixed(&dec, fix_prec, &mut buf)
+        fixed_len(&dec, fix_prec)
     };
-
-    // Remove trailing zeros (unless # flag).
-    if !flags.alt_form {
-        text = trim_float_text(&mut buf, text);
-    }
-
-    // C99 '#' flag for %g: always include a decimal point.
-    // When precision is low enough that the computed sub-precision is 0,
-    // fmt_fixed / fmt_scientific won't emit a '.'.  Insert one if missing.
-    if flags.alt_form {
-        let has_dot = buf.get(..text.len).is_some_and(|b| b.contains(&b'.'));
-        if !has_dot {
-            insert_point_before_exponent(&mut buf, &mut text);
+    with_float_buf(dst, need, |dst, buf| {
+        let mut text = if scientific {
+            // Scientific, with P-1 digits after the point.
+            render_scientific(&dec, p.saturating_sub(1), upper, buf)
+        } else {
+            render_fixed(&dec, fix_prec, buf)
+        };
+        // Remove trailing zeros (unless # flag).
+        if !flags.alt_form {
+            text = trim_float_text(buf, text);
         }
-    }
+        // C99 '#' flag for %g: always include a decimal point.  When the
+        // precision leaves no fraction digit, the render wrote no '.'.
+        if flags.alt_form {
+            let has_dot = buf.get(..text.len).is_some_and(|b| b.contains(&b'.'));
+            if !has_dot {
+                insert_point_before_exponent(buf, &mut text);
+            }
+        }
+        emit_float_padded(dst, buf, text, negative, flags, width);
+    });
+}
 
-    emit_float_padded(dst, &buf, text, negative, flags, width);
+/// `sprintf(buf, "%.*g", precision, val)` for this library's own callers
+/// (`gcvt`), which have a value rather than a `va_list`: the `%g` conversion
+/// of `val` into `buf`, terminated. Returns the length, less the terminator.
+///
+/// # Safety
+///
+/// `buf` has room for the conversion and its terminator -- at most 25 bytes
+/// for a precision of 17 or less.
+pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> usize {
+    let mut out = FmtOutput::new(buf, usize::MAX);
+    // `%.0g` is `%.1g`, as the dispatcher treats it.
+    let prec = if precision == 0 { 1 } else { precision };
+    format_float_general(
+        &mut out,
+        FloatArg::Double(val),
+        false,
+        &FormatFlags::new(),
+        0,
+        prec,
+    );
+    let n = out.pos;
+    // SAFETY: the caller's buffer has room for the terminator after `n`.
+    unsafe { buf.add(n).write(0) };
+    n
 }
 
 /// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).
 ///
 /// The form is `0xh.hhhhp±d`: a hex significand scaled by a power of two.
-/// Because the radix is a power of the base, *every* `double` has an exact
-/// such representation in at most 13 fraction digits — the significand is 52
-/// bits — and no rounding of any kind is involved in producing it. That is
-/// what `%a` is for: it is the only `printf` conversion guaranteed to
-/// round-trip a `double` through a short string, which is why C99 requires it
-/// and why the standard's own `strtod` must read it back.
+/// Because the radix is a power of the base, *every* value has an exact such
+/// representation -- 13 fraction digits for a `double`'s 52 bits, 15 for a
+/// `long double`'s 60 below its leading digit -- and no rounding of any kind
+/// is involved in producing it. That is what `%a` is for: it is the only
+/// `printf` conversion guaranteed to round-trip a value through a short
+/// string, which is why C99 requires it and why `strtod` must read it back.
 ///
 /// Omitting the precision asks for exactly that shortest exact form, with
 /// trailing zeros dropped. Giving one rounds the significand to that many hex
-/// digits, ties to even, and the carry can reach the leading digit — `%.0a` of
-/// `0x1.fp+0` is `0x2p+0`.
+/// digits, in the current direction, and the carry can reach the leading
+/// digit -- `%.0a` of `0x1.fp+0` is `0x2p+0`.
 ///
-/// The leading digit is `1` for a normal value and `0` for zero and the
-/// subnormals, which is how glibc writes them; a subnormal's exponent is then
-/// pinned at the format's minimum (`p-1022`) rather than normalised away.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+/// The leading digit is glibc's. For a `double` it is `1` for a normal value
+/// and `0` for zero and the subnormals, whose exponent is then pinned at the
+/// format's minimum (`p-1022`) rather than normalised away. For a `long
+/// double` it is the significand's top four bits, integer bit first -- 1.0L
+/// is `0x8p-3` -- and a carry out of it renormalises: `0xf.f8p-3` to one
+/// place is `0x1.0p+1`.
+// Hex digits and bit positions: shifts of at most 60 and counts of at most
+// 15, which clippy cannot see bounded.
+#[allow(clippy::arithmetic_side_effects)]
 fn format_float_hex(
     dst: &mut FmtOutput,
-    val: f64,
+    arg: FloatArg,
     upper: bool,
     flags: &FormatFlags,
     width: usize,
     precision: Option<usize>,
 ) {
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        format_float_special(dst, s, false, flags, width);
+    if emit_nonfinite(dst, arg, upper, flags, width) {
         return;
     }
-    let negative = val.is_sign_negative();
-    if val.is_infinite() {
-        let s = if upper { b"INF" } else { b"inf" };
-        format_float_special(dst, s, negative, flags, width);
-        return;
-    }
+    let negative = arg.is_sign_negative();
 
-    /// Fraction bits in an `f64` significand.
-    const FRAC_BITS: u32 = 52;
-    /// Hex digits those bits make: 52 / 4, exactly.
-    const HEX_DIGITS: usize = 13;
-
-    let bits = if negative {
-        (-val).to_bits()
-    } else {
-        val.to_bits()
+    // The leading digit, the fraction below it and how many bits that is, and
+    // the power of two.
+    let (mut lead, frac, frac_bits, mut exp2): (u64, u64, u32, i32) = match arg {
+        FloatArg::Double(v) => {
+            let bits = v.abs().to_bits();
+            let exp_field = (bits >> 52) & 0x7ff;
+            let mant = bits & ((1u64 << 52) - 1);
+            if exp_field == 0 {
+                // Zero prints as `0x0p+0`; a subnormal keeps the minimum
+                // exponent instead of being normalised, so its digits show
+                // where it sits in the subnormal range.
+                (0, mant, 52, if mant == 0 { 0 } else { -1022 })
+            } else {
+                (
+                    1,
+                    mant,
+                    52,
+                    i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023),
+                )
+            }
+        }
+        FloatArg::Long(l) => {
+            let m = l.significand;
+            let e = i32::from(l.biased_exponent().max(1)) - 16383 - 3;
+            (
+                m >> 60,
+                m & ((1u64 << 60) - 1),
+                60,
+                if m == 0 { 0 } else { e },
+            )
+        }
     };
-    let exp_field = (bits >> FRAC_BITS) & 0x7ff;
-    let mant = bits & ((1u64 << FRAC_BITS) - 1);
-
-    // The leading digit and the power of two, before any rounding.
-    let (mut lead, exp2) = if exp_field == 0 {
-        // Zero prints as `0x0p+0`; a subnormal keeps the minimum exponent
-        // instead of being normalised, so its digits show where it sits in
-        // the subnormal range.
-        (0u64, if mant == 0 { 0i32 } else { -1022 })
-    } else {
-        (
-            1u64,
-            i32::try_from(exp_field).unwrap_or(0).wrapping_sub(1023),
-        )
-    };
+    let long = matches!(arg, FloatArg::Long(_));
+    // Hex digits the fraction makes: 13 or 15, exactly.
+    let hex_digits = (frac_bits / 4) as usize;
 
     // Fraction digits, rounded to `precision` if one was given.  `kept` holds
     // them right-aligned, `digits` says how many there are and `pad` how many
-    // further zeros the precision asks for beyond the 13 that can differ.
+    // further zeros the precision asks for beyond those that can differ.
     let (kept, digits, pad) = match precision {
-        Some(p) if p < HEX_DIGITS => {
-            let dropped = FRAC_BITS - (u32::try_from(p).unwrap_or(0) * 4);
-            let keep = mant >> dropped;
-            let rest = mant & ((1u64 << dropped) - 1);
+        Some(p) if p < hex_digits => {
+            let p32 = u32::try_from(p).unwrap_or(0);
+            let dropped = frac_bits - p32 * 4;
+            let keep = frac >> dropped;
+            let rest = frac & ((1u64 << dropped) - 1);
             let half = 1u64 << (dropped - 1);
-            // Ties to even, matching every other rounding in this library.
-            // "Even" is a property of the last *retained* digit, which at
-            // precision 0 is the leading one and not part of `keep` at all:
-            // `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie whose leading `1` is
-            // odd, so it rounds to `0x2p+1`.
+            // In the current rounding direction, as glibc: to nearest, ties
+            // to even, where "even" is a property of the last *retained*
+            // digit, which at precision 0 is the leading one and not part of
+            // `keep` at all -- `%.0a` of 3.0 (`0x1.8p+1`) is an exact tie
+            // whose leading `1` is odd, so it rounds to `0x2p+1`.
             let last = if p == 0 { lead } else { keep };
-            let round_up = rest > half || (rest == half && (last & 1) == 1);
+            let round_up = Rounding::current().rounds_up(
+                negative,
+                last & 1 == 1,
+                crate::decfloat::Cut::of_part(rest, half),
+            );
             let mut keep = keep;
             if round_up {
                 keep = keep.wrapping_add(1);
-                if keep >> (u32::try_from(p).unwrap_or(0) * 4) != 0 {
-                    // The carry left the fraction: it lands on the leading
-                    // digit, which C leaves as `2` rather than renormalising.
+                if keep >> (p32 * 4) != 0 {
+                    // The carry left the fraction and lands on the leading
+                    // digit: a `double`'s becomes `2`, as C has it, and a
+                    // `long double`'s, carried past `f`, is renormalised.
                     keep = 0;
                     lead = lead.wrapping_add(1);
+                    if long && lead == 16 {
+                        lead = 1;
+                        exp2 = exp2.wrapping_add(4);
+                    }
                 }
             }
             (keep, p, 0usize)
         }
-        Some(p) => (mant, HEX_DIGITS, p.wrapping_sub(HEX_DIGITS)),
-        None if mant == 0 => (0, 0, 0usize),
+        Some(p) => (frac, hex_digits, p.wrapping_sub(hex_digits)),
+        None if frac == 0 => (0, 0, 0usize),
         None => {
-            // Shortest exact form: drop whole trailing zero digits.  `mant` is
-            // 52 bits and nonzero here, so at most 12 of the 13 can go.
-            let zero_digits = (mant.trailing_zeros() / 4) as usize;
-            (mant >> (zero_digits * 4), HEX_DIGITS - zero_digits, 0usize)
+            // Shortest exact form: drop whole trailing zero digits.  `frac`
+            // is nonzero here, so at least one digit stays.
+            let zero_digits = (frac.trailing_zeros() / 4) as usize;
+            (frac >> (zero_digits * 4), hex_digits - zero_digits, 0usize)
         }
     };
 
@@ -1810,7 +2226,7 @@ fn format_float_hex(
     put(
         &mut buf,
         &mut pos,
-        hex.get(lead as usize % 16).copied().unwrap_or(b'0'),
+        hex.get((lead % 16) as usize).copied().unwrap_or(b'0'),
     );
 
     if digits > 0 || pad > 0 || flags.alt_form {
@@ -2044,17 +2460,14 @@ struct FloatText {
     zeros: usize,
 }
 
-/// Format a non-negative, finite `f64` in fixed notation into `buf`.
-fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> FloatText {
-    let mut dec = crate::decfloat::Decimal::new(val);
-    dec.round_to_place(i32::try_from(precision).unwrap_or(i32::MAX));
-    render_fixed(&dec, precision, buf)
-}
-
 /// Write an already-rounded expansion as `III.FFF` with exactly `precision`
 /// fraction digits.
 #[allow(clippy::arithmetic_side_effects)]
-fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]) -> FloatText {
+fn render_fixed<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dec: &Decimal<D>,
+    precision: usize,
+    buf: &mut [u8],
+) -> FloatText {
     let decpt = dec.decpt();
     let mut pos = 0usize;
 
@@ -2096,22 +2509,10 @@ fn render_fixed(dec: &crate::decfloat::Decimal, precision: usize, buf: &mut [u8]
     }
 }
 
-/// Format a non-negative, finite `f64` in scientific notation into `buf`.
-fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> FloatText {
-    let mut dec = crate::decfloat::Decimal::new(val);
-    // `precision` digits after the point plus the one before it.
-    dec.round_to_significant(
-        i32::try_from(precision)
-            .unwrap_or(i32::MAX)
-            .saturating_add(1),
-    );
-    render_scientific(&dec, precision, upper, buf)
-}
-
 /// Write an already-rounded expansion as `D.FFFe+XX`.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn render_scientific(
-    dec: &crate::decfloat::Decimal,
+fn render_scientific<D: AsRef<[u8]> + AsMut<[u8]>>(
+    dec: &Decimal<D>,
     precision: usize,
     upper: bool,
     buf: &mut [u8],
@@ -2143,20 +2544,21 @@ fn render_scientific(
 
     put(buf, &mut pos, if upper { b'E' } else { b'e' });
     put(buf, &mut pos, if exp < 0 { b'-' } else { b'+' });
-    // An `f64` exponent never leaves [-323, 308], so three digits is the most
-    // that can be needed and the leading one is always in range.
+    // At least two digits, as C requires; a `double`'s exponent needs at most
+    // three, a `long double`'s four.
     let abs_exp = exp.unsigned_abs();
-    debug_assert!(abs_exp < 1000, "decimal exponent out of f64 range");
-    if abs_exp >= 100 {
-        put(buf, &mut pos, b'0'.wrapping_add((abs_exp / 100) as u8));
+    let mut place = 1u32;
+    while place <= abs_exp / 10 || place < 10 {
+        place *= 10;
     }
-    // C requires at least two exponent digits.
-    put(
-        buf,
-        &mut pos,
-        b'0'.wrapping_add(((abs_exp / 10) % 10) as u8),
-    );
-    put(buf, &mut pos, b'0'.wrapping_add((abs_exp % 10) as u8));
+    while place > 0 {
+        put(
+            buf,
+            &mut pos,
+            b'0'.wrapping_add(((abs_exp / place) % 10) as u8),
+        );
+        place /= 10;
+    }
 
     FloatText {
         len: pos,
@@ -2827,6 +3229,63 @@ mod tests {
     // -----------------------------------------------------------------------
     // 15. format_core with null format
     // -----------------------------------------------------------------------
+
+    /// Output longer than the stack buffer reaches the sink whole, in
+    /// order.  Until 2026-09-26 `printf`/`fprintf`/`dprintf` wrote only the
+    /// first 4096 bytes and returned the full count.
+    #[test]
+    fn format_to_sink_streams_past_the_buffer() {
+        let long: std::vec::Vec<u8> = (0..10_000u32)
+            .map(|i| b'a' + (i % 26) as u8)
+            .chain([0])
+            .collect();
+        for fmt in [b"%s\0".as_slice(), b"<%s>\0".as_slice()] {
+            let mut out = std::vec::Vec::new();
+            let n = with_args(&[long.as_ptr() as u64], &[], |a| {
+                format_to_sink(Sink::Capture(&raw mut out), fmt.as_ptr(), a)
+            });
+            let body = &long[..10_000];
+            let want: std::vec::Vec<u8> = if fmt.len() == 3 {
+                body.to_vec()
+            } else {
+                [b"<".as_slice(), body, b">".as_slice()].concat()
+            };
+            assert_eq!(n as usize, want.len());
+            assert_eq!(out, want);
+        }
+    }
+
+    /// Exactly one buffer's worth, and one byte more: the boundary cases of
+    /// the flush.
+    #[test]
+    fn format_to_sink_at_the_buffer_boundary() {
+        for len in [
+            PRINTF_BUF_SIZE - 1,
+            PRINTF_BUF_SIZE,
+            PRINTF_BUF_SIZE + 1,
+            2 * PRINTF_BUF_SIZE,
+        ] {
+            let text: std::vec::Vec<u8> = std::iter::repeat_n(b'x', len).chain([0]).collect();
+            let mut out = std::vec::Vec::new();
+            let n = with_args(&[text.as_ptr() as u64], &[], |a| {
+                format_to_sink(Sink::Capture(&raw mut out), b"%s\0".as_ptr(), a)
+            });
+            assert_eq!(n as usize, len, "len {len}");
+            assert_eq!(out.len(), len, "len {len}");
+        }
+    }
+
+    /// A bounded buffer is unchanged: it counts past its end and drops the
+    /// rest, which is `snprintf`'s contract.
+    #[test]
+    fn bounded_output_still_counts_and_drops() {
+        let mut buf = [0u8; 4];
+        let n = with_args(&[], &[], |a| {
+            format_core(buf.as_mut_ptr(), 4, b"abcdefgh\0".as_ptr(), a)
+        });
+        assert_eq!(n, 8);
+        assert_eq!(&buf, b"abcd");
+    }
 
     #[test]
     fn format_core_null_fmt() {
@@ -3673,6 +4132,188 @@ mod tests {
             .to_string()
     }
 
+    /// The one argument a conversion-oracle line formats.
+    #[derive(Clone, Copy)]
+    enum ConvArg {
+        /// A `double`, by its bits: passed in the first vector register.
+        Double(u64),
+        /// A `long double`, as its sign-and-exponent word and significand:
+        /// passed in the overflow area, 16-byte aligned, as the ABI has it.
+        Long(u16, u64),
+    }
+
+    /// `fmt` with its one argument, through `vsnprintf`, into a buffer big
+    /// enough for any line of the conversion oracle.
+    fn conv_format(fmt: &[u8], arg: ConvArg) -> String {
+        #[repr(align(16))]
+        struct Overflow([u8; 64]);
+        let mut reg = [0u8; 176];
+        let mut overflow = Overflow([0u8; 64]);
+        match arg {
+            ConvArg::Double(bits) => reg[48..56].copy_from_slice(&bits.to_le_bytes()),
+            ConvArg::Long(se, m) => {
+                overflow.0[..8].copy_from_slice(&m.to_le_bytes());
+                overflow.0[8..10].copy_from_slice(&se.to_le_bytes());
+            }
+        }
+        let mut va = VaList {
+            gp_offset: 48,
+            fp_offset: 48,
+            overflow_arg_area: overflow.0.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        let mut buf = std::vec![0u8; 32768];
+        // SAFETY: `va` describes the buffers above, which hold the one
+        // argument `fmt` asks for; `buf` is as long as it says.
+        let n = unsafe { vsnprintf(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &mut va) };
+        let n = usize::try_from(n).expect("vsnprintf failed");
+        assert!(n < buf.len(), "output truncated");
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// The four rounding directions, in the oracle's order.
+    const ORACLE_MODES: [i32; 4] = [
+        crate::fenv::FE_TONEAREST,
+        crate::fenv::FE_UPWARD,
+        crate::fenv::FE_DOWNWARD,
+        crate::fenv::FE_TOWARDZERO,
+    ];
+
+    /// The oracle's lines where glibc 2.39 is wrong: `(format, value bits,
+    /// the standard's answer)`, which this library gives.
+    ///
+    /// `%#.3g` of 999.5 rounds to 1000, whose `%e` exponent is 3, so C99
+    /// 7.21.6.1 makes it `%e` with precision P - 1 = 2 -- and `#` keeps the
+    /// trailing zeros: "1.00e+03". glibc sizes the fraction from the
+    /// exponent before the rounding carried, and prints "1.e+03", one
+    /// significant digit where three were asked for (in both rounding modes
+    /// that carry).
+    const GLIBC_PRINTF_BUGS: &[(usize, &str, u64, &str)] = &[
+        (0, "%#.3g", 0x408f_3c00_0000_0000, "1.00e+03"),
+        (1, "%#.3g", 0x408f_3c00_0000_0000, "1.00e+03"),
+    ];
+
+    /// [`GLIBC_PRINTF_BUGS`] for a `long double`, whose `%#.3Lg` of 999.5 --
+    /// `(sign-and-exponent, significand)` -- glibc gets wrong the same way.
+    const GLIBC_PRINTF_BUGS_L: &[(usize, &str, (u16, u64), &str)] = &[
+        (0, "%#.3Lg", (0x4008, 0xf9e0_0000_0000_0000), "1.00e+03"),
+        (1, "%#.3Lg", (0x4008, 0xf9e0_0000_0000_0000), "1.00e+03"),
+    ];
+
+    /// glibc 2.39's `printf` of a `double`, every conversion the oracle asks
+    /// for, in each of the four rounding directions
+    /// (`posix/tools/oracle/conv_harness.py`): glibc rounds the digits it
+    /// prints in the current direction, and so does this.
+    #[test]
+    fn printf_of_a_double_answers_as_glibc_does_in_every_rounding_mode() {
+        let mut bad = Vec::new();
+        let mut per_mode = [0usize; 4];
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("p "))
+        {
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[2] != "d" {
+                continue;
+            }
+            let mode: usize = w[1].parse().unwrap();
+            let mut fmt = unhex(w[3]);
+            fmt.push(0);
+            let bits = u64::from_str_radix(w[4], 16).unwrap();
+            let mut want = &rhs[1..rhs.len() - 1];
+            // Where glibc is wrong, the standard's answer instead.
+            if let Some(&(_, _, _, right)) = GLIBC_PRINTF_BUGS.iter().find(|&&(m, f, b, _)| {
+                m == mode && f.as_bytes() == &fmt[..fmt.len() - 1] && b == bits
+            }) {
+                want = right;
+            }
+            assert_eq!(crate::fenv::fesetround(ORACLE_MODES[mode]), 0);
+            let got = conv_format(&fmt, ConvArg::Double(bits));
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            calls += 1;
+            if got != want {
+                per_mode[mode] += 1;
+                bad.push((mode, format!("{line}\n    ours [{got}]")));
+            }
+        }
+        // Round-to-nearest first: it is the mode almost every program runs in.
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(calls > 10_000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.clone())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// glibc 2.39's `printf` of a `long double` -- every `%L` conversion the
+    /// oracle asks for, of values across the whole 80-bit range and the
+    /// encodings the x87 unit rejects, in each of the four rounding
+    /// directions: all 64 bits of the significand, printed exactly.
+    #[test]
+    fn printf_of_a_long_double_answers_as_glibc_does_in_every_rounding_mode() {
+        let mut bad = Vec::new();
+        let mut per_mode = [0usize; 4];
+        let mut calls = 0;
+        for line in crate::decfloat::CONV_ORACLE
+            .lines()
+            .filter(|l| l.starts_with("p "))
+        {
+            let (lhs, rhs) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            if w[2] != "l" {
+                continue;
+            }
+            let mode: usize = w[1].parse().unwrap();
+            let mut fmt = unhex(w[3]);
+            fmt.push(0);
+            let (se, m) = w[4].split_once(':').unwrap();
+            let se = u16::from_str_radix(se, 16).unwrap();
+            let m = u64::from_str_radix(m, 16).unwrap();
+            let mut want = &rhs[1..rhs.len() - 1];
+            // Where glibc is wrong, the standard's answer instead.
+            if let Some(&(_, _, _, right)) = GLIBC_PRINTF_BUGS_L.iter().find(|&&(md, f, v, _)| {
+                md == mode && f.as_bytes() == &fmt[..fmt.len() - 1] && v == (se, m)
+            }) {
+                want = right;
+            }
+            assert_eq!(crate::fenv::fesetround(ORACLE_MODES[mode]), 0);
+            let got = conv_format(&fmt, ConvArg::Long(se, m));
+            assert_eq!(crate::fenv::fesetround(crate::fenv::FE_TONEAREST), 0);
+            calls += 1;
+            if got != want {
+                per_mode[mode] += 1;
+                bad.push((mode, format!("{line}\n    ours [{got}]")));
+            }
+        }
+        bad.sort_by_key(|(m, _)| *m);
+        assert!(calls > 10_000, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ (by mode {per_mode:?}):\n{}",
+            bad.len(),
+            bad.iter()
+                .take(60)
+                .map(|(_, s)| s.chars().take(400).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
     #[test]
     fn vsnprintf_long_double_basic() {
         // `%Lf` must consume a 16-byte x87 slot from the overflow area, not
@@ -4218,6 +4859,84 @@ mod tests {
             vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
         });
         (from_wide(&buf), n)
+    }
+
+    /// `vfwprintf`'s refusals, which happen before anything reaches the
+    /// stream (its success path writes to a real stream, and is checked at
+    /// ring 3 by services/ctest-printf-streams).
+    #[test]
+    fn vfwprintf_refuses_before_writing() {
+        static WRITES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        unsafe extern "C" fn count_write(
+            _: *mut core::ffi::c_void,
+            _: *const u8,
+            n: usize,
+        ) -> isize {
+            WRITES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            n as isize
+        }
+        let f = wide("x=%s");
+        // A stream whose far end must never be reached: every case below
+        // fails before the write.
+        let io = crate::stdio::CookieIoFunctions {
+            read: None,
+            write: Some(count_write),
+            seek: None,
+            close: None,
+        };
+        let stream =
+            unsafe { crate::stdio::fopencookie(core::ptr::null_mut(), c"w".as_ptr().cast(), io) };
+        assert!(!stream.is_null());
+        crate::errno::set_errno(0);
+        let n = with_valist(&[0], &[], |ap| unsafe {
+            vfwprintf(core::ptr::null_mut(), f.as_ptr(), ap)
+        });
+        assert_eq!(
+            (n, crate::errno::get_errno()),
+            (-1, crate::errno::EBADF),
+            "NULL is no stream (§1120)"
+        );
+        let n = with_valist(&[0], &[], |_| unsafe {
+            vfwprintf(stream, f.as_ptr(), core::ptr::null_mut())
+        });
+        assert_eq!(n, -1);
+        // A %s argument that is not valid UTF-8: EILSEQ, nothing written.
+        let broken = b"\xC3(\0";
+        crate::errno::set_errno(0);
+        let n = with_valist(&[broken.as_ptr() as u64], &[], |ap| unsafe {
+            vfwprintf(stream, f.as_ptr(), ap)
+        });
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
+        // An unencodable character in the format itself.
+        let bad_fmt = [0xD800 as crate::wchar::WcharT, 0];
+        crate::errno::set_errno(0);
+        let n = with_valist(&[], &[], |ap| unsafe {
+            vfwprintf(stream, bad_fmt.as_ptr(), ap)
+        });
+        assert_eq!((n, crate::errno::get_errno()), (-1, crate::errno::EILSEQ));
+        assert_eq!(crate::stdio::fclose(stream), 0);
+        assert_eq!(
+            WRITES.load(core::sync::atomic::Ordering::Relaxed),
+            0,
+            "nothing reached the far end"
+        );
+    }
+
+    /// The buffer need not be zeroed. `format_core` does not terminate what it
+    /// writes, and vswprintf used to read the formatted bytes as a string
+    /// without terminating them, so every test here -- all on `vec![0; ..]`
+    /// buffers -- passed while a caller's uninitialised buffer failed.
+    #[test]
+    fn vswprintf_does_not_rely_on_a_zeroed_buffer() {
+        let f = wide("n=%d");
+        for cap in [5usize, 6, 64] {
+            let mut buf = vec![0x5555 as crate::wchar::WcharT; 64];
+            let n = with_valist(&[42], &[], |ap| unsafe {
+                vswprintf(buf.as_mut_ptr(), cap, f.as_ptr(), ap)
+            });
+            assert_eq!(n, 4, "cap {cap}");
+            assert_eq!(from_wide(&buf), "n=42", "cap {cap}");
+        }
     }
 
     #[test]

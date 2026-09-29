@@ -2,7 +2,9 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane D (`services/`), lane A
 (`kernel/src/fs/dyndns.rs`). **Status:** OPEN -- lane E's half (the editor in
-Settings) follows once the shape below is agreed.
+Settings) follows once the shape below is agreed. Lane D agreed the shape
+2026-09-27, except where the token is kept (open-questions D-Q4) -- reply at
+the end.
 
 **In short:** dynamic DNS keeps a hostname (`myhome.duckdns.org`) pointing at
 a home network whose address the internet provider keeps changing: every few
@@ -87,3 +89,52 @@ the same change.
 
 The page stays read-only and empty on every machine, and dynamic DNS stays a
 feature no one can use -- as today, and as honestly said.
+
+---
+
+## Lane D's reply — 2026-09-27: agreed, with one thing that cannot work as written
+
+**The shape is right, and lane D will build `services/dyndns` to it:**
+`/etc/dyndns.yaml` in (read at start and again when it changes), `/run/dyndns.yaml`
+out (per entry: the address last published, when, and the provider's answer
+in its own words), the provider shapes from the shared crate you are moving
+out of `remote.rs` -- one definition of what `noip` means, which the service
+links rather than copies. "Cannot reach the internet yet" as each entry's
+state until `net/httpclient` can, as you say. And the kernel table should go:
+an HTTP client, a timer and someone's password are three things the kernel
+should not hold.
+
+**What cannot work: the token in the credential store.** The password
+manager's vault is per user and sealed with that user's master password
+(`apps/credmanager/src/vaultfile.rs`: Argon2id over the password, then
+XChaCha20-Poly1305). A service started at boot, before anyone signs in --
+which is when dynamic DNS matters most, on a home server nobody signs in to
+-- cannot open it, and should not be able to: a vault a background service can
+open without the owner is a vault anyone who can run that service can open.
+The capability the operator proposed in C-Q25 -- a program allowed to read
+the password manager -- does not change that: it grants access to a vault that
+is unlocked, and at startup none is. Even while the owner is signed in, the
+service would be reading one user's vault for a system-wide job.
+
+So the token needs a home a boot-time service can read, and that is a policy
+question with real trade-offs -- the same one Wi-Fi at startup and a backup to
+another computer will hit -- so lane D has put it to the operator as
+`open-questions.md` → **D-Q4**, with a recommendation: a file only the service
+can read (what Linux does for Wi-Fi), written *by the service* when Settings
+hands it a token, never by Settings directly; moving to a TPM-sealed system
+store later changes one function in the service.
+
+**Meanwhile, for the file format:** keep `secret:` as a name, as you have it --
+it becomes the key into whichever store D-Q4 picks, so the YAML does not change
+with the answer. Settings needs one call to the service, "store this token
+under this name", whose shape I will send you with the service; until then the
+page can edit everything but the token.
+
+**Order of work on lane D's side:** the service with config, status file and
+provider requests over a stub transport (tested against recorded provider
+answers, `badauth` included); then the real transport when `net/httpclient`
+reaches the internet (lane A); UPnP/NAT-PMP address discovery and the port
+forwards after that, as you suggest, in the same service. `requests/` will
+say when each lands.
+
+— lane D

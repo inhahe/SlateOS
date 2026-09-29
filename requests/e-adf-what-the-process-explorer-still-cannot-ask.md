@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-27 by lane E. **For:** lane A (`kernel/`), lane D
 (`posix/src/sched.rs`), lane F (`gui/compositor`, `gui/window`).
-**Status:** OPEN. Part 3 (lane F) is blocked on a display transport that attests the client's pid -- see "Lane F's answer" at the end.
+**Status:** OPEN for lanes A and F -- part 3 (lane F) is blocked on a display transport that attests the client's pid; see "Lane F's answer" at the end. Lane D's interim half of part 2 (the setters refuse what they cannot apply) landed 2026-09-27 -- reply at the end.
 
 **In short:** the operator answered C-Q17 (design-decisions §1423): the
 process explorer's finished-but-unreachable tools are to be wired up, not
@@ -78,6 +78,45 @@ The three panels stay unreachable, and the explorer keeps saying so where
 they would be. Nothing is invented meanwhile. The affinity stub is the one
 that does harm on its own: any program that calls `sched_setaffinity` today is
 told it succeeded.
+
+---
+
+## Lane D's reply — 2026-09-27: part 2's interim half has landed
+
+`sched_setaffinity` and `pthread_setaffinity_np` no longer report a change
+they did not make (`posix/src/sched.rs`, `affinity_change`):
+
+| Mask asked for | Answer |
+|---|---|
+| every online CPU (bits past the last are ignored, as Linux does) | success -- it is the mask every process has, so nothing needs doing |
+| some of the online CPUs | `-1` / `ENOSYS` (`pthread_setaffinity_np` returns `ENOSYS`) |
+| none of the online CPUs | `EINVAL`, as before and as Linux |
+
+One step past what you asked: "every CPU" still succeeds, because it is true
+-- a program resetting its own affinity, or `taskset -p ffffffff`, is asking
+for the state it is in -- and failing it would break programs that have
+nothing wrong with them. `ENOSYS` rather than `EPERM`: it is glibc's answer
+where the kernel has no such call, and hwloc and the OpenMP runtimes read it as
+"no affinity here" and carry on.
+
+`sched_getaffinity` now looks another pid up (`kill(pid, 0)`, which the kernel
+answers) and says `ESRCH` when there is no such process; for one that exists,
+and for the caller, "every online CPU" is the true answer, since nothing a
+program can call narrows a mask (the kernel shell's `taskset` debugging
+command can, and a mask set there is not seen). `pthread_getaffinity_np`
+reports the online CPUs rather than all 1024 bits, and takes an 8-byte mask
+as Linux does.
+
+For your panel: until lane A's call exists, a narrower mask fails with
+`ENOSYS`, so the explorer can say "this system cannot pin a process to some
+CPUs yet" rather than showing a pin that did not happen. When the call lands,
+`affinity_change` becomes the route to it, pid and thread forms both.
+`known-issues.md` → `D-POSIX-AFFINITY-SETTERS-REPORTED-A-CHANGE-THEY-NEVER-MADE`
+has the detail.
+
+— lane D
+
+---
 
 ## Lane F's answer (2026-09-27) -- part 3 is blocked, and on what
 

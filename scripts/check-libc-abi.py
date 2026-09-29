@@ -39,26 +39,60 @@ The third check is a ratchet, not a wall.  `BASELINE_UNCOVERED` below is the
 set that was already uncovered when this gate was written; each name removed
 from it is one more type checked, and nothing may be added.
 
+The numbers, too
+----------------
+
+Since 2026-09-27 the gate checks the other half of what a C caller shares with
+the library: its numbers -- every flag, error code and item number
+(design-decisions.md section 1119).  An audit that day found 83 of the
+library's constants disagreeing with musl's headers.  `nl_langinfo(CODESET)`
+answered "Sun": the library's `CODESET` was glibc's item number, a program's
+was musl's, and each side was right about its own header.  The audit was a
+one-off; this keeps it true.  Three more programs, again with no number typed
+by a human:
+
+4. rustdoc's JSON output lists every public constant of `posix` with the
+   value the compiler evaluated -- `1 << 4` arrives as `16i32` -- built for
+   the SlateOS target, so a `cfg` there is honoured and no Python re-reads a
+   Rust expression.
+5. `zig cc -dM -E` over musl's headers lists the macros they define; a
+   constant whose name is one of them is a number a caller shares with the
+   library.  The kernel's headers (`linux/...`) answer, in a unit of their
+   own, only for names musl's lack: in one unit `linux/limits.h` would
+   redefine musl's `NGROUPS_MAX`.
+6. A `_Static_assert` per pair compares the two in the bits both have -- the
+   Rust type's width and the C expression's.  So musl's `(1<<31)`, an `int`
+   sign-extended on its way to an `unsigned long`, agrees with a Rust `u64` of
+   bit 31, and a signed Rust `WEOF` with musl's unsigned one.
+
+The list is derived, never kept: a constant added tomorrow is checked from its
+first push.  `KNOWN_DIFFERENT` holds section 1119's deliberate differences and
+`NOT_CONSTANT_IN_MUSL` the macros that call a function; both are ratchets that
+fail when an entry stops being true.
+
 Usage
 -----
 
     python scripts/check-libc-abi.py            # the gate
     python scripts/check-libc-abi.py --self-test
     python scripts/check-libc-abi.py --print-uncovered   # to shrink the baseline
+    python scripts/check-libc-abi.py --list-constants    # every pair checked
 
-Exit codes: 0 pass (or skipped for want of zig), 1 a layout or coverage
-failure, 2 the checker could not run.
+Exit codes: 0 pass (or skipped for want of zig), 1 a layout, coverage or
+constant failure, 2 the checker could not run.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -453,6 +487,8 @@ def self_test() -> int:
         KNOWN_MISMATCH.clear()
         KNOWN_MISMATCH.update(probe)
 
+    failures.extend(constants_self_test())
+
     for f in failures:
         print(f"check-libc-abi --self-test: FAIL: {f}")
     if failures:
@@ -494,10 +530,498 @@ def stale_no_oracle(zig: str, table: dict | None = None) -> list[str]:
     return out
 
 
+# ===========================================================================
+# The numbers: every public constant whose name musl's headers define
+# (design-decisions.md section 1119).  See "The numbers, too" above.
+# ===========================================================================
+
+POSIX_DIR = REPO / "posix"
+LIBC_SPEC = POSIX_DIR / "x86_64-slateos-libc.json"
+
+# The headers whose macros are the oracle: the 2026-09-27 audit's list, which
+# is every header a module of the library answers for.  The headers
+# `abi_layout.rs` names are added at run time (`constant_headers()`), so a
+# header the layout half learns about reaches this half too.
+CONSTANT_HEADERS = """
+stdio.h stdlib.h stddef.h unistd.h fcntl.h errno.h signal.h termios.h
+sys/ioctl.h sys/socket.h netinet/in.h netinet/tcp.h netinet/udp.h arpa/inet.h
+netdb.h sys/stat.h sys/mman.h sys/wait.h sys/resource.h sys/time.h time.h
+sys/select.h poll.h sys/epoll.h sys/eventfd.h sys/signalfd.h sys/timerfd.h
+sys/inotify.h sys/prctl.h sys/ptrace.h sys/reboot.h sys/personality.h
+sys/random.h sys/xattr.h sys/statvfs.h sys/vfs.h sys/mount.h sys/swap.h
+sys/sysinfo.h sys/utsname.h sys/uio.h sys/un.h sys/sendfile.h sys/file.h
+sys/klog.h sys/quota.h sys/sem.h sys/shm.h sys/msg.h sys/ipc.h mqueue.h
+semaphore.h pthread.h sched.h spawn.h dlfcn.h locale.h langinfo.h iconv.h
+wchar.h wctype.h ctype.h limits.h float.h stdint.h fnmatch.h glob.h regex.h
+wordexp.h ftw.h getopt.h syslog.h pwd.h grp.h shadow.h utmpx.h utmp.h
+paths.h sysexits.h err.h search.h aio.h ifaddrs.h net/if.h sys/auxv.h
+elf.h link.h sys/fsuid.h sys/timex.h sys/times.h utime.h sys/sysmacros.h
+stdio_ext.h malloc.h sys/membarrier.h
+""".split()
+
+# Section 1119's table: where this library's number is deliberately not
+# musl's.  Keyed by name; every module's constant of that name is exempt.
+# Each entry must keep differing -- `check_constants` refuses one that agrees.
+KNOWN_DIFFERENT: dict[str, str] = {
+    "FD_SETSIZE":
+        "256 here, 1024 in musl: a policy limit, the fd table's size; the "
+        "fd_set layout is musl's 1024 bits (FD_SET_BITS, section 1011)",
+    "PAGE_SIZE":
+        "16384 here, 4096 in musl: this kernel's pages are 16 KiB; a port that "
+        "uses the macro instead of sysconf(_SC_PAGESIZE) is wrong here whatever "
+        "the library says",
+    "SHMLBA":
+        "16384 here, 4096 in musl: SysV segments attach on this kernel's 16 KiB "
+        "pages, as PAGE_SIZE",
+    "ARG_MAX":
+        "2 MiB here, 128 KiB in musl: the kernel's real limit (Linux's); musl's "
+        "header states its own",
+    "HOST_NAME_MAX":
+        "64 here, 255 in musl: the kernel's real limit (Linux's)",
+    "NGROUPS_MAX":
+        "65536 here, 32 in musl: the kernel's real limit (Linux's)",
+    "MAXQUOTAS":
+        "3 here, 2 in musl: the kernel has project quotas; musl's header "
+        "predates them",
+    "O_ACCMODE":
+        "3 here; musl folds O_SEARCH into the access mode (3|O_PATH): the "
+        "library's own masking is glibc's",
+}
+
+# musl macros that call a function, which no `_Static_assert` can evaluate.
+# The function is this library's, which is what makes the value right: name it
+# and say what it answers.  Each entry must stay a call.
+NOT_CONSTANT_IN_MUSL: dict[str, str] = {
+    "SIGRTMIN":
+        "musl: (__libc_current_sigrtmin()), which is this library's and "
+        "answers 32 (section 1119)",
+    "SIGRTMAX":
+        "musl: (__libc_current_sigrtmax()), which is this library's and "
+        "answers 64",
+    "MB_CUR_MAX":
+        "musl: (__ctype_get_mb_cur_max()), which is this library's and "
+        "answers 4 (section 1119)",
+}
+
+INT_BITS = {
+    "i8": 8, "u8": 8, "i16": 16, "u16": 16, "i32": 32, "u32": 32,
+    "i64": 64, "u64": 64, "isize": 64, "usize": 64,
+}
+FLOATS = ("f32", "f64")
+VALUE_RE = re.compile(
+    r"^(?P<num>-?[0-9_]+(?:\.[0-9_]+)?(?:[eE][+-]?[0-9]+)?)"
+    r"(?P<ty>i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64)$"
+)
+
+
+@dataclass(frozen=True)
+class Const:
+    """One public numeric constant of the crate."""
+
+    module: str  # "socket", "stdio::ext", ...
+    name: str
+    ty: str      # the Rust primitive
+    value: int | float
+
+    @property
+    def label(self) -> str:
+        return f"{self.module}::{self.name}" if self.module else self.name
+
+
+def parse_value(text: str) -> tuple[int | float, str] | None:
+    """rustdoc's rendering of an evaluated constant --
+    `18_446_744_073_709_551_615u64`, `-5i32`, `1.5f64` -- as (value, type);
+    None if it is not a number."""
+    m = VALUE_RE.match(text.strip())
+    if m is None:
+        return None
+    num, ty = m.group("num").replace("_", ""), m.group("ty")
+    if ty in FLOATS:
+        return float(num), ty
+    if "." in num or "e" in num.lower():
+        return None
+    return int(num), ty
+
+
+def constants_from_rustdoc(doc: dict) -> tuple[list[Const], list[str]]:
+    """Every local, public, numeric constant in a rustdoc JSON document, and
+    the labels of those whose value could not be read."""
+    paths = doc.get("paths", {})
+    out: list[Const] = []
+    unread: list[str] = []
+    for iid, item in doc.get("index", {}).items():
+        if item.get("crate_id", 0) != 0:
+            continue
+        inner = item.get("inner") or {}
+        c = inner.get("constant")
+        if not isinstance(c, dict):
+            continue
+        ty = (c.get("type") or {}).get("primitive")
+        if ty not in INT_BITS and ty not in FLOATS:
+            continue
+        name = item.get("name") or ""
+        path = (paths.get(iid) or {}).get("path") or []
+        module = "::".join(path[1:-1]) if len(path) > 2 else ""
+        raw = (c.get("const") or {}).get("value")
+        parsed = parse_value(raw) if isinstance(raw, str) else None
+        if parsed is None:
+            unread.append(f"{module}::{name}" if module else name)
+            continue
+        out.append(Const(module, name, ty, parsed[0]))
+    out.sort(key=lambda k: (k.name, k.module))
+    return out, sorted(unread)
+
+
+# The bits a C expression has: all 64 for a `long` or wider, else its width.
+BITS_MACRO = ("#define SLATE_BITS(e) "
+              "(sizeof(e) >= 8 ? ~0ULL : (1ULL << (8 * sizeof(e))) - 1ULL)")
+
+
+def constant_assert(c: Const) -> str:
+    """The `_Static_assert` comparing musl's value of `c.name` with `c`'s, in
+    the bits both have: the Rust type's width and the C expression's."""
+    label = c.label.replace("\\", "\\\\").replace('"', '\\"')
+    n = c.name
+    if c.ty in FLOATS:
+        return f'_Static_assert((double)({n}) == {float(c.value)!r}, "{label}");'
+    rmask = (1 << INT_BITS[c.ty]) - 1
+    want = int(c.value) & rmask
+    return (f"_Static_assert(((unsigned long long)({n}) & SLATE_BITS({n}) & {rmask:#x}ULL)"
+            f' == ({want:#x}ULL & SLATE_BITS({n})), "{label}");')
+
+
+def macro_names(define_dump: str) -> set[str]:
+    """The object-like macros in `cc -dM -E` output (a function-like one is
+    not a number a caller passes)."""
+    names = set()
+    for line in define_dump.splitlines():
+        m = re.match(r"#define ([A-Za-z_][A-Za-z0-9_]*)(\(|\s|$)", line)
+        if m and m.group(2) != "(":
+            names.add(m.group(1))
+    return names
+
+
+def constants_source(includes: list[str], shared: list[Const]) -> tuple[str, dict[int, Const]]:
+    """The translation unit, and which line asserts which constant."""
+    lines = ["#define _GNU_SOURCE 1"] + [f"#include <{h}>" for h in includes] + [BITS_MACRO]
+    at: dict[int, Const] = {}
+    for c in shared:
+        lines.append(constant_assert(c))
+        at[len(lines)] = c
+    return "\n".join(lines) + "\n", at
+
+
+CONST_ERROR_RE = re.compile(r"^consts\.c:(\d+):\d+: (?:fatal )?error: (.*)$", re.M)
+# clang follows a failed comparison with the values it compared, musl's first:
+#   consts.c:6:86: note: expression evaluates to '10000 == 238328'
+CONST_NOTE_RE = re.compile(
+    r"^consts\.c:(\d+):\d+: note: expression evaluates to '(.*) == (.*)'$", re.M)
+NOT_ICE = "not an integral constant expression"
+
+
+@dataclass
+class ConstVerdict:
+    mismatched: dict[str, list[tuple[Const, str]]]  # name -> [(constant, musl's value)]
+    not_constant: dict[str, list[Const]]
+    other: list[str]  # errors that are neither, whole
+
+
+def classify_constants(stderr: str, at: dict[int, Const]) -> ConstVerdict:
+    """Sort the compiler's errors by what they say about each constant."""
+    v = ConstVerdict({}, {}, [])
+    compared = {int(n.group(1)): n.group(2) for n in CONST_NOTE_RE.finditer(stderr)}
+    for m in CONST_ERROR_RE.finditer(stderr):
+        line, msg = int(m.group(1)), m.group(2)
+        c = at.get(line)
+        if c is None:
+            v.other.append(m.group(0))
+        elif msg.startswith("static assertion failed"):
+            musl = compared.get(line, "(clang did not say)")
+            v.mismatched.setdefault(c.name, []).append((c, musl))
+        elif NOT_ICE in msg:
+            v.not_constant.setdefault(c.name, []).append(c)
+        else:
+            v.other.append(m.group(0))
+    # An error this did not read -- one inside a header has another file's
+    # name -- still means the unit reached no verdict after it.
+    unread = stderr.count("error:") - len(CONST_ERROR_RE.findall(stderr))
+    if unread > 0:
+        v.other.append(f"{unread} error(s) outside consts.c:\n{stderr[-3000:]}")
+    return v
+
+
+def constant_headers() -> tuple[list[str], list[str]]:
+    """musl's own headers -- the audit's, and the ones `abi_layout.rs` names --
+    and, apart, the kernel's (`linux/`, `asm/`) that `abi_layout.rs` names.
+
+    Apart because a kernel header can redefine a musl name: `linux/limits.h`
+    says `NGROUPS_MAX` is 65536 where musl's `limits.h` says 32, and in one
+    translation unit whichever comes last wins.  A name musl's own headers
+    define is judged by them; a kernel header answers only for the names
+    musl's do not have (`PERF_EVENT_IOC_*`, `LANDLOCK_*`, ...)."""
+    libc, kernel = list(CONSTANT_HEADERS), []
+    if ABI_LAYOUT.exists():
+        for line in ABI_LAYOUT.read_text(encoding="utf-8").splitlines():
+            # Code only: the module's docs show the macro's shape with a
+            # placeholder "header.h".
+            if line.lstrip().startswith("//"):
+                continue
+            for h in re.findall(r'"([a-z0-9_/]+\.h)"', line):
+                side = kernel if h.startswith(("linux/", "asm/", "asm-generic/")) else libc
+                if h not in side:
+                    side.append(h)
+    return libc, sorted(kernel)
+
+
+def target_directory() -> Path | None:
+    """The target directory cargo builds `posix` into."""
+    env = os.environ.get("CARGO_TARGET_DIR")
+    if env:
+        return Path(env) if Path(env).is_absolute() else POSIX_DIR / env
+    try:
+        proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"],
+                              cwd=POSIX_DIR, capture_output=True, text=True, timeout=300,
+                              check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return Path(json.loads(proc.stdout)["target_directory"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def run_rustdoc() -> tuple[dict | None, str]:
+    """rustdoc's JSON for `posix`, built for the SlateOS target."""
+    env = dict(os.environ, CARGO_UNSTABLE_JSON_TARGET_SPEC="true")
+    cmd = ["cargo", "+nightly", "rustdoc", "--lib", "--release",
+           "--target", str(LIBC_SPEC), "-Zbuild-std=core,compiler_builtins",
+           "--", "-Z", "unstable-options", "--output-format", "json"]
+    try:
+        proc = subprocess.run(cmd, cwd=POSIX_DIR, env=env, capture_output=True,
+                              text=True, timeout=1800, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"rustdoc did not run: {e}"
+    if proc.returncode != 0:
+        return None, f"rustdoc failed (exit {proc.returncode}):\n{proc.stderr[-4000:]}"
+    # Cargo names no output file for `--output-format json` (it prints a
+    # "Generated" line for HTML only), so the path is built the way cargo
+    # builds it: the target directory, the target's name, `doc`.
+    tdir = target_directory()
+    if tdir is None:
+        return None, "cargo metadata did not name a target directory"
+    out = tdir / LIBC_SPEC.stem / "doc" / "posix.json"
+    if not out.exists():
+        return None, f"rustdoc succeeded and {out} is not there:\n{proc.stderr[-2000:]}"
+    return json.loads(out.read_text(encoding="utf-8")), ""
+
+
+def run_zig_unit(zig: str, args: list[str], src: str) -> subprocess.CompletedProcess:
+    """`zig cc` over `src`, from a temporary directory."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # newline="" keeps the unit LF on every platform, and the relative name
+        # keeps a drive letter's colon out of the diagnostics read above.
+        (Path(tmp) / "consts.c").write_text(src, encoding="utf-8", newline="")
+        return subprocess.run([zig, "cc", f"--target={MUSL_TARGET}", *args, "consts.c"],
+                              cwd=tmp, capture_output=True, text=True, timeout=600,
+                              check=False)
+
+
+@dataclass
+class Numbers:
+    """What `check_constants` found."""
+
+    problems: int
+    summary: str
+    skipped: bool = False
+    broken: bool = False  # the tooling failed, so no verdict
+
+
+def check_constants(zig: str, list_pairs: bool = False) -> Numbers:
+    """The numbers half: every constant a C caller shares, against musl."""
+    doc, err = run_rustdoc()
+    if doc is None:
+        if "toolchain 'nightly" in err or "is not installed" in err:
+            print(f"check-libc-abi: SKIPPED the constants -- no nightly rustdoc:\n{err}")
+            return Numbers(0, "constants skipped", skipped=True)
+        print(f"check-libc-abi: the constants could not be read: {err}")
+        return Numbers(1, "", broken=True)
+    consts, unread = constants_from_rustdoc(doc)
+
+    libc_h, kernel_h = constant_headers()
+    tables: dict[str, set[str]] = {}
+    for side, includes in (("musl", libc_h), ("kernel", kernel_h)):
+        if not includes:
+            tables[side] = set()
+            continue
+        dump = run_zig_unit(zig, ["-dM", "-E"], "#define _GNU_SOURCE 1\n"
+                            + "".join(f"#include <{h}>\n" for h in includes))
+        if dump.returncode != 0:
+            print(f"check-libc-abi: the {side} headers did not preprocess:\n"
+                  f"{dump.stderr[-4000:]}")
+            return Numbers(1, "", broken=True)
+        tables[side] = macro_names(dump.stdout)
+    in_libc = [c for c in consts if c.name in tables["musl"]]
+    in_kernel = [c for c in consts
+                 if c.name in tables["kernel"] and c.name not in tables["musl"]]
+    shared = in_libc + in_kernel
+    if list_pairs:
+        for c in shared:
+            print(f"{c.label} = {c.value} ({c.ty})")
+
+    verdict = ConstVerdict({}, {}, [])
+    for includes, group in ((libc_h, in_libc), (kernel_h, in_kernel)):
+        if not group:
+            continue
+        src, at = constants_source(includes, group)
+        proc = run_zig_unit(zig, ["-ferror-limit=0", "-c", "-o", "consts.o"], src)
+        if proc.returncode == 0:
+            continue
+        v = classify_constants(proc.stderr, at)
+        if not (v.mismatched or v.not_constant or v.other):
+            print("check-libc-abi: the constants' C did not compile, and said nothing "
+                  f"parseable:\n{proc.stderr[-4000:]}")
+            return Numbers(1, "", broken=True)
+        for name, hits in v.mismatched.items():
+            verdict.mismatched.setdefault(name, []).extend(hits)
+        for name, hits in v.not_constant.items():
+            verdict.not_constant.setdefault(name, []).extend(hits)
+        verdict.other.extend(v.other)
+
+    problems = 0
+    for label in unread:
+        print(f"check-libc-abi: rustdoc gave the constant `{label}` no value it could read")
+        problems += 1
+    for name, hits in sorted(verdict.mismatched.items()):
+        if name in KNOWN_DIFFERENT:
+            continue
+        for c, musl in hits:
+            print(f"check-libc-abi: CONSTANT MISMATCH {c.label}: here {c.value} ({c.ty}), "
+                  f"musl's header {musl} (compared in the bits both have)")
+            problems += 1
+    for name, hits in sorted(verdict.not_constant.items()):
+        if name not in NOT_CONSTANT_IN_MUSL:
+            labels = ", ".join(c.label for c in hits)
+            print(f"check-libc-abi: musl's `{name}` is not a constant, so {labels} cannot "
+                  "be checked. Say why its value is right in NOT_CONSTANT_IN_MUSL.")
+            problems += 1
+    shared_names = {c.name for c in shared}
+    for name, why in sorted(KNOWN_DIFFERENT.items()):
+        if name not in shared_names:
+            print(f"check-libc-abi: KNOWN_DIFFERENT names `{name}`, which no constant "
+                  "shares with musl any more. Delete the entry.")
+            problems += 1
+        elif name not in verdict.mismatched:
+            print(f"check-libc-abi: `{name}` is KNOWN_DIFFERENT and now agrees with musl. "
+                  f"Delete the entry; it read:\n  {why}")
+            problems += 1
+    for name, why in sorted(NOT_CONSTANT_IN_MUSL.items()):
+        if name not in shared_names:
+            print(f"check-libc-abi: NOT_CONSTANT_IN_MUSL names `{name}`, which no "
+                  "constant shares with musl any more. Delete the entry.")
+            problems += 1
+        elif name not in verdict.not_constant:
+            print(f"check-libc-abi: musl's `{name}` is a constant now, so it is checked. "
+                  f"Delete its NOT_CONSTANT_IN_MUSL entry; it read:\n  {why}")
+            problems += 1
+    for line in verdict.other:
+        print(f"check-libc-abi: the constants' C did not compile: {line}")
+    if verdict.other:
+        # A unit that failed for another reason reached no verdict on the
+        # assertions after the failure, so a missing mismatch means nothing.
+        return Numbers(problems + len(verdict.other), "", broken=True)
+    return Numbers(
+        problems,
+        f"{len(shared)} constants checked against musl, {len(KNOWN_DIFFERENT)} known "
+        f"different, {len(NOT_CONSTANT_IN_MUSL)} not constants in musl",
+    )
+
+
+def constants_self_test() -> list[str]:
+    """The numbers half's parsing and verdicts, against fixtures: no cargo,
+    no zig."""
+    failures: list[str] = []
+
+    def check(what: str, ok: bool) -> None:
+        if not ok:
+            failures.append(what)
+
+    check("a u64 with separators",
+          parse_value("18_446_744_073_709_551_615u64") == (2**64 - 1, "u64"))
+    check("a negative i32", parse_value("-5i32") == (-5, "i32"))
+    check("an f64", parse_value("1.5f64") == (1.5, "f64"))
+    check("a string is not a number", parse_value('"x"') is None)
+    check("a float on an integer type is refused", parse_value("1.5i32") is None)
+
+    doc = {
+        "index": {
+            "1": {"crate_id": 0, "name": "AF_INET",
+                  "inner": {"constant": {"type": {"primitive": "i32"},
+                                         "const": {"value": "2i32"}}}},
+            "2": {"crate_id": 0, "name": "WEOF",
+                  "inner": {"constant": {"type": {"primitive": "i32"},
+                                         "const": {"value": "-1i32"}}}},
+            "3": {"crate_id": 0, "name": "PATH",
+                  "inner": {"constant": {"type": {"borrowed_ref": {}},
+                                         "const": {"value": None}}}},
+            "4": {"crate_id": 1, "name": "FOREIGN",
+                  "inner": {"constant": {"type": {"primitive": "i32"},
+                                         "const": {"value": "1i32"}}}},
+            "5": {"crate_id": 0, "name": "ODD",
+                  "inner": {"constant": {"type": {"primitive": "u8"},
+                                         "const": {"value": "?"}}}},
+        },
+        "paths": {"1": {"path": ["posix", "socket", "AF_INET"]},
+                  "2": {"path": ["posix", "wchar", "WEOF"]}},
+    }
+    consts, unread = constants_from_rustdoc(doc)
+    check("numeric local constants are read, others are not",
+          [c.label for c in consts] == ["socket::AF_INET", "wchar::WEOF"])
+    check("a numeric constant with no readable value is reported", unread == ["ODD"])
+
+    weof = Const("wchar", "WEOF", "i32", -1)
+    check("a signed constant is compared as its bits, in the width both have",
+          "& SLATE_BITS(WEOF) & 0xffffffffULL) == (0xffffffffULL & SLATE_BITS(WEOF))"
+          in constant_assert(weof))
+    check("a float is compared as a double",
+          constant_assert(Const("m", "M_E", "f64", 2.5))
+          .startswith("_Static_assert((double)(M_E) == 2.5,"))
+
+    dump = "#define A 1\n#define F(x) x\n#define B\n#define _C (2)\n"
+    check("object-like macros only", macro_names(dump) == {"A", "B", "_C"})
+
+    src, at = constants_source(["fcntl.h"], [Const("fcntl", "O_CREAT", "i32", 65),
+                                             Const("signal", "SIGRTMIN", "i32", 32)])
+    check("the width macro precedes the assertions", BITS_MACRO in src.splitlines()[2])
+    check("each assertion's line is known", at.get(4) is not None and at[4].name == "O_CREAT")
+    stderr = (
+        "consts.c:4:16: error: static assertion failed due to requirement "
+        "'((unsigned long long)(0100) & ...) == (0x41ULL & ...)': fcntl::O_CREAT\n"
+        "consts.c:4:86: note: expression evaluates to '64 == 65'\n"
+        "consts.c:5:38: error: static assertion expression is not an integral "
+        "constant expression\n"
+        "consts.c:1:10: fatal error: 'nosuch.h' file not found\n"
+    )
+    v = classify_constants(stderr, at)
+    check("a failed assertion is a mismatch, with musl's value from clang's note",
+          [(c.label, m) for c, m in v.mismatched.get("O_CREAT", [])]
+          == [("fcntl::O_CREAT", "64")])
+    check("a call is not a constant",
+          [c.label for c in v.not_constant.get("SIGRTMIN", [])] == ["signal::SIGRTMIN"])
+    check("anything else is reported whole", len(v.other) == 1 and "nosuch.h" in v.other[0])
+    v = classify_constants("/x/include/bits/foo.h:9:1: error: unknown type name 'bar'\n", at)
+    check("an error in a header is reported too",
+          len(v.other) == 1 and "outside" in v.other[0])
+    return [f"constants: {f}" for f in failures]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--self-test", "--selftest", action="store_true", dest="selftest")
     ap.add_argument("--print-uncovered", action="store_true")
+    ap.add_argument("--list-constants", action="store_true",
+                    help="print every constant the numbers half checks, with its value")
     args = ap.parse_args()
 
     if args.selftest:
@@ -585,8 +1109,17 @@ def main() -> int:
             "recorded in known-issues.md; they do not refuse the push."
         )
 
+    numbers = check_constants(zig, list_pairs=args.list_constants)
+    problems += numbers.problems
+
+    if numbers.broken:
+        print("\ncheck-libc-abi: the constants half reached no verdict. "
+              "See design-decisions.md 1119.")
+        return 2
+
     if problems:
-        print(f"\ncheck-libc-abi: {problems} problem(s). See design-decisions.md 1010.")
+        print(f"\ncheck-libc-abi: {problems} problem(s). See design-decisions.md 1010 "
+              "(layouts) and 1119 (constants).")
         return 1
 
     n = len(covered_types())
@@ -596,11 +1129,12 @@ def main() -> int:
         # trains the reader to stop reading the lines above it.
         print(
             f"check-libc-abi: OK ({n} types checked against musl; "
-            f"{len(known_seen)} known-bad and recorded, 0 new)"
+            f"{len(known_seen)} known-bad and recorded, 0 new; {numbers.summary})"
         )
     else:
-        print(f"check-libc-abi: OK ({n} types checked against musl, 0 mismatches)")
-    return 0
+        print(f"check-libc-abi: OK ({n} types checked against musl, 0 mismatches; "
+              f"{numbers.summary})")
+    return 3 if numbers.skipped else 0
 
 
 if __name__ == "__main__":

@@ -7864,15 +7864,18 @@ Remaining net improvements (diminishing returns):
   always-ready per POSIX.  Polling loop uses 10ms sleep — a true epoll/
   kqueue would still be a nice optimization but not a correctness issue.
 
-- getaddrinfo() uses static storage (no heap) and returns at most one
-  result.  Not re-entrant — same as POSIX gethostbyname().
+- (DONE 2026-09-27, lane D) getaddrinfo() used static storage and returned
+  one result: it is glibc's now (known-issues.md,
+  D-POSIX-GETADDRINFO-WAS-IPV4-ONLY-AND-UNSORTED).
 
 - ioctl TCSETS/TCGETS are accepted but don't actually change terminal
   behavior (no line discipline).  Programs that set raw mode work via
   VT100 escape sequences.  Will need real terminal mode support when
   porting interactive programs (vim, less, etc.).
 
-- (DONE) stdio buffering: Replaced unbuffered FILE* sentinels with real
+- (DONE, SUPERSEDED 2026-09-27 by the rewrite in design-decisions.md §1121 --
+  the pool, the 1 KiB buffers and the stdout rule below are gone) stdio
+  buffering: Replaced unbuffered FILE* sentinels with real
   FILE structs backed by 1 KiB internal buffers.  stdout is line-buffered
   (flushes on '\n'), stderr is unbuffered, fopen'd files fully-buffered.
   Static pool of 16 FILE slots for fopen'd files.  Read-ahead buffering
@@ -7884,26 +7887,6 @@ Remaining net improvements (diminishing returns):
   because the crate targets x86_64-unknown-none.  Need a QEMU-based
   test runner or a separate host-testable crate that extracts pure
   logic functions.
-
-- (DONE 2026-05-29) crypt() real SHA-256/SHA-512 hashing: replaced the
-  insecure "$0$<key>" stub (which stored passwords in cleartext with a
-  marker prefix — any program hashing a password was effectively storing
-  the plaintext) with proper SHA-crypt ($5$ / $6$) per Ulrich Drepper's
-  spec.  New self-contained SHA-2 cores in posix/src/sha2.rs (no heap, no
-  external crate; works on target_os="none"), verified against NIST FIPS
-  180-4 vectors.  crypt.rs now parses "rounds=N$", clamps to [1000,
-  999999999], truncates salt to 16 bytes, and emits the crypt-base64
-  encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
-  Sequences P and S are fed incrementally (add_repeated) so no unbounded
-  stack/heap buffer is needed regardless of password length.
-  FOLLOW-UP (DONE 2026-05-29): MD5 crypt ($1$) now implemented too —
-  Poul-Henning Kamp's md5crypt, new MD5 core in posix/src/md5.rs (RFC
-  1321 vectors), verified against OpenSSL 3.5 `passwd -1`.  crypt() now
-  dispatches $1$/$5$/$6$.  Only legacy DES (2-char salt) remains
-  unimplemented; it returns NULL + EINVAL rather than a fake result.
-  Implement DES crypt only if a ported program must verify ancient
-  DES-format /etc/shadow entries (low priority; DES crypt is obsolete
-  and insecure).
 
 - (DONE 2026-05-30) CRITICAL stat() ABI translation bug fixed.  The kernel's
   SYS_FS_STAT/SYS_FS_LSTAT/SYS_FS_FSTAT write a compact 16-byte FsStatResult
@@ -8891,6 +8874,9 @@ Remaining net improvements (diminishing returns):
       THREAD_TABLE and report their mmap'd stack region (guard = 0, since
       pthread_create installs no guard page).  Any other thread (i.e. the
       main thread) reports the kernel main-stack geometry.
+      [2026-09-26: pthread_create now maps a guard -- one page by default --
+      and pthread_getattr_np reports it; known-issues.md
+      B-D-PTHREAD-CREATE-IGNORED-ITS-ATTRIBUTE.]
     * pthread_attr_getstack / pthread_attr_setstack: read/write the stack
       address ([16..24)) and size ([0..8)) in the opaque attr buffer.
     * pthread_attr_getguardsize / pthread_attr_setguardsize: read/write the
@@ -59081,6 +59067,55 @@ is already waiting, not whether the setter exists.
   refresh, measured from the last frame shown (`Server::next_wake`,
   design-decisions §1302). A fixed vblank-aligned grid would not drift, but the
   kernel sends no flip event to align to; revisit when it does.
+
+## Lane D — POSIX, libc & toolchain
+
+- **crypt: libxcrypt's other methods** (posix/src/crypt.rs).  Only $1$, $5$
+  and $6$ hash; every other setting gets the failure token "*0" with EINVAL,
+  as libxcrypt answers for a method it lacks.  Ubuntu 24.04's libxcrypt has,
+  probed 2026-09-26: traditional DES (two-character salt), BSDi DES ("_"),
+  bcrypt ($2b$), scrypt ($7$), yescrypt ($y$), gost-yescrypt ($gy$),
+  sha1crypt ($sha1$), SunMD5 ($md5$) and NT ($3$), and real DES behind
+  encrypt/setkey (compat symbols there; ours answer ENOSYS).  yescrypt comes
+  first: it is Ubuntu's default for new passwords, so an /etc/shadow brought
+  from Ubuntu does not verify here.  Port from libxcrypt 4.4.36 (source in
+  D:\refsrc\libxcrypt-4.4.36), per design-decisions.md §539: primitives
+  ported, not written.  (Replaces the DES follow-up of the 2026-05-29
+  crypt entry, deleted as done.)
+
+- **iconv: glibc's other character sets** (posix/src/iconv.rs).  UTF-8,
+  ASCII, ISO-8859-1, UTF-16, UTF-32, UCS-2, UCS-4, UNICODE, WCHAR_T, UTF-7
+  and UTF-7-IMAP, glibc's 141 table-driven 8-bit sets
+  (posix/src/iconv_8bit.rs, generated from glibc's charmaps by
+  posix/tools/gen_iconv_8bit.py), and CP1255, CP1258 and TCVN5712-1
+  (posix/src/iconv_combining.rs, read out of glibc's cp1255.c, cp1258.c
+  and tcvn5712-1.c by posix/tools/gen_iconv_combining.py) convert as glibc
+  2.39's (B-D-ICONV-HAD-THREE-CHARSETS), and since 2026-09-28 the 25
+  single-byte sets glibc writes by hand whose converters are their
+  charmaps -- iso646.c's 23 national variants, ISO_11548-1 and ARMSCII-8
+  (iconv_8bit.rs, checked against glibc's own converters by
+  posix/tools/oracle/iconv_hand_harness.py), the two-byte-diacritic sets
+  T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110 (iconv_prefix.rs, read out of
+  glibc's running converters by posix/tools/gen_iconv_prefix.py), and
+  TSCII (iconv.rs: glibc's tscii.c, but for three bugs it has where the
+  output runs out, which that section lists), and the 55 single-byte sets
+  glibc builds from table headers of its own -- IBM's EBCDIC and PC code
+  pages past the generated ones, CP737, CP775, ISIRI-3342 (iconv_8bit.rs,
+  read from iconvdata's headers by gen_iconv_8bit.py and checked against
+  glibc's converters by iconv_hand_harness.py); every other name is
+  refused with EINVAL.  That is every single-byte set glibc has.  Next:
+  the multibyte sets -- IBM's double-byte EBCDIC ones (IBM930 ...) and
+  the East Asian ones (EUC-JP,
+  SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
+  megabytes -- and whose size in every program that links iconv is its own
+  question (design-decisions.md §1117).  A new set is a Charset variant, a
+  decoder and an encoder in its glibc module's check order (glibc 2.39's
+  source is in D:\refsrc\glibc-2.39), and its names from
+  iconvdata/gconv-modules* -- each probed against Ubuntu before it is
+  trusted, as the module docs say.  The `iconv` program (userspace/iconv,
+  lane B) converts with tables of its own; the libc now has every set it
+  knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
+  requests/d-b-the-iconv-program-can-run-on-the-libc.md.
 
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 

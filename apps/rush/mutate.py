@@ -1054,6 +1054,18 @@ MUTATIONS = [
         '    "Enter: select   Arrows: slide   Z: undo   Ctrl+Y: redo",',
         ["the_list_of_keys_reaches_the_window"],
     ),
+    (
+        'the puzzle sheet reads no list key',
+        '        if let Some(movement) = ListKey::of(ev) {',
+        '        if let Some(movement) = ListKey::of(ev).filter(|_| false) {',
+        ['home_end_and_the_page_keys_reach_the_ends_of_the_sheet', 'the_sheet_cursor_walks_the_list_and_stops_at_the_ends'],
+    ),
+    (
+        'a page of the puzzle sheet is one row',
+        'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, PUZZLE_COUNT)',
+        'movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, 1)',
+        ['home_end_and_the_page_keys_reach_the_ends_of_the_sheet'],
+    ),
 ]
 
 if __name__ == "__main__":

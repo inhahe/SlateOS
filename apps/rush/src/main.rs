@@ -125,6 +125,7 @@ use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::listview::ListKey;
 use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2052,7 +2053,7 @@ impl RushHour {
             label_centred(
                 f,
                 &Label {
-                    text: "Up/Down: browse   Enter: open   1-8: jump   Esc: close",
+                    text: "Up/Down, Home/End: browse   Enter: open   1-8: jump   Esc: close",
                     size: l.small,
                     weight: FontWeightHint::Regular,
                     // Secondary text: the faintest grey is 2.3:1 on a light
@@ -2247,15 +2248,18 @@ impl RushHour {
             self.load_puzzle(index);
             return EventResult::Consumed;
         }
+        // Up and Down, Home and End, and the page keys, as every list in the
+        // shell reads them (`guitk::listview::ListKey`); Home and End went
+        // nowhere. The sheet shows every puzzle at once, so a page is all of
+        // them.
+        if let Some(movement) = ListKey::of(ev) {
+            if let Some(to) = movement.target(Some(self.sheet_cursor), PUZZLE_COUNT, PUZZLE_COUNT) {
+                self.sheet_cursor = to;
+            }
+            return EventResult::Consumed;
+        }
         match ev.key {
             Key::Escape | Key::P => self.sheet_open = false,
-            Key::Up => self.sheet_cursor = self.sheet_cursor.saturating_sub(1),
-            Key::Down => {
-                self.sheet_cursor = self
-                    .sheet_cursor
-                    .saturating_add(1)
-                    .min(PUZZLE_COUNT.saturating_sub(1));
-            }
             Key::Enter | Key::Space => self.load_puzzle(self.sheet_cursor),
             _ => return EventResult::Ignored,
         }
@@ -5634,6 +5638,24 @@ mod tests {
             PUZZLE_COUNT - 1,
             "the cursor ran off the bottom"
         );
+    }
+
+    /// Home and End reach the ends of the sheet, and the page keys go as
+    /// far as there is -- the sheet shows every puzzle, so a page is all of
+    /// them. They went nowhere: the sheet read Up and Down only.
+    #[test]
+    fn home_end_and_the_page_keys_reach_the_ends_of_the_sheet() {
+        let mut g = game();
+        probe::key(&mut g, &probe::press(Key::P));
+        probe::key(&mut g, &probe::press(Key::End));
+        assert_eq!(g.sheet_cursor(), PUZZLE_COUNT - 1, "End");
+        probe::key(&mut g, &probe::press(Key::Home));
+        assert_eq!(g.sheet_cursor(), 0, "Home");
+        probe::key(&mut g, &probe::press(Key::PageDown));
+        assert_eq!(g.sheet_cursor(), PUZZLE_COUNT - 1, "Page Down");
+        probe::key(&mut g, &probe::press(Key::PageUp));
+        assert_eq!(g.sheet_cursor(), 0, "Page Up");
+        assert!(g.sheet_open(), "a movement closed the sheet");
     }
 
     #[test]

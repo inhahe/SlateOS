@@ -3387,6 +3387,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "randrange",
+ "statehistory",
 ]
 
 [[package]]

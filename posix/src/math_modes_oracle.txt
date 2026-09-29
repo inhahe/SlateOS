@@ -1,7 +1,6 @@
-# glibc 2.39 libm under WSL in the directed rounding modes (posix/tools/oracle/math_modes_harness.py):
-# <mode> <function> <inputs> = <outputs> <errno>, for each call that answers
-# otherwise than math_oracle.txt says it does to nearest; floats as bit
-# patterns in hex.
+# glibc 2.39 under WSL in the directed rounding modes: the double and float calls of math_harness.py
+# (posix/tools/oracle/_modes.py). <mode> <call>, for each call whose answer
+# differs from the one math_oracle.txt gives to nearest.
 down sqrt 000fffffffffffff = 1ffffffffffffffe 0
 down sqrt 3fe0000000000000 = 3fe6a09e667f3bcc 0
 down sqrt 4000000000000000 = 3ff6a09e667f3bcc 0

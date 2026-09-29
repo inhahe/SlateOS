@@ -1,3 +1,6 @@
+# glibc 2.39 under WSL in the directed rounding modes: the long double calls of mathl_harness.py
+# (posix/tools/oracle/_modes.py). <mode> <call>, for each call whose answer
+# differs from the one mathl_oracle.txt gives to nearest.
 down sqrtl 4000:c000000000000000 = 3fff:ddb3d742c265539d 0
 down sqrtl 0000:7fffffffffffffff = 1fff:fffffffffffffffe 0
 down sqrtl 4005:c900000000000000 = 4002:a06645b6b2be0e3f 0

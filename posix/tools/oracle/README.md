@@ -20,6 +20,8 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `math_modes_harness.py` (the same cases, in the three directed rounding modes) | `posix/src/math_modes_oracle.txt` (the answers that differ from nearest) | `math.rs`, `include_str!` |
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
 | `mathl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/mathl_modes_oracle.txt` (the answers that differ from nearest) | `mathl.rs`, `include_str!` |
+| `complex_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complex_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complex.rs`, `include_str!` |
+| `complexl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complexl_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complexl.rs`, `include_str!` |
 | `lgammal_zeros.py table 30` (mpmath, not glibc) | the `LGAMMAL_ZEROS` table, pasted | `mathl.rs` (`lgammal_near_zero`) |
 | `lgammal_zeros.py oracle` (mpmath, not glibc) | `posix/src/lgammal_zero_oracle.txt` | `mathl.rs`, `include_str!` |
 | `ldclass.c` | its output, pasted as `CLASS_ORACLE` | `mathl.rs` |
@@ -42,6 +44,10 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `hosts_harness.py` (`hosts_oracle.c`) | a table, pasted | `hosts.rs` |
 | `netdb_harness.py` (`netdb_oracle.c`) | a table, pasted | `netdb.rs` |
 | `ifaddrs_run.sh` (`ifaddrs_oracle.c`) | its output, pasted by hand as `GLIBC_UP` ... | `socket.rs` |
+
+The four `*_modes_harness.py` share `_modes.py`, which runs a harness's own
+program once per rounding mode and checks its to-nearest pass against the
+harness's table before writing anything.
 
 ## Running one
 

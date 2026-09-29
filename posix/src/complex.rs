@@ -37,10 +37,20 @@
 //!   it. FreeBSD's code sets none; each place says what it adds.
 //! - **Signs Annex G leaves open** are glibc's where FreeBSD chose
 //!   differently; each such place says so.
-//! - **The `long double` functions** (`cabsl` and the rest) are not here:
-//!   a `long double` is x87's 80-bit format, passed in memory and returned on
-//!   the x87 stack, and this library has no 80-bit arithmetic yet
-//!   (known-issues.md -> `D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX`).
+//! - **Every rounding direction** (`fesetround`): the sines, cosines and
+//!   tangents these are built from are computed to nearest, as `math.rs`'s
+//!   own are -- musl's argument reduction assumes it, and rounding upward
+//!   `cexp(i pi/2)`'s real part was 2.3e-11 -- and where FreeBSD multiplies
+//!   an `e^x` or `cosh x` that has overflowed by a sine or cosine, the
+//!   overflow is answered as the direction rounds the signed result
+//!   (`overflowed`): rounding downward an infinity times `cos 1` is an
+//!   infinity, but `DBL_MAX` times it a finite number far below `DBL_MAX`.
+//!   The scaled branches take the parts' signs before the scaling that
+//!   overflows, for the same reason: negated after it, -`DBL_MAX` came out
+//!   where the direction owes -inf. Replayed against glibc in all three
+//!   directed modes (`complex_modes_oracle.txt`).
+//! - **The `long double` functions** (`cabsl` and the rest) are
+//!   `complexl.rs`'s.
 //!
 //! # ABI
 //!
@@ -105,6 +115,78 @@ fn nan_mix(x: f64, y: f64) -> f64 {
 
 fn nan_mixf(x: f32, y: f32) -> f32 {
     x + y
+}
+
+// The real sine, cosine and tangent the complex functions are built from,
+// computed to nearest whatever the rounding direction
+// ([`crate::fenv::in_nearest`]), as `math.rs`'s own are: musl's argument
+// reduction assumes it, and rounding upward `cexp(i pi/2)`'s real part was
+// 2.3e-11 (`math.rs`, "Every rounding direction"). The crate's functions,
+// not `math.rs`'s: no `errno`, which the complex functions set by rules of
+// their own.
+
+fn sin_n(x: f64) -> f64 {
+    crate::fenv::in_nearest(x, libm::sin)
+}
+
+fn cos_n(x: f64) -> f64 {
+    crate::fenv::in_nearest(x, libm::cos)
+}
+
+fn tan_n(x: f64) -> f64 {
+    crate::fenv::in_nearest(x, libm::tan)
+}
+
+fn sincos_n(x: f64) -> (f64, f64) {
+    crate::fenv::in_nearest(x, libm::sincos)
+}
+
+fn sinf_n(x: f32) -> f32 {
+    crate::fenv::in_nearest(x, libm::sinf)
+}
+
+fn cosf_n(x: f32) -> f32 {
+    crate::fenv::in_nearest(x, libm::cosf)
+}
+
+fn tanf_n(x: f32) -> f32 {
+    crate::fenv::in_nearest(x, libm::tanf)
+}
+
+fn sincosf_n(x: f32) -> (f32, f32) {
+    crate::fenv::in_nearest(x, libm::sincosf)
+}
+
+/// An overflow with `sign`'s sign, as the rounding direction gives it --
+/// an infinity, or the largest finite value where the direction rounds
+/// toward zero ([`crate::math::Real::overflow`]). For the branches where
+/// FreeBSD multiplies an `e^x` or `cosh x` that has already overflowed by a
+/// sine or cosine: an infinity times either is an infinity, but rounding
+/// downward the overflowed factor is `DBL_MAX`, and `DBL_MAX * cos(1)` a
+/// finite number far below it -- `cexpf(1e38 + i)` was 1.8e38 where the
+/// direction owes `FLT_MAX`.
+fn overflowed<R: crate::math::Real>(sign: R) -> R {
+    R::overflow(sign)
+}
+
+/// `sinh(x)` with an overflow answered as the rounding direction gives it
+/// ([`crate::math::saturated`]): the crate's rounds the magnitude and then
+/// negates it, so that rounding downward `csinh(-DBL_MAX)` was -DBL_MAX
+/// where the direction owes -inf. No `errno`: glibc's `csinh` reports no
+/// overflow.
+fn sinh_d(x: f64) -> f64 {
+    crate::math::saturated(x, libm::sinh, |r| {
+        crate::math::overflow_only(x.is_finite(), r)
+    })
+    .0
+}
+
+/// [`sinh_d`] (float).
+fn sinhf_d(x: f32) -> f32 {
+    crate::math::saturated(x, libm::sinhf, |r| {
+        crate::math::overflow_only(x.is_finite(), r)
+    })
+    .0
 }
 
 // ===========================================================================
@@ -368,8 +450,12 @@ fn scale_of(e: i32) -> f64 {
 
 /// `cexp(z) * 2^expt` for a large real part (`k_exp.c`'s `__ldexp_cexp`):
 /// `expt` is small (0 or -1), and the caller has filtered out a real part so
-/// large that overflow is inevitable.
-fn ldexp_cexp(x: f64, y: f64, expt: i32) -> Complex64 {
+/// large that overflow is inevitable. `re_sign` and `im_sign` (each +-1)
+/// multiply the parts before they are scaled: `ccosh` and `csinh` want one
+/// of them negated, and negating after the scaling would round an overflow
+/// the wrong way -- rounding downward, -DBL_MAX where the direction owes
+/// -inf.
+fn ldexp_cexp(x: f64, y: f64, expt: i32, re_sign: f64, im_sign: f64) -> Complex64 {
     let (exp_x, ex_expt) = frexp_exp(x);
     let expt = expt.wrapping_add(ex_expt);
     // Arrange that scale1 * scale2 == 2**expt; either alone could be out of
@@ -377,7 +463,8 @@ fn ldexp_cexp(x: f64, y: f64, expt: i32) -> Complex64 {
     let half = expt / 2;
     let scale1 = scale_of(half);
     let scale2 = scale_of(expt.wrapping_sub(half));
-    let (s, c) = libm::sincos(y);
+    let (s, c) = sincos_n(y);
+    let (c, s) = (c * re_sign, s * im_sign);
     c64(c * exp_x * scale1 * scale2, s * exp_x * scale1 * scale2)
 }
 
@@ -398,7 +485,7 @@ pub extern "C" fn cexp(z: Complex64) -> Complex64 {
     let (hx, lx) = (hi(x), lo(x));
     // cexp(0 + I y) = cos(y) + I sin(y)
     if ((hx & 0x7fff_ffff) | lx) == 0 {
-        let (s, c) = libm::sincos(y);
+        let (s, c) = sincos_n(y);
         return c64(c, s);
     }
 
@@ -420,14 +507,19 @@ pub extern "C" fn cexp(z: Complex64) -> Complex64 {
     if (EXP_OVFL..=CEXP_OVFL).contains(&hx) {
         // x is between 709.7 and 1454.3, so we must scale to avoid overflow
         // in exp(x).
-        ldexp_cexp(x, y, 0)
+        ldexp_cexp(x, y, 0, 1.0, 1.0)
+    } else if hx > CEXP_OVFL && hx < 0x7ff0_0000 {
+        // x > 1454.3, finite: e^x times cos(y) or sin(y), neither of which is
+        // zero for a finite nonzero y, overflows.
+        let (s, c) = sincos_n(y);
+        c64(overflowed(c), overflowed(s))
     } else {
         // x < EXP_OVFL (the common case: exp(x) cannot overflow); or
         // x > CEXP_OVFL, where exp(x) * s overflows for every s > 0; or x is
         // +-Inf or NaN.
         let exp_x = libm::exp(x);
         cexp_errno(x, exp_x);
-        let (s, c) = libm::sincos(y);
+        let (s, c) = sincos_n(y);
         c64(exp_x * c, exp_x * s)
     }
 }
@@ -448,13 +540,15 @@ fn scale_off(e: i32) -> f32 {
     f32::from_bits((0x7f_i32.wrapping_add(e) as u32) << 23)
 }
 
-fn ldexp_cexpf(x: f32, y: f32, expt: i32) -> Complex32 {
+/// [`ldexp_cexp`] (float).
+fn ldexp_cexpf(x: f32, y: f32, expt: i32, re_sign: f32, im_sign: f32) -> Complex32 {
     let (exp_x, ex_expt) = frexp_expf(x);
     let expt = expt.wrapping_add(ex_expt);
     let half = expt / 2;
     let scale1 = scale_off(half);
     let scale2 = scale_off(expt.wrapping_sub(half));
-    let (s, c) = libm::sincosf(y);
+    let (s, c) = sincosf_n(y);
+    let (c, s) = (c * re_sign, s * im_sign);
     c32(c * exp_x * scale1 * scale2, s * exp_x * scale1 * scale2)
 }
 
@@ -474,7 +568,7 @@ pub extern "C" fn cexpf(z: Complex32) -> Complex32 {
     let hx = x.to_bits();
     // cexp(+-0 + I y) = cos(y) + I sin(y)
     if x == 0.0 {
-        let (s, c) = libm::sincosf(y);
+        let (s, c) = sincosf_n(y);
         return c32(c, s);
     }
 
@@ -489,11 +583,15 @@ pub extern "C" fn cexpf(z: Complex32) -> Complex32 {
     }
 
     if (EXP_OVFL..=CEXP_OVFL).contains(&hx) {
-        ldexp_cexpf(x, y, 0)
+        ldexp_cexpf(x, y, 0, 1.0, 1.0)
+    } else if hx > CEXP_OVFL && hx < 0x7f80_0000 {
+        // As in `cexp`: x > 192.7, finite, overflows.
+        let (s, c) = sincosf_n(y);
+        c32(overflowed(c), overflowed(s))
     } else {
         let exp_x = libm::expf(x);
         cexpf_errno(x, exp_x);
-        let (s, c) = libm::sincosf(y);
+        let (s, c) = sincosf_n(y);
         c32(exp_x * c, exp_x * s)
     }
 }
@@ -764,7 +862,6 @@ pub extern "C" fn cpowf(x: Complex32, y: Complex32) -> Complex32 {
 /// The hyperbolic cosine, `cosh(re) cos(im) + i sinh(re) sin(im)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ccosh(z: Complex64) -> Complex64 {
-    const HUGE: f64 = p2(1023);
     let (x, y) = (z.re, z.im);
     let (hx, lx) = (hi(x), lo(x));
     let (hy, ly) = (hi(y), lo(y));
@@ -778,21 +875,21 @@ pub extern "C" fn ccosh(z: Complex64) -> Complex64 {
         }
         if ix < 0x4036_0000 {
             // |x| < 22: normal case
-            return c64(libm::cosh(x) * libm::cos(y), libm::sinh(x) * libm::sin(y));
+            return c64(libm::cosh(x) * cos_n(y), libm::sinh(x) * sin_n(y));
         }
         // |x| >= 22, so cosh(x) ~= exp(|x|)
         if ix < 0x4086_2e42 {
             // |x| < 710: exp(|x|) won't overflow
             let h = libm::exp(x.abs()) * 0.5;
-            return c64(h * libm::cos(y), h.copysign(x) * libm::sin(y));
+            return c64(h * cos_n(y), h.copysign(x) * sin_n(y));
         } else if ix < 0x4096_bbaa {
             // |x| < 1455: scale to avoid overflow
-            let w = ldexp_cexp(x.abs(), y, -1);
-            return c64(w.re, w.im * 1.0_f64.copysign(x));
+            return ldexp_cexp(x.abs(), y, -1, 1.0, 1.0_f64.copysign(x));
         }
-        // |x| >= 1455: the result always overflows
-        let h = HUGE * x;
-        return c64(h * h * libm::cos(y), h * libm::sin(y));
+        // |x| >= 1455: the result always overflows -- cosh(x) cos(y) with
+        // cos(y)'s sign, sinh(x) sin(y) with x's and sin(y)'s.
+        let (s, c) = sincos_n(y);
+        return c64(overflowed(c), overflowed(if x < 0.0 { -s } else { s }));
     }
 
     // cosh(+-0 +- I Inf) = dNaN + I 0, and cosh(+-0 +- I NaN) = d(NaN) +
@@ -826,7 +923,7 @@ pub extern "C" fn ccosh(z: Complex64) -> Complex64 {
         if iy >= 0x7ff0_0000 {
             return c64(f64::INFINITY, x * (y - y));
         }
-        return c64(f64::INFINITY * libm::cos(y), x * libm::sin(y));
+        return c64(f64::INFINITY * cos_n(y), x * sin_n(y));
     }
 
     // cosh(NaN + I NaN) = d(NaN) + I d(NaN); cosh(NaN +- I Inf) = d(NaN) +
@@ -843,7 +940,6 @@ pub extern "C" fn ccos(z: Complex64) -> Complex64 {
 /// The hyperbolic sine, `sinh(re) cos(im) + i cosh(re) sin(im)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn csinh(z: Complex64) -> Complex64 {
-    const HUGE: f64 = p2(1023);
     let (x, y) = (z.re, z.im);
     let (hx, lx) = (hi(x), lo(x));
     let (hy, ly) = (hi(y), lo(y));
@@ -852,21 +948,22 @@ pub extern "C" fn csinh(z: Complex64) -> Complex64 {
 
     if ix < 0x7ff0_0000 && iy < 0x7ff0_0000 {
         if (iy | ly) == 0 {
-            return c64(libm::sinh(x), y);
+            return c64(sinh_d(x), y);
         }
         if ix < 0x4036_0000 {
             // |x| < 22: normal case
-            return c64(libm::sinh(x) * libm::cos(y), libm::cosh(x) * libm::sin(y));
+            return c64(libm::sinh(x) * cos_n(y), libm::cosh(x) * sin_n(y));
         }
         if ix < 0x4086_2e42 {
             let h = libm::exp(x.abs()) * 0.5;
-            return c64(h.copysign(x) * libm::cos(y), h * libm::sin(y));
+            return c64(h.copysign(x) * cos_n(y), h * sin_n(y));
         } else if ix < 0x4096_bbaa {
-            let w = ldexp_cexp(x.abs(), y, -1);
-            return c64(w.re * 1.0_f64.copysign(x), w.im);
+            return ldexp_cexp(x.abs(), y, -1, 1.0_f64.copysign(x), 1.0);
         }
-        let h = HUGE * x;
-        return c64(h * libm::cos(y), h * h * libm::sin(y));
+        // |x| >= 1455: the result always overflows -- sinh(x) cos(y) with
+        // x's and cos(y)'s signs, cosh(x) sin(y) with sin(y)'s.
+        let (s, c) = sincos_n(y);
+        return c64(overflowed(if x < 0.0 { -c } else { c }), overflowed(s));
     }
 
     // sinh(+-0 +- I Inf) = +-0 + I dNaN, raising invalid; sinh(+-0 +- I
@@ -895,7 +992,7 @@ pub extern "C" fn csinh(z: Complex64) -> Complex64 {
         if iy >= 0x7ff0_0000 {
             return c64(f64::INFINITY, y - y);
         }
-        return c64(x * libm::cos(y), f64::INFINITY * libm::sin(y));
+        return c64(x * cos_n(y), f64::INFINITY * sin_n(y));
     }
 
     // sinh(NaN1 + I NaN2), sinh(NaN +- I Inf) and sinh(NaN + I y): NaN +
@@ -931,7 +1028,7 @@ pub extern "C" fn ctanh(z: Complex64) -> Complex64 {
         let s = if y.is_infinite() {
             y
         } else {
-            libm::sin(y) * libm::cos(y)
+            sin_n(y) * cos_n(y)
         };
         return c64(x, 0.0_f64.copysign(s));
     }
@@ -950,12 +1047,12 @@ pub extern "C" fn ctanh(z: Complex64) -> Complex64 {
         let exp_mx = libm::exp(-x.abs());
         return c64(
             1.0_f64.copysign(x),
-            4.0 * libm::sin(y) * libm::cos(y) * exp_mx * exp_mx,
+            4.0 * sin_n(y) * cos_n(y) * exp_mx * exp_mx,
         );
     }
 
     // Kahan's algorithm
-    let t = libm::tan(y);
+    let t = tan_n(y);
     let beta = 1.0 + t * t; // = 1 / cos^2(y)
     let s = libm::sinh(x);
     let rho = libm::sqrt(1.0 + s * s); // = cosh(x)
@@ -973,7 +1070,6 @@ pub extern "C" fn ctan(z: Complex64) -> Complex64 {
 /// [`ccosh`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ccoshf(z: Complex32) -> Complex32 {
-    const HUGE: f32 = p2f(127);
     let (x, y) = (z.re, z.im);
     let ix = x.to_bits() & 0x7fff_ffff;
     let iy = y.to_bits() & 0x7fff_ffff;
@@ -984,22 +1080,19 @@ pub extern "C" fn ccoshf(z: Complex32) -> Complex32 {
         }
         if ix < 0x4110_0000 {
             // |x| < 9: normal case
-            return c32(
-                libm::coshf(x) * libm::cosf(y),
-                libm::sinhf(x) * libm::sinf(y),
-            );
+            return c32(libm::coshf(x) * cosf_n(y), libm::sinhf(x) * sinf_n(y));
         }
         if ix < 0x42b1_7218 {
             // |x| < 88.7: expf(|x|) won't overflow
             let h = libm::expf(x.abs()) * 0.5;
-            return c32(h * libm::cosf(y), h.copysign(x) * libm::sinf(y));
+            return c32(h * cosf_n(y), h.copysign(x) * sinf_n(y));
         } else if ix < 0x4340_b1e7 {
             // |x| < 192.7: scale to avoid overflow
-            let w = ldexp_cexpf(x.abs(), y, -1);
-            return c32(w.re, w.im * 1.0_f32.copysign(x));
+            return ldexp_cexpf(x.abs(), y, -1, 1.0, 1.0_f32.copysign(x));
         }
-        let h = HUGE * x;
-        return c32(h * h * libm::cosf(y), h * libm::sinf(y));
+        // |x| >= 192.7: the result always overflows (as in `ccosh`).
+        let (s, c) = sincosf_n(y);
+        return c32(overflowed(c), overflowed(if x < 0.0 { -s } else { s }));
     }
 
     if ix == 0 {
@@ -1018,7 +1111,7 @@ pub extern "C" fn ccoshf(z: Complex32) -> Complex32 {
         if iy >= 0x7f80_0000 {
             return c32(f32::INFINITY, x * (y - y));
         }
-        return c32(f32::INFINITY * libm::cosf(y), x * libm::sinf(y));
+        return c32(f32::INFINITY * cosf_n(y), x * sinf_n(y));
     }
     c32((x * x) * (y - y), (x + x) * (y - y))
 }
@@ -1032,30 +1125,26 @@ pub extern "C" fn ccosf(z: Complex32) -> Complex32 {
 /// [`csinh`] (float).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn csinhf(z: Complex32) -> Complex32 {
-    const HUGE: f32 = p2f(127);
     let (x, y) = (z.re, z.im);
     let ix = x.to_bits() & 0x7fff_ffff;
     let iy = y.to_bits() & 0x7fff_ffff;
 
     if ix < 0x7f80_0000 && iy < 0x7f80_0000 {
         if iy == 0 {
-            return c32(libm::sinhf(x), y);
+            return c32(sinhf_d(x), y);
         }
         if ix < 0x4110_0000 {
-            return c32(
-                libm::sinhf(x) * libm::cosf(y),
-                libm::coshf(x) * libm::sinf(y),
-            );
+            return c32(libm::sinhf(x) * cosf_n(y), libm::coshf(x) * sinf_n(y));
         }
         if ix < 0x42b1_7218 {
             let h = libm::expf(x.abs()) * 0.5;
-            return c32(h.copysign(x) * libm::cosf(y), h * libm::sinf(y));
+            return c32(h.copysign(x) * cosf_n(y), h * sinf_n(y));
         } else if ix < 0x4340_b1e7 {
-            let w = ldexp_cexpf(x.abs(), y, -1);
-            return c32(w.re * 1.0_f32.copysign(x), w.im);
+            return ldexp_cexpf(x.abs(), y, -1, 1.0_f32.copysign(x), 1.0);
         }
-        let h = HUGE * x;
-        return c32(h * libm::cosf(y), h * h * libm::sinf(y));
+        // |x| >= 192.7: the result always overflows (as in `csinh`).
+        let (s, c) = sincosf_n(y);
+        return c32(overflowed(if x < 0.0 { -c } else { c }), overflowed(s));
     }
 
     if ix == 0 {
@@ -1071,7 +1160,7 @@ pub extern "C" fn csinhf(z: Complex32) -> Complex32 {
         if iy >= 0x7f80_0000 {
             return c32(f32::INFINITY, y - y);
         }
-        return c32(x * libm::cosf(y), f32::INFINITY * libm::sinf(y));
+        return c32(x * cosf_n(y), f32::INFINITY * sinf_n(y));
     }
     c32((x + x) * (y - y), (x * x) * (y - y))
 }
@@ -1098,7 +1187,7 @@ pub extern "C" fn ctanhf(z: Complex32) -> Complex32 {
         let s = if y.is_infinite() {
             y
         } else {
-            libm::sinf(y) * libm::cosf(y)
+            sinf_n(y) * cosf_n(y)
         };
         return c32(x, 0.0_f32.copysign(s));
     }
@@ -1112,11 +1201,11 @@ pub extern "C" fn ctanhf(z: Complex32) -> Complex32 {
         let exp_mx = libm::expf(-x.abs());
         return c32(
             1.0_f32.copysign(x),
-            4.0 * libm::sinf(y) * libm::cosf(y) * exp_mx * exp_mx,
+            4.0 * sinf_n(y) * cosf_n(y) * exp_mx * exp_mx,
         );
     }
 
-    let t = libm::tanf(y);
+    let t = tanf_n(y);
     // `1.0 + t * t` is a double sum in the C, rounded once to float; the
     // exact double sum of two floats rounds to the same float as a float
     // addition does, so float arithmetic gives the identical value.
@@ -1930,6 +2019,175 @@ mod tests {
     /// [<re2> <im2>] = <outputs> <errno>`, floats as their bits in hex.
     const ORACLE: &str = include_str!("complex_oracle.txt");
 
+    /// glibc's answers in the three directed rounding modes, for each call of
+    /// [`ORACLE`] whose answer there differs from its answer to nearest in
+    /// kind -- an infinity, a NaN or a zero where to nearest it has none, or
+    /// of the other sign -- or in `errno`: `<mode> <call>`, mode `down`, `up`
+    /// or `zero` (`posix/tools/oracle/complex_modes_harness.py`).
+    const MODES_ORACLE: &str = include_str!("complex_modes_oracle.txt");
+
+    std::thread_local! {
+        /// What [`ulps_allowed`] adds to a nonzero bound while
+        /// [`every_call_answers_in_every_rounding_direction`] replays a
+        /// directed mode; 0 otherwise.
+        static DIRECTED_SLACK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// How far a directed answer may be from glibc's answer *to nearest*,
+    /// beyond the bound to nearest, where the call keeps its kind: each
+    /// rounding goes the direction's way instead of to nearest, and Kahan's
+    /// `ctan` and `ctanh` round at every step -- measured 4 at worst, there.
+    const DIRECTED_DRIFT: u64 = 4;
+
+    /// Every call of [`ORACLE`] again in each directed rounding mode: where
+    /// [`MODES_ORACLE`] has the call, glibc's answer in that mode, within the
+    /// bound to nearest and one ulp more, its infinities, NaNs and zeros
+    /// exactly; elsewhere glibc's answer to nearest, within the bound and
+    /// [`DIRECTED_DRIFT`] more. `errno` is the one to nearest where that is
+    /// set, as `math.rs`'s replay has it (design-decisions section 1139).
+    ///
+    /// Before 2026-09-28 the double and float functions took their sines and
+    /// cosines from the crate, whose argument reduction assumes rounding to
+    /// nearest -- rounding upward `cexp(i pi/2)` had a real part of 2.3e-11
+    /// -- and answered an overflow multiplied by a sine or cosine with a
+    /// finite number: rounding downward, `cexpf(1e38 + i)` was 1.8e38, and
+    /// `ccos(1 + 1000i)`'s imaginary part -DBL_MAX where the direction owes
+    /// -inf. `carg` is left out:
+    /// it is `atan2` (`math.rs`), whose rule for `errno` in a directed mode --
+    /// `ERANGE` where the answer itself underflows -- that replay holds, and
+    /// which answers zero where glibc's answers the least subnormal.
+    #[test]
+    fn every_call_answers_in_every_rounding_direction() {
+        let mut directed = std::collections::HashMap::new();
+        for line in MODES_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (mode, call) = line.split_once(' ').expect("a mode");
+            let (lhs, rhs) = call.split_once(" = ").expect("an =");
+            directed.insert((mode, lhs), rhs);
+        }
+        let mut bad = Vec::new();
+        let mut n = 0usize;
+        let mut listed = std::collections::HashSet::new();
+        for (mode_name, mode) in [
+            ("down", crate::fenv::FE_DOWNWARD),
+            ("up", crate::fenv::FE_UPWARD),
+            ("zero", crate::fenv::FE_TOWARDZERO),
+        ] {
+            for line in ORACLE.lines().filter(|l| !l.is_empty()) {
+                let (lhs, near) = line.split_once(" = ").expect("an =");
+                let glibc = directed.get(&(mode_name, lhs)).copied();
+                if glibc.is_some() {
+                    listed.insert((mode_name, lhs));
+                }
+                if lhs.starts_with("carg") {
+                    continue;
+                }
+                let (want, slack) = match glibc {
+                    Some(rhs) => {
+                        let mut outs: Vec<&str> = rhs.split(' ').collect();
+                        let near_errno = near.rsplit(' ').next().expect("an errno");
+                        if near_errno != "0" {
+                            *outs.last_mut().expect("an errno") = near_errno;
+                        }
+                        (format!("{lhs} = {}", outs.join(" ")), 1)
+                    }
+                    None => (line.to_owned(), DIRECTED_DRIFT),
+                };
+                n += 1;
+                DIRECTED_SLACK.with(|s| s.set(slack));
+                let result = {
+                    let _r = Rounding::set(mode);
+                    check_line(&want)
+                };
+                DIRECTED_SLACK.with(|s| s.set(0));
+                if let Err(e) = result {
+                    bad.push(format!(
+                        "{mode_name} {want}\n    to nearest {near}\n    {e}"
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            listed.len(),
+            directed.len(),
+            "every directed line is a call of ORACLE's"
+        );
+        assert!(n > 120_000, "only {n} calls replayed");
+        assert!(
+            bad.is_empty(),
+            "{} of {n} calls differ in a directed mode:\n{}",
+            bad.len(),
+            bad.iter().take(80).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Rounds in `mode` -- the SSE unit and the x87 alike -- until dropped, then to nearest
+    /// again.
+    struct Rounding;
+
+    impl Rounding {
+        fn set(mode: i32) -> Self {
+            assert_eq!(crate::fenv::fesetround(mode), 0);
+            Self
+        }
+    }
+
+    impl Drop for Rounding {
+        fn drop(&mut self) {
+            crate::fenv::fesetround(crate::fenv::FE_TONEAREST);
+        }
+    }
+
+    /// The fixes by name, in every directed mode: the sines and cosines are
+    /// the ones to nearest, and an overflow multiplied by one answers as the
+    /// direction rounds the signed result.
+    #[test]
+    fn overflow_and_trigonometry_in_every_rounding_direction() {
+        use core::hint::black_box as bb;
+        let near = cexp(c64(0.0, bb(core::f64::consts::FRAC_PI_2)));
+        let max = f64::MAX;
+        let inf = f64::INFINITY;
+        for (mode_name, mode) in [
+            ("down", crate::fenv::FE_DOWNWARD),
+            ("up", crate::fenv::FE_UPWARD),
+            ("zero", crate::fenv::FE_TOWARDZERO),
+        ] {
+            let _r = Rounding::set(mode);
+            let w = cexp(c64(0.0, bb(core::f64::consts::FRAC_PI_2)));
+            assert_eq!(
+                (w.re.to_bits(), w.im.to_bits()),
+                (near.re.to_bits(), near.im.to_bits()),
+                "cexp(i pi/2) {mode_name}"
+            );
+            // cexp(2000 + i): both parts overflow, positive.
+            let w = cexp(c64(bb(2000.0), 1.0));
+            let pos = if mode_name == "up" { inf } else { max };
+            assert_eq!((w.re, w.im), (pos, pos), "cexp(2000 + i) {mode_name}");
+            // cexpf(1e38 + i), the float branch.
+            let w = cexpf(c32(bb(1e38), 1.0));
+            let posf = if mode_name == "up" {
+                f32::INFINITY
+            } else {
+                f32::MAX
+            };
+            assert_eq!((w.re, w.im), (posf, posf), "cexpf(1e38 + i) {mode_name}");
+            // ccos(1 + 1000i) = ccosh(-1000 + i): the scaled branch, its
+            // imaginary part negative -- -inf rounding downward.
+            let w = ccos(c64(1.0, bb(1000.0)));
+            let neg = if mode_name == "down" { -inf } else { -max };
+            assert_eq!(w.im, neg, "ccos(1 + 1000i) {mode_name}: {w:?}");
+            // csinh(-DBL_MAX + 0i): sinh's own overflow, negative.
+            let w = csinh(c64(bb(-max), 0.0));
+            assert_eq!(w.re, neg, "csinh(-DBL_MAX) {mode_name}");
+            // ccosh(-2000 + 2i): the always-overflows branch; cos(2) < 0,
+            // sin(2) > 0 and x < 0 make both parts negative.
+            let w = ccosh(c64(bb(-2000.0), 2.0));
+            assert_eq!((w.re, w.im), (neg, neg), "ccosh(-2000 + 2i) {mode_name}");
+        }
+    }
+
     /// How far from glibc's answer each part of ours may be, in units in the
     /// last place.
     ///
@@ -1941,13 +2199,18 @@ mod tests {
     /// the real functions' own difference, rounded up. A difference past it
     /// is a bug in one of the three.
     fn ulps_allowed(name: &str) -> u64 {
-        match name.strip_suffix('f').unwrap_or(name) {
+        let base = match name.strip_suffix('f').unwrap_or(name) {
             "creal" | "cimag" | "conj" | "cproj" => 0,
             "cabs" | "carg" => 2,
             "cexp" | "csin" | "ccos" | "csinh" | "ccosh" | "csqrt" => 4,
             "clog" | "ctan" | "ctanh" => 6,
             "casin" | "cacos" | "casinh" | "cacosh" | "catan" | "catanh" => 8,
             other => panic!("no tolerance for {other}"),
+        };
+        if base == 0 {
+            0
+        } else {
+            base + DIRECTED_SLACK.with(core::cell::Cell::get)
         }
     }
 

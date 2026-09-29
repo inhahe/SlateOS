@@ -19,6 +19,16 @@
 //! `double` code tests bit patterns. `cpowl` is glibc's definition, as `cpow`
 //! is: `cexpl(y * clogl(x))` with the product formed as `__mulxc3` forms it.
 //!
+//! # Every rounding direction
+//!
+//! As `complex.rs`'s: the real functions they are built from are
+//! `mathl.rs`'s, right in every direction, and where an `e^x` or `cosh x`
+//! that has overflowed is multiplied by a sine or cosine, the overflow is
+//! answered as the direction rounds the signed result (`overflowed`) --
+//! rounding downward, `ccoshl(LDBL_MAX - 2i)` was two finite numbers where
+//! the direction owes -inf. Replayed against glibc in all three directed
+//! modes (`complexl_modes_oracle.txt`).
+//!
 //! # ABI
 //!
 //! A `long double complex` is class COMPLEX_X87: an argument is passed in
@@ -316,6 +326,21 @@ pub fn csqrtl(z: LdComplex) -> LdComplex {
     }
 }
 
+/// An overflow with `sign`'s sign, as the x87 unit's rounding direction
+/// gives it -- an infinity, or `LDBL_MAX` where the direction rounds toward
+/// zero ([`crate::math::Real::overflow`]). For the branches where FreeBSD
+/// multiplies an `e^x` or `cosh x` that has already overflowed by a sine or
+/// cosine: rounding downward the overflowed factor is `LDBL_MAX`, and
+/// `LDBL_MAX * cos(1)` a finite number far below it.
+fn overflowed(sign: L) -> L {
+    <L as crate::math::Real>::overflow(sign)
+}
+
+/// `v` with the sign of `v * x`: negated for a negative `x`.
+fn signed_by(v: L, x: L) -> L {
+    if x.is_sign_negative() { v.negate() } else { v }
+}
+
 // ===========================================================================
 // cexpl -- FreeBSD ld80/s_cexpl.c, and __ldexp_cexpl from ld80/k_expl.h
 //
@@ -332,8 +357,12 @@ pub fn csqrtl(z: LdComplex) -> LdComplex {
 /// the first with its low 32 bits zero so the product with `k` is exact --
 /// leaves an `r` whose `expl` is near 1, and the result is scaled as
 /// FreeBSD scales it: by `2^16382` first, then by the rest in two halves,
-/// neither of which overflows on its own.
-fn ldexp_cexpl(x: L, y: L, expt: i32) -> LdComplex {
+/// neither of which overflows on its own. `re_sign` and `im_sign` (each
+/// +-1) multiply the parts before they are scaled: `ccoshl` and `csinhl`
+/// want one negated, and negating after the scaling would round an overflow
+/// the wrong way -- rounding downward, -`LDBL_MAX` where the direction owes
+/// -inf.
+fn ldexp_cexpl(x: L, y: L, expt: i32, re_sign: L, im_sign: L) -> LdComplex {
     const LN2_HI: L = L::from_bits(0x3FFE, 0xB172_17F7_0000_0000);
     const LN2_LO: L = L::from_bits(0x3FDE, 0xD1CF_79AB_C9E3_B398);
     const INV_LN2: L = L::from_bits(0x3FFF, 0xB8AA_3B29_5C17_F0BC);
@@ -349,6 +378,7 @@ fn ldexp_cexpl(x: L, y: L, expt: i32) -> LdComplex {
     let scale1 = ONE.scalbn(half);
     let scale2 = ONE.scalbn(expt.saturating_sub(half));
     let (s, c) = crate::mathl::sincosl(y);
+    let (c, s) = (c * re_sign, s * im_sign);
     cl(c * exp_x * scale1 * scale2, s * exp_x * scale1 * scale2)
 }
 
@@ -390,7 +420,13 @@ pub fn cexpl(z: LdComplex) -> LdComplex {
     if x > exp_ovfl && x < cexp_ovfl {
         // x is between exp_ovfl and cexp_ovfl, so we must scale to avoid
         // overflow in exp(x).
-        ldexp_cexpl(x, y, 0)
+        ldexp_cexpl(x, y, 0, ONE, ONE)
+    } else if x >= cexp_ovfl && x.is_finite() {
+        // e^x times cos(y) or sin(y), neither zero for a finite nonzero y,
+        // overflows: answered as the rounding direction gives it
+        // ([`overflowed`]).
+        let (s, c) = crate::mathl::sincosl(y);
+        cl(overflowed(c), overflowed(s))
     } else {
         // Cases covered here:
         //  -  x < exp_ovfl and exp(x) won't overflow (common case)
@@ -588,7 +624,6 @@ const CEXP_OVFL: L = L::from_bits(0x400D, 0xB1C6_A857_3DE9_768C);
 #[must_use]
 pub fn ccoshl(z: LdComplex) -> LdComplex {
     let _keep = KeepErrno::new();
-    let huge = p2l(16383);
     let (x, y) = (z.re, z.im);
     let ax = x.abs();
 
@@ -610,13 +645,12 @@ pub fn ccoshl(z: LdComplex) -> LdComplex {
             return cl(h * c, h.copysign(x) * s);
         } else if ax < CEXP_OVFL {
             // scale to avoid overflow
-            let w = ldexp_cexpl(ax, y, -1);
-            return cl(w.re, w.im * ONE.copysign(x));
+            return ldexp_cexpl(ax, y, -1, ONE, ONE.copysign(x));
         }
-        // the result always overflows
-        let h = huge * x;
+        // the result always overflows -- cosh(x) cos(y) with cos(y)'s sign,
+        // sinh(x) sin(y) with x's and sin(y)'s
         let (s, c) = crate::mathl::sincosl(y);
-        return cl(h * h * c, h * s);
+        return cl(overflowed(c), overflowed(signed_by(s, x)));
     }
 
     // cosh(+-0 +- I Inf) = dNaN + I 0, and cosh(+-0 +- I NaN) = d(NaN) +
@@ -666,7 +700,6 @@ pub fn ccosl(z: LdComplex) -> LdComplex {
 #[must_use]
 pub fn csinhl(z: LdComplex) -> LdComplex {
     let _keep = KeepErrno::new();
-    let huge = p2l(16383);
     let (x, y) = (z.re, z.im);
     let ax = x.abs();
 
@@ -684,12 +717,12 @@ pub fn csinhl(z: LdComplex) -> LdComplex {
             let (s, c) = crate::mathl::sincosl(y);
             return cl(h.copysign(x) * c, h * s);
         } else if ax < CEXP_OVFL {
-            let w = ldexp_cexpl(ax, y, -1);
-            return cl(w.re * ONE.copysign(x), w.im);
+            return ldexp_cexpl(ax, y, -1, ONE.copysign(x), ONE);
         }
-        let h = huge * x;
+        // the result always overflows -- sinh(x) cos(y) with x's and cos(y)'s
+        // signs, cosh(x) sin(y) with sin(y)'s
         let (s, c) = crate::mathl::sincosl(y);
-        return cl(h * c, h * h * s);
+        return cl(overflowed(signed_by(c, x)), overflowed(s));
     }
 
     // sinh(+-0 +- I Inf) = +-0 + I dNaN, raising invalid; sinh(+-0 +- I
@@ -1323,6 +1356,169 @@ mod tests {
     /// glibc 2.39's answers (`posix/tools/oracle/complexl_harness.py`).
     const ORACLE: &str = include_str!("complexl_oracle.txt");
 
+    /// glibc's answers in the three directed rounding modes, for each call of
+    /// [`ORACLE`] whose answer there differs from its answer to nearest in
+    /// kind -- an infinity, a NaN or a zero where to nearest it has none, or
+    /// of the other sign -- or in `errno`: `<mode> <call>`, mode `down`, `up`
+    /// or `zero` (`posix/tools/oracle/complexl_modes_harness.py`).
+    const MODES_ORACLE: &str = include_str!("complexl_modes_oracle.txt");
+
+    std::thread_local! {
+        /// What [`ulps_allowed`] adds to a nonzero bound while
+        /// [`every_call_answers_in_every_rounding_direction`] replays a
+        /// directed mode; 0 otherwise.
+        static DIRECTED_SLACK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+    }
+
+    /// How far a directed answer may be from glibc's answer *to nearest*,
+    /// beyond the bound to nearest, where the call keeps its kind: each
+    /// rounding goes the direction's way instead of to nearest, and Kahan's
+    /// `ctan` and `ctanh` round at every step -- measured 4 at worst, there.
+    const DIRECTED_DRIFT: u64 = 4;
+
+    /// Every call of [`ORACLE`] again in each directed rounding mode: where
+    /// [`MODES_ORACLE`] has the call, glibc's answer in that mode, within the
+    /// bound to nearest and one ulp more, its infinities, NaNs and zeros
+    /// exactly; elsewhere glibc's answer to nearest, within the bound and
+    /// [`DIRECTED_DRIFT`] more. `errno` is the one to nearest where that is
+    /// set, as `math.rs`'s replay has it (design-decisions section 1139).
+    ///
+    /// Before 2026-09-28 the double and float functions took their sines and
+    /// cosines from the crate, whose argument reduction assumes rounding to
+    /// nearest -- rounding upward `cexp(i pi/2)` had a real part of 2.3e-11
+    /// -- and answered an overflow multiplied by a sine or cosine with a
+    /// finite number: rounding downward, `cexpf(1e38 + i)` was 1.8e38, and
+    /// `ccos(1 + 1000i)`'s imaginary part -DBL_MAX where the direction owes
+    /// -inf. (The `long double`
+    /// functions had the second bug, not the first.)
+    #[test]
+    fn every_call_answers_in_every_rounding_direction() {
+        extended();
+        let mut directed = std::collections::HashMap::new();
+        for line in MODES_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let (mode, call) = line.split_once(' ').expect("a mode");
+            let (lhs, rhs) = call.split_once(" = ").expect("an =");
+            directed.insert((mode, lhs), rhs);
+        }
+        let mut bad = Vec::new();
+        let mut n = 0usize;
+        let mut listed = std::collections::HashSet::new();
+        for (mode_name, mode) in [
+            ("down", crate::fenv::FE_DOWNWARD),
+            ("up", crate::fenv::FE_UPWARD),
+            ("zero", crate::fenv::FE_TOWARDZERO),
+        ] {
+            for line in ORACLE.lines().filter(|l| !l.is_empty()) {
+                let (lhs, near) = line.split_once(" = ").expect("an =");
+
+                let glibc = directed.get(&(mode_name, lhs)).copied();
+                if glibc.is_some() {
+                    listed.insert((mode_name, lhs));
+                }
+                let (want, slack) = match glibc {
+                    Some(rhs) => {
+                        let mut outs: Vec<&str> = rhs.split(' ').collect();
+                        let near_errno = near.rsplit(' ').next().expect("an errno");
+                        if near_errno != "0" {
+                            *outs.last_mut().expect("an errno") = near_errno;
+                        }
+                        (format!("{lhs} = {}", outs.join(" ")), 1)
+                    }
+                    None => (line.to_owned(), DIRECTED_DRIFT),
+                };
+                n += 1;
+                DIRECTED_SLACK.with(|s| s.set(slack));
+                let result = {
+                    let _r = Rounding::set(mode);
+                    check_line(&want)
+                };
+                DIRECTED_SLACK.with(|s| s.set(0));
+                if let Err(e) = result {
+                    bad.push(format!(
+                        "{mode_name} {want}\n    to nearest {near}\n    {e}"
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            listed.len(),
+            directed.len(),
+            "every directed line is a call of ORACLE's"
+        );
+        assert!(n > 70_000, "only {n} calls replayed");
+        assert!(
+            bad.is_empty(),
+            "{} of {n} calls differ in a directed mode:\n{}",
+            bad.len(),
+            bad.iter().take(80).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Rounds in `mode` -- both units, with the x87 at 64 bits -- until dropped, then to nearest
+    /// again.
+    struct Rounding;
+
+    impl Rounding {
+        fn set(mode: i32) -> Self {
+            assert_eq!(crate::fenv::fesetround(mode), 0);
+            Self
+        }
+    }
+
+    impl Drop for Rounding {
+        fn drop(&mut self) {
+            crate::fenv::fesetround(crate::fenv::FE_TONEAREST);
+        }
+    }
+
+    /// The fixes by name, in every directed mode: an overflow multiplied by
+    /// a sine or cosine answers as the direction rounds the signed result.
+    #[test]
+    fn overflow_in_every_rounding_direction() {
+        extended();
+        let max = L::from_bits(0x7FFE, u64::MAX);
+        let bits = |v: L| (v.sign_exp, v.significand);
+        for (mode_name, mode) in [
+            ("down", crate::fenv::FE_DOWNWARD),
+            ("up", crate::fenv::FE_UPWARD),
+            ("zero", crate::fenv::FE_TOWARDZERO),
+        ] {
+            let _r = Rounding::set(mode);
+            let pos = if mode_name == "up" { INF } else { max };
+            let neg = if mode_name == "down" {
+                INF.negate()
+            } else {
+                max.negate()
+            };
+            // cexpl(LDBL_MAX + i): both parts overflow, positive.
+            let w = cexpl(cl(max, ONE));
+            assert_eq!(
+                (bits(w.re), bits(w.im)),
+                (bits(pos), bits(pos)),
+                "cexpl {mode_name}"
+            );
+            // ccoshl(-12000 + 2i): cos(2) < 0, sin(2) > 0, x < 0 -- the scaled
+            // branch, both parts negative.
+            let w = ccoshl(cl(ld(-12000.0), ld(2.0)));
+            assert_eq!(
+                (bits(w.re), bits(w.im)),
+                (bits(neg), bits(neg)),
+                "ccoshl scaled {mode_name}"
+            );
+            // ccoshl(LDBL_MAX - 2i): the always-overflows branch; cos(-2) and
+            // sin(-2) both negative.
+            let w = ccoshl(cl(max, ld(-2.0)));
+            assert_eq!(
+                (bits(w.re), bits(w.im)),
+                (bits(neg), bits(neg)),
+                "ccoshl {mode_name}"
+            );
+        }
+    }
+
     /// A value from the oracle's `SSSS:MMMMMMMMMMMMMMMM`.
     fn val(s: &str) -> L {
         let (se, m) = s.split_once(':').unwrap();
@@ -1337,7 +1533,7 @@ mod tests {
     /// case for the `long double` function (`libm-test-ulps`, x86_64),
     /// FreeBSD's, and one for the real functions' own difference.
     fn ulps_allowed(name: &str) -> u64 {
-        match name.strip_suffix('l').unwrap_or(name) {
+        let base = match name.strip_suffix('l').unwrap_or(name) {
             "creal" | "cimag" | "conj" | "cproj" => 0,
             "cabs" | "carg" => 2,
             "cexp" | "csin" | "ccos" | "csinh" | "ccosh" | "csqrt" => 4,
@@ -1348,6 +1544,11 @@ mod tests {
             "ctan" | "ctanh" => 8,
             "casin" | "cacos" | "casinh" | "cacosh" | "catan" | "catanh" => 8,
             other => panic!("no tolerance for {other}"),
+        };
+        if base == 0 {
+            0
+        } else {
+            base + DIRECTED_SLACK.with(core::cell::Cell::get)
         }
     }
 

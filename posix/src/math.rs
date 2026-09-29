@@ -240,39 +240,44 @@ pub(crate) fn ranged<A: Copy, R: Real>(
     f: impl Fn(A) -> R,
     range: impl Fn(R) -> Range,
 ) -> R {
+    let (r, error) = saturated(args, f, range);
+    if error {
+        set(errno::ERANGE);
+    }
+    r
+}
+
+/// [`ranged`] without the `errno`: the answer, and whether it is a range
+/// error. For the functions that report no range error of their own but are
+/// built from ones that do -- the complex functions, whose `sinh` must still
+/// answer an overflow as the direction rounds it.
+pub(crate) fn saturated<A: Copy, R: Real>(
+    args: A,
+    f: impl Fn(A) -> R,
+    range: impl Fn(R) -> Range,
+) -> (R, bool) {
     let r = f(args);
     if !r.at_the_edge() {
-        return r;
+        return (r, false);
     }
     if R::unit_rounds_to_nearest() {
-        if range(r) != Range::Within {
-            set(errno::ERANGE);
-        }
-        return r;
+        return (r, range(r) != Range::Within);
     }
     let near = R::to_nearest(args, &f);
     match range(near) {
-        Range::Within => {
-            // In range to nearest, but not as rounded here: DBL_MAX + 1
-            // rounded upward is an infinity, the least subnormal times 0.9
-            // rounded downward zero.
-            if range(r) != Range::Within {
-                set(errno::ERANGE);
-            }
-            r
-        }
-        Range::Overflow => {
-            set(errno::ERANGE);
-            R::overflow(near)
-        }
-        Range::Underflow => {
-            set(errno::ERANGE);
+        // In range to nearest, but perhaps not as rounded here: DBL_MAX + 1
+        // rounded upward is an infinity, the least subnormal times 0.9
+        // rounded downward zero.
+        Range::Within => (r, range(r) != Range::Within),
+        Range::Overflow => (R::overflow(near), true),
+        Range::Underflow => (
             if near.is_zero() {
                 R::underflow(near)
             } else {
                 r
-            }
-        }
+            },
+            true,
+        ),
     }
 }
 

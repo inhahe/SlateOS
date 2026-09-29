@@ -5834,7 +5834,10 @@ mod tests {
         // lgammal writes signgam, which math.rs's tests read.
         let _g = crate::math::signgam_test_lock();
         let mut directed = std::collections::HashMap::new();
-        for line in MODES_ORACLE.lines().filter(|l| !l.is_empty()) {
+        for line in MODES_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
             let (mode, call) = line.split_once(' ').expect("a mode");
             let (lhs, rhs) = call.split_once(" = ").expect("an =");
             directed.insert((mode, lhs), rhs);

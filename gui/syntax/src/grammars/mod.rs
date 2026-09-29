@@ -19,7 +19,10 @@ pub(crate) mod toml;
 pub(crate) mod yaml;
 
 /// The generated file for a grammar, in a module of its own. `$scanner`,
-/// when given, is the type the generated code calls `Scanner`.
+/// when given, is the type the generated code calls `Scanner` -- and its
+/// tokens must be the grammar's, name for name, or the grammar does not
+/// build: the runtime hands a scanner one flag for each of the grammar's
+/// tokens, and the scanner reads as many flags as it has tokens.
 macro_rules! generated {
     ($dir:literal) => {
         #[allow(
@@ -54,6 +57,13 @@ macro_rules! generated {
             type Scanner = $scanner;
             include!(concat!(env!("OUT_DIR"), "/", $dir, "/language.rs"));
             crate::ffi::language_fn!();
+            const _: () = assert!(
+                crate::ffi::same_names(
+                    <Scanner as crate::ffi::ExternalScanner>::TOKENS,
+                    &EXTERNAL_TOKENS
+                ),
+                "the scanner's tokens are not its grammar's, in the grammar's order"
+            );
         }
     };
 }

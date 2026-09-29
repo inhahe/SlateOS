@@ -416,7 +416,9 @@ pub const SERIALIZATION_BUFFER_SIZE: usize = 1024;
 /// cannot recognise -- indentation, raw strings, nested comments.
 pub trait ExternalScanner: Default {
     /// Its tokens, in the grammar's order: what a `valid` list is indexed
-    /// by. Tested against the grammar's own list (`EXTERNAL_TOKENS`).
+    /// by. Checked against the grammar's own list (`EXTERNAL_TOKENS`) when
+    /// the grammar is built ([`same_names`]): a scanner whose list is not
+    /// its grammar's does not compile.
     const TOKENS: &'static [&'static str];
 
     /// Try to recognise, at the lexer's position, one of the tokens `valid`
@@ -431,6 +433,28 @@ pub trait ExternalScanner: Default {
     /// Restore a state [`serialize`](Self::serialize) wrote; empty means the
     /// state it starts in.
     fn deserialize(&mut self, bytes: &[u8]);
+}
+
+/// Whether two lists of names are the same, name for name and in order:
+/// a scanner's [`TOKENS`](ExternalScanner::TOKENS) and its grammar's, which
+/// `grammars::generated!` compares while compiling.
+#[must_use]
+pub const fn same_names(a: &[&str], b: &[&str]) -> bool {
+    match (a, b) {
+        ([], []) => true,
+        ([x, a @ ..], [y, b @ ..]) => same_bytes(x.as_bytes(), y.as_bytes()) && same_names(a, b),
+        _ => false,
+    }
+}
+
+/// Whether two byte strings are the same: `==`, which a `const fn` cannot
+/// call.
+const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    match (a, b) {
+        ([], []) => true,
+        ([x, a @ ..], [y, b @ ..]) => *x == *y && same_bytes(a, b),
+        _ => false,
+    }
 }
 
 /// The runtime's table of functions for scanner `S`, over the grammar's
@@ -472,8 +496,9 @@ unsafe extern "C" fn scanner_scan<S: ExternalScanner>(
     // SAFETY: `payload` is a live `Box<S>` from `scanner_create::<S>` that
     // the runtime uses for nothing else during the call; `valid` is a row of
     // the grammar's scanner states -- `external_token_count` flags, which is
-    // `S::TOKENS.len()` (tested per grammar) -- or the runtime's own list of
-    // as many; `lexer` is as in `lexer_entry!`.
+    // `S::TOKENS.len()` (each grammar's `generated!` does not compile
+    // otherwise) -- or the runtime's own list of as many; `lexer` is as in
+    // `lexer_entry!`.
     let (scanner, valid, mut lexer) = unsafe {
         (
             &mut *payload.cast::<S>(),
@@ -550,6 +575,25 @@ mod tests {
         assert_eq!(offset_of!(TSLanguage, supertype_count), 252);
         assert_eq!(offset_of!(TSLanguage, metadata), 280);
         assert_eq!(size_of::<TSLanguage>(), 288);
+    }
+
+    /// **Two lists of names are the same only name for name, in order** --
+    /// what keeps a scanner from reading past the flags it is given.
+    #[test]
+    fn names_are_the_same_only_name_for_name() {
+        assert!(same_names(&[], &[]));
+        assert!(same_names(&["a", "bc"], &["a", "bc"]));
+        for (a, b) in [
+            (&["a", "bc"][..], &["a", "b"][..]),
+            (&["a", "bc"], &["a", "bd"]),
+            (&["a", "bc"], &["bc", "a"]),
+            (&["a", "bc"], &["a"]),
+            (&["a"], &["a", ""]),
+            (&[""], &[]),
+        ] {
+            assert!(!same_names(a, b), "{a:?} {b:?}");
+            assert!(!same_names(b, a), "{b:?} {a:?}");
+        }
     }
 
     /// **A set holds a character when a range does**, ends included.

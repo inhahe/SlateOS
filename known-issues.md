@@ -176115,7 +176115,7 @@ harmless and named in the gate's `EXCEPTIONS` with why.
 `scripts/check-libc-declared.py`.
 
 
-## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: OPEN (2026-09-29: `posix/include` declares the 195 of them glibc 2.39's headers declare, where and as glibc's do -- held to glibc's by `scripts/check-libc-overlay.py`, design-decisions §1141 -- and the C fixtures are built with it; left: the gate for the other direction, a public name `libc.a` defines and no header declares, and the names glibc declares nowhere either, each to be decided)**
+## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 -- `posix/include` declares the 195 of them glibc 2.39's headers declare, where and as glibc's do (held to glibc's by `scripts/check-libc-overlay.py`; design-decisions §1141), and the C fixtures are built with it; `scripts/check-libc-declared.py` now refuses a public name `libc.a` defines that no header declares, and of the rest fifteen stopped being exported (D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES) and each other one is excused with its reason. Still to come, when there is something to take it: the rootfs's `/usr/include`, for a native toolchain, and each port's build, when it is next rebuilt**
 
 **In short:** C on SlateOS is compiled against musl's headers (`zig cc
 --target=x86_64-linux-musl`), and musl's headers declare only what musl
@@ -176161,4 +176161,43 @@ disagrees with the definition's types is caught at compile time.
 
 **Where:** `posix/include/` (new), `services/*/build.py`,
 `scripts/create-ext4-rootfs.sh`, a gate beside
+`scripts/check-libc-declared.py`.
+
+## D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES — `libc.a` exported fifteen names into the program's namespace that no header declared: `<limits.h>`'s constants as data, `select`'s helpers, `execl`'s internal targets, and `readdir64_r` misspelt (lane D, 2026-09-29) — **Status: FIXED 2026-09-29**
+
+**In short:** a C library may give a program only the names its headers
+declare, and names reserved to itself (a leading underscore). This one
+exported fifteen more: `OPEN_MAX`, `CHILD_MAX`, `LINK_MAX`, `MQ_OPEN_MAX`,
+`PATH_MAX_LIMIT`, `SYMLINK_MAX` and `TIMER_MAX` as data -- with 58 more of
+`<limits.h>`'s constants, which musl's macros happened to hide; `select`'s
+own helpers `fd_set_zero`, `fd_set_set`, `fd_set_clr` and `fd_set_isset`;
+`vexecl`, `vexeclp` and `vexecle`, where `execl`'s trampolines jump; and
+`readdir_r64`, a misspelling of glibc's `readdir64_r`. A program with a
+global of one of those names of its own -- `OPEN_MAX`, in a program that
+does not include `<limits.h>`, is legal C -- could fail to link, with two
+definitions; and a program built against glibc that calls `readdir64_r`
+could not link at all. Found by the second half of
+`scripts/check-libc-declared.py`, new the same day, which asks whether every
+public name the library defines is declared by some header.
+
+**Fixed:** the limits are Rust constants and nothing more (`limits.rs`, not
+`no_mangle`); `select`'s `fd_set_zero` and `fd_set_set` are `pub(crate)`
+and unexported, and its `fd_set_clr`, which nothing called, and
+`fd_set_isset`, a second copy of the `is_set_in` it reads sets with, are
+gone (`poll.rs`); `execl`'s targets are `__slate_vexecl` and the rest, named as
+the library's other internal symbols are (`spawn.rs`); and `readdir64_r`
+has its name (`dirent.rs`). The gate refuses a new one.
+
+**What the gate lets stand, on purpose** (`UNDECLARED_OK`, each with its
+reason): seventeen Linux system calls glibc 2.39 declares no function for
+either (`clone3`, `openat2`, `futex` ...), which C makes through
+`syscall()`; `sysctl`, `sys_errlist` and `sys_nerr`, which glibc stopped
+declaring; the six XSI STREAMS functions, which POSIX.1-2024 removed;
+`fpurge`, BSD's name for `__fpurge`; gnulib's `verror` and
+`verror_at_line`; SlateOS's own `setkeylayout` and `slateos_spawn_caps`,
+whose C declarations wait on a header set for SlateOS's own calls; and the
+compiler runtime's 35 `_Float16` and `_Float128` functions, which are the
+compiler's to declare.
+
+**Where:** `posix/src/limits.rs`, `poll.rs`, `spawn.rs`, `dirent.rs`;
 `scripts/check-libc-declared.py`.

@@ -58,3 +58,11 @@ declarations it adds is visible exactly where glibc's is, with glibc's type.
 It needs zig, as the other two do, and no archive; about a minute. Same exit
 codes, `--self-test`, and a `PINNED` entry of its own in
 `check-gates-are-wired.py`.
+
+## And the converse (2026-09-29, later)
+
+`check-libc-declared.py` now asks the question the other way round as well:
+is every public name `libc.a` defines declared by a header? Its first answer
+was fifteen names that should never have been exported, fixed the same day
+(known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES). Same
+command and exit codes; it takes about a minute and a quarter now.

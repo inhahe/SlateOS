@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Refuse a function musl's headers declare that `libc.a` does not define.
+"""Refuse a function musl's headers declare that `libc.a` does not define --
+and a public name `libc.a` defines that no header declares.
 
 Why
 ---
@@ -37,6 +38,23 @@ written, less what has been implemented since. The gate fails when
     new header declaration nobody implemented), or
   - a baseline name is now defined (a stale exemption: delete the line).
 
+The other direction
+-------------------
+
+Since 2026-09-29 it also asks the converse: is every *public* name `libc.a`
+defines -- one a program could collide with or want to call, not reserved
+with a leading underscore -- declared by some header a program can include,
+musl's or `posix/include`'s, as a function, an object or a macro? Every
+header is probed on its own for each name, all feature macros on; a name
+declared nowhere is either something C cannot call (clang refuses a call to
+an undeclared function, so it wants a declaration in the overlay, as glibc
+2.39's headers have it), or a name the library had no business putting in
+the program's namespace (so it wants to stop being exported). The few that
+are neither, on purpose, are `UNDECLARED_OK`, each with its reason; the
+compiler runtime's `_Float16` and `_Float128` functions are the compiler's
+business, not the library's. The first run found 81
+(known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES).
+
 Exit codes: 0 clean, 1 violation, 2 could not check (no archive, an
 unreadable one, too little found in either to judge) -- a failure too, not a
 pass -- and 3 could not run: no zig to read the headers with, which
@@ -53,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import concurrent.futures
 import importlib.util
 import os
 import re
@@ -81,6 +100,42 @@ NOT_FUNCTIONS = frozenset({
 # libc.a. Only ever removed from, and so empty for good: a name that turns
 # up missing now is a regression, not a baseline entry.
 BASELINE_MISSING: frozenset[str] = frozenset()
+
+# Public names libc.a defines that no header declares, on purpose -- name ->
+# why. Neither something C must be able to call by name, nor a name that
+# should not be exported. Only ever removed from as each gets a declaration.
+_SYSCALL = ("a Linux system call glibc 2.39 declares no function for either: C makes it "
+            "through syscall(), as on Linux")
+_STREAMS = ("XSI STREAMS, which POSIX.1-2024 removed and glibc 2.30 stopped declaring "
+            "(<stropts.h>): defined for what was built before")
+UNDECLARED_OK: dict[str, str] = {
+    **{n: _SYSCALL for n in ("arch_prctl", "capget", "capset", "clone3", "delete_module",
+                             "faccessat2", "fadvise64", "finit_module", "futex", "init_module",
+                             "ioprio_get", "ioprio_set", "kcmp", "openat2", "seccomp",
+                             "signalfd4", "userfaultfd")},
+    "sysctl": "glibc 2.32 removed it and <sys/sysctl.h>: defined for what was built before",
+    **{n: _STREAMS for n in ("fattach", "fdetach", "getmsg", "getpmsg", "putmsg", "putpmsg")},
+    "sys_errlist": "glibc 2.32 stopped declaring it (strerror is the interface): defined for "
+                   "what was built before",
+    "sys_nerr": "as sys_errlist",
+    "fpurge": "BSD's name for __fpurge, which <stdio_ext.h> declares; glibc has neither name "
+              "declared, and gnulib's fpurge module declares it itself where it finds it",
+    "verror": "gnulib's -- its verror.h declares it -- and the va_list form error's trampoline "
+              "delegates to; glibc has no such function to declare it as",
+    "verror_at_line": "as verror",
+    "setkeylayout": "SlateOS's own call, made from Rust (localectl): a C declaration of "
+                    "SlateOS's own calls waits on a header set for them",
+    "slateos_spawn_caps": "as setkeylayout: posix_spawn with a capability list",
+}
+
+# The compiler runtime's (compiler_builtins') _Float16 and _Float128 maths,
+# which it exports into libc.a: glibc declares the _Float128 ones only for
+# GCC, and this compiler has no _Float128 to declare them with.
+FLOAT16_128 = re.compile(r"[a-z_]+f(?:16|128)")
+
+# Every feature-test macro on, so that whatever any header can declare, it does.
+ALL_FEATURES = ["-std=gnu17", "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE",
+                "-D__STDC_WANT_IEC_60559_EXT__"]
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)
 # `int (name)(...)`: a parenthesised declarator, which keeps a function-like
@@ -212,6 +267,72 @@ def declared(zig: str, inc: Path, overlay: Path | None = None) -> dict[str, str]
     return out
 
 
+def public_names(members: dict[int, set[str]]) -> set[str]:
+    """The names libc.a defines for programs: identifiers, not reserved to the
+    implementation by a leading underscore (and not the compiler's own
+    `anon.*` and the like, which are no identifiers at all)."""
+    out: set[str] = set()
+    for names in members.values():
+        out |= {n for n in names if re.fullmatch(r"[A-Za-z]\w*", n)}
+    return out
+
+
+def overlay_module():
+    """`check-libc-overlay.py`, for its compiler driver."""
+    spec = importlib.util.spec_from_file_location("check_libc_overlay",
+                                                  ROOT / "scripts" / "check-libc-overlay.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def undeclared(zig: str, inc: Path, overlay: Path, names: set[str]) -> tuple[set[str], list[str]]:
+    """Which of `names` no header declares -- as a function, an object or a
+    macro -- each header probed on its own with ALL_FEATURES: (the names, the
+    errors of any header that did not compile, which make its answer void)."""
+    ov = overlay_module()
+    bases = [b for b in (overlay, inc) if b.is_dir()]
+    headers = sorted({p.relative_to(b).as_posix() for b in bases for p in b.rglob("*.h")
+                      if not p.relative_to(b).as_posix().startswith("bits/")})
+    probe_body = "".join(f"#ifndef {n}\n(void)&{n};\n#endif\n" for n in sorted(names))
+
+    def probe(h: str) -> tuple[str, set[str], list[str]]:
+        src = f"#include <{h}>\nvoid slateos_probe(void) {{\n{probe_body}}}\n"
+        _, diag = ov.compile_c(zig, src, ALL_FEATURES + ["-w", "-ferror-limit=0"], overlay)
+        missing, other = set(), []
+        for line in ov.errors_of(diag):
+            m = ov.UNDECLARED.search(line)
+            if m:
+                missing.add(m.group(1))
+            else:
+                other.append(line)
+        return h, set(names) - missing, other
+
+    declared_somewhere: set[str] = set()
+    broken: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+        for h, seen, other in pool.map(probe, headers):
+            if other:
+                broken.append(f"<{h}>: {other[0]}")
+            else:
+                declared_somewhere |= seen
+    return set(names) - declared_somewhere, broken
+
+
+def verdict_undeclared(undecl: set[str], public: set[str], allowed: dict[str, str]) -> list[str]:
+    """The violations of the other direction: a public name no header
+    declares and UNDECLARED_OK does not excuse, and an UNDECLARED_OK entry
+    that is declared now or no longer defined. Empty is clean."""
+    out = [f"undeclared: {n} -- libc.a defines it and no header declares it: declare it "
+           "(posix/include, as glibc 2.39's headers do), stop exporting it, or say why "
+           "neither in UNDECLARED_OK"
+           for n in sorted(undecl - set(allowed)) if not FLOAT16_128.fullmatch(n)]
+    out += [f"stale UNDECLARED_OK entry: {n} is " + ("declared now" if n in public
+                                                      else "no longer defined")
+            + " -- delete it" for n in sorted(set(allowed) - undecl)]
+    return out
+
+
 def shape_module():
     """`check-libc-shape.py`, for its archive-index parser."""
     spec = importlib.util.spec_from_file_location("check_libc_shape", ROOT / "scripts" / "check-libc-shape.py")
@@ -250,11 +371,21 @@ def self_test() -> int:
     v = verdict(decl, {"foo", "bar", "baz"}, frozenset({"bar"}))
     if len(v) != 1 or "stale baseline entry: bar" not in v[0]:
         failures.append(f"a stale exemption was not refused: {v}")
+    pub = public_names({0: {"open", "_start", "__errno_location", "anon.1a2b.0.llvm.9",
+                            "sqrtf128"}})
+    if pub != {"open", "sqrtf128"}:
+        failures.append(f"public names: {sorted(pub)} -- reserved and compiler names are not")
+    v = verdict_undeclared({"ok", "new", "sqrtf128"}, {"ok", "new", "sqrtf128", "gone2"},
+                           {"ok": "why", "gone": "why", "gone2": "why"})
+    if len(v) != 3 or "undeclared: new" not in v[0] \
+            or not any("entry: gone is no longer defined" in x for x in v) \
+            or not any("entry: gone2 is declared now" in x for x in v):
+        failures.append(f"the other direction's verdict: {v}")
     for f in failures:
         print(f"check-libc-declared --self-test: {f}", file=sys.stderr)
     if failures:
         return 1
-    print("check-libc-declared --self-test: all 4 fixtures pass")
+    print("check-libc-declared --self-test: all 6 fixtures pass")
     return 0
 
 
@@ -294,12 +425,22 @@ def main(argv: list[str] | None = None) -> int:
               "few to judge; the headers or the archive were not read. (Exit 2.)", file=sys.stderr)
         return 2
     problems = verdict(decl, defined, BASELINE_MISSING)
+    # The other direction.
+    public = public_names(members)
+    undecl, broken = undeclared(zig, inc, ROOT / "posix" / "include", public)
+    if broken:
+        problems += [f"a header did not compile, so what it declares is unknown: {b}"
+                     for b in broken]
+    problems += verdict_undeclared(undecl, public, UNDECLARED_OK)
     for p in problems:
         print(f"check-libc-declared: {p}", file=sys.stderr)
     if problems:
         return 1
-    print(f"check-libc-declared: {len(decl)} functions declared by musl's headers; "
-          f"{len(BASELINE_MISSING)} known missing (baseline), no new ones")
+    compiler = sum(1 for n in undecl if FLOAT16_128.fullmatch(n))
+    print(f"check-libc-declared: {len(decl)} functions declared by musl's headers and "
+          f"posix/include; {len(BASELINE_MISSING)} known missing (baseline), no new ones. "
+          f"Of the {len(public)} public names libc.a defines, every one is declared but "
+          f"{len(UNDECLARED_OK)} (UNDECLARED_OK) and {compiler} of the compiler's")
     return 0
 
 

@@ -1156,9 +1156,11 @@ pub extern "C" fn readdir64(dirp: *mut Dir) -> *mut Dirent {
     readdir(dirp)
 }
 
-/// `readdir_r64` — LFS64 alias for `readdir_r`.
+/// `readdir64_r` — LFS64 alias for `readdir_r`. (Exported until 2026-09-29
+/// as `readdir_r64`, a name no header or binary uses, so that a program
+/// built against glibc calling `readdir64_r` did not link.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn readdir_r64(
+pub unsafe extern "C" fn readdir64_r(
     dirp: *mut Dir,
     entry: *mut Dirent,
     result: *mut *mut Dirent,
@@ -2518,7 +2520,7 @@ mod tests {
     }
 
     #[test]
-    fn test_readdir_r64_null_dirp() {
+    fn test_readdir64_r_null_dirp() {
         let mut entry = Dirent {
             d_ino: 0,
             d_off: 0,
@@ -2527,14 +2529,14 @@ mod tests {
             d_name: [0; 256],
         };
         let mut result: *mut Dirent = core::ptr::null_mut();
-        let ret = unsafe { readdir_r64(core::ptr::null_mut(), &mut entry, &mut result) };
+        let ret = unsafe { readdir64_r(core::ptr::null_mut(), &mut entry, &mut result) };
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
-    fn test_readdir_r64_null_entry() {
+    fn test_readdir64_r_null_entry() {
         let mut result: *mut Dirent = core::ptr::null_mut();
-        let ret = unsafe { readdir_r64(core::ptr::null_mut(), core::ptr::null_mut(), &mut result) };
+        let ret = unsafe { readdir64_r(core::ptr::null_mut(), core::ptr::null_mut(), &mut result) };
         assert_eq!(ret, crate::errno::EFAULT);
     }
 

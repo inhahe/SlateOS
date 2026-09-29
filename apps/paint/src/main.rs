@@ -2023,6 +2023,17 @@ impl PaintApp {
             return true;
         }
 
+        // A key held with Alt alone, or with the Windows key, is not the
+        // canvas's: Alt's chords are the window's and the Windows key's the
+        // desktop's, and Alt+B chose the pencil. AltGr -- which arrives as
+        // Ctrl+Alt -- goes on: it types characters, and a character it types
+        // is that character.
+        let alt_chord = key.modifiers.alt && !key.modifiers.ctrl;
+        if alt_chord || key.modifiers.super_key {
+            return false;
+        }
+        let altgr = key.modifiers.ctrl && key.modifiers.alt;
+
         if let Some(special) = match key.key {
             Key::Enter => Some(SpecialKey::Enter),
             Key::Escape => Some(SpecialKey::Escape),
@@ -2079,7 +2090,10 @@ impl PaintApp {
             Key::RightBracket => Some(']'),
             _ => None,
         };
-        let Some(ch) = typed.or(from_key) else {
+        // AltGr counts only by what it types: one that types nothing is not
+        // the letter under it, which is what the letter from the key stands
+        // in for.
+        let Some(ch) = typed.or(from_key.filter(|_| !altgr)) else {
             return false;
         };
         // Ctrl without Alt: Ctrl+Alt is AltGr, and what it types is not a
@@ -6242,6 +6256,52 @@ mod tests {
         assert!(!said(&app));
         paint_first_pixel(&mut app, Color::rgb(1, 2, 3));
         assert!(said(&app), "the status bar does not say undo can go");
+    }
+
+    /// **A key held with Alt or the Windows key is not a tool**: Alt+B and
+    /// Windows+E are the window's and the desktop's, not the pencil and the
+    /// eraser. AltGr -- Ctrl+Alt -- counts by what it types: a bracket it
+    /// types is the bracket, and one that types nothing is nothing, not the
+    /// letter under it.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_is_not_a_tool() {
+        let mut app = PaintApp::new(800.0, 600.0);
+        let held = |key: Key, text: &str, ctrl: bool, alt: bool, win: bool| {
+            let mut event = KeyEvent {
+                key,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::NONE,
+                text: text.to_string(),
+            };
+            event.modifiers.ctrl = ctrl;
+            event.modifiers.alt = alt;
+            event.modifiers.super_key = win;
+            event
+        };
+        let before = app.current_tool;
+        assert!(
+            !app.handle_key(&held(Key::B, "", false, true, false)),
+            "Alt+B was taken"
+        );
+        assert!(
+            !app.handle_key(&held(Key::E, "e", false, false, true)),
+            "Windows+E was taken"
+        );
+        assert!(
+            !app.handle_key(&held(Key::E, "", true, true, false)),
+            "AltGr+E, typing nothing, was taken as E"
+        );
+        assert_eq!(app.current_tool, before, "a held key chose a tool");
+
+        app.brush.set_size(5);
+        assert!(
+            app.handle_key(&held(Key::Num8, "[", true, true, false)),
+            "AltGr's [ was not taken"
+        );
+        assert_eq!(app.brush.size, 4, "AltGr's [ is not the bracket");
+
+        assert!(app.handle_key(&held(Key::E, "e", false, false, false)));
+        assert_eq!(app.current_tool, Tool::Eraser, "plain E is not the eraser");
     }
 
     /// **Alt+Z held with the Windows key is the desktop's**, not a journey.

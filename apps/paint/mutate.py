@@ -408,6 +408,24 @@ MUTATIONS = [
         "                let _ = shift;",
         ["the_swatches_and_c_open_the_colour_dialog_and_enter_keeps_the_colour"],
     ),
+    (
+        'a key held with Alt is a tool',
+        '        let alt_chord = key.modifiers.alt && !key.modifiers.ctrl;',
+        '        let alt_chord = false;',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
+    ),
+    (
+        'a key held with the Windows key is a tool',
+        '        if alt_chord || key.modifiers.super_key {',
+        '        if alt_chord {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
+    ),
+    (
+        'AltGr typing nothing is the letter under it',
+        'typed.or(from_key.filter(|_| !altgr))',
+        'typed.or(from_key)',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_a_tool'],
+    ),
 ]
 
 if __name__ == "__main__":

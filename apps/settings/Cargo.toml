@@ -20,6 +20,9 @@ programs = { path = "../../gui/programs" }
 # for the same page: a program installed here can do a job SlateOS's own
 # cannot.
 desktopentry = { path = "../../gui/desktopentry" }
+# The third-party notices the image carries (design-decisions §1433): the
+# About page shows them, which is where §815 puts a screen you open.
+notices = { path = "../../gui/notices" }
 guitk = { path = "../../gui/toolkit" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.

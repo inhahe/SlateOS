@@ -369,6 +369,54 @@ MUTATIONS = [
         '            .filter(|_| false),',
         ['the_default_apps_page_names_the_program_for_every_job'],
     ),
+    (
+        'the About page is listed nowhere',
+        '                SettingsPage::Power,\n                SettingsPage::About,\n            ],',
+        '                SettingsPage::Power,\n            ],',
+        ['the_about_page_is_named_about_and_listed_under_system'],
+    ),
+    (
+        'entering the About page reads no notices',
+        '        if page == SettingsPage::About {\n            self.refresh_notices();\n        }',
+        '',
+        ['the_about_page_lists_the_notices_and_opens_one'],
+    ),
+    (
+        "a notice's licence is not said",
+        '                    s.value_row("Licence", &notice.licence, pal.subtext0);\n',
+        '',
+        ['the_about_page_lists_the_notices_and_opens_one'],
+    ),
+    (
+        "a notice's attribution is not shown",
+        '                    if let Some(attribution) = &notice.attribution {\n                        s.note(attribution, 20.0);\n                    }\n',
+        '',
+        ['the_about_page_lists_the_notices_and_opens_one'],
+    ),
+    (
+        'an opened notice shows none of its text',
+        '                                    for line in body.lines() {',
+        '                                    for line in body.lines().take(0) {',
+        ['the_about_page_lists_the_notices_and_opens_one'],
+    ),
+    (
+        'a notice opened is never put away',
+        '        if self.open_notice.as_ref().is_some_and(|(i, _)| *i == index) {\n            self.open_notice = None;\n            return;\n        }\n',
+        '',
+        ['the_about_page_lists_the_notices_and_opens_one'],
+    ),
+    (
+        'a byte that is not UTF-8 is dropped',
+        '            let _ = write!(out, "\\\\x{byte:02X}");',
+        '            let _ = byte;',
+        ['a_licence_byte_that_is_not_utf8_is_shown_escaped'],
+    ),
+    (
+        'notices not installed are shown as none',
+        '            Err(notices::NoticesError::NotInstalled { .. }) => NoticesShown::NotInstalled,',
+        '            Err(notices::NoticesError::NotInstalled { .. }) => NoticesShown::Loaded(Vec::new()),',
+        ['the_about_page_says_when_the_notices_are_not_installed'],
+    ),
 ]
 
 if __name__ == "__main__":

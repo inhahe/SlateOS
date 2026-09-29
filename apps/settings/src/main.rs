@@ -38,6 +38,7 @@ use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
 use oswindow::app::{Reloads, Response};
 use pathtext::ShowPath;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 // ============================================================================
@@ -172,6 +173,7 @@ impl SettingsCategory {
                 SettingsPage::Notifications,
                 SettingsPage::DateTime,
                 SettingsPage::Power,
+                SettingsPage::About,
             ],
             Self::Network => &[
                 SettingsPage::NetworkStatus,
@@ -219,6 +221,8 @@ pub enum SettingsPage {
     Notifications,
     DateTime,
     Power,
+    /// The system, and the notices of the code others wrote that it carries.
+    About,
     // Network
     NetworkStatus,
     WiFi,
@@ -274,6 +278,7 @@ impl SettingsPage {
             Self::Notifications => "notifications",
             Self::DateTime => "date-time",
             Self::Power => "power",
+            Self::About => "about",
             Self::NetworkStatus => "network-status",
             Self::WiFi => "wifi",
             Self::Ethernet => "ethernet",
@@ -323,6 +328,7 @@ impl SettingsPage {
             Self::Notifications => "Notifications",
             Self::DateTime => "Date & Time",
             Self::Power => "Power",
+            Self::About => "About",
             Self::NetworkStatus => "Status",
             Self::WiFi => "Wi-Fi",
             Self::Ethernet => "Ethernet",
@@ -727,6 +733,15 @@ pub struct SettingsState {
     /// The program that does each job (`programs::Role`), by its name, or
     /// `None` when no program here can: refreshed with the associations.
     default_roles: Vec<(programs::Role, Option<String>)>,
+    /// Where the third-party notices are read from: `/usr/share/licenses`
+    /// (`notices::SYSTEM_DIR`), which a test points elsewhere.
+    notices_dir: PathBuf,
+    /// The notices, as read on entering the About page: `None` until then.
+    notices: Option<NoticesShown>,
+    /// The notice whose texts are open on the About page, and the texts, as
+    /// read when it was opened -- not before: forty licences are not needed
+    /// to draw a list of forty names.
+    open_notice: Option<(usize, Vec<OpenText>)>,
     /// Where installed programs' desktop entries are looked for: the
     /// environment's data directories, which `main` sets -- none otherwise,
     /// so a test's page names SlateOS's own programs on every machine.
@@ -1239,6 +1254,11 @@ impl SettingsState {
         }
         if page == SettingsPage::Themes {
             self.refresh_themes();
+        }
+        // The notices, read on entry: a list is cheap, and the page shows
+        // what is installed now.
+        if page == SettingsPage::About {
+            self.refresh_notices();
         }
     }
 
@@ -1778,6 +1798,9 @@ impl SettingsState {
             default_app_categories: Vec::new(),
             default_roles: Vec::new(),
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
+            notices_dir: PathBuf::from(notices::SYSTEM_DIR),
+            notices: None,
+            open_notice: None,
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
@@ -2861,6 +2884,8 @@ enum ButtonId {
     OpenCalendar,
     /// Read the calendar's events again.
     LookAgain,
+    /// Open or close the `n`-th third-party notice on the About page.
+    Notice(usize),
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -3748,6 +3773,7 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::About => self.build_about_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::LockScreen => self.build_lockscreen_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
@@ -5456,6 +5482,106 @@ impl SettingsState {
         );
     }
 
+    /// The system, and the notices of the code others wrote that it carries
+    /// (design-decisions §1433; §815 puts a screen you open in Settings).
+    ///
+    /// Each notice is a row naming the component and its licence, with its
+    /// attribution -- a sentence its licence requires to be shown, word for
+    /// word -- as a line of its own under it, not folded into a text only
+    /// someone who opened it would see. A notice's texts are read when it is
+    /// opened. With nothing installed the page says so, rather than showing
+    /// an empty list that would read as "this system carries no one else's
+    /// code".
+    fn build_about_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.section("SlateOS");
+        s.note(
+            "SlateOS carries software that other people wrote. Their licences ask that these notices go with it, and here they are.",
+            28.0,
+        );
+        s.gap();
+        s.section("Software from others");
+        match &self.notices {
+            None | Some(NoticesShown::NotInstalled) => s.note(
+                "The licence notices are not installed on this system.",
+                20.0,
+            ),
+            Some(NoticesShown::Failed(why)) => {
+                s.value_row("Could not be read", why, pal.peach);
+            }
+            Some(NoticesShown::Loaded(list)) => {
+                for (index, notice) in list.iter().enumerate() {
+                    let open = self.open_notice.as_ref().is_some_and(|(i, _)| *i == index);
+                    s.button_row(
+                        &notice.title(),
+                        if open { "Hide licence" } else { "Show licence" },
+                        pal.text,
+                        Some(RowHit::Press(ButtonId::Notice(index))),
+                    );
+                    s.value_row("Licence", &notice.licence, pal.subtext0);
+                    if let Some(attribution) = &notice.attribution {
+                        s.note(attribution, 20.0);
+                    }
+                    if let Some((_, texts)) = self.open_notice.as_ref().filter(|_| open) {
+                        for text in texts {
+                            s.section(&text.name);
+                            match &text.shown {
+                                Ok(body) => {
+                                    for line in body.lines() {
+                                        let line = line.to_string();
+                                        let colour = pal.subtext0;
+                                        s.draw(move |tree, x, y| {
+                                            tree.text(x, y, &line, colour, 11.0);
+                                        });
+                                        s.advance(15.0);
+                                    }
+                                }
+                                Err(why) => s.value_row("Could not be read", why, pal.peach),
+                            }
+                        }
+                    }
+                    s.gap();
+                }
+            }
+        }
+    }
+
+    /// Read the notices again, closing any that was open.
+    fn refresh_notices(&mut self) {
+        self.open_notice = None;
+        self.notices = Some(match notices::load(&self.notices_dir) {
+            Ok(list) => NoticesShown::Loaded(list),
+            Err(notices::NoticesError::NotInstalled { .. }) => NoticesShown::NotInstalled,
+            Err(other) => NoticesShown::Failed(other.to_string()),
+        });
+    }
+
+    /// Open the notice at `index`, reading its texts now, or close it.
+    fn toggle_notice(&mut self, index: usize) {
+        if self.open_notice.as_ref().is_some_and(|(i, _)| *i == index) {
+            self.open_notice = None;
+            return;
+        }
+        let Some(NoticesShown::Loaded(list)) = &self.notices else {
+            return;
+        };
+        let Some(notice) = list.get(index) else {
+            return;
+        };
+        let texts = notice
+            .texts
+            .iter()
+            .map(|text| OpenText {
+                name: text.name.clone(),
+                shown: text
+                    .read()
+                    .map(|bytes| shown_as_text(&bytes))
+                    .map_err(|e| e.to_string()),
+            })
+            .collect();
+        self.open_notice = Some((index, texts));
+    }
+
     fn build_dyndns_page<S: PageSink>(s: &mut S, pal: &Palette) {
         let (summary, rows) = dyndns::system_dyndns();
 
@@ -6635,6 +6761,7 @@ impl SettingsState {
             }
             RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
             RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
+            RowHit::Press(ButtonId::Notice(index)) => self.toggle_notice(index),
         }
     }
 
@@ -7248,6 +7375,43 @@ fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App>
     list
 }
 
+/// What the About page has of the third-party notices.
+#[derive(Debug)]
+enum NoticesShown {
+    /// The system was built without them: said, never an empty list.
+    NotInstalled,
+    /// They are there and could not be read: the reason.
+    Failed(String),
+    /// Every notice, in the index's order.
+    Loaded(Vec<notices::Notice>),
+}
+
+/// One licence text of the notice open on the About page.
+#[derive(Debug)]
+struct OpenText {
+    /// The file's name, which tells two texts of one notice apart.
+    name: String,
+    /// The text as shown ([`shown_as_text`]), or why it could not be read.
+    shown: Result<String, String>,
+}
+
+/// A licence text as the page shows it: its words as they are, and a byte
+/// that is not UTF-8 written as `\xNN` -- visible, where dropping it or
+/// replacing it would show a text its authors did not write. Nobody's text
+/// here needs it today; a file that ever does is shown honestly.
+fn shown_as_text(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len());
+    for chunk in bytes.utf8_chunks() {
+        out.push_str(chunk.valid());
+        for byte in chunk.invalid() {
+            // Writing to a `String` cannot fail.
+            let _ = write!(out, "\\x{byte:02X}");
+        }
+    }
+    out
+}
+
 /// The page `settings --page <name>` asks for, or `None` for no arguments.
 ///
 /// Anything else is refused by name, with the list of pages -- the rule the
@@ -7617,6 +7781,95 @@ mod tests {
                 .and_then(|(_, program)| program.clone());
             assert_eq!(browser.as_deref(), Some("Example Browser"));
         });
+    }
+
+    /// The small bundle `gui/notices` tests against: three notices, one with
+    /// an attribution.
+    fn notices_fixture() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../gui/notices/tests/fixtures/bundle")
+    }
+
+    /// **The About page lists the third-party notices**, each by name and
+    /// licence, libjpeg-turbo's attribution word for word on a line of its
+    /// own; opening one reads its text and shows it, and a second press puts
+    /// it away (lane C's `c-e-show-the-third-party-notices`, §1433).
+    #[test]
+    fn the_about_page_lists_the_notices_and_opens_one() {
+        settingsfile::testing::with_scratch_config("settings-about", |_root| {
+            let mut app = SettingsState::new();
+            app.notices_dir = notices_fixture();
+            app.go_to_page(SettingsPage::About);
+            let text = format!("{:?}", app.render_tree());
+            for want in [
+                "cfg-if 1.0.5",
+                "libjpeg-turbo 3.1.1",
+                "spin 0.9.8",
+                "MIT OR Apache-2.0",
+                "IJG AND BSD-3-Clause AND Zlib",
+                "This software is based in part on the work of the Independent JPEG Group.",
+            ] {
+                assert!(text.contains(want), "{want:?} is not on the page");
+            }
+            assert!(
+                app.open_notice.is_none(),
+                "a text was read before anybody opened it"
+            );
+            assert!(!text.contains("spin MIT text"));
+
+            let press = |app: &mut SettingsState| {
+                let (x, y) = center_of(app, RowHit::Press(ButtonId::Notice(2)))
+                    .expect("spin's button is drawn");
+                app.handle_event(&Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }));
+            };
+            press(&mut app);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("spin MIT text"),
+                "the opened text is not shown"
+            );
+            assert!(text.contains("Hide licence"));
+            press(&mut app);
+            let text = format!("{:?}", app.render_tree());
+            assert!(!text.contains("spin MIT text"), "the text stayed open");
+        });
+    }
+
+    /// **With no notices installed, the page says so**, rather than showing an
+    /// empty list -- which would read as "this system carries no one else's
+    /// code".
+    #[test]
+    fn the_about_page_says_when_the_notices_are_not_installed() {
+        settingsfile::testing::with_scratch_config("settings-about-none", |root| {
+            let mut app = SettingsState::new();
+            app.notices_dir = root.join("licenses");
+            app.go_to_page(SettingsPage::About);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("The licence notices are not installed on this system."),
+                "{text}"
+            );
+        });
+    }
+
+    /// **A byte that is not UTF-8 is shown, escaped** -- not dropped, and not
+    /// replaced with a character its authors did not write.
+    #[test]
+    fn a_licence_byte_that_is_not_utf8_is_shown_escaped() {
+        assert_eq!(shown_as_text(b"caf\xE9 ok"), "caf\\xE9 ok");
+        assert_eq!(shown_as_text("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
+        assert_eq!(shown_as_text(b"\xFF\xFE"), "\\xFF\\xFE");
+    }
+
+    /// The About page is where `settings --page about` lands, under System.
+    #[test]
+    fn the_about_page_is_named_about_and_listed_under_system() {
+        assert_eq!(SettingsPage::from_name("about"), Some(SettingsPage::About));
+        assert_eq!(SettingsPage::About.category(), SettingsCategory::System);
     }
 
     /// The Fonts page names the font actually being drawn with.

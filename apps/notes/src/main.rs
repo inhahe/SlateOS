@@ -2996,6 +2996,14 @@ impl NotesApp {
         if self.text_entry.is_some() {
             return self.handle_text_entry_key(key);
         }
+        // A key held with Alt or the Windows key is not this window's: the
+        // Windows key's are the desktop's, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter (`ś` is AltGr+S on a Polish keyboard),
+        // which is neither Ctrl+S's keeping nor S's sort. So `ctrl` below is
+        // Ctrl alone.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
+        }
         let ctrl = key.modifiers.ctrl;
         match key.key {
             // Panels. Tab moves rightwards through them, which is the
@@ -3409,28 +3417,32 @@ impl NotesApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ś` is
+                // AltGr+S. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
+                let typed: String = key.typed().collect();
                 match entry {
                     TextEntry::Search => {
-                        self.search_query.push_str(&key.text);
+                        self.search_query.push_str(&typed);
                         self.reanchor_selection();
                     }
                     TextEntry::Tag(mut tag) => {
-                        tag.push_str(&key.text);
+                        tag.push_str(&typed);
                         self.text_entry = Some(TextEntry::Tag(tag));
                     }
                     TextEntry::NotebookName(mut name) => {
-                        name.push_str(&key.text);
+                        name.push_str(&typed);
                         self.text_entry = Some(TextEntry::NotebookName(name));
                     }
                     TextEntry::NewNote(mut title) => {
-                        title.push_str(&key.text);
+                        title.push_str(&typed);
                         self.text_entry = Some(TextEntry::NewNote(title));
                     }
                     TextEntry::NewNotebook(mut name) => {
-                        name.push_str(&key.text);
+                        name.push_str(&typed);
                         self.text_entry = Some(TextEntry::NewNotebook(name));
                     }
                     TextEntry::NoteBody(_) => {}
@@ -5722,6 +5734,85 @@ mod tests {
         // And now the same key sorts again.
         app.handle_event(&press(Key::S));
         assert_ne!(app.sort_order, order);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **AltGr types into a field and runs no shortcut.** AltGr arrives as
+    /// Ctrl+Alt -- `ś` is AltGr+S and `ń` AltGr+N on a Polish keyboard --
+    /// and was Ctrl: in the list AltGr+S kept the library as Ctrl+S does and
+    /// AltGr+N began a new note, and every field refused both.
+    #[test]
+    fn altgr_types_into_a_field_and_runs_no_shortcut() {
+        let mut app = seeded();
+        let order = app.sort_order;
+        assert_eq!(
+            app.handle_event(&held(Key::S, ALTGR, "\u{15b}")),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            app.handle_event(&held(Key::N, ALTGR, "\u{144}")),
+            EventResult::Ignored
+        );
+        assert_eq!(app.last_save, None, "AltGr+S kept the library");
+        assert_eq!(app.text_entry, None, "AltGr+N began a note");
+        assert_eq!(app.sort_order, order, "AltGr+S sorted");
+        app.handle_event(&press(Key::Slash));
+        for (k, text) in [(Key::S, "\u{15b}"), (Key::N, "\u{144}")] {
+            assert_eq!(
+                app.handle_event(&held(k, ALTGR, text)),
+                EventResult::Consumed,
+                "AltGr+{k:?} was not typed"
+            );
+        }
+        assert_eq!(app.search_query, "\u{15b}\u{144}");
+    }
+
+    /// **A command types nothing into a field, and a key held with Alt or
+    /// the Windows key is no shortcut.** A command carries its letter as
+    /// text on a real machine -- Ctrl+K arrives as `k`, Alt+F as `f` -- and
+    /// the fields typed Alt's and the Windows key's; in the list, Alt+S and
+    /// Windows+S sorted as S does.
+    #[test]
+    fn a_command_types_nothing_and_alt_or_windows_is_no_shortcut() {
+        let mut app = seeded();
+        let order = app.sort_order;
+        for modifiers in [Modifiers::alt(), Modifiers::super_key()] {
+            assert_eq!(
+                app.handle_event(&held(Key::S, modifiers, "s")),
+                EventResult::Ignored,
+                "{modifiers:?}+S"
+            );
+            assert_eq!(app.sort_order, order, "{modifiers:?}+S sorted");
+        }
+        app.handle_event(&press(Key::Slash));
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed"
+            );
+        }
+        assert_eq!(app.search_query, "");
     }
 
     #[test]

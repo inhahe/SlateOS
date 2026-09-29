@@ -724,6 +724,13 @@ pub struct SettingsState {
     /// Computed when the associations are, from the same document, so the two
     /// halves of the page cannot disagree about what is on disk.
     default_app_categories: Vec<(&'static str, associations::CategoryDefault)>,
+    /// The program that does each job (`programs::Role`), by its name, or
+    /// `None` when no program here can: refreshed with the associations.
+    default_roles: Vec<(programs::Role, Option<String>)>,
+    /// Where installed programs' desktop entries are looked for: the
+    /// environment's data directories, which `main` sets -- none otherwise,
+    /// so a test's page names SlateOS's own programs on every machine.
+    app_dirs: desktopentry::scan::DataDirs,
     /// Every font family installed here, for the Fonts page's picker.
     ///
     /// Held rather than asked for while drawing: `available_families` walks
@@ -1169,6 +1176,11 @@ impl SettingsState {
         self.default_app_categories = associations::CATEGORIES
             .iter()
             .map(|c| (c.name, associations::category_default(&doc, c)))
+            .collect();
+        let known = known_programs(&self.app_dirs);
+        self.default_roles = programs::Role::ALL
+            .iter()
+            .map(|&role| (role, role.filled_by(&known).map(|app| app.name.clone())))
             .collect();
     }
 
@@ -1764,6 +1776,8 @@ impl SettingsState {
             calendar_note: None,
             starter: start_program,
             default_app_categories: Vec::new(),
+            default_roles: Vec::new(),
+            app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
             // Empty for the same reason as `default_apps`: enumerating
             // installed fonts is I/O, and this constructor does none.
             font_families: Vec::new(),
@@ -5378,6 +5392,23 @@ impl SettingsState {
     fn build_default_apps_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
 
+        // Every job, from the one list of them (`programs::Role`, C-Q20):
+        // what does it here, or that nothing does -- "no web browser is
+        // installed" is an answer, where leaving the job out would hide the
+        // question.
+        s.section("For each job");
+        for (role, program) in &self.default_roles {
+            match program {
+                Some(name) => s.value_row(role.label(), name, pal.text),
+                None => s.value_row(role.label(), "None installed", pal.subtext0),
+            }
+        }
+        s.note(
+            "The program SlateOS uses for each job: its own, or one installed here that does it. The programs chosen for kinds of file are below.",
+            28.0,
+        );
+        s.gap();
+
         s.section("By kind");
         for (name, state) in &self.default_app_categories {
             match state {
@@ -7200,6 +7231,23 @@ impl oswindow::app::App for SettingsState {
     }
 }
 
+/// The programs this machine has, for the Default Apps page's jobs: those
+/// installed here, read as the start menu reads them, with SlateOS's own
+/// (`programs::built_in`) behind them -- an installed entry with the same id
+/// replaces SlateOS's. Installed first, because `Role::filled_by` takes the
+/// first program that does a job when no built-in default names one.
+fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (mut list, _unusable) = desktopentry::scan::apps(&scan, None);
+    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();
+    list.extend(
+        programs::built_in(None)
+            .into_iter()
+            .filter(|own| !installed.contains(&own.id)),
+    );
+    list
+}
+
 /// The page `settings --page <name>` asks for, or `None` for no arguments.
 ///
 /// Anything else is refused by name, with the list of pages -- the rule the
@@ -7286,6 +7334,9 @@ fn main() -> ExitCode {
     // the Accounts page says rather than drawing a blank panel.
     state.load_user_accounts();
 
+    // Where installed programs' entries are, for the Default Apps page's
+    // jobs: the environment's data directories, as the start menu reads them.
+    state.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
     // The file associations, so the Default Apps page is right even if it is
     // the first page shown. Entering the page re-reads them; this is only the
     // case that entry never happens because the page is already open.
@@ -7492,6 +7543,79 @@ mod tests {
                 text.contains("/usr/bin/chosen-editor"),
                 "the program the file manager would run was not drawn"
             );
+        });
+    }
+
+    /// **The Default Apps page names the program for every job**
+    /// (`programs::Role::ALL`, C-Q20's step 3): SlateOS's own where one does
+    /// it, and "None installed" where none does -- a question the page
+    /// answers rather than hides.
+    #[test]
+    fn the_default_apps_page_names_the_program_for_every_job() {
+        settingsfile::testing::with_scratch_config("settings-roles", |_root| {
+            let mut app = SettingsState::new();
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+            for role in programs::Role::ALL {
+                assert!(
+                    text.contains(role.label()),
+                    "{} is not listed",
+                    role.label()
+                );
+            }
+            assert_eq!(app.default_roles.len(), programs::Role::ALL.len());
+            let doing = |role: programs::Role| {
+                app.default_roles
+                    .iter()
+                    .find(|(r, _)| *r == role)
+                    .and_then(|(_, program)| program.clone())
+            };
+            assert_eq!(
+                doing(programs::Role::TextEditor).as_deref(),
+                Some("Text Editor")
+            );
+            assert_eq!(doing(programs::Role::Terminal).as_deref(), Some("Terminal"));
+            assert_eq!(
+                doing(programs::Role::WebBrowser),
+                None,
+                "SlateOS has no web browser"
+            );
+            assert!(
+                text.contains("None installed"),
+                "a job nothing does was not said"
+            );
+        });
+    }
+
+    /// **A program installed here does the job its entry claims** -- a web
+    /// browser, which SlateOS has none of -- read from the data directories
+    /// as the start menu reads them, and it goes before SlateOS's own.
+    #[test]
+    fn an_installed_program_does_the_job_its_entry_claims() {
+        settingsfile::testing::with_scratch_config("settings-roles-installed", |root| {
+            let share = root.join("share");
+            let apps = share.join("applications");
+            std::fs::create_dir_all(&apps).expect("make the applications folder");
+            std::fs::write(
+                apps.join("org.example.Browser.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Example Browser\nExec=browser %u\n\
+                 MimeType=x-scheme-handler/http;text/html;\n",
+            )
+            .expect("write the entry");
+            let mut app = SettingsState::new();
+            app.app_dirs = desktopentry::scan::DataDirs::new(vec![share]);
+            app.go_to_page(SettingsPage::DefaultApps);
+            let text = format!("{:?}", app.render_tree());
+            assert!(
+                text.contains("Example Browser"),
+                "the installed browser was not named"
+            );
+            let browser = app
+                .default_roles
+                .iter()
+                .find(|(r, _)| *r == programs::Role::WebBrowser)
+                .and_then(|(_, program)| program.clone());
+            assert_eq!(browser.as_deref(), Some("Example Browser"));
         });
     }
 

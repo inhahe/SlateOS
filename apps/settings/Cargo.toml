@@ -13,6 +13,13 @@ quoting = { path = "../../userspace/quoting" }
 # what is set; `apps/fileassoc` writes it and `apps/explorer` obeys it, and all
 # three used to spell the group name separately. See gui/associations/src/lib.rs.
 associations = { path = "../../gui/associations" }
+# The programs SlateOS knows and the jobs each can do (C-Q20, design-decisions
+# §1425): the Default Apps page names the program for every job.
+programs = { path = "../../gui/programs" }
+# The installed programs' desktop entries, read as the start menu reads them,
+# for the same page: a program installed here can do a job SlateOS's own
+# cannot.
+desktopentry = { path = "../../gui/desktopentry" }
 guitk = { path = "../../gui/toolkit" }
 # The Personalization pages edit the same preferences the desktop shell paints
 # from, so they share one model and one file rather than each keeping a copy.

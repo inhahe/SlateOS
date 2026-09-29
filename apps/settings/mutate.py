@@ -339,6 +339,36 @@ MUTATIONS = [
         '            false\n',
         ['every_file_settings_shows_is_read_again_when_it_changes'],
     ),
+    (
+        'the Default Apps page lists no jobs',
+        '        for (role, program) in &self.default_roles {',
+        '        for (role, program) in self.default_roles.iter().take(0) {',
+        ['the_default_apps_page_names_the_program_for_every_job'],
+    ),
+    (
+        'a job nothing does is not said',
+        '                None => s.value_row(role.label(), "None installed", pal.subtext0),',
+        '                None => {}',
+        ['the_default_apps_page_names_the_program_for_every_job'],
+    ),
+    (
+        'no job is done by anything',
+        '            .map(|&role| (role, role.filled_by(&known).map(|app| app.name.clone())))',
+        '            .map(|&role| (role, None::<String>))',
+        ['the_default_apps_page_names_the_program_for_every_job', 'an_installed_program_does_the_job_its_entry_claims'],
+    ),
+    (
+        'the programs installed here are not read',
+        '    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();',
+        '    list.clear();\n    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();',
+        ['an_installed_program_does_the_job_its_entry_claims'],
+    ),
+    (
+        "SlateOS's own programs are not behind the installed ones",
+        '            .filter(|own| !installed.contains(&own.id)),',
+        '            .filter(|_| false),',
+        ['the_default_apps_page_names_the_program_for_every_job'],
+    ),
 ]
 
 if __name__ == "__main__":

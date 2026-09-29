@@ -1692,7 +1692,9 @@ fn lgammaf_ranged(x: f32) -> (f32, i32) {
 /// own call left. (Until 2026-09-28 the lock was `math.rs`'s tests' alone,
 /// and `mathl.rs`'s tests wrote `signgam` beside it -- a race the pre-push
 /// gate's shuffled orders could lose.) Poison is recovered so that one real
-/// failure reports once.
+/// failure reports once. Every test calls this itself, with no wrapper
+/// between: the pre-push gate's `scripts/raced-globals.py` looks one call deep
+/// from a test for the lock it takes, and a wrapper hid this one.
 #[cfg(test)]
 pub(crate) fn signgam_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3213,18 +3215,12 @@ mod tests {
     // Gamma functions
     // -----------------------------------------------------------------------
 
-    /// [`super::signgam_test_lock`], which every test that calls `lgamma`
-    /// or one of its kin takes first.
-    fn signgam_lock() -> std::sync::MutexGuard<'static, ()> {
-        super::signgam_test_lock()
-    }
-
     /// `lgamma` leaves the sign of Γ(x) in `signgam`: Γ is negative between
     /// -1 and 0 and positive between -2 and -1, and positive for every
     /// positive x.
     #[test]
     fn lgamma_sets_signgam() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         let sign = || signgam.load(Ordering::Relaxed);
         let _ = lgamma(-0.5);
         assert_eq!(sign(), -1, "gamma(-0.5) is -3.54");
@@ -3240,7 +3236,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_values() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // lgamma(1) = ln(0!) = ln(1) = 0.
         assert_approx(lgamma(1.0), 0.0, 1e-8, "lgamma(1)");
         // lgamma(2) = ln(1!) = ln(1) = 0.
@@ -3251,7 +3247,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_poles() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         assert_eq!(lgamma(0.0), f64::INFINITY, "lgamma(0) = inf");
         assert_eq!(lgamma(-1.0), f64::INFINITY, "lgamma(-1) = inf");
     }
@@ -3371,7 +3367,7 @@ mod tests {
 
     #[test]
     fn test_lgamma_r_sign() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         let mut sign: i32 = 0;
         let val = lgamma_r(5.0, &mut sign);
         assert_approx(val, lgamma(5.0), EPS, "lgamma_r(5) value");
@@ -4399,7 +4395,7 @@ mod tests {
 
     #[test]
     fn lgammaf_values() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // lgamma(1) = ln(Γ(1)) = ln(1) = 0
         assert_approx(f64::from(lgammaf(1.0)), 0.0, 1e-5, "lgammaf(1)");
         // lgamma(2) = ln(Γ(2)) = ln(1) = 0
@@ -4410,7 +4406,7 @@ mod tests {
 
     #[test]
     fn lgammaf_poles() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // lgamma at non-positive integers → +inf.
         assert_eq!(lgammaf(0.0), f32::INFINITY, "lgammaf(0) = inf");
         assert_eq!(lgammaf(-1.0), f32::INFINITY, "lgammaf(-1) = inf");
@@ -4669,7 +4665,7 @@ mod tests {
 
     #[test]
     fn gammaf_is_lgammaf() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // gamma is a deprecated alias for lgamma.
         let vals = [1.0f32, 2.0, 5.0, 0.5];
         for &x in &vals {
@@ -4859,7 +4855,7 @@ mod tests {
 
     #[test]
     fn test_gamma_is_lgamma() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         let vals = [1.0, 2.0, 5.0, 0.5, 10.0];
         for &x in &vals {
             #[allow(clippy::float_cmp)]
@@ -4871,14 +4867,14 @@ mod tests {
 
     #[test]
     fn test_gamma_one() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // gamma(1) = lgamma(1) = ln(0!) = 0.
         assert_approx(gamma(1.0), 0.0, 1e-6, "gamma(1) ≈ 0");
     }
 
     #[test]
     fn test_gamma_two() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         // gamma(2) = lgamma(2) = ln(1!) = 0.
         assert_approx(gamma(2.0), 0.0, 1e-6, "gamma(2) ≈ 0");
     }
@@ -5868,7 +5864,7 @@ mod tests {
     /// exactly where the call answers one to nearest ([`EDGES_EXACT`]).
     #[test]
     fn every_answer_in_every_rounding_direction() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         let mut directed = std::collections::HashMap::new();
         for line in MODES_ORACLE
             .lines()
@@ -5951,7 +5947,7 @@ mod tests {
     /// rest.
     #[test]
     fn every_answer_is_glibcs_or_within_its_error() {
-        let _g = signgam_lock();
+        let _g = super::signgam_test_lock();
         let mut failures = Vec::new();
         let mut calls = 0usize;
         for line in ORACLE

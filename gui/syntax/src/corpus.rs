@@ -407,6 +407,13 @@ fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
 }
 
+/// **The Dockerfile grammar -- tables, lexers and its ported heredoc
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn dockerfile_passes_its_corpus() {
+    check("Dockerfile", "dockerfile", 113, &[]);
+}
+
 /// **XML's grammar and DTD's -- their tables, lexers and ported scanners --
 /// parse the package's corpus as upstream's do**, save one example: the
 /// corpus has `<?bar is ?> invalid?>` inside an element be an error, where

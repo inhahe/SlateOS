@@ -13,6 +13,7 @@ pub(crate) mod c;
 pub(crate) mod cpp;
 pub(crate) mod css;
 pub(crate) mod diff;
+pub(crate) mod dockerfile;
 pub(crate) mod dtd;
 pub(crate) mod go;
 pub(crate) mod html;
@@ -91,13 +92,14 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 25] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 26] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
             ("cpp", &super::cpp::generated::TABLES),
             ("css", &super::css::generated::TABLES),
             ("diff", &super::diff::generated::TABLES),
+            ("dockerfile", &super::dockerfile::generated::TABLES),
             ("dtd", &super::dtd::generated::TABLES),
             ("go", &super::go::generated::TABLES),
             ("html", &super::html::generated::TABLES),

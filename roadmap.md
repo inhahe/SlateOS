@@ -2036,7 +2036,7 @@ live.
   grammar says where names are declared (§1440: a parameter wherever it is
   used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
-  own), DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
+  own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, Makefiles, Markdown (block and inline), Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
@@ -2051,7 +2051,7 @@ live.
   A diff's hunks are coloured in their files' languages, git's diffs and
   plain `diff -u`'s alike (§1444), an injected language's colours over its
   host's in the text it was given and a query's `priority` read (§1443).
-  **Next:** Dockerfiles.
+  **Next:** a Dockerfile's RUN commands in Bash.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

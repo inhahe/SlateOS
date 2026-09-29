@@ -19,6 +19,7 @@ const GRAMMARS: &[&str] = &[
     "cpp",
     "css",
     "diff",
+    "dockerfile",
     "dtd",
     "go",
     "html",

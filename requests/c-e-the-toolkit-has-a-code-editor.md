@@ -36,7 +36,7 @@ work and gives both of them the rest.
 ## Colouring the code (added 2026-09-28)
 
 Syntax highlighting is there now, and it is tree-sitter's (design-decisions
-§1437): the `syntax` crate (`gui/syntax`) has Ada, Bash, C, C++, CSS, diffs, DTD, Go, HTML, INI, Java, JavaScript,
+§1437): the `syntax` crate (`gui/syntax`) has Ada, Bash, C, C++, CSS, diffs, Dockerfiles, DTD, Go, HTML, INI, Java, JavaScript,
 JSON, Makefiles, Markdown, Python, Rust, TOML, TypeScript, TSX, XML and YAML so far, each
 grammar passing its authors' own test corpus. A language inside another is coloured as itself: a Markdown code
 fence in the language its info string names, front matter as YAML.

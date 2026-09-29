@@ -105,7 +105,9 @@ pub struct Language {
     name: &'static str,
     /// File name extensions, without the dot, in lower case.
     extensions: &'static [&'static str],
-    /// Whole file names, for files with no extension that says.
+    /// Whole file names, for files with no extension that says -- and, where
+    /// one ends in `.`, the start of a name: `Dockerfile.` names
+    /// `Dockerfile.dev`.
     file_names: &'static [&'static str],
     /// The interpreters a `#!` line may name.
     interpreters: &'static [&'static str],
@@ -144,11 +146,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 22;
+const VISIBLE: usize = 23;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 25] = [
+static LANGUAGES: [Language; 26] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -239,6 +241,25 @@ static LANGUAGES: [Language; 25] = [
         index: 5,
     },
     Language {
+        name: "Dockerfile",
+        extensions: &["dockerfile", "containerfile"],
+        file_names: &[
+            "Dockerfile",
+            "dockerfile",
+            "Containerfile",
+            "containerfile",
+            "Dockerfile.",
+            "Containerfile.",
+        ],
+        interpreters: &[],
+        aliases: &["docker", "containerfile"],
+        grammar: grammars::dockerfile::generated::language_fn,
+        highlights: grammars::dockerfile::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 6,
+    },
+    Language {
         name: "DTD",
         extensions: &["dtd", "ent"],
         file_names: &[],
@@ -248,7 +269,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::dtd::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 6,
+        index: 7,
     },
     Language {
         name: "Go",
@@ -260,7 +281,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::go::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 7,
+        index: 8,
     },
     Language {
         name: "HTML",
@@ -272,7 +293,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::html::HIGHLIGHTS,
         injections: grammars::html::INJECTIONS,
         locals: "",
-        index: 8,
+        index: 9,
     },
     Language {
         name: "INI",
@@ -296,7 +317,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::ini::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 9,
+        index: 10,
     },
     Language {
         name: "Java",
@@ -308,7 +329,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::java::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 10,
+        index: 11,
     },
     Language {
         name: "JavaScript",
@@ -320,7 +341,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::javascript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::javascript::LOCALS,
-        index: 11,
+        index: 12,
     },
     Language {
         name: "JSON",
@@ -332,7 +353,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 12,
+        index: 13,
     },
     Language {
         name: "Make",
@@ -344,7 +365,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::make::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 13,
+        index: 14,
     },
     Language {
         name: "Markdown",
@@ -356,7 +377,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 14,
+        index: 15,
     },
     Language {
         name: "Python",
@@ -368,7 +389,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 15,
+        index: 16,
     },
     Language {
         name: "Rust",
@@ -380,7 +401,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 16,
+        index: 17,
     },
     Language {
         name: "TOML",
@@ -393,7 +414,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 17,
+        index: 18,
     },
     Language {
         name: "TSX",
@@ -405,7 +426,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 18,
+        index: 19,
     },
     Language {
         name: "TypeScript",
@@ -417,7 +438,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 19,
+        index: 20,
     },
     Language {
         name: "XML",
@@ -433,7 +454,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::xml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 20,
+        index: 21,
     },
     Language {
         name: "YAML",
@@ -445,7 +466,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 21,
+        index: 22,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -458,7 +479,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 22,
+        index: 23,
     },
     // Hidden: injected by JavaScript and TypeScript into their comments.
     Language {
@@ -471,7 +492,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::jsdoc::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 23,
+        index: 24,
     },
     // Hidden: injected by JavaScript and TypeScript into their regular
     // expressions.
@@ -485,7 +506,7 @@ static LANGUAGES: [Language; 25] = [
         highlights: grammars::regex::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 24,
+        index: 25,
     },
 ];
 
@@ -686,7 +707,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 25] = [const { OnceLock::new() }; 25];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 26] = [const { OnceLock::new() }; 26];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -723,10 +744,16 @@ impl Language {
     #[must_use]
     pub fn for_file(path: &Path) -> Option<&'static Self> {
         let name = path.file_name()?.as_encoded_bytes();
-        if let Some(language) = Self::all()
-            .iter()
-            .find(|l| l.file_names.iter().any(|f| f.as_bytes() == name))
-        {
+        if let Some(language) = Self::all().iter().find(|l| {
+            l.file_names.iter().any(|f| {
+                let f = f.as_bytes();
+                if f.ends_with(b".") {
+                    name.starts_with(f) && name.len() > f.len()
+                } else {
+                    f == name
+                }
+            })
+        }) {
             return Some(language);
         }
         let dot = name.iter().rposition(|&b| b == b'.')?;
@@ -988,6 +1015,12 @@ mod tests {
         assert_eq!(found("Info.plist"), Some("XML"));
         assert_eq!(found("app.csproj"), Some("XML"));
         assert_eq!(found("xhtml1-strict.dtd"), Some("DTD"));
+        assert_eq!(found("Dockerfile"), Some("Dockerfile"));
+        assert_eq!(found("images/base/Containerfile"), Some("Dockerfile"));
+        assert_eq!(found("Dockerfile.dev"), Some("Dockerfile"));
+        assert_eq!(found("web.Dockerfile"), Some("Dockerfile"));
+        assert_eq!(found("Dockerfile."), None);
+        assert_eq!(found("Dockerfilex"), None);
         assert_eq!(found("deploy.sh"), Some("Bash"));
         assert_eq!(found("/home/me/.bashrc"), Some("Bash"));
         assert_eq!(found("PKGBUILD"), Some("Bash"));

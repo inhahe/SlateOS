@@ -176083,3 +176083,81 @@ converges, a short recurrence from a Debye value on the far side (upward
 for `Y`, Miller's downward for `J`), about `n^(1/3)` steps. The same
 double-long-double arithmetic and the same oracle (mpmath, which evaluates
 large orders directly) test it.
+
+## D-POSIX-PROTOTYPES-DISAGREED-WITH-THEIR-DEFINITIONS — eleven functions took or returned a different width than musl's headers declare, and `sigset` was declared but never defined (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 -- the definitions changed to the declarations', `sigset` written, and `scripts/check-libc-prototypes.py` refuses a new disagreement (run by `toolchain/build-sysroot.ps1`)**
+
+**In short:** a C program calls this library's functions through musl's
+headers, and the linker joins the two by name alone -- nothing checked that
+a function takes and returns what its header says. A new check compares the
+two for all 1,475 functions both have, by what the x86-64 calling convention
+does with each argument, and found eleven that disagreed. None would stop a
+program building; each could make one quietly misbehave.
+
+| Function | Header said | Definition was | What a caller got |
+|---|---|---|---|
+| `timer_create` | `timer_t` is `void *`, 8 bytes | `i32`, 4 | 4 bytes of its 8-byte `timer_t` written, 4 left as they were: comparing two, or one with `NULL`, compared garbage |
+| `timer_delete`, `timer_settime`, `timer_gettime`, `timer_getoverrun` | the same | the same | the id read from half the register |
+| `wctype`, `wctype_l` | `wctype_t` is `unsigned long` | `u32` | `wctype("x") == 0` tested an upper half nothing had set |
+| `wctrans`, `wctrans_l` | `wctrans_t` is `const int *` | `u32` | the same |
+| `iswctype`, `iswctype_l`, `towctrans`, `towctrans_l` | take them back at 8 bytes | at 4 | harmless while the handles were small |
+| `readahead` | returns `ssize_t` | `i32` | an error's -1 read as 4,294,967,295 bytes |
+| `__fpurge` | returns `int` (musl; glibc says `void`) | nothing | a caller testing the result tested an unset register |
+| `sigset` | declared (`<signal.h>`) | **not defined** | a program calling it did not link -- and `check-libc-declared.py`, reading its declaration (a function returning a function pointer) as a variable's, never said so |
+
+**Also:** `ioctl`'s request is `int` in musl's header and `unsigned long` in
+glibc's; it now reads only the low 32 bits, since a caller of the first
+leaves the rest of the register undefined. Five differences remain, each
+harmless and named in the gate's `EXCEPTIONS` with why.
+
+**Where:** `posix/src/time.rs`, `wchar.rs`, `file.rs`, `stdio.rs`,
+`ioctl.rs`, `signal.rs`; `scripts/check-libc-prototypes.py`,
+`scripts/check-libc-declared.py`.
+
+
+## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: OPEN**
+
+**In short:** C on SlateOS is compiled against musl's headers (`zig cc
+--target=x86_64-linux-musl`), and musl's headers declare only what musl
+has. The C library here has more: glibc's extensions and C23's additions,
+written since -- `j0l`, `clog10`, `nextup`, the narrowing functions, `fts_*`,
+`error`, `backtrace`, `close_range`, `renameat2`, `arc4random`, `getcpu` and
+some two hundred more. A C program cannot call any of them without writing
+its own prototype, because clang refuses a call to an undeclared function.
+Worse, a port's `configure` script decides what exists by *linking* a test
+program with a dummy declaration of its own -- which succeeds -- and then
+the port's real code, calling the function through the headers, does not
+compile.
+
+**Measured** (2026-09-29): the functions `libc.a` defines, that glibc 2.39
+exports as public interface, and that no header under zig's `generic-musl`
+declares with `_GNU_SOURCE`, `_BSD_SOURCE` and `_LARGEFILE64_SOURCE`: 263.
+Some are the pattern's false positives (variables such as `stdin`,
+`environ`, `signgam`; macros musl makes of `isnan`); the rest, by where they
+belong:
+
+| Header | Undeclared |
+|---|---|
+| `<math.h>` | `j0l` ... `ynl`; C23's `nextup`, `nextdown`, `llogb`, `canonicalize`, `fromfp` ... `ufromfpx`, `getpayload`, `setpayload`, `setpayloadsig`, `totalorder`, `totalordermag`, `fmaximum` ... `fminimum_mag_num`, `roundeven`, and every `f`/`l` form; the narrowing `fadd` ... `dfmal`; `scalbl`, `gammal`, `significandl`, `finitel`, `dreml`; the `f128` functions |
+| `<complex.h>` | `clog10`, `clog10f`, `clog10l` |
+| `<fenv.h>` | `feenableexcept`, `fedisableexcept`, `fegetexcept`, `fesetexcept`, `fetestexceptflag` |
+| no header in musl | `<fts.h>` (`fts_open` ...), `<error.h>` (`error`, `error_at_line` and their variables), `<execinfo.h>` (`backtrace` ...), `<gnu/libc-version.h>` |
+| `<stdlib.h>`, `<string.h>`, `<stdio.h>`, `<wchar.h>` | `arc4random`, `arc4random_buf`, `arc4random_uniform`, `canonicalize_file_name`, `ecvt_r`, `fcvt_r`, `on_exit`, `rawmemchr`, `fcloseall`, `tmpnam_r`, `wmempcpy` |
+| `<unistd.h>`, `<fcntl.h>`, `<stdio.h>`, `<sys/*.h>` | `close_range`, `closefrom`, `getcpu`, `renameat2`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `epoll_pwait2`, `sethostid`, `sysctl`, `arch_prctl`, `capget`, `capset`, `init_module`, `delete_module`, the LFS64 names (`open64`, `stat64` ... which musl 1.2.4 dropped) |
+| `<pthread.h>`, `<semaphore.h>` | the `clock*` waits, the `*_np` robust-mutex names, `sem_clockwait` |
+| `<malloc.h>`, `<search.h>`, `<time.h>`, others | `mallinfo`, `mallinfo2`, `malloc_trim`, `malloc_stats`, `pvalloc`, `twalk_r`, `timelocal`, `getdate_r`, the `*_r` database iterators |
+
+**The proper fix:** a header overlay -- `posix/include/`, searched before
+musl's with `-isystem`, each file `#include_next`ing musl's header of the
+same name and adding the declarations for what this library defines,
+under the feature macros glibc declares them under (`_GNU_SOURCE`, C23 by
+`__STDC_VERSION__`, `__STDC_WANT_IEC_60559_*`); and whole headers for the
+families musl has none of. Every C build here -- the `services/` fixtures,
+and the rootfs's `/usr/include` for the native toolchain to come -- takes
+it. A gate that fails when `libc.a` defines a public name no header
+declares, and a C program that includes every overlay header with
+`-Wall -Werror` and calls each declared function, so a declaration that
+disagrees with the definition's types is caught at compile time.
+
+**Where:** `posix/include/` (new), `services/*/build.py`,
+`scripts/create-ext4-rootfs.sh`, a gate beside
+`scripts/check-libc-declared.py`.

@@ -6994,7 +6994,7 @@ pub extern "C" fn __readlinkat_chk(
 /// until 2026-09-13, which would send the next reader to build a cache that
 /// already exists instead of adding the one call that is needed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
+pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> isize {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;

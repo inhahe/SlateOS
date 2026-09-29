@@ -666,8 +666,13 @@ fn terminal_arg(kind: HandleKind, handle: u64) -> Option<u64> {
 /// The third argument is a pointer whose type depends on `request`.
 ///
 /// Returns 0 on success, -1 on error.
+///
+/// `request` is 32 bits, whoever declared it: glibc's `<sys/ioctl.h>` makes
+/// it an `unsigned long`, musl's an `int` -- whose register's upper half
+/// the caller leaves undefined -- so only the low 32 bits are read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
+    let request = request & 0xFFFF_FFFF;
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;

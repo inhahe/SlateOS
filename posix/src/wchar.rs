@@ -954,9 +954,13 @@ pub extern "C" fn towupper(wc: WcharT) -> WcharT {
 
 /// Opaque handle for a character class (returned by `wctype()`).
 ///
-/// POSIX defines `wctype_t` as a scalar.  We encode each class as
-/// a small nonzero integer so `0` means "invalid."
-pub type WctypeT = u32;
+/// POSIX defines `wctype_t` as a scalar; musl's `<wctype.h>` makes it an
+/// `unsigned long`, so it is 64 bits wide here too -- a caller's
+/// `wctype_t` holds all of what `wctype` returns, and `wctype("x") == 0`
+/// tests all of it. (It was a `u32` until 2026-09-29: the caller read the
+/// return register's upper half, which nothing had set.) We encode each
+/// class as a small nonzero integer so `0` means "invalid."
+pub type WctypeT = usize;
 
 // Class IDs — keep in sync with wctype() and iswctype().
 const WC_ALNUM: WctypeT = 1;
@@ -1043,8 +1047,10 @@ pub extern "C" fn iswctype(wc: WcharT, ct: WctypeT) -> i32 {
 // wctrans / towctrans — generic transformation dispatch (<wctype.h>)
 // ---------------------------------------------------------------------------
 
-/// Opaque handle for a character transformation (returned by `wctrans()`).
-pub type WctransT = u32;
+/// Opaque handle for a character transformation (returned by `wctrans()`):
+/// pointer-wide, as musl's `<wctype.h>` makes `wctrans_t` a `const int *`
+/// (a `u32` until 2026-09-29, `wctype_t`'s fault too).
+pub type WctransT = usize;
 
 const WT_TOLOWER: WctransT = 1;
 const WT_TOUPPER: WctransT = 2;

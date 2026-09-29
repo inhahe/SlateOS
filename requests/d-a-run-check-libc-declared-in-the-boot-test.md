@@ -3,6 +3,10 @@
 **Filed:** 2026-09-28 by lane D. **For:** lane A (`scripts/boot-test.sh`).
 **Status:** OPEN.
 
+**Updated 2026-09-29:** a second gate, `scripts/check-libc-prototypes.py`,
+now runs beside it -- the other half of the same question -- and this asks
+for both; see the last section.
+
 **In short:** a new gate checks that every function musl's headers declare
 exists in the C library. On 2026-09-28 126 did not -- among them all of C11's
 `<threads.h>` and the two helpers every `pthread_cleanup_push` expands to, so
@@ -28,3 +32,17 @@ beside `check-libc-shape.py`, so a push that removes a function cannot pass.
 
 `scripts/check-gates-are-wired.py` carries a `PINNED` entry for it, pointing
 here; the commit that wires it should delete that entry.
+
+## The second gate (2026-09-29)
+
+`python scripts/check-libc-prototypes.py` checks that each of those functions
+also *takes and returns* what its declaration says, by the x86-64 calling
+convention: on its first run it found eleven that did not (a four-byte
+`timer_t` against the header's eight, `wctype_t` likewise, `readahead` and
+`__fpurge` returning the wrong width -- known-issues.md ->
+D-POSIX-PROTOTYPES-DISAGREED-WITH-THEIR-DEFINITIONS). It reads `posix/src`
+and the headers, not the archive, so it can run anywhere in the boot test;
+it takes about half a minute the first time and a few seconds after, the
+parsed headers cached in `target/`. Same exit codes as above, same
+`--self-test`, and its own `PINNED` entry in `check-gates-are-wired.py` to
+delete with the wiring.

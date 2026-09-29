@@ -2995,8 +2995,12 @@ fn first_weekday(tm_year: i32, mon: i32, wday: i32) -> i32 {
 // `signal.rs`'s trampoline.  It is that nothing here asks the kernel for
 // a timer.  See the module doc and `known-issues.md`.
 
-/// Timer ID type.
-pub type TimerT = i32;
+/// Timer ID type: pointer-wide, as musl's `<time.h>` makes `timer_t` a
+/// `void *`. It was an `i32` until 2026-09-29, and `timer_create` stored
+/// four bytes into the caller's eight, leaving the other four whatever they
+/// were -- so a `timer_t` compared with another, or with `NULL`, compared
+/// garbage.
+pub type TimerT = usize;
 
 /// Timer specification (interval + initial expiration).
 #[repr(C)]
@@ -3228,9 +3232,10 @@ pub extern "C" fn timer_create(
                     tv_nsec: 0,
                 },
             });
-            // SAFETY: timerid verified non-null above; idx fits in i32.
+            // SAFETY: timerid verified non-null above; a table index is a
+            // `timer_t`, all eight bytes of it.
             unsafe {
-                *timerid = idx as TimerT;
+                *timerid = idx;
             }
             return 0;
         }
@@ -3320,7 +3325,7 @@ pub extern "C" fn timer_settime(
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3393,7 +3398,7 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3427,7 +3432,7 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get_mut(timerid as usize) else {
+    let Some(slot) = table.get_mut(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -3481,7 +3486,7 @@ pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
         return -1;
     };
 
-    let Some(slot) = table.get(timerid as usize) else {
+    let Some(slot) = table.get(timerid) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };
@@ -6720,7 +6725,7 @@ mod tests {
     fn test_timer_getoverrun_negative_timer_id_einval_phase149() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_getoverrun(-1);
+        let ret = timer_getoverrun(usize::MAX);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6840,7 +6845,7 @@ mod tests {
         assert_eq!(timer_getoverrun(id), 0);
 
         crate::errno::set_errno(0);
-        assert_eq!(timer_getoverrun(-2), -1);
+        assert_eq!(timer_getoverrun(usize::MAX - 1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         timer_delete(id);
@@ -7029,7 +7034,7 @@ mod tests {
     fn test_timer_gettime_negative_timer_id_beats_null_curr_value_phase148() {
         reset_timers();
         crate::errno::set_errno(0);
-        let ret = timer_gettime(-1, core::ptr::null_mut());
+        let ret = timer_gettime(usize::MAX, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7317,10 +7322,10 @@ mod tests {
             CLOCK_BOOTTIME,
         ] {
             reset_timers();
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(clk, core::ptr::null(), &raw mut id);
             assert_eq!(ret, 0, "clock {clk} should be accepted");
-            assert!(id >= 0, "clock {clk}: a valid slot must be returned");
+            assert!(id < MAX_TIMERS, "clock {clk}: a valid slot must be returned");
             timer_delete(id);
         }
     }
@@ -7355,7 +7360,7 @@ mod tests {
                 sigev_notify: notify,
                 _pad: [0u8; 48],
             };
-            let mut id: TimerT = -1;
+            let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(CLOCK_REALTIME, &raw const sev, &raw mut id);
             assert_eq!(ret, 0, "sigev_notify {notify} should be accepted");
             timer_delete(id);
@@ -7531,7 +7536,7 @@ mod tests {
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
@@ -7577,7 +7582,7 @@ mod tests {
         reset_timers();
 
         // Burn one slot first to establish baseline.
-        let mut id0: TimerT = -1;
+        let mut id0: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id0),
             0
@@ -7593,7 +7598,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Next valid call must land in slot 1 (slot 0 still held).
-        let mut id1: TimerT = -1;
+        let mut id1: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1),
             0
@@ -7625,7 +7630,7 @@ mod tests {
             sigev_notify: 55,
             _pad: [0u8; 48],
         };
-        let mut id_tmp: TimerT = -1;
+        let mut id_tmp: TimerT = TimerT::MAX;
         crate::errno::set_errno(0);
         assert_eq!(
             timer_create(CLOCK_REALTIME, &raw const bad_sev, &raw mut id_tmp),
@@ -7642,7 +7647,7 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         // Now valid: must land in slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(id, 0, "no slot should have been consumed by the bad calls");
@@ -7663,7 +7668,7 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
         // Table still empty: first allocation goes to slot 0.
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         assert_eq!(
             timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
             0
@@ -7677,7 +7682,7 @@ mod tests {
     fn test_timer_create_success_doesnt_touch_errno_phase147() {
         reset_timers();
         crate::errno::set_errno(54321);
-        let mut id: TimerT = -1;
+        let mut id: TimerT = TimerT::MAX;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
         assert_eq!(

@@ -88,16 +88,24 @@ NOT_NAMES = {"__attribute__", "sizeof", "__typeof__", "_Static_assert", "void", 
              "__asm", "__extension__"}
 
 
+FN_RETURNING_FN_PTR = re.compile(r"\*\s*([A-Za-z_]\w*)\s*\(")
+
+
 def decl_name(d: str) -> str | None:
     """The function a declaration declares, or None: the identifier before
-    its first `(`, or inside it for `int (name)(...)`; None for `(*` -- a
-    pointer to a function, which is a variable or a type, not a function."""
+    its first `(`, or inside it for `int (name)(...)`. A `(*` opens either a
+    pointer to a function -- `void (*name)(int)`, a variable or a type, not a
+    function -- or a function *returning* one, `void (*name(int, ...))(int)`,
+    whose name is followed by its own parameter list: `sigset`'s shape, and
+    `signal`'s. Until 2026-09-29 both were taken for variables, and `sigset`,
+    which nothing defined, was never missed."""
     i = d.find("(")
     if i < 0:
         return None
     after = d[i + 1:]
     if after.lstrip().startswith("*"):
-        return None
+        m = FN_RETURNING_FN_PTR.match(after.lstrip())
+        return m.group(1) if m else None
     m = PAREN_NAME.match(after)
     if m:
         return m.group(1)
@@ -223,9 +231,10 @@ def self_test() -> int:
     failures = []
     got = names_in("int foo(int);\nvoid bar(void) __attribute__((noreturn));\n"
                    "typedef int (*fp)(int);\nint (*table)(void);\nstatic int x;\n"
-                   "int (qux)(int);\n")
-    if got != {"foo", "bar", "qux"}:
-        failures.append(f"declaration pattern: {sorted(got)}")
+                   "int (qux)(int);\nvoid (*sigset(int, void (*)(int)))(int);\n")
+    if got != {"foo", "bar", "qux", "sigset"}:
+        failures.append(f"declaration pattern: {sorted(got)} -- a function returning a "
+                        "function pointer is a function, a pointer to one is not")
     decl = {"foo": "a.h", "bar": "b.h", "baz": "c.h", "return": "tgmath.h", "__internal": "d.h"}
     if verdict(decl, {"foo", "bar", "baz"}, frozenset()) != []:
         failures.append("a complete library was not clean")

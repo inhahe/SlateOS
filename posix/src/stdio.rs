@@ -3124,10 +3124,15 @@ mod gnu_fpurge {
     /// Discard buffered input and output, pushback included, without
     /// writing anything (glibc's `__fpurge`).  bash calls it in forked
     /// children so they do not write out the parent's buffered output again.
+    ///
+    /// Returns 0: musl's `<stdio_ext.h>` declares it returning `int`, glibc's
+    /// `void`, so a caller of either is answered. (It returned nothing until
+    /// 2026-09-29, and a caller through musl's header read an unset
+    /// register.)
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    pub extern "C" fn __fpurge(stream: *mut u8) {
+    pub extern "C" fn __fpurge(stream: *mut u8) -> i32 {
         let Some(f) = stream_to_file(stream) else {
-            return;
+            return 0;
         };
         // SAFETY: a live stream.
         let _g = unsafe { locked(f) };
@@ -3140,6 +3145,7 @@ mod gnu_fpurge {
                 file.wpos = file.wbase;
             }
         }
+        0
     }
 }
 pub use gnu_fpurge::__fpurge;
@@ -3150,8 +3156,7 @@ mod gnu_fpurge_bsd {
     /// `__fpurge`, returning 0 (musl's `fpurge`).
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub extern "C" fn fpurge(stream: *mut u8) -> i32 {
-        super::__fpurge(stream);
-        0
+        super::__fpurge(stream)
     }
 }
 pub use gnu_fpurge_bsd::fpurge;

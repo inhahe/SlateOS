@@ -131,6 +131,9 @@ pub const SIG_DFL: SighandlerT = 0;
 pub const SIG_IGN: SighandlerT = 1;
 /// Error return from signal().
 pub const SIG_ERR: SighandlerT = usize::MAX;
+/// `sigset`'s disposition that blocks the signal rather than changing what
+/// is done with it (XSI; musl's and glibc's value).
+pub const SIG_HOLD: SighandlerT = 2;
 
 // ---------------------------------------------------------------------------
 // sigprocmask `how` argument constants
@@ -2011,6 +2014,53 @@ pub extern "C" fn sigpause(sig: i32) -> i32 {
     sigsuspend(&raw const mask)
 }
 
+/// Set `sig`'s disposition, or with [`SIG_HOLD`] block it (XSI's `sigset`,
+/// obsolescent, which musl's `<signal.h>` declares -- and which nothing
+/// defined until 2026-09-29, `check-libc-declared.py` having read its
+/// declaration, a function returning a function pointer, as a variable). Any
+/// other `disp` becomes the action, with an empty handler mask and no flags,
+/// and `sig` leaves the mask; `SIG_HOLD` leaves the action and puts `sig` in
+/// the mask. Returns `SIG_HOLD` if `sig` was blocked, its previous action if
+/// not, and `SIG_ERR` -- with `EINVAL` -- for a number that is no signal, or
+/// an action `sigaction` refuses (`SIGKILL`'s and `SIGSTOP`'s).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigset(sig: i32, disp: SighandlerT) -> SighandlerT {
+    let Some(set) = only(sig) else {
+        return SIG_ERR;
+    };
+    let mut old = DEFAULT_SIGACTION;
+    let mut old_mask = SigsetT::EMPTY;
+    if disp == SIG_HOLD {
+        // SAFETY: no new action; the old one into a local.
+        if unsafe { sigaction(sig, core::ptr::null(), &raw mut old) } != 0 {
+            return SIG_ERR;
+        }
+        if sigprocmask(SIG_BLOCK, &raw const set, &raw mut old_mask) != 0 {
+            return SIG_ERR;
+        }
+    } else {
+        let act = Sigaction {
+            sa_handler: disp,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: a local action, the old one into a local.
+        if unsafe { sigaction(sig, &raw const act, &raw mut old) } != 0 {
+            return SIG_ERR;
+        }
+        if sigprocmask(SIG_UNBLOCK, &raw const set, &raw mut old_mask) != 0 {
+            return SIG_ERR;
+        }
+    }
+    // SAFETY: a local set.
+    if unsafe { sigismember(&raw const old_mask, sig) } == 1 {
+        SIG_HOLD
+    } else {
+        old.sa_handler
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sigaltstack — alternate signal stack
 // ---------------------------------------------------------------------------
@@ -2699,6 +2749,64 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(sigignore(0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `sigset`: `SIG_HOLD` blocks and reports the action it leaves; any
+    /// other disposition is installed, unblocks, and reports `SIG_HOLD` if
+    /// the signal had been blocked. (`SIGPWR`: no other test changes its
+    /// action, which is the process's, not the thread's.)
+    #[test]
+    fn sigset_holds_installs_and_reports_what_it_replaced() {
+        let mut before_act = DEFAULT_SIGACTION;
+        let mut before_mask = SigsetT::EMPTY;
+        unsafe {
+            assert_eq!(sigaction(SIGPWR, core::ptr::null(), &raw mut before_act), 0);
+        }
+        assert_eq!(
+            sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut before_mask),
+            0
+        );
+        let blocked = || {
+            let mut now = SigsetT::EMPTY;
+            assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+            unsafe { sigismember(&raw const now, SIGPWR) == 1 }
+        };
+        let action = || {
+            let mut now = DEFAULT_SIGACTION;
+            unsafe { assert_eq!(sigaction(SIGPWR, core::ptr::null(), &raw mut now), 0) };
+            now.sa_handler
+        };
+        // From a known state: SIG_DFL, unblocked.
+        assert_ne!(sigset(SIGPWR, SIG_DFL), SIG_ERR);
+        assert!(!blocked());
+        // Hold: blocked, the action unchanged and reported.
+        assert_eq!(sigset(SIGPWR, SIG_HOLD), SIG_DFL);
+        assert!(blocked());
+        assert_eq!(action(), SIG_DFL);
+        // Ignore: unblocked, and the hold is what it replaced.
+        assert_eq!(sigset(SIGPWR, SIG_IGN), SIG_HOLD);
+        assert!(!blocked());
+        assert_eq!(action(), SIG_IGN);
+        // Back to the default: the previous action reported.
+        assert_eq!(sigset(SIGPWR, SIG_DFL), SIG_IGN);
+        assert_eq!(action(), SIG_DFL);
+        // No signal, and one whose action cannot change.
+        errno::set_errno(0);
+        assert_eq!(sigset(0, SIG_IGN), SIG_ERR);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(sigset(SIGKILL, SIG_IGN), SIG_ERR);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        unsafe {
+            assert_eq!(
+                sigaction(SIGPWR, &raw const before_act, core::ptr::null_mut()),
+                0
+            );
+        }
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before_mask, core::ptr::null_mut()),
+            0
+        );
     }
 
     // -- sigaltstack: the stack is stored, reported and used --

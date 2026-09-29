@@ -1432,9 +1432,11 @@ pub struct ExplorerState {
 
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
-        // Read once, before the literal: two fields are derived from it, and
-        // reading the file twice would let them disagree if it changed between.
-        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
+        // The out-of-the-box choices until `take_up_prefs`, below, takes up
+        // the file's -- from one reading of it, the same a re-read makes. The
+        // file was read five times here, and one changed between two of the
+        // readings would have given the window half of each.
+        let none = yamldoc::Document::new();
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
@@ -1468,43 +1470,31 @@ impl ExplorerState {
             show_help: false,
             manual_order: Vec::new(),
             row_drag: None,
-            preview_open: columnprefs::preview_open(&prefs),
-            preview_split: columnprefs::preview_split(&prefs),
-            preview_side: columnprefs::preview_side(&prefs),
+            preview_open: columnprefs::preview_open(&none),
+            preview_split: columnprefs::preview_split(&none),
+            preview_side: columnprefs::preview_side(&none),
             preview_text: None,
             divider_grab: None,
             search_showing: None,
             search_origin: None,
             columns: ColumnManager::with_defaults(),
-            column_prefs: prefs,
+            column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
-            icon_labels: columnprefs::icon_labels(&settingsfile::load(columnprefs::CONFIG_NAME)),
-            conflict_policy: columnprefs::conflict_policy(&settingsfile::load(
-                columnprefs::CONFIG_NAME,
-            )),
-            failure_policy: columnprefs::failure_policy(&settingsfile::load(
-                columnprefs::CONFIG_NAME,
-            )),
-            thumb_config: {
-                // The size the user last chose, if they chose one. Applied
-                // here rather than after construction so the first listing is
-                // already generating at the right size -- otherwise every
-                // thumbnail on screen at start-up is made twice.
-                let mut config = ThumbConfig::default();
-                if let Some(size) =
-                    columnprefs::thumb_size(&settingsfile::load(columnprefs::CONFIG_NAME))
-                {
-                    config.size = size;
-                }
-                config
-            },
+            icon_labels: columnprefs::icon_labels(&none),
+            conflict_policy: columnprefs::conflict_policy(&none),
+            failure_policy: columnprefs::failure_policy(&none),
+            thumb_config: ThumbConfig::default(),
             pending_uploads: Vec::new(),
             thumb_worker: None,
             uploaded: HashSet::new(),
             dropzone: DropZoneManager::new(start_path.to_path_buf()),
             drag: None,
         };
+        // Before the first listing, so that it is already generating
+        // thumbnails at the size the user chose -- otherwise every one on
+        // screen at start-up is made twice.
+        state.take_up_prefs();
         state.sync_sort_indicator();
         state.load_directory();
         state
@@ -4547,6 +4537,95 @@ impl ExplorerState {
         tree.untranslate();
     }
 
+    /// Take up the choices `explorer.yaml` keeps for every folder -- the
+    /// preview, the icons' labels, what a paste does with a name that is
+    /// taken, what an operation does with a file it cannot carry out, and the
+    /// thumbnails' size -- from the document this window holds: when the
+    /// window opens, and again whenever the desktop says the file changed.
+    ///
+    /// Thumbnails made at another size are dropped and made again, as
+    /// choosing a size from the menu does.
+    fn take_up_prefs(&mut self) {
+        let prefs = &self.column_prefs;
+        self.preview_open = columnprefs::preview_open(prefs);
+        self.preview_split = columnprefs::preview_split(prefs);
+        self.preview_side = columnprefs::preview_side(prefs);
+        self.icon_labels = columnprefs::icon_labels(prefs);
+        self.conflict_policy = columnprefs::conflict_policy(prefs);
+        self.failure_policy = columnprefs::failure_policy(prefs);
+        let size = columnprefs::thumb_size(prefs).unwrap_or(ThumbConfig::default().size);
+        if size != self.thumb_config.size {
+            self.thumb_config.size = size;
+            self.thumbs.clear();
+            self.queue_thumbnails();
+        }
+    }
+
+    /// Read `explorer.yaml` again after the desktop said it changed -- a
+    /// choice made in another window, or a hand edit (§1418, §1434). Whether
+    /// the file held anything this window did not.
+    ///
+    /// The file replaces the document this window holds. Every choice made
+    /// here is saved by writing that document whole, so a copy read only when
+    /// the window opened went stale, and the next choice -- a column set, the
+    /// preview, an arrangement -- wrote it over whatever another window had
+    /// chosen meanwhile.
+    ///
+    /// This folder's columns and arrangement are taken up again only when the
+    /// file's entry for them changed. Columns shown or hidden here and not
+    /// saved are this window's own view, and another window choosing a
+    /// thumbnail size is no reason to undo them.
+    fn reread_prefs(&mut self) -> bool {
+        let prefs = settingsfile::load(columnprefs::CONFIG_NAME);
+        if prefs.to_text() == self.column_prefs.to_text() {
+            return false;
+        }
+        let before = std::mem::replace(&mut self.column_prefs, prefs);
+        self.take_up_prefs();
+        let folder = self.current_path.clone();
+        let saved_columns = |prefs: &yamldoc::Document| {
+            columnprefs::for_folder(prefs, &folder).or_else(|| columnprefs::global(prefs))
+        };
+        if saved_columns(&before) != saved_columns(&self.column_prefs) {
+            self.apply_saved_columns();
+        }
+        if manualorder::for_folder(&before, &folder)
+            != manualorder::for_folder(&self.column_prefs, &folder)
+        {
+            // A row being dragged is a position in the order just replaced.
+            self.row_drag = None;
+            self.load_manual_order();
+            self.sync_sort_indicator();
+            self.resort();
+        }
+        true
+    }
+
+    /// Sort the listing again, keeping the selection on the files it was on.
+    ///
+    /// The selection is a list of positions in `entries`, and sorting moves
+    /// the entries: sorted without this, the same rows stayed lit over other
+    /// files, and the next Delete acted on files nobody had chosen.
+    fn resort(&mut self) {
+        let chosen: Vec<PathBuf> = self
+            .selected_indices
+            .iter()
+            .filter_map(|&i| self.entries.get(i))
+            .map(|e| e.path.clone())
+            .collect();
+        self.sort_entries();
+        let at: std::collections::HashMap<&Path, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.path.as_path(), i))
+            .collect();
+        self.selected_indices = chosen
+            .iter()
+            .filter_map(|path| at.get(path.as_path()).copied())
+            .collect();
+    }
+
     /// Show the columns saved for this folder, or the saved default.
     ///
     /// Answers whether either existed. The folder's own preference wins; a
@@ -5657,7 +5736,7 @@ impl ExplorerState {
             self.sort_dir = SortDir::Ascending;
         }
         self.sync_sort_indicator();
-        self.sort_entries();
+        self.resort();
     }
 
     /// Switch view modes, re-deriving what thumbnail work the new mode needs.
@@ -6080,6 +6159,13 @@ impl ExplorerState {
     /// disagreed, the user would click one file and open another.
     #[must_use]
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // A settings file changed and the desktop says so (§1434). Not input,
+        // so ahead of the modal, which owns input: a choice made in another
+        // window while a dialog is up here is still what this window's next
+        // save has to start from.
+        if let Event::SettingsChanged { group } = event {
+            return group.file_name() == columnprefs::CONFIG_NAME && self.reread_prefs();
+        }
         // A modal owns the INPUT while it is up. Falling through to the
         // listing as well is how a Delete confirmation also moves the
         // selection, so that confirming it acts on a different file than the
@@ -6119,21 +6205,11 @@ impl ExplorerState {
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
             Event::Tick { .. } => self.tick_work(),
-            // `SettingsChanged` is a different kind of "no" from its
-            // neighbours here, and is grouped with them only because the
-            // answer happens to coincide. The others are events this window
-            // has nothing to *do* about; this one is an announcement that the
-            // user's settings were rewritten, which this program ignores
-            // because it reads no settings file at all -- it draws in its own
-            // palette and takes no preference from disk. If that ever stops
-            // being true, this arm is where the re-read belongs, and moving it
-            // out of this group is part of the change.
-            //
-            // `ModifierChord` is here for a third reason again: this program
-            // never asks for one, so the compositor never sends it. Named
-            // rather than swept up in a `_ =>` because a wildcard here would
-            // also swallow the *next* event added to the vocabulary, which may
-            // well be one this window should act on.
+            // `ModifierChord` is here for another reason: this program never
+            // asks for one, so the compositor never sends it. Named rather
+            // than swept up in a `_ =>` because a wildcard here would also
+            // swallow the *next* event added to the vocabulary, which may well
+            // be one this window should act on.
             Event::CloseRequested
             | Event::Moved { .. }
             | Event::FocusIn
@@ -6147,8 +6223,9 @@ impl ExplorerState {
             // window dispatch. Listed because this match is exhaustive on
             // purpose -- a wildcard would swallow the next event added, which
             // may well be one this program should act on.
-            | Event::TrayIconClicked { .. }
-            | Event::SettingsChanged { .. } => false,
+            | Event::TrayIconClicked { .. } => false,
+            // Answered at the top, ahead of the modal.
+            Event::SettingsChanged { .. } => false,
         }
     }
 
@@ -8892,8 +8969,24 @@ mod tests {
                 .find(|s| *s != before)
                 .expect("the offered sizes are not all the same");
 
+            state.thumbs.insert(
+                root.join("a.txt"),
+                0,
+                1,
+                Thumbnail {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                    source_path: root.join("a.txt"),
+                    source_mtime: 0,
+                },
+            );
             state.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(wanted));
             assert_eq!(state.thumb_config.size, wanted, "the size was not applied");
+            assert!(
+                state.thumbs.is_empty(),
+                "thumbnails made at the old size were kept"
+            );
 
             let again = state_at(&root);
             assert_eq!(
@@ -9082,6 +9175,252 @@ mod tests {
             let state = state_at(&root);
             assert_eq!(state.columns.visible_keys(), vec!["name", "date_modified"]);
         });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **A choice made in another window reaches this one** when the desktop
+    /// says `explorer.yaml` changed (§1434) -- every choice the file keeps.
+    /// Read when the window opened and not again, each window kept its own,
+    /// and the next choice in one wrote its whole stale copy over the other's.
+    /// Another program's announcement is not this one's; a window's own save
+    /// announced back changes nothing.
+    #[test]
+    fn a_choice_made_in_another_window_reaches_this_one() {
+        settingsfile::testing::with_scratch_config("explorer-reread", |_root| {
+            let scratch = temp_dir("reread");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+
+            // One of each, all different from what the second window has.
+            let side = columnprefs::PreviewSide::ALL
+                .iter()
+                .position(|s| *s != second.preview_side)
+                .unwrap();
+            let conflict = columnprefs::CONFLICT_CHOICES
+                .iter()
+                .position(|c| c.0 != second.conflict_policy)
+                .unwrap();
+            let failure = columnprefs::FAILURE_CHOICES
+                .iter()
+                .position(|c| c.0 != second.failure_policy)
+                .unwrap();
+            let size = columnprefs::THUMB_SIZES
+                .iter()
+                .copied()
+                .find(|s| *s != second.thumb_config.size)
+                .unwrap();
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            first.activate_menu_item(MENU_PREVIEW_SIDE_BASE + side as u64);
+            first.activate_menu_item(MENU_CONFLICT_BASE + conflict as u64);
+            first.activate_menu_item(MENU_FAILURE_BASE + failure as u64);
+            first.activate_menu_item(MENU_ICON_LABEL_BASE + 1);
+            first.activate_menu_item(MENU_THUMB_SIZE_BASE + u64::from(size));
+            let split = if (second.preview_split - 0.5).abs() < 0.01 {
+                0.4
+            } else {
+                0.5
+            };
+            first.preview_split = split;
+            columnprefs::set_preview_split(&mut first.column_prefs, split);
+            first.persist_view_prefs("resized");
+            first
+                .columns
+                .set_columns(vec![ColumnId::SIZE, ColumnId::NAME]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+
+            second.thumbs.insert(
+                root.join("a.txt"),
+                0,
+                1,
+                Thumbnail {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                    source_path: root.join("a.txt"),
+                    source_mtime: 0,
+                },
+            );
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_ne!(
+                second.preview_open, first.preview_open,
+                "another file was read"
+            );
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.preview_open, first.preview_open);
+            assert_eq!(second.preview_side, first.preview_side);
+            assert!((second.preview_split - first.preview_split).abs() < 0.001);
+            assert_eq!(second.icon_labels, first.icon_labels);
+            assert_eq!(second.conflict_policy, first.conflict_policy);
+            assert_eq!(second.failure_policy, first.failure_policy);
+            assert_eq!(second.thumb_config.size, size);
+            assert!(
+                second.thumbs.is_empty(),
+                "thumbnails made at the old size were kept"
+            );
+            assert_eq!(second.columns.visible_keys(), vec!["size", "name"]);
+            assert!(
+                !first.handle_event(&announce(b"explorer")),
+                "a window's own save, announced back, changed it"
+            );
+
+            // The second window's next choice keeps the first's.
+            second.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            let third = state_at(&root);
+            assert_eq!(third.preview_open, !first.preview_open);
+            assert_eq!(
+                third.thumb_config.size, size,
+                "the other window's choice was written over"
+            );
+            assert_eq!(third.conflict_policy, first.conflict_policy);
+            assert_eq!(third.columns.visible_keys(), vec!["size", "name"]);
+        });
+    }
+
+    /// **A choice made in another window is taken up while a dialog is open
+    /// here.** The dialog owns the input; an announcement is not input, and
+    /// held back by the dialog it was lost -- the window's next save then
+    /// wrote its stale copy over the other window's choice.
+    #[test]
+    fn a_choice_made_elsewhere_is_taken_up_while_a_dialog_is_open() {
+        settingsfile::testing::with_scratch_config("explorer-reread-modal", |_root| {
+            let scratch = temp_dir("reread_modal");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            second.activate_menu_item(MENU_NEW_FOLDER);
+            assert!(second.modal.is_some(), "no dialog opened: nothing tested");
+
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.preview_open, first.preview_open);
+            assert!(second.modal.is_some(), "the dialog was closed by it");
+        });
+    }
+
+    /// **Columns shown or hidden here and not saved outlast another window's
+    /// choice** of something else: they are this window's own view. A column
+    /// set saved for this folder in another window is taken up.
+    #[test]
+    fn unsaved_columns_outlast_another_windows_choice() {
+        settingsfile::testing::with_scratch_config("explorer-reread-columns", |_root| {
+            let scratch = temp_dir("reread_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            first
+                .columns
+                .set_columns(vec![ColumnId::SIZE, ColumnId::NAME]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["size", "name"]);
+
+            // Shown here, not saved; another window changes something else.
+            second
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::DATE_MODIFIED]);
+            first.activate_menu_item(MENU_PREVIEW_TOGGLE);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["name", "date_modified"]);
+
+            // Another set saved for this folder is taken up.
+            first
+                .columns
+                .set_columns(vec![ColumnId::DATE_MODIFIED, ColumnId::SIZE]);
+            first.activate_menu_item(MENU_COLUMNS_SAVE_FOLDER);
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(second.columns.visible_keys(), vec!["date_modified", "size"]);
+        });
+    }
+
+    /// **An arrangement made in another window is taken up, and the selection
+    /// stays on its files.** The selection is positions in the listing; moved
+    /// under it, it would have lit other files.
+    #[test]
+    fn an_arrangement_made_elsewhere_keeps_the_selection_on_its_files() {
+        settingsfile::testing::with_scratch_config("explorer-reread-order", |_root| {
+            let scratch = temp_dir("reread_order");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                fs::write(root.join(name), "x").unwrap();
+            }
+            let names = |state: &ExplorerState| -> Vec<String> {
+                state.entries.iter().map(|e| e.name.clone()).collect()
+            };
+            let mut first = state_at(&root);
+            let mut second = state_at(&root);
+            // The second window is arranged by hand, c first, with a chosen.
+            assert!(second.reorder_rows(vec![2], 0));
+            assert_eq!(names(&second), ["c.txt", "a.txt", "b.txt"]);
+            second.selected_indices = vec![1];
+            // Another window takes that arrangement up, shows it, and moves a
+            // to the end.
+            assert!(first.handle_event(&announce(b"explorer")));
+            first.set_sort(SortBy::Custom);
+            assert_eq!(names(&first), ["c.txt", "a.txt", "b.txt"]);
+            assert!(first.reorder_rows(vec![1], 3));
+            assert_eq!(names(&first), ["c.txt", "b.txt", "a.txt"]);
+
+            second.row_drag = Some(RowDrag {
+                start_x: 0.0,
+                start_y: 0.0,
+                rows: vec![0],
+                active: true,
+                insert_at: 2,
+            });
+            assert!(second.handle_event(&announce(b"explorer")));
+            assert_eq!(names(&second), ["c.txt", "b.txt", "a.txt"]);
+            assert!(
+                second.row_drag.is_none(),
+                "a drag went on moving positions in the order replaced"
+            );
+            let chosen: Vec<&str> = second
+                .selected_indices
+                .iter()
+                .map(|&i| second.entries[i].name.as_str())
+                .collect();
+            assert_eq!(chosen, ["a.txt"], "the selection moved to another file");
+        });
+    }
+
+    /// **Sorting keeps the selection on the files it was on.** The selection
+    /// is positions in the listing and sorting moves the files: the same rows
+    /// stayed lit over other files, and a Delete after a sort acted on files
+    /// nobody had chosen.
+    #[test]
+    fn sorting_keeps_the_selection_on_its_files() {
+        let scratch = temp_dir("sort_selection");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        fs::write(root.join("c.txt"), "xx").unwrap();
+        let mut state = state_at(&root);
+        let a = state
+            .entries
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        state.selected_indices = vec![a];
+        state.set_sort(SortBy::Size);
+        let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["b.txt", "c.txt", "a.txt"]);
+        let chosen: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .map(|&i| state.entries[i].name.as_str())
+            .collect();
+        assert_eq!(chosen, ["a.txt"], "the selection moved to another file");
     }
 
     /// A name the address bar cannot represent is skipped, not mangled.

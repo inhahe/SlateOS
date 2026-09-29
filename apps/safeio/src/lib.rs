@@ -34,6 +34,8 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(windows)]
+use std::time::Duration;
 
 /// How many temporary names to try before giving up.
 ///
@@ -417,7 +419,7 @@ pub fn write_atomically(path: &Path, contents: &[u8]) -> io::Result<()> {
         // support permissions at all reach this on every save.
     }
 
-    if let Err(e) = fs::rename(&tmp_path, &target) {
+    if let Err(e) = rename_over(&tmp_path, &target) {
         let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.
         return Err(e);
     }
@@ -562,6 +564,58 @@ fn write_new_with(
     Ok(())
 }
 
+/// How long, in turn, a rename Windows refuses waits before it is tried
+/// again: about a second in all, over eight attempts. A scanner or an
+/// indexer lets go of a file it has just been told about well inside that;
+/// a file held longer is held by something that means to, and the save says
+/// so.
+#[cfg(windows)]
+const RENAME_WAITS: [Duration; 7] = [
+    Duration::from_millis(10),
+    Duration::from_millis(20),
+    Duration::from_millis(40),
+    Duration::from_millis(80),
+    Duration::from_millis(160),
+    Duration::from_millis(320),
+    Duration::from_millis(370),
+];
+
+/// Rename `from` over `to` -- `fs::rename` -- trying again for a moment when
+/// Windows refuses because another program has `to` open.
+///
+/// A rename over a file fails on Windows, with "access is denied" or a
+/// sharing violation, while any process holds the target open without
+/// `FILE_SHARE_DELETE` -- and one very often does: the virus scanner and the
+/// search indexer open a file as soon as it has been written. A second save a
+/// moment after the first met the first save's file still held, and failed;
+/// `apps/email`'s draft test went red on a busy machine for it
+/// (`requests/c-e-safeio-rename-fails-on-windows-while-something-holds-the-file.md`).
+/// cargo and git for Windows try again for exactly this.
+#[cfg(windows)]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    for wait in RENAME_WAITS {
+        match fs::rename(from, to) {
+            Err(e) if held_by_another_program(&e) => std::thread::sleep(wait),
+            done => return done,
+        }
+    }
+    fs::rename(from, to)
+}
+
+/// Rename `from` over `to`. Everywhere but Windows a refused rename is a
+/// real refusal, and the first answer is the answer.
+#[cfg(not(windows))]
+fn rename_over(from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// Whether Windows refused because another program has the file open:
+/// `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32).
+#[cfg(windows)]
+fn held_by_another_program(e: &io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(5 | 32))
+}
+
 /// Put a finished temporary at `target` on a filesystem without hard links:
 /// claim the name with an exclusive create, which fails if anything has it,
 /// then rename the temporary over the empty claim.
@@ -571,7 +625,7 @@ fn claim_then_rename(tmp_path: &Path, target: &Path) -> io::Result<()> {
         .create_new(true)
         .open(target)?;
     drop(claim);
-    if let Err(e) = fs::rename(tmp_path, target) {
+    if let Err(e) = rename_over(tmp_path, target) {
         // The claim is ours and empty: a name held by nothing anybody wrote.
         let _ = fs::remove_file(target); // Best effort; the rename error is the one worth reporting.
         return Err(e);
@@ -634,7 +688,7 @@ pub fn copy_atomically(src: &Path, dest: &Path) -> io::Result<u64> {
         return Err(e);
     }
 
-    if let Err(e) = fs::rename(&tmp_path, &target) {
+    if let Err(e) = rename_over(&tmp_path, &target) {
         let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.
         return Err(e);
     }
@@ -844,6 +898,85 @@ mod tests {
     }
 
     use scratchdir::ScratchDir;
+
+    /// Open `path` as a virus scanner or an indexer opens a file it has just
+    /// been told about: for reading, sharing reading only -- not delete, so a
+    /// rename over it is refused while it is open. (`File::open` shares
+    /// delete, and would not.)
+    #[cfg(windows)]
+    fn held_as_a_scanner_holds_it(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(path)
+            .expect("the scanner opens the file")
+    }
+
+    /// Let go of `held` after `ms` milliseconds, on another thread.
+    #[cfg(windows)]
+    fn let_go_after(held: fs::File, ms: u64) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(ms));
+            drop(held);
+        })
+    }
+
+    /// **A save waits a moment for a file another program holds.** The
+    /// second of two saves a moment apart met the first's file still held by
+    /// the scanner, and failed -- "Draft not saved: Access is denied" on a
+    /// second Ctrl+S, fine on a third.
+    #[cfg(windows)]
+    #[test]
+    fn a_save_waits_a_moment_for_a_file_another_program_holds() {
+        let scratch = temp_dir("held_save");
+        let path = scratch.dir().join("Plans.eml");
+        write_atomically(&path, b"First line").expect("the first save");
+        let scanner = let_go_after(held_as_a_scanner_holds_it(&path), 100);
+        write_atomically(&path, b"First line, more")
+            .expect("the save gave up while the file was held a moment");
+        scanner.join().expect("the scanner");
+        assert_eq!(fs::read(&path).expect("read back"), b"First line, more");
+    }
+
+    /// **A copy waits a moment for a file another program holds**, as a
+    /// save does: its last step is the same rename.
+    #[cfg(windows)]
+    #[test]
+    fn a_copy_waits_a_moment_for_a_file_another_program_holds() {
+        let scratch = temp_dir("held_copy");
+        let src = scratch.dir().join("new.bin");
+        let dest = scratch.dir().join("old.bin");
+        fs::write(&src, b"new").expect("the source");
+        fs::write(&dest, b"old").expect("the destination");
+        let scanner = let_go_after(held_as_a_scanner_holds_it(&dest), 100);
+        copy_atomically(&src, &dest).expect("the copy gave up while the file was held a moment");
+        scanner.join().expect("the scanner");
+        assert_eq!(fs::read(&dest).expect("read back"), b"new");
+    }
+
+    /// **A file held for good is reported, and left as it was**, with no
+    /// temporary beside it: waiting a moment is not waiting for ever.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_held_for_good_is_reported_and_left_as_it_was() {
+        let scratch = temp_dir("held_for_good");
+        let path = scratch.dir().join("Plans.eml");
+        write_atomically(&path, b"First line").expect("the first save");
+        let held = held_as_a_scanner_holds_it(&path);
+        let refused = write_atomically(&path, b"First line, more");
+        drop(held);
+        assert!(
+            refused.is_err(),
+            "a save over a file held throughout went through"
+        );
+        assert_eq!(fs::read(&path).expect("read back"), b"First line");
+        let names: Vec<_> = fs::read_dir(scratch.dir())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["Plans.eml"], "a temporary was left behind");
+    }
 
     /// A private temporary directory for one test, removed when the returned
     /// guard drops.

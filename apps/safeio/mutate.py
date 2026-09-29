@@ -62,6 +62,40 @@ MUTATIONS = [
         "        if false {",
         ["a_directory_at_the_name_is_refused"],
     ),
+    # Windows only, as the retry is: on Linux these three survive.
+    (
+        "a rename Windows refuses is not tried again",
+        "    for wait in RENAME_WAITS {",
+        "    for wait in RENAME_WAITS.iter().copied().take(0) {",
+        [
+            "a_save_waits_a_moment_for_a_file_another_program_holds",
+            "a_copy_waits_a_moment_for_a_file_another_program_holds",
+        ],
+    ),
+    (
+        "a save renames without waiting",
+        "    if let Err(e) = rename_over(&tmp_path, &target) {\n"
+        "        let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.\n"
+        "        return Err(e);\n    }\n\n"
+        "    // Counted after the rename, so the number reports saves that actually",
+        "    if let Err(e) = fs::rename(&tmp_path, &target) {\n"
+        "        let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.\n"
+        "        return Err(e);\n    }\n\n"
+        "    // Counted after the rename, so the number reports saves that actually",
+        ["a_save_waits_a_moment_for_a_file_another_program_holds"],
+    ),
+    (
+        "a copy renames without waiting",
+        "    if let Err(e) = rename_over(&tmp_path, &target) {\n"
+        "        let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.\n"
+        "        return Err(e);\n    }\n\n"
+        "    // Counted after the rename, for the same reason as in `write_atomically`.",
+        "    if let Err(e) = fs::rename(&tmp_path, &target) {\n"
+        "        let _ = fs::remove_file(&tmp_path); // Best effort; the rename error is the one worth reporting.\n"
+        "        return Err(e);\n    }\n\n"
+        "    // Counted after the rename, for the same reason as in `write_atomically`.",
+        ["a_copy_waits_a_moment_for_a_file_another_program_holds"],
+    ),
 ]
 
 if __name__ == "__main__":

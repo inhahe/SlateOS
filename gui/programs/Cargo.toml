@@ -14,6 +14,8 @@ desktopentry = { path = "../desktopentry" }
 # The inventory test checks that the file types the kernel knew reached the
 # toolkit's table (INVENTORY.md section 5).
 guitk = { path = "../toolkit" }
+# Scratch data directories for the tests of `known`.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

@@ -3502,7 +3502,10 @@ impl StickyNotesApp {
             };
         }
 
-        if m.ctrl && !m.alt {
+        // Ctrl without Alt, as AltGr arrives as Ctrl+Alt; and without the
+        // Windows key, whose chords are the desktop's -- Ctrl+Windows+Q is
+        // no quit.
+        if textline::is_ctrl_chord(m) {
             let canvas = self.canvas_rect(size.0, size.1);
             return match event.key {
                 Key::Q => self.quit_requested(),
@@ -3538,6 +3541,16 @@ impl StickyNotesApp {
                 Key::L => self.cycle_line_kind(),
                 _ => Action::None,
             };
+        }
+
+        // What AltGr types goes into the title or the search. It arrives as
+        // Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and the guard
+        // below would take it for a chord. A command's letter, which it
+        // carries as text, does not (`textline::types_into_field`).
+        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus
+            && textline::types_into_field(event)
+        {
+            return self.type_into(focus, event, size);
         }
 
         // A bare key must stay bare: Alt-Tab and the Super menu belong to the
@@ -5648,6 +5661,91 @@ mod tests {
             Some("Milk")
         );
         assert_eq!(app.store.all_tags(), vec![String::from("shopping")]);
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **A title and the search take what AltGr types, and no command's
+    /// letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish
+    /// keyboard -- and the guard that keeps a bare key bare took it for a
+    /// chord before either field saw it. A command carries its letter as
+    /// text on a real machine, and types none of it.
+    #[test]
+    fn a_title_and_the_search_take_altgr_letters_and_no_commands_letter() {
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let (mut app, id) = app_with_note();
+        if let Some(note) = app.store.get_note_mut(id) {
+            note.title.clear();
+        }
+        app.focus = Some(Focus::Title(id));
+        app.title_before = String::new();
+        app.caret = (0, 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the title"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the title"
+            );
+        }
+        assert_eq!(
+            app.store.get_note(id).map(|n| n.title.clone()).as_deref(),
+            Some("\u{17c}")
+        );
+
+        app.focus = Some(Focus::Search);
+        app.caret = (0, 0);
+        assert_eq!(
+            probe::key(&mut app, &held(Key::Z, ALTGR, "\u{17c}")),
+            Action::Redraw,
+            "AltGr+Z was refused by the search"
+        );
+        for (key, modifiers, text) in commands {
+            assert_eq!(
+                probe::key(&mut app, &held(key, modifiers, text)),
+                Action::None,
+                "{modifiers:?}+{key:?} went into the search"
+            );
+        }
+        assert_eq!(app.store.search_query(), "\u{17c}");
+    }
+
+    /// **Ctrl held with the Windows key is no chord of the program's:**
+    /// Ctrl+Windows+Q is the desktop's, and quit.
+    #[test]
+    fn ctrl_with_the_windows_key_is_no_chord() {
+        let (mut app, _) = app_with_note();
+        let windows_ctrl = Modifiers {
+            super_key: true,
+            ..Modifiers::ctrl()
+        };
+        assert_eq!(
+            probe::key(&mut app, &probe::press_with(Key::Q, windows_ctrl)),
+            Action::None
+        );
     }
 
     #[test]

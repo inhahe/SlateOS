@@ -18,6 +18,10 @@ settingsfile = { path = "../../gui/settingsfile" }
 # truncates before it writes: a crash mid-save loses every note, not one.
 safeio = { path = "../safeio" }
 
+# Whether a key types into a title or the search, or is a command: AltGr
+# arrives as Ctrl+Alt, and a command carries its letter as text.
+textline = { path = "../textline" }
+
 [dev-dependencies]
 # The same crate with its counters on, so a test can prove the save really went
 # through `safeio` rather than quietly regressing to `std::fs::write` — the two

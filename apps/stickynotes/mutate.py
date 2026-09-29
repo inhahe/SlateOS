@@ -302,6 +302,28 @@ MUTATIONS = [
         "            self.refill_body();",
         ["leaving_a_title_after_undoing_its_typing_keeps_the_redo"],
     ),
+    (
+        "a title and the search refuse what AltGr types",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && textline::types_into_field(event)",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && false",
+        ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a title and the search type a command's letter",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && textline::types_into_field(event)",
+        "        if let Some(focus @ (Focus::Title(_) | Focus::Search)) = self.focus\n"
+        "            && event.types_text()",
+        ["a_title_and_the_search_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "Ctrl held with the Windows key is a chord",
+        "        if textline::is_ctrl_chord(m) {",
+        "        if m.ctrl && !m.alt {",
+        ["ctrl_with_the_windows_key_is_no_chord"],
+    ),
 ]
 
 if __name__ == "__main__":

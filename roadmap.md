@@ -2566,17 +2566,25 @@ word; text inside them that says "lane C" is history.
   `TextInput::edit_key`, wait on the request above); the Alt/Super guard in
   the programs not yet through it (paint, whiteboard, and the rest by
   survey); Page Up/Down, Home/End and Ctrl+Home/End through
-  `guitk::listview::ListKey` for programs with lists of their own (pomodoro's
-  log done; rush's and sokoban's lists of puzzles and levels, taskscheduler's
-  lists, logviewer's among the rest); a test pressing every row of 2048's
-  and connect four's sheets, whose tables mix rules with keys and need
-  splitting as towers' is.
+  `guitk::listview::ListKey` for programs with lists of their own (done
+  2026-09-29 for pomodoro's log, rush's puzzle sheet, sokoban's level menu
+  and taskscheduler's task list and history -- which answered Home alone;
+  logviewer already answered all of them; the rest by survey); a test
+  pressing every row of 2048's
+  and connect four's sheets (done 2026-09-29: 2048's split into keys and
+  rules as towers' is, Esc given its own row; connect four's "1 - 7" was a
+  label the parser could not read, now "1-7").
 
 - `[ ]` `[E]` **Lane C's requests of 2026-09-27/28** — what lane C's toolkit
   and desktop work asks of the programs, one request each (all in
   `requests/`, from lane C unless said):
-  - every program that keeps a settings file re-reads it on
-    `Event::SettingsChanged` (`c-e-a-changed-settings-file-is-announced-now.md`);
+  - ~~every program that keeps a settings file re-reads it on
+    `Event::SettingsChanged` (`c-e-a-changed-settings-file-is-announced-now.md`)~~
+    **done 2026-09-28**: the nine programs and Settings' seven files, each
+    with a two-window test. It turned up that data files (notes, contacts,
+    the e-book library, fourteen more) have the same lost update and are
+    not announced: `known-issues.md` "[E] Two windows of one program",
+    E-Q5;
   - four programs read the one list of programs, `gui/programs`, instead of
     their own (`c-e-read-the-one-list-of-programs.md`, the operator's C-Q20);
   - an About page in Settings that shows the third-party notices

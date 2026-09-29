@@ -392,8 +392,8 @@ MUTATIONS = [
     # -- keys -----------------------------------------------------------------------------
     (
         "a chord nobody bound runs the bare key",
-        "        if key.modifiers.ctrl {\n            return self.handle_chord(key);\n        }\n",
-        "        if key.modifiers.ctrl && self.handle_chord(key) == EventResult::Consumed {\n"
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_chord(key);\n        }\n",
+        "        if textline::is_ctrl_chord(key.modifiers) && self.handle_chord(key) == EventResult::Consumed {\n"
         "            return EventResult::Consumed;\n        }\n",
         ["a_chord_nobody_bound_does_not_run_the_key_under_it"],
     ),
@@ -431,6 +431,39 @@ MUTATIONS = [
             "the_follow_button_starts_following_from_the_end_and_stops_it",
             "a_reader_who_selects_an_earlier_entry_is_not_dragged_away_from_it",
         ],
+    ),
+    (
+        "AltGr is a chord",
+        "        if textline::is_ctrl_chord(key.modifiers) {\n            return self.handle_chord(key);",
+        "        if key.modifiers.ctrl {\n            return self.handle_chord(key);",
+        ["altgr_types_into_the_search_box_and_runs_no_chord"],
+    ),
+    (
+        "a key held with Alt or the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        "        match key.key {",
+        [
+            "altgr_types_into_the_search_box_and_runs_no_chord",
+            "a_command_types_nothing_and_alt_or_windows_is_no_shortcut",
+        ],
+    ),
+    (
+        "a key held with the Windows key is a shortcut",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        "        if key.modifiers.alt {\n            return EventResult::Ignored;\n        }\n        match key.key {",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
+    (
+        "the search box types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if key.text.is_empty() {",
+        ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut"],
+    ),
+    (
+        "the search box refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["altgr_types_into_the_search_box_and_runs_no_chord"],
     ),
 ]
 

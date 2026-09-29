@@ -4086,14 +4086,16 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::F1));
         let seen = |a: &SolitaireApp| (a.state.move_count, a.state.stock.len(), a.state.focus);
         let before = seen(&app);
-        for key in [Key::Space, Key::Right, Key::A, Key::N, Key::Z] {
+        // Checked after each key, not once after all of them: N deals a new
+        // game, which would put back whatever a key before it moved.
+        for key in [Key::Space, Key::Right, Key::A, Key::Z, Key::N] {
             assert_eq!(
                 probe::key(&mut app, &probe::press(key)),
                 EventResult::Consumed
             );
             assert!(app.show_help, "{key:?} put the list away");
+            assert_eq!(seen(&app), before, "{key:?} reached the table");
         }
-        assert_eq!(seen(&app), before, "a key reached the table");
         probe::click(&mut app, Target::Stock);
         assert!(!app.show_help, "a click did not put the list away");
         assert_eq!(seen(&app), before, "the click dealt from the stock");

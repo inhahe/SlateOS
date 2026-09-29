@@ -3086,14 +3086,20 @@ mod tests {
         let point = probe::rect_of(&app, Target::Point(7, 7)).expect("the middle point");
         app.handle_key(&key_of(Key::F1));
         let cursor = (app.cursor_row, app.cursor_col);
-        for key in [Key::Left, Key::Space, Key::N, Key::Z] {
+        // Checked after each key, not once after all of them: N starts a new
+        // game, which would put back whatever a key before it moved.
+        for key in [Key::Left, Key::Space, Key::Z, Key::N] {
             assert_eq!(app.handle_key(&key_of(key)), EventResult::Consumed);
             assert!(app.show_help, "{key:?} put the list away");
+            assert_eq!(
+                (app.cursor_row, app.cursor_col),
+                cursor,
+                "{key:?} moved the cursor"
+            );
+            assert_eq!(app.move_count, 0, "{key:?} put a stone down under the list");
         }
         app.handle_key(&probe::press_with(Key::F1, guitk::event::Modifiers::alt()));
         assert!(app.show_help, "Alt+F1 put the list away");
-        assert_eq!((app.cursor_row, app.cursor_col), cursor, "the cursor moved");
-        assert_eq!(app.move_count, 0, "a stone went down under the list");
         // A click on a point: the list goes, and no stone goes down.
         app.handle_event(&Event::Mouse(MouseEvent {
             x: point.x + point.w / 2.0,

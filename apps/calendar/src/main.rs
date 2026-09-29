@@ -3384,7 +3384,10 @@ impl CalendarApp {
 }
 
 fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
-    if key.modifiers.ctrl {
+    // A Ctrl chord, not Ctrl held: AltGr arrives as Ctrl+Alt, and AltGr+S
+    // is a Polish `ś` -- it opened the save dialog, and in the search box
+    // it typed nothing.
+    if textline::is_ctrl_chord(key.modifiers) {
         return match key.key {
             Key::F => {
                 state.search_focused = true;
@@ -3407,6 +3410,27 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         };
     }
 
+    // Typed into the search box: what the key typed, AltGr's included, and
+    // not a command's letter -- Alt+W typed a `w` into the query.
+    if state.search_focused && textline::types_into_field(key) {
+        state.search_query.extend(key.typed());
+        state.search();
+        // The agenda is the only view that shows results, so a search that
+        // leaves you looking at a month grid has found nothing as far as the
+        // user can tell.
+        state.view = CalendarView::Agenda;
+        state.content_scroll = 0.0;
+        return EventResult::Consumed;
+    }
+
+    // Every other binding is on the key itself, and is the calendar's only
+    // with nothing but Shift held: a chord with Alt or the Windows key is
+    // the window's or the desktop's, and arrives carrying its key -- Alt+N
+    // opened a new event and Alt+Delete asked to delete one.
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Ignored;
+    }
+
     if state.search_focused {
         match key.key {
             Key::Escape => {
@@ -3424,16 +3448,6 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             }
             Key::Enter => {
                 state.search_focused = false;
-                return EventResult::Consumed;
-            }
-            _ if key.types_text() => {
-                state.search_query.extend(key.typed());
-                state.search();
-                // The agenda is the only view that shows results, so a search
-                // that leaves you looking at a month grid has found nothing as
-                // far as the user can tell.
-                state.view = CalendarView::Agenda;
-                state.content_scroll = 0.0;
                 return EventResult::Consumed;
             }
             _ => {}
@@ -3553,8 +3567,12 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     if !fields.contains(&state.form_field) {
         state.form_field = fields.first().copied().unwrap_or(FormField::Title);
     }
+    // The form's own keys are taken plain (Shift+Tab walks back): Alt+Enter
+    // saved it and Alt+Escape threw it away. Anything else goes to the
+    // field, which knows a command from typing.
+    let plain = textline::is_plain(key.modifiers);
     match key.key {
-        Key::Tab => {
+        Key::Tab if plain => {
             let at = fields
                 .iter()
                 .position(|f| *f == state.form_field)
@@ -3563,15 +3581,15 @@ fn handle_form_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
             state.form_field = fields.get(next).copied().unwrap_or(state.form_field);
             EventResult::Consumed
         }
-        Key::Enter => {
+        Key::Enter if plain => {
             state.save_form();
             EventResult::Consumed
         }
-        Key::Escape => {
+        Key::Escape if plain => {
             state.cancel_form();
             EventResult::Consumed
         }
-        Key::Left | Key::Right | Key::Space if !state.form_field.is_text() => {
+        Key::Left | Key::Right | Key::Space if plain && !state.form_field.is_text() => {
             let (field, forward) = (state.form_field, key.key != Key::Left);
             let pal = state.palette;
             if let Some(form) = state.form.as_mut()
@@ -3644,6 +3662,11 @@ fn handle_form_click(state: &mut CalendarApp, hit: Option<Target>) -> EventResul
 /// keeps it; every other key is swallowed, since a key that reached the
 /// calendar would be acted on under a question it has not answered.
 fn handle_confirm_key(state: &mut CalendarApp, id: u64, key: &KeyEvent) -> EventResult {
+    // Answered by a plain key only: Alt+Y, a chord that is not an answer,
+    // deleted the event.
+    if !textline::is_plain(key.modifiers) {
+        return EventResult::Consumed;
+    }
     match key.key {
         Key::Enter | Key::Y => state.delete_event(id),
         Key::Escape | Key::N => state.pending_delete = None,
@@ -6951,6 +6974,93 @@ mod tests {
             fresh.choice_label(FormField::Repeats, &Palette::for_mode(false)),
             "Yearly"
         );
+    }
+
+    /// **A key held with Alt or the Windows key is not the calendar's, and
+    /// AltGr is not Ctrl**: Alt+N opened a new event, Alt+Y answered "delete
+    /// this event?", Alt+W typed a `w` into the search, and AltGr+S -- a
+    /// Polish `ś` -- opened the save dialog rather than typing.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_calendars() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = CalendarApp::new(DEFAULT_WIDTH, DEFAULT_HEIGHT, a_saturday());
+        let id = app.store.add(awkward_event("Kept"));
+        app.selected_event_id = Some(id);
+        let (view, date, week) = (app.view, app.view_date, app.week_starts_monday);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [
+                Key::N,
+                Key::W,
+                Key::Num2,
+                Key::Right,
+                Key::F1,
+                Key::S,
+                Key::Delete,
+            ] {
+                assert_eq!(
+                    probe::key(&mut app, &probe::press_with(key, held)),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert!(app.form.is_none(), "a chord opened a new event");
+        assert_eq!(
+            (app.view, app.view_date),
+            (view, date),
+            "a chord moved the calendar"
+        );
+        assert_eq!(app.week_starts_monday, week, "a chord changed the week");
+        assert!(!app.show_help, "a chord raised the keys");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
+        assert_eq!(app.pending_delete, None, "a chord asked to delete");
+
+        // The question before a delete is answered by a plain key only.
+        app.pending_delete = Some(id);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            probe::key(&mut app, &probe::press_with(Key::Y, held));
+            probe::key(&mut app, &probe::press_with(Key::Enter, held));
+        }
+        assert_eq!(app.store.len(), 1, "a chord deleted the event");
+        assert_eq!(
+            app.pending_delete,
+            Some(id),
+            "a chord answered the question"
+        );
+        app.pending_delete = None;
+
+        // The form's own keys are plain: Alt+Enter does not save it, nor
+        // Alt+Escape throw it away.
+        probe::key(&mut app, &probe::press(Key::N));
+        assert!(app.form.is_some(), "control: N opens the form");
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            probe::key(&mut app, &probe::press_with(Key::Enter, held));
+            probe::key(&mut app, &probe::press_with(Key::Escape, held));
+        }
+        assert!(app.form.is_some(), "a chord closed the form");
+        assert_eq!(app.store.len(), 1, "a chord saved the form");
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(app.form.is_none(), "control: Escape closes the form");
+
+        // The search types what a key typed -- AltGr's `ś` among it -- and
+        // not a command's letter.
+        app.search_focused = true;
+        let typed = |key: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        probe::key(&mut app, &typed(Key::W, "w", Modifiers::alt()));
+        probe::key(&mut app, &typed(Key::W, "w", Modifiers::super_key()));
+        assert_eq!(app.search_query, "", "a command's letter was typed");
+        probe::key(&mut app, &typed(Key::S, "ś", altgr));
+        assert_eq!(app.search_query, "ś", "AltGr's ś was not typed");
+        assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
     }
 
     #[test]

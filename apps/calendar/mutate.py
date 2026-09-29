@@ -534,6 +534,36 @@ MUTATIONS = [
         "            [_, ..] => Ok(Self::Calendar),",
         ["the_argument_opens_an_events_colour"],
     ),
+    (
+        'AltGr is taken for Ctrl',
+        '    if textline::is_ctrl_chord(key.modifiers) {',
+        '    if key.modifiers.ctrl {',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '    if state.search_focused && textline::types_into_field(key) {',
+        '    if state.search_focused && key.types_text() {',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a key held with Alt or the Windows key is the calendar's",
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Ignored;\n    }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        'a chord answers the question before a delete',
+        '    if !textline::is_plain(key.modifiers) {\n        return EventResult::Consumed;\n    }\n',
+        '',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
+    (
+        "a chord works the form's own keys",
+        '    let plain = textline::is_plain(key.modifiers);',
+        '    let plain = true;',
+        ['a_key_held_with_a_modifier_is_not_the_calendars'],
+    ),
 ]
 
 # The model, the events file and iCalendar moved to apps/calendarstore on

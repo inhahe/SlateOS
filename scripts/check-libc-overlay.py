@@ -33,6 +33,13 @@ What it checks
    type**: `__builtin_types_compatible_p` against the type clang read out of
    glibc's headers, typedefs resolved.
 
+4. **The types the overlay defines have glibc's layouts** -- `femode_t`,
+   `FTS`, `FTSENT`, `struct mallinfo` and the rest, which musl's headers have
+   none of: each one's size, and each field's offset, against glibc's
+   (OVERLAY_TYPES, which must name every struct the overlay's text defines).
+   `check-libc-abi.py` holds the library's Rust types to these, and so, one
+   step removed, to glibc's.
+
 The declarations' calling conventions against the library's definitions are
 scripts/check-libc-prototypes.py's to check; this one checks what a program
 compiling against the overlay sees.
@@ -41,9 +48,10 @@ The reference
 -------------
 posix/tools/oracle/glibc_declarations.txt: for each name the overlay
 declares, the header glibc 2.39 declares it in, the CONFIGS it is declared
-in, and its type -- read out of glibc's headers with clang by
+in, and its type; and glibc_layouts.txt, each OVERLAY_TYPES type's size and
+field offsets -- both read out of glibc's headers with clang by
 posix/tools/oracle/glibc_declarations.py, under WSL. After adding to the
-overlay, regenerate it:
+overlay, regenerate them:
 
     python posix/tools/oracle/glibc_declarations.py
 
@@ -71,6 +79,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / "posix" / "include"
 REFERENCE = ROOT / "posix" / "tools" / "oracle" / "glibc_declarations.txt"
+LAYOUTS = ROOT / "posix" / "tools" / "oracle" / "glibc_layouts.txt"
 
 # The feature-macro settings a declaration's visibility is compared in: the
 # same names, and the same flags, as glibc_declarations.py reads glibc with.
@@ -112,6 +121,25 @@ KNOWN: dict[tuple[str, str], str] = {
                                    "for the declaration to take"
        for cfg in ("c17", "c23", "bfp", "ext", "lfs64")},
 }
+
+# The types the overlay defines itself -- musl's headers have none of them, so
+# their layouts are the overlay's to get right -- and the header each is in.
+# Check 4 holds each to glibc's; `defined_types` sees that none is missing.
+OVERLAY_TYPES: dict[str, str] = {
+    "femode_t": "fenv.h",
+    "FTS": "fts.h",
+    "FTSENT": "fts.h",
+    "struct mallinfo": "malloc.h",
+    "struct mallinfo2": "malloc.h",
+    "cookie_io_functions_t": "stdio.h",
+}
+
+# glibc's name for a field, where the overlay's differs: the overlay's.
+FIELD_NAMES: dict[tuple[str, str], str] = {("femode_t", "__glibc_reserved"): "__reserved"}
+
+# Where the layouts are read, both sides: C23, for femode_t; not _GNU_SOURCE,
+# so that <stdio.h>'s cookie types are the overlay's own and not musl's.
+LAYOUT_FLAGS = ["-std=gnu2x"]
 
 # glibc's names for types whose musl names differ, in the reference's types.
 # `__sigset_t` is glibc's unnamed struct behind sigset_t; musl's has the tag
@@ -238,6 +266,81 @@ def overlay_names(zig: str, overlay: Path) -> set[str]:
     return visible(zig, overlay_headers(overlay), candidates(overlay), WIDEST, overlay)
 
 
+def defined_types(overlay: Path) -> list[frozenset[str]]:
+    """Each struct the overlay's text defines, as the names it goes by: its
+    tag, as `struct tag`, and the typedef naming it."""
+    out = []
+    for p in sorted(overlay.rglob("*.h")):
+        text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
+        for m in re.finditer(r"\b(typedef\s+)?struct(?:\s+(\w+))?\s*\{", text):
+            depth, i = 1, m.end()
+            while depth and i < len(text):
+                depth += {"{": 1, "}": -1}.get(text[i], 0)
+                i += 1
+            names = {f"struct {m.group(2)}"} if m.group(2) else set()
+            if m.group(1):
+                after = re.match(r"\s*(\w+)\s*;", text[i:])
+                if after:
+                    names.add(after.group(1))
+            if names:
+                out.append(frozenset(names))
+    return out
+
+
+def read_layouts(path: Path) -> dict[str, tuple[str, int, list[tuple[str, int]]]]:
+    """C type -> (header, size, [(field, offset)]), glibc's."""
+    out = {}
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4:
+            raise ValueError(f"{path.name}:{n}: expected 4 tab-separated fields")
+        cty, header, size, fields = parts
+        pairs = []
+        for f in fields.split(","):
+            name, _, off = f.partition("=")
+            pairs.append((name, int(off)))
+        out[cty] = (header, int(size), pairs)
+    return out
+
+
+def mislaid(zig: str, overlay: Path,
+            layouts: dict[str, tuple[str, int, list[tuple[str, int]]]]) -> list[str]:
+    """Check 4: each OVERLAY_TYPES type's size and offsets against glibc's."""
+    problems = []
+    for names in defined_types(overlay):
+        if not names & set(OVERLAY_TYPES):
+            problems.append(f"the overlay defines {' / '.join(sorted(names))}, which "
+                            "OVERLAY_TYPES does not list: its layout is held to nothing")
+    by_header: dict[str, list[str]] = {}
+    for cty, hdr in sorted(OVERLAY_TYPES.items()):
+        if cty not in layouts:
+            problems.append(f"{cty} is in OVERLAY_TYPES and not in {LAYOUTS.name}: regenerate "
+                            "it (posix/tools/oracle/glibc_declarations.py)")
+        else:
+            by_header.setdefault(hdr, []).append(cty)
+    for hdr, types in sorted(by_header.items()):
+        what: list[str] = []
+        src = f"#include <{hdr}>\n#include <stddef.h>\n"
+        for cty in types:
+            _, size, fields = layouts[cty]
+            src += f"_Static_assert(sizeof({cty}) == {size}, \"@{len(what)}@\");\n"
+            what.append(f"sizeof({cty}) is not glibc's {size}")
+            for f, off in fields:
+                ours = FIELD_NAMES.get((cty, f), f)
+                src += f"_Static_assert(offsetof({cty}, {ours}) == {off}, \"@{len(what)}@\");\n"
+                what.append(f"{cty}'s {ours} is not at glibc's offset {off}")
+        _, diag = compile_c(zig, src, LAYOUT_FLAGS + ["-w", "-ferror-limit=0"], overlay)
+        for line in errors_of(diag):
+            m = FAILED_ASSERT.search(line)
+            if m and "static assertion failed" in line:
+                problems.append(f"<{hdr}>: {what[int(m.group(1))]}")
+            else:
+                problems.append(f"<{hdr}>, checking layouts: {line}")
+    return problems
+
+
 def read_reference(path: Path) -> dict[str, tuple[str, frozenset[str], str]]:
     """name -> (header, the CONFIGS it is declared in, its type)."""
     out = {}
@@ -357,6 +460,20 @@ def self_test() -> int:
             check("an unknown configuration is refused", False)
         except ValueError:
             pass
+        (d / "defs").mkdir()
+        (d / "defs" / "b.h").write_text(
+            "typedef struct { int a; } plain_t;\nstruct tagged { int b; };\n"
+            "typedef struct both_tag { int c; } both_t;\nstruct tagged *use(void);\n",
+            encoding="utf-8", newline="")
+        found = set(defined_types(d / "defs"))
+        check("an unnamed struct's typedef, a tag and a tagged typedef are found",
+              found == {frozenset({"plain_t"}), frozenset({"struct tagged"}),
+                        frozenset({"struct both_tag", "both_t"})})
+        (d / "l.txt").write_text("# x\nfemode_t\tfenv.h\t8\t__control_word=0,__mxcsr=4\n",
+                                 encoding="utf-8", newline="")
+        check("the layouts are read",
+              read_layouts(d / "l.txt") == {"femode_t": ("fenv.h", 8, [("__control_word", 0),
+                                                                     ("__mxcsr", 4)])})
     zig = find_zig()
     if zig and musl_include(zig):
         with tempfile.TemporaryDirectory() as t:
@@ -373,6 +490,24 @@ def self_test() -> int:
             check("a wrong type is caught, a right one passes", bad == {"printf"})
             check("the overlay's names are what it adds to musl's",
                   overlay_names(zig, d) == {"fcloseall"})
+            (d / "sys").mkdir()
+            (d / "sys" / "lay.h").write_text("typedef struct { int a; long b; } lay_t;\n",
+                                             encoding="utf-8", newline="")
+            saved = dict(OVERLAY_TYPES)
+            try:
+                OVERLAY_TYPES.clear()
+                OVERLAY_TYPES["lay_t"] = "sys/lay.h"
+                good = {"lay_t": ("sys/lay.h", 16, [("a", 0), ("b", 8)])}
+                bad = {"lay_t": ("sys/lay.h", 16, [("a", 0), ("b", 4)])}
+                check("a layout that is glibc's passes", mislaid(zig, d, good) == [])
+                check("an offset that is not is caught",
+                      any("b is not at glibc's offset 4" in p for p in mislaid(zig, d, bad)))
+                OVERLAY_TYPES.clear()
+                check("a struct OVERLAY_TYPES does not list is caught",
+                      any("lay_t" in p and "does not list" in p for p in mislaid(zig, d, good)))
+            finally:
+                OVERLAY_TYPES.clear()
+                OVERLAY_TYPES.update(saved)
     else:
         print("check-libc-overlay self-test: no zig; the compiler cases were not run")
     print(f"check-libc-overlay self-test: {failures} failure(s)")
@@ -384,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", "--selftest", action="store_true")
     parser.add_argument("--overlay", default=str(OVERLAY), help="the overlay (default: this tree's)")
     parser.add_argument("--reference", default=str(REFERENCE), help="the reference to compare with")
+    parser.add_argument("--layouts", default=str(LAYOUTS), help="glibc's layouts to compare with")
     args = parser.parse_args(argv)
     if args.self_test:
         return self_test()
@@ -395,6 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     overlay = Path(args.overlay)
     try:
         ref = read_reference(Path(args.reference))
+        layouts = read_layouts(Path(args.layouts))
     except (OSError, ValueError) as e:
         print(f"ERROR: the reference: {e} (Exit 2.)", file=sys.stderr)
         return 2
@@ -405,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         problems = check_builds(zig, overlay)
         found, compared = check_declarations(zig, overlay, ref)
+        problems += mislaid(zig, overlay, layouts)
     except RuntimeError as e:
         print(f"check-libc-overlay: {e}", file=sys.stderr)
         return 1
@@ -415,7 +553,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"check-libc-overlay: {len(overlay_headers(overlay))} headers compile in "
           f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings; {compared} declarations appear where "
-          f"glibc 2.39's do ({len(CONFIGS)} settings each), with glibc's types")
+          f"glibc 2.39's do ({len(CONFIGS)} settings each), with glibc's types; "
+          f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts")
     return 0
 
 

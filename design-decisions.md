@@ -42771,8 +42771,12 @@ two C++ ones; the names the overlay adds to musl's are exactly the
 reference's, which `posix/tools/oracle/glibc_declarations.py` reads out of
 glibc 2.39's headers with libclang; and each appears, after its header, in
 exactly the settings glibc's does, with a type `__builtin_types_compatible_p`
-finds compatible with glibc's. `scripts/check-libc-prototypes.py` checks each
-against its Rust definition by the x86-64 calling convention.
+finds compatible with glibc's; and each type the overlay defines itself
+(`femode_t`, `FTS`, `struct mallinfo` ...) has glibc's size and field
+offsets. `scripts/check-libc-prototypes.py` checks each declaration against
+its Rust definition by the x86-64 calling convention, and
+`scripts/check-libc-abi.py`, which compiles against musl's headers with the
+overlay in front, the library's Rust types against the overlay's.
 
 **Where it parts from glibc, on purpose:** the LFS64 names (`open64`,
 `stat64` ...) stay as musl has them, macros under `_LARGEFILE64_SOURCE`

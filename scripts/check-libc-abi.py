@@ -26,9 +26,14 @@ Three programs, and no third copy of anything:
 1. `posix::abi_layout` prints C.  The numbers come from `size_of` and
    `offset_of!` and are never typed out by a human.
 2. `zig cc --target=x86_64-linux-musl` compiles that C against musl's own
-   headers.  A `_Static_assert` that fails is a layout that disagrees.  musl is
-   the toolchain every C port in this tree is already built with, so it is the
-   right oracle rather than merely an available one.
+   headers, with `posix/include` -- the overlay C here is compiled with,
+   declaring what this library has beyond musl (design-decisions 1141) -- in
+   front of them, as every C build here has it.  A `_Static_assert` that
+   fails is a layout that disagrees.  musl is the toolchain every C port in
+   this tree is already built with, so it is the right oracle rather than
+   merely an available one; for the few types only the overlay defines
+   (`femode_t`, `FTS`, `struct mallinfo` ...) the overlay is, and
+   `check-libc-overlay.py` holds those to glibc's own layouts.
 3. This script also *derives* which types cross the C boundary -- every
    `#[repr(C)] pub struct` reachable as a pointer parameter of an exported
    `extern "C"` function -- and refuses a **new** one that has no entry in
@@ -55,7 +60,7 @@ by a human:
    value the compiler evaluated -- `1 << 4` arrives as `16i32` -- built for
    the SlateOS target, so a `cfg` there is honoured and no Python re-reads a
    Rust expression.
-5. `zig cc -dM -E` over musl's headers lists the macros they define; a
+5. `zig cc -dM -E` over musl's headers (and the overlay's) lists the macros they define; a
    constant whose name is one of them is a number a caller shares with the
    library.  The kernel's headers (`linux/...`) answer, in a unit of their
    own, only for names musl's lack: in one unit `linux/limits.h` would
@@ -98,6 +103,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 POSIX_SRC = REPO / "posix" / "src"
 ABI_LAYOUT = POSIX_SRC / "abi_layout.rs"
+# The headers C here is compiled with are musl's with this in front (-I, which
+# zig searches before its own libc headers; -isystem it would not).
+OVERLAY = REPO / "posix" / "include"
+
+
+def overlay_flags() -> list[str]:
+    """`-I` for the overlay, where there is one."""
+    return ["-I", str(OVERLAY)] if OVERLAY.is_dir() else []
 
 BEGIN = "===ABI-C-BEGIN==="
 END = "===ABI-C-END==="
@@ -168,17 +181,8 @@ NO_ORACLE: dict[str, tuple[str, tuple[str, str] | None]] = {
         "self-contained and the handle is opaque to callers.",
         ("DBM", "ndbm.h"),
     ),
-    "Fts": (
-        "`FTS` lives in <fts.h>, which musl does not ship -- a BSD interface "
-        "glibc also carries. Opaque to callers.",
-        ("FTS", "fts.h"),
-    ),
-    "FtsEnt": (
-        "`FTSENT`, same header and reason as `Fts`. Not opaque -- callers read "
-        "it -- so this is the entry here most worth revisiting if a definition "
-        "ever becomes available.",
-        ("FTSENT", "fts.h"),
-    ),
+    # `Fts` and `FtsEnt` were here until 2026-09-29, <fts.h> being absent from
+    # musl; posix/include has it now, and they are checked in abi_layout.rs.
     "SysctlArgs": (
         "`struct __sysctl_args` lived in <linux/sysctl.h>, removed from the "
         "kernel headers along with the syscall it served. Nothing defines it "
@@ -279,7 +283,7 @@ def compile_c(zig: str, src: str) -> tuple[list[str], str | None]:
         # but the gate grades the declaration, not the compiler.
         c.write_text(src, encoding="utf-8", newline="")
         proc = subprocess.run(
-            [zig, "cc", f"--target={MUSL_TARGET}", "-c",
+            [zig, "cc", f"--target={MUSL_TARGET}", *overlay_flags(), "-c",
              str(c), "-o", str(Path(tmp) / "abi.o")],
             capture_output=True,
             text=True,
@@ -823,7 +827,8 @@ def run_zig_unit(zig: str, args: list[str], src: str) -> subprocess.CompletedPro
         # newline="" keeps the unit LF on every platform, and the relative name
         # keeps a drive letter's colon out of the diagnostics read above.
         (Path(tmp) / "consts.c").write_text(src, encoding="utf-8", newline="")
-        return subprocess.run([zig, "cc", f"--target={MUSL_TARGET}", *args, "consts.c"],
+        return subprocess.run([zig, "cc", f"--target={MUSL_TARGET}", *overlay_flags(), *args,
+                               "consts.c"],
                               cwd=tmp, capture_output=True, text=True, timeout=600,
                               check=False)
 
@@ -1128,11 +1133,11 @@ def main() -> int:
         # summary line that says zero while the lines above it say otherwise
         # trains the reader to stop reading the lines above it.
         print(
-            f"check-libc-abi: OK ({n} types checked against musl; "
+            f"check-libc-abi: OK ({n} types checked against musl and posix/include; "
             f"{len(known_seen)} known-bad and recorded, 0 new; {numbers.summary})"
         )
     else:
-        print(f"check-libc-abi: OK ({n} types checked against musl, 0 mismatches; "
+        print(f"check-libc-abi: OK ({n} types checked against musl and posix/include, 0 mismatches; "
               f"{numbers.summary})")
     return 3 if numbers.skipped else 0
 

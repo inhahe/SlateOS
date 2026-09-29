@@ -5,5 +5,7 @@ FTS	fts.h	72	fts_cur=0,fts_child=8,fts_array=16,fts_dev=24,fts_path=32,fts_rfd=4
 FTSENT	fts.h	120	fts_cycle=0,fts_parent=8,fts_link=16,fts_number=24,fts_pointer=32,fts_accpath=40,fts_path=48,fts_errno=56,fts_symfd=60,fts_pathlen=64,fts_namelen=66,fts_ino=72,fts_dev=80,fts_nlink=88,fts_level=96,fts_info=98,fts_flags=100,fts_instr=102,fts_statp=104,fts_name=112
 cookie_io_functions_t	stdio.h	32	read=0,write=8,seek=16,close=24
 femode_t	fenv.h	8	__control_word=0,__glibc_reserved=2,__mxcsr=4
+struct drand48_data	stdlib.h	24	__x=0,__old_x=6,__c=12,__init=14,__a=16
 struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblks=20,fsmblks=24,uordblks=28,fordblks=32,keepcost=36
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
+struct random_data	stdlib.h	48	fptr=0,rptr=8,state=16,rand_type=24,rand_deg=28,rand_sep=32,end_ptr=40

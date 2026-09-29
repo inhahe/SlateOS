@@ -453,6 +453,7 @@ pub mod perthread;
 pub mod pipe;
 pub mod poll;
 pub mod printf;
+pub mod prng;
 pub mod process;
 pub mod pthread;
 pub mod pty;

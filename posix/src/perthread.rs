@@ -189,6 +189,11 @@ pub struct PerThread {
     /// The same for [`crate::signal::strsignal`]: "Unknown signal N" and
     /// "Real-time signal N".
     pub strsignal: [u8; 32],
+
+    /// The `X` [`crate::prng::seed48`] replaced, which it returns a pointer
+    /// to: the calling thread's own, so that another thread's `seed48` cannot
+    /// overwrite it while it is read.
+    pub seed48: [u16; 3],
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -253,6 +258,7 @@ impl PerThread {
         cleanup: core::ptr::null_mut(),
         strerror: [0; 32],
         strsignal: [0; 32],
+        seed48: [0; 3],
     };
 }
 

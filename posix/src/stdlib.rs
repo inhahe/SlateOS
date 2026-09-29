@@ -1,8 +1,8 @@
 //! C standard library conversion functions.
 //!
 //! Implements integer and floating-point conversion, absolute value,
-//! integer division structs, sorting, searching, random numbers, and
-//! temporary file creation.
+//! integer division structs, sorting, searching, and temporary file
+//! creation. The pseudo-random number generators are [`crate::prng`].
 //!
 //! ## Functions
 //!
@@ -12,7 +12,6 @@
 //! - `abs`, `labs`, `llabs` — absolute value
 //! - `div`, `ldiv`, `lldiv` — integer division with quotient/remainder
 //! - `qsort`, `bsearch` — array sorting/searching
-//! - `srand`, `rand`, `rand_r` — pseudo-random numbers
 //! - `mkstemp`, `tmpfile` — temporary file creation
 //!
 //! These are not strictly POSIX but are required by virtually every
@@ -1385,130 +1384,9 @@ pub unsafe extern "C" fn bsearch(
 // ---------------------------------------------------------------------------
 // Random number generation
 // ---------------------------------------------------------------------------
-
-/// Linear congruential PRNG state.
-///
-/// Uses the glibc LCG parameters. POSIX gives a process exactly one `rand`
-/// sequence, so this is shared by specification and cannot become per-thread —
-/// `rand_r` is the reentrant form for callers that need their own stream.
-///
-/// Serialising it is therefore the *caller's* obligation, not this module's;
-/// POSIX marks `rand`/`srand` as not thread-safe for exactly this reason. The
-/// crate's own tests discharge it with `tests::lock_rand_for_test`.
-static mut RAND_STATE: u64 = 1;
-
-/// Seed the random number generator.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srand(seed: u32) {
-    // SAFETY: `addr_of_mut!` never forms a reference to the static, so no
-    // aliasing rule is at stake; the write is a plain aligned store to a
-    // `u64` that outlives the program.
-    //
-    // Concurrency is a *caller* obligation imported from POSIX, not a fact
-    // about this program: `srand` is one of the functions POSIX explicitly
-    // declines to make thread-safe. (The previous comment here claimed
-    // "single-threaded userspace", which was false — this crate's own test
-    // suite runs it on several libtest threads at once, and the determinism
-    // tests silently depended on winning that race.)
-    unsafe {
-        core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed));
-    }
-}
-
-/// Generate a pseudo-random integer in [0, RAND_MAX].
-///
-/// Uses the glibc LCG: state = state * 6364136223846793005 + 1.
-/// Returns the upper 31 bits.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn rand() -> i32 {
-    // SAFETY: As `srand` — `addr_of_mut!` forms no reference, and the
-    // read-modify-write below is *not* atomic, which is exactly why POSIX
-    // makes serialising `rand` the caller's job. See `RAND_STATE`.
-    let state = unsafe { core::ptr::addr_of_mut!(RAND_STATE).read() };
-    let new_state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1);
-    unsafe {
-        core::ptr::addr_of_mut!(RAND_STATE).write(new_state);
-    }
-    // Return upper 31 bits as a non-negative i32.
-    ((new_state >> 33) & 0x7FFF_FFFF) as i32
-}
-
-/// Thread-safe pseudo-random number generator.
-///
-/// Uses caller-provided state instead of the global `RAND_STATE`.
-/// The algorithm matches glibc's LCG for compatibility.
-///
-/// # Safety
-///
-/// `seed` must point to a valid `u32`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
-    if seed.is_null() {
-        return 0;
-    }
-    // Use a 32-bit LCG: state = state * 1103515245 + 12345 (POSIX spec).
-    let state = unsafe { *seed };
-    let new_state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    unsafe {
-        *seed = new_state;
-    }
-    // Return upper bits as a non-negative i32.
-    ((new_state >> 1) & 0x7FFF_FFFF) as i32
-}
-
-/// Maximum value returned by rand().
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static RAND_MAX: i32 = 0x7FFF_FFFF;
-
-/// POSIX: Seed the better random number generator.
-///
-/// For our purposes, this is identical to `srand`.  POSIX specifies
-/// `random()`/`srandom()` as a better-quality RNG than `rand()`/`srand()`,
-/// but our implementation uses the same LCG for both.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srandom(seed: u32) {
-    srand(seed);
-}
-
-/// POSIX: Generate a pseudo-random integer in [0, 2^31).
-///
-/// Better-quality RNG than `rand()` per POSIX, but our implementation
-/// delegates to the same LCG.  Returns a `i64` (`long`) per POSIX.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn random() -> i64 {
-    i64::from(rand())
-}
-
-/// POSIX: Initialize random state for `random_r`.
-///
-/// Stub — stores the seed in the state buffer for compatibility.
-///
-/// # Safety
-///
-/// `statebuf` must be a valid pointer to at least 8 bytes.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn initstate(seed: u32, statebuf: *mut u8, n: usize) -> *mut u8 {
-    if statebuf.is_null() || n < 8 {
-        return core::ptr::null_mut();
-    }
-    srand(seed);
-    statebuf
-}
-
-/// POSIX: Set the random state buffer.
-///
-/// Stub — accepts the state pointer for API compatibility.
-///
-/// # Safety
-///
-/// `statebuf` must have been returned by a prior `initstate` call.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
-    // No-op: we use a global state regardless.
-    statebuf
-}
+//
+// rand, random, the rand48 family, their reentrant forms and RAND_MAX are
+// crate::prng's.
 
 // ---------------------------------------------------------------------------
 // Temporary files
@@ -2061,84 +1939,6 @@ fn char_to_digit(c: u8, base: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// drand48 / lrand48 / mrand48 family — 48-bit LCG PRNG (POSIX)
-// ---------------------------------------------------------------------------
-//
-// Uses the standard POSIX 48-bit linear congruential generator:
-//   X_{n+1} = (a * X_n + c) mod 2^48
-// where a = 0x5DEECE66D, c = 0xB.
-
-/// 48-bit PRNG state.
-///
-/// One sequence per process, by specification — `drand48_r` and friends are the
-/// reentrant forms for a caller that wants its own. So, as with [`RAND_STATE`],
-/// serialising this is the caller's obligation; `tests::lock_rand48_for_test`
-/// is how this crate's own tests meet it.
-static mut RAND48_STATE: u64 = 0x330E_ABCD_1234_u64;
-
-/// LCG multiplier (POSIX standard value).
-const RAND48_A: u64 = 0x0005_DEEC_E66D;
-/// LCG addend (POSIX standard value).
-const RAND48_C: u64 = 0xB;
-/// 48-bit mask.
-const RAND48_MASK: u64 = (1_u64 << 48) - 1;
-
-/// The multiplier and addend in use: POSIX's, until [`lcong48`] changes
-/// them, and again after [`srand48`] or [`seed48`], which restore them, as
-/// POSIX requires. Serialised like [`RAND48_STATE`], by the caller.
-static mut RAND48_MUL: u64 = RAND48_A;
-/// See [`RAND48_MUL`].
-static mut RAND48_ADD: u64 = RAND48_C;
-
-/// One step of the generator from `state`: `(a * state + c) mod 2^48`, with
-/// the multiplier and addend in use -- which [`lcong48`] sets for every
-/// function of the family, those with their own state included.
-fn rand48_next(state: u64) -> u64 {
-    // SAFETY: plain reads through `addr_of!`, no reference formed; see
-    // `RAND48_STATE` on why the family is not locked.
-    let (a, c) = unsafe {
-        (
-            core::ptr::addr_of!(RAND48_MUL).read(),
-            core::ptr::addr_of!(RAND48_ADD).read(),
-        )
-    };
-    (state.wrapping_mul(a).wrapping_add(c)) & RAND48_MASK
-}
-
-/// Put POSIX's multiplier and addend back ([`srand48`], [`seed48`]).
-fn rand48_standard_parameters() {
-    // SAFETY: plain writes through `addr_of_mut!`; see `RAND48_STATE`.
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_MUL).write(RAND48_A);
-        core::ptr::addr_of_mut!(RAND48_ADD).write(RAND48_C);
-    }
-}
-
-/// Set the generator's state, multiplier and addend at once (XSI):
-/// `param[0..3]` the state, `param[3..6]` the multiplier, low 16 bits first,
-/// and `param[6]` the addend. A NULL `param` changes nothing.
-///
-/// # Safety
-///
-/// `param` is NULL or points to seven `unsigned short`s.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn lcong48(param: *const u16) {
-    if param.is_null() {
-        return;
-    }
-    // SAFETY: seven readable values, by this function's contract.
-    let p = |i: usize| u64::from(unsafe { param.add(i).read() });
-    let x = (p(2) << 32) | (p(1) << 16) | p(0);
-    let a = (p(5) << 32) | (p(4) << 16) | p(3);
-    // SAFETY: plain writes through `addr_of_mut!`; see `RAND48_STATE`.
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(x);
-        core::ptr::addr_of_mut!(RAND48_MUL).write(a);
-        core::ptr::addr_of_mut!(RAND48_ADD).write(p(6));
-    }
-}
-
-// ---------------------------------------------------------------------------
 // ecvt, fcvt, gcvt
 // ---------------------------------------------------------------------------
 //
@@ -2441,199 +2241,6 @@ pub unsafe extern "C" fn gcvt(value: f64, ndigit: i32, buf: *mut u8) -> *mut u8 
     // SAFETY: this function's contract.
     unsafe { crate::printf::format_g_into(buf, value, p) };
     buf
-}
-
-/// Advance the 48-bit LCG state.
-#[inline]
-fn rand48_step() -> u64 {
-    // SAFETY: `addr_of_mut!` forms no reference to the static. The
-    // read-modify-write is deliberately non-atomic: POSIX assigns the caller
-    // responsibility for serialising the `drand48` family, so adding a lock
-    // here would slow every caller to fix a problem only unserialised ones
-    // have. See `RAND48_STATE`.
-    let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
-    let next = rand48_next(state);
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(next);
-    }
-    next
-}
-
-/// Return a non-negative `f64` in [0.0, 1.0).
-///
-/// Uses the full 48-bit state scaled to a double.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-pub extern "C" fn drand48() -> f64 {
-    let state = rand48_step();
-    // 2^48 = 281474976710656.0; 48-bit value fits in f64's 52-bit mantissa.
-    state as f64 / 281_474_976_710_656.0
-}
-
-/// Return a non-negative `i64` in [0, 2^31).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lrand48() -> i64 {
-    let state = rand48_step();
-    (state >> 17) as i64 // Upper 31 bits.
-}
-
-/// Return a signed `i64` in [-2^31, 2^31).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mrand48() -> i64 {
-    let state = rand48_step();
-    // Interpret upper 32 bits as signed.
-    i64::from((state >> 16) as i32)
-}
-
-/// Seed the 48-bit PRNG with a 32-bit value.
-///
-/// Sets the upper 32 bits of state; lower 16 bits are set to 0x330E
-/// (POSIX default).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn srand48(seedval: i64) {
-    let hi = (seedval as u64) << 16;
-    let state = (hi | 0x330E) & RAND48_MASK;
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(state);
-    }
-    rand48_standard_parameters();
-}
-
-/// Seed the 48-bit PRNG with a full 48-bit value.
-///
-/// `seed16v` points to an array of 3 `u16` values.
-/// Returns a pointer to the previous seed (static storage).
-///
-/// # Safety
-///
-/// `seed16v` must point to at least 3 `u16` values.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
-    /// Storage for the value `seed48` hands back. Same hazard as [`L64A_BUF`]:
-    /// the caller gets a pointer *into* it, so it is still shared while being
-    /// read. It rides on `tests::lock_rand48_for_test` rather than a lock of
-    /// its own, because `seed48` writes this and `RAND48_STATE` in one call —
-    /// two locks could not make that pair atomic.
-    static mut OLD_SEED: [u16; 3] = [0; 3];
-
-    // Use addr_of_mut to avoid creating shared references to mutable
-    // statics (Rust 2024).  addr_of_mut! is safe; only the dereference
-    // is unsafe.
-    let old_seed_ptr = core::ptr::addr_of_mut!(OLD_SEED);
-
-    if seed16v.is_null() {
-        return old_seed_ptr.cast::<u16>();
-    }
-
-    // Save old state.
-    let old = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
-    unsafe {
-        (*old_seed_ptr)[0] = (old & 0xFFFF) as u16;
-        (*old_seed_ptr)[1] = ((old >> 16) & 0xFFFF) as u16;
-        (*old_seed_ptr)[2] = ((old >> 32) & 0xFFFF) as u16;
-    }
-
-    // Set new state from seed16v[0..3].
-    // SAFETY: seed16v verified non-null, caller guarantees 3 elements.
-    let s0 = u64::from(unsafe { *seed16v });
-    let s1 = u64::from(unsafe { *seed16v.add(1) });
-    let s2 = u64::from(unsafe { *seed16v.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-    unsafe {
-        core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK);
-    }
-    rand48_standard_parameters();
-
-    old_seed_ptr.cast::<u16>()
-}
-
-/// Same as `lrand48` but uses caller-provided state.
-///
-/// # Safety
-///
-/// `xsubi` must point to an array of 3 `u16` values that the
-/// function will read and update.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
-    if xsubi.is_null() {
-        return 0;
-    }
-
-    // Read state from xsubi.
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    // Step.
-    let next = rand48_next(state);
-
-    // Write back.
-    unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
-    }
-
-    (next >> 17) as i64
-}
-
-/// Same as `drand48` but uses caller-provided state.
-///
-/// # Safety
-///
-/// `xsubi` must point to an array of 3 `u16` values.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
-pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
-    if xsubi.is_null() {
-        return 0.0;
-    }
-
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    let next = rand48_next(state);
-
-    unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
-    }
-
-    // 48-bit value fits in f64's 52-bit mantissa — no precision loss.
-    next as f64 / 281_474_976_710_656.0
-}
-
-/// Same as `mrand48` but uses caller-provided state.
-///
-/// # Safety
-///
-/// `xsubi` must point to an array of 3 `u16` values.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
-    if xsubi.is_null() {
-        return 0;
-    }
-
-    let s0 = u64::from(unsafe { *xsubi });
-    let s1 = u64::from(unsafe { *xsubi.add(1) });
-    let s2 = u64::from(unsafe { *xsubi.add(2) });
-    let state = (s2 << 32) | (s1 << 16) | s0;
-
-    let next = rand48_next(state);
-
-    unsafe {
-        *xsubi = (next & 0xFFFF) as u16;
-        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
-        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
-    }
-
-    i64::from((next >> 16) as i32)
 }
 
 // ---------------------------------------------------------------------------
@@ -3170,45 +2777,22 @@ mod tests {
 
     // -- Serialising the process-wide state these tests drive -------------
     //
-    // `cargo test` runs these on separate threads, and three of the globals
-    // below are shared *by specification* -- POSIX gives a process one `rand`
-    // sequence, one `drand48` sequence and one `l64a` return buffer, so they
+    // `cargo test` runs these on separate threads, and `l64a`'s return buffer
+    // is shared *by specification* -- POSIX gives a process one -- so it
     // cannot stop being shared the way a test-only counter can (which would
     // become a `thread_local!`; see `posix::malloc::live_allocations`). The
-    // remaining option is to stop the tests overlapping.
+    // remaining option is to stop the tests overlapping. (The generators'
+    // tests, which need the same, are crate::prng's.)
     //
-    // Each guard must be the FIRST statement of its test and stay bound for
-    // the whole body: the indivisible unit is the entire "seed it, draw from
-    // it, read the result back" sequence, not any single call inside it.
+    // The guard must be the FIRST statement of its test and stay bound for
+    // the whole body: the indivisible unit is the entire "call it, read the
+    // result back" sequence, not any single call inside it.
     //
     // Poison is recovered rather than propagated. A test that genuinely fails
-    // while holding one of these should report once, not poison its fourteen
-    // siblings and bury the cause under a wall of secondary panics.
-    //
-    // Three locks rather than one, because these are three unrelated pieces of
-    // state and a single lock would serialise 21 tests that mostly do not
-    // contend. `OLD_SEED` rides on the rand48 lock because `seed48` writes both
-    // it and `RAND48_STATE` in one call.
+    // while holding it should report once, not poison its siblings and bury
+    // the cause under a wall of secondary panics.
 
-    static RAND_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    static RAND48_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static L64A_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Serialises `RAND_STATE` (`srand`/`rand`).
-    #[must_use = "the guard serialises the global rand state; bind it to `_g`"]
-    fn lock_rand_for_test() -> std::sync::MutexGuard<'static, ()> {
-        RAND_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Serialises `RAND48_STATE` and `seed48`'s `OLD_SEED`.
-    #[must_use = "the guard serialises the global rand48 state; bind it to `_g`"]
-    fn lock_rand48_for_test() -> std::sync::MutexGuard<'static, ()> {
-        RAND48_TEST_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     /// Serialises `L64A_BUF`.
     ///
@@ -3493,27 +3077,6 @@ mod tests {
             )
         };
         assert!(p.is_null());
-    }
-
-    // -- rand / srand tests --
-
-    #[test]
-    fn test_srand_rand_deterministic() {
-        let _g = lock_rand_for_test();
-        srand(12345);
-        let a = rand();
-        srand(12345);
-        let b = rand();
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_rand_nonnegative() {
-        let _g = lock_rand_for_test();
-        srand(42);
-        for _ in 0..100 {
-            assert!(rand() >= 0);
-        }
     }
 
     // -- getsubopt tests --
@@ -4517,206 +4080,6 @@ mod tests {
         };
         assert_eq!(v, u64::MAX);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
-    }
-
-    // -----------------------------------------------------------------------
-    // drand48 / lrand48 / mrand48 — LCG PRNG
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn drand48_range() {
-        let _g = lock_rand48_for_test();
-        // After seeding, drand48 must return values in [0.0, 1.0).
-        srand48(12345);
-        for _ in 0..100 {
-            let v = drand48();
-            assert!(v >= 0.0 && v < 1.0, "drand48 returned {v}, expected [0, 1)");
-        }
-    }
-
-    #[test]
-    fn lrand48_range() {
-        let _g = lock_rand48_for_test();
-        // lrand48 returns values in [0, 2^31).
-        srand48(42);
-        for _ in 0..100 {
-            let v = lrand48();
-            assert!(v >= 0, "lrand48 returned negative {v}");
-            assert!(v < (1_i64 << 31), "lrand48 returned {v} >= 2^31");
-        }
-    }
-
-    #[test]
-    fn mrand48_full_signed_range() {
-        let _g = lock_rand48_for_test();
-        // mrand48 returns values in [-2^31, 2^31).  After many calls,
-        // we should see at least one negative and one positive value.
-        srand48(99);
-        let mut seen_neg = false;
-        let mut seen_pos = false;
-        for _ in 0..1000 {
-            let v = mrand48();
-            assert!(v >= i64::from(i32::MIN), "mrand48 out of range: {v}");
-            assert!(v <= i64::from(i32::MAX), "mrand48 out of range: {v}");
-            if v < 0 {
-                seen_neg = true;
-            }
-            if v > 0 {
-                seen_pos = true;
-            }
-        }
-        assert!(seen_neg, "mrand48 never returned negative");
-        assert!(seen_pos, "mrand48 never returned positive");
-    }
-
-    #[test]
-    fn srand48_deterministic() {
-        let _g = lock_rand48_for_test();
-        // Same seed must produce same sequence.
-        srand48(777);
-        let a1 = drand48();
-        let a2 = drand48();
-        let a3 = drand48();
-
-        srand48(777);
-        let b1 = drand48();
-        let b2 = drand48();
-        let b3 = drand48();
-
-        assert_eq!(a1.to_bits(), b1.to_bits());
-        assert_eq!(a2.to_bits(), b2.to_bits());
-        assert_eq!(a3.to_bits(), b3.to_bits());
-    }
-
-    #[test]
-    fn srand48_different_seeds_diverge() {
-        let _g = lock_rand48_for_test();
-        srand48(1);
-        let a = drand48();
-        srand48(2);
-        let b = drand48();
-        assert_ne!(
-            a.to_bits(),
-            b.to_bits(),
-            "different seeds should produce different values"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // nrand48 / erand48 / jrand48 — caller-provided state
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn nrand48_range_and_state_update() {
-        let mut state: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
-        let original = state;
-        let v = nrand48(state.as_mut_ptr());
-        assert!(v >= 0, "nrand48 returned negative {v}");
-        assert!(v < (1_i64 << 31), "nrand48 returned {v} >= 2^31");
-        // State should have been updated.
-        assert_ne!(state, original, "nrand48 should update state");
-    }
-
-    #[test]
-    fn lcong48_sets_multiplier_and_addend_until_srand48() {
-        let _g = lock_rand48_for_test();
-        // x = 3, a = 2, c = 1: the next state is 7, for every function of the
-        // family -- the caller-state ones too.
-        let p: [u16; 7] = [3, 0, 0, 2, 0, 0, 1];
-        unsafe { lcong48(p.as_ptr()) };
-        let mut xs: [u16; 3] = [3, 0, 0];
-        let _ = nrand48(xs.as_mut_ptr());
-        assert_eq!(xs, [7, 0, 0]);
-        // The process's own state stepped from 3 as well.
-        let _ = lrand48();
-        let seen: [u16; 3] = [0; 3];
-        let old = seed48(seen.as_ptr());
-        // SAFETY: `seed48` returns its three-value buffer.
-        let prev = unsafe { core::slice::from_raw_parts(old, 3) };
-        assert_eq!(prev, [7, 0, 0]);
-        // seed48 put the standard parameters back.
-        let mut ys: [u16; 3] = [3, 0, 0];
-        let _ = nrand48(ys.as_mut_ptr());
-        let want = (3u64.wrapping_mul(0x0005_DEEC_E66D).wrapping_add(0xB)) & ((1 << 48) - 1);
-        assert_eq!(
-            ys,
-            [
-                (want & 0xFFFF) as u16,
-                ((want >> 16) & 0xFFFF) as u16,
-                (want >> 32) as u16
-            ]
-        );
-        srand48(0);
-    }
-
-    #[test]
-    fn nrand48_null_returns_zero() {
-        let v = nrand48(core::ptr::null_mut());
-        assert_eq!(v, 0, "nrand48(NULL) should return 0");
-    }
-
-    #[test]
-    fn erand48_range() {
-        let mut state: [u16; 3] = [0x0001, 0x0002, 0x0003];
-        for _ in 0..100 {
-            let v = erand48(state.as_mut_ptr());
-            assert!(v >= 0.0 && v < 1.0, "erand48 returned {v}, expected [0, 1)");
-        }
-    }
-
-    #[test]
-    fn erand48_null_returns_zero() {
-        let v = erand48(core::ptr::null_mut());
-        assert_eq!(v, 0.0);
-    }
-
-    #[test]
-    fn jrand48_signed_range() {
-        let mut state: [u16; 3] = [0xFFFF, 0xFFFF, 0x7FFF];
-        let v = jrand48(state.as_mut_ptr());
-        // jrand48 returns i32-range signed values extended to i64.
-        assert!(v >= i64::from(i32::MIN), "jrand48 out of range: {v}");
-        assert!(v <= i64::from(i32::MAX), "jrand48 out of range: {v}");
-    }
-
-    #[test]
-    fn jrand48_null_returns_zero() {
-        let v = jrand48(core::ptr::null_mut());
-        assert_eq!(v, 0);
-    }
-
-    #[test]
-    fn nrand48_deterministic() {
-        // Same initial state must produce same sequence.
-        let mut s1: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
-        let mut s2: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
-        let a = nrand48(s1.as_mut_ptr());
-        let b = nrand48(s2.as_mut_ptr());
-        assert_eq!(a, b, "same state should produce same result");
-        assert_eq!(s1, s2, "same state should produce same next state");
-    }
-
-    // -----------------------------------------------------------------------
-    // seed48 — full 48-bit seeding
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn seed48_basic() {
-        let _g = lock_rand48_for_test();
-        let seed: [u16; 3] = [0x1111, 0x2222, 0x3333];
-        let old_ptr = seed48(seed.as_ptr());
-        assert!(!old_ptr.is_null(), "seed48 should return non-null");
-
-        // After seeding, drand48 should produce deterministic results.
-        let v = drand48();
-        assert!(v >= 0.0 && v < 1.0);
-    }
-
-    #[test]
-    fn seed48_null_returns_old_pointer() {
-        let _g = lock_rand48_for_test();
-        let ptr = seed48(core::ptr::null());
-        assert!(!ptr.is_null());
     }
 
     // -----------------------------------------------------------------------
@@ -6037,213 +5400,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // srandom / random
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_srandom_random_deterministic() {
-        srandom(42);
-        let a = random();
-        srandom(42);
-        let b = random();
-        assert_eq!(a, b, "Same seed should produce same sequence");
-    }
-
-    #[test]
-    fn test_random_range() {
-        srandom(1);
-        for _ in 0..20 {
-            let val = random();
-            assert!(val >= 0, "random() must be non-negative");
-            assert!(val < (1_i64 << 31), "random() must be < 2^31");
-        }
-    }
-
-    #[test]
-    fn test_random_different_seeds_differ() {
-        srandom(1);
-        let a = random();
-        srandom(999);
-        let b = random();
-        assert_ne!(a, b, "Different seeds should produce different values");
-    }
-
-    // -----------------------------------------------------------------------
-    // initstate / setstate
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_initstate_valid() {
-        let mut buf = [0u8; 256];
-        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 256) };
-        assert!(!ret.is_null());
-        assert_eq!(ret, buf.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_initstate_null_returns_null() {
-        let ret = unsafe { initstate(42, core::ptr::null_mut(), 256) };
-        assert!(ret.is_null());
-    }
-
-    #[test]
-    fn test_initstate_too_small_returns_null() {
-        let mut buf = [0u8; 4];
-        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 4) };
-        assert!(ret.is_null(), "Buffer too small for initstate");
-    }
-
-    #[test]
-    fn test_setstate_returns_input() {
-        let mut buf = [0u8; 256];
-        let ret = unsafe { setstate(buf.as_mut_ptr()) };
-        assert_eq!(ret, buf.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_setstate_null_returns_null() {
-        let ret = unsafe { setstate(core::ptr::null_mut()) };
-        assert!(ret.is_null());
-    }
-
-    // -----------------------------------------------------------------------
-    // drand48 / lrand48 / mrand48 / srand48 / seed48
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_srand48_drand48_deterministic() {
-        let _g = lock_rand48_for_test();
-        srand48(123);
-        let a = drand48();
-        srand48(123);
-        let b = drand48();
-        assert_eq!(a, b, "Same seed should produce same drand48 value");
-    }
-
-    #[test]
-    fn test_drand48_range() {
-        let _g = lock_rand48_for_test();
-        srand48(42);
-        for _ in 0..20 {
-            let val = drand48();
-            assert!(val >= 0.0, "drand48 must be >= 0");
-            assert!(val < 1.0, "drand48 must be < 1");
-        }
-    }
-
-    #[test]
-    fn test_lrand48_range() {
-        let _g = lock_rand48_for_test();
-        srand48(42);
-        for _ in 0..20 {
-            let val = lrand48();
-            assert!(val >= 0, "lrand48 must be non-negative");
-            assert!(val < (1_i64 << 31), "lrand48 must be < 2^31");
-        }
-    }
-
-    #[test]
-    fn test_mrand48_signed() {
-        let _g = lock_rand48_for_test();
-        // mrand48 returns values in [-2^31, 2^31).
-        srand48(42);
-        // Just verify it doesn't crash and produces i64 values.
-        for _ in 0..20 {
-            let _val = mrand48();
-        }
-    }
-
-    #[test]
-    fn test_seed48_returns_old_seed() {
-        let _g = lock_rand48_for_test();
-        srand48(0);
-        let seed: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
-        let old = seed48(seed.as_ptr());
-        assert!(!old.is_null(), "seed48 must return non-null old seed");
-    }
-
-    #[test]
-    fn test_seed48_null_returns_old_seed() {
-        let _g = lock_rand48_for_test();
-        let old = seed48(core::ptr::null());
-        assert!(
-            !old.is_null(),
-            "seed48(NULL) must still return old seed pointer"
-        );
-    }
-
-    #[test]
-    fn test_seed48_updates_state() {
-        let _g = lock_rand48_for_test();
-        let seed: [u16; 3] = [1, 2, 3];
-        seed48(seed.as_ptr());
-        let a = drand48();
-
-        // Re-seed with the same value.
-        seed48(seed.as_ptr());
-        let b = drand48();
-        assert_eq!(
-            a, b,
-            "Re-seeding with same values should reproduce sequence"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // nrand48 / erand48 / jrand48
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_nrand48_caller_state() {
-        let mut xsubi: [u16; 3] = [1, 2, 3];
-        let val = nrand48(xsubi.as_mut_ptr());
-        assert!(val >= 0, "nrand48 must be non-negative");
-        assert!(val < (1_i64 << 31), "nrand48 must be < 2^31");
-        // State should have been updated.
-        assert!(xsubi != [1, 2, 3], "nrand48 must update caller state");
-    }
-
-    #[test]
-    fn test_nrand48_null_returns_zero() {
-        assert_eq!(nrand48(core::ptr::null_mut()), 0);
-    }
-
-    #[test]
-    fn test_erand48_range() {
-        let mut xsubi: [u16; 3] = [10, 20, 30];
-        let val = erand48(xsubi.as_mut_ptr());
-        assert!(val >= 0.0, "erand48 must be >= 0");
-        assert!(val < 1.0, "erand48 must be < 1");
-    }
-
-    #[test]
-    fn test_erand48_null_returns_zero() {
-        assert_eq!(erand48(core::ptr::null_mut()), 0.0);
-    }
-
-    #[test]
-    fn test_erand48_deterministic() {
-        let mut a: [u16; 3] = [100, 200, 300];
-        let mut b: [u16; 3] = [100, 200, 300];
-        let va = erand48(a.as_mut_ptr());
-        let vb = erand48(b.as_mut_ptr());
-        assert_eq!(va, vb, "Same state should produce same erand48 value");
-        assert_eq!(a, b, "States should match after identical sequences");
-    }
-
-    #[test]
-    fn test_jrand48_caller_state() {
-        let mut xsubi: [u16; 3] = [5, 10, 15];
-        let _val = jrand48(xsubi.as_mut_ptr());
-        // jrand48 returns signed values and updates state.
-        assert!(xsubi != [5, 10, 15], "jrand48 must update caller state");
-    }
-
-    #[test]
-    fn test_jrand48_null_returns_zero() {
-        assert_eq!(jrand48(core::ptr::null_mut()), 0);
-    }
-
-    // -----------------------------------------------------------------------
     // mktemp / mkstemp / mkostemp
     // -----------------------------------------------------------------------
 
@@ -6497,7 +5653,7 @@ mod tests {
     }
 
     // ===================================================================
-    // Additional coverage — atoll, rand_r
+    // Additional coverage — atoll
     // ===================================================================
 
     #[test]
@@ -6508,32 +5664,6 @@ mod tests {
     #[test]
     fn test_atoll_negative_large() {
         assert_eq!(unsafe { atoll(b"-9876543210\0".as_ptr()) }, -9_876_543_210);
-    }
-
-    #[test]
-    fn test_rand_r_deterministic_same_seed() {
-        let mut seed: u32 = 123;
-        let a = unsafe { rand_r(&mut seed) };
-        let mut seed2: u32 = 123;
-        let b = unsafe { rand_r(&mut seed2) };
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_rand_r_advances_seed() {
-        let mut seed: u32 = 42;
-        let original = seed;
-        let _ = unsafe { rand_r(&mut seed) };
-        assert_ne!(seed, original, "rand_r should advance the seed");
-    }
-
-    #[test]
-    fn test_rand_r_non_negative() {
-        let mut seed: u32 = 7;
-        for _ in 0..20 {
-            let val = unsafe { rand_r(&mut seed) };
-            assert!(val >= 0, "rand_r should return non-negative values");
-        }
     }
 
     #[test]

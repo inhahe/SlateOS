@@ -587,6 +587,32 @@ pub(crate) fn abi_asserts() -> String {
         fordblks,
         keepcost
     );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::RandomData,
+        "struct random_data",
+        "stdlib.h",
+        fptr,
+        rptr,
+        state,
+        rand_type,
+        rand_deg,
+        rand_sep,
+        end_ptr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::Drand48Data,
+        "struct drand48_data",
+        "stdlib.h",
+        x as "__x",
+        old_x as "__old_x",
+        c as "__c",
+        init as "__init",
+        a as "__a",
+    );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
     abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");

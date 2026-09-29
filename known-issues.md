@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176270,7 +176270,7 @@ probes for one (`configure`) takes its fallback. Measured by
 |---|---|---|
 | C23 bit utilities | `stdc_leading_zeros_uc` ... `stdc_bit_ceil_ull`, 70 | `<stdbit.h>` -- **done 2026-09-29** |
 | C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` |
-| reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` |
+| reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` -- **done 2026-09-29** (`posix/src/prng.rs`) |
 | locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
 | old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... |
@@ -176293,3 +176293,38 @@ GNU programs carry copies of (gnulib) where the C library has none, so they
 matter least.
 
 **Where:** `posix/src/`, a module per family; `posix/include/`.
+
+## D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB — `random()` was a linear congruential generator, `initstate` and `setstate` did nothing and returned the wrong array, `drand48`'s unseeded state was nobody's, and the `rand48` initializers raced (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/prng.rs`)**
+
+**In short:** POSIX specifies `random()` as a particular kind of generator
+-- additive feedback over a table of 31 numbers, with `initstate` and
+`setstate` to give it other tables and switch between them. Ours was a
+simpler one, shared with `rand()`; `initstate` and `setstate` took a table
+and ignored it, and both returned the table they were given instead of the
+one they replaced, so a program that saved the generator and put it back
+got the wrong one. And what a seed gave was nobody's sequence -- not
+glibc's, not musl's -- so a program's recorded output (a test suite's
+expected file, a replay) differed from Linux's for the same seed.
+
+| What | Was | Is |
+|---|---|---|
+| `random`, `srandom` | `rand`'s generator: `x * 6364136223846793005 + 1` in 64 bits, bits 33 up returned, under a comment calling it glibc's | POSIX's additive feedback generator, glibc's sequences to the number |
+| `initstate` | seeded that generator and returned its argument | lays the generator the size picks (8, 32, 64, 128, 256 bytes) out in the caller's array; returns the array it replaced, NULL under 8 bytes |
+| `setstate` | returned its argument and did nothing else | takes up the generator in the array where it was left; returns the array it replaced, NULL for one no generator wrote |
+| `rand`, `srand` | the generator above, unlocked | `random` and `srandom`, as glibc's are, and locked: POSIX requires `random` to be thread-safe and `rand` to avoid data races with it |
+| `rand_r` | one step of a 32-bit generator | glibc's three-step form |
+| the `rand48` family, unseeded | started from `0x330EABCD1234`, BSD's starting value with its words reversed | from 0, as glibc's |
+| `srand48`, `seed48`, `lcong48`, `erand48`, `nrand48`, `jrand48` | unlocked reads and writes of three plain statics | race-free: POSIX exempts only `drand48`, `lrand48` and `mrand48` |
+| `seed48`'s returned array | one static all threads shared | the calling thread's own |
+| `erand48`, `nrand48`, `jrand48`, `seed48` | safe Rust functions dereferencing a caller's pointer | `unsafe`, their contracts stated |
+
+Found writing the reentrant `_r` forms (D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE),
+which need a real generator to be reentrant forms of. Replayed against
+glibc 2.39 (`posix/src/random_oracle.txt`: every state size with eight
+seeds, `setstate`'s switches, all of the `_r` forms) and against POSIX's
+own example on its `drand48` page. The choices -- glibc's sequences, and
+which functions lock -- are design-decisions §1142.
+
+**Where:** `posix/src/prng.rs`, moved out of `stdlib.rs`;
+`posix/src/process.rs` (`fork` holds the two generators' locks across the
+system call).

@@ -1,8 +1,9 @@
 # E → C — The multi-line field measures in one face, and two of its users write code
 
 **From:** Lane E (`apps/**`). **To:** Lane C (`gui/toolkit`).
-**Filed:** 2026-09-28. **Status:** step 1 of 2 LANDED on `lane-c` 2026-09-28
-(`79a4d311f`); step 2 waits for lane E's three `Metrics` sites -- reply at the end.
+**Filed:** 2026-09-28. **Status:** step 1 of 2 DONE -- landed on `lane-c` 2026-09-28
+(`79a4d311f`), on `main` since 2026-09-28 (`9154182d0`); step 2 waits for lane E's
+three `Metrics` sites -- reply at the end.
 
 **In short:** `guitk::textarea::TextArea` lays its text out with the
 proportional face's measurements, and has no way to be told otherwise.

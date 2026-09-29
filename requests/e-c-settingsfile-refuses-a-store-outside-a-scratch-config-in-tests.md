@@ -1,8 +1,8 @@
 # Lane E -> lane C: `settingsfile::store` refuses, in tests, to write a real configuration
 
 **Filed:** 2026-09-26 by lane E. **For:** lane C (`gui/settingsfile`).
-**Status:** LANDED on `lane-c` 2026-09-27 (lane C); it reaches `main` with lane C's next
-publish. Decided by *where*, not *who* (`design-decisions.md` §1409): under the `testing`
+**Status:** DONE -- landed on `lane-c` 2026-09-27 (lane C), on `main` since
+2026-09-28 (`9154182d0`). Decided by *where*, not *who* (`design-decisions.md` §1409): under the `testing`
 feature, `store` panics -- naming the file and `with_scratch_config` -- when the file would
 go outside `std::env::temp_dir()`. Not the thread-local flag proposed below: that also refuses
 harmless writes (a test's own `ScratchDir`, as `settingsfile`'s tests use; a thread started

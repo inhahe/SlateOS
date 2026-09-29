@@ -1008,6 +1008,48 @@ MUTATIONS = [
         "        if m.ctrl || m.alt {",
         [HELD],
     ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(event) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(event) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a key under the list reaches the board',
+        '                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        if help::raises(event) {',
+        '                self.show_help = false;\n            }\n        }\n        if help::raises(event) {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            if let MouseEventKind::Press(_) = event.kind {',
+        '        if false {\n            if let MouseEventKind::Press(_) = event.kind {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click leaves the list up',
+        '            if let MouseEventKind::Press(_) = event.kind {\n                self.show_help = false;',
+        '            if let MouseEventKind::Press(_) = event.kind {\n',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the hint line does not start with how to raise the list',
+        'const HELP_TEXT: &str = "F1=All keys  N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";',
+        'const HELP_TEXT: &str = "N=New  Z=Undo  Ctrl+Y=Redo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
 ]
 
 if __name__ == "__main__":

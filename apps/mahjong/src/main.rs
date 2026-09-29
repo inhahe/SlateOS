@@ -34,7 +34,7 @@
 
 use std::process::ExitCode;
 
-use gamechrome::{Chrome, HistoryKey};
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -136,8 +136,33 @@ fn legend_label(codes: &str, kind: TileKind) -> String {
 /// The note under the legend explaining the asterisks.
 const LEGEND_NOTE: &str = "* match any in group";
 
-/// The key hints along the bottom of the window.
-const HELP_TEXT: &str = "N=New  Z=Undo  Ctrl+Y=Redo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";
+/// The key hints along the bottom of the window. F1 first: the line is cut
+/// with an ellipsis in a narrow window, and the key to the rest is the one
+/// that must survive.
+const HELP_TEXT: &str = "F1=All keys  N=New  Z=Undo  H=Hint  S=Shuffle  Arrows=Navigate  Enter/Space=Select  Esc=Deselect";
+
+/// Every key the game answers, on the list F1 raises.
+///
+/// The game had no list, and its hint line had room for neither the
+/// history's keys -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to
+/// C-Q24 added (`design-decisions.md` §1416) -- nor, in most windows, the
+/// end of itself. **Each row is a key the game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move between the free tiles"),
+    ("Enter / Space", "Choose the tile, or take the pair"),
+    ("Esc", "Let go of the tile, and hide the hint"),
+    ("H", "Show a pair that can be taken"),
+    ("S", "Shuffle the tiles still in play"),
+    ("Z / Ctrl+Z", "Take back a pair or a shuffle"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
+    ("N", "Deal a new game"),
+    ("F1 / ?", "This list"),
+];
 
 // ── Layout ──────────────────────────────────────────────────────────
 
@@ -994,6 +1019,9 @@ struct Mahjong {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame. A new game deals into this same state, so they carry over.
     palette: Palette,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// pair taken under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Mahjong {
@@ -1031,6 +1059,7 @@ impl Mahjong {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            show_help: false,
         };
         app.update_status();
         app
@@ -1346,6 +1375,18 @@ impl Mahjong {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the board under it.
+        if self.show_help {
+            if help::closes(event) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(event) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
         // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
         // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
         if let Some(key) = HistoryKey::of(event) {
@@ -1411,6 +1452,15 @@ impl Mahjong {
     /// second copy of the geometry, kept in step with the picture by nothing
     /// but care, and wrong the moment either side was edited alone.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the tile under it is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = event.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         // A tile game answers the left button. Answering all three meant a
         // right-click removed a pair, which is a move the player did not make.
         if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
@@ -1470,6 +1520,17 @@ impl Mahjong {
         self.draw_help(&mut f, &l, &c);
 
         f.unclip();
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
         f
     }
 
@@ -4160,6 +4221,121 @@ mod tests {
         g.board.tiles.iter().map(|t| (t.kind, t.removed)).collect()
     }
 
+    /// Games chosen so that between them every key on the list of keys has
+    /// work. A key here answers only when it changes something, so: the
+    /// cursor on every free tile in turn, for each arrow to have somewhere
+    /// to go from one of them; a tile chosen, for Escape; a pair taken, for
+    /// Ctrl+Z and Alt+Z; and one taken back, for Ctrl+Y and Alt+Shift+Z.
+    fn list_states() -> Vec<Mahjong> {
+        let mut states: Vec<Mahjong> = game()
+            .board
+            .free_tiles()
+            .into_iter()
+            .map(|idx| {
+                let mut g = game();
+                g.cursor.tile_idx = Some(idx);
+                g
+            })
+            .collect();
+        let mut took = game();
+        take_a_pair(&mut took);
+        let mut undone = game();
+        take_a_pair(&mut undone);
+        assert!(undone.undo());
+        let mut chosen = game();
+        press_key(&mut chosen, Key::Enter);
+        assert!(chosen.selected.is_some(), "Enter chose no tile");
+        states.extend([game(), took, undone, chosen]);
+        states
+    }
+
+    /// **Every key the list of keys advertises is one the game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed through the window's own
+    /// route, rather than matched against a table beside it here.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| handle_event(g, &Event::Key(stroke.clone())) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 18, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at its opening size, joined.
+    fn drawn_texts(g: &Mahjong) -> String {
+        g.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the hint line starts with how to raise it,
+    /// the part an ellipsis leaves.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "up before anybody asked"
+        );
+        assert!(
+            HELP_TEXT.starts_with("F1"),
+            "the hint line does not start with F1"
+        );
+        assert_eq!(press_key(&mut g, Key::F1), EventResult::Consumed);
+        let shown = drawn_texts(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        press_key(&mut g, Key::Escape);
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the board takes nothing**: a pair
+    /// taken under the list would be one the player cannot see. A click puts
+    /// the list away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = game();
+        let tile = g.cursor.tile_idx.expect("a fresh deal has a free tile");
+        press_key(&mut g, Key::F1);
+        let seen = |g: &Mahjong| (faces(g), g.moves, g.selected, g.cursor.tile_idx);
+        let before = seen(&g);
+        for key in [Key::S, Key::N, Key::H, Key::Z, Key::Right, Key::Space] {
+            assert_eq!(press_key(&mut g, key), EventResult::Consumed);
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        assert!(seen(&g) == before, "a key reached the board");
+        probe::click(&mut g, Target::Tile(tile));
+        assert!(!g.show_help, "a click did not put the list away");
+        assert!(seen(&g) == before, "the click chose a tile");
+        press_key(&mut g, Key::F1);
+        press_key(&mut g, Key::Enter);
+        assert!(!g.show_help, "Enter did not put the list away");
+        assert!(seen(&g) == before, "Enter chose a tile as it closed");
+    }
+
     /// **A move made after an undo starts a branch, and the undone one is
     /// kept**: redo follows the new branch, and Alt+Z walks back through
     /// every board there has been, in the order each was reached;
@@ -4816,7 +4992,7 @@ mod tests {
     fn a_key_this_game_does_not_use_is_left_for_the_window() {
         // Swallowing it would break every shortcut the window itself owns.
         let mut g = game();
-        for key in [Key::A, Key::Q, Key::F1, Key::Tab] {
+        for key in [Key::A, Key::Q, Key::F9, Key::Tab] {
             assert_eq!(
                 press_key(&mut g, key),
                 EventResult::Ignored,

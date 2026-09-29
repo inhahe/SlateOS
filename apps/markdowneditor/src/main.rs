@@ -3190,10 +3190,12 @@ struct PreviewContext {
 }
 
 impl PreviewContext {
-    /// Create a new preview rendering context.
-    fn new(palette: Palette, x: f32, y: f32, width: f32, height: f32, scroll_offset: f32) -> Self {
+    /// Create a new preview rendering context, drawing in a copy of
+    /// `palette`. Borrowed rather than moved in: a palette is past the size
+    /// clippy lets pass by value (`large_types_passed_by_value`).
+    fn new(palette: &Palette, x: f32, y: f32, width: f32, height: f32, scroll_offset: f32) -> Self {
         Self {
-            palette,
+            palette: *palette,
             y,
             x,
             width,
@@ -3246,7 +3248,7 @@ pub fn render_preview(
     let content_x = x + PREVIEW_PADDING;
     let content_width = width - PREVIEW_PADDING * 2.0;
     let mut ctx = PreviewContext::new(
-        *pal,
+        pal,
         content_x,
         y + PREVIEW_PADDING,
         content_width,
@@ -5349,7 +5351,7 @@ impl App {
             find_state: FindReplaceState::new(),
             toolbar: default_toolbar(),
             show_help: false,
-            autosave_enabled: true,
+            autosave_enabled: AUTOSAVE_BY_DEFAULT,
             autosave_interval: DEFAULT_AUTOSAVE_INTERVAL,
             keeps_settings: false,
             template_chooser_open: false,
@@ -7064,7 +7066,7 @@ fn preview_content_height(blocks: &[MdBlock], pal: &Palette, width: f32) -> f32 
     // A zero-height viewport: every element is laid out and none is drawn,
     // so this measures without building a frame's worth of commands.
     let mut ctx = PreviewContext::new(
-        *pal,
+        pal,
         PREVIEW_PADDING,
         0.0,
         width - PREVIEW_PADDING * 2.0,
@@ -7920,6 +7922,16 @@ impl oswindow::app::App for App {
         }
 
         let response = match event {
+            // Auto-save switched in another window, or the file edited by
+            // hand, and the desktop says so: this window follows. Read at
+            // startup only, it did not until it was opened again.
+            GEvent::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_settings() {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
             // Not `Exit` outright any more: see `App::request_quit`. And
             // `KeepOpen`, not `Redraw`, while it asks: any other answer to a
             // close request still closes the window, so the question would be
@@ -8055,6 +8067,9 @@ const CONFIG_NAME: &str = "markdowneditor";
 /// Whether auto-save is on.
 const AUTOSAVE_KEY: [&str; 1] = ["autosave"];
 
+/// Auto-save in a window whose settings file does not say: on.
+const AUTOSAVE_BY_DEFAULT: bool = true;
+
 impl App {
     /// This window, with the preferences the user chose last time -- and
     /// keeping any they change from now on.
@@ -8065,6 +8080,22 @@ impl App {
             self.autosave_enabled = on;
         }
         self
+    }
+
+    /// Read this program's settings again, after the desktop said the file
+    /// changed -- another window's switch, or a hand edit (§1418, §1434).
+    /// A file deleted reads as the default. A window that keeps no settings,
+    /// as a test's does not, reads none. Whether anything changed.
+    fn reread_settings(&mut self) -> bool {
+        if !self.keeps_settings {
+            return false;
+        }
+        let on = settingsfile::load(CONFIG_NAME)
+            .get_bool(&AUTOSAVE_KEY)
+            .unwrap_or(AUTOSAVE_BY_DEFAULT);
+        let changed = on != self.autosave_enabled;
+        self.autosave_enabled = on;
+        changed
     }
 
     /// Turn auto-save on or off, and keep the choice for next time.
@@ -12434,6 +12465,52 @@ mod tests {
             let text = std::fs::read_to_string(dir.join("slateos").join("markdowneditor.yaml"))
                 .unwrap_or_default();
             assert!(text.contains("autosave"), "{text:?}");
+        });
+    }
+
+    /// **Auto-save switched in one window reaches the others.** Each window
+    /// read the setting when it opened, and the desktop now says when the
+    /// file changes (§1434): an open window follows it. Another program's
+    /// announcement is not this one's, a window's own save announced back
+    /// changes nothing, and a file deleted reads as the default.
+    #[test]
+    fn auto_save_switched_in_one_window_reaches_the_others() {
+        use oswindow::app::{App as _, Response};
+        settingsfile::testing::with_scratch_config("md_autosave_reread", |dir| {
+            let announce = |name: &[u8]| guitk::event::Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let mut first = App::new(1280.0, 800.0).with_settings();
+            let mut second = App::new(1280.0, 800.0).with_settings();
+            first.set_autosave(false);
+            assert!(second.autosave_enabled, "the second window changed untold");
+
+            assert_eq!(second.on_event(&announce(b"notes")), Response::Idle);
+            assert!(second.autosave_enabled, "another program's file was read");
+            assert_eq!(
+                second.on_event(&announce(b"markdowneditor")),
+                Response::Redraw
+            );
+            assert!(
+                !second.autosave_enabled,
+                "the switch did not reach the other window"
+            );
+            assert_eq!(first.on_event(&announce(b"markdowneditor")), Response::Idle);
+
+            std::fs::remove_file(dir.join("slateos").join("markdowneditor.yaml"))
+                .expect("delete the file");
+            second.on_event(&announce(b"markdowneditor"));
+            assert!(second.autosave_enabled, "a deleted file kept auto-save off");
+
+            let mut quiet = App::new(1280.0, 800.0);
+            quiet.set_autosave(false);
+            assert_eq!(quiet.on_event(&announce(b"markdowneditor")), Response::Idle);
+            assert!(
+                !quiet.autosave_enabled,
+                "a window that keeps no settings read them"
+            );
         });
     }
 

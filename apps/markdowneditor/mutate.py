@@ -351,6 +351,36 @@ MUTATIONS = [
         "    let altgr = ev.modifiers.ctrl && ev.modifiers.alt;",
         ["an_altgr_letter_is_typed"],
     ),
+    (
+        'an announced change is not read',
+        '            GEvent::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            GEvent::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            GEvent::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            GEvent::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a window that keeps no settings reads them',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let on = settingsfile::load(CONFIG_NAME)',
+        '        let on = settingsfile::load(CONFIG_NAME)',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a deleted file keeps auto-save as it was',
+        '            .unwrap_or(AUTOSAVE_BY_DEFAULT);',
+        '            .unwrap_or(self.autosave_enabled);',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a change read is not drawn',
+        '                if self.reread_settings() {\n                    Response::Redraw',
+        '                if self.reread_settings() {\n                    Response::Idle',
+        ['auto_save_switched_in_one_window_reaches_the_others'],
+    ),
 ]
 
 if __name__ == "__main__":

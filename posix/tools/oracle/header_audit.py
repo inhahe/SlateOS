@@ -4,6 +4,7 @@ than glibc 2.39's headers do. A report, not a gate: run it after zig brings new
 musl headers, or when a port written for glibc does not compile.
 
     python posix/tools/oracle/header_audit.py [--all]
+    python posix/tools/oracle/header_audit.py --missing
 
 For each header both C libraries have, and each of
 scripts/check-libc-overlay.py's feature-macro settings (CONFIGS), it compares
@@ -24,6 +25,14 @@ report marks: the LFS64 names, which musl gives only to _LARGEFILE64_SOURCE.
 "shown here" is a name a strictly conforming program might define itself;
 printed with --all.
 
+`--missing` asks the other question: which functions and objects glibc
+2.39 exports (libc.so.6 and libm.so.6, at their default versions) and its
+headers declare, with every feature macro on, that libc.a does not define
+at all -- what a program written for glibc may call and find nothing to link
+against. Listed by the header glibc declares each in; the _FloatN aliases
+(`sinf128`, `strtof64` ...), which the compiler here has no types for, as a
+count per header (known-issues.md -> D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE).
+
 Needs WSL with glibc 2.39's headers and libclang's Python bindings, as
 glibc_declarations.py does (its docstring says how), and zig (FASTPY_ZIG or
 PATH).
@@ -32,6 +41,7 @@ PATH).
 import concurrent.futures
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -98,6 +108,71 @@ json.dump(out, open(sys.argv[4], "w"))
 
 LFS64 = "LFS64: musl's headers give it only to _LARGEFILE64_SOURCE, on purpose"
 
+# Run in WSL: argv = names file, headers file, output (JSON: name -> the file
+# glibc declares it in).
+MISSING_READER = r'''
+import json, sys
+import clang.cindex as ci
+ci.Config.set_library_file(LIBCLANG)
+names = set(open(sys.argv[1]).read().split())
+headers = open(sys.argv[2]).read().split()
+idx = ci.Index.create()
+flags = ["-x", "c", "-std=gnu2x", "-D_GNU_SOURCE", "-D__STDC_WANT_IEC_60559_TYPES_EXT__",
+         "-D__STDC_WANT_IEC_60559_FUNCS_EXT__"]
+out = {}
+for h in headers:
+    tu = idx.parse("t.c", args=flags, unsaved_files=[("t.c", "#include <%s>\n" % h)])
+    for c in tu.cursor.get_children():
+        if c.kind in (ci.CursorKind.FUNCTION_DECL, ci.CursorKind.VAR_DECL) \
+                and c.spelling in names and c.location.file is not None:
+            f = c.location.file.name
+            for pre in ("/usr/include/x86_64-linux-gnu/", "/usr/include/"):
+                if f.startswith(pre):
+                    f = f[len(pre):]
+            out.setdefault(c.spelling, f)
+json.dump(out, open(sys.argv[3], "w"))
+'''.replace("LIBCLANG", repr(LIBCLANG))
+
+FLOATN = re.compile(r".+f(?:16|32|64|128)x?(?:_r|_l)?$")
+
+
+def missing(public: set[str]) -> None:
+    """--missing: glibc's exported, declared names libc.a does not define."""
+    with workdir() as t:
+        d = Path(t)
+        r = run("nm -D --defined-only /lib/x86_64-linux-gnu/libc.so.6 "
+                "/lib/x86_64-linux-gnu/libm.so.6")
+        exported = {line.split()[-1].split("@")[0] for line in r.stdout.splitlines()
+                    if "@@" in line}
+        names = sorted(n for n in exported if not n.startswith("_") and n not in public)
+        r = run("dpkg -L libc6-dev | grep '[.]h$'")
+        headers = sorted({h.replace("/usr/include/x86_64-linux-gnu/", "").replace("/usr/include/", "")
+                          for h in r.stdout.split() if "/bits/" not in h and "/gnu/stubs" not in h})
+        (d / "names.txt").write_text("\n".join(names) + "\n", encoding="utf-8", newline="\n")
+        (d / "headers.txt").write_text("\n".join(headers) + "\n", encoding="utf-8", newline="\n")
+        (d / "reader.py").write_text(MISSING_READER, encoding="utf-8", newline="\n")
+        r = run(f"{PYTHON} {wsl_path(d / 'reader.py')} {wsl_path(d / 'names.txt')} "
+                f"{wsl_path(d / 'headers.txt')} {wsl_path(d / 'out.json')}")
+        if r.returncode != 0:
+            sys.exit(f"the reader failed:\n{r.stderr}")
+        where = json.loads((d / "out.json").read_text(encoding="utf-8"))
+    by_file: dict[str, list[str]] = {}
+    for n, f in where.items():
+        by_file.setdefault(f, []).append(n)
+    total = floatn = 0
+    for f in sorted(by_file, key=lambda k: (-len(by_file[k]), k)):
+        plain = sorted(n for n in by_file[f] if not FLOATN.fullmatch(n))
+        fl = len(by_file[f]) - len(plain)
+        total += len(plain)
+        floatn += fl
+        extra = f" (and {fl} _FloatN)" if fl else ""
+        if plain:
+            print(f"<{f}> {len(plain)}{extra}: {' '.join(plain)}")
+        elif fl:
+            print(f"<{f}> {fl} _FloatN only")
+    print(f"{len(names)} names glibc exports that libc.a does not define; {len(where)} of them "
+          f"declared by glibc's headers: {total}, and {floatn} _FloatN aliases")
+
 
 def ours(zig: str, header: str, names: list[str]) -> dict[str, set[str]]:
     """name -> the settings in which <header>, with the overlay in front,
@@ -124,6 +199,9 @@ def main() -> None:
     shape = declared.shape_module()
     public = declared.public_names(shape.parse_symbol_index(
         ROOT / "toolchain" / "sysroot" / "lib" / "libc.a"))
+    if "--missing" in sys.argv:
+        missing(public)
+        return
     heads = sorted({p.relative_to(b).as_posix() for b in (musl, overlay.OVERLAY)
                     for p in b.rglob("*.h") if not p.relative_to(b).as_posix().startswith("bits/")})
     with workdir() as t:

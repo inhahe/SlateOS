@@ -176253,3 +176253,43 @@ defining one of them itself could notice; none is known to matter.
 `stdio.h`, `pwd.h`, `grp.h`, `malloc.h`, `netdb.h`, and new `strings.h`,
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
+
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's)**
+
+**In short:** a program written for glibc can call anything glibc's headers
+declare. This library already has most of it -- every function musl's
+headers declare, and the 226 glibc and C23 names `posix/include` adds --
+but not all: of what glibc 2.39 exports and declares, some 380 names had no
+definition here (besides about 500 `_Float32`, `_Float64` ... aliases the
+compiler has no types for). A port that calls one fails to link, or -- where
+the overlay does not declare it either -- to compile, and a port that
+probes for one (`configure`) takes its fallback. Measured by
+`posix/tools/oracle/header_audit.py --missing`; rerun it to see what is left.
+
+| Family | Names | Header |
+|---|---|---|
+| C23 bit utilities | `stdc_leading_zeros_uc` ... `stdc_bit_ceil_ull`, 70 | `<stdbit.h>` -- **done 2026-09-29** |
+| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` |
+| reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` |
+| locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` |
+| glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` |
+| old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... |
+| Linux calls | `execveat` `tgkill` `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
+| threads | `pthread_attr_{get,set}affinity_np` `pthread_attr_{get,set}sigmask_np` `pthread_clockjoin_np` `pthread_rwlockattr_{get,set}kind_np` `pthread_yield` `pthread_attr_{get,set}stackaddr` | `<pthread.h>` |
+| name services | `getaddrinfo_a` `gai_suspend` `gai_error` `gai_cancel`; netgroups; the RPC database; `rcmd` `rexec` `ruserok` and their `_af` forms; `res_nquery` and the reentrant resolver; `ns_name_*`; mail aliases (`<aliases.h>`) | `<netdb.h>`, `<resolv.h>` ... |
+| IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` |
+| GNU libraries in libc | argz (12), envz (6), argp (10), obstack's four, the old GNU regex API (`re_compile_pattern` ... 9), printf's registration (7), `mcheck` and `mtrace` (6) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
+| system databases | `/etc/gshadow` (`getsgnam` ... 11), `/etc/fstab` (`getfsent` ... 5), `/etc/ttys` (`getttyent` ... 4), `getutmp`, `login` `logout` `logwtmp` | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
+| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s, `rpmatch`, `getpt`, `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym`, `glob_pattern_p`, `getdirentries`, `addseverity`, `monstartup` `sprofil` `vlimit`, and some twenty LFS64 names musl's headers have only as macros (`mkstemp64`, `pread64` ...) | |
+
+**The proper fix, family by family:** each written from its specification
+-- the C standard, POSIX, the Linux man pages -- with glibc 2.39 as the
+oracle it is replayed against, and declared by `posix/include` where musl's
+headers do not, as glibc's do (design-decisions §1141). The overlay's gate
+then holds each declaration to glibc's, and `check-libc-declared.py` each to
+`libc.a`. Some want lane A first: the new mount API, the memory protection
+keys, `pidfd_spawn`. The argz, envz, argp and obstack families are the ones
+GNU programs carry copies of (gnulib) where the C library has none, so they
+matter least.
+
+**Where:** `posix/src/`, a module per family; `posix/include/`.

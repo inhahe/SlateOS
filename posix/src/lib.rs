@@ -479,6 +479,7 @@ pub mod socket;
 pub mod spawn;
 pub mod stat;
 pub mod statvfs;
+pub mod stdbit;
 pub mod stdio;
 pub mod stdio_mem;
 pub mod stdlib;

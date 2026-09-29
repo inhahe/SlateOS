@@ -17,7 +17,8 @@ What it checks
 1. **Every overlay header compiles** -- on its own, and all of them together
    -- with `-Wall -Wextra -Werror`, in each of CONFIGS and in EXTRA_BUILDS
    (older C, C++), so that no feature-macro setting a program might use
-   breaks it. (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
+   breaks it; and <stdbit.h>'s type-generic macros, expanded on each type
+   they take, choose the function for its type (`macro_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
    a program, as musl's are, and their warnings not its business;
    `_SLATEOS_OVERLAY_WARNINGS` makes them ordinary ones here, to be held to
    these warnings themselves.
@@ -358,6 +359,35 @@ def read_reference(path: Path) -> dict[str, tuple[str, frozenset[str], str]]:
     return out
 
 
+def macro_uses() -> str:
+    """A translation unit using each of the overlay's type-generic macros --
+    <stdbit.h>'s -- on each type it takes, and asserting, as a constant
+    expression, that each chose by the argument's type: the counts are
+    `unsigned int`, `stdc_has_single_bit` a bool, and `stdc_bit_floor` and
+    `stdc_bit_ceil` the argument's own type. A header that only declares
+    macros is compiled and never expands them; this expands every one."""
+    types = ["unsigned char", "unsigned short", "unsigned int", "unsigned long",
+             "unsigned long long"]
+    counts = ["leading_zeros", "leading_ones", "trailing_zeros", "trailing_ones",
+              "first_leading_zero", "first_leading_one", "first_trailing_zero",
+              "first_trailing_one", "count_zeros", "count_ones", "bit_width"]
+    src = ["#include <stdbit.h>"]
+    for i, t in enumerate(types):
+        v = f"(({t})1)"
+        for f in counts:
+            src.append(f"_Static_assert(_Generic(stdc_{f}({v}), unsigned int: 1, default: 0), "
+                       f"\"stdc_{f} on {t}\");")
+        src.append(f"_Static_assert(_Generic(stdc_has_single_bit({v}), bool: 1, default: 0), "
+                   f"\"stdc_has_single_bit on {t}\");")
+        for f in ("bit_floor", "bit_ceil"):
+            src.append(f"_Static_assert(_Generic(stdc_{f}({v}), {t}: 1, default: 0), "
+                       f"\"stdc_{f} on {t}\");")
+        # and a call, so the functions it names are declared as used
+        src.append(f"unsigned int use{i}({t} x) {{ return stdc_leading_zeros(x) + "
+                   f"(unsigned int)stdc_bit_ceil(x); }}")
+    return "\n".join(src) + "\n"
+
+
 def check_builds(zig: str, overlay: Path) -> list[str]:
     """Check 1: the headers compile, alone and together, everywhere."""
     heads = overlay_headers(overlay)
@@ -366,6 +396,9 @@ def check_builds(zig: str, overlay: Path) -> list[str]:
             for h in heads for cfg, flags in (("gnu", CONFIGS["gnu"]), ("c17", CONFIGS["c17"]))]
     jobs += [(f"every header together ({cfg})", together, flags)
              for cfg, flags in {**CONFIGS, **EXTRA_BUILDS}.items()]
+    jobs += [(f"<stdbit.h>'s type-generic macros ({cfg})", macro_uses(), flags)
+             for cfg, flags in (("c11", ["-std=c11"]), ("c23", CONFIGS["c23"]),
+                                ("gnu", CONFIGS["gnu"]))]
     strict = ["-D_SLATEOS_OVERLAY_WARNINGS", "-Wall", "-Wextra", "-Werror"]
 
     def run(job):

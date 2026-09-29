@@ -143,11 +143,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 15;
+const VISIBLE: usize = 17;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 18] = [
+static LANGUAGES: [Language; 20] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -226,6 +226,18 @@ static LANGUAGES: [Language; 18] = [
         index: 4,
     },
     Language {
+        name: "Go",
+        extensions: &["go"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["golang"],
+        grammar: grammars::go::generated::language_fn,
+        highlights: grammars::go::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 5,
+    },
+    Language {
         name: "HTML",
         extensions: &["html", "htm", "xhtml", "shtml"],
         file_names: &[],
@@ -235,7 +247,19 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::html::HIGHLIGHTS,
         injections: grammars::html::INJECTIONS,
         locals: "",
-        index: 5,
+        index: 6,
+    },
+    Language {
+        name: "Java",
+        extensions: &["java"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::java::generated::language_fn,
+        highlights: grammars::java::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 7,
     },
     Language {
         name: "JavaScript",
@@ -247,7 +271,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::javascript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::javascript::LOCALS,
-        index: 6,
+        index: 8,
     },
     Language {
         name: "JSON",
@@ -259,7 +283,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 7,
+        index: 9,
     },
     Language {
         name: "Markdown",
@@ -271,7 +295,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 8,
+        index: 10,
     },
     Language {
         name: "Python",
@@ -283,7 +307,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 9,
+        index: 11,
     },
     Language {
         name: "Rust",
@@ -295,7 +319,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 10,
+        index: 12,
     },
     Language {
         name: "TOML",
@@ -308,7 +332,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 11,
+        index: 13,
     },
     Language {
         name: "TSX",
@@ -320,7 +344,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 12,
+        index: 14,
     },
     Language {
         name: "TypeScript",
@@ -332,7 +356,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 13,
+        index: 15,
     },
     Language {
         name: "YAML",
@@ -344,7 +368,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 14,
+        index: 16,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -357,7 +381,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 15,
+        index: 17,
     },
     // Hidden: injected by JavaScript and TypeScript into their comments.
     Language {
@@ -370,7 +394,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::jsdoc::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 16,
+        index: 18,
     },
     // Hidden: injected by JavaScript and TypeScript into their regular
     // expressions.
@@ -384,7 +408,7 @@ static LANGUAGES: [Language; 18] = [
         highlights: grammars::regex::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 17,
+        index: 19,
     },
 ];
 
@@ -517,7 +541,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 18] = [const { OnceLock::new() }; 18];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 20] = [const { OnceLock::new() }; 20];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -719,6 +743,8 @@ mod tests {
             ("C", Some("c"), 15, 363, 39),
             ("C++", None, 14, 543, 50),
             ("CSS", Some("css"), 15, 151, 0),
+            ("Go", Some("go"), 15, 219, 35),
+            ("Java", None, 14, 321, 40),
             ("HTML", None, 14, 41, 0),
             ("JavaScript", Some("javascript"), 15, 265, 36),
             ("TOML", None, 14, 66, 0),
@@ -807,6 +833,8 @@ mod tests {
         assert_eq!(found("vector.HPP"), Some("C++"));
         assert_eq!(found("a.c++"), Some("C++"));
         assert_eq!(found("site.css"), Some("CSS"));
+        assert_eq!(found("cmd/main.go"), Some("Go"));
+        assert_eq!(found("Main.java"), Some("Java"));
         assert_eq!(found("app.js"), Some("JavaScript"));
         assert_eq!(found("index.html"), Some("HTML"));
         assert_eq!(found("main.ts"), Some("TypeScript"));

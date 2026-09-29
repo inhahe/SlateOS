@@ -2673,4 +2673,36 @@ mod tests {
             "{spans:?}"
         );
     }
+
+    /// **Go is coloured as its query says** -- its grammar ships no
+    /// highlight tests -- keywords, a function's name and a call's, a type,
+    /// a string, a number, a comment.
+    #[test]
+    fn go_is_coloured_as_its_query_says() {
+        let text = "// Package main runs.\npackage main\n\nimport \"fmt\"\n\nfunc add(a int, b int) int {\n\treturn a + b + 42\n}\n\nfunc main() {\n\tfmt.Println(add(1, 2))\n}\n";
+        let spans = highlighted(text, "go");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("// Package", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("package", 0), Some(Highlight::Keyword));
+        assert_eq!(at("\"fmt\"", 0), Some(Highlight::String));
+        assert_eq!(at("func add", 0), Some(Highlight::Keyword));
+        assert_eq!(at("add(", 0), Some(Highlight::Function));
+        assert_eq!(at("int,", 0), Some(Highlight::Type));
+        assert_eq!(at("return", 0), Some(Highlight::Keyword));
+        assert_eq!(at("42", 0), Some(Highlight::Number));
+        assert_eq!(at("Println", 0), Some(Highlight::Function));
+        // In the published order the general patterns come last, and win:
+        // the function's name a variable, the method a property (§1442).
+        let mut h = with_queries_for(
+            "go",
+            include_str!("../grammars/go/highlights.scm"),
+            "(identifier) @local.reference",
+        );
+        let buffer = TextBuffer::from_text(text);
+        h.reset(&buffer);
+        let spans = settled(&mut h, &buffer);
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("add(", 0), Some(Highlight::Variable));
+        assert_eq!(at("Println", 0), Some(Highlight::Property));
+    }
 }

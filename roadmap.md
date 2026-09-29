@@ -2034,8 +2034,8 @@ live.
   highlight tests), a name coloured as its declaration is where the
   grammar says where names are declared (§1440: a parameter wherever it is
   used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
-  shell script), C, C++, CSS, HTML,
-  JavaScript (JSX included), JSON, Markdown (block and inline), Python,
+  shell script), C, C++, CSS, Go (§1442: its query read general-first),
+  HTML, Java, JavaScript (JSX included), JSON, Markdown (block and inline), Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   and YAML (every settings file), each passing its authors' test corpus. **Injections** (a language inside another): a Markdown code fence
   in the language it names, front matter as YAML or TOML, every paragraph

@@ -296,6 +296,12 @@ fn css_is_coloured_as_its_tests_say() {
     check("CSS", "css", 37, &[]);
 }
 
+/// **Java is coloured as its grammar's highlight tests say.**
+#[test]
+fn java_is_coloured_as_its_tests_say() {
+    check("Java", "java", 17, &[]);
+}
+
 /// **HTML is coloured as its grammar's highlight tests say**, the end tag
 /// that closes nothing among them.
 #[test]

@@ -1917,8 +1917,8 @@ live.
   kernel's default pins as the shell's first start, and the shell reading the
   library. **Waiting on others:** lane E's Settings, file manager, File
   Associations and launcher read it (`requests/c-e-read-the-one-list-of-programs.md`);
-  then lane A removes the kernel's lists. **Lane C, when lane E's 3275adc99 is
-  on `main`:** add `.oga` to the toolkit's table and to the inventory test.
+  then lane A removes the kernel's lists. `.oga` is in the toolkit's table and
+  the inventory test, lane E's 3275adc99 having made room for it.
 
 - `[C]` **Automatic sign-in, with a key held at start-up to choose** --
   **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:

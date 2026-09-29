@@ -68,7 +68,7 @@ use thumbs::{
 };
 
 use std::collections::{HashSet, VecDeque};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1287,6 +1287,18 @@ pub struct ExplorerState {
     /// The folder whose columns are shown: set on entering a folder, so a
     /// listing of the same one again keeps columns shown and not saved.
     columns_folder: Option<PathBuf>,
+    /// How a program is started on a file: its path and its arguments. A
+    /// field so the tests can see what would start without starting it.
+    launch: fn(&OsStr, &[OsString]) -> std::io::Result<()>,
+    /// Where installed programs' desktop entries are looked for, for what
+    /// opens a file nobody chose a program for and for Open With: the
+    /// environment's data directories, which `main` sets -- none otherwise,
+    /// so a test's explorer knows SlateOS's own programs on every machine.
+    app_dirs: desktopentry::scan::DataDirs,
+    /// The programs the file menu's Open With offered, in its order: the
+    /// row chosen starts the program it showed, whatever was installed
+    /// since.
+    open_with: Vec<desktopentry::App>,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
@@ -1505,6 +1517,9 @@ impl ExplorerState {
             search_origin: None,
             columns: ColumnManager::with_defaults(),
             columns_folder: None,
+            launch: start_program,
+            app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
+            open_with: Vec::new(),
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -1610,18 +1625,124 @@ impl ExplorerState {
             return;
         }
         let (path, name) = (entry.path.clone(), entry.name.clone());
-        self.status_message = match Self::opener_for(&path) {
-            Some(program) => match process::Command::new(&program).arg(&path).spawn() {
-                Ok(_) => format!("Opening {name} with {program}"),
-                // Named, because the interesting failures are all about
-                // *which* program: an association carried over from another
-                // machine names a path that is not here, and saying so is the
-                // difference between "this file cannot be opened" and "that
-                // association is wrong".
-                Err(e) => format!("Could not start {program}: {e}"),
-            },
+        self.status_message = match self.opener(&path) {
+            Some(opener) => self.start(&opener, &name),
             None => format!("Nothing is set to open {name}"),
         };
+    }
+
+    /// What opening `path` starts: the program the person chose for its
+    /// kind (`gui/associations`), or else the one SlateOS opens its type with
+    /// (`programs::default_for`, the type read from the toolkit's table of
+    /// extensions) -- among the programs installed here, with SlateOS's own
+    /// behind them. `None` when neither says.
+    ///
+    /// Only the person's choice was asked, so every file of a kind nobody
+    /// had chosen for -- all of them, on a new machine -- said "Nothing is
+    /// set to open" when SlateOS has a program for it.
+    fn opener(&self, path: &Path) -> Option<Opener> {
+        if let Some(program) = Self::opener_for(path) {
+            return Some(Opener {
+                label: program.clone(),
+                program: OsString::from(program),
+                args: vec![path.as_os_str().to_os_string()],
+            });
+        }
+        let ext = path.extension().and_then(OsStr::to_str)?;
+        let id = programs::default_for(guitk::filetypes::mime_for_extension(ext))?;
+        let app = known_programs(&self.app_dirs)
+            .into_iter()
+            .find(|app| app.id == id)?;
+        Opener::of(&app, path)
+    }
+
+    /// Start `opener`'s program on the file called `name`, and say so.
+    fn start(&self, opener: &Opener, name: &str) -> String {
+        let label = &opener.label;
+        match (self.launch)(&opener.program, &opener.args) {
+            Ok(()) => format!("Opening {name} with {label}"),
+            // Named, because the interesting failures are all about *which*
+            // program: an association carried over from another machine
+            // names a path that is not here, and saying so is the difference
+            // between "this file cannot be opened" and "that association is
+            // wrong".
+            Err(e) => format!("Could not start {label}: {e}"),
+        }
+    }
+
+    /// The programs that open `path`'s kind of file -- those whose entries
+    /// list its type -- for Open With: SlateOS's default for the type first,
+    /// then the rest in the order `known_programs` gives, installed ones
+    /// before SlateOS's own. Empty for a folder, or a type nothing opens.
+    fn programs_opening(&self, path: &Path) -> Vec<desktopentry::App> {
+        let Some(ext) = path.extension().and_then(OsStr::to_str) else {
+            return Vec::new();
+        };
+        let mime = guitk::filetypes::mime_for_extension(ext);
+        let mut list: Vec<desktopentry::App> = known_programs(&self.app_dirs)
+            .into_iter()
+            .filter(|app| app.mime_types.iter().any(|m| m.eq_ignore_ascii_case(mime)))
+            .collect();
+        if let Some(at) =
+            programs::default_for(mime).and_then(|id| list.iter().position(|app| app.id == id))
+        {
+            let default = list.remove(at);
+            list.insert(0, default);
+        }
+        list
+    }
+
+    /// The file menu's Open With: the programs that open the file, as
+    /// `programs_opening` found them when the menu opened. Greyed rather
+    /// than absent when none does, so the rows below do not move.
+    fn open_with_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_OPEN_WITH_BASE,
+            label: String::from("Open with"),
+            icon: None,
+            enabled: !self.open_with.is_empty(),
+            children: self
+                .open_with
+                .iter()
+                .enumerate()
+                .map(|(i, app)| MenuItem::Action {
+                    id: MENU_OPEN_WITH_BASE
+                        .saturating_add(1)
+                        .saturating_add(i as u64),
+                    label: app.name.clone(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: true,
+                    checked: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Open the selected file with the program chosen from Open With.
+    /// Answers whether the id was one of these.
+    fn open_with_action(&mut self, id: u64) -> bool {
+        let Some(app) = id
+            .checked_sub(MENU_OPEN_WITH_BASE.saturating_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| self.open_with.get(n))
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(entry) = self
+            .selected_indices
+            .first()
+            .and_then(|&i| self.entries.get(i))
+        else {
+            return true;
+        };
+        let (path, name) = (entry.path.clone(), entry.name.clone());
+        self.status_message = match Opener::of(&app, &path) {
+            Some(opener) => self.start(&opener, &name),
+            None => format!("{} cannot be started with a file", app.name),
+        };
+        true
     }
 
     /// The program the user has chosen for this kind of file.
@@ -2985,6 +3106,13 @@ impl ExplorerState {
         if let Some(index) = on_row {
             self.select_single(index);
         }
+        // Found now, for the file the menu is about, and kept: the row chosen
+        // from Open With is the program it showed.
+        self.open_with = on_row
+            .and_then(|index| self.entries.get(index))
+            .filter(|entry| !entry.is_dir)
+            .map(|entry| self.programs_opening(&entry.path))
+            .unwrap_or_default();
         let items = if on_row.is_some() {
             self.file_menu_items()
         } else {
@@ -3513,6 +3641,7 @@ impl ExplorerState {
     fn file_menu_items(&self) -> Vec<MenuItem> {
         vec![
             Self::menu_action(MENU_OPEN, "Open", true),
+            self.open_with_menu(),
             Self::menu_action(MENU_CUT, "Cut", true),
             Self::menu_action(MENU_COPY, "Copy", true),
             Self::menu_action(MENU_RENAME, "Rename", true),
@@ -3615,6 +3744,7 @@ impl ExplorerState {
             || self.conflict_action(id)
             || self.failure_action(id)
             || self.sort_action(id)
+            || self.open_with_action(id)
         {
             return;
         }
@@ -6057,6 +6187,9 @@ const MENU_FAILURE_BASE: u64 = 5000;
 /// The "Sort by" submenu; its rows are the base plus one, plus their place in
 /// [`SORTS`].
 const MENU_SORT_BASE: u64 = 6000;
+/// The file menu's "Open with" submenu; its rows are the base plus one, plus
+/// their place in `ExplorerState::open_with`.
+const MENU_OPEN_WITH_BASE: u64 = 7000;
 /// The sorts the menu offers, in its order.
 const SORTS: [(SortBy, &str); 5] = [
     (SortBy::Name, "Name"),
@@ -7492,6 +7625,75 @@ fn restore_outcome(restored: &[(String, PathBuf, bool)], failed: &[String]) -> O
     )
 }
 
+/// A program to start on a file, and what to call it when saying so.
+struct Opener {
+    /// The program's name, or the path the person chose.
+    label: String,
+    program: OsString,
+    args: Vec<OsString>,
+}
+
+impl Opener {
+    /// `app` as its entry starts it on the file at `path`: the entry's own
+    /// command line, `%f` or `%F` standing for the file. A program the entry
+    /// says runs in a terminal is started in one. `None` for an entry with
+    /// no command line.
+    fn of(app: &desktopentry::App, path: &Path) -> Option<Self> {
+        let exec = app.exec.as_ref()?;
+        let invocation = desktopentry::Invocation {
+            icon: app.icon.as_deref(),
+            name: &app.name,
+            location: None,
+        };
+        let mut line = exec
+            .command_lines(
+                &[desktopentry::Target::File(path.to_path_buf())],
+                &invocation,
+            )
+            .into_iter()
+            .next()?
+            .into_iter();
+        let first = line.next()?;
+        let (program, args) = if app.terminal {
+            let mut args = vec![OsString::from("-e"), first];
+            args.extend(line);
+            (OsString::from(TERMINAL), args)
+        } else {
+            (first, line.collect())
+        };
+        Some(Self {
+            label: app.name.clone(),
+            program,
+            args,
+        })
+    }
+}
+
+/// The terminal, for a program whose entry says it runs in one.
+const TERMINAL: &str = "/usr/bin/terminal";
+
+/// Start `program` with `args`, and let it run: the file manager does not
+/// wait for what it opens.
+fn start_program(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
+    process::Command::new(program).args(args).spawn().map(drop)
+}
+
+/// The programs this machine has: those installed here, read as the start
+/// menu reads them, with SlateOS's own (`programs::built_in`) behind them --
+/// an installed entry with the same id replaces SlateOS's. The rule
+/// `apps/settings`' `known_programs` keeps for its Default Apps page.
+fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App> {
+    let scan = desktopentry::scan::scan(dirs);
+    let (mut list, _unusable) = desktopentry::scan::apps(&scan, None);
+    let installed: Vec<String> = list.iter().map(|app| app.id.clone()).collect();
+    list.extend(
+        programs::built_in(None)
+            .into_iter()
+            .filter(|own| !installed.contains(&own.id)),
+    );
+    list
+}
+
 fn main() -> std::process::ExitCode {
     // A path given on the command line is what makes "open containing folder"
     // possible from anywhere else in the desktop.
@@ -7510,6 +7712,9 @@ fn main() -> std::process::ExitCode {
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut explorer = explorer_for(&args.rest, home);
+    // Where installed programs' entries are, for opening a file nobody chose
+    // a program for and for Open With: as the start menu reads them.
+    explorer.app_dirs = desktopentry::scan::DataDirs::from_env(|name| std::env::var_os(name));
     oswindow::app::launch_with("explorer", args.display.as_deref(), &mut explorer)
 }
 
@@ -7899,6 +8104,10 @@ mod tests {
             let _turn = settingsfile::testing::config_turn();
             ExplorerState::new(dir)
         };
+        // Nothing a test opens is started: what would have been is written
+        // down (`launched`).
+        state.launch = record_launch;
+        LAUNCHED.with(|l| l.borrow_mut().clear());
         state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
         state.thumb_gen =
             ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
@@ -9909,6 +10118,203 @@ mod tests {
                 state.status_message
             );
         });
+    }
+
+    thread_local! {
+        /// What the test launcher was asked to start, in order.
+        static LAUNCHED: std::cell::RefCell<Vec<(OsString, Vec<OsString>)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A launcher that starts nothing and writes down what it was asked.
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the signature is the launch field's, which the real spawn fills"
+    )]
+    fn record_launch(program: &OsStr, args: &[OsString]) -> std::io::Result<()> {
+        LAUNCHED.with(|l| {
+            l.borrow_mut().push((program.to_os_string(), args.to_vec()));
+        });
+        Ok(())
+    }
+
+    /// What was started since the last ask, clearing it.
+    fn launched() -> Vec<(OsString, Vec<OsString>)> {
+        LAUNCHED.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    /// **A file nobody chose a program for opens with SlateOS's own** -- the
+    /// default for its type (`programs::default_for`), started as its entry
+    /// says. Only the person's choice was asked, so every file of a kind
+    /// nobody had chosen for said "Nothing is set to open" -- on a new
+    /// machine, every file.
+    #[test]
+    fn a_file_nobody_chose_a_program_for_opens_with_slateos_default() {
+        settingsfile::testing::with_scratch_config("explorer-open-default", |_root| {
+            let scratch = temp_dir("open_default");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "hello");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is in the listing");
+            state.open_entry(index);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/usr/bin/editor"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+            assert!(
+                state
+                    .status_message
+                    .contains("Opening notes.txt with Text Editor"),
+                "{}",
+                state.status_message
+            );
+        });
+    }
+
+    /// **The person's choice goes before SlateOS's default.**
+    #[test]
+    fn the_persons_choice_goes_before_the_default() {
+        settingsfile::testing::with_scratch_config("explorer-open-chosen", |_root| {
+            let mut doc = yamldoc::Document::new();
+            doc.set_str(
+                &[associations::ASSOCIATIONS, "txt"],
+                "/nowhere/chosen-editor",
+            );
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("scratch config is writable");
+            let scratch = temp_dir("open_chosen");
+            let root = scratch.dir().to_path_buf();
+            write(&root.join("notes.txt"), "hello");
+            let mut state = state_at(&root);
+            let index = state
+                .entries
+                .iter()
+                .position(|e| e.name == "notes.txt")
+                .expect("the file is in the listing");
+            state.open_entry(index);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/nowhere/chosen-editor"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+        });
+    }
+
+    /// **Open With offers the programs that open the file's kind** --
+    /// SlateOS's default first, and a program installed here that claims the
+    /// type -- and starts the one chosen on the file, as its entry says.
+    #[test]
+    fn open_with_offers_the_programs_that_open_the_type() {
+        settingsfile::testing::with_scratch_config("explorer-open-with", |_root| {
+            let scratch = temp_dir("open_with");
+            let root = scratch.dir().to_path_buf();
+            let share = scratch.dir().join("share");
+            fs::create_dir_all(share.join("applications")).expect("make the entries' folder");
+            // A program that runs in a terminal is started in one.
+            fs::write(
+                share.join("applications").join("org.example.Pager.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Pager\nExec=pager %f\nTerminal=true\n\
+                 MimeType=text/plain;\n",
+            )
+            .expect("write the entry");
+            fs::write(
+                share.join("applications").join("org.example.Notepad.desktop"),
+                "[Desktop Entry]\nType=Application\nName=Notepad\nExec=notepad %f\nMimeType=text/plain;\n",
+            )
+            .expect("write the entry");
+            let mut state = one_file(&root, "notes.txt");
+            state.app_dirs = desktopentry::scan::DataDirs::new(vec![share]);
+            let (x, y) = row_centre(&state, "notes.txt");
+            right_click(&mut state, x, y);
+            let names: Vec<String> = state.open_with.iter().map(|a| a.name.clone()).collect();
+            assert_eq!(
+                names.first().map(String::as_str),
+                Some("Text Editor"),
+                "{names:?}"
+            );
+            let notepad = names
+                .iter()
+                .position(|n| n == "Notepad")
+                .unwrap_or_else(|| panic!("the installed program is not offered: {names:?}"));
+            assert!(
+                state.file_menu_items().iter().any(|item| matches!(
+                    item,
+                    MenuItem::Submenu { label, enabled: true, .. } if label == "Open with"
+                )),
+                "the file menu has no Open with"
+            );
+            state.activate_menu_item(MENU_OPEN_WITH_BASE + 1 + notepad as u64);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("notepad"),
+                    vec![root.join("notes.txt").into_os_string()]
+                )]
+            );
+            assert!(
+                state.status_message.contains("with Notepad"),
+                "{}",
+                state.status_message
+            );
+
+            let pager = names
+                .iter()
+                .position(|n| n == "Pager")
+                .unwrap_or_else(|| panic!("the terminal program is not offered: {names:?}"));
+            state.activate_menu_item(MENU_OPEN_WITH_BASE + 1 + pager as u64);
+            assert_eq!(
+                launched(),
+                [(
+                    OsString::from("/usr/bin/terminal"),
+                    vec![
+                        OsString::from("-e"),
+                        OsString::from("pager"),
+                        root.join("notes.txt").into_os_string()
+                    ]
+                )]
+            );
+        });
+    }
+
+    /// **A kind of file nothing else opens is offered the hex editor**, which
+    /// reads any file as bytes: every unrecognised file has the type its
+    /// entry claims (`gui/programs/INVENTORY.md`, section 4 -- the type has no
+    /// default, so opening such a file starts nothing, but Open With offers
+    /// the hex editor). A folder's Open With is greyed, not missing, so the
+    /// rows below it stay where they were.
+    #[test]
+    fn an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing() {
+        let scratch = temp_dir("open_with_unknown");
+        let root = scratch.dir().to_path_buf();
+        // Named like a text file, so only its being a folder keeps the text
+        // editor off its menu.
+        fs::create_dir(root.join("old.txt")).expect("make a folder");
+        let mut state = one_file(&root, "mystery.zzz");
+        let (x, y) = row_centre(&state, "mystery.zzz");
+        right_click(&mut state, x, y);
+        let names: Vec<&str> = state.open_with.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Hex Editor"]);
+
+        state.menu = None;
+        let (x, y) = row_centre(&state, "old.txt");
+        right_click(&mut state, x, y);
+        assert!(state.open_with.is_empty(), "{:?}", state.open_with);
+        assert!(
+            state.file_menu_items().iter().any(|item| matches!(
+                item,
+                MenuItem::Submenu { label, enabled: false, .. } if label == "Open with"
+            )),
+            "a folder's Open with is not there greyed"
+        );
     }
 
     /// A type nobody has chosen a program for says so, rather than pretending.

@@ -774,6 +774,84 @@ MAIN = [
         '',
         ['columns_shown_and_not_saved_outlast_a_refresh'],
     ),
+    (
+        'a file nobody chose a program for opens with nothing',
+        '        let id = programs::default_for(guitk::filetypes::mime_for_extension(ext))?;',
+        '        let id = programs::default_for("")?;',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default'],
+    ),
+    (
+        "the person's choice is not asked first",
+        '        if let Some(program) = Self::opener_for(path) {',
+        '        if let Some(program) = Self::opener_for(path).filter(|_| false) {',
+        ['the_persons_choice_goes_before_the_default', 'opening_a_file_starts_what_the_user_chose_for_it'],
+    ),
+    (
+        'the default is looked for among no programs',
+        '        let app = known_programs(&self.app_dirs)\n            .into_iter()\n            .find(|app| app.id == id)?;',
+        '        let app = Vec::<desktopentry::App>::new()\n            .into_iter()\n            .find(|app| app.id == id)?;',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default'],
+    ),
+    (
+        "an entry's command line is not given the file",
+        '                &[desktopentry::Target::File(path.to_path_buf())],',
+        '                &[],',
+        ['a_file_nobody_chose_a_program_for_opens_with_slateos_default', 'open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'a program that runs in a terminal is started outside one',
+        '        let (program, args) = if app.terminal {',
+        '        let (program, args) = if false {',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With offers nothing',
+        '            .map(|entry| self.programs_opening(&entry.path))',
+        '            .map(|_| Vec::new())',
+        ['open_with_offers_the_programs_that_open_the_type', 'an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        "a folder is offered what opens its name's kind",
+        '            .filter(|entry| !entry.is_dir)\n            .map(|entry| self.programs_opening(&entry.path))',
+        '            .map(|entry| self.programs_opening(&entry.path))',
+        ['an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        'Open With offers programs that do not open the kind',
+        '            .filter(|app| app.mime_types.iter().any(|m| m.eq_ignore_ascii_case(mime)))',
+        '            .filter(|_| true)',
+        ['an_unknown_kind_is_offered_the_hex_editor_and_a_folder_nothing'],
+    ),
+    (
+        'Open With does not put the default first',
+        '            list.insert(0, default);',
+        '            list.push(default);',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'the Open With row chosen starts the first program',
+        '            .and_then(|n| self.open_with.get(n))',
+        '            .and_then(|_| self.open_with.first())',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        "Open With's rows are counted from the submenu's own id",
+        '            .checked_sub(MENU_OPEN_WITH_BASE.saturating_add(1))',
+        '            .checked_sub(MENU_OPEN_WITH_BASE)',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With is not reached',
+        '            || self.open_with_action(id)\n',
+        '',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
+    (
+        'Open With is greyed where it has programs',
+        '            enabled: !self.open_with.is_empty(),',
+        '            enabled: false,',
+        ['open_with_offers_the_programs_that_open_the_type'],
+    ),
 ]
 
 COLUMNS = [

@@ -147,11 +147,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 26;
+const VISIBLE: usize = 27;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 29] = [
+static LANGUAGES: [Language; 30] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -441,6 +441,18 @@ static LANGUAGES: [Language; 29] = [
         index: 20,
     },
     Language {
+        name: "SQL",
+        extensions: &["sql", "psql", "pgsql", "mysql"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["postgres", "postgresql", "sqlite", "plpgsql"],
+        grammar: grammars::sql::generated::language_fn,
+        highlights: grammars::sql::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 21,
+    },
+    Language {
         name: "TOML",
         extensions: &["toml"],
         // TOML under names of their own: Cargo's lock file, pipenv's.
@@ -451,7 +463,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 21,
+        index: 22,
     },
     Language {
         name: "TSX",
@@ -463,7 +475,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 22,
+        index: 23,
     },
     Language {
         name: "TypeScript",
@@ -475,7 +487,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 23,
+        index: 24,
     },
     Language {
         name: "XML",
@@ -491,7 +503,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::xml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 24,
+        index: 25,
     },
     Language {
         name: "YAML",
@@ -503,7 +515,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 25,
+        index: 26,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -516,7 +528,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 26,
+        index: 27,
     },
     // Hidden: injected by JavaScript and TypeScript into their comments.
     Language {
@@ -529,7 +541,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::jsdoc::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 27,
+        index: 28,
     },
     // Hidden: injected by JavaScript and TypeScript into their regular
     // expressions.
@@ -543,7 +555,7 @@ static LANGUAGES: [Language; 29] = [
         highlights: grammars::regex::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 28,
+        index: 29,
     },
 ];
 
@@ -744,7 +756,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 29] = [const { OnceLock::new() }; 29];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 30] = [const { OnceLock::new() }; 30];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -1059,6 +1071,7 @@ mod tests {
         assert_eq!(found("xhtml1-strict.dtd"), Some("DTD"));
         assert_eq!(found("Dockerfile"), Some("Dockerfile"));
         assert_eq!(found("init.lua"), Some("Lua"));
+        assert_eq!(found("schema.SQL"), Some("SQL"));
         assert_eq!(found("toolchain/build-sysroot.ps1"), Some("PowerShell"));
         assert_eq!(found("kernel/linker.ld"), Some("Linker script"));
         assert_eq!(found("images/base/Containerfile"), Some("Dockerfile"));

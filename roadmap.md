@@ -2039,7 +2039,7 @@ live.
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, linker scripts
   (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), PowerShell, Python,
-  Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
+  Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
   valid XML be an error: `grammars/xml.rs`). **Injections** (a language inside another): a Markdown code fence
@@ -2055,8 +2055,7 @@ live.
   A Dockerfile's RUN commands, and a `RUN <<EOF` script, are Bash.
   A bracket's partner is found in the tree, a language inside another's
   in its own (`Highlighter::brackets`): a bracket in a string or a comment
-  is none. **Next:** more languages as the editor meets them (SQL for the
-  database viewer).
+  is none. **Next:** more languages as the editor meets them.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

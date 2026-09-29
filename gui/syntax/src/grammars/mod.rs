@@ -31,6 +31,7 @@ pub(crate) mod powershell;
 pub(crate) mod python;
 pub(crate) mod regex;
 pub(crate) mod rust;
+pub(crate) mod sql;
 pub(crate) mod toml;
 pub(crate) mod tsx;
 pub(crate) mod typescript;
@@ -95,7 +96,7 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 29] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 30] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
@@ -123,6 +124,7 @@ mod tests {
             ("python", &super::python::generated::TABLES),
             ("regex", &super::regex::generated::TABLES),
             ("rust", &super::rust::generated::TABLES),
+            ("sql", &super::sql::generated::TABLES),
             ("toml", &super::toml::generated::TABLES),
             ("tsx", &super::tsx::generated::TABLES),
             ("typescript", &super::typescript::generated::TABLES),

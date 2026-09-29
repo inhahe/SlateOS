@@ -37,6 +37,7 @@ const GRAMMARS: &[&str] = &[
     "python",
     "regex",
     "rust",
+    "sql",
     "toml",
     "tsx",
     "typescript",

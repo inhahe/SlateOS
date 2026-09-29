@@ -160,6 +160,12 @@ tree-sitter-rust:
   texts:
     - tree-sitter-rust-LICENSE
 
+tree-sitter-sql:
+  version: 0.3.11
+  licence: MIT
+  texts:
+    - tree-sitter-sql-LICENSE
+
 tree-sitter-toml:
   version: 0.7.0
   licence: MIT

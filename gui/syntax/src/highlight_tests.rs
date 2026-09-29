@@ -309,6 +309,12 @@ fn html_is_coloured_as_its_tests_say() {
     check("HTML", "html", 38, &[]);
 }
 
+/// **SQL is coloured as its grammar's highlight tests say.**
+#[test]
+fn sql_is_coloured_as_its_tests_say() {
+    check("SQL", "sql", 27, &[]);
+}
+
 /// **Lua is coloured as its grammar's highlight tests say.**
 #[test]
 fn lua_is_coloured_as_its_tests_say() {

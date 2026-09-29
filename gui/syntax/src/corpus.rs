@@ -407,6 +407,13 @@ fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
 }
 
+/// **The SQL grammar -- tables, lexers and its ported dollar-quote
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn sql_passes_its_corpus() {
+    check("SQL", "sql", 412, &[]);
+}
+
 /// **The PowerShell grammar -- tables, lexers and its ported
 /// statement-end scanner -- parses its whole corpus as upstream's does.**
 #[test]

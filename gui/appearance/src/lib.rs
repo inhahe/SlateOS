@@ -241,6 +241,15 @@ impl PaletteSource for AppearanceSettings {
     fn widget_style(&self) -> guitk::widget_style::WidgetStyle {
         self.widget_theme.style()
     }
+
+    /// The animation theme's motion at the user's speed: Slow makes the
+    /// theme's transitions half again as long, and Off -- like a theme's own
+    /// `enabled: false` -- is still.
+    fn motion(&self) -> guitk::motion::Motion {
+        self.animation_theme
+            .motion()
+            .at_speed(self.animation_speed.multiplier())
+    }
 }
 
 // ============================================================================
@@ -1501,6 +1510,14 @@ pub struct AppearanceSettings {
     /// for [`color_theme`](Self::color_theme)'s reason; see
     /// [`themes::WidgetTheme`] and `design-decisions.md` §1435.
     pub widget_theme: themes::WidgetTheme,
+    /// The theme the desktop's transitions move by -- how long the standard
+    /// one takes, its curve, or that nothing moves: the built-in one unless
+    /// the user chose another. `theme.animation` in the file, by the theme's
+    /// folder name, which may name a fourth theme again. The user's
+    /// [`animation_speed`](Self::animation_speed) then scales it; the two
+    /// reach everything that animates together, as `Palette::motion`. See
+    /// [`themes::AnimationTheme`] and `design-decisions.md` §1446.
+    pub animation_theme: themes::AnimationTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1756,6 +1773,7 @@ impl Default for AppearanceSettings {
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
             widget_theme: themes::WidgetTheme::built_in(),
+            animation_theme: themes::AnimationTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -1990,7 +2008,14 @@ impl AppearanceSettings {
         self.scaling_percent as f32 / 100.0
     }
 
-    /// Whether any animations are enabled.
+    /// Whether the user has left animation on: their speed is not Off.
+    ///
+    /// The user's own switch, and only theirs. A theme whose transitions do
+    /// not move (`animation.enabled: false`) does not make this false: that is
+    /// a look, not the user asking for less motion -- a picture viewer asks
+    /// this before playing an animated picture, and a theme's taste in panel
+    /// slides is no reason to stop one. The transitions themselves follow
+    /// `Palette::motion`, which reads both.
     pub fn animations_enabled(&self) -> bool {
         self.animation_speed != AnimationSpeed::Off
     }
@@ -2436,6 +2461,10 @@ impl AppearanceSettings {
         if let Some(name) = widget_theme_name(doc) {
             s.widget_theme = themes::WidgetTheme::load(&name);
         }
+        // The motion, for the same reason: the palette carries it.
+        if let Some(name) = animation_theme_name(doc) {
+            s.animation_theme = themes::AnimationTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2736,6 +2765,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.widget_theme.id())),
         );
         doc.set_str(
+            &["theme", "animation"],
+            &pathcodec::encode_path(std::path::Path::new(self.animation_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -2973,6 +3006,13 @@ pub(crate) fn color_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
 /// [`color_theme_name`] is.
 pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "widget_style")
+}
+
+/// The animation theme a settings document names, decoded; `None` for the
+/// built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "animation")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3474,6 +3514,9 @@ mod tests {
     const ROUND_TRIP_WIDGETS: &str = "round été";
     const ROUND_TRIP_WIDGETS_FILE: &str =
         "widget-style:\n  button:\n    radius: 11\n    gloss: false\n  toggle: checkbox\n";
+    /// The round trip's animation theme: a fourth, for the same reason.
+    const ROUND_TRIP_ANIMATION: &str = "ressort ü";
+    const ROUND_TRIP_ANIMATION_FILE: &str = "animation:\n  duration-ms: 320\n  easing: spring\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3505,6 +3548,13 @@ mod tests {
                 themes::parse(ROUND_TRIP_WIDGETS_FILE)
                     .widget_style
                     .expect("the fixture sets a widget style"),
+            ),
+            // A fourth, read back from the file the round trip installs.
+            animation_theme: themes::AnimationTheme::from_motion(
+                ROUND_TRIP_ANIMATION,
+                themes::parse(ROUND_TRIP_ANIMATION_FILE)
+                    .motion
+                    .expect("the fixture sets a motion"),
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3604,6 +3654,7 @@ mod tests {
         let reread = config::testing::with_scratch_config("round-trip", |root| {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
+            install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);
@@ -3924,6 +3975,183 @@ mod tests {
             // The widget theme alone depends on its file too.
             let widgets = Document::parse("theme:\n  widget_style: soft\n");
             assert!(!themes::fingerprint(&widgets).is_empty());
+        });
+    }
+
+    // ---- the animation ----
+
+    /// A theme's motion reaches the palette from the settings file and the
+    /// theme's own, at the user's speed -- and it is a separate choice: the
+    /// colours and the controls stay the built-in ones.
+    #[test]
+    fn a_chosen_animation_reaches_the_palette_at_the_users_speed() {
+        use guitk::motion::{Curve, Motion};
+        config::testing::with_scratch_config("animation-palette", |root| {
+            install_theme(
+                root,
+                "springy",
+                "animation:\n  duration-ms: 300\n  easing: spring\n",
+            );
+            for (speed, standard_ms) in [("normal", 300), ("slow", 450), ("fast", 225)] {
+                let s = AppearanceSettings::read_from(&Document::parse(&format!(
+                    "theme:\n  animation: springy\neffects:\n  animation_speed: {speed}\n"
+                )));
+                assert_eq!(s.animation_theme.problem(), None);
+                let p = Palette::from_settings(&s);
+                assert_eq!(p.motion, Motion::new(standard_ms, Curve::Spring), "{speed}");
+                assert_eq!(
+                    p.roles(),
+                    Palette::from_settings(&AppearanceSettings::default()).roles()
+                );
+                assert_eq!(p.widget_style, guitk::widget_style::WidgetStyle::AERO);
+            }
+            let off = AppearanceSettings::read_from(&Document::parse(
+                "theme:\n  animation: springy\neffects:\n  animation_speed: off\n",
+            ));
+            assert!(Palette::from_settings(&off).motion.is_still());
+        });
+        // With nothing chosen, the built-in motion at the normal speed.
+        assert_eq!(
+            Palette::from_settings(&AppearanceSettings::default()).motion,
+            Motion::STANDARD
+        );
+    }
+
+    /// **A still theme is still at every speed** -- and it is not the user
+    /// turning animation off: `animations_enabled` is the user's switch, and
+    /// stays on.
+    #[test]
+    fn a_still_theme_is_still_at_every_speed() {
+        for speed in [
+            AnimationSpeed::Fast,
+            AnimationSpeed::Normal,
+            AnimationSpeed::Slow,
+        ] {
+            let s = AppearanceSettings {
+                animation_theme: themes::AnimationTheme::from_motion(
+                    "calm",
+                    guitk::motion::Motion::STILL,
+                ),
+                animation_speed: speed,
+                ..AppearanceSettings::default()
+            };
+            assert!(Palette::from_settings(&s).motion.is_still(), "{speed:?}");
+            assert!(s.animations_enabled(), "{speed:?}");
+        }
+    }
+
+    /// The animation is its own setting: read from `theme.animation`, written
+    /// back there, the built-in one when the file names none or a blank --
+    /// and a theme that cannot be used keeps its name through a save and says
+    /// why, while the built-in motion is used.
+    #[test]
+    fn the_animation_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("animation-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.animation_theme, themes::AnimationTheme::built_in());
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  animation: \" \"\n"));
+            assert_eq!(blank.animation_theme, themes::AnimationTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "animation"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            // A colours-only theme cannot give the motion.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let doc = Document::parse("theme:\n  colors: nord\n  animation: nord\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.color_theme.problem(), None, "the colours are usable");
+            assert_eq!(s.animation_theme.id(), "nord");
+            assert_eq!(
+                Palette::from_settings(&s).motion,
+                guitk::motion::Motion::STANDARD
+            );
+            assert!(
+                s.animation_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no animation")),
+                "{:?}",
+                s.animation_theme.problem()
+            );
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "animation"]).as_deref(),
+                Some("nord")
+            );
+        });
+    }
+
+    /// **High contrast keeps the motion, whole**: it is about telling things
+    /// apart, and how fast they move does not change that.
+    #[test]
+    fn high_contrast_keeps_the_motion() {
+        use guitk::motion::{Curve, Motion};
+        let chosen = Motion::new(400, Curve::Linear);
+        let s = AppearanceSettings {
+            animation_theme: themes::AnimationTheme::from_motion("slowish", chosen),
+            high_contrast: Some(HighContrastScheme::WhiteOnBlack),
+            ..AppearanceSettings::default()
+        };
+        assert_eq!(Palette::from_settings(&s).motion, chosen);
+        let bare = Palette::high_contrast(
+            Color::rgb(0, 0, 0),
+            Color::rgb(255, 255, 255),
+            Color::rgb(0, 128, 255),
+        );
+        assert_eq!(bare.motion, Motion::STANDARD);
+    }
+
+    /// `watcher()` sees the chosen animation theme's file edited in place, as
+    /// it sees a colour theme's -- the motion changes without a byte of
+    /// `appearance.yaml` changing.
+    #[test]
+    fn the_appearance_watcher_sees_the_chosen_animation_edited_in_place() {
+        config::testing::with_scratch_config("watch-animation", |root| {
+            install_theme(root, "springy", "animation:\n  easing: spring\n");
+            let mut file = AppearanceFile::load();
+            file.settings.animation_theme =
+                themes::AnimationTheme::load(std::ffi::OsStr::new("springy"));
+            file.save().unwrap();
+
+            let mut w = watcher();
+            assert!(w.poll().is_some(), "the first look");
+            assert!(w.poll().is_none(), "nothing has changed");
+
+            install_theme(root, "springy", "animation:\n  enabled: false\n");
+            let doc = w.poll().expect("the theme changed, so the motion did");
+            let s = AppearanceSettings::read_from(&doc);
+            assert!(Palette::from_settings(&s).motion.is_still());
+            assert!(w.poll().is_none(), "reported once");
+        });
+    }
+
+    /// A theme chosen for every axis is one file, and depends on it once; the
+    /// animation theme alone depends on its file too.
+    #[test]
+    fn a_theme_chosen_for_every_axis_is_one_dependency() {
+        config::testing::with_scratch_config("every-axis", |root| {
+            install_theme(
+                root,
+                "nord",
+                "colors:\n  base: \"#2e3440\"\nwidget-style:\n  toggle: checkbox\n\
+                 animation:\n  easing: linear\n",
+            );
+            install_theme(root, "calm", "animation:\n  enabled: false\n");
+            let colours = Document::parse("theme:\n  colors: nord\n");
+            let all = Document::parse(
+                "theme:\n  colors: nord\n  widget_style: nord\n  animation: nord\n",
+            );
+            let other = Document::parse("theme:\n  colors: nord\n  animation: calm\n");
+            assert_eq!(themes::fingerprint(&all), themes::fingerprint(&colours));
+            assert_ne!(themes::fingerprint(&other), themes::fingerprint(&colours));
+            let alone = Document::parse("theme:\n  animation: calm\n");
+            assert!(!themes::fingerprint(&alone).is_empty());
         });
     }
 

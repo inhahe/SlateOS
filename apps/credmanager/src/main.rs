@@ -9134,6 +9134,8 @@ mod tests {
             "a,b",
             "say \"hi\"",
             "\"",
+            "\"\"",
+            "nul\0inside",
             "line\nbreak",
             "cr\rand\r\ncrlf",
             " leading and trailing ",
@@ -11594,7 +11596,7 @@ mod tests {
     #[test]
     fn the_contents_keep_every_character_of_every_field() {
         let mut vault = unlocked_vault();
-        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + -";
+        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + - nul\0";
         let folder = vault.add_folder(odd);
         let mut login = LoginData::new(odd, odd, odd);
         login.url = odd.to_string();

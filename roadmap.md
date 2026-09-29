@@ -2594,9 +2594,12 @@ word; text inside them that says "lane C" is history.
     `c-e-the-toolkit-has-a-dock.md`);
   - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
     the requests themselves are on lane B's branch): the terminal answers
-    how wide it will draw a run of text (§1042), and the password manager's
-    CSV export survives any password -- the operator's own words, "make
-    sure you don't mess that up";
+    how wide it will draw a run of text -- **done** (e99d960e6, OSC 7730,
+    §1224; answered in `e-b-the-terminal-answers-how-wide-it-will-draw-text.md`)
+    -- and the password manager's CSV export survives any password, the
+    operator's own words "make sure you don't mess that up": the export
+    quotes every field and is tested by round trip through a strict reader,
+    and the reply to lane B is owed;
   - standing: a notices manifest beside any code ported into a lane E crate
     (`c-abdef-third-party-code-needs-a-notices-manifest.md`).
   Done 2026-09-28: `safeio`'s rename on Windows while a scanner holds the

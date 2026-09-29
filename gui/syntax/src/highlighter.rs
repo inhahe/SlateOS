@@ -2493,4 +2493,26 @@ mod tests {
         assert_eq!(at("let", 0), Some(Highlight::Keyword));
         assert_eq!(at("1;", 0), Some(Highlight::Number));
     }
+
+    /// **Ada is coloured as its query says** -- which names its captures as
+    /// Neovim does (`@keyword.function`, `@repeat`, `@include`), each
+    /// painting its kind: keywords, a subprogram's and a package's names,
+    /// strings, numbers, comments. (Its grammar ships no highlight tests.)
+    #[test]
+    fn ada_is_coloured_as_its_query_says() {
+        let text = "-- The disk's driver.\nwith Ada.Text_IO;\npackage body Ahci is\n   procedure Reset (Port : in out Port_Type) is\n   begin\n      if Port.Busy then\n         raise Device_Error with \"busy\";\n      end if;\n      for I in 1 .. 10 loop\n         null;\n      end loop;\n   end Reset;\nend Ahci;\n";
+        let spans = highlighted(text, "ada");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("-- The", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("with Ada", 0), Some(Highlight::Keyword));
+        assert_eq!(at("Ada.Text_IO", 0), Some(Highlight::Module));
+        assert_eq!(at("package", 0), Some(Highlight::Keyword));
+        assert_eq!(at("Ahci", 0), Some(Highlight::Function));
+        assert_eq!(at("Reset", 0), Some(Highlight::Function));
+        assert_eq!(at("if Port", 0), Some(Highlight::Keyword));
+        assert_eq!(at("raise", 0), Some(Highlight::Keyword));
+        assert_eq!(at("\"busy\"", 0), Some(Highlight::String));
+        assert_eq!(at("10", 0), Some(Highlight::Number));
+        assert_eq!(at("loop", 0), Some(Highlight::Keyword));
+    }
 }

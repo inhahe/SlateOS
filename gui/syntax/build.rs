@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 /// Every grammar in `grammars/`, by directory.
 const GRAMMARS: &[&str] = &[
+    "ada",
     "bash",
     "c",
     "cpp",

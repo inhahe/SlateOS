@@ -143,11 +143,23 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 14;
+const VISIBLE: usize = 15;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 15] = [
+static LANGUAGES: [Language; 16] = [
+    Language {
+        name: "Ada",
+        extensions: &["ads", "adb", "ada"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::ada::generated::language_fn,
+        highlights: grammars::ada::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 0,
+    },
     Language {
         name: "Bash",
         extensions: &["sh", "bash", "ksh", "zsh"],
@@ -171,7 +183,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::bash::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 0,
+        index: 1,
     },
     Language {
         name: "C",
@@ -183,7 +195,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::c::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 1,
+        index: 2,
     },
     Language {
         name: "C++",
@@ -199,7 +211,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::cpp::HIGHLIGHTS,
         injections: grammars::cpp::INJECTIONS,
         locals: "",
-        index: 2,
+        index: 3,
     },
     Language {
         name: "CSS",
@@ -211,7 +223,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::css::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 3,
+        index: 4,
     },
     Language {
         name: "HTML",
@@ -223,7 +235,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::html::HIGHLIGHTS,
         injections: grammars::html::INJECTIONS,
         locals: "",
-        index: 4,
+        index: 5,
     },
     Language {
         name: "JavaScript",
@@ -235,7 +247,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::javascript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::javascript::LOCALS,
-        index: 5,
+        index: 6,
     },
     Language {
         name: "JSON",
@@ -247,7 +259,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 6,
+        index: 7,
     },
     Language {
         name: "Markdown",
@@ -259,7 +271,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 7,
+        index: 8,
     },
     Language {
         name: "Python",
@@ -271,7 +283,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 8,
+        index: 9,
     },
     Language {
         name: "Rust",
@@ -283,7 +295,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 9,
+        index: 10,
     },
     Language {
         name: "TOML",
@@ -296,7 +308,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 10,
+        index: 11,
     },
     Language {
         name: "TSX",
@@ -308,7 +320,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 11,
+        index: 12,
     },
     Language {
         name: "TypeScript",
@@ -320,7 +332,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 12,
+        index: 13,
     },
     Language {
         name: "YAML",
@@ -332,7 +344,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 13,
+        index: 14,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -345,7 +357,7 @@ static LANGUAGES: [Language; 15] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 14,
+        index: 15,
     },
 ];
 
@@ -478,7 +490,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 15] = [const { OnceLock::new() }; 15];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 16] = [const { OnceLock::new() }; 16];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -675,6 +687,7 @@ mod tests {
     #[test]
     fn the_runtime_reads_each_grammar_as_it_was_written() {
         for (language, name, abi, kinds, fields) in [
+            ("Ada", None, 14, 459, 50),
             ("Bash", Some("bash"), 15, 280, 19),
             ("C", Some("c"), 15, 363, 39),
             ("C++", None, 14, 543, 50),
@@ -755,6 +768,8 @@ mod tests {
         assert_eq!(found("Cargo.lock"), Some("TOML"));
         assert_eq!(found("gui/syntax/Cargo.toml"), Some("TOML"));
         assert_eq!(found("stdio.h"), Some("C"));
+        assert_eq!(found("drivers/ahci.adb"), Some("Ada"));
+        assert_eq!(found("AHCI.ADS"), Some("Ada"));
         assert_eq!(found("main.cpp"), Some("C++"));
         assert_eq!(found("vector.HPP"), Some("C++"));
         assert_eq!(found("a.c++"), Some("C++"));

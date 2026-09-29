@@ -7,6 +7,7 @@
 //! a converted state machine nobody edits, and its shape is the generator's.
 //! The hand-ported scanner beside it is held to every lint the crate is.
 
+pub(crate) mod ada;
 pub(crate) mod bash;
 pub(crate) mod c;
 pub(crate) mod cpp;

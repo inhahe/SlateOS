@@ -2033,7 +2033,8 @@ live.
   tree-sitter's own highlighter reads them (§1438, held to upstream's
   highlight tests), a name coloured as its declaration is where the
   grammar says where names are declared (§1440: a parameter wherever it is
-  used). **Grammars:** Bash (every shell script), C, C++, CSS, HTML,
+  used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
+  shell script), C, C++, CSS, HTML,
   JavaScript (JSX included), JSON, Markdown (block and inline), Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   and YAML (every settings file), each passing its authors' test corpus. **Injections** (a language inside another): a Markdown code fence
@@ -2042,7 +2043,8 @@ live.
   template (`` html`...` ``, `` css`...` ``) in the language its tag names,
   an HTML page's scripts and styles, a C++ raw string in the language its
   delimiter names (`R"sql(...)sql"`).
-  **Next:** Ada -- the language of the OS's safety-critical drivers.
+  **Next:** the formats the tree holds most of that no grammar reads yet --
+  Makefiles, Dockerfiles, INI, XML, diffs -- as the editor meets them.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

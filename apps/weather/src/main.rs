@@ -358,7 +358,7 @@ pub enum TimeFormat {
 }
 
 /// Application settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     pub temp_unit: TempUnit,
     pub wind_unit: WindSpeedUnit,
@@ -1168,6 +1168,16 @@ impl WeatherApp {
                 EventResult::Ignored
             }
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // A unit changed in another window, and the desktop says so: this
+            // window follows. Read at startup only, it showed the old unit
+            // until it was opened again.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_units() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -2952,6 +2962,16 @@ impl WeatherApp {
             Some("12h") => self.settings.time_format = TimeFormat::H12,
             _ => {}
         }
+    }
+
+    /// Read the units again after the desktop said `weather.yaml` changed --
+    /// a unit changed in another window, or a hand edit (§1418, §1434). From
+    /// the defaults, as at startup, so a file deleted reads as them. Whether
+    /// anything changed.
+    fn reread_units(&mut self) -> bool {
+        let before = std::mem::take(&mut self.settings);
+        self.load_units(&settingsfile::load(CONFIG_NAME));
+        before != self.settings
     }
 
     /// What is under `(x, y)` in the frame last shown.
@@ -4798,6 +4818,59 @@ mod tests {
             assert_eq!(next.settings.wind_unit, WindSpeedUnit::Ms);
             assert_eq!(next.settings.pressure_unit, PressureUnit::Hpa);
             assert_eq!(next.settings.time_format, TimeFormat::H12);
+        });
+    }
+
+    /// **A unit changed in one window reaches the others**, when the desktop
+    /// says `weather.yaml` changed (§1434): read at startup only, the other
+    /// windows showed the old unit until opened again. Another program's
+    /// announcement is not this one's; a window's own save announced back
+    /// changes nothing; a file deleted reads as the defaults.
+    #[test]
+    fn a_unit_changed_in_one_window_reaches_the_others() {
+        settingsfile::testing::with_scratch_config("wx_units_reread", |dir| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let mut first = WeatherApp::new(900.0, 800.0);
+            let mut second = WeatherApp::new(900.0, 800.0);
+            first.handle_event(&press(Key::U));
+            assert_eq!(first.settings.temp_unit, TempUnit::Fahrenheit);
+
+            assert_eq!(
+                second.handle_event(&announce(b"notes")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                second.settings.temp_unit,
+                TempUnit::Celsius,
+                "another file was read"
+            );
+            assert_eq!(
+                second.handle_event(&announce(b"weather")),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                second.settings.temp_unit,
+                TempUnit::Fahrenheit,
+                "the unit did not reach it"
+            );
+            assert_eq!(
+                first.handle_event(&announce(b"weather")),
+                EventResult::Ignored,
+                "a window's own save, announced back, changed what it shows"
+            );
+
+            std::fs::remove_file(dir.join("slateos").join("weather.yaml"))
+                .expect("delete the file");
+            second.handle_event(&announce(b"weather"));
+            assert_eq!(
+                second.settings,
+                Settings::default(),
+                "a deleted file kept its units"
+            );
         });
     }
 

@@ -1,40 +1,58 @@
-"""glibc 2.39's hand-written single-byte character sets -- iso646.c's 23
-national variants of ISO 646, ISO_11548-1 and ARMSCII-8 -- as the oracle for
-the tables posix/tools/gen_iconv_8bit.py makes of them from their charmaps.
+"""glibc 2.39's single-byte character sets that are not generated from a
+charmap -- iso646.c's 23 national variants of ISO 646, ISO_11548-1 and
+ARMSCII-8, and the 55 modules glibc builds on 8bit-gap.c from table headers
+of their own (IBM's EBCDIC and PC code pages past the generated ones, CP737,
+CP775, ISIRI-3342) -- as the oracle for the tables
+posix/tools/gen_iconv_8bit.py makes of them.
 
     python posix/tools/oracle/iconv_hand_harness.py   # writes posix/src/iconv_hand_oracle.txt
 
 For each set, glibc's converter decodes every byte on its own and encodes
 every code point (U+0000 to U+10FFFF, surrogates aside). The table records
-what decoding gave, one line a set:
+it in up to three lines a set:
 
-    <name> <256 entries>
+    <name> <256 entries>                   each byte's code point in hex, or
+                                           `-` where glibc refused the byte
+    <name> decode-only <byte> ...          the bytes that decode but whose
+                                           code point is written otherwise
+    <name> encode-only <cp>:<byte> ...     the code points no byte decodes to
+                                           that are written, and as what
 
-each entry a byte's code point in hex, or `-` where glibc refused the byte.
-Encoding is not recorded but checked, here, against the one rule iconv.rs
-applies to every 8-bit table: a code point is written as the byte that
-decodes to it, and nothing else is written -- but for the bytes a set's
-`.irreversible` file names, which decode and are never written, and the
-Unicode tag characters (U+E0000-U+E007F), which every glibc converter drops
-without a word. The harness refuses to write a table if glibc's encoder
-answers any code point otherwise, so the table's being there is the claim.
+the last two only where there are any. Together they are the whole of each
+encoder, and the harness refuses to write a table unless they are: every
+code point glibc writes is one byte, the byte that decodes to it unless
+that byte is decode-only, else its encode-only byte -- and nothing else is
+written but the Unicode tag characters (U+E0000-U+E007F), which every glibc
+converter drops without a word. That is the one rule iconv.rs applies to
+every 8-bit table, so the table's being there is the claim that it can.
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parent))
 from _wsl import POSIX_SRC, run, workdir, wsl_path  # noqa: E402
+from gen_iconv_8bit import DEFAULT_GLIBC, module_lists, table_header_modules  # noqa: E402
 
 OUT = POSIX_SRC / "iconv_hand_oracle.txt"
-GLIBC = Path("D:/refsrc/glibc-2.39")
 
 # gconv-modules' canonical names, in its order (as gen_iconv_8bit.py reads
-# them), and each set's decode-only bytes from its .irreversible file.
-SETS = ["BS_4730", "CSA_Z243.4-1985-1", "CSA_Z243.4-1985-2", "DIN_66003", "DS_2089", "ES", "ES2",
-        "GB_1988-80", "IT", "JIS_C6220-1969-RO", "JIS_C6229-1984-B", "JUS_I.B1.002", "KSC5636",
-        "MSZ_7795.3", "NC_NC00-10", "NF_Z_62-010", "NF_Z_62-010_1973", "NS_4551-1", "NS_4551-2",
-        "PT", "PT2", "SEN_850200_B", "SEN_850200_C", "ISO_11548-1", "ARMSCII-8"]
+# them): the hand-written sets whose converters are their charmaps.
+CHARMAP_SETS = [
+    "BS_4730", "CSA_Z243.4-1985-1", "CSA_Z243.4-1985-2", "DIN_66003", "DS_2089", "ES", "ES2",
+    "GB_1988-80", "IT", "JIS_C6220-1969-RO", "JIS_C6229-1984-B", "JUS_I.B1.002", "KSC5636",
+    "MSZ_7795.3", "NC_NC00-10", "NF_Z_62-010", "NF_Z_62-010_1973", "NS_4551-1", "NS_4551-2",
+    "PT", "PT2", "SEN_850200_B", "SEN_850200_C", "ISO_11548-1", "ARMSCII-8"]
+
+
+def header_sets():
+    """The table-header modules' names, by file name, as the generator finds them."""
+    lists = module_lists(DEFAULT_GLIBC / "iconvdata/Makefile")
+    generated = set(lists["gen-8bit-modules"]) | set(lists["gen-8bit-gap-modules"])
+    return [m.upper() for m, *_ in table_header_modules(DEFAULT_GLIBC / "iconvdata", generated)]
+
 
 PROGRAM = r"""
 #include <errno.h>
@@ -86,20 +104,14 @@ int main(int argc, char **argv) {
 """
 
 
-def irreversible(name):
-    p = GLIBC / "iconvdata" / f"{name}.irreversible"
-    if not p.exists():
-        return set()
-    return {int(line.split()[0], 16) for line in p.read_text().splitlines() if line.strip()}
-
-
 def main():
+    sets_wanted = CHARMAP_SETS + header_sets()
     with workdir() as tmp:
         (Path(tmp) / "hand.c").write_text(PROGRAM, encoding="utf-8", newline="\n")
-        r = run(f"cd {wsl_path(tmp)} && gcc -O1 -w -o hand hand.c && ./hand " + " ".join(SETS))
+        r = run(f"cd {wsl_path(tmp)} && gcc -O1 -w -o hand hand.c && ./hand " + " ".join(sets_wanted))
     if r.returncode != 0:
         sys.exit(f"oracle failed:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
-    lines, name, decode = [], None, None
+    name = None
     sets = {}
     for line in r.stdout.splitlines():
         f = line.split()
@@ -110,32 +122,40 @@ def main():
             sets[name]["decode"] = f[1:]
         elif f[0] == "e":
             sets[name]["encode"][int(f[1], 16)] = [int(b, 16) for b in f[2:]]
-    for name in SETS:
+    lines = []
+    tags = set(range(0xE0000, 0xE0080))
+    for name in sets_wanted:
         s = sets[name]
         decode = s["decode"]
         assert len(decode) == 256, name
-        only = irreversible(name)
-        want = {}
-        for b, v in enumerate(decode):
-            if v != "-" and b not in only:
-                cp = int(v, 16)
-                assert cp not in want, (name, hex(cp), "decoded from two reversible bytes")
-                want[cp] = [b]
-        tags = set(range(0xE0000, 0xE0080))
-        got = {cp: bs for cp, bs in s["encode"].items() if not (cp in tags and bs == [])}
-        if got != want:
-            extra = {hex(k): v for k, v in got.items() if want.get(k) != v}
-            missing = [hex(k) for k in want if k not in got]
-            sys.exit(f"{name}: glibc's encoder is not the decoder's reverse: "
-                     f"extra {list(extra.items())[:8]} missing {missing[:8]}")
-        for b in only:
-            assert decode[b] != "-", (name, b)
+        dec = {b: int(v, 16) for b, v in enumerate(decode) if v != "-"}
+        written = {}
+        for cp, bs in s["encode"].items():
+            if cp in tags and bs == []:
+                continue
+            if len(bs) != 1:
+                sys.exit(f"{name}: U+{cp:04X} is written as {bs}, not one byte")
+            if cp > 0xFFFF:
+                sys.exit(f"{name}: U+{cp:04X}, beyond the BMP, is written")
+            written[cp] = bs[0]
+        decode_only = sorted(b for b, cp in dec.items() if written.get(cp) != b)
+        encode_only = sorted((cp, b) for cp, b in written.items() if dec.get(b) != cp)
+        reverse = {cp: b for b, cp in dec.items() if b not in decode_only}
+        for cp, b in encode_only:
+            if cp in reverse:
+                sys.exit(f"{name}: U+{cp:04X} is read from 0x{reverse[cp]:02x} and written 0x{b:02x}")
         lines.append(f"{name} " + " ".join(decode))
-    header = ("# glibc 2.39's hand-written single-byte sets under WSL, every byte decoded\n"
+        if decode_only:
+            lines.append(f"{name} decode-only " + " ".join(f"{b:02x}" for b in decode_only))
+        if encode_only:
+            lines.append(f"{name} encode-only " + " ".join(f"{cp:04x}:{b:02x}" for cp, b in encode_only))
+    header = ("# glibc 2.39's single-byte sets not generated from a charmap, under WSL\n"
               "# (posix/tools/oracle/iconv_hand_harness.py): <name> <each byte's code point,\n"
-              "# or - where glibc refuses it>. Each encoder checked there to be the reverse.\n")
+              "# or - where glibc refuses it>; <name> decode-only <bytes decoded and never\n"
+              "# written>; <name> encode-only <code point:byte written with no byte decoding\n"
+              "# to it>. Every encoder is checked there to be exactly those.\n")
     OUT.write_text(header + "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
-    print(f"{len(lines)} sets -> {OUT}")
+    print(f"{len(sets_wanted)} sets -> {OUT}")
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |
 | `strtod_nan_harness.py` | a table, pasted as `GLIBC_NAN` | `stdlib.rs` |
 | `cp125x_harness.py` | a table, pasted as `GLIBC_CP125X` | `iconv.rs` |
-| `iconv_hand_harness.py` | `posix/src/iconv_hand_oracle.txt` (every byte of the 25 hand-written single-byte sets, each encoder checked to be its decoder turned round) | `iconv.rs`, `include_str!` |
+| `iconv_hand_harness.py` | `posix/src/iconv_hand_oracle.txt` (every byte and every encoder of the 80 single-byte sets not generated from a charmap: the 25 hand-written ones and the 55 with table headers of their own) | `iconv.rs`, `include_str!` |
 | `tcvn_harness.py` (cases: `tcvn_cases.py`) | a table, pasted as `GLIBC_TCVN` | `iconv.rs` |
 | `prefix_harness.py` (cases: `prefix_cases.py`) | a table, pasted as `GLIBC_PREFIX` | `iconv.rs` |
 | `tscii_harness.py` (cases: `tscii_cases.py`) | a table, pasted as `GLIBC_TSCII` | `iconv.rs` |

@@ -41649,6 +41649,15 @@ loading tables at run time should be weighed again.
 **How to reverse.** Storing the reverse half is the generator's to emit and
 `encode_table8`'s to read; dropping sets is a list in the generator.
 
+**Addendum, 2026-09-28.** The same bargain now covers every single-byte set
+glibc has: 221 tables -- the 141, iso646.c's 23 variants, ISO_11548-1 and
+ARMSCII-8, and the 55 glibc builds from table headers of its own (IBM's
+EBCDIC and PC code pages past the generated ones, CP737, CP775,
+ISIRI-3342) -- 110 KiB of byte-to-character tables, and 3.6 KiB more for the
+925 characters those 55's encoders write as another character's byte
+(`encode_only`), which the reverse built at open cannot know. The East
+Asian sets remain the point to weigh loading tables at run time.
+
 ---
 
 ## 1118. Constant modules nothing uses are deleted, not checked and kept

@@ -59089,10 +59089,14 @@ is already waiting, not whether the setter exists.
   T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110 (iconv_prefix.rs, read out of
   glibc's running converters by posix/tools/gen_iconv_prefix.py), and
   TSCII (iconv.rs: glibc's tscii.c, but for three bugs it has where the
-  output runs out, which that section lists); every other name is refused
-  with EINVAL.  Next, by how often programs ask: the rest of
-  iconvdata/Makefile's `modules` that are neither
-  generated nor multibyte; then the East Asian multibyte sets (EUC-JP,
+  output runs out, which that section lists), and the 55 single-byte sets
+  glibc builds from table headers of its own -- IBM's EBCDIC and PC code
+  pages past the generated ones, CP737, CP775, ISIRI-3342 (iconv_8bit.rs,
+  read from iconvdata's headers by gen_iconv_8bit.py and checked against
+  glibc's converters by iconv_hand_harness.py); every other name is
+  refused with EINVAL.  That is every single-byte set glibc has.  Next:
+  the multibyte sets -- IBM's double-byte EBCDIC ones (IBM930 ...) and
+  the East Asian ones (EUC-JP,
   SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
   megabytes -- and whose size in every program that links iconv is its own
   question (design-decisions.md §1117).  A new set is a Charset variant, a

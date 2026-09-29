@@ -61,9 +61,9 @@ MUTATIONS = [
         "                break;\n"
         "            }\n"
         "            if y - self.alarm_scroll + card_h > list.y {\n"
-        "                alarm.draw(f, list.x, y, list.w, self.time_format);\n"
+        "                alarm.draw(&self.palette, f, list.x, y, list.w, self.time_format);\n"
         "            }\n",
-        "            alarm.draw(f, list.x, y, list.w, self.time_format);\n",
+        "            alarm.draw(&self.palette, f, list.x, y, list.w, self.time_format);\n",
         ["nothing_is_painted_entirely_outside_the_clip_in_force"],
     ),
     (

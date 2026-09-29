@@ -114,8 +114,8 @@ MUTATIONS = [
     # -- what is painted -----------------------------------------------------
     (
         "only the body is filled, leaving the rest of the window bare",
-        "        f.push(fill(l.window, BASE, 0.0));",
-        "        f.push(fill(l.body, BASE, 0.0));",
+        "        f.push(fill(l.window, self.palette.base, 0.0));",
+        "        f.push(fill(l.body, self.palette.base, 0.0));",
         ["the_window_is_painted_edge_to_edge_at_every_size"],
     ),
     (

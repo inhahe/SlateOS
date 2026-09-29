@@ -464,7 +464,7 @@ MUTATIONS = [
     ),
     (
         "a failed save is not said",
-        '                self.store_error = Some(format!("Not saved to {}: {err}", path.display()));',
+        '                self.store_error = Some(format!("Not saved to {}: {err}", path.shown()));',
         "                drop(err);",
         [FAILING],
     ),

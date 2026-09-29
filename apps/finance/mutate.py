@@ -353,7 +353,7 @@ MUTATIONS = [
     ),
     (
         "a failed save says nothing",
-        '            Err(err) => Some(format!("Not saved to {}: {err}", path.display())),',
+        '            Err(err) => Some(format!("Not saved to {}: {err}", path.shown())),',
         "            Err(_) => None,",
         ["a_save_that_fails_says_so_and_the_next_one_clears_it"],
     ),

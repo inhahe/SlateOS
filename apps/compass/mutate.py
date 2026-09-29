@@ -282,6 +282,36 @@ MUTATIONS = [
         "                let _ = here;",
         ["the_set_position_button_sets_it"],
     ),
+    (
+        'AltGr+D is taken for Ctrl+D',
+        '        if event.key == Key::D && textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.key == Key::D && event.modifiers.ctrl {',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the compass',
+        '        // Alt+M dropped a waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n',
+        '        // Alt+M dropped a waypoint.\n',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the waypoint list',
+        "        // Taken plain, as the compass's: Alt+Delete removed a waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n",
+        "        // Taken plain, as the compass's: Alt+Delete removed a waypoint.\n",
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        "a command's letter is typed into a coordinate",
+        '        if textline::types_into_field(event) {',
+        '        if event.types_text() {',
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
+    (
+        'a chord works the coordinate form',
+        "        // The form's own keys are taken plain: Alt+Enter added the waypoint.\n        if !textline::is_plain(event.modifiers) {\n            return;\n        }\n",
+        "        // The form's own keys are taken plain: Alt+Enter added the waypoint.\n",
+        ['a_key_held_with_a_modifier_is_not_the_compasss'],
+    ),
 ]
 
 if __name__ == "__main__":

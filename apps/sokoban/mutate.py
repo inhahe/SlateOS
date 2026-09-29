@@ -14,6 +14,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_z_and_ctrl_y_take_back_and_make_again"
+HELD = "a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_games"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # -- Layout -------------------------------------------------------
@@ -311,14 +315,14 @@ MUTATIONS = [
     ),
     (
         "a push is not counted as a push",
-        "            self.pushes = self.pushes.saturating_add(1);",
-        "",
+        "            self.pushes = self.pushes.saturating_add(1);\n        }\n        self.history.record(",
+        "        }\n        self.history.record(",
         ["a_crate_with_floor_behind_it_is_pushed_and_counts_a_push"],
     ),
     (
         "a move is not counted as a move",
-        "        self.moves = self.moves.saturating_add(1);",
-        "",
+        "        self.player = dest;\n        self.moves = self.moves.saturating_add(1);",
+        "        self.player = dest;",
         ["a_step_onto_floor_moves_the_player_and_counts_a_move"],
     ),
     (
@@ -357,10 +361,10 @@ MUTATIONS = [
     # -- Undo ---------------------------------------------------------
     (
         "undo on an empty stack claims to have taken a move back",
-        "        let Some(entry) = self.undo_stack.pop_back() else {\n"
+        "        let Some(entry) = self.history.undo() else {\n"
         "            return false;\n"
         "        };",
-        "        let Some(entry) = self.undo_stack.pop_back() else {\n"
+        "        let Some(entry) = self.history.undo() else {\n"
         "            return true;\n"
         "        };",
         ["undo_on_an_untouched_level_does_nothing_and_says_so"],
@@ -391,16 +395,14 @@ MUTATIONS = [
     ),
     (
         "the move is never recorded, so nothing can be undone",
-        "        self.undo_stack.push_back(UndoEntry {\n            player: self.player,\n            push,\n        });",
+        "        self.history.record(UndoEntry {\n            player: self.player,\n            dest,\n            push,\n        });",
         "",
         ["undo_takes_back_a_step"],
     ),
     (
         "the undo stack grows without a cap",
-        "        if self.undo_stack.len() > MAX_UNDO {\n"
-        "            self.undo_stack.pop_front();\n"
-        "        }",
-        "",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 100) {",
         ["the_undo_stack_stops_growing_at_its_cap"],
     ),
     # -- Winning ------------------------------------------------------
@@ -955,7 +957,100 @@ MUTATIONS = [
         "            self.button(f, r, name, size, false, true, self.colours.mantle);",
         ["undo_is_switched_off_with_nothing_to_take_back"],
     ),
+    (
+        "the cap is ten moves more",
+        "const MAX_UNDO: usize = 1000;",
+        "const MAX_UNDO: usize = 1010;",
+        ["the_undo_stack_stops_growing_at_its_cap"],
+    ),
+    # -- The history: a tree, walked with Alt+Z (C-Q24) -----------------
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let Some(entry) = self.history.redo() else {",
+        "        let Some(entry) = self.history.undo() else {",
+        [CTRL_Y, TREE],
+    ),
+    (
+        "alt+z only undoes",
+        "        let steps = self.history.earlier();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let steps = self.history.later();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(entry) => self.take_back(entry),",
+        "                Travel::Undo(entry) => self.make_again(entry),",
+        [TREE],
+    ),
+    (
+        "a move made again leaves the keeper where the undo put them",
+        "        self.player = entry.dest;",
+        "        self.player = entry.player;",
+        [TREE, CTRL_Y],
+    ),
+    (
+        "a push made again leaves its crate",
+        "            self.move_box(from, to);\n            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        "            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        [CTRL_Y],
+    ),
+    (
+        "a push made again is not counted",
+        "            self.move_box(from, to);\n            self.pushes = self.pushes.saturating_add(1);\n        }\n    }",
+        "            self.move_box(from, to);\n        }\n    }",
+        [CTRL_Y],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD, "a_warehouse_shortcut_with_a_modifier_held_is_handed_on"],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
+    ),
+    (
+        "the header says undo can go when it cannot",
+        '                    if self.history.can_undo() { "yes" } else { "no" }',
+        '                    if true { "yes" } else { "no" }',
+        ["the_header_says_which_level_and_how_it_is_going"],
+    ),
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "sokoban", timeout=120))
+    sys.exit(sweep(SRC, MUTATIONS, "sokoban", timeout=120, only=sys.argv[1:] or None))

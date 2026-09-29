@@ -146,11 +146,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 23;
+const VISIBLE: usize = 24;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 26] = [
+static LANGUAGES: [Language; 27] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -356,6 +356,18 @@ static LANGUAGES: [Language; 26] = [
         index: 13,
     },
     Language {
+        name: "Lua",
+        extensions: &["lua"],
+        file_names: &[],
+        interpreters: &["lua", "luajit"],
+        aliases: &[],
+        grammar: grammars::lua::generated::language_fn,
+        highlights: grammars::lua::HIGHLIGHTS,
+        injections: grammars::lua::INJECTIONS,
+        locals: grammars::lua::LOCALS,
+        index: 14,
+    },
+    Language {
         name: "Make",
         extensions: &["mk", "mak", "make"],
         file_names: &["Makefile", "makefile", "GNUmakefile", "MAKEFILE"],
@@ -365,7 +377,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::make::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 14,
+        index: 15,
     },
     Language {
         name: "Markdown",
@@ -377,7 +389,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 15,
+        index: 16,
     },
     Language {
         name: "Python",
@@ -389,7 +401,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 16,
+        index: 17,
     },
     Language {
         name: "Rust",
@@ -401,7 +413,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 17,
+        index: 18,
     },
     Language {
         name: "TOML",
@@ -414,7 +426,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 18,
+        index: 19,
     },
     Language {
         name: "TSX",
@@ -426,7 +438,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 19,
+        index: 20,
     },
     Language {
         name: "TypeScript",
@@ -438,7 +450,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 20,
+        index: 21,
     },
     Language {
         name: "XML",
@@ -454,7 +466,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::xml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 21,
+        index: 22,
     },
     Language {
         name: "YAML",
@@ -466,7 +478,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 22,
+        index: 23,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -479,7 +491,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 23,
+        index: 24,
     },
     // Hidden: injected by JavaScript and TypeScript into their comments.
     Language {
@@ -492,7 +504,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::jsdoc::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 24,
+        index: 25,
     },
     // Hidden: injected by JavaScript and TypeScript into their regular
     // expressions.
@@ -506,7 +518,7 @@ static LANGUAGES: [Language; 26] = [
         highlights: grammars::regex::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 25,
+        index: 26,
     },
 ];
 
@@ -707,7 +719,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 26] = [const { OnceLock::new() }; 26];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 27] = [const { OnceLock::new() }; 27];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -1016,6 +1028,7 @@ mod tests {
         assert_eq!(found("app.csproj"), Some("XML"));
         assert_eq!(found("xhtml1-strict.dtd"), Some("DTD"));
         assert_eq!(found("Dockerfile"), Some("Dockerfile"));
+        assert_eq!(found("init.lua"), Some("Lua"));
         assert_eq!(found("images/base/Containerfile"), Some("Dockerfile"));
         assert_eq!(found("Dockerfile.dev"), Some("Dockerfile"));
         assert_eq!(found("web.Dockerfile"), Some("Dockerfile"));

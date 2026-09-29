@@ -112,6 +112,12 @@ tree-sitter-json:
   texts:
     - tree-sitter-json-LICENSE
 
+tree-sitter-lua:
+  version: 0.5.0
+  licence: MIT
+  texts:
+    - tree-sitter-lua-LICENSE
+
 tree-sitter-make:
   version: 1.1.1
   licence: MIT

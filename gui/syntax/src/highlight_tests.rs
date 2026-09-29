@@ -309,6 +309,12 @@ fn html_is_coloured_as_its_tests_say() {
     check("HTML", "html", 38, &[]);
 }
 
+/// **Lua is coloured as its grammar's highlight tests say.**
+#[test]
+fn lua_is_coloured_as_its_tests_say() {
+    check("Lua", "lua", 29, &[]);
+}
+
 /// **XML is coloured as its grammar's highlight tests say.**
 #[test]
 fn xml_is_coloured_as_its_tests_say() {

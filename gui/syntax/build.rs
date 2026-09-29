@@ -28,6 +28,7 @@ const GRAMMARS: &[&str] = &[
     "javascript",
     "jsdoc",
     "json",
+    "lua",
     "make",
     "markdown",
     "markdown_inline",

@@ -407,6 +407,13 @@ fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
 }
 
+/// **The Lua grammar -- tables, lexers and its ported long-bracket
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn lua_passes_its_corpus() {
+    check("Lua", "lua", 42, &[]);
+}
+
 /// **The Dockerfile grammar -- tables, lexers and its ported heredoc
 /// scanner -- parses its whole corpus as upstream's does.**
 #[test]

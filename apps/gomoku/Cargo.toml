@@ -11,6 +11,8 @@ guitk = { path = "../../gui/toolkit" }
 # the opening board, dropped it and exited, so no stone ever reached a screen
 # and no click ever arrived at the game that reads clicks.
 oswindow = { path = "../../gui/window" }
+# The undo history: the toolkit's tree, kept of whole games (C-Q24).
+statehistory = { path = "../statehistory" }
 
 [dev-dependencies]
 # `palette_check`: the window is drawn from the palette.

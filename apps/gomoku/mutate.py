@@ -15,6 +15,12 @@ in the old file ever built an `Event`, so `handle_key` never having read the
 `pressed` field -- which made every arrow step two intersections, leaving every
 other row and column unreachable -- was invisible to all 117 of them.
 
+The undo is a history of turns now (the operator's answer to C-Q24, §1416),
+whole positions through `statehistory`: its rows are the lines that put each
+piece of a position back, the one place a turn begins, and the keys.  The
+undo it replaced worked each piece out by hand -- which colour to lift first,
+which score a win or a draw took back -- and its rows went with it.
+
 Usage:  python -u apps/gomoku/mutate.py [substring ...]
 """
 
@@ -26,6 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
 from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
+
+TREE = "a_turn_after_an_undo_keeps_the_undone_turn_reachable_with_alt_z"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_play_a_turn_again_and_a_win_scores_again"
+HELD = "a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_boards"
+MID = "a_turn_undone_mid_thought_is_redone_to_whites_move"
 
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
@@ -309,8 +320,8 @@ MUTATIONS = [
     ),
     (
         "a new game clears the scores as well as the board",
-        "        self.last_move = None;\n    }",
-        "        self.last_move = None;\n        self.scores = (0, 0, 0);\n    }",
+        "        self.last_move = None;\n        self.history.clear();\n    }",
+        "        self.last_move = None;\n        self.history.clear();\n        self.scores = (0, 0, 0);\n    }",
         [
             "a_new_game_clears_the_board_and_keeps_the_scores",
             "the_buttons_answer_the_pointer_after_the_game_is_over",
@@ -343,53 +354,140 @@ MUTATIONS = [
     ),
     (
         "White answers inside Black's move again, as it used to",
-        "        self.place_stone(row, col);\n        true",
-        "        self.place_stone(row, col);\n        self.think();\n        true",
+        "        let before = self.snapshot();\n        self.place_stone(row, col);\n",
+        "        let before = self.snapshot();\n        self.place_stone(row, col);\n        self.think();\n",
         ["blacks_move_leaves_white_thinking_rather_than_answered"],
     ),
     # ── Undo ──────────────────────────────────────────────────────────────
     (
         "undo takes back White's reply and leaves Black's move",
-        "        self.take_back(Cell::White);\n        self.take_back(Cell::Black);",
-        "        self.take_back(Cell::White);",
+        "        self.cursor_col = c as i32;\n        self.place_stone(r, c);",
+        "        self.cursor_col = c as i32;\n        let before = self.snapshot();\n        self.place_stone(r, c);\n        self.history.begin(before);",
         ["undo_takes_back_the_pair_not_just_the_reply"],
     ),
     (
-        "take_back lifts whatever stone is on top",
-        "        if self.move_history.last().map(|m| m.stone) != Some(stone) {\n"
-        "            return;\n"
-        "        }\n",
-        "",
-        ["undoing_blacks_win_does_not_also_take_back_whites_last_reply"],
+        "the turn's position is taken after its stone",
+        "        let before = self.snapshot();\n        self.place_stone(row, col);",
+        "        self.place_stone(row, col);\n        let before = self.snapshot();",
+        ["undo_takes_back_the_pair_not_just_the_reply"],
     ),
     (
         "undo keeps the point the finished game awarded",
-        "            match self.winner {\n"
-        "                Cell::Black => self.scores.0 = self.scores.0.saturating_sub(1),\n"
-        "                Cell::White => self.scores.1 = self.scores.1.saturating_sub(1),\n"
-        "                Cell::Empty => self.scores.2 = self.scores.2.saturating_sub(1),\n"
-        "            }\n",
+        "        self.scores = s.scores;\n",
         "",
-        ["undoing_a_win_takes_back_the_point_it_scored"],
-    ),
-    (
-        "undoing a draw takes the point off Black instead",
-        "                Cell::Empty => self.scores.2 = self.scores.2.saturating_sub(1),",
-        "                Cell::Empty => self.scores.0 = self.scores.0.saturating_sub(1),",
-        ["undoing_a_draw_takes_back_the_point_it_scored"],
+        [
+            "undoing_a_win_takes_back_the_point_it_scored",
+            "undoing_a_draw_takes_back_the_point_it_scored",
+        ],
     ),
     (
         "undo leaves the game in the phase it ended in",
-        "            self.phase = GamePhase::Playing;\n            self.win_line = None;",
-        "            self.win_line = None;",
+        "        self.phase = s.phase;\n",
+        "",
         ["undoing_a_win_takes_back_the_point_it_scored"],
     ),
     (
         "undo does not hand the turn back to Black",
-        "        self.current_turn = Cell::Black;\n"
-        "        self.last_move = self.move_history.last().map(|m| (m.row, m.col));",
-        "        self.last_move = self.move_history.last().map(|m| (m.row, m.col));",
+        "        self.current_turn = s.current_turn;\n",
+        "",
         ["undo_while_white_is_thinking_gives_the_move_back"],
+    ),
+    (
+        "undo leaves the stones on the board",
+        "        self.board = s.board;\n",
+        "",
+        ["undo_takes_back_the_pair_not_just_the_reply"],
+    ),
+    (
+        "undo leaves the move list as it was",
+        "        self.move_history = s.move_history;\n",
+        "",
+        ["undoing_blacks_win_does_not_also_take_back_whites_last_reply"],
+    ),
+    (
+        "undo leaves the move count as it was",
+        "        self.move_count = s.move_count;\n",
+        "",
+        ["undo_takes_back_the_pair_not_just_the_reply"],
+    ),
+    (
+        "undo leaves the winning five marked",
+        "        self.win_line = s.win_line;\n",
+        "",
+        ["undoing_a_win_takes_back_the_point_it_scored"],
+    ),
+    (
+        "undo leaves the winner named",
+        "        self.winner = s.winner;\n",
+        "",
+        ["undoing_a_win_takes_back_the_point_it_scored"],
+    ),
+    (
+        "undo leaves the last stone marked",
+        "        self.last_move = s.last_move;\n",
+        "",
+        ["undo_takes_back_the_pair_not_just_the_reply"],
+    ),
+    (
+        "a new game keeps the old one's history",
+        "        self.last_move = None;\n        self.history.clear();\n    }",
+        "        self.last_move = None;\n    }",
+        ["a_new_game_clears_the_board_and_keeps_the_scores"],
+    ),
+    # -- the history: a tree of turns, walked with Alt+Z (C-Q24) --------------
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let then = self.history.redo(now);",
+        "        let then = self.history.undo(now);",
+        [CTRL_Y, MID],
+    ),
+    (
+        "alt+z only undoes",
+        "        let then = self.history.earlier(now);",
+        "        let then = self.history.undo(now);",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let then = self.history.later(now);",
+        "        let then = self.history.redo(now);",
+        [TREE],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
     ),
     # ── The keyboard ──────────────────────────────────────────────────────
     (
@@ -682,4 +780,4 @@ MUTATIONS = [
 
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "gomoku", timeout=300))
+    sys.exit(sweep(SRC, MUTATIONS, "gomoku", timeout=300, only=sys.argv[1:] or None))

@@ -776,6 +776,50 @@ MUTATIONS = [
         "        let label_ink = c.chrome.dim;",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "F1 does not raise the list",
+        "        if help::raises(event) {\n            self.show_help = true;",
+        "        if false {\n            self.show_help = true;",
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "the list is not drawn",
+        "        if self.show_help {\n            guitk::shortcut::render_card(",
+        "        if false {\n            guitk::shortcut::render_card(",
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        "nothing puts the list away",
+        "            if help::closes(event) {\n                self.show_help = false;",
+        "            if false {\n                self.show_help = false;",
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "a key under the list reaches the board",
+        "                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n"
+        "        // The history's keys",
+        "                self.show_help = false;\n            }\n        }\n"
+        "        // The history's keys",
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "a click under the list plays",
+        "        if self.show_help {\n            if let MouseEventKind::Press(_) = event.kind {",
+        "        if false {\n            if let MouseEventKind::Press(_) = event.kind {",
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "a click leaves the list up",
+        "            if let MouseEventKind::Press(_) = event.kind {\n                self.show_help = false;",
+        "            if let MouseEventKind::Press(_) = event.kind {\n",
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "the status line does not say how to raise the list",
+        "\"Arrows move, Enter places, Z undoes, F1 lists the rest\",",
+        "\"Arrows move, Enter places, Z undoes, N starts again\",",
+        ["the_list_of_keys_reaches_the_window"],
+    ),
 ]
 
 

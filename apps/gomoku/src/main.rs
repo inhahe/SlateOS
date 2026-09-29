@@ -16,7 +16,7 @@
 //! synchronously, as it was, "White is thinking" was a string no frame ever
 //! showed, because the search ran to completion before the handler returned.
 
-use gamechrome::{Chrome, HistoryKey};
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -130,6 +130,27 @@ const PANEL_LINES: [(&str, &str); 5] = [
 
 const NEW_GAME_LABEL: &str = "New game (N)";
 const UNDO_LABEL: &str = "Undo (Z)";
+
+/// The keys this game answers, on the list F1 raises.
+///
+/// The game had none: the status line named four keys, and the history's
+/// -- Ctrl+Y and Alt+Z, which the operator's answer to C-Q24 added
+/// (`design-decisions.md` §1416) -- could be found only by pressing them.
+/// **Each row is a key this game answers**, checked by
+/// `every_advertised_key_does_something`, which reads each label with
+/// `guitk::shortcut` and presses every key it names.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move the cursor"),
+    ("Enter / Space", "Place a stone"),
+    ("Z / Ctrl+Z", "Take back your stone and the reply"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Play them again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
+    ("N", "Start a new game"),
+    ("F1 / ?", "This list"),
+];
 
 /// The panel's buttons, drawn centred at [`Layout::small`].
 const PANEL_BUTTONS: [&str; 2] = [NEW_GAME_LABEL, UNDO_LABEL];
@@ -839,6 +860,9 @@ struct GomokuApp {
     /// the defaults; the framework calls `App::theme_changed` before the
     /// first frame.
     palette: Palette,
+    /// Whether the list of keys is up. While it is, it is the window's:
+    /// a stone placed under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl GomokuApp {
@@ -860,6 +884,7 @@ impl GomokuApp {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
             palette: Palette::for_mode(false),
+            show_help: false,
         }
     }
 
@@ -1077,6 +1102,14 @@ impl GomokuApp {
         if !event.pressed {
             return EventResult::Ignored;
         }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the board under it.
+        if self.show_help {
+            if help::closes(event) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
         // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
         if let Some(key) = HistoryKey::of(event) {
@@ -1100,6 +1133,10 @@ impl GomokuApp {
         let m = event.modifiers;
         if m.ctrl || m.alt || m.super_key {
             return EventResult::Ignored;
+        }
+        if help::raises(event) {
+            self.show_help = true;
+            return EventResult::Consumed;
         }
         match event {
             // Arrow key movement
@@ -1155,6 +1192,15 @@ impl GomokuApp {
     /// game, which made New game and Undo keyboard-only -- so the pointer
     /// could not start a second game after the first one ended.
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and plays nothing: the
+        // point under the list is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = event.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         let MouseEventKind::Press(MouseButton::Left) = event.kind else {
             return EventResult::Ignored;
         };
@@ -1209,6 +1255,17 @@ impl GomokuApp {
         self.draw_board(f, l, &c);
         self.draw_panel(f, l, &c);
         self.draw_status(f, l, &c);
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
     }
 
     /// The title, and beside it whose turn it is.
@@ -1577,7 +1634,7 @@ impl GomokuApp {
             GamePhase::Draw => ("A draw. N for a new game", c.chrome.even),
             GamePhase::Thinking => ("White is thinking...", c.chrome.title),
             GamePhase::Playing => (
-                "Arrows move, Enter places, Z undoes, N starts again",
+                "Arrows move, Enter places, Z undoes, F1 lists the rest",
                 c.chrome.dim,
             ),
         };
@@ -2946,6 +3003,110 @@ mod tests {
             "a held key took a turn back or dealt a game"
         );
         assert_eq!(app.cursor_row, row, "a held key moved the cursor");
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// The label is read by `guitk::shortcut` rather than matched against a
+    /// table beside it here -- a third copy of the same fact drifts from both
+    /// the list and the handler. The property is "some game answers this
+    /// key": Ctrl+Y has nothing to play again until a turn is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = help_states()
+                    .iter_mut()
+                    .any(|a| a.handle_key(&stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and no game answers {:?}",
+                    stroke.key
+                );
+            }
+        }
+    }
+
+    /// Games chosen so that between them every advertised key has work.
+    fn help_states() -> Vec<GomokuApp> {
+        // A fresh game, the cursor in the middle: the arrows, Enter, N, F1.
+        let plain = GomokuApp::new();
+        // A turn played, so Z, Ctrl+Z and Alt+Z have one to take back.
+        let mut played = GomokuApp::new();
+        play_moves(&mut played, &[(7, 7)]);
+        // ...and taken back, so Ctrl+Y and Alt+Shift+Z have one to play.
+        let mut undone = GomokuApp::new();
+        play_moves(&mut undone, &[(7, 7)]);
+        undone.handle_key(&key_of(Key::Z));
+        vec![plain, played, undone]
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away. `?` raises it as F1 does -- from the slash key
+    /// with Shift, or wherever a layout puts it.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut app = GomokuApp::new();
+        let frame = |a: &GomokuApp| a.frame(a.width, a.height);
+        assert!(!says(&frame(&app), help::CLOSES), "up before anybody asked");
+        // And the status line says how to raise it: a list nobody can find
+        // is no better than none.
+        assert!(says(&frame(&app), "F1"), "nothing on the window says F1");
+        assert_eq!(app.handle_key(&key_of(Key::F1)), EventResult::Consumed);
+        let shown = frame(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(says(&shown, keys), "{keys:?} never reached the window");
+            assert!(says(&shown, what), "{what:?} never reached the window");
+        }
+        app.handle_key(&key_of(Key::Escape));
+        assert!(!says(&frame(&app), help::CLOSES), "Escape did not close it");
+        let german = KeyEvent {
+            key: Key::Minus,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::shift(),
+            text: "?".to_owned(),
+        };
+        for stroke in [
+            probe::press_with(Key::Slash, guitk::event::Modifiers::shift()),
+            german,
+        ] {
+            app.handle_key(&stroke);
+            assert!(app.show_help, "{stroke:?} did not raise the list");
+            app.handle_key(&stroke);
+            assert!(!app.show_help, "{stroke:?} did not put it away");
+        }
+    }
+
+    /// **While the list of keys is up, the board takes nothing.** A stone
+    /// placed under the card would be one the player cannot see; a click
+    /// puts the card away and places nothing, and Alt+F1 is not F1.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut app = GomokuApp::new();
+        let point = probe::rect_of(&app, Target::Point(7, 7)).expect("the middle point");
+        app.handle_key(&key_of(Key::F1));
+        let cursor = (app.cursor_row, app.cursor_col);
+        for key in [Key::Left, Key::Space, Key::N, Key::Z] {
+            assert_eq!(app.handle_key(&key_of(key)), EventResult::Consumed);
+            assert!(app.show_help, "{key:?} put the list away");
+        }
+        app.handle_key(&probe::press_with(Key::F1, guitk::event::Modifiers::alt()));
+        assert!(app.show_help, "Alt+F1 put the list away");
+        assert_eq!((app.cursor_row, app.cursor_col), cursor, "the cursor moved");
+        assert_eq!(app.move_count, 0, "a stone went down under the list");
+        // A click on a point: the list goes, and no stone goes down.
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: point.x + point.w / 2.0,
+            y: point.y + point.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(!app.show_help, "a click did not put the list away");
+        assert_eq!(app.move_count, 0, "the click that closed it placed a stone");
+        // Enter puts it away too.
+        app.handle_key(&key_of(Key::F1));
+        app.handle_key(&key_of(Key::Enter));
+        assert!(!app.show_help, "Enter did not put the list away");
+        assert_eq!(app.move_count, 0, "Enter placed a stone as it closed");
     }
 
     /// **A turn taken back while White was thinking is redone to White's

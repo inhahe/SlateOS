@@ -7699,9 +7699,16 @@ fn the_toasts_surface_is_exactly_the_stack() {
     for _ in 0..40 {
         frame(&mut session, 16);
     }
-    let grown = session.shell_mut().toast_extent().expect("toasts are showing");
+    let grown = session
+        .shell_mut()
+        .toast_extent()
+        .expect("toasts are showing");
     assert!(grown.h > extent.h, "the stack did not grow");
-    assert_eq!(session.toasts_at, Some(grown), "the surface stayed where it was");
+    assert_eq!(
+        session.toasts_at,
+        Some(grown),
+        "the surface stayed where it was"
+    );
     assert_eq!(session.toasts.origin(), (grown.x.round(), grown.y.round()));
 }
 

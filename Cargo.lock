@@ -562,6 +562,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "statehistory",
 ]
 
 [[package]]

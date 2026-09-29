@@ -121,7 +121,7 @@
 //!     failed. The test now asks `ai_best_move` what it would choose, on a
 //!     clone of the board, before letting `ai_turn` play at all.
 
-use gamechrome::{Chrome, Ink};
+use gamechrome::{Chrome, HistoryKey, Ink};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -132,6 +132,7 @@ use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
+use statehistory::StateHistory;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -719,6 +720,12 @@ pub enum Intent {
     /// Play the other colour, and start again.
     SwapSides,
     Undo,
+    /// Play the last turn taken back again: Ctrl+Y or Ctrl+Shift+Z.
+    Redo,
+    /// The position before this one, on any branch: Alt+Z.
+    Earlier,
+    /// The position after this one: Alt+Shift+Z.
+    Later,
     ToggleHelp,
     CloseHelp,
 }
@@ -1067,7 +1074,7 @@ fn button(
 
 const HELP_TITLE: &str = "Connect Four";
 
-const HELP_ROWS: [(&str, &str); 7] = [
+const HELP_ROWS: [(&str, &str); 9] = [
     // `A` and `D` are bound beside the arrows -- `Key::Left | Key::A` --
     // and the sheet named only the arrows. Slashes rather than "or A / D":
     // the label parser splits on `/` and `,`, so a row reading
@@ -1076,6 +1083,11 @@ const HELP_ROWS: [(&str, &str); 7] = [
     ("Enter / Space", "drop a piece there"),
     ("1 - 7", "drop straight into that column"),
     ("U / Ctrl+Z", "take back your last move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "play it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "the position before / after, any branch",
+    ),
     ("N", "start a new game"),
     ("S", "play the other colour, and start again"),
     ("H", "show or hide this sheet"),
@@ -1092,21 +1104,31 @@ const HELP_ROWS: [(&str, &str); 7] = [
 /// score and left the *status* alone, so taking back the winning move left
 /// "You win!" over a board with no win on it.
 ///
-/// The status and the winning line are deliberately *not* among the fields.
-/// A snapshot is only ever taken in `drop_at`, past its refusal to move on a
-/// game that is over, so the position recorded is always one still in play:
-/// storing those two would be storing a constant, and `restore` sets them back
-/// to that constant instead. See `restore`.
+/// The status and the winning line are deliberately *not* among the fields:
+/// both are facts about the board, and `restore` reads them off it. They
+/// were set back to "in play" when the only way back was undo, which only
+/// ever went to a position before a move; a redo or a journey through the
+/// history arrives at the position after one, which may be a won game.
+///
+/// The move list is kept whole, not as its length: a length can be cut back
+/// to, and a redo goes forward.
 #[derive(Debug, Clone)]
 struct Snapshot {
     board: Board,
     current_player: Cell,
-    /// How long `move_history` was, which is what it is truncated back to.
-    moves: usize,
+    move_history: Vec<(usize, Cell)>,
     human_wins: u32,
     ai_wins: u32,
     draws: u32,
 }
+
+/// How many turns the history keeps. A game is over in at most
+/// [`CELL_COUNT`] drops; the history keeps branches too, each a game taken
+/// back and played another way.
+const HISTORY_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(1_000) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 pub struct Connect4 {
     board: Board,
@@ -1124,12 +1146,12 @@ pub struct Connect4 {
     draws: u32,
     /// Every move played this game, as `(column, player)`.
     move_history: Vec<(usize, Cell)>,
-    /// The position before each drop, oldest first.
-    ///
-    /// Uncapped, and it does not need a cap: a game is over after at most
-    /// `CELL_COUNT` drops and a new game clears it, so the deepest this can
-    /// ever go is 42 boards.
-    history: Vec<Snapshot>,
+    /// Every position the player has had the move in this game, as a tree
+    /// (C-Q24, `design-decisions.md` §1416): each step is one turn -- the
+    /// player's drop and the reply to it -- so undo, redo and the journeys
+    /// all land where it is the player's move, and a turn played after an
+    /// undo keeps the turns undone as a branch, reached with Alt+Z.
+    history: StateHistory<Snapshot>,
     show_help: bool,
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
@@ -1156,7 +1178,7 @@ impl Connect4 {
             ai_wins: 0,
             draws: 0,
             move_history: Vec::new(),
-            history: Vec::new(),
+            history: StateHistory::new(HISTORY_LIMIT),
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
@@ -1207,36 +1229,35 @@ impl Connect4 {
     }
 
     pub fn can_undo(&self) -> bool {
-        !self.history.is_empty()
+        self.history.can_undo()
     }
 
-    /// The state to come back to if the move about to be played is taken back.
+    /// The game as it stands, for the history.
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             board: self.board.clone(),
             current_player: self.current_player,
-            moves: self.move_history.len(),
+            move_history: self.move_history.clone(),
             human_wins: self.human_wins,
             ai_wins: self.ai_wins,
             draws: self.draws,
         }
     }
 
-    /// Puts a snapshot back, and puts the game back *in play*.
+    /// Puts a snapshot back, with the status and the winning line read off
+    /// its board.
     ///
-    /// The status is set rather than restored: every snapshot is taken of a
-    /// live game (see `Snapshot`), so the position being returned to is one
-    /// still being played by construction. This is the line that takes the
-    /// "You win!" off the board when the winning move is taken back — and
-    /// while the status travelled in the snapshot it was a field that could
-    /// only ever hold `Playing`, so nothing could tell a restore that read it
-    /// from one that ignored it.
+    /// Read, not set: undo only ever went back to a position still in play,
+    /// and this set "in play" -- the line that takes "You win!" off the board
+    /// when the winning move is taken back. A redo of that move arrives at the
+    /// won board, and has to put "You win!" back.
     fn restore(&mut self, s: Snapshot) {
-        self.move_history.truncate(s.moves);
+        self.move_history = s.move_history;
         self.board = s.board;
         self.current_player = s.current_player;
-        self.status = GameStatus::Playing;
-        self.win_line = None;
+        let (status, line) = self.board.outcome();
+        self.status = status;
+        self.win_line = line;
         self.human_wins = s.human_wins;
         self.ai_wins = s.ai_wins;
         self.draws = s.draws;
@@ -1249,14 +1270,21 @@ impl Connect4 {
             return false;
         }
         let player = self.current_player;
-        let before = self.snapshot();
+        // A turn is the player's drop and the reply to it, and the history
+        // keeps one step per turn -- so undo, redo and the journeys all land
+        // where it is the player's move, as undo always did. The reply is
+        // part of the step its turn began, which closes when the next turn
+        // begins or the history is walked.
+        let before = (player == self.human_player).then(|| self.snapshot());
         // `drop_piece` states the "is there room in this column" bound itself
         // and reports it; a `can_drop` guard here would be the same bound
         // written a second time, one statement away from the read it guards.
         if self.board.drop_piece(col, player).is_none() {
             return false;
         }
-        self.history.push(before);
+        if let Some(before) = before {
+            self.history.begin(before);
+        }
         self.move_history.push((col, player));
 
         let (status, line) = self.board.outcome();
@@ -1293,23 +1321,50 @@ impl Connect4 {
         Some(col)
     }
 
-    /// Takes back moves until it is the player's turn on a playable board.
-    ///
-    /// That is one drop when the AI has not replied yet and two when it has,
-    /// and the loop says so rather than the count: a rule written as "pop two"
-    /// is wrong on the first move of the game and wrong again the moment
-    /// anything else can move.
+    /// Takes back the last turn, back to the player's move on a playable
+    /// board: one drop when the AI has not replied yet and two when it has.
+    /// A turn is one step of the history (see `drop_at`), so neither count is
+    /// written down: a rule written as "pop two" is wrong on the first move
+    /// of the game and wrong again the moment anything else can move.
     pub fn undo(&mut self) -> bool {
-        if self.history.is_empty() {
-            return false;
-        }
-        while let Some(s) = self.history.pop() {
-            self.restore(s);
-            if self.status == GameStatus::Playing && self.current_player == self.human_player {
-                break;
+        let now = self.snapshot();
+        let then = self.history.undo(now);
+        self.put_back(then)
+    }
+
+    /// Plays the last turn taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z -- the reply included, and a win with its
+    /// point.
+    pub fn redo(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.redo(now);
+        self.put_back(then)
+    }
+
+    /// The position the player had the move in just before this one, on
+    /// whichever branch -- Alt+Z.
+    pub fn earlier(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.earlier(now);
+        self.put_back(then)
+    }
+
+    /// The position reached just after this one -- Alt+Shift+Z.
+    pub fn later(&mut self) -> bool {
+        let now = self.snapshot();
+        let then = self.history.later(now);
+        self.put_back(then)
+    }
+
+    /// Put the game the history handed back in place, if it handed one.
+    fn put_back(&mut self, then: Option<Snapshot>) -> bool {
+        match then {
+            Some(s) => {
+                self.restore(s);
+                true
             }
+            None => false,
         }
-        true
     }
 
     fn drop_for_human(&mut self, col: usize) -> EventResult {
@@ -1380,6 +1435,27 @@ impl Connect4 {
             }
             Intent::Undo => {
                 if self.undo() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Redo => {
+                if self.redo() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Earlier => {
+                if self.earlier() {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Intent::Later => {
+                if self.later() {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -1841,12 +1917,21 @@ pub fn key_intent(ev: &KeyEvent) -> Option<Intent> {
     if !ev.pressed {
         return None;
     }
-    if ev.key == Key::Z && ev.modifiers.ctrl {
-        return Some(Intent::Undo);
+    // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+    // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z. Ctrl+Z was read here as
+    // any Z with Ctrl down -- AltGr+Z, which types ż, and Ctrl+Shift+Z too.
+    if let Some(key) = HistoryKey::of(ev) {
+        return Some(match key {
+            HistoryKey::Undo => Intent::Undo,
+            HistoryKey::Redo => Intent::Redo,
+            HistoryKey::Earlier => Intent::Earlier,
+            HistoryKey::Later => Intent::Later,
+        });
     }
-    // Ctrl and Alt combinations belong to the window, not to the board: a
-    // Ctrl+Left that moves the cursor is a Ctrl+Left the desktop cannot have.
-    if ev.modifiers.ctrl || ev.modifiers.alt {
+    // Ctrl, Alt and Windows-key combinations belong to the window and the
+    // desktop, not to the board: a Ctrl+Left that moves the cursor is a
+    // Ctrl+Left the desktop cannot have, and Windows+D no less.
+    if ev.modifiers.ctrl || ev.modifiers.alt || ev.modifiers.super_key {
         return None;
     }
     match ev.key {
@@ -3886,9 +3971,17 @@ mod tests {
         for _ in 0..ROWS {
             app.drop_at(0);
         }
-        let depth = app.history.len();
-        app.drop_at(0);
-        assert_eq!(app.history.len(), depth, "a refused drop was made undoable");
+        assert!(!app.drop_at(0), "a full column took a piece");
+        // Counted by undoing: the history keeps no count. Three turns were
+        // played -- each the player's drop and the reply to it -- so three
+        // undos empty the board, and a refused drop made undoable is a
+        // fourth that changes nothing.
+        let mut undone = 0;
+        while undone <= ROWS && app.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, ROWS / 2, "a refused drop was made undoable");
+        assert_eq!(app.board.pieces(), 0);
     }
 
     #[test]
@@ -4189,6 +4282,147 @@ mod tests {
             "the taken-back moves are still listed"
         );
         assert_eq!(app.moves()[0], (1, Cell::Red));
+    }
+
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ──
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    fn key(app: &mut Connect4, ev: &KeyEvent) -> EventResult {
+        handle_event(app, &Event::Key(ev.clone()))
+    }
+
+    /// **A turn played after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position the player has had the move in, in the order each was
+    /// reached; Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_turn_after_an_undo_keeps_the_undone_turn_reachable_with_alt_z() {
+        let mut app = game();
+        app.drop_at(2);
+        app.drop_at(4);
+        let first = app.board.clone();
+        assert!(app.undo());
+        app.drop_at(5);
+        app.drop_at(6);
+        let second = app.board.clone();
+        assert!(!app.redo(), "redo went onto the branch left");
+        assert_eq!(
+            key(&mut app, &held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board, first, "the turn undone was lost");
+        assert_eq!(app.moves(), [(2, Cell::Red), (4, Cell::Yellow)]);
+        key(&mut app, &held(false, true, false, Key::Z));
+        assert_eq!(app.board.pieces(), 0);
+        key(&mut app, &held(false, true, true, Key::Z));
+        key(&mut app, &held(false, true, true, Key::Z));
+        assert_eq!(app.board, second);
+        assert_eq!(
+            key(&mut app, &held(false, true, true, Key::Z)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **A win redone is a win again, with its point.** The status was set
+    /// back to "in play" by every restore, which was right while restoring
+    /// only ever went back before a move.
+    #[test]
+    fn a_redone_win_is_a_win_again_with_its_point() {
+        let mut app = game();
+        for col in 0..3 {
+            app.drop_at(col);
+            app.current_player = Cell::Red;
+        }
+        app.drop_at(3);
+        assert_eq!(app.status(), GameStatus::Won(Cell::Red));
+        assert!(app.undo());
+        assert_eq!(app.status(), GameStatus::Playing);
+        assert_eq!(app.human_wins, 0);
+        assert!(app.redo());
+        assert_eq!(
+            app.status(),
+            GameStatus::Won(Cell::Red),
+            "the redone win is not a win"
+        );
+        assert!(app.win_line().is_some(), "the winning four are not ringed");
+        assert_eq!(app.human_wins, 1, "the redone win did not score");
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z play the turn taken back again.** There was
+    /// no redo, and Ctrl+Shift+Z undid.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_play_a_turn_again() {
+        assert_eq!(
+            key_intent(&held(true, false, false, Key::Y)),
+            Some(Intent::Redo)
+        );
+        assert_eq!(
+            key_intent(&held(true, false, true, Key::Z)),
+            Some(Intent::Redo)
+        );
+        let mut app = game();
+        app.drop_at(3);
+        app.drop_at(4);
+        let played = app.board.clone();
+        key(&mut app, &held(true, false, false, Key::Z));
+        assert_eq!(app.board.pieces(), 0, "Ctrl+Z did not undo");
+        assert_eq!(
+            key(&mut app, &held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board, played, "Ctrl+Y did not play the turn again");
+        key(&mut app, &held(true, false, false, Key::Z));
+        key(&mut app, &held(true, false, true, Key::Z));
+        assert_eq!(app.board, played, "Ctrl+Shift+Z did not play it again");
+    }
+
+    /// **AltGr and the Windows key are not the board's.** AltGr arrives as
+    /// Ctrl+Alt and types a letter -- ż on a Polish keyboard; the Windows
+    /// key's combinations are the desktop's.
+    #[test]
+    fn altgr_and_the_windows_key_are_not_the_boards() {
+        assert_eq!(key_intent(&held(true, true, false, Key::Z)), None);
+        let windows = |key| {
+            probe::press_with(
+                key,
+                guitk::event::Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            )
+        };
+        for k in [Key::Left, Key::D, Key::Num4, Key::Enter, Key::U] {
+            assert_eq!(key_intent(&windows(k)), None, "Windows+{k:?}");
+        }
+    }
+
+    /// **A turn undone while the AI was thinking is redone to the AI's
+    /// move**: the history keeps the turn as it was when it was taken back,
+    /// and the AI replies on its next tick, as it would have.
+    #[test]
+    fn a_turn_undone_mid_thought_is_redone_to_the_ais_move() {
+        let mut app = game();
+        assert!(app.drop_at(3));
+        assert!(app.ai_to_play());
+        assert!(app.undo());
+        assert_eq!(app.board.pieces(), 0);
+        assert!(app.redo());
+        assert_eq!(app.moves(), [(3, Cell::Red)]);
+        assert!(app.ai_to_play(), "the AI's move was lost");
     }
 
     // ── The cursor ──

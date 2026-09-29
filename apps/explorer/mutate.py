@@ -650,8 +650,8 @@ MAIN = [
     ),
     (
         'a new arrangement is sorted without keeping the selection',
-        '            self.sync_sort_indicator();\n            self.resort();\n        }\n        true',
-        '            self.sync_sort_indicator();\n            self.sort_entries();\n        }\n        true',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.sort_entries();\n        }\n        true',
         ['an_arrangement_made_elsewhere_keeps_the_selection_on_its_files'],
     ),
     (
@@ -668,9 +668,87 @@ MAIN = [
     ),
     (
         'a re-read says it changed nothing',
-        '            self.resort();\n        }\n        true\n    }',
-        '            self.resort();\n        }\n        false\n    }',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true\n    }',
+        '            self.load_manual_order();\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        false\n    }',
         ['a_choice_made_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a click on a heading does nothing',
+        '        if self.over_column_header(x, y) {\n            return self.sort_by_heading(x);\n        }\n',
+        '',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way', 'a_heading_that_cannot_sort_says_so'],
+    ),
+    (
+        'a heading that can sort does not',
+        '            Some(by) => self.set_sort(by),',
+        '            Some(_) => {}',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'a heading that cannot sort says nothing',
+        '                self.status_message = format!(\n                    "The list cannot be sorted by {label} -- by Name, Size, Date modified or Type"\n                );\n',
+        '                let _ = label;\n',
+        ['a_heading_that_cannot_sort_says_so'],
+    ),
+    (
+        'a heading asks for no sort',
+        '            .find(|by| by.column() == Some(column))',
+        '            .find(|_| false)',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        "the Size heading's sort is another column's",
+        '            Self::Size => Some(ColumnId::SIZE),',
+        '            Self::Size => Some(ColumnId::NAME),',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'the folder menu has no Sort by',
+        '            self.sort_menu(),\n            self.conflict_menu(),',
+        '            self.conflict_menu(),',
+        ['sort_by_is_on_the_folder_menu_and_the_headings_menu'],
+    ),
+    (
+        "the headings' menu has no Sort by",
+        '        let mut items = vec![self.sort_menu(), MenuItem::Separator];',
+        '        let mut items = vec![MenuItem::Separator];',
+        ['sort_by_is_on_the_folder_menu_and_the_headings_menu'],
+    ),
+    (
+        'your own order is offered where there is none',
+        '                    enabled: by != SortBy::Custom || !self.manual_order.is_empty(),',
+        '                    enabled: true,',
+        ['your_own_order_is_offered_only_where_there_is_one'],
+    ),
+    (
+        'asking for your own order where there is none takes it anyway',
+        '        if by == SortBy::Custom && self.manual_order.is_empty() {',
+        '        if false {',
+        ['your_own_order_is_offered_only_where_there_is_one'],
+    ),
+    (
+        "the menu's sort is not applied",
+        '        if self.sort_by != by {\n            self.sort_by = by;\n',
+        '        if self.sort_by != by {\n',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        'choosing the sort in force turns it round',
+        '        if self.sort_by != by {\n            self.sort_by = by;\n            self.sort_dir = SortDir::Ascending;\n            self.sync_sort_indicator();\n            self.resort();\n        }\n        true\n    }',
+        '        self.set_sort(by);\n        true\n    }',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        "the menu's rows are counted from the submenu's own id",
+        '            .checked_sub(MENU_SORT_BASE.saturating_add(1))',
+        '            .checked_sub(MENU_SORT_BASE)',
+        ['the_folders_own_order_comes_back_from_the_menu'],
+    ),
+    (
+        'the menu does not reach the sort',
+        '            || self.sort_action(id)\n',
+        '',
+        ['the_folders_own_order_comes_back_from_the_menu', 'your_own_order_is_offered_only_where_there_is_one'],
     ),
 ]
 
@@ -724,6 +802,18 @@ COLUMNS = [
         "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"avif\", \"ico\", \"cur\", \"tif\", \"tiff\",",
         "            \"png\", \"jpg\", \"jpeg\", \"gif\", \"bmp\", \"webp\", \"ico\", \"cur\", \"tif\", \"tiff\",",
         ["an_avif_is_measured"],
+    ),
+    (
+        'a click names a heading to the left of the one under it',
+        '        .find(|&(_, left, width)| x >= left && x < left + width)',
+        '        .find(|&(_, left, width)| x >= left + width)',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        "every heading starts at the header's left edge",
+        '            left += width;\n',
+        '',
+        ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
     ),
 ]
 

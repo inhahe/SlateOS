@@ -2104,6 +2104,35 @@ pub fn render_column_values_from(
 
 /// Resolve widths for active columns, distributing remaining space
 /// to flexible columns.
+/// Each shown column's heading as `(column, left, width)`, measured from the
+/// header's left edge in a header `total_width` wide -- the widths
+/// [`render_column_header`] draws, so a click can name the heading it lands
+/// on and a test can find where one is drawn.
+#[must_use]
+pub fn heading_spans(manager: &ColumnManager, total_width: f32) -> Vec<(ColumnId, f32, f32)> {
+    let mut left = 0.0_f32;
+    manager
+        .active_columns()
+        .iter()
+        .zip(resolve_widths(manager, total_width))
+        .map(|(&id, width)| {
+            let span = (id, left, width);
+            left += width;
+            span
+        })
+        .collect()
+}
+
+/// The column whose heading is under `x`, measured as [`heading_spans`]
+/// measures; `None` before the first heading or past the last.
+#[must_use]
+pub fn column_at(manager: &ColumnManager, total_width: f32, x: f32) -> Option<ColumnId> {
+    heading_spans(manager, total_width)
+        .into_iter()
+        .find(|&(_, left, width)| x >= left && x < left + width)
+        .map(|(id, _, _)| id)
+}
+
 fn resolve_widths(manager: &ColumnManager, total_width: f32) -> Vec<f32> {
     let active = manager.active_columns();
     let mut widths = Vec::with_capacity(active.len());

@@ -377,6 +377,29 @@ pub enum SortBy {
     Custom,
 }
 
+impl SortBy {
+    /// The column whose heading carries this sort's arrow, and whose heading
+    /// a click sorts by -- `None` for the hand arrangement, which is no
+    /// column's. One mapping, read both ways, so the arrow and the click
+    /// cannot come to disagree.
+    const fn column(self) -> Option<ColumnId> {
+        match self {
+            Self::Name => Some(ColumnId::NAME),
+            Self::Size => Some(ColumnId::SIZE),
+            Self::Modified => Some(ColumnId::DATE_MODIFIED),
+            Self::Type => Some(ColumnId::TYPE),
+            Self::Custom => None,
+        }
+    }
+
+    /// The sort a column's heading asks for, if the listing has one.
+    fn for_column(column: ColumnId) -> Option<Self> {
+        [Self::Name, Self::Size, Self::Modified, Self::Type]
+            .into_iter()
+            .find(|by| by.column() == Some(column))
+    }
+}
+
 /// Sort direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortDir {
@@ -2157,19 +2180,13 @@ impl ExplorerState {
     /// The explorer owns the sort — [`Self::sort_entries`] does the work — so
     /// the column manager is told the answer rather than asked for one.
     fn sync_sort_indicator(&mut self) {
-        let id = match self.sort_by {
-            SortBy::Name => ColumnId::NAME,
-            SortBy::Size => ColumnId::SIZE,
-            SortBy::Modified => ColumnId::DATE_MODIFIED,
-            SortBy::Type => ColumnId::TYPE,
+        let Some(id) = self.sort_by.column() else {
             // A hand arrangement is not a column, so no header carries an
             // arrow. Pointing one at Name would say the list is in name order
             // when it is in the user's own -- a header that lies about what it
             // is showing is worse than a header that says nothing.
-            SortBy::Custom => {
-                self.columns.set_sort(ColumnId::NAME, SortOrder::None);
-                return;
-            }
+            self.columns.set_sort(ColumnId::NAME, SortOrder::None);
+            return;
         };
         let order = match self.sort_dir {
             SortDir::Ascending => SortOrder::Ascending,
@@ -2963,6 +2980,35 @@ impl ExplorerState {
         self.menu = Some(menu);
     }
 
+    /// Sort by the column whose heading is under `x`, or the other way when
+    /// the listing is sorted by it already -- how a detail view is sorted.
+    ///
+    /// The header drew an arrow and nothing could move it: `set_sort` had no
+    /// caller but a test, and the module's "Sort by name/size/date/type" was
+    /// reachable by nobody. A heading this listing cannot sort by says so,
+    /// rather than being a control that does nothing.
+    fn sort_by_heading(&mut self, x: f32) -> bool {
+        let list = self.list_rect();
+        let table_w = (list.w - ICON_GUTTER).max(0.0);
+        let Some(column) = columns::column_at(&self.columns, table_w, x - list.x - ICON_GUTTER)
+        else {
+            return false;
+        };
+        match SortBy::for_column(column) {
+            Some(by) => self.set_sort(by),
+            None => {
+                let label = self
+                    .columns
+                    .column_def(column)
+                    .map_or_else(String::new, |d| d.label.clone());
+                self.status_message = format!(
+                    "The list cannot be sorted by {label} -- by Name, Size, Date modified or Type"
+                );
+            }
+        }
+        true
+    }
+
     /// Whether `(x, y)` is over the detail view's header row.
     ///
     /// Only in Details: the other views draw no header, and a menu offering to
@@ -3136,6 +3182,58 @@ impl ExplorerState {
         true
     }
 
+    /// The sorts offered, ticked at the one in force: the four columns a
+    /// heading sorts by, and the folder's own order -- the way back to it
+    /// after a column sort, which overrides it only for as long as it is
+    /// chosen (`roadmap-detailed.md` §4.1). Offered only where the folder has
+    /// an order of its own: dragging a file is how one is made.
+    fn sort_menu(&self) -> MenuItem {
+        MenuItem::Submenu {
+            id: MENU_SORT_BASE,
+            label: String::from("Sort by"),
+            icon: None,
+            enabled: true,
+            children: SORTS
+                .iter()
+                .enumerate()
+                .map(|(i, &(by, label))| MenuItem::Action {
+                    id: MENU_SORT_BASE.saturating_add(1).saturating_add(i as u64),
+                    label: label.to_string(),
+                    shortcut: None,
+                    icon: None,
+                    enabled: by != SortBy::Custom || !self.manual_order.is_empty(),
+                    checked: Some(self.sort_by == by),
+                })
+                .collect(),
+        }
+    }
+
+    /// Choose a sort from the menu. Answers whether the id was one of these.
+    ///
+    /// Choosing the sort in force changes nothing: the menu names a sort, not
+    /// a direction, and a click on the heading is how the direction turns.
+    fn sort_action(&mut self, id: u64) -> bool {
+        let Some(&(by, _)) = id
+            .checked_sub(MENU_SORT_BASE.saturating_add(1))
+            .and_then(|n| usize::try_from(n).ok())
+            .and_then(|n| SORTS.get(n))
+        else {
+            return false;
+        };
+        if by == SortBy::Custom && self.manual_order.is_empty() {
+            self.status_message =
+                String::from("This folder has no order of its own: drag a file to make one");
+            return true;
+        }
+        if self.sort_by != by {
+            self.sort_by = by;
+            self.sort_dir = SortDir::Ascending;
+            self.sync_sort_indicator();
+            self.resort();
+        }
+        true
+    }
+
     /// The thumbnail sizes offered, ticked at the one in force.
     ///
     /// A submenu rather than four rows in the folder menu: the sizes are one
@@ -3267,7 +3365,16 @@ impl ExplorerState {
 
     /// The column picker: every column, ticked when shown, and the two saves.
     fn open_column_menu(&mut self, x: f32, y: f32) {
-        let mut items = self.column_menu_items();
+        let mut menu = ContextMenu::new(self.heading_menu_items());
+        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
+        self.menu = Some(menu);
+    }
+
+    /// The headings' menu: how the listing is sorted, which columns it
+    /// shows, and where the set shown is saved.
+    fn heading_menu_items(&self) -> Vec<MenuItem> {
+        let mut items = vec![self.sort_menu(), MenuItem::Separator];
+        items.extend(self.column_menu_items());
         items.push(MenuItem::Separator);
         items.push(Self::menu_action(
             MENU_COLUMNS_SAVE_FOLDER,
@@ -3279,9 +3386,7 @@ impl ExplorerState {
             "Save as default for all folders",
             true,
         ));
-        let mut menu = ContextMenu::new(items);
-        menu.show(x, y, (self.window_width as f32, self.window_height as f32));
-        self.menu = Some(menu);
+        items
     }
 
     /// One row per column, ticked when it is currently shown.
@@ -3411,6 +3516,7 @@ impl ExplorerState {
             // next.
             Self::menu_action(MENU_PASTE, "Paste", self.clipboard.is_some()),
             Self::menu_action(MENU_REFRESH, "Refresh", true),
+            self.sort_menu(),
             self.conflict_menu(),
             self.failure_menu(),
         ];
@@ -3493,6 +3599,7 @@ impl ExplorerState {
             || self.icon_label_action(id)
             || self.conflict_action(id)
             || self.failure_action(id)
+            || self.sort_action(id)
         {
             return;
         }
@@ -5932,6 +6039,17 @@ const MENU_ICON_LABEL_BASE: u64 = 3000;
 const MENU_CONFLICT_BASE: u64 = 4000;
 /// One id per choice of what an operation does with a file it cannot do.
 const MENU_FAILURE_BASE: u64 = 5000;
+/// The "Sort by" submenu; its rows are the base plus one, plus their place in
+/// [`SORTS`].
+const MENU_SORT_BASE: u64 = 6000;
+/// The sorts the menu offers, in its order.
+const SORTS: [(SortBy, &str); 5] = [
+    (SortBy::Name, "Name"),
+    (SortBy::Size, "Size"),
+    (SortBy::Modified, "Date modified"),
+    (SortBy::Type, "Type"),
+    (SortBy::Custom, "Your own order"),
+];
 const MENU_CUT: u64 = 2;
 const MENU_COPY: u64 = 3;
 const MENU_RENAME: u64 = 4;
@@ -6358,6 +6476,10 @@ impl ExplorerState {
                 self.open_recycle_bin();
             }
             return true;
+        }
+        // A column's heading sorts by that column, and again the other way.
+        if self.over_column_header(x, y) {
+            return self.sort_by_heading(x);
         }
         if self.bin.is_none()
             && let Some(index) = self.dropzone.find_file_row(x, y)
@@ -9392,6 +9514,184 @@ mod tests {
                 .collect();
             assert_eq!(chosen, ["a.txt"], "the selection moved to another file");
         });
+    }
+
+    /// The middle of `column`'s heading, where the window draws it.
+    fn heading(state: &ExplorerState, column: ColumnId) -> (f32, f32) {
+        let list = state.list_rect();
+        let table_w = (list.w - ICON_GUTTER).max(0.0);
+        let (_, left, width) = columns::heading_spans(&state.columns, table_w)
+            .into_iter()
+            .find(|(id, _, _)| *id == column)
+            .expect("the column is shown");
+        (
+            list.x + ICON_GUTTER + left + width / 2.0,
+            list.y + HEADER_H / 2.0,
+        )
+    }
+
+    /// The listing's names, in order.
+    fn listed(state: &ExplorerState) -> Vec<String> {
+        state.entries.iter().map(|e| e.name.clone()).collect()
+    }
+
+    /// **A click on a heading sorts by its column, and a second the other
+    /// way.** `set_sort` had no caller but a test: the header drew an arrow
+    /// that nothing could move. The file chosen stays chosen -- lit, and the
+    /// one an action takes.
+    #[test]
+    fn a_click_on_a_heading_sorts_by_it_and_again_the_other_way() {
+        let scratch = temp_dir("heading_sort");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        fs::write(root.join("c.txt"), "xx").unwrap();
+        let mut state = state_at(&root);
+        let a = state
+            .entries
+            .iter()
+            .position(|e| e.name == "a.txt")
+            .unwrap();
+        state.select_single(a);
+
+        let (x, y) = heading(&state, ColumnId::SIZE);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["b.txt", "c.txt", "a.txt"]);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Ascending)
+        );
+        let (x, y) = heading(&state, ColumnId::SIZE);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["a.txt", "c.txt", "b.txt"]);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Descending)
+        );
+        let (x, y) = heading(&state, ColumnId::NAME);
+        assert!(press(&mut state, x, y));
+        assert_eq!(listed(&state), ["a.txt", "b.txt", "c.txt"]);
+
+        let chosen: Vec<&str> = state
+            .selected_indices
+            .iter()
+            .map(|&i| state.entries[i].name.as_str())
+            .collect();
+        assert_eq!(chosen, ["a.txt"], "an action would take another file");
+        let lit: Vec<&str> = state
+            .entries
+            .iter()
+            .filter(|e| e.selected)
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(lit, ["a.txt"], "another file is lit");
+    }
+
+    /// A heading the listing cannot sort by says so, and the order stays.
+    #[test]
+    fn a_heading_that_cannot_sort_says_so() {
+        let scratch = temp_dir("heading_unsorted");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "xxx").unwrap();
+        fs::write(root.join("b.txt"), "x").unwrap();
+        let mut state = state_at(&root);
+        state
+            .columns
+            .set_columns(vec![ColumnId::NAME, ColumnId::DIMENSIONS]);
+        let (x, y) = heading(&state, ColumnId::DIMENSIONS);
+        assert!(press(&mut state, x, y));
+        assert_eq!(state.sort_by, SortBy::Name);
+        assert_eq!(listed(&state), ["a.txt", "b.txt"]);
+        assert!(
+            state.status_message.contains("cannot be sorted by"),
+            "{}",
+            state.status_message
+        );
+    }
+
+    /// **The folder's own order comes back from the menu** after a column
+    /// sort, which overrides it only while chosen (`roadmap-detailed.md`
+    /// §4.1). Dragging was the only way into it, and a drag saves the order
+    /// on screen -- so once sorted by name, the arrangement could only be
+    /// written over, never returned to.
+    #[test]
+    fn the_folders_own_order_comes_back_from_the_menu() {
+        settingsfile::testing::with_scratch_config("explorer-sort-back", |_root| {
+            let scratch = temp_dir("sort_back");
+            let root = scratch.dir().to_path_buf();
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                fs::write(root.join(name), "x").unwrap();
+            }
+            let mut state = state_at(&root);
+            assert!(state.reorder_rows(vec![2], 0));
+            assert_eq!(listed(&state), ["c.txt", "a.txt", "b.txt"]);
+
+            state.activate_menu_item(MENU_SORT_BASE + 1);
+            assert_eq!(state.sort_by, SortBy::Name);
+            assert_eq!(listed(&state), ["a.txt", "b.txt", "c.txt"]);
+            state.activate_menu_item(MENU_SORT_BASE + 5);
+            assert_eq!(state.sort_by, SortBy::Custom);
+            assert_eq!(listed(&state), ["c.txt", "a.txt", "b.txt"]);
+            assert_eq!(state.columns.current_sort().1, SortOrder::None);
+            // The menu names a sort, not a direction: choosing it again
+            // changes nothing.
+            state.activate_menu_item(MENU_SORT_BASE + 2);
+            state.activate_menu_item(MENU_SORT_BASE + 2);
+            assert_eq!(
+                (state.sort_by, state.sort_dir),
+                (SortBy::Size, SortDir::Ascending)
+            );
+        });
+    }
+
+    /// Your own order is offered only where the folder has one, and asking
+    /// for it anyway says how one is made.
+    #[test]
+    fn your_own_order_is_offered_only_where_there_is_one() {
+        settingsfile::testing::with_scratch_config("explorer-sort-none", |_root| {
+            let scratch = temp_dir("sort_none");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut state = state_at(&root);
+            let own = |state: &ExplorerState| -> bool {
+                let MenuItem::Submenu { children, .. } = state.sort_menu() else {
+                    panic!("Sort by is not a submenu");
+                };
+                children.iter().any(|c| {
+                    matches!(c, MenuItem::Action { label, enabled: true, .. }
+                        if label == "Your own order")
+                })
+            };
+            assert!(!own(&state), "offered for a folder with no order");
+            state.activate_menu_item(MENU_SORT_BASE + 5);
+            assert_eq!(state.sort_by, SortBy::Name);
+            assert!(
+                state.status_message.contains("no order of its own"),
+                "{}",
+                state.status_message
+            );
+            fs::write(root.join("b.txt"), "x").unwrap();
+            state.load_directory();
+            assert!(state.reorder_rows(vec![1], 0));
+            assert!(own(&state), "not offered once the folder has one");
+        });
+    }
+
+    /// "Sort by" is on the folder's menu, which every view has, and on the
+    /// headings' own menu.
+    #[test]
+    fn sort_by_is_on_the_folder_menu_and_the_headings_menu() {
+        let scratch = temp_dir("sort_menus");
+        let root = scratch.dir().to_path_buf();
+        fs::write(root.join("a.txt"), "x").unwrap();
+        let state = state_at(&root);
+        let has_sort = |items: &[MenuItem]| {
+            items
+                .iter()
+                .any(|i| matches!(i, MenuItem::Submenu { label, .. } if label == "Sort by"))
+        };
+        assert!(has_sort(&state.folder_menu_items()));
+        assert!(has_sort(&state.heading_menu_items()));
     }
 
     /// **Sorting keeps the selection on the files it was on.** The selection

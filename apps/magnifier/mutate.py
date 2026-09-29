@@ -609,7 +609,7 @@ MUTATIONS = [
         "the filter never reaches the pixels that are drawn",
         "                let (fr, fg, fb) = self.filter.apply(r, g, b);",
         "                let (fr, fg, fb) = (r, g, b);",
-        ["the_filter_reaches_the_pixels_the_window_draws"],
+        ["the_magnification_pass_draws_and_the_filter_reaches_it"],
     ),
     (
         "the sheet lists no shortcuts",

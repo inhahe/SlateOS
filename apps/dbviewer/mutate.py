@@ -292,7 +292,8 @@ MUTATIONS = [
         "            f.hit(Target::Execute, btn);",
         [
             "the_filters_button_shows_and_hides_the_builder",
-            "export_puts_the_table_in_the_editor_and_import_reads_it_back",
+            "exporting_opens_a_picker_and_does_not_eat_the_query",
+            "importing_opens_a_picker",
         ],
     ),
     (

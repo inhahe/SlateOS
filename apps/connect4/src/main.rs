@@ -1081,7 +1081,7 @@ const HELP_ROWS: [(&str, &str); 9] = [
     // "Left / Right, or A / D" would hand it the piece "or A".
     ("Left / Right / A / D", "choose a column"),
     ("Enter / Space", "drop a piece there"),
-    ("1 - 7", "drop straight into that column"),
+    ("1-7", "drop straight into that column"),
     ("U / Ctrl+Z", "take back your last move"),
     ("Ctrl+Y / Ctrl+Shift+Z", "play it again"),
     (
@@ -5957,6 +5957,44 @@ mod tests {
             1,
             "the title is drawn twice with the sheet shut: {lines:?}"
         );
+    }
+
+    /// Games chosen so that between them every key on the sheet has work: a
+    /// fresh board, a turn played (the take-backs), and one taken back (the
+    /// replays).
+    fn sheet_states() -> Vec<Connect4> {
+        let fresh = game();
+        let mut played = game();
+        played.drop_at(2);
+        played.drop_at(4);
+        let mut undone = game();
+        undone.drop_at(2);
+        undone.drop_at(4);
+        assert!(undone.undo(), "the fixture had nothing to take back");
+        vec![fresh, played, undone]
+    }
+
+    /// **Every key the sheet advertises is one this game answers.** The
+    /// sheet named the arrows and not A and D beside them, bound all along,
+    /// and nothing pressed its rows to find out. Read with `guitk::shortcut`
+    /// and pressed, against boards on which each has work.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in HELP_ROWS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = sheet_states()
+                    .iter_mut()
+                    .any(|g| key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the sheet advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 24, "only {checked} keystrokes were checked");
     }
 
     #[test]

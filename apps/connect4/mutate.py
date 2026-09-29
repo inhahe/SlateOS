@@ -1420,6 +1420,36 @@ MUTATIONS = [
         '    if false {\n        return Some(Intent::ToggleHelp);',
         ['f1_and_a_question_mark_raise_the_sheet_as_h_does'],
     ),
+    (
+        'A does not move to the column before',
+        '        Key::Left | Key::A => Some(Intent::CursorLeft),',
+        '        Key::Left => Some(Intent::CursorLeft),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'D does not move to the column after',
+        '        Key::Right | Key::D => Some(Intent::CursorRight),',
+        '        Key::Right => Some(Intent::CursorRight),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        '7 drops nowhere',
+        '        Key::Num7 => Some(Intent::Drop(6)),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'S does not swap sides',
+        '        Key::S => Some(Intent::SwapSides),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'U takes nothing back',
+        '        Key::U => Some(Intent::Undo),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
 ]
 
 if __name__ == "__main__":

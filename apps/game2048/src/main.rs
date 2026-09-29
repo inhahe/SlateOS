@@ -200,9 +200,14 @@ const FALLBACK_SEED: u64 = 0x3230_3438_4741_4D45;
 // is exactly uniform rather than merely unbiased in its high bits.
 
 const HELP_TITLE: &str = "How to play";
-const HELP_ROWS: [(&str, &str); 10] = [
+/// The keys this game answers, drawn on the sheet above [`RULES`].
+///
+/// Apart from the rows that are not keys -- the pointer's, and the rule --
+/// so that `every_advertised_key_does_something` can press every row it has,
+/// rather than being taught to skip rows it cannot read (as towers' sheet was
+/// split). Esc has a row of its own: it closes the sheet and does not open it.
+const SHORTCUTS: [(&str, &str); 8] = [
     ("Arrows / WASD", "Slide every tile that way"),
-    ("Click < ^ v >", "The same, with a pointer"),
     ("U / Ctrl+Z", "Take back the last move"),
     ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
     (
@@ -211,10 +216,25 @@ const HELP_ROWS: [(&str, &str); 10] = [
     ),
     ("N / R", "Start a new game"),
     ("C / Enter", "Keep playing after winning"),
-    ("F1 / ? / H / Esc", "Show or hide this sheet"),
-    ("", ""),
+    ("F1 / ? / H", "Show or hide this sheet"),
+    ("Esc", "Hide it"),
+];
+
+/// What the sheet says that is not a key, drawn below [`SHORTCUTS`] after a
+/// gap: the pointer's way to slide, and the one rule.
+const RULES: [(&str, &str); 2] = [
+    ("Click < ^ v >", "Slide the tiles with a pointer"),
     ("Two tiles alike", "merge into one of twice the value"),
 ];
+
+/// Every row of the sheet as it is drawn: the keys, a gap, what is not a key.
+fn sheet_rows() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SHORTCUTS
+        .iter()
+        .copied()
+        .chain(std::iter::once(("", "")))
+        .chain(RULES.iter().copied())
+}
 
 /// The smallest font size the renderer will honour, in pixels.
 ///
@@ -1482,14 +1502,14 @@ impl Game2048 {
         // last row's band, written across the last row and -- because it was
         // placed from the sheet's bottom edge rather than from the ladder --
         // hanging below the sheet, and in a short window below the window.
-        let rows = HELP_ROWS.len() as f32;
+        let rows = sheet_rows().count() as f32;
         let body_h = (h.h - head_h - l.pad * 2.0).max(0.0);
         let step = body_h / (rows + 1.0);
         // Sized to the band it is written in, not to the sheet: a row taller
         // than its own band overwrites the row beneath it.
         let size = l.small.min(step * 0.7);
         let key_w = (h.w * 0.42).max(0.0);
-        for (i, &(key, meaning)) in HELP_ROWS.iter().enumerate() {
+        for (i, (key, meaning)) in sheet_rows().enumerate() {
             let y = h.y + head_h + l.pad + i as f32 * step;
             label(
                 f,
@@ -4024,13 +4044,62 @@ mod tests {
         }
     }
 
+    /// Games chosen so that between them every key on the sheet has work: a
+    /// board mid-game, a move made (the take-backs), one taken back (the
+    /// replays), a game just won (keep playing), and one with the sheet up
+    /// (Esc).
+    fn sheet_states() -> Vec<Game2048> {
+        let board = [[2, 2, 0, 0], [4, 0, 0, 0], [0; 4], [0, 0, 0, 8]];
+        let fresh = playing(board);
+        let mut moved = playing(board);
+        assert!(moved.make_move(Direction::Left), "the fixture did not move");
+        let mut undone = playing(board);
+        assert!(undone.make_move(Direction::Left));
+        assert_eq!(press(&mut undone, Key::U), EventResult::Consumed);
+        let mut won = playing([[1024, 1024, 0, 0], [0; 4], [0; 4], [0; 4]]);
+        won.make_move(Direction::Left);
+        assert_eq!(
+            won.board.status(),
+            GameStatus::Won,
+            "the fixture did not win"
+        );
+        let mut sheet = playing(board);
+        sheet.show_help = true;
+        vec![fresh, moved, undone, won, sheet]
+    }
+
+    /// **Every key the sheet advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, against games on which each
+    /// has work. Only `SHORTCUTS` is read: `RULES` names no keys, and is a
+    /// list of its own for that reason -- a check that skipped the rows it
+    /// could not read is how a dead key hides.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = sheet_states()
+                    .iter_mut()
+                    .any(|g| handle_event(g, &Event::Key(stroke.clone())) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the sheet advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 20, "only {checked} keystrokes were checked");
+    }
+
     #[test]
     fn the_help_sheet_names_every_control_the_game_has() {
         let mut app = windowed(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.show_help = true;
         let joined = texts(&app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)).join(" ");
         assert!(joined.contains(HELP_TITLE));
-        for (key, _) in HELP_ROWS {
+        for (key, _) in sheet_rows() {
             if !key.is_empty() {
                 assert!(joined.contains(key), "the sheet does not mention {key:?}");
             }
@@ -4115,7 +4184,7 @@ mod tests {
                 .1
         };
         let mut previous = f32::NEG_INFINITY;
-        for &(key, meaning) in &HELP_ROWS {
+        for (key, meaning) in sheet_rows() {
             // The blank row is a gap between the controls and the closing
             // remark, and a gap is drawn by drawing nothing: `label` refuses
             // an empty body, so there is no box to find and none to compare.

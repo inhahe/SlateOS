@@ -1089,6 +1089,36 @@ MUTATIONS = [
         '    if false {\n        return Some(Intent::ToggleHelp);',
         ['f1_and_a_question_mark_raise_the_sheet_as_h_does', 'the_keys_the_help_sheet_names_are_the_keys_the_program_reads'],
     ),
+    (
+        'A does not slide the tiles',
+        '        Key::Left | Key::A => Some(Intent::Move(Direction::Left)),',
+        '        Key::Left => Some(Intent::Move(Direction::Left)),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'U takes nothing back',
+        '        Key::U => Some(Intent::Undo),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'R does not start a new game',
+        '        Key::N | Key::R => Some(Intent::NewGame),',
+        '        Key::N => Some(Intent::NewGame),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'Enter does not keep playing after a win',
+        '        Key::C | Key::Enter => Some(Intent::Continue),',
+        '        Key::C => Some(Intent::Continue),',
+        ['every_advertised_key_does_something'],
+    ),
+    (
+        'Esc does not put the sheet away',
+        '        Key::Escape => Some(Intent::CloseHelp),\n',
+        '',
+        ['every_advertised_key_does_something'],
+    ),
 ]
 
 if __name__ == "__main__":

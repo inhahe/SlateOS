@@ -10,6 +10,7 @@
 pub(crate) mod bash;
 pub(crate) mod c;
 pub(crate) mod css;
+pub(crate) mod javascript;
 pub(crate) mod json;
 pub(crate) mod markdown;
 pub(crate) mod markdown_inline;

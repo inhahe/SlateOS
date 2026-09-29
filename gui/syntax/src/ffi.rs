@@ -195,6 +195,20 @@ impl Lexer<'_> {
         }
     }
 
+    /// Whether the character ahead is where one of the ranges the parse was
+    /// given begins (`is_at_included_range_start`): the text's start, or
+    /// where it resumes after a stretch left out of the parse -- a
+    /// template's code, say, on the far side of the template's own markup.
+    #[must_use]
+    pub fn is_at_included_range_start(&self) -> bool {
+        // SAFETY: as `advance_with`.
+        unsafe {
+            (*self.raw)
+                .is_at_included_range_start
+                .is_some_and(|at| at(self.raw))
+        }
+    }
+
     /// Whether the text has ended.
     #[must_use]
     pub fn eof(&self) -> bool {

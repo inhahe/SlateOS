@@ -270,6 +270,14 @@ fn bash_passes_its_corpus() {
     check("Bash", "bash", 100, &[]);
 }
 
+/// **The JavaScript grammar -- tables, lexers and ported scanner -- parses
+/// its whole corpus as upstream's does**: the semicolons a line leaves out,
+/// template strings, regular expressions, JSX.
+#[test]
+fn javascript_passes_its_corpus() {
+    check("JavaScript", "javascript", 115, &[]);
+}
+
 /// **The C grammar parses its whole corpus as upstream's does.**
 #[test]
 fn c_passes_its_corpus() {

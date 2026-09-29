@@ -46,6 +46,12 @@ tree-sitter-css:
   texts:
     - tree-sitter-css-LICENSE
 
+tree-sitter-javascript:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-javascript-LICENSE
+
 tree-sitter-json:
   version: 0.24.8
   licence: MIT

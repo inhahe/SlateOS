@@ -3140,7 +3140,9 @@ impl<T: Transport> ShellSession<T> {
     /// session has a clock, so it puts the pane back where it started and lets
     /// the clock carry it. See `design-decisions.md` §520 and §562.
     fn begin_notifications_slide(&mut self) {
-        if self.animations.reduced_motion || self.shell.motion().is_still() {
+        // A still motion needs no check here: the pane starts no slide under
+        // one, and a frame armed for nothing moving arms nothing.
+        if self.animations.reduced_motion {
             return;
         }
         self.shell.notifications.begin_slide();
@@ -3156,10 +3158,12 @@ impl<T: Transport> ShellSession<T> {
     /// by hand — gets a fully-open overview instead of one waiting for a frame
     /// that never comes. See `design-decisions.md` §520.
     fn begin_overview_fade(&mut self) {
-        let motion = self.shell.motion();
-        if self.animations.reduced_motion || motion.is_still() {
+        // A still motion needs no check here: `begin_fade` starts no fade of
+        // no length, and a frame armed for nothing moving arms nothing.
+        if self.animations.reduced_motion {
             return;
         }
+        let motion = self.shell.motion();
         self.shell
             .overview
             .begin_fade(motion, self.shell.overview_config.fade_ms);

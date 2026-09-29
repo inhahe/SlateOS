@@ -21,6 +21,7 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 LIB = Path(__file__).parent / "src" / "lib.rs"
 LEGIBILITY = Path(__file__).parent / "src" / "legibility.rs"
 HISTORY = Path(__file__).parent / "src" / "history.rs"
+HELP = Path(__file__).parent / "src" / "help.rs"
 
 # (name, old, new, [tests that must fail])
 LIB_MUTATIONS = [
@@ -230,6 +231,69 @@ HISTORY_MUTATIONS = [
     ),
 ]
 
+HELP_MUTATIONS = [
+    (
+        "F1 does not raise the list",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "the slash key with Shift does not raise it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "the slash key alone raises it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || key.key == Key::Slash || key.single_char() == Some('?')",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "a ? from another key does not raise it",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift) || key.single_char() == Some('?')",
+        "    key.key == Key::F1 || (key.key == Key::Slash && m.shift)",
+        ["f1_and_a_question_mark_raise_the_list"],
+    ),
+    (
+        "a key held with Ctrl, Alt or the Windows key raises it",
+        "    if !key.pressed || m.ctrl || m.alt || m.super_key {",
+        "    if !key.pressed {",
+        ["nothing_held_with_ctrl_alt_or_the_windows_key_raises_it"],
+    ),
+    (
+        "a release raises it",
+        "    if !key.pressed || m.ctrl || m.alt || m.super_key {",
+        "    if m.ctrl || m.alt || m.super_key {",
+        ["nothing_held_with_ctrl_alt_or_the_windows_key_raises_it"],
+    ),
+    (
+        "Escape and Enter do not put it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    raises(key)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "any key puts it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    key.pressed",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "what raised it does not put it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    key.pressed && matches!(key.key, Key::Escape | Key::Enter)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+    (
+        "a released Escape puts it away",
+        "    raises(key) || (key.pressed && matches!(key.key, Key::Escape | Key::Enter))",
+        "    raises(key) || matches!(key.key, Key::Escape | Key::Enter)",
+        ["escape_enter_and_what_raised_it_put_it_away"],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -238,6 +302,7 @@ if __name__ == "__main__":
         (LIB, LIB_MUTATIONS),
         (LEGIBILITY, LEGIBILITY_MUTATIONS),
         (HISTORY, HISTORY_MUTATIONS),
+        (HELP, HELP_MUTATIONS),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

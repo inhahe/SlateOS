@@ -25,6 +25,8 @@
 //! - [`history`], the keys a game's undo history answers (C-Q24, §1416):
 //!   Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z, read the same
 //!   way in every game.
+//! - [`help`], the keys that raise and put away a game's list of keys --
+//!   F1, `?` -- which every game draws with the toolkit's card.
 //!
 //! A game's own colours -- the seven tetrominoes, the four ghosts, a card's
 //! red suits -- stay in the game, named, and its palette test lists them as
@@ -529,6 +531,7 @@ pub fn button(
     });
 }
 
+pub mod help;
 pub mod history;
 pub mod legibility;
 

@@ -284,6 +284,36 @@ MUTATIONS = [
         "        let mut right = WINDOW_WIDTH - PADDING;",
         ["the_toolbar_is_laid_out_at_the_size_it_is_given"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'an entry deleted elsewhere stays',
+        '        self.library\n            .retain(|e| e.category != PatternCategory::Custom);\n',
+        '',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'the selection stays in its place',
+        '        self.selected_library_entry = selected.and_then(|(category, name)| {',
+        '        let _kept_in_place = selected.and_then(|(category, name)| {',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.library\n    }',
+        '        false\n    }',
+        ['the_library_follows_a_change_made_in_another_window'],
+    ),
 ]
 
 if __name__ == "__main__":

@@ -1303,7 +1303,7 @@ fn explain_regex(pattern: &str) -> Vec<String> {
 // Common regex patterns library
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PatternEntry {
     name: String,
     pattern: String,
@@ -2154,6 +2154,30 @@ impl App {
                 .retain(|e| !(e.category == PatternCategory::Custom && e.name == name));
             self.library.push(custom_entry(&name, &pattern, flags));
         }
+    }
+
+    /// Read the user's patterns again after the desktop said
+    /// `regextester.yaml` changed -- a pattern saved or deleted in another
+    /// window, or a hand edit (§1418, §1434). The user's entries are replaced
+    /// by the file's; the built-in ones stay. The selection follows its entry
+    /// by name, and is let go if the entry went. Whether anything changed.
+    fn reread_library(&mut self) -> bool {
+        let selected = self
+            .selected_library_entry
+            .and_then(|i| self.library.get(i))
+            .map(|e| (e.category, e.name.clone()));
+        let before = self.library.clone();
+        self.library
+            .retain(|e| e.category != PatternCategory::Custom);
+        self.load_library(&settingsfile::load(CONFIG_NAME));
+        self.selected_library_entry = selected.and_then(|(category, name)| {
+            self.library
+                .iter()
+                .position(|e| e.category == category && e.name == name)
+        });
+        let shown = self.visible_library().len();
+        self.library_scroll = self.library_scroll.min(shown.saturating_sub(1));
+        before != self.library
     }
 
     /// The entries the chips leave, with their indices in the library.
@@ -3778,6 +3802,12 @@ impl App {
             }
             Event::Key(key) if key.pressed => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
+            // A pattern saved or deleted in another window, and the desktop
+            // says so: this window's library follows. Read at startup only,
+            // two windows each kept their own list.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                self.reread_library()
+            }
             _ => false,
         }
     }
@@ -6537,6 +6567,87 @@ mod tests {
             next.use_library_entry(index);
             assert_eq!(next.pattern.text(), "\\d+");
             assert!(next.flags.case_insensitive && next.flags.multiline);
+        });
+    }
+
+    /// **A pattern saved or deleted in another window reaches this one**,
+    /// when the desktop says `regextester.yaml` changed (§1434): read at
+    /// startup only, each window kept its own list. The built-in patterns
+    /// stay; the selection follows its entry by name when the list shifts,
+    /// and is let go when its entry is deleted.
+    #[test]
+    fn the_library_follows_a_change_made_in_another_window() {
+        settingsfile::testing::with_scratch_config("rt_reread", |_| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let save = |app: &mut App, pattern: &str, name: &str| {
+                app.set_pattern(pattern);
+                app.ask_to_save();
+                probe::type_str(app, name);
+                app.handle_event(&Event::Key(probe::press(Key::Enter)));
+            };
+            let place = |app: &App, name: &str| {
+                app.library
+                    .iter()
+                    .position(|e| e.category == PatternCategory::Custom && e.name == name)
+            };
+            let own = |app: &App| -> Vec<String> {
+                app.library
+                    .iter()
+                    .filter(|e| e.category == PatternCategory::Custom)
+                    .map(|e| e.name.clone())
+                    .collect()
+            };
+            let mut first = testing("a+", "");
+            save(&mut first, "a+", "alpha");
+            save(&mut first, "b+", "beta");
+            let mut second = App::new();
+            second.load_library(&settingsfile::load(CONFIG_NAME));
+            let built_in = second.library.len() - 2;
+            second.selected_library_entry = place(&second, "beta");
+
+            save(&mut first, "c+", "gamma");
+            let alpha = place(&first, "alpha").expect("alpha");
+            first.delete_library_entry(alpha);
+
+            assert!(!second.handle_event(&announce(b"notes")));
+            assert_eq!(
+                own(&second),
+                ["alpha", "beta"],
+                "another program's file was read"
+            );
+            assert!(second.handle_event(&announce(b"regextester")));
+            assert_eq!(
+                own(&second),
+                ["beta", "gamma"],
+                "the change did not reach it"
+            );
+            assert_eq!(
+                second.library.len(),
+                built_in + 2,
+                "a built-in pattern went"
+            );
+            assert_eq!(
+                second.selected_library_entry,
+                place(&second, "beta"),
+                "the selection lost its entry"
+            );
+
+            let beta = place(&first, "beta").expect("beta");
+            first.delete_library_entry(beta);
+            second.handle_event(&announce(b"regextester"));
+            assert_eq!(
+                second.selected_library_entry, None,
+                "a deleted entry stayed selected"
+            );
+
+            assert!(
+                !first.handle_event(&announce(b"regextester")),
+                "a window's own save, announced back, changed its list"
+            );
         });
     }
 

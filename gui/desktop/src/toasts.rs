@@ -784,6 +784,8 @@ mod tests {
         s.tick(SETTLED);
         s.tick(600_000);
         assert_eq!(s.ids(), [1]);
+        // Not leaving, either: a toast sliding out is still listed.
+        assert!(!s.is_moving(), "an urgent toast started to leave");
         assert_eq!(s.next_due_in(), None);
         let close = s.placed()[0].close;
         assert!(s.handle_mouse(&press(close.x + 2.0, close.y + 2.0)));

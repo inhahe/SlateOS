@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Self-test for verify_mutations.py: a harness whose rows all hold passes;
-a dead or ambiguous anchor, a test that is not there, or a duplicate row
-name is named and fails the run; a source named as a directory is read file
-by file, and a test in the crate's `tests/` counts.
+"""Regression tests for `scripts/verify_mutations.py`.
+
+A harness whose rows all hold passes; a dead or ambiguous anchor, a test that
+is not there, or a duplicate row name is named and fails the run; a source
+named as a directory is read file by file, and a test in the crate's `tests/`
+counts.
 
 usage: python scripts/test-verify_mutations.py
 """

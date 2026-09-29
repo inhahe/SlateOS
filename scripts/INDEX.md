@@ -389,6 +389,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-src-digest.py` | Regression tests for `scripts/src_digest.py`. |
 | `scripts/test-srcload.py` | Regression tests for `scripts/srcload.py`. |
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
+| `scripts/test-verify_mutations.py` | Regression tests for `scripts/verify_mutations.py`. |
 | `scripts/test-worktree.sh` | Self-test for `slate_ensure_src` in scripts/lib/worktree.sh. |
 | `scripts/time-diff.sh` | Differential test: our `time` against GNU Time 1.9's `/usr/bin/time`. |
 | `scripts/touch-diff.sh` | Differential test: our `touch` against GNU coreutils'. |
@@ -401,7 +402,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/uniq-diff.sh` | Differential test: our uniq against GNU uniq. |
 | `scripts/unknown-option-sweep.py` | Find programs that take an unknown option as a FILE and then create it. |
 | `scripts/uptime-diff.sh` | Differential test: our `uptime` against procps-ng `uptime`. |
-| `scripts/verify_mutations.py` | Check a `mutate.py` table against the source it claims to break. |
+| `scripts/verify_mutations.py` | Check `mutate.py` tables against the source they claim to break. |
 | `scripts/wc-diff.sh` | Differential test: our wc against GNU wc. |
 | `scripts/wdog-nmi-soak.sh` | wdog-nmi-soak.sh — DIAGNOSTIC (throwaway): boot repeatedly under the |
 | `scripts/wdog-reset-experiment.sh` | wdog-reset-experiment.sh — DIAGNOSTIC (throwaway) loop to discriminate, for the |
@@ -414,4 +415,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_404 scripts._
+_405 scripts._

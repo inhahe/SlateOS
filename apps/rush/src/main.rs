@@ -120,7 +120,7 @@
 //!     was wrong. One arm now turns a key into an axis and a delta, and the
 //!     move rule decides the rest.
 
-use gamechrome::{Chrome, HistoryKey};
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -917,10 +917,35 @@ impl Layout {
 }
 
 /// The keyboard reminder, in the order the footer draws it. The second line is
-/// the one dropped first when the footer has room for only one.
+/// the one dropped first when the footer has room for only one, so the first
+/// ends with the key to the rest.
 const FOOTER_LINES: [&str; 2] = [
-    "Enter: select   Arrows: slide   Z: undo   Ctrl+Y: redo",
+    "Enter: select   Arrows: slide   Z: undo   F1: all keys",
     "N/Tab: next   B: prev   R: restart   P: puzzles",
+];
+
+/// Every key this game answers, on the list F1 raises.
+///
+/// The game had no list, and its footer had room for ten keys and not the
+/// history's -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24
+/// added (`design-decisions.md` §1416) -- nor the digits. **Each row is a
+/// key this game answers**, checked by `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Enter / Space", "Choose the next car"),
+    ("Arrows", "Slide the chosen car along its lane"),
+    ("Esc", "Let go of the car"),
+    ("Z / Ctrl+Z", "Take back a slide"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Slide it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The yard before / after this one, on any branch",
+    ),
+    ("N / Tab", "The next puzzle"),
+    ("B", "The puzzle before"),
+    ("R", "Start this puzzle again"),
+    ("P", "The list of puzzles"),
+    ("1-8", "Puzzle 1 to 8"),
+    ("F1 / ?", "This list"),
 ];
 
 // ── The game ────────────────────────────────────────────────────────
@@ -948,6 +973,9 @@ pub struct RushHour {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// car slid under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Default for RushHour {
@@ -971,6 +999,7 @@ impl RushHour {
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            show_help: false,
         };
         game.load_puzzle(0);
         game
@@ -1504,6 +1533,17 @@ impl RushHour {
         }
         if self.sheet_open {
             self.draw_sheet(&mut f, &l);
+        }
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
         }
         f
     }
@@ -2082,6 +2122,15 @@ impl RushHour {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the car under the card is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = ev.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -2109,6 +2158,19 @@ impl RushHour {
         // up. Reading only `key` runs every binding twice per press.
         if !ev.pressed {
             return EventResult::Ignored;
+        }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the yard under it. F1 raises it whatever
+        // has the keyboard -- the puzzle list among them.
+        if self.show_help {
+            if help::closes(ev) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(ev) {
+            self.show_help = true;
+            return EventResult::Consumed;
         }
         if self.sheet_open {
             return self.handle_sheet_key(ev);
@@ -2785,6 +2847,140 @@ mod tests {
 
     fn player_id(g: &RushHour) -> usize {
         g.player().expect("every position has a player").id
+    }
+
+    /// Yards chosen so that between them every key on the list of keys has
+    /// work: a car chosen along each axis, for the arrows; a slide made, for
+    /// Ctrl+Z and Alt+Z; and one taken back, for Ctrl+Y and Alt+Shift+Z.
+    fn list_states() -> Vec<RushHour> {
+        let chosen = |axis: Orientation| {
+            let mut g = game();
+            let id = g
+                .vehicles()
+                .iter()
+                .find(|v| v.orientation == axis)
+                .map(|v| v.id)
+                .expect("a car along that axis");
+            g.selected = Some(id);
+            g
+        };
+        let mut slid = one_slide_from_winning();
+        let red = player_id(&slid);
+        assert!(slid.slide(red, -1), "the red car could not back up");
+        let mut undone = one_slide_from_winning();
+        let red = player_id(&undone);
+        assert!(undone.slide(red, -1), "the red car could not back up");
+        assert!(undone.undo(), "the slide could not be taken back");
+        vec![
+            game(),
+            chosen(Orientation::Vertical),
+            chosen(Orientation::Horizontal),
+            slid,
+            undone,
+        ]
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, rather than matched against
+    /// a table beside it here. The property is "some yard answers this key":
+    /// an arrow needs a car chosen along it, Ctrl+Y a slide taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 25, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at the probe's size, joined.
+    fn drawn_texts(g: &RushHour) -> String {
+        g.frame(SIZE.0, SIZE.1)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the footer's first line says how to raise
+    /// it, so a window with room for one line still shows where the rest
+    /// are.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "up before anybody asked"
+        );
+        assert!(
+            FOOTER_LINES[0].contains("F1"),
+            "the footer's first line does not say F1"
+        );
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+        // Over the list of puzzles too: F1 is the list of keys whatever has
+        // the keyboard.
+        probe::key(&mut g, &probe::press(Key::P));
+        assert!(g.sheet_open);
+        probe::key(&mut g, &probe::press(Key::F1));
+        assert!(g.show_help, "F1 did nothing over the list of puzzles");
+    }
+
+    /// **While the list of keys is up, the yard takes nothing**: a car slid
+    /// under the card would be one the player cannot see. A click puts the
+    /// card away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = one_slide_from_winning();
+        let red = player_id(&g);
+        g.selected = Some(red);
+        probe::key(&mut g, &probe::press(Key::F1));
+        let before = (g.moves, g.current_puzzle, g.selected, g.sheet_open);
+        for key in [Key::Right, Key::Space, Key::N, Key::Z, Key::Num2, Key::P] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        let now = (g.moves, g.current_puzzle, g.selected, g.sheet_open);
+        assert_eq!(now, before, "a key reached the yard");
+        probe::click_background(&mut g);
+        assert!(!g.show_help, "a click did not put the list away");
+        let now = (g.moves, g.current_puzzle, g.selected, g.sheet_open);
+        assert_eq!(now, before, "the click did something");
+        probe::key(&mut g, &probe::press(Key::F1));
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert!(!g.show_help, "Enter did not put the list away");
+        assert_eq!(g.selected, before.2, "Enter chose a car as it closed");
     }
 
     /// The id of the vehicle with this label, for tests that name a car the way

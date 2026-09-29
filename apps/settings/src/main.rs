@@ -733,6 +733,10 @@ pub struct SettingsState {
     /// The program that does each job (`programs::Role`), by its name, or
     /// `None` when no program here can: refreshed with the associations.
     default_roles: Vec<(programs::Role, Option<String>)>,
+    /// The zone this machine is in (`datetimesettings::system_zone`), read
+    /// with the clock's settings rather than per frame, for the Wallpaper
+    /// page's "up now".
+    system_zone: datetimesettings::Tz,
     /// Where the third-party notices are read from: `/usr/share/licenses`
     /// (`notices::SYSTEM_DIR`), which a test points elsewhere.
     notices_dir: PathBuf,
@@ -915,6 +919,10 @@ pub enum DropdownId {
     /// `available_families`, which is how it declines to make that decision on
     /// the user's behalf.
     MonoFont,
+    /// When the morning picture goes up.
+    DayWallpaperFrom,
+    /// When the evening picture goes up.
+    NightWallpaperFrom,
 }
 
 impl DropdownId {
@@ -1458,6 +1466,8 @@ impl SettingsState {
                         self.appearance.settings.login_background =
                             appearance::LoginBackground::CustomImage(path);
                     }
+                    PickerPurpose::DayWallpaper => self.set_scheduled_picture(true, path),
+                    PickerPurpose::NightWallpaper => self.set_scheduled_picture(false, path),
                 }
             }
             DialogAction::Cancelled => self.dialog = None,
@@ -1517,6 +1527,7 @@ impl SettingsState {
     /// Read the user's saved clock settings, for the Date & Time page.
     pub fn load_datetime(&mut self) {
         self.datetime = datetimesettings::DateTimeFile::load();
+        self.system_zone = datetimesettings::system_zone();
     }
 
     /// Read the settings file called `name` again after the desktop said it
@@ -1798,6 +1809,7 @@ impl SettingsState {
             default_app_categories: Vec::new(),
             default_roles: Vec::new(),
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
+            system_zone: datetimesettings::Tz::utc(),
             notices_dir: PathBuf::from(notices::SYSTEM_DIR),
             notices: None,
             open_notice: None,
@@ -2886,6 +2898,12 @@ enum ButtonId {
     LookAgain,
     /// Open or close the `n`-th third-party notice on the About page.
     Notice(usize),
+    /// Choose the picture up from the morning.
+    ChooseDayWallpaper,
+    /// Choose the picture up from the evening.
+    ChooseNightWallpaper,
+    /// Stop changing the picture by the time of day.
+    ClearSchedule,
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -2978,6 +2996,10 @@ enum PickerPurpose {
     Wallpaper,
     RotationFolder,
     LoginImage,
+    /// The picture up from the morning, by time of day.
+    DayWallpaper,
+    /// The picture up from the evening, by time of day.
+    NightWallpaper,
 }
 
 /// What a click on a page landed on.
@@ -4122,6 +4144,10 @@ impl SettingsState {
     /// page below refuses in its own words.
     fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
         s.section("Desktop Picture");
+        // Pictures by time of day are the wallpaper while they are set (lane
+        // C's `wallpaper_schedule`): the picture and the rotation each say
+        // so, rather than read as what the desktop shows.
+        let scheduled = !self.appearance.settings.wallpaper_schedule.is_empty();
 
         match self.appearance.settings.wallpaper.as_deref() {
             Some(path) => {
@@ -4129,7 +4155,14 @@ impl SettingsState {
                 // heading, and a label is text by definition. The path itself
                 // is held exactly; nothing is rebuilt from this string.
                 s.note(&path.shown().to_string(), 28.0);
+                if scheduled {
+                    s.note(
+                        "Not shown while there are pictures by time of day, below.",
+                        28.0,
+                    );
+                }
             }
+            None if scheduled => s.note("No picture.", 28.0),
             None => {
                 s.note(
                     "No picture. The desktop is the plain background, which follows your theme.",
@@ -4146,9 +4179,20 @@ impl SettingsState {
             Some(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
 
+        self.build_wallpaper_schedule(s);
+
         s.section("Rotation");
         match self.appearance.settings.wallpaper_folder.as_deref() {
-            Some(folder) => s.note(&folder.shown().to_string(), 28.0),
+            Some(folder) => {
+                s.note(&folder.shown().to_string(), 28.0);
+                if scheduled {
+                    s.note(
+                        "Not shown while there are pictures by time of day, above.",
+                        28.0,
+                    );
+                }
+            }
+            None if scheduled => s.note("No folder.", 28.0),
             None => s.note(
                 "No folder. The desktop shows the single picture above.",
                 28.0,
@@ -5482,6 +5526,156 @@ impl SettingsState {
         );
     }
 
+    /// A picture by time of day: one up from the morning, one from the
+    /// evening (`AppearanceSettings::wallpaper_schedule`, lane C's
+    /// `c-e-day-and-night-wallpapers-need-a-place-in-settings`).
+    ///
+    /// Choosing either picture sets it at its time, 06:00 or 18:00, which a
+    /// dropdown then moves; Clear stops it. A schedule is the wallpaper --
+    /// it wins over the picture and the rotation -- so the section says so
+    /// while one is set, and which picture is up now. A schedule written by
+    /// hand with more than two pictures is listed as it is, with Clear: this
+    /// page sets two.
+    fn build_wallpaper_schedule<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let schedule = &self.appearance.settings.wallpaper_schedule;
+        s.section("By time of day");
+        let Some((day, night)) = day_and_night(schedule) else {
+            for entry in schedule {
+                s.value_row(
+                    &format!("From {}", notifsettings::format_hm(entry.from)),
+                    &entry.image.shown().to_string(),
+                    pal.text,
+                );
+            }
+            s.note(
+                "These pictures by time of day were written into appearance.yaml. This page sets a morning and an evening picture; Clear starts again.",
+                28.0,
+            );
+            s.button_row(
+                "",
+                "Clear",
+                pal.subtext0,
+                Some(RowHit::Press(ButtonId::ClearSchedule)),
+            );
+            return;
+        };
+        for (name, entry, choose, from) in [
+            (
+                "Daytime picture",
+                day,
+                ButtonId::ChooseDayWallpaper,
+                DropdownId::DayWallpaperFrom,
+            ),
+            (
+                "Evening picture",
+                night,
+                ButtonId::ChooseNightWallpaper,
+                DropdownId::NightWallpaperFrom,
+            ),
+        ] {
+            let label = match entry {
+                Some(entry) => format!("{name}: {}", entry.image.shown()),
+                None => name.to_string(),
+            };
+            s.button_row(&label, "Choose...", pal.accent, Some(RowHit::Press(choose)));
+            if let Some(entry) = entry {
+                s.dropdown_row("Up from", from, &notifsettings::format_hm(entry.from));
+            }
+        }
+        if schedule.is_empty() {
+            s.note(
+                "Choose a picture for the morning, the evening, or both, and the desktop changes it at those times.",
+                28.0,
+            );
+            return;
+        }
+        let now = self.scheduled_up_at(datetimesettings::clock::now_utc_secs());
+        s.note(
+            &format!(
+                "While these are set they are the wallpaper, in place of the picture above and the rotation below.{}",
+                now.map_or_else(String::new, |up| format!(" Up now: {up}."))
+            ),
+            28.0,
+        );
+        s.button_row(
+            "Stop changing by time of day",
+            "Clear",
+            pal.subtext0,
+            Some(RowHit::Press(ButtonId::ClearSchedule)),
+        );
+    }
+
+    /// The scheduled picture up at `utc_secs`, by this machine's time of day:
+    /// the zone the Date & Time page chose, or the system's.
+    fn scheduled_up_at(&self, utc_secs: u64) -> Option<String> {
+        self.appearance
+            .settings
+            .scheduled_wallpaper_at(utc_secs, self.datetime.settings.rule(self.system_zone))
+            .map(|path| path.shown().to_string())
+    }
+
+    /// Choose the picture up from the morning or from the evening.
+    fn open_schedule_dialog(&mut self, day: bool) {
+        let start = day_and_night(&self.appearance.settings.wallpaper_schedule)
+            .and_then(|(d, n)| if day { d } else { n })
+            .map(|entry| entry.image.clone())
+            .or_else(|| self.appearance.settings.wallpaper.clone());
+        let purpose = if day {
+            PickerPurpose::DayWallpaper
+        } else {
+            PickerPurpose::NightWallpaper
+        };
+        self.open_picture_dialog(purpose, start.as_deref());
+    }
+
+    /// Make `image` the morning or the evening picture: the one there is,
+    /// with its time kept, or a new one at 06:00 or 18:00.
+    fn set_scheduled_picture(&mut self, day: bool, image: PathBuf) {
+        let schedule = &mut self.appearance.settings.wallpaper_schedule;
+        let at = match day_and_night(schedule) {
+            Some((d, n)) => {
+                let entry = if day { d } else { n };
+                entry.and_then(|e| schedule.iter().position(|x| x == e))
+            }
+            // A hand-written schedule is not this page's to edit piecemeal.
+            None => return,
+        };
+        match at.and_then(|i| schedule.get_mut(i)) {
+            Some(entry) => entry.image = image,
+            None => {
+                let from = if day { DAY_FROM } else { NIGHT_FROM };
+                schedule.push(appearance::ScheduledWallpaper { from, image });
+                schedule.sort_by_key(|entry| entry.from);
+            }
+        }
+    }
+
+    /// The times the morning or the evening picture may go up from: every
+    /// half hour on its own side of the other's time, so the morning one
+    /// stays the earlier.
+    ///
+    /// A picture on its own keeps to its half of the day instead. Which half
+    /// it is in is what says which of the two it is (`day_and_night`), so an
+    /// evening picture moved to 09:00 would have become the morning's, its
+    /// row changing places under the pointer.
+    fn schedule_time_choices(&self, day: bool) -> Vec<notifsettings::TimeOfDay> {
+        let Some((d, n)) = day_and_night(&self.appearance.settings.wallpaper_schedule) else {
+            return Vec::new();
+        };
+        let (Some(this), other) = (if day { (d, n) } else { (n, d) }) else {
+            return Vec::new();
+        };
+        Self::time_choices(this.from)
+            .into_iter()
+            .filter(|t| match other {
+                Some(other) if day => *t < other.from,
+                Some(other) => *t > other.from,
+                None => (t.hour() < NOON_HOUR) == day,
+            })
+            .collect()
+    }
+
     /// The system, and the notices of the code others wrote that it carries
     /// (design-decisions §1433; §815 puts a screen you open in Settings).
     ///
@@ -5835,7 +6029,7 @@ impl SettingsState {
                 } else {
                     window.end()
                 };
-                let choices = Self::quiet_time_choices(current);
+                let choices = Self::time_choices(current);
                 let at = choices.iter().position(|t| *t == current).unwrap_or(0);
                 (
                     choices
@@ -5888,6 +6082,23 @@ impl SettingsState {
                     .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
                     .unwrap_or(0);
                 (items, at)
+            }
+            DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
+                let day = dropdown_id == DropdownId::DayWallpaperFrom;
+                let current = day_and_night(&self.appearance.settings.wallpaper_schedule)
+                    .and_then(|(d, n)| if day { d } else { n })
+                    .map(|entry| entry.from);
+                let choices = self.schedule_time_choices(day);
+                let at = current
+                    .and_then(|c| choices.iter().position(|t| *t == c))
+                    .unwrap_or(0);
+                (
+                    choices
+                        .iter()
+                        .map(|t| notifsettings::format_hm(*t))
+                        .collect(),
+                    at,
+                )
             }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let (current, other) = self.auto_hour_ends(dropdown_id);
@@ -6762,6 +6973,11 @@ impl SettingsState {
             RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
             RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
             RowHit::Press(ButtonId::Notice(index)) => self.toggle_notice(index),
+            RowHit::Press(ButtonId::ChooseDayWallpaper) => self.open_schedule_dialog(true),
+            RowHit::Press(ButtonId::ChooseNightWallpaper) => self.open_schedule_dialog(false),
+            RowHit::Press(ButtonId::ClearSchedule) => {
+                self.appearance.settings.wallpaper_schedule.clear();
+            }
         }
     }
 
@@ -6955,13 +7171,13 @@ impl SettingsState {
         current: notifsettings::TimeOfDay,
         other: notifsettings::TimeOfDay,
     ) -> Vec<notifsettings::TimeOfDay> {
-        Self::quiet_time_choices(current)
+        Self::time_choices(current)
             .into_iter()
             .filter(|t| *t != other)
             .collect()
     }
 
-    fn quiet_time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
+    fn time_choices(current: notifsettings::TimeOfDay) -> Vec<notifsettings::TimeOfDay> {
         let mut times: Vec<notifsettings::TimeOfDay> = (0..48)
             .filter_map(|half| {
                 notifsettings::TimeOfDay::new(half / 2, if half % 2 == 0 { 0 } else { 30 })
@@ -7083,6 +7299,20 @@ impl SettingsState {
                         };
                 }
             }
+            DropdownId::DayWallpaperFrom | DropdownId::NightWallpaperFrom => {
+                let day = dropdown_id == DropdownId::DayWallpaperFrom;
+                let chosen = self.schedule_time_choices(day).get(index).copied();
+                let schedule = &mut self.appearance.settings.wallpaper_schedule;
+                let at = day_and_night(schedule)
+                    .and_then(|(d, n)| if day { d } else { n })
+                    .and_then(|entry| schedule.iter().position(|x| x == entry));
+                // No re-sort: the choices keep each picture on its own side
+                // of the other (`schedule_time_choices`), so the order holds.
+                if let (Some(chosen), Some(entry)) = (chosen, at.and_then(|i| schedule.get_mut(i)))
+                {
+                    entry.from = chosen;
+                }
+            }
             DropdownId::AutoLightFrom | DropdownId::AutoDarkFrom => {
                 let hours = self.appearance.settings.auto_light_hours;
                 let (current, other) = self.auto_hour_ends(dropdown_id);
@@ -7099,7 +7329,7 @@ impl SettingsState {
                 let window = self.notif.settings.quiet_hours.window;
                 let start = dropdown_id == DropdownId::QuietStart;
                 let current = if start { window.start() } else { window.end() };
-                if let Some(chosen) = Self::quiet_time_choices(current).get(index) {
+                if let Some(chosen) = Self::time_choices(current).get(index) {
                     self.notif.settings.quiet_hours.window = if start {
                         notifsettings::DailyWindow::new(*chosen, window.end())
                     } else {
@@ -7373,6 +7603,40 @@ fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App>
             .filter(|own| !installed.contains(&own.id)),
     );
     list
+}
+
+/// When a new morning picture goes up: 06:00, as lane C's schedule has it.
+const DAY_FROM: notifsettings::TimeOfDay = match notifsettings::TimeOfDay::from_minutes(6 * 60) {
+    Some(t) => t,
+    None => notifsettings::TimeOfDay::MIDNIGHT,
+};
+/// When a new evening picture goes up: 18:00.
+const NIGHT_FROM: notifsettings::TimeOfDay = match notifsettings::TimeOfDay::from_minutes(18 * 60) {
+    Some(t) => t,
+    None => notifsettings::TimeOfDay::MIDNIGHT,
+};
+
+/// The hour that splits the day between the morning picture and the
+/// evening one, when only one of them is set.
+const NOON_HOUR: u8 = 12;
+
+/// A schedule as the Wallpaper page sets it: the morning picture and the
+/// evening one, either of them absent. Two entries are the earlier and the
+/// later; one is the morning's if it goes up before noon. `None` for a
+/// schedule of more than two, which was written by hand.
+fn day_and_night(
+    schedule: &[appearance::ScheduledWallpaper],
+) -> Option<(
+    Option<&appearance::ScheduledWallpaper>,
+    Option<&appearance::ScheduledWallpaper>,
+)> {
+    match schedule {
+        [] => Some((None, None)),
+        [one] if one.from.hour() < NOON_HOUR => Some((Some(one), None)),
+        [one] => Some((None, Some(one))),
+        [day, night] => Some((Some(day), Some(night))),
+        _ => None,
+    }
 }
 
 /// What the About page has of the third-party notices.
@@ -7872,14 +8136,218 @@ mod tests {
         assert_eq!(SettingsPage::About.category(), SettingsCategory::System);
     }
 
-    /// The Fonts page names the font actually being drawn with.
-    ///
-    /// The "in use" row is the whole point of the page rather than a
-    /// decoration beside the picker. A configured family that this machine
-    /// does not have is silently ignored by the toolkit -- correctly, since
-    /// losing every glyph to a bad setting is worse -- so the setting alone
-    /// cannot tell the user why choosing a font changed nothing. Asserting
-    /// only that a picker exists would pass on a page that promised a font
+    /// Press the control `what` names on the page, as a click does.
+    fn press_row(state: &mut SettingsState, what: RowHit) {
+        let (x, y) = center_of(state, what).unwrap_or_else(|| panic!("{what:?} is not drawn"));
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **A morning and an evening picture are chosen on the Wallpaper page**
+    /// (lane C's `c-e-day-and-night-wallpapers-need-a-place-in-settings`):
+    /// each with its own Choose, up from 06:00 and 18:00, each moved by its
+    /// dropdown on its own side of the other, and Clear stops them. It could
+    /// be set only by editing `appearance.yaml`.
+    #[test]
+    fn a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let schedule = |state: &SettingsState| -> Vec<(String, PathBuf)> {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .iter()
+                .map(|e| (notifsettings::format_hm(e.from), e.image.clone()))
+                .collect()
+        };
+
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseNightWallpaper));
+        assert!(state.dialog.is_some(), "no picker appeared");
+        assert!(
+            state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/night.jpg")))
+        );
+        assert_eq!(
+            schedule(&state),
+            [(String::from("18:00"), PathBuf::from("/pics/night.jpg"))]
+        );
+        // On its own, the evening picture keeps to the afternoon and the
+        // evening: before noon it would be the morning's.
+        state.show_dropdown(DropdownId::NightWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(items.contains(&String::from("12:00")), "{items:?}");
+        assert!(
+            !items.contains(&String::from("11:30")),
+            "a lone evening picture is offered the morning"
+        );
+        state.handle_event(&key_press(Key::Escape));
+
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseDayWallpaper));
+        assert!(state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/day.jpg"))));
+        assert_eq!(
+            schedule(&state),
+            [
+                (String::from("06:00"), PathBuf::from("/pics/day.jpg")),
+                (String::from("18:00"), PathBuf::from("/pics/night.jpg")),
+            ]
+        );
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains("Daytime picture: /pics/day.jpg"), "{text}");
+        assert!(text.contains("Up now:"), "the picture up now is not said");
+
+        state.show_dropdown(DropdownId::DayWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(
+            !items.contains(&String::from("18:00")),
+            "the evening's time is offered for the morning"
+        );
+        assert!(
+            !items.contains(&String::from("19:00")),
+            "a time after the evening is offered for the morning"
+        );
+        let at = items
+            .iter()
+            .position(|t| t == "07:30")
+            .expect("07:30 is offered");
+        state.apply_dropdown_selection(at);
+        state.show_dropdown(DropdownId::NightWallpaperFrom);
+        let items = state.dropdown_layout().expect("a layout").items;
+        assert!(
+            !items.contains(&String::from("07:00")),
+            "a time before the morning is offered for the evening"
+        );
+        state.handle_event(&key_press(Key::Escape));
+        assert!(
+            state.dropdown_layout().is_none(),
+            "Escape left the dropdown open"
+        );
+
+        // A new morning picture keeps the morning's time.
+        press_row(&mut state, RowHit::Press(ButtonId::ChooseDayWallpaper));
+        state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/dawn.jpg")));
+        assert_eq!(
+            schedule(&state),
+            [
+                (String::from("07:30"), PathBuf::from("/pics/dawn.jpg")),
+                (String::from("18:00"), PathBuf::from("/pics/night.jpg")),
+            ]
+        );
+
+        press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+        assert!(schedule(&state).is_empty(), "Clear left the schedule");
+    }
+
+    /// **A schedule written by hand is shown as it is**, with Clear; the page
+    /// sets two pictures and does not edit one of three piecemeal.
+    #[test]
+    fn a_schedule_of_more_than_two_pictures_is_listed_as_it_is() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        for (minutes, name) in [(360, "a.jpg"), (720, "b.jpg"), (1080, "c.jpg")] {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from: notifsettings::TimeOfDay::from_minutes(minutes).expect("a time"),
+                    image: PathBuf::from(name),
+                });
+        }
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains("From 12:00"), "{text}");
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_none());
+        state.set_scheduled_picture(true, PathBuf::from("x.jpg"));
+        assert_eq!(
+            state.appearance.settings.wallpaper_schedule.len(),
+            3,
+            "a hand-written schedule was edited"
+        );
+        press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+        assert!(state.appearance.settings.wallpaper_schedule.is_empty());
+    }
+
+    /// **The picture up now is the one for this machine's time of day**: at
+    /// noon UTC it is the morning's in UTC and the evening's twelve hours
+    /// ahead, where it is midnight.
+    #[test]
+    fn the_picture_up_now_is_the_one_for_this_machines_time_of_day() {
+        let mut state = SettingsState::new();
+        for (from, image) in [(DAY_FROM, "/pics/day.jpg"), (NIGHT_FROM, "/pics/night.jpg")] {
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from,
+                    image: PathBuf::from(image),
+                });
+        }
+        let noon_utc = 12 * 3600;
+        state.system_zone = datetimesettings::Tz::utc();
+        assert_eq!(
+            state.scheduled_up_at(noon_utc).as_deref(),
+            Some("/pics/day.jpg")
+        );
+        state.system_zone = datetimesettings::Tz::parse(b"NZST-12").expect("a zone");
+        assert_eq!(
+            state.scheduled_up_at(noon_utc).as_deref(),
+            Some("/pics/night.jpg"),
+            "the machine's zone is not what the picture goes by"
+        );
+    }
+
+    /// **The picture and the rotation say so while a schedule hides them**:
+    /// pictures by time of day are the wallpaper while they are set, and
+    /// "No folder. The desktop shows the single picture above." was then
+    /// untrue. Without a schedule each reads as it did.
+    #[test]
+    fn the_picture_and_the_rotation_say_when_a_schedule_hides_them() {
+        let hidden_above = "Not shown while there are pictures by time of day, above.";
+        let hidden_below = "Not shown while there are pictures by time of day, below.";
+        let single = "No folder. The desktop shows the single picture above.";
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+        let text = format!("{:?}", state.render_tree());
+        assert!(text.contains(single), "{text}");
+        assert!(!text.contains(hidden_below) && !text.contains(hidden_above));
+
+        state
+            .appearance
+            .settings
+            .wallpaper_schedule
+            .push(appearance::ScheduledWallpaper {
+                from: DAY_FROM,
+                image: PathBuf::from("/pics/day.jpg"),
+            });
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            text.contains(hidden_below),
+            "the picture does not say it is hidden"
+        );
+        assert!(
+            !text.contains(single),
+            "the rotation still says the picture is shown"
+        );
+
+        state.appearance.settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            text.contains(hidden_above),
+            "the rotation does not say it is hidden"
+        );
+
+        state.appearance.settings.wallpaper = None;
+        let text = format!("{:?}", state.render_tree());
+        assert!(
+            !text.contains("the plain background"),
+            "no picture reads as the plain background under a schedule"
+        );
+    }
+
     /// The page summarises each kind, and tells the three states apart.
     ///
     /// The Mixed case is the one worth a test: a group with one of its
@@ -7926,6 +8394,14 @@ mod tests {
         });
     }
 
+    /// The Fonts page names the font actually being drawn with.
+    ///
+    /// The "in use" row is the whole point of the page rather than a
+    /// decoration beside the picker. A configured family that this machine
+    /// does not have is silently ignored by the toolkit -- correctly, since
+    /// losing every glyph to a bad setting is worse -- so the setting alone
+    /// cannot tell the user why choosing a font changed nothing. Asserting
+    /// only that a picker exists would pass on a page that promised a font
     /// nothing could load.
     #[test]
     fn the_fonts_page_reports_the_font_actually_in_use() {

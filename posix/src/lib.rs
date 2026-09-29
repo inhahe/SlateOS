@@ -441,6 +441,7 @@ pub mod mman;
 pub mod mntent;
 pub mod monetary;
 pub mod mqueue;
+pub mod narrow;
 pub mod netdb;
 pub mod nl_types;
 pub(crate) mod nss_files;

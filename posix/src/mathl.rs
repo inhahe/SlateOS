@@ -4465,6 +4465,15 @@ fn add_and_denormalize(a: L, b: L, scale: i32) -> L {
 /// `x * y + z` rounded once (FreeBSD's `fmal`): the product exactly as two
 /// long doubles by Dekker's method, the sum with `z` exactly, and one
 /// rounding at the end, with the low bit of the correction made sticky.
+///
+/// Inexact is raised exactly when the result is inexact, as glibc's `fmal`
+/// raises it: Dekker's product raises it whenever `x * y` needs more than
+/// 64 bits, though the pair it makes is exact, so the flag the caller came
+/// in with is noted before any of that, the flags of those exact steps are
+/// cleared before the one rounding, and the caller's is put back after.
+/// (FreeBSD's re-raised what it saw after the exact steps -- so
+/// `fmal(x, 1 + 2^-52, -x)`, exact, raised inexact; and C23's `ffmal` and
+/// `dfmal`, which round to odd on this flag, went wrong upward.)
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub fn fmal(x: L, y: L, z: L) -> L {
@@ -4485,6 +4494,7 @@ pub fn fmal(x: L, y: L, z: L) -> L {
     if z.is_zero() {
         return x * y;
     }
+    let caller_inexact = crate::fenv::fetestexcept(FE_INEXACT) != 0;
     let (xs, ex) = frexpl(x);
     let (ys, ey) = frexpl(y);
     let (zs, ez) = frexpl(z);
@@ -4537,30 +4547,43 @@ pub fn fmal(x: L, y: L, z: L) -> L {
     if r_hi.is_zero() {
         // The addends cancelled to 0: make sure of the sign.
         crate::fenv::fesetround(oround);
+        crate::fenv::feclearexcept(FE_INEXACT);
         let vzs = core::hint::black_box(zs);
-        return xy_hi + vzs + scalbnl_raw(xy_lo, spread);
+        let r = xy_hi + vzs + scalbnl_raw(xy_lo, spread);
+        if caller_inexact {
+            crate::fenv::feraiseexcept(FE_INEXACT);
+        }
+        return r;
     }
     if oround != FE_TONEAREST {
         // No double rounding to worry about in a directed mode, but the
         // underflow flag has to be raised by hand.
-        let had_inexact = crate::fenv::fetestexcept(FE_INEXACT);
         crate::fenv::feclearexcept(FE_INEXACT);
         crate::fenv::fesetround(oround);
         let adj = r_lo + xy_lo;
         let ret = scalbnl_raw(r_hi + adj, spread);
         if ilogbl_raw(ret) < -16382 && crate::fenv::fetestexcept(FE_INEXACT) != 0 {
             crate::fenv::feraiseexcept(FE_UNDERFLOW);
-        } else if had_inexact != 0 {
+        }
+        if caller_inexact {
             crate::fenv::feraiseexcept(FE_INEXACT);
         }
         return ret;
     }
     let adj = add_adjusted(r_lo, xy_lo);
-    if spread + ilogbl_raw(r_hi) > -16383 {
+    // What rounds from here is the result; the correction carries a sticky
+    // bit if its own sum was inexact, so the last addition is inexact
+    // exactly when the result is.
+    crate::fenv::feclearexcept(FE_INEXACT);
+    let r = if spread + ilogbl_raw(r_hi) > -16383 {
         scalbnl_raw(r_hi + adj, spread)
     } else {
         add_and_denormalize(r_hi, adj, spread)
+    };
+    if caller_inexact {
+        crate::fenv::feraiseexcept(FE_INEXACT);
     }
+    r
 }
 
 // ===========================================================================

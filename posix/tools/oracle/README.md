@@ -21,6 +21,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `mathl_harness.py` | `posix/src/mathl_oracle.txt` | `mathl.rs`, `include_str!` |
 | `mathl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/mathl_modes_oracle.txt` (the answers that differ from nearest) | `mathl.rs`, `include_str!` |
 | `c23math_harness.py` | `posix/src/c23math_oracle.txt` (C23's exact functions -- `nextup` ... `fminimum_mag_num` -- in all three precisions, and `scalbl`, `ilogbl`, `logbl`: value, flags raised and `errno`) | `c23math.rs`, `include_str!` |
+| `narrow_harness.py` | `posix/src/narrow_oracle.txt` (C23's narrowing functions, `fadd` ... `dfmal`, each call in all four rounding directions: value, flags raised and `errno`) | `narrow.rs`, `include_str!` |
 | `complex_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complex_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complex.rs`, `include_str!` |
 | `complexl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complexl_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complexl.rs`, `include_str!` |
 | `lgammal_zeros.py table 30` (mpmath, not glibc) | the `LGAMMAL_ZEROS` table, pasted | `mathl.rs` (`lgammal_near_zero`) |

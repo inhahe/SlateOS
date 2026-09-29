@@ -53,6 +53,8 @@
 /// | `f_fl` | `F f(F, L)` | `(*const L, F) -> F` |
 /// | `n_lii` | `N f(L, I, I)` | `(*const L, I, I) -> N` |
 /// | `i_pl` | `I f(P, L)` | `(P, *const L) -> I` |
+/// | `x_ll` | `F f(L, L)` or `D f(L, L)` | `(*const L, *const L) -> F` (or `D`) |
+/// | `x_lll` | `F f(L, L, L)` or `D f(L, L, L)` | `(*const L, *const L, *const L) -> F` (or `D`) |
 /// | `cl_cl` | `C f(C)` | `(*const C, *mut C)` |
 /// | `cl_clcl` | `C f(C, C)` | `(*const C, *const C, *mut C)` |
 /// | `cl_llll` | `C f(L, L, L, L)` | `(*const L, *const L, *const L, *const L, *mut C)` |
@@ -216,6 +218,24 @@ macro_rules! ld_c {
             "mov edx, esi",
             "mov esi, edi",
             "lea rdi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // faddl(x, y), daddl and the rest of the narrowing two: a float or a
+    // double comes back in xmm0 on its own, so a tail jump.
+    (x_ll $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "lea rdi, [rsp + 8]",
+            "lea rsi, [rsp + 24]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // ffmal(x, y, z) and dfmal.
+    (x_lll $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "lea rdi, [rsp + 8]",
+            "lea rsi, [rsp + 24]",
+            "lea rdx, [rsp + 40]",
             concat!("jmp ", stringify!($rust)),
         );
     };

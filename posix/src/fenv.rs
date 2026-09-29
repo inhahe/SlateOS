@@ -197,6 +197,51 @@ pub(crate) fn with_flags_held<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
     r
 }
 
+/// glibc's `ROUND_TO_ODD` hold and update for the SSE unit
+/// (`math/math-narrow.h` over `libc_feholdexcept_setround_sse` and
+/// `libc_feupdateenv_test_sse`): `f(args)` rounding toward zero, with MXCSR's
+/// flags cleared and its exceptions masked; then MXCSR as it was with the
+/// flags `f` raised added -- but the denormal operand's, which glibc's
+/// `FE_ALL_EXCEPT` leaves out -- and whether `f` was inexact, which the
+/// narrowing functions fold into their result's last bit. `f` is pinned
+/// between the switches as in [`in_nearest`].
+pub(crate) fn toward_zero_sse<A, T>(args: A, f: impl FnOnce(A) -> T) -> (T, bool) {
+    let old = stmxcsr();
+    ldmxcsr(((old | 0x1f80) & !0x603f) | MXCSR_ROUNDING);
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    let raised = stmxcsr() & 0x3d;
+    ldmxcsr(old | raised);
+    (r, raised & 0x20 != 0)
+}
+
+/// [`toward_zero_sse`] for the x87 unit, where the `long double` narrowing
+/// functions compute (`libc_feholdexcept_setround_387`,
+/// `libc_feupdateenv_test_387`): the x87 environment held -- its flags
+/// cleared as `fnclex` clears them, every exception masked, rounding toward
+/// zero -- while `f` runs; then put back, and the exceptions `f` raised raised
+/// again by [`feraiseexcept`], as glibc's `__feraiseexcept` raises them, so a
+/// trap the caller enabled is taken then. MXCSR is kept across `f` too, its
+/// flags merged: `f` may be `fmal`, which sets both units' direction and
+/// puts back only the x87's.
+pub(crate) fn toward_zero_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> (T, bool) {
+    let mut env = FenvT::default();
+    fnstenv(&mut env);
+    let mut held = env;
+    // IE DE ZE OE UE PE, the stack fault, the error summary and busy: what
+    // `fnclex` clears.
+    held.status_word &= !0x80ff;
+    held.control_word = ((held.control_word | 0x3f) & !0xc00) | 0xc00;
+    fldenv(&held);
+    let csr = stmxcsr();
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    let raised = i32::from(fnstsw() & 0x3d);
+    ldmxcsr(csr | (stmxcsr() & 0x3f));
+    fldenv(&env);
+    // The return value only reports an argument outside FE_ALL_EXCEPT.
+    let _ = feraiseexcept(raised);
+    (r, raised & FE_INEXACT != 0)
+}
+
 /// Whether the SSE unit -- every `double` and `float` operation -- rounds to
 /// nearest, the default. One `stmxcsr`: the math functions ask it on every
 /// call, and nearly every call answers yes.

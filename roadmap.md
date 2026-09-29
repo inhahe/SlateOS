@@ -2572,6 +2572,37 @@ word; text inside them that says "lane C" is history.
   and connect four's sheets, whose tables mix rules with keys and need
   splitting as towers' is.
 
+- `[ ]` `[E]` **Lane C's requests of 2026-09-27/28** — what lane C's toolkit
+  and desktop work asks of the programs, one request each (all in
+  `requests/`, from lane C unless said):
+  - every program that keeps a settings file re-reads it on
+    `Event::SettingsChanged` (`c-e-a-changed-settings-file-is-announced-now.md`);
+  - four programs read the one list of programs, `gui/programs`, instead of
+    their own (`c-e-read-the-one-list-of-programs.md`, the operator's C-Q20);
+  - an About page in Settings that shows the third-party notices
+    (`c-e-show-the-third-party-notices.md`);
+  - the controls' shapes: a picker in Settings, the programs' own text
+    fields and scrollbars, the user's focus width
+    (`c-e-a-theme-can-shape-the-controls.md`);
+  - day and night wallpapers on Settings' Wallpaper page
+    (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`);
+  - the editor and the markdown editor onto the toolkit's code editor
+    (`c-e-the-toolkit-has-a-code-editor.md`);
+  - adoption, program by program: the slider, the switch, checkbox, radio
+    button and drop-down, and the dock (`c-e-the-toolkit-has-a-slider-now.md`,
+    `c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`,
+    `c-e-the-toolkit-has-a-dock.md`);
+  - lane B's two, forwarded by lane C (`c-b-your-two-requests-to-c-are-lane-es.md`;
+    the requests themselves are on lane B's branch): the terminal answers
+    how wide it will draw a run of text (§1042), and the password manager's
+    CSV export survives any password -- the operator's own words, "make
+    sure you don't mess that up";
+  - standing: a notices manifest beside any code ported into a lane E crate
+    (`c-abdef-third-party-code-needs-a-notices-manifest.md`).
+  Done 2026-09-28: `safeio`'s rename on Windows while a scanner holds the
+  file (f661f4c01); the three modules lane C's palette refusal waited on
+  (16d1a710a).
+
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task
   above. `libcall::pty` (`spawn`, `set_window_size`, `try_wait`) over lane D's

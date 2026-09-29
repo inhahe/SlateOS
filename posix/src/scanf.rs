@@ -1,40 +1,39 @@
-//! Scanf family: `sscanf`, `scanf`, `fscanf` via assembly trampoline.
+//! The scanf families: `sscanf`, `scanf`, `fscanf`, and the wide `swscanf`,
+//! `wscanf`, `fwscanf`, via assembly trampolines.
 //!
-//! `scanf` is variadic in C, so the three direct entry points are assembly
+//! `scanf` is variadic in C, so the six direct entry points are assembly
 //! trampolines that perform a real System V `va_start` and tail-call the
-//! corresponding `v*` function.  There is exactly one scanning engine, and it
-//! pulls each destination pointer from the `va_list` at the point of use.
+//! corresponding `v*` function.  The `v*` variants take that `va_list`
+//! directly; since a `va_list` parameter decays to a pointer on the x86_64
+//! System V ABI, they are ordinary Rust functions, reachable from host
+//! `cargo test`.  The glibc `__isoc99_*` aliases are provided too.
 //!
-//! `scanf` and `fscanf` read a line from stdin/stream into a stack
-//! buffer, then scan it with the same engine as `sscanf`.
+//! There is one engine: glibc's (`stdio-common/vfscanf-internal.c`, C
+//! locale) ported, and written once over a character [`Unit`] -- a byte for
+//! `scanf`, a `wchar_t` for `wscanf` -- as glibc compiles that file twice,
+//! the second time with `COMPILE_WSCANF`.  It reads one character at a time
+//! and gives back the one character it looked at too far, as glibc's
+//! `inchar`/`ungetc` do -- over a string for `sscanf` and `swscanf`, and
+//! through the stream for the others (a wide stream's characters are its
+//! bytes' UTF-8, read as `fgetwc` reads them), so what a call does not use
+//! stays in the stream for the next.
 //!
-//! The `v*` variants (`vsscanf`, `vscanf`, `vfscanf`) take that `va_list`
-//! directly.  Since a `va_list` parameter decays to a pointer on the x86_64
-//! System V ABI, they are ordinary Rust functions — and therefore the whole
-//! family is reachable from host `cargo test`.  The glibc `__isoc99_v*scanf`
-//! aliases are provided too.
+//! ## Conversions (glibc's)
 //!
-//! ## Supported Format Specifiers
-//!
-//! - `%d` — signed decimal integer → `*mut i32`
-//! - `%i` — signed integer with auto-detect base (0x→hex, 0→oct, else dec) → `*mut i32`
-//! - `%u` — unsigned decimal integer → `*mut u32`
-//! - `%ld`, `%li`, `%lu` — long variants → `*mut i64` / `*mut u64`
-//! - `%lld`, `%lli`, `%llu` — long long → same as long on LP64
-//! - `%x`, `%X` — unsigned hex → `*mut u32` (or `*mut u64` with `l`)
-//! - `%o` — unsigned octal → `*mut u32` (or `*mut u64` with `l`)
-//! - `%s` — whitespace-delimited string → `*mut u8` buffer
-//! - `%c` — single character → `*mut u8`
-//! - `%f`, `%lf` — floating-point → `*mut f32` / `*mut f64`
-//! - `%n` — characters consumed so far → `*mut i32`
-//! - `%%` — literal percent (consumed, not assigned)
-//! - `%[...]` — scanset (character class matching)
-//!   - `%[abc]` matches characters in the set {a, b, c}
-//!   - `%[^abc]` matches characters NOT in the set
-//!   - `%[a-z]` matches range a through z
-//!   - `%[]abc]` leading `]` is part of the set
-//! - Width: `%5d` limits digits consumed
-//! - `*` (assignment suppression): `%*d` reads but doesn't store
+//! - integers `%d %i %u %o %x %X %b` with `hh h l ll L q j z t` and C23's
+//!   `w8`..`w64`, `wf8`..`wf64` (the fast types' widths musl's, §1119);
+//!   `%p`, which also reads glibc's `(nil)`; converted by `strtol` and its
+//!   kin, so an out-of-range value saturates with `ERANGE`;
+//! - floats `%e %f %g %a` and their capitals, with `l` and `L`: glibc's
+//!   grammar (`nan`, `inf`, `infinity`, `0x` hex, one `.`, a signed
+//!   exponent), converted by `strtof`, `strtod`, `strtold`;
+//! - `%s`, `%c`, `%[...]`, and their wide forms `%ls`, `%lc`, `%l[` (and
+//!   `%S`, `%C`).  In `scanf` the wide forms store multibyte input as
+//!   `wchar_t`; in `wscanf` it is the other way about -- the narrow forms
+//!   store each wide character's multibyte encoding, the wide forms the
+//!   characters as they came;
+//! - `%n`, `%%`, `*`, a width, `m` (the destination is allocated; freed
+//!   again if the call ends in `EOF`) and `%N$`.
 
 // ---------------------------------------------------------------------------
 // Assembly trampolines
@@ -57,6 +56,14 @@ va_trampoline!("sscanf", "vsscanf", "16", "rdx");
 va_trampoline!("scanf", "vscanf", "8", "rsi");
 #[cfg(target_os = "none")]
 va_trampoline!("fscanf", "vfscanf", "16", "rdx");
+// The wide family, the same shapes: swscanf(ws, fmt, ...) and
+// fwscanf(stream, fmt, ...) 2 named, wscanf(fmt, ...) 1.
+#[cfg(target_os = "none")]
+va_trampoline!("swscanf", "vswscanf", "16", "rdx");
+#[cfg(target_os = "none")]
+va_trampoline!("wscanf", "vwscanf", "8", "rsi");
+#[cfg(target_os = "none")]
+va_trampoline!("fwscanf", "vfwscanf", "16", "rdx");
 
 #[cfg(target_os = "none")]
 core::arch::global_asm!(
@@ -86,92 +93,71 @@ core::arch::global_asm!(
     ".type __isoc99_vfscanf, @function",
     "__isoc99_vfscanf:",
     "jmp vfscanf",
+    // The wide family's C99 names, likewise.
+    ".global __isoc99_swscanf",
+    ".type __isoc99_swscanf, @function",
+    "__isoc99_swscanf:",
+    "jmp swscanf",
+    ".global __isoc99_wscanf",
+    ".type __isoc99_wscanf, @function",
+    "__isoc99_wscanf:",
+    "jmp wscanf",
+    ".global __isoc99_fwscanf",
+    ".type __isoc99_fwscanf, @function",
+    "__isoc99_fwscanf:",
+    "jmp fwscanf",
+    ".global __isoc99_vswscanf",
+    ".type __isoc99_vswscanf, @function",
+    "__isoc99_vswscanf:",
+    "jmp vswscanf",
+    ".global __isoc99_vwscanf",
+    ".type __isoc99_vwscanf, @function",
+    "__isoc99_vwscanf:",
+    "jmp vwscanf",
+    ".global __isoc99_vfwscanf",
+    ".type __isoc99_vfwscanf, @function",
+    "__isoc99_vfwscanf:",
+    "jmp vfwscanf",
 );
 
 // ---------------------------------------------------------------------------
-// The scanning engine's three entry shapes
-// ---------------------------------------------------------------------------
-
-use crate::printf::{self, VaList};
-
-// Length-modifier codes threaded through the `scan_*` helpers as `long_mod`.
-//
-// The ordering is load-bearing: the integer scanners test `>= LEN_LONG` to
-// decide between a 32- and a 64-bit store, and every modifier at or above
-// `LEN_LONG` is 64-bit on LP64.  Only `scan_float` looks at the exact value,
-// because only it can be handed something wider than 64 bits.
-
-/// No modifier: `%d` -> `i32`, `%f` -> `f32`.
-const LEN_DEFAULT: u8 = 0;
-/// `l` (and `z`/`j`/`t`, all 64-bit here): `%ld` -> `i64`, `%lf` -> `f64`.
-const LEN_LONG: u8 = 1;
-/// `ll`: `%lld` -> `i64`.
-const LEN_LONG_LONG: u8 = 2;
-/// `L`: `%Lf` -> a 16-byte x87 `long double`.  On the integer conversions this
-/// behaves like `ll`, matching glibc's treatment of `L` as a deprecated
-/// synonym for `ll` (C leaves it undefined there).
-const LEN_LONG_DOUBLE: u8 = 3;
-
-/// Buffer size for reading a line from stdin/stream for scanf/fscanf.
-const SCANF_LINE_BUF: usize = 4096;
-
-/// Scan `input` against `fmt`, storing through pointers pulled from `args`.
-///
-/// Returns the number of items successfully assigned, or EOF (-1) if the
-/// input is exhausted before the first conversion.
-fn scan_string_source(input: *const u8, fmt: *const u8, args: &mut printf::Args) -> i32 {
-    if input.is_null() || fmt.is_null() {
-        return -1;
-    }
-
-    let mut ctx = ScanCtx {
-        input,
-        fmt,
-        args,
-        si: 0,       // Position in input string.
-        fi: 0,       // Position in format string.
-        assigned: 0, // Number of successful assignments.
-    };
-
-    scan_core(&mut ctx)
-}
-
-/// Read one line from `fd` into a stack buffer and scan it.
-///
-/// Shared by `vscanf` (fd 0) and `vfscanf` (the stream's fd): both differ from
-/// `vsscanf` only in where the bytes come from.
-fn scan_fd_source(fd: i32, fmt: *const u8, args: &mut printf::Args) -> i32 {
-    if fmt.is_null() {
-        return -1;
-    }
-
-    let mut buf = [0u8; SCANF_LINE_BUF];
-    if read_line_from_fd(fd, &mut buf) == 0 {
-        return -1; // EOF
-    }
-
-    scan_string_source(buf.as_ptr(), fmt, args)
-}
-
-// ---------------------------------------------------------------------------
-// va_list support -- the v* scanf family
+// The v* entry points
 // ---------------------------------------------------------------------------
 //
 // `vsscanf`/`vscanf`/`vfscanf` receive an already-initialised `va_list` (which
 // decays to a pointer on the x86_64 System V ABI), so they are plain Rust
 // functions -- host-testable, and the sole route into the engine: the direct
 // `sscanf`/`scanf`/`fscanf` trampolines above synthesise a `va_list` and call
-// straight into these.
-//
-// An earlier design instead flattened the destination pointers into a fixed
-// `[u64; 8]` by pre-walking the format string.  That was strictly worse than
-// printf's equivalent bug (BUG-POSIX-SCANF-ARG-ARRAY-OOB): a ninth conversion
-// read past the array and used whatever stack word it found as a destination
-// pointer *to write through*, turning `sscanf` with nine conversions into an
-// arbitrary stack write.  Pulling each pointer at the point of use removes the
-// array, and with it the bound.
+// straight into these.  Each destination pointer is pulled from the `va_list`
+// where its conversion stores (BUG-POSIX-SCANF-ARG-ARRAY-OOB was the fixed
+// array this replaced), and `%N$` counts from a copy of the list as it came.
 
-/// `vsscanf(str, fmt, ap)` — `sscanf` with a `va_list`.
+use crate::printf::{self, VaList};
+
+/// Run the engine over `inp` with `ap`'s pointers.
+///
+/// # Safety
+///
+/// `fmt` is a C string; `ap` is NULL or a valid `va_list` matching it.
+unsafe fn scan_with<I: Input>(inp: &mut I, fmt: *const I::U, ap: *mut VaList) -> i32 {
+    // SAFETY: the caller's contract.
+    let orig = if ap.is_null() {
+        None
+    } else {
+        Some(unsafe { *ap })
+    };
+    // SAFETY: as above.
+    let mut seq = unsafe { printf::Args::from_raw(ap) };
+    let mut args = ScanArgs {
+        seq: &mut seq,
+        orig,
+    };
+    vscan(inp, fmt, &mut args)
+}
+
+/// `vsscanf(str, fmt, ap)` — `sscanf` with a `va_list`.  A NULL `fmt` is
+/// `EINVAL` (glibc's `ARGCHECK`); a NULL `str` is `EFAULT` (§1115: glibc
+/// faults reading it).
 ///
 /// # Safety
 /// `str`/`fmt` must be valid NUL-terminated strings and `ap` a valid
@@ -179,1189 +165,1996 @@ fn scan_fd_source(fd: i32, fmt: *const u8, args: &mut printf::Args) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn vsscanf(input: *const u8, fmt: *const u8, ap: *mut VaList) -> i32 {
     if ap.is_null() {
-        return -1;
+        return EOF;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let mut args = unsafe { printf::Args::from_raw(ap) };
-    scan_string_source(input, fmt, &mut args)
+    if fmt.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return EOF;
+    }
+    if input.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return EOF;
+    }
+    let mut inp = StrInput {
+        p: input,
+        i: 0,
+        end: End::default(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe { scan_with(&mut inp, fmt, ap) }
 }
 
-/// `vscanf(fmt, ap)` — `scanf` with a `va_list` (reads from stdin).
+/// `vscanf(fmt, ap)` — `scanf` with a `va_list`: [`vfscanf`] on `stdin`.
 ///
 /// # Safety
 /// As [`vsscanf`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn vscanf(fmt: *const u8, ap: *mut VaList) -> i32 {
-    if ap.is_null() {
-        return -1;
-    }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let mut args = unsafe { printf::Args::from_raw(ap) };
-    scan_fd_source(0, fmt, &mut args)
+    // SAFETY: forwarded; `stdin` is a stream.
+    unsafe { vfscanf(crate::stdio::stdin_stream(), fmt, ap) }
 }
 
-/// `vfscanf(stream, fmt, ap)` — `fscanf` with a `va_list`.
+/// `vfscanf(stream, fmt, ap)` — `fscanf` with a `va_list`, reading through
+/// the stream (held for the call) one character at a time and giving back the
+/// one it looked at too far, so what follows is still there for the next call
+/// -- `fgets`, `getc` or another `fscanf`.  A wide stream answers `EOF`; one not
+/// open for reading is `EBADF` and `EOF`, with no stream error (glibc's
+/// `ARGCHECK`); a NULL `fmt` `EINVAL`.
 ///
 /// # Safety
 /// As [`vsscanf`]; `stream` must be a valid `FILE*`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn vfscanf(stream: *mut u8, fmt: *const u8, ap: *mut VaList) -> i32 {
     if ap.is_null() {
-        return -1;
+        return EOF;
     }
-    // The fd must be resolved before the format check so a bad stream is
-    // reported as an error rather than as EOF.
-    let fd = crate::stdio::fileno(stream);
-    if fd < 0 {
-        return -1;
+    let Some(s) = crate::stdio::lock_scan_stream(stream) else {
+        return EOF;
+    };
+    if fmt.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return EOF;
     }
-    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
-    let mut args = unsafe { printf::Args::from_raw(ap) };
-    scan_fd_source(fd, fmt, &mut args)
+    let mut inp = StreamInput {
+        s,
+        n: 0,
+        end: End::default(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe { scan_with(&mut inp, fmt, ap) }
 }
 
-/// Read bytes from a file descriptor until newline or buffer full.
+/// `vswscanf(ws, fmt, ap)` — `swscanf` with a `va_list`: the engine over a
+/// wide string with a wide format (glibc's `COMPILE_WSCANF`).  A NULL `fmt`
+/// is `EINVAL`, a NULL `ws` `EFAULT`, as for [`vsscanf`].
 ///
-/// Returns the number of bytes read (0 on EOF/error).  The buffer
-/// is always null-terminated.
-fn read_line_from_fd(fd: i32, buf: &mut [u8; SCANF_LINE_BUF]) -> usize {
-    let mut pos: usize = 0;
-    let max = SCANF_LINE_BUF.wrapping_sub(1); // Leave room for NUL.
-
-    while pos < max {
-        let mut byte = 0u8;
-        let ret = crate::file::read(fd, &raw mut byte, 1);
-        if ret <= 0 {
-            break; // EOF or error.
-        }
-        if let Some(slot) = buf.get_mut(pos) {
-            *slot = byte;
-        }
-        pos = pos.wrapping_add(1);
-        if byte == b'\n' {
-            break;
-        }
+/// # Safety
+/// `ws`/`fmt` must be valid wide C strings and `ap` a valid `va_list` whose
+/// pointer arguments match the conversions in `fmt`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vswscanf(
+    input: *const crate::wchar::WcharT,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    if ap.is_null() {
+        return EOF;
     }
-
-    // Null-terminate.
-    if let Some(slot) = buf.get_mut(pos) {
-        *slot = 0;
+    if fmt.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return EOF;
     }
-    pos
+    if input.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return EOF;
+    }
+    let mut inp = WStrInput {
+        p: input,
+        i: 0,
+        end: End::default(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe { scan_with(&mut inp, fmt, ap) }
 }
 
-// ---------------------------------------------------------------------------
-// Scan context
-// ---------------------------------------------------------------------------
-
-/// Bundles all mutable state for the scanning engine.
+/// `vwscanf(fmt, ap)` — `wscanf` with a `va_list`: [`vfwscanf`] on `stdin`.
 ///
-/// The destination pointers are not held here: `args` is the caller's live
-/// `va_list`, and each conversion pulls its own pointer out of it as it runs.
-struct ScanCtx<'a, 'v> {
-    input: *const u8,
-    fmt: *const u8,
-    args: &'a mut printf::Args<'v>,
-    si: usize,
-    fi: usize,
-    assigned: i32,
+/// # Safety
+/// As [`vswscanf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vwscanf(fmt: *const crate::wchar::WcharT, ap: *mut VaList) -> i32 {
+    // SAFETY: forwarded; `stdin` is a stream.
+    unsafe { vfwscanf(crate::stdio::stdin_stream(), fmt, ap) }
 }
 
-impl ScanCtx<'_, '_> {
-    /// Read the current input byte (0 if past end).
-    #[inline]
-    fn peek(&self) -> u8 {
-        // SAFETY: Caller guarantees input is a valid null-terminated string.
-        unsafe { *self.input.add(self.si) }
+/// `vfwscanf(stream, fmt, ap)` — `fwscanf` with a `va_list`: the stream
+/// read as `fgetwc` reads it, one wide character at a time, and the one it
+/// looked at too far given back as `ungetwc` gives it back.  A byte stream
+/// answers `EOF` (glibc's `_IO_fwide (s, 1) != 1`); one not open for
+/// reading is `EBADF` and `EOF`, with no stream error; a NULL `fmt` `EINVAL`.
+///
+/// # Safety
+/// As [`vswscanf`]; `stream` must be a valid `FILE*`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vfwscanf(
+    stream: *mut u8,
+    fmt: *const crate::wchar::WcharT,
+    ap: *mut VaList,
+) -> i32 {
+    if ap.is_null() {
+        return EOF;
     }
-
-    /// Read the input byte `off` positions ahead (0 if past end).
-    ///
-    /// Lets a conversion look ahead at a multi-byte token — `infinity`, a
-    /// `nan(...)` payload — and only commit `si` once the whole thing matched.
-    #[inline]
-    fn peek_at(&self, off: usize) -> u8 {
-        // SAFETY: Caller guarantees input is a valid null-terminated string,
-        // and every caller stops at the first NUL, so `si + off` stays inside
-        // it once the bytes before it have been checked.
-        unsafe { *self.input.add(self.si.wrapping_add(off)) }
+    let Some(s) = crate::stdio::lock_wscan_stream(stream) else {
+        return EOF;
+    };
+    if fmt.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return EOF;
     }
-
-    /// Read the current format byte.
-    #[inline]
-    fn fmt_peek(&self) -> u8 {
-        unsafe { *self.fmt.add(self.fi) }
-    }
-
-    /// Advance input by one byte.
-    #[inline]
-    fn advance(&mut self) {
-        self.si = self.si.wrapping_add(1);
-    }
-
-    /// Advance format by one byte.
-    #[inline]
-    fn fmt_advance(&mut self) {
-        self.fi = self.fi.wrapping_add(1);
-    }
-
-    /// Consume the next destination pointer from the caller's `va_list`.
-    ///
-    /// A `va_list` cannot report exhaustion, so a caller that passes fewer
-    /// pointers than `fmt` has conversions gets garbage here exactly as it
-    /// would from glibc.  Every store site null-checks, which at least makes
-    /// the common "passed a NULL" mistake a no-op rather than a fault.
-    #[inline]
-    fn next_arg(&mut self) -> u64 {
-        self.args.int()
-    }
-
-    /// Skip ASCII whitespace in input.
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
-            self.advance();
-        }
-    }
-
-    /// Did the directive that just failed fail because the input ran out?
-    ///
-    /// C distinguishes an *input* failure — the input ended before the
-    /// directive matched anything — from a *matching* failure, where
-    /// characters were read but did not form a valid item.  Only the former
-    /// makes `scanf` return `EOF`; a matching failure returns the number of
-    /// items assigned so far, which is often zero.
-    ///
-    /// The distinction is not simply "are we at end of input": `sscanf("0x",
-    /// "%lf")` ends at end of input and still returns 0, because the directive
-    /// consumed `0x` before discovering there was no value there.  What makes
-    /// it an input failure is that *nothing was matched*, so the test is
-    /// whether everything consumed since the directive started was leading
-    /// whitespace — which no directive treats as part of its item.
-    fn stopped_at_end_of_input(&self, started_at: usize) -> bool {
-        if self.peek() != 0 {
-            return false;
-        }
-        (started_at..self.si).all(|i| {
-            // SAFETY: `i` is below `self.si`, so it names a byte this scan has
-            // already read from the caller's NUL-terminated string.
-            let byte = unsafe { *self.input.add(i) };
-            matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
-        })
-    }
+    let mut inp = WStreamInput {
+        s,
+        n: 0,
+        end: End::default(),
+    };
+    // SAFETY: the caller's contract.
+    unsafe { scan_with(&mut inp, fmt, ap) }
 }
 
 // ---------------------------------------------------------------------------
-// Core scanning engine
+// The engine: glibc's vfscanf, over a source with one character of pushback
 // ---------------------------------------------------------------------------
+//
+// A port of glibc 2.40's `stdio-common/vfscanf-internal.c`, both its paths
+// (byte, and `COMPILE_WSCANF`), C locale: the same directive parser, the same
+// conversions and -- what makes the difference -- the same way of reading.
+// glibc reads one character at a time (`inchar`) and, when a conversion has
+// read one character too many, gives that one back (`ungetc`); it never looks
+// further ahead than that, because a stream cannot.  So every conversion here
+// consumes exactly what glibc's consumes: `0x` followed by no hex digit is
+// consumed by `%x`, the `e` of `1ex` by `%f`, the `infin` of `infinx` by a
+// `%f` that then fails.  `sscanf` and `swscanf` run the same engine over a
+// string.
+//
+// Written once over [`Unit`]: where the two paths differ -- a multibyte
+// format character, `%c`/`%s`/`%[` against their `l` forms, `ISSPACE`, the
+// scanset -- the engine asks `Unit::WIDE`, as glibc asks `COMPILE_WSCANF`.
+// Numbers are the same in both: every character they accept is ASCII, so
+// they are collected as bytes whatever the unit.
+//
+// Until 2026-09-27 the engine read a NUL-terminated string with arbitrary
+// look-ahead, and `fscanf` fed it one line read straight from the file
+// descriptor (`known-issues.md` -> `D-POSIX-SCANF-READS-AROUND-THE-STREAM`),
+// so `scanf("%d")` on `12 34` threw the 34 away and a format could not span
+// lines.  It also stored `%hd` and `%hhd` as four bytes -- overwriting the
+// memory after a `short` or a `char` -- and had no `%m`, `%p`, `%b`, `%lc`,
+// `%ls`, `%l[` or `%N$`.
 
-/// Main scan loop.
-#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-fn scan_core(ctx: &mut ScanCtx<'_, '_>) -> i32 {
-    // Set when the scan stopped because the input ran out rather than because
-    // it held something that did not match.  Only the former yields EOF.
-    let mut input_failure = false;
-    loop {
-        let fc = ctx.fmt_peek();
-        if fc == 0 {
-            break;
+use crate::errno;
+
+/// `l`.
+const LONG: u32 = 1;
+/// `L`, `ll`, `q`: `long long` and `long double`.
+const LONGDBL: u32 = 1 << 1;
+/// `h`.
+const SHORT: u32 = 1 << 2;
+/// `hh`.
+const CHAR: u32 = 1 << 3;
+/// `*`.
+const SUPPRESS: u32 = 1 << 4;
+/// `m`: the conversion allocates its destination.
+const MALLOC: u32 = 1 << 5;
+/// `%d` and `%i`.
+const NUMBER_SIGNED: u32 = 1 << 6;
+/// `%p`.
+const READ_POINTER: u32 = 1 << 7;
+/// A `0x` float.
+const HEXA_FLOAT: u32 = 1 << 8;
+
+/// `isspace` in the C locale.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// One character of a format or an input: a byte for the `scanf` family, a
+/// `wchar_t` for the `wscanf` family -- glibc's `CHAR_T`, over which glibc
+/// compiles `vfscanf-internal.c` twice.  The engine is written once over it;
+/// where the two differ, it asks [`Unit::WIDE`], as glibc asks
+/// `COMPILE_WSCANF`.
+trait Unit: Copy + Eq {
+    /// Whether this is `wscanf`'s.
+    const WIDE: bool;
+    /// A format's, or an `sscanf` string's, terminator.
+    const NUL: Self;
+    /// The character as a byte, to compare with the ASCII a directive or a
+    /// number is made of: a byte is itself; a wide character is itself when
+    /// it is ASCII and otherwise 0xFF, which nothing the engine looks for is.
+    fn byte(self) -> u8;
+    /// glibc's `ISSPACE`: `isspace` or `iswspace`, C locale.
+    fn space(self) -> bool;
+    /// The character's value, unsigned: what glibc's wide scanset compares,
+    /// as `unsigned int`.
+    fn code(self) -> u32;
+}
+
+impl Unit for u8 {
+    const WIDE: bool = false;
+    const NUL: Self = 0;
+    fn byte(self) -> u8 {
+        self
+    }
+    fn space(self) -> bool {
+        is_space(self)
+    }
+    fn code(self) -> u32 {
+        u32::from(self)
+    }
+}
+
+impl Unit for crate::wchar::WcharT {
+    const WIDE: bool = true;
+    const NUL: Self = 0;
+    fn byte(self) -> u8 {
+        u8::try_from(self).ok().filter(u8::is_ascii).unwrap_or(0xff)
+    }
+    fn space(self) -> bool {
+        crate::wchar::iswspace(self) != 0
+    }
+    fn code(self) -> u32 {
+        self.cast_unsigned()
+    }
+}
+
+/// Where the characters come from: glibc's `inchar` and `ungetc`.
+trait Input {
+    /// What it gives: bytes, or wide characters.
+    type U: Unit;
+    /// The next character, consumed; `None` at the end, which stays the end
+    /// for the rest of the call.
+    fn get(&mut self) -> Option<Self::U>;
+    /// Give back `c`, the character `get` returned last.
+    fn unget(&mut self, c: Self::U);
+    /// Characters consumed so far: `%n`'s answer.
+    fn read_in(&self) -> usize;
+}
+
+/// The end of an input, as glibc's `inchar` keeps it: the `errno` of the
+/// moment the input ended (`inchar_errno`), put back by every read after --
+/// so the `EILSEQ` or `EIO` that ended a stream survives the whitespace
+/// skip, which saves and restores `errno` around its reads.
+#[derive(Default)]
+struct End {
+    ended: bool,
+    errno: i32,
+}
+
+impl End {
+    /// The input ends now, or has ended: `None`, with `errno` as it was when
+    /// it did.
+    fn reached<T>(&mut self) -> Option<T> {
+        if self.ended {
+            errno::set_errno(self.errno);
+        } else {
+            self.ended = true;
+            self.errno = errno::get_errno();
         }
+        None
+    }
+}
 
-        // Whitespace in format matches zero or more whitespace in input.
-        if matches!(fc, b' ' | b'\t' | b'\n' | b'\r') {
-            ctx.fmt_advance();
-            ctx.skip_ws();
-            continue;
+/// `sscanf`'s input: a C string, whose NUL is the end.
+struct StrInput {
+    p: *const u8,
+    i: usize,
+    end: End,
+}
+
+impl Input for StrInput {
+    type U = u8;
+    fn get(&mut self) -> Option<u8> {
+        // SAFETY: a C string, and `i` never passes its NUL.
+        let c = unsafe { *self.p.add(self.i) };
+        if c == 0 {
+            return self.end.reached();
         }
+        self.i = self.i.wrapping_add(1);
+        Some(c)
+    }
+    fn unget(&mut self, _c: u8) {
+        self.i = self.i.saturating_sub(1);
+    }
+    fn read_in(&self) -> usize {
+        self.i
+    }
+}
 
-        // Format specifier.
-        if fc == b'%' {
-            ctx.fmt_advance();
-            let spec = ctx.fmt_peek();
-            if spec == 0 {
-                break;
+/// `fscanf`'s input: a stream, held for the call.  A NUL is a character like
+/// any other there.
+struct StreamInput {
+    s: crate::stdio::ScanStream,
+    n: usize,
+    end: End,
+}
+
+impl Input for StreamInput {
+    type U = u8;
+    fn get(&mut self) -> Option<u8> {
+        if self.end.ended {
+            return self.end.reached();
+        }
+        match u8::try_from(self.s.getc()) {
+            Ok(c) => {
+                self.n = self.n.wrapping_add(1);
+                Some(c)
             }
+            Err(_) => self.end.reached(),
+        }
+    }
+    fn unget(&mut self, c: u8) {
+        self.n = self.n.saturating_sub(1);
+        self.s.unget(c);
+    }
+    fn read_in(&self) -> usize {
+        self.n
+    }
+}
 
-            // Literal %%.
-            if spec == b'%' {
-                ctx.fmt_advance();
-                if ctx.peek() != b'%' {
-                    // Input mismatch.
-                    input_failure = ctx.peek() == 0;
-                    break;
+/// `swscanf`'s input: a wide C string, whose NUL is the end.
+struct WStrInput {
+    p: *const crate::wchar::WcharT,
+    i: usize,
+    end: End,
+}
+
+impl Input for WStrInput {
+    type U = crate::wchar::WcharT;
+    fn get(&mut self) -> Option<crate::wchar::WcharT> {
+        // SAFETY: a wide C string, and `i` never passes its NUL.
+        let c = unsafe { *self.p.add(self.i) };
+        if c == 0 {
+            return self.end.reached();
+        }
+        self.i = self.i.wrapping_add(1);
+        Some(c)
+    }
+    fn unget(&mut self, _c: crate::wchar::WcharT) {
+        self.i = self.i.saturating_sub(1);
+    }
+    fn read_in(&self) -> usize {
+        self.i
+    }
+}
+
+/// `fwscanf`'s input: a wide stream, held for the call, read as `fgetwc`
+/// reads it -- the UTF-8 of its characters -- and given back as `ungetwc`
+/// gives back.  A byte sequence that is no character ends the input, with
+/// the stream in error and `errno` `EILSEQ`: glibc's `inchar` sees `WEOF`.
+struct WStreamInput {
+    s: crate::stdio::WideStream,
+    n: usize,
+    end: End,
+}
+
+impl Input for WStreamInput {
+    type U = crate::wchar::WcharT;
+    fn get(&mut self) -> Option<crate::wchar::WcharT> {
+        if self.end.ended {
+            return self.end.reached();
+        }
+        match crate::wchar::read_wide(&self.s) {
+            Ok(Some(wc)) => {
+                self.n = self.n.wrapping_add(1);
+                Some(wc)
+            }
+            Ok(None) | Err(_) => self.end.reached(),
+        }
+    }
+    fn unget(&mut self, c: crate::wchar::WcharT) {
+        self.n = self.n.saturating_sub(1);
+        // Always room: the character's bytes -- four at most -- came out of
+        // the stream just now, and it keeps eight bytes of pushback besides.
+        let _ = crate::wchar::unget_wide(&self.s, c);
+    }
+    fn read_in(&self) -> usize {
+        self.n
+    }
+}
+
+/// The destination pointers: the next in order, or the `N`th for `%N$`.
+struct ScanArgs<'a, 'v> {
+    seq: &'a mut printf::Args<'v>,
+    /// The `va_list` as the call received it, to count from for `%N$`.
+    orig: Option<VaList>,
+}
+
+impl ScanArgs<'_, '_> {
+    fn ptr(&mut self, pos: usize) -> u64 {
+        if pos == 0 {
+            return self.seq.int();
+        }
+        let Some(mut va) = self.orig else {
+            return 0;
+        };
+        let mut v = 0;
+        for _ in 0..pos {
+            // SAFETY: the caller's `va_list` holds at least `pos` pointers,
+            // by the contract `%N$` puts on it.
+            v = unsafe { printf::va_arg_int(&mut va) };
+        }
+        v
+    }
+}
+
+/// glibc's `char_buffer`: the text of a number, grown as needed.
+struct CharBuf {
+    inline: [u8; 128],
+    heap: *mut u8,
+    len: usize,
+    cap: usize,
+    failed: bool,
+}
+
+impl CharBuf {
+    const fn new() -> Self {
+        Self {
+            inline: [0; 128],
+            heap: core::ptr::null_mut(),
+            len: 0,
+            cap: 128,
+            failed: false,
+        }
+    }
+    fn data(&mut self) -> *mut u8 {
+        if self.heap.is_null() {
+            self.inline.as_mut_ptr()
+        } else {
+            self.heap
+        }
+    }
+    fn rewind(&mut self) {
+        self.len = 0;
+        self.failed = false;
+    }
+    fn push(&mut self, c: u8) {
+        if self.failed {
+            return;
+        }
+        if self.len == self.cap {
+            let Some(cap) = self.cap.checked_mul(2) else {
+                self.failed = true;
+                return;
+            };
+            let nb = crate::malloc::malloc(cap);
+            if nb.is_null() {
+                self.failed = true;
+                return;
+            }
+            let old = self.data();
+            // SAFETY: `len` bytes at `old`, into a larger new buffer.
+            unsafe { core::ptr::copy_nonoverlapping(old, nb, self.len) };
+            // SAFETY: the old heap buffer (or null), ours.
+            unsafe { crate::malloc::free(self.heap) };
+            self.heap = nb;
+            self.cap = cap;
+        }
+        let at = self.len;
+        // SAFETY: `at < cap`.
+        unsafe { *self.data().add(at) = c };
+        self.len = at.wrapping_add(1);
+    }
+    fn size(&self) -> usize {
+        self.len
+    }
+    fn at(&mut self, i: usize) -> u8 {
+        if i >= self.len {
+            return 0;
+        }
+        // SAFETY: `i < len`.
+        unsafe { *self.data().add(i) }
+    }
+    /// The text, terminated.
+    fn cstr(&mut self) -> *const u8 {
+        self.push(0);
+        self.data()
+    }
+}
+
+impl Drop for CharBuf {
+    fn drop(&mut self) {
+        // SAFETY: ours, or null.
+        unsafe { crate::malloc::free(self.heap) };
+    }
+}
+
+/// The `%m` destinations filled so far, freed and set to NULL if the call
+/// ends in `EOF`: glibc's `ptrs_to_free`.
+struct Allocs {
+    list: *mut *mut *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+impl Allocs {
+    const fn new() -> Self {
+        Self {
+            list: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }
+    }
+    fn push(&mut self, p: *mut *mut u8) -> bool {
+        if self.len == self.cap {
+            let cap = if self.cap == 0 {
+                8
+            } else {
+                self.cap.saturating_mul(2)
+            };
+            let Some(bytes) = cap.checked_mul(core::mem::size_of::<*mut *mut u8>()) else {
+                return false;
+            };
+            // SAFETY: ours, or null.
+            let nl =
+                unsafe { crate::malloc::realloc(self.list.cast(), bytes) }.cast::<*mut *mut u8>();
+            if nl.is_null() {
+                return false;
+            }
+            self.list = nl;
+            self.cap = cap;
+        }
+        // SAFETY: `len < cap`.
+        unsafe { *self.list.add(self.len) = p };
+        self.len = self.len.wrapping_add(1);
+        true
+    }
+    fn free_all(&mut self) {
+        for i in 0..self.len {
+            // SAFETY: each entry is a caller's `char **` that we filled.
+            unsafe {
+                let p = *self.list.add(i);
+                crate::malloc::free(*p);
+                *p = core::ptr::null_mut();
+            }
+        }
+        self.len = 0;
+    }
+}
+
+impl Drop for Allocs {
+    fn drop(&mut self) {
+        // SAFETY: ours, or null.
+        unsafe { crate::malloc::free(self.list.cast()) };
+    }
+}
+
+/// Why a scan stopped early: glibc's `input_error`, `conv_error`,
+/// `encode_error` and its out-of-memory `done = EOF`.
+enum Stop {
+    Input,
+    Conv,
+    Encode,
+    NoMem,
+}
+
+type Step = Result<(), Stop>;
+
+/// One call's state.
+struct Engine<'x, 'a, 'v, I: Input> {
+    inp: &'x mut I,
+    args: &'x mut ScanArgs<'a, 'v>,
+    f: *const I::U,
+    done: i32,
+    allocs: Allocs,
+    /// The `%m` buffer of the conversion in progress, freed if it fails.
+    strptr: *mut *mut u8,
+    charbuf: CharBuf,
+}
+
+/// Run `fmt` over `inp`.  The number of assignments, or `EOF` if the input
+/// ended (or memory ran out) before the first.
+fn vscan<I: Input>(inp: &mut I, fmt: *const I::U, args: &mut ScanArgs<'_, '_>) -> i32 {
+    let mut e = Engine {
+        inp,
+        args,
+        f: fmt,
+        done: 0,
+        allocs: Allocs::new(),
+        strptr: core::ptr::null_mut(),
+        charbuf: CharBuf::new(),
+    };
+    match e.run() {
+        Ok(()) | Err(Stop::Conv | Stop::Encode) => {}
+        Err(Stop::Input) => {
+            if e.done == 0 {
+                e.done = EOF;
+            }
+        }
+        Err(Stop::NoMem) => e.done = EOF,
+    }
+    if e.done == EOF {
+        e.allocs.free_all();
+    } else if !e.strptr.is_null() {
+        // SAFETY: the caller's `char **`, which we filled.
+        unsafe {
+            crate::malloc::free(*e.strptr);
+            *e.strptr = core::ptr::null_mut();
+        }
+    }
+    e.done
+}
+
+const EOF: i32 = -1;
+
+impl<I: Input> Engine<'_, '_, '_, I> {
+    /// The format character under the cursor.
+    fn fpeek(&self) -> I::U {
+        // SAFETY: the format is a C string, and the cursor stops at its NUL.
+        unsafe { *self.f }
+    }
+    fn fnext(&mut self) -> I::U {
+        let c = self.fpeek();
+        if c != I::U::NUL {
+            // SAFETY: not past the NUL.
+            self.f = unsafe { self.f.add(1) };
+        }
+        c
+    }
+    /// glibc's `read_int`: a decimal number, saturating.
+    fn read_int(&mut self) -> usize {
+        let mut n: usize = 0;
+        while self.fpeek().byte().is_ascii_digit() {
+            n = n
+                .saturating_mul(10)
+                .saturating_add(usize::from(self.fpeek().byte().wrapping_sub(b'0')));
+            self.fnext();
+        }
+        n
+    }
+
+    fn run(&mut self) -> Step {
+        let mut skip_space = false;
+        while self.fpeek() != I::U::NUL {
+            // A multibyte character in the format must match the same bytes
+            // -- and, glibc's order, before any whitespace the format asked to
+            // skip.  A wide format has no multibyte characters: a non-ASCII
+            // one is a character like any other, below.
+            if !I::U::WIDE && !self.fpeek().byte().is_ascii() {
+                let len = utf8_len(self.fpeek().byte());
+                for _ in 0..len {
+                    let want = self.fpeek();
+                    if want == I::U::NUL {
+                        break;
+                    }
+                    let c = self.inp.get().ok_or(Stop::Input)?;
+                    if c != want {
+                        self.inp.unget(c);
+                        return Err(Stop::Conv);
+                    }
+                    self.fnext();
                 }
-                ctx.advance();
                 continue;
             }
-
-            // Parse optional '*' (suppression flag).
-            let suppress = spec == b'*';
-            if suppress {
-                ctx.fmt_advance();
+            let fc = self.fnext();
+            if fc.byte() != b'%' {
+                if fc.space() {
+                    skip_space = true;
+                    continue;
+                }
+                let mut c = self.inp.get().ok_or(Stop::Input)?;
+                if skip_space {
+                    while c.space() {
+                        c = self.inp.get().ok_or(Stop::Input)?;
+                    }
+                    skip_space = false;
+                }
+                if c != fc {
+                    self.inp.unget(c);
+                    return Err(Stop::Conv);
+                }
+                continue;
             }
-
-            // Parse optional width.
-            let mut width: usize = 0;
-            let mut has_width = false;
-            while ctx.fmt_peek().is_ascii_digit() {
-                has_width = true;
-                width = width
-                    .saturating_mul(10)
-                    .saturating_add(usize::from(ctx.fmt_peek().wrapping_sub(b'0')));
-                ctx.fmt_advance();
+            self.directive(&mut skip_space)?;
+        }
+        // Whitespace ended the format: consume the input's.
+        if skip_space {
+            while let Some(c) = self.inp.get() {
+                if !c.space() {
+                    self.inp.unget(c);
+                    break;
+                }
             }
-            if !has_width {
-                width = usize::MAX; // No limit.
-            }
+        }
+        Ok(())
+    }
 
-            // Parse length modifier.  See the LEN_* constants: everything from
-            // LEN_LONG upward stores 64 bits, so the integer scanners only
-            // test `>= LEN_LONG`; only the float path distinguishes further.
-            let mut long_mod = LEN_DEFAULT;
-            match ctx.fmt_peek() {
-                b'l' => {
-                    long_mod = LEN_LONG;
-                    ctx.fmt_advance();
-                    if ctx.fmt_peek() == b'l' {
-                        long_mod = LEN_LONG_LONG;
-                        ctx.fmt_advance();
+    /// One `%` directive, from just after the `%`.
+    #[allow(clippy::too_many_lines)]
+    fn directive(&mut self, skip_space: &mut bool) -> Step {
+        let mut flags: u32 = 0;
+        let mut argpos: usize = 0;
+        let mut width: i64;
+        self.charbuf.rewind();
+
+        let mut have_width = None;
+        if self.fpeek().byte().is_ascii_digit() {
+            let n = self.read_int();
+            if self.fpeek().byte() == b'$' {
+                self.fnext();
+                argpos = n;
+            } else {
+                // That was the field width.
+                have_width = Some(n);
+            }
+        }
+        if let Some(n) = have_width {
+            width = i64::try_from(n).unwrap_or(i64::MAX);
+        } else {
+            // `*`, and glibc's `'` (grouping: nothing to group in the C
+            // locale) and `I` (locale digits: the C locale has none).
+            while matches!(self.fpeek().byte(), b'*' | b'\'' | b'I') {
+                if self.fnext().byte() == b'*' {
+                    flags |= SUPPRESS;
+                }
+            }
+            width = 0;
+            if self.fpeek().byte().is_ascii_digit() {
+                width = i64::try_from(self.read_int()).unwrap_or(i64::MAX);
+            }
+        }
+        if width == 0 {
+            width = -1;
+        }
+
+        // Type modifiers.
+        match self.fpeek().byte() {
+            b'h' => {
+                self.fnext();
+                if self.fpeek().byte() == b'h' {
+                    self.fnext();
+                    flags |= CHAR;
+                } else {
+                    flags |= SHORT;
+                }
+            }
+            b'l' => {
+                self.fnext();
+                if self.fpeek().byte() == b'l' {
+                    self.fnext();
+                    flags |= LONGDBL | LONG;
+                } else {
+                    flags |= LONG;
+                }
+            }
+            b'q' | b'L' => {
+                self.fnext();
+                flags |= LONGDBL | LONG;
+            }
+            b'm' => {
+                self.fnext();
+                flags |= MALLOC;
+                if self.fpeek().byte() == b'l' {
+                    self.fnext();
+                    flags |= LONG;
+                }
+            }
+            // `size_t`, `intmax_t`, `ptrdiff_t`: 64 bits, `long` here.
+            b'z' | b'j' | b't' => {
+                self.fnext();
+                flags |= LONG;
+            }
+            // C23's `w8`...`w64` and `wf8`...`wf64`.  The fast types' widths
+            // are musl's (§1119): `int_fast16_t` and `int_fast32_t` are 32
+            // bits in the headers a program here is compiled against, where
+            // glibc's are 64 -- storing 64 bits into one would overwrite what
+            // follows it.
+            b'w' => {
+                self.fnext();
+                let fast = self.fpeek().byte() == b'f';
+                if fast {
+                    self.fnext();
+                }
+                let mut bits = self.read_int();
+                if fast {
+                    bits = match bits {
+                        16 => 32,
+                        n => n,
+                    };
+                }
+                match bits {
+                    8 => flags |= CHAR,
+                    16 => flags |= SHORT,
+                    32 => {}
+                    64 => flags |= LONGDBL | LONG,
+                    _ => {
+                        errno::set_errno(errno::EINVAL);
+                        return Err(Stop::Conv);
                     }
                 }
-                b'h' => {
-                    ctx.fmt_advance();
-                    if ctx.fmt_peek() == b'h' {
-                        ctx.fmt_advance();
-                    }
-                    // We treat h/hh the same as default (store as i32/u32).
-                }
-                // `size_t`, `intmax_t` and `ptrdiff_t` are all 64-bit on LP64.
-                // Without these the modifier was read as the conversion
-                // character, so `%zu` matched nothing and stored nothing.
-                b'z' | b'j' | b't' => {
-                    long_mod = LEN_LONG;
-                    ctx.fmt_advance();
-                }
-                b'L' => {
-                    long_mod = LEN_LONG_DOUBLE;
-                    ctx.fmt_advance();
-                }
-                _ => {}
             }
-
-            let conv = ctx.fmt_peek();
-            if conv == 0 {
-                break;
-            }
-            ctx.fmt_advance();
-
-            let started_at = ctx.si;
-            let matched = match conv {
-                b'd' => scan_signed_int(ctx, suppress, width, long_mod),
-                // %i auto-detects base: 0x/0X → hex, 0 → octal, else decimal.
-                b'i' => scan_signed_int_auto(ctx, suppress, width, long_mod),
-                b'u' => scan_unsigned_int(ctx, suppress, width, long_mod, 10),
-                b'x' | b'X' => scan_unsigned_int(ctx, suppress, width, long_mod, 16),
-                b'o' => scan_unsigned_int(ctx, suppress, width, long_mod, 8),
-                b's' => scan_string(ctx, suppress, width),
-                b'c' => scan_char(ctx, suppress, width, has_width),
-                b'[' => scan_scanset(ctx, suppress, width),
-                b'f' | b'e' | b'g' | b'a' => scan_float(ctx, suppress, width, long_mod),
-                b'n' => {
-                    // %n: store characters consumed so far.
-                    if !suppress {
-                        let ptr = ctx.next_arg() as *mut i32;
-                        if !ptr.is_null() {
-                            unsafe {
-                                *ptr = ctx.si as i32;
-                            }
-                        }
-                    }
-                    // %n does NOT count toward assigned.
-                    true
-                }
-                // Unknown specifier — stop.
-                _ => false,
-            };
-            if !matched {
-                input_failure = ctx.stopped_at_end_of_input(started_at);
-                break;
-            }
-        } else {
-            // Literal character — must match input exactly.
-            if ctx.peek() != fc {
-                input_failure = ctx.peek() == 0;
-                break;
-            }
-            ctx.advance();
-            ctx.fmt_advance();
+            _ => {}
         }
-    }
 
-    // EOF is reported only when the input ran out before anything matched;
-    // a directive that read characters and then found them unusable is a
-    // matching failure and reports the assignments made so far — zero,
-    // usually.  See `ScanCtx::stopped_at_end_of_input`.
-    if ctx.assigned == 0 && input_failure {
-        -1 // EOF
-    } else {
-        ctx.assigned
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Conversion helpers
-// ---------------------------------------------------------------------------
-
-/// Scan a signed decimal integer (`%d`).
-///
-/// Always base 10.  Returns true if conversion succeeded (even if suppressed).
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
-    ctx.skip_ws();
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let negative = ctx.peek() == b'-';
-    let has_sign = negative || ctx.peek() == b'+';
-    if has_sign {
-        ctx.advance();
-    }
-
-    let mut val: i64 = 0;
-    let mut count: usize = 0;
-    let max = if has_sign {
-        width.saturating_sub(1)
-    } else {
-        width
-    };
-
-    while count < max {
-        let c = ctx.peek();
-        if !c.is_ascii_digit() {
-            break;
+        if self.fpeek() == I::U::NUL {
+            return Err(Stop::Conv);
         }
-        val = val
-            .wrapping_mul(10)
-            .wrapping_add(i64::from(c.wrapping_sub(b'0')));
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
+        let fc = self.fnext().byte();
 
-    if count == 0 {
-        return false;
-    }
-
-    if negative {
-        val = val.wrapping_neg();
-    }
-
-    if !suppress {
-        let ptr = ctx.next_arg();
-        if long_mod >= LEN_LONG {
-            let p = ptr as *mut i64;
-            if !p.is_null() {
-                unsafe {
-                    *p = val;
-                }
-            }
-        } else {
-            let p = ptr as *mut i32;
-            if !p.is_null() {
-                unsafe {
-                    *p = val as i32;
-                }
-            }
-        }
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Scan a signed integer with auto-detected base (`%i`).
-///
-/// POSIX/C: `%i` detects the base from the input prefix:
-/// - `0x` or `0X` → hexadecimal (base 16)
-/// - `0` (without x) → octal (base 8)
-/// - otherwise → decimal (base 10)
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int_auto(
-    ctx: &mut ScanCtx<'_, '_>,
-    suppress: bool,
-    width: usize,
-    long_mod: u8,
-) -> bool {
-    ctx.skip_ws();
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let negative = ctx.peek() == b'-';
-    let has_sign = negative || ctx.peek() == b'+';
-    if has_sign {
-        ctx.advance();
-    }
-
-    let mut remaining = if has_sign {
-        width.saturating_sub(1)
-    } else {
-        width
-    };
-
-    // Detect base from prefix.
-    let base: u64;
-    let saved_pos = ctx.si; // Save for rollback if hex prefix is incomplete.
-    if ctx.peek() == b'0' && remaining > 0 {
-        // Could be hex (0x) or octal (0).
-        let next = unsafe { *ctx.input.add(ctx.si.wrapping_add(1)) };
-        if (next == b'x' || next == b'X') && remaining > 2 {
-            base = 16;
-            ctx.advance(); // skip '0'
-            ctx.advance(); // skip 'x'/'X'
-            remaining = remaining.saturating_sub(2);
-        } else {
-            base = 8;
-            // Don't consume the leading '0' — it's a valid octal digit
-            // and the loop below will parse it.
-        }
-    } else {
-        base = 10;
-    }
-
-    // Parse digits in the detected base.
-    let mut val: i64 = 0;
-    let mut count: usize = 0;
-
-    while count < remaining {
-        let c = ctx.peek();
-        let digit = match c {
-            b'0'..=b'9' => i64::from(c.wrapping_sub(b'0')),
-            b'a'..=b'f' if base == 16 => i64::from(c.wrapping_sub(b'a')).wrapping_add(10),
-            b'A'..=b'F' if base == 16 => i64::from(c.wrapping_sub(b'A')).wrapping_add(10),
-            _ => break,
-        };
-        if digit >= base as i64 {
-            break;
-        }
-        val = val.wrapping_mul(base as i64).wrapping_add(digit);
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    if count == 0 {
-        if base == 16 {
-            // Incomplete hex prefix (e.g. "0xZ"): roll back past the "0x"
-            // and re-parse as octal "0".
-            ctx.si = saved_pos;
-            // The leading '0' is a valid octal integer with value 0.
-            ctx.advance(); // consume the '0'
-            val = 0;
-        } else {
-            return false;
-        }
-    }
-
-    if negative {
-        val = val.wrapping_neg();
-    }
-
-    if !suppress {
-        let ptr = ctx.next_arg();
-        if long_mod >= LEN_LONG {
-            let p = ptr as *mut i64;
-            if !p.is_null() {
-                unsafe {
-                    *p = val;
-                }
-            }
-        } else {
-            let p = ptr as *mut i32;
-            if !p.is_null() {
-                unsafe {
-                    *p = val as i32;
-                }
-            }
-        }
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Scan an unsigned integer in a given base.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_unsigned_int(
-    ctx: &mut ScanCtx<'_, '_>,
-    suppress: bool,
-    width: usize,
-    long_mod: u8,
-    base: u64,
-) -> bool {
-    ctx.skip_ws();
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    // Skip optional 0x/0X prefix for hex, with backtracking if no
-    // valid hex digit follows (e.g. "0xG" → parse "0" as the result).
-    let saved_pos = ctx.si;
-    let mut consumed_prefix: usize = 0;
-    if base == 16 && ctx.peek() == b'0' {
-        let next = unsafe { *ctx.input.add(ctx.si.wrapping_add(1)) };
-        if next == b'x' || next == b'X' {
-            ctx.advance();
-            ctx.advance();
-            consumed_prefix = 2;
-        }
-    }
-
-    let mut val: u64 = 0;
-    let mut count: usize = 0;
-    let max = width.saturating_sub(consumed_prefix);
-
-    while count < max {
-        let c = ctx.peek();
-        let digit = match c {
-            b'0'..=b'9' => u64::from(c.wrapping_sub(b'0')),
-            b'a'..=b'f' if base == 16 => u64::from(c.wrapping_sub(b'a')).wrapping_add(10),
-            b'A'..=b'F' if base == 16 => u64::from(c.wrapping_sub(b'A')).wrapping_add(10),
-            _ => break,
-        };
-        if digit >= base {
-            break;
-        }
-        val = val.wrapping_mul(base).wrapping_add(digit);
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    if count == 0 {
-        if consumed_prefix > 0 {
-            // Incomplete hex prefix ("0xG"): backtrack and parse "0".
-            ctx.si = saved_pos;
-            ctx.advance(); // consume the '0'
-            val = 0;
-        } else {
-            return false;
-        }
-    }
-
-    if !suppress {
-        let ptr = ctx.next_arg();
-        if long_mod >= LEN_LONG {
-            let p = ptr as *mut u64;
-            if !p.is_null() {
-                unsafe {
-                    *p = val;
-                }
-            }
-        } else {
-            let p = ptr as *mut u32;
-            if !p.is_null() {
-                unsafe {
-                    *p = val as u32;
-                }
-            }
-        }
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Scan a whitespace-delimited string.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_string(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize) -> bool {
-    ctx.skip_ws();
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let ptr = if suppress { 0 } else { ctx.next_arg() };
-    let dest = ptr as *mut u8;
-    let mut count: usize = 0;
-
-    while count < width {
-        let c = ctx.peek();
-        if c == 0 || matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
-            break;
-        }
-        if !suppress && !dest.is_null() {
-            unsafe {
-                *dest.add(count) = c;
-            }
-        }
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    if count == 0 {
-        return false;
-    }
-
-    // Null-terminate.
-    if !suppress && !dest.is_null() {
-        unsafe {
-            *dest.add(count) = 0;
-        }
-    }
-    if !suppress {
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Scan character(s).
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_char(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, has_width: bool) -> bool {
-    // %c does NOT skip whitespace (unlike %s, %d, etc.).
-    let n = if has_width { width } else { 1 };
-
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let ptr = if suppress { 0 } else { ctx.next_arg() };
-    let dest = ptr as *mut u8;
-    let mut count: usize = 0;
-
-    while count < n {
-        let c = ctx.peek();
-        if c == 0 {
-            break;
-        }
-        if !suppress && !dest.is_null() {
-            unsafe {
-                *dest.add(count) = c;
-            }
-        }
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    if count == 0 {
-        return false;
-    }
-
-    if !suppress {
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Match a case-insensitive literal, consuming it only if all of it is there.
-///
-/// `scanf` must not eat a partial token: seeing `in` of `int` and advancing
-/// would corrupt every conversion after it.
-fn match_word(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize, word: &[u8]) -> bool {
-    for (k, &want) in word.iter().enumerate() {
-        if count.wrapping_add(k) >= width {
-            return false;
-        }
-        let c = ctx.peek_at(k);
-        if c == 0 || (c | 0x20) != want {
-            return false;
-        }
-    }
-    ctx.si = ctx.si.wrapping_add(word.len());
-    *count = count.wrapping_add(word.len());
-    true
-}
-
-/// Consume as much of `word` as the input matches, and report how much.
-///
-/// Unlike [`match_word`] this keeps a partial match.  Its one caller is the
-/// `infinity` extension of `inf`, which needs the longest-prefix rule:
-/// `"infi"` is a prefix of a matching sequence, so it belongs to the
-/// conversion even though the conversion then has no value to produce.
-fn match_prefix(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize, word: &[u8]) -> usize {
-    let mut k = 0usize;
-    for &want in word {
-        if count.wrapping_add(k) >= width {
-            break;
-        }
-        let c = ctx.peek_at(k);
-        if c == 0 || (c | 0x20) != want {
-            break;
-        }
-        k = k.wrapping_add(1);
-    }
-    ctx.si = ctx.si.wrapping_add(k);
-    *count = count.wrapping_add(k);
-    k
-}
-
-/// What [`scan_float_named`] found.
-enum NamedScan {
-    /// The input does not begin with `inf`/`nan`; try the digit grammar.
-    NotNamed,
-    /// A named value was matched and consumed.
-    Value(f64),
-    /// A partial `infinity` was consumed, which is a prefix of a matching
-    /// sequence but not one itself — a matching failure.
-    Failed,
-}
-
-/// Match `INF`/`INFINITY` or `NAN[(n-char-sequence)]`, as `strtod` does.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_float_named(ctx: &mut ScanCtx<'_, '_>, count: &mut usize, width: usize) -> NamedScan {
-    if match_word(ctx, count, width, b"nan") {
-        // The optional payload is consumed only if it is properly closed;
-        // otherwise the '(' belongs to whatever comes next in the input.
-        if *count < width && ctx.peek() == b'(' {
-            let mut k = 1usize;
+        // Leading whitespace, for every conversion but `[`, `c`, `C` and `n`.
+        if *skip_space || !matches!(fc, b'[' | b'c' | b'C' | b'n') {
+            let saved = errno::get_errno();
+            errno::set_errno(0);
             loop {
-                if count.wrapping_add(k) >= width {
-                    break;
+                match self.inp.get() {
+                    None => {
+                        if errno::get_errno() == errno::EINTR {
+                            return Err(Stop::Input);
+                        }
+                        break;
+                    }
+                    Some(c) if c.space() => {}
+                    Some(c) => {
+                        self.inp.unget(c);
+                        break;
+                    }
                 }
-                let c = ctx.peek_at(k);
-                if c == b')' {
-                    ctx.si += k + 1;
-                    *count += k + 1;
-                    break;
+            }
+            errno::set_errno(saved);
+            *skip_space = false;
+        }
+
+        match fc {
+            b'%' => {
+                let c = self.inp.get().ok_or(Stop::Input)?;
+                if c.byte() != b'%' {
+                    self.inp.unget(c);
+                    return Err(Stop::Conv);
                 }
-                if c == 0 || !(c.is_ascii_alphanumeric() || c == b'_') {
-                    break;
+                Ok(())
+            }
+            b'n' => {
+                if flags & SUPPRESS == 0 {
+                    let n = self.inp.read_in();
+                    let p = self.args.ptr(argpos);
+                    if p == 0 {
+                        return Err(Stop::Conv);
+                    }
+                    store_int(p, flags, n as u64);
                 }
-                k += 1;
+                Ok(())
+            }
+            b'c' if flags & LONG == 0 => self.conv_c(flags, argpos, width),
+            b'c' | b'C' => self.conv_lc(flags | LONG, argpos, width),
+            b's' if flags & LONG == 0 => self.conv_s(flags, argpos, width),
+            b's' | b'S' => self.conv_ls(flags | LONG, argpos, width),
+            b'x' | b'X' => self.number(flags, argpos, width, 16),
+            b'o' => self.number(flags, argpos, width, 8),
+            b'b' => self.number(flags, argpos, width, 2),
+            b'u' => self.number(flags, argpos, width, 10),
+            b'd' => self.number(flags | NUMBER_SIGNED, argpos, width, 10),
+            b'i' => self.number(flags | NUMBER_SIGNED, argpos, width, 0),
+            b'p' => {
+                let f = (flags & !(SHORT | LONGDBL | CHAR)) | LONG | READ_POINTER;
+                self.number(f, argpos, width, 16)
+            }
+            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
+                self.float(flags, argpos, width)
+            }
+            b'[' => self.scanset(flags, argpos, width),
+            _ => Err(Stop::Conv),
+        }
+    }
+
+    /// glibc's `STRING_ARG`: the destination of a string conversion, or a
+    /// fresh `malloc` of `initial` elements of `size` for `%m`.  NULL is a
+    /// conversion error, as glibc makes it.
+    fn string_arg(
+        &mut self,
+        flags: u32,
+        argpos: usize,
+        initial: usize,
+        size: usize,
+    ) -> Result<*mut u8, Stop> {
+        let p = self.args.ptr(argpos);
+        if flags & MALLOC == 0 {
+            if p == 0 {
+                return Err(Stop::Conv);
+            }
+            return Ok(p as *mut u8);
+        }
+        let strptr = p as *mut *mut u8;
+        if strptr.is_null() {
+            return Err(Stop::Conv);
+        }
+        let bytes = initial.max(1).saturating_mul(size);
+        let buf = crate::malloc::malloc(bytes);
+        if buf.is_null() {
+            return Err(Stop::NoMem);
+        }
+        // SAFETY: the caller's `char **`.
+        unsafe { *strptr = buf };
+        if !self.allocs.push(strptr) {
+            return Err(Stop::NoMem);
+        }
+        self.strptr = strptr;
+        Ok(buf)
+    }
+
+    /// Grow a `%m` buffer from `used` elements of `size` to at least one more,
+    /// as glibc does (doubling, then one if that fails): the new write
+    /// position, or `None` when memory ran out.
+    fn grow(&mut self, used: usize, size: usize, cap: &mut usize) -> Option<*mut u8> {
+        let strptr = self.strptr;
+        let tries = [cap.saturating_mul(2), cap.saturating_add(1)];
+        for want in tries {
+            let bytes = want.checked_mul(size)?;
+            // SAFETY: the buffer `string_arg` made.
+            let nb = unsafe { crate::malloc::realloc(*strptr, bytes) };
+            if !nb.is_null() {
+                // SAFETY: the caller's `char **`; `used` elements fit.
+                unsafe {
+                    *strptr = nb;
+                    *cap = want;
+                    return Some(nb.add(used.wrapping_mul(size)));
+                }
             }
         }
-        return NamedScan::Value(f64::NAN);
-    }
-    if match_word(ctx, count, width, b"inf") {
-        // "infinity" extends "inf", and the longest prefix of it wins.  Stop
-        // after zero extra characters and the item is "inf"; after all five
-        // and it is "infinity".  Anything in between — "infi", "infinit" — is
-        // a prefix of a matching sequence and so is consumed, but is not
-        // itself one, which makes it a matching failure.  Treating it as a
-        // plain "inf" instead would hand "ix" to the next conversion out of
-        // `sscanf("infix", "%lf%s", ...)`; glibc reports the failure.
-        let extra = match_prefix(ctx, count, width, b"inity");
-        if extra == 0 || extra == b"inity".len() {
-            return NamedScan::Value(f64::INFINITY);
-        }
-        return NamedScan::Failed;
-    }
-    NamedScan::NotNamed
-}
-
-/// Scan the digits of a float into `acc`, honouring the field width.
-///
-/// Accepts either a decimal literal or a C99 hexadecimal one (`0x1.8p+3`).
-/// Returns false if there was no digit at all, in which case the caller has a
-/// matching failure.
-// `*count` only ever rises towards `width`, so it cannot overflow: the input
-// would have to be 2^64 bytes long first.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_float_digits(
-    ctx: &mut ScanCtx<'_, '_>,
-    count: &mut usize,
-    width: usize,
-    acc: &mut crate::decfloat::DigitCollector,
-) -> bool {
-    match scan_hex_float_digits(ctx, count, width, acc) {
-        HexScan::Converted => return true,
-        HexScan::Failed => return false,
-        HexScan::NotHex => {}
+        None
     }
 
-    let mut has_digits = false;
-
-    while *count < width && ctx.peek().is_ascii_digit() {
-        acc.push_integer(ctx.peek());
-        ctx.advance();
-        *count += 1;
-        has_digits = true;
-    }
-
-    if *count < width && ctx.peek() == b'.' {
-        ctx.advance();
-        *count += 1;
-        while *count < width && ctx.peek().is_ascii_digit() {
-            acc.push_fraction(ctx.peek());
-            ctx.advance();
-            *count += 1;
-            has_digits = true;
+    /// A finished `%m` buffer shrunk to `used` elements of `size`.
+    fn shrink(&mut self, used: usize, size: usize, cap: usize) {
+        if used != cap {
+            let strptr = self.strptr;
+            // SAFETY: the buffer `string_arg` made.
+            let nb = unsafe { crate::malloc::realloc(*strptr, used.max(1).saturating_mul(size)) };
+            if !nb.is_null() {
+                // SAFETY: the caller's `char **`.
+                unsafe { *strptr = nb };
+            }
         }
     }
 
-    if !has_digits {
-        return false;
-    }
-
-    scan_float_exponent(ctx, count, width, acc, b'e');
-    true
-}
-
-/// What [`scan_hex_float_digits`] found.
-enum HexScan {
-    /// Not a hex literal; nothing was consumed and the decimal grammar
-    /// should be tried instead.
-    NotHex,
-    /// A hex literal was read into the collector.
-    Converted,
-    /// A `0x` prefix was consumed but no digit followed it, so there is no
-    /// value — a matching failure.
-    Failed,
-}
-
-/// Scan a `0x`-prefixed hexadecimal float, if that is what comes next.
-///
-/// `scanf` consumes the longest sequence that is *a prefix of* a matching
-/// input sequence, so unlike `strtod` it cannot back out of a `0x` once it has
-/// read it: `sscanf("0xz", "%lf", &v)` consumes `0x`, finds no digit and
-/// reports a matching failure rather than converting the `0` and leaving `xz`
-/// behind. That is the [`HexScan::Failed`] case.
-///
-/// The field width is different: it truncates the input rather than describing
-/// it, so a width that stops before the first hex digit means the literal was
-/// never there — `sscanf("0x1", "%2lf", &v)` converts `0` and leaves `x1`.
-// `*count` only ever rises towards `width`; see `scan_float_digits`.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_hex_float_digits(
-    ctx: &mut ScanCtx<'_, '_>,
-    count: &mut usize,
-    width: usize,
-    acc: &mut crate::decfloat::DigitCollector,
-) -> HexScan {
-    if ctx.peek() != b'0' || (ctx.peek_at(1) | 0x20) != b'x' {
-        return HexScan::NotHex;
-    }
-    // Where the first significant digit would be: after `0x`, or after a
-    // point that immediately follows it.
-    let probe = if ctx.peek_at(2) == b'.' { 3 } else { 2 };
-    let have_digit = ctx.peek_at(probe).is_ascii_hexdigit();
-
-    if !have_digit {
-        // No digit anywhere after the prefix.  Consuming `0x` is what the
-        // longest-prefix rule demands, and it leaves nothing to convert.
-        if width.saturating_sub(*count) < 2 {
-            return HexScan::NotHex;
+    /// `%c`: `width` characters (1 without one), whitespace included, no
+    /// terminator.
+    fn conv_c(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        if I::U::WIDE {
+            return self.conv_c_multibyte(flags, argpos, width);
         }
-        ctx.advance();
-        ctx.advance();
-        *count += 2;
-        return HexScan::Failed;
-    }
-    if width.saturating_sub(*count) <= probe {
-        // The width stops short of the digit, so only the leading `0` is
-        // really in the field.
-        return HexScan::NotHex;
-    }
-
-    acc.set_hex();
-    ctx.advance();
-    ctx.advance();
-    *count += 2;
-
-    while *count < width && ctx.peek().is_ascii_hexdigit() {
-        acc.push_integer(ctx.peek());
-        ctx.advance();
-        *count += 1;
-    }
-    if *count < width && ctx.peek() == b'.' {
-        ctx.advance();
-        *count += 1;
-        while *count < width && ctx.peek().is_ascii_hexdigit() {
-            acc.push_fraction(ctx.peek());
-            ctx.advance();
-            *count += 1;
+        let mut width = if width == -1 { 1 } else { width };
+        let initial = usize::try_from(width.min(1024)).unwrap_or(1);
+        let mut out = core::ptr::null_mut::<u8>();
+        let mut cap = initial;
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, initial, 1)?;
         }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut used = 0usize;
+        loop {
+            if flags & SUPPRESS == 0 {
+                if flags & MALLOC != 0 && used == cap {
+                    out = self.grow(used, 1, &mut cap).ok_or(Stop::NoMem)?;
+                }
+                // SAFETY: `used < cap` (or the caller's `width` bytes).
+                unsafe {
+                    *out = c.byte();
+                    out = out.add(1);
+                }
+                used = used.wrapping_add(1);
+            }
+            width = width.saturating_sub(1);
+            if width <= 0 {
+                break;
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 {
+                self.shrink(used, 1, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
     }
 
-    scan_float_exponent(ctx, count, width, acc, b'p');
-    HexScan::Converted
-}
-
-/// Scan an optional `[marker][sign]digits` exponent and apply it to `acc`.
-///
-/// `marker` is the lowercase form; both cases are accepted.
-///
-/// The marker and its sign are consumed even when no digits follow them.  A
-/// directive takes the longest sequence that *is, or is a prefix of*, a
-/// matching sequence (C11 7.21.6.2p9), and `"1.5e+"` is a prefix of
-/// `"1.5e+1"`, so all of it belongs to this conversion.  The digits read
-/// before the marker still give a value, so `sscanf("1.5e", "%lf", &v)` yields
-/// 1.5 and leaves nothing behind — as glibc does.  Rolling the marker back
-/// instead would hand a stray `e` to the next directive.
-///
-/// The same rule is what makes a field width cut cleanly: with `%6lf` on
-/// `"0x1.8p+1"` the field is `"0x1.8p"`, and the trailing `p` is consumed
-/// because it was the width, not the input, that ended the exponent.
-// `*count` only ever rises towards `width`; see `scan_float_digits`.  The
-// exponent value itself accumulates with saturating arithmetic.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_float_exponent(
-    ctx: &mut ScanCtx<'_, '_>,
-    count: &mut usize,
-    width: usize,
-    acc: &mut crate::decfloat::DigitCollector,
-    marker: u8,
-) {
-    if *count >= width || (ctx.peek() | 0x20) != marker {
-        return;
-    }
-
-    ctx.advance();
-    *count += 1;
-
-    let mut exp_neg = false;
-    if *count < width && matches!(ctx.peek(), b'+' | b'-') {
-        exp_neg = ctx.peek() == b'-';
-        ctx.advance();
-        *count += 1;
-    }
-
-    let mut exp_val: i32 = 0;
-    let mut has_digits = false;
-    while *count < width && ctx.peek().is_ascii_digit() {
-        exp_val = exp_val
-            .saturating_mul(10)
-            .saturating_add(i32::from(ctx.peek().wrapping_sub(b'0')));
-        ctx.advance();
-        *count += 1;
-        has_digits = true;
-    }
-
-    if has_digits {
-        acc.apply_exponent(if exp_neg {
-            exp_val.saturating_neg()
-        } else {
-            exp_val
-        });
-    }
-}
-
-/// Raise `ERANGE` if a conversion said it was out of range, and pass the
-/// value through.
-fn report_erange<T>(converted: (T, bool)) -> T {
-    let (value, out_of_range) = converted;
-    if out_of_range {
-        crate::errno::set_errno(crate::errno::ERANGE);
-    }
-    value
-}
-
-/// Scan a floating-point number.
-///
-/// Accepts the same subject sequence as `strtod` — `[sign]digits[.digits]`
-/// with an optional `e[sign]digits` exponent, or `INF`/`INFINITY`/`NAN`
-/// (C99 7.21.6.2p12) — and stores an `f32`, `f64` or `long double` according
-/// to the length modifier.
-///
-/// Digits go straight into a [`crate::decfloat::DigitCollector`] rather than
-/// into a text buffer.  A fixed text buffer has to stop somewhere, and
-/// stopping in the middle of a number leaves the tail — including any
-/// exponent — in the input, which both changes the value silently and derails
-/// every conversion after it.  Feeding the collector instead means an
-/// arbitrarily long literal is consumed in full and converted exactly.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_float(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize, long_mod: u8) -> bool {
-    ctx.skip_ws();
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let mut count: usize = 0;
-
-    // Sign.
-    let negative = ctx.peek() == b'-';
-    if (negative || ctx.peek() == b'+') && count < width {
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    let mut acc = crate::decfloat::DigitCollector::new();
-    let named = match scan_float_named(ctx, &mut count, width) {
-        NamedScan::Value(v) => Some(v),
-        NamedScan::Failed => return false,
-        NamedScan::NotNamed => None,
-    };
-    if named.is_none() && !scan_float_digits(ctx, &mut count, width, &mut acc) {
-        return false;
-    }
-
-    if !suppress {
-        let ptr = ctx.next_arg();
-        if long_mod >= LEN_LONG {
-            let magnitude = named.unwrap_or_else(|| report_erange(acc.to_f64()));
-            let val = if negative { -magnitude } else { magnitude };
-            if long_mod == LEN_LONG_DOUBLE {
-                // %Lf → a 16-byte x87 `long double`.  Storing only the 8 bytes
-                // of an f64 here would leave the destination's exponent/sign
-                // half holding whatever was there before, so the caller would
-                // read a value unrelated to the input — hence the explicit
-                // re-encode.  The value itself still carries only f64
-                // precision; see TD-POSIX-LONG-DOUBLE-PRECISION.
-                let p = ptr as *mut crate::x87::LongDouble;
-                if !p.is_null() {
-                    // SAFETY: `%Lf` promises a writable `long double *`, which
-                    // is exactly `LongDouble`'s 16 bytes.  Written unaligned
-                    // because `LongDouble` declares `align(16)` and we would
-                    // rather not make a UB claim about a pointer that came
-                    // from C.
-                    unsafe {
-                        p.write_unaligned(crate::x87::from_f64(val));
+    /// Decode one multibyte character starting with `c` (reading more as
+    /// needed): glibc's `mbrtowc` loop.  `Err(Encode)` for no character.
+    fn wide_char(
+        &mut self,
+        c: u8,
+        state: &mut crate::wchar::MbstateT,
+    ) -> Result<crate::wchar::WcharT, Stop> {
+        let mut byte = c;
+        loop {
+            let mut wc: crate::wchar::WcharT = 0;
+            // SAFETY: one byte at `byte`; the state is ours.
+            let n = unsafe { crate::wchar::mbrtowc(&raw mut wc, &raw const byte, 1, state) };
+            if n == usize::MAX.wrapping_sub(1) {
+                // A character begun, not finished.
+                match self.inp.get() {
+                    Some(next) => {
+                        byte = next.byte();
+                        continue;
                     }
+                    None => {
+                        errno::set_errno(errno::EILSEQ);
+                        return Err(Stop::Encode);
+                    }
+                }
+            }
+            if n != 1 {
+                // glibc's `n != 1`: an invalid sequence, and -- its quirk,
+                // kept -- a NUL, which mbrtowc answers 0 for.
+                errno::set_errno(errno::EILSEQ);
+                return Err(Stop::Encode);
+            }
+            return Ok(wc);
+        }
+    }
+
+    /// `%lc`: `width` multibyte characters as `wchar_t`s.
+    fn conv_lc(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let mut width = if width == -1 { 1 } else { width };
+        let size = core::mem::size_of::<crate::wchar::WcharT>();
+        let initial = usize::try_from(width.min(1024)).unwrap_or(1);
+        let mut cap = initial;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, initial, size)?;
+        }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut state = crate::wchar::MbstateT::new();
+        let mut used = 0usize;
+        loop {
+            if flags & SUPPRESS == 0 && flags & MALLOC != 0 && used == cap {
+                out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+            }
+            // wscanf's input is wide already: glibc stores it as it came.
+            let wc = if I::U::WIDE {
+                c.code().cast_signed()
+            } else {
+                self.wide_char(c.byte(), &mut state)?
+            };
+            if flags & SUPPRESS == 0 {
+                // SAFETY: room for `used + 1` wide characters.
+                unsafe {
+                    out.cast::<crate::wchar::WcharT>().write_unaligned(wc);
+                    out = out.add(size);
+                }
+                used = used.wrapping_add(1);
+            }
+            width = width.saturating_sub(1);
+            if width <= 0 {
+                break;
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 {
+                self.shrink(used, size, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// `%s`: characters up to whitespace, terminated.
+    fn conv_s(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        if I::U::WIDE {
+            return self.conv_s_multibyte(flags, argpos, width);
+        }
+        let mut width = width;
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, 1)?;
+        }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut used = 0usize;
+        loop {
+            if c.space() {
+                self.inp.unget(c);
+                break;
+            }
+            if flags & SUPPRESS == 0 {
+                // SAFETY: room for one more (grown below when `%m`).
+                unsafe {
+                    *out = c.byte();
+                    out = out.add(1);
+                }
+                used = used.wrapping_add(1);
+                if flags & MALLOC != 0 && used == cap {
+                    out = self.grow(used, 1, &mut cap).ok_or(Stop::NoMem)?;
+                }
+            }
+            if width > 0 {
+                width = width.wrapping_sub(1);
+                if width == 0 {
+                    break;
+                }
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 && used == cap {
+                out = self.grow(used, 1, &mut cap).ok_or(Stop::NoMem)?;
+            }
+            // SAFETY: room for the terminator.
+            unsafe { *out = 0 };
+            if flags & MALLOC != 0 {
+                self.shrink(used.wrapping_add(1), 1, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// `%ls`: multibyte characters up to whitespace, as a `wchar_t` string.
+    fn conv_ls(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let mut width = width;
+        let size = core::mem::size_of::<crate::wchar::WcharT>();
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, size)?;
+        }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut state = crate::wchar::MbstateT::new();
+        let mut used = 0usize;
+        loop {
+            if c.space() {
+                self.inp.unget(c);
+                break;
+            }
+            let wc = if I::U::WIDE {
+                c.code().cast_signed()
+            } else {
+                self.wide_char(c.byte(), &mut state)?
+            };
+            if flags & SUPPRESS == 0 {
+                // SAFETY: room for one more (grown below when `%m`).
+                unsafe {
+                    out.cast::<crate::wchar::WcharT>().write_unaligned(wc);
+                    out = out.add(size);
+                }
+                used = used.wrapping_add(1);
+                if flags & MALLOC != 0 && used == cap {
+                    out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+                }
+            }
+            if width > 0 {
+                width = width.wrapping_sub(1);
+                if width == 0 {
+                    break;
+                }
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 && used == cap {
+                out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+            }
+            // SAFETY: room for the terminator.
+            unsafe { out.cast::<crate::wchar::WcharT>().write_unaligned(0) };
+            if flags & MALLOC != 0 {
+                self.shrink(used.wrapping_add(1), size, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Integers: glibc's `number:`.  The text is collected as glibc collects
+    /// it and converted with `strtol` and its kin, so overflow saturates as
+    /// theirs does.
+    #[allow(clippy::too_many_lines)]
+    fn number(&mut self, flags: u32, argpos: usize, width: i64, base: i32) -> Step {
+        let mut flags = flags;
+        let mut width = width;
+        let mut base = base;
+        let c = self.inp.get().ok_or(Stop::Input)?;
+        let mut cur: Option<I::U> = Some(c);
+
+        // A sign.
+        if c.byte() == b'-' || c.byte() == b'+' {
+            self.charbuf.push(c.byte());
+            if width > 0 {
+                width = width.wrapping_sub(1);
+            }
+            cur = self.inp.get();
+        }
+        // A leading base indication.
+        if width != 0 && cur.map(Unit::byte) == Some(b'0') {
+            if width > 0 {
+                width = width.wrapping_sub(1);
+            }
+            self.charbuf.push(b'0');
+            cur = self.inp.get();
+            let lower = cur.map(|x| x.byte().to_ascii_lowercase());
+            if width != 0 && lower == Some(b'x') {
+                if base == 0 {
+                    base = 16;
+                }
+                if base == 16 {
+                    if width > 0 {
+                        width = width.wrapping_sub(1);
+                    }
+                    cur = self.inp.get();
+                }
+            } else if width != 0 && lower == Some(b'b') && base == 2 {
+                // glibc's plain and C99 scanf take a `0b` only for `%b`;
+                // `%i` takes one only in C23 mode, which has entry points of
+                // its own (`__isoc23_*`) that this library does not provide.
+                base = 2;
+                if width > 0 {
+                    width = width.wrapping_sub(1);
+                }
+                cur = self.inp.get();
+            } else if base == 0 {
+                base = 8;
+            }
+        }
+        if base == 0 {
+            base = 10;
+        }
+        // The digits.
+        while let Some(du) = cur {
+            if width == 0 {
+                break;
+            }
+            let d = du.byte();
+            let ok = match base {
+                16 => d.is_ascii_hexdigit(),
+                _ => d.is_ascii_digit() && i32::from(d.wrapping_sub(b'0')) < base,
+            };
+            if !ok {
+                break;
+            }
+            self.charbuf.push(d);
+            if width > 0 {
+                width = width.wrapping_sub(1);
+            }
+            cur = self.inp.get();
+        }
+        if self.charbuf.failed {
+            errno::set_errno(errno::ENOMEM);
+            return Err(Stop::NoMem);
+        }
+        let size = self.charbuf.size();
+        let only_sign = size == 1 && matches!(self.charbuf.at(0), b'+' | b'-');
+        if size == 0 || only_sign {
+            // No number: but `%p` reads glibc's "(nil)".
+            let nil = size == 0
+                && flags & READ_POINTER != 0
+                && (width < 0 || width >= 5)
+                && cur.map(Unit::byte) == Some(b'(')
+                && match self.read_nil() {
+                    Ok(()) => true,
+                    Err(last) => {
+                        cur = last;
+                        false
+                    }
+                };
+            if nil {
+                self.charbuf.push(b'0');
+            } else {
+                if let Some(x) = cur {
+                    self.inp.unget(x);
+                }
+                return Err(Stop::Conv);
+            }
+        } else if let Some(x) = cur {
+            // The character that stopped the number is not part of it.
+            self.inp.unget(x);
+        }
+        let text = self.charbuf.cstr();
+        if self.charbuf.failed {
+            errno::set_errno(errno::ENOMEM);
+            return Err(Stop::NoMem);
+        }
+        let mut end: *const u8 = core::ptr::null();
+        // SAFETY: `text` is the terminated text; `end` is ours.
+        let bits: u64 = unsafe {
+            if flags & NUMBER_SIGNED != 0 {
+                crate::stdlib::strtoll(text, &raw mut end, base) as u64
+            } else {
+                crate::stdlib::strtoull(text, &raw mut end, base)
+            }
+        };
+        if core::ptr::eq(end, text) {
+            return Err(Stop::Conv);
+        }
+        if flags & SUPPRESS == 0 {
+            let p = self.args.ptr(argpos);
+            if p == 0 {
+                return Err(Stop::Conv);
+            }
+            if flags & READ_POINTER != 0 {
+                flags = (flags & !(SHORT | CHAR)) | LONG;
+            }
+            store_int(p, flags, bits);
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// The rest of glibc's `(nil)` after its `(`: `Err` with the character
+    /// that did not match (or `None` at the end), which the caller gives back
+    /// -- as glibc's `ungetc(c)` after its `inchar` chain gives back the last
+    /// one.
+    fn read_nil(&mut self) -> Result<(), Option<I::U>> {
+        for want in [b'n', b'i', b'l'] {
+            match self.inp.get() {
+                Some(x) if x.byte().to_ascii_lowercase() == want => {}
+                other => return Err(other),
+            }
+        }
+        match self.inp.get() {
+            Some(x) if x.byte() == b')' => Ok(()),
+            other => Err(other),
+        }
+    }
+
+    /// Floats: glibc's `e`..`A` conversions.  The text is collected by
+    /// glibc's grammar -- `nan`, `inf`, `infinity` (no `nan(...)` payload:
+    /// glibc's scanf reads none), `0x` hex with a `p` exponent, digits, one
+    /// `.`, an exponent with a sign -- and converted by `strtod` and its kin.
+    #[allow(clippy::too_many_lines)]
+    fn float(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let mut flags = flags;
+        let mut width = width;
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        if width > 0 {
+            width = width.wrapping_sub(1);
+        }
+        let (mut got_digit, mut got_dot, mut got_e) = (false, false, false);
+        let mut got_sign = 0usize;
+        // A sign.
+        if c.byte() == b'-' || c.byte() == b'+' {
+            got_sign = 1;
+            self.charbuf.push(c.byte());
+            if width == 0 {
+                return Err(Stop::Conv);
+            }
+            c = self.inp.get().ok_or(Stop::Conv)?;
+            if width > 0 {
+                width = width.wrapping_sub(1);
+            }
+        }
+        let mut named = false;
+        let lower = c.byte().to_ascii_lowercase();
+        if lower == b'n' {
+            // "nan", or nothing.
+            self.charbuf.push(c.byte());
+            for want in [b'a', b'n'] {
+                if width == 0 {
+                    return Err(Stop::Conv);
+                }
+                c = self.inp.get().ok_or(Stop::Conv)?;
+                if c.byte().to_ascii_lowercase() != want {
+                    return Err(Stop::Conv);
+                }
+                if width > 0 {
+                    width = width.wrapping_sub(1);
+                }
+                self.charbuf.push(c.byte());
+            }
+            named = true;
+        } else if lower == b'i' {
+            // "inf", maybe "infinity".
+            self.charbuf.push(c.byte());
+            for want in [b'n', b'f'] {
+                if width == 0 {
+                    return Err(Stop::Conv);
+                }
+                c = self.inp.get().ok_or(Stop::Conv)?;
+                if c.byte().to_ascii_lowercase() != want {
+                    return Err(Stop::Conv);
+                }
+                if width > 0 {
+                    width = width.wrapping_sub(1);
+                }
+                self.charbuf.push(c.byte());
+            }
+            if width != 0 {
+                if let Some(next) = self.inp.get() {
+                    if next.byte().eq_ignore_ascii_case(&b'i') {
+                        if width > 0 {
+                            width = width.wrapping_sub(1);
+                        }
+                        self.charbuf.push(next.byte());
+                        for want in [b'n', b'i', b't', b'y'] {
+                            if width == 0 {
+                                return Err(Stop::Conv);
+                            }
+                            c = self.inp.get().ok_or(Stop::Conv)?;
+                            if c.byte().to_ascii_lowercase() != want {
+                                return Err(Stop::Conv);
+                            }
+                            if width > 0 {
+                                width = width.wrapping_sub(1);
+                            }
+                            self.charbuf.push(c.byte());
+                        }
+                    } else {
+                        self.inp.unget(next);
+                    }
+                }
+            }
+            named = true;
+        }
+        if !named {
+            let mut exp_char = b'e';
+            let mut cur = Some(c);
+            if width != 0 && c.byte() == b'0' {
+                self.charbuf.push(c.byte());
+                cur = self.inp.get();
+                if width > 0 {
+                    width = width.wrapping_sub(1);
+                }
+                if let Some(x) = cur.filter(|x| width != 0 && x.byte().eq_ignore_ascii_case(&b'x'))
+                {
+                    // Hexadecimal.
+                    self.charbuf.push(x.byte());
+                    flags |= HEXA_FLOAT;
+                    exp_char = b'p';
+                    cur = self.inp.get();
+                    if width > 0 {
+                        width = width.wrapping_sub(1);
+                    }
+                } else {
+                    got_digit = true;
+                }
+            }
+            while let Some(du) = cur {
+                let d = du.byte();
+                let last = self
+                    .charbuf
+                    .size()
+                    .checked_sub(1)
+                    .map(|i| self.charbuf.at(i));
+                if d.is_ascii_digit() {
+                    self.charbuf.push(d);
+                    got_digit = true;
+                } else if !got_e && flags & HEXA_FLOAT != 0 && d.is_ascii_hexdigit() {
+                    self.charbuf.push(d);
+                    got_digit = true;
+                } else if got_e && last == Some(exp_char) && (d == b'-' || d == b'+') {
+                    self.charbuf.push(d);
+                } else if got_digit && !got_e && d.to_ascii_lowercase() == exp_char {
+                    self.charbuf.push(exp_char);
+                    got_e = true;
+                    got_dot = true;
+                } else if !got_dot && d == b'.' {
+                    self.charbuf.push(d);
+                    got_dot = true;
+                } else {
+                    // Not part of the number.
+                    self.inp.unget(du);
+                    break;
+                }
+                if width == 0 {
+                    break;
+                }
+                cur = self.inp.get();
+                if cur.is_none() {
+                    break;
+                }
+                if width > 0 {
+                    width = width.wrapping_sub(1);
+                }
+            }
+            if self.charbuf.failed {
+                errno::set_errno(errno::ENOMEM);
+                return Err(Stop::NoMem);
+            }
+            // Nothing but a sign, or a bare "0x": no number.
+            let size = self.charbuf.size();
+            if size == got_sign || (flags & HEXA_FLOAT != 0 && size == got_sign.wrapping_add(2)) {
+                return Err(Stop::Conv);
+            }
+        }
+        let _ = (got_dot, got_digit);
+        let text = self.charbuf.cstr();
+        if self.charbuf.failed {
+            errno::set_errno(errno::ENOMEM);
+            return Err(Stop::NoMem);
+        }
+        let mut end: *const u8 = core::ptr::null();
+        let p = if flags & SUPPRESS == 0 {
+            self.args.ptr(argpos)
+        } else {
+            0
+        };
+        // SAFETY: `text` is the terminated text; each store is to the
+        // caller's pointer of the type its modifier names.
+        unsafe {
+            if flags & LONGDBL != 0 {
+                // At the long double's own precision; out of memory for a
+                // literal of hundreds of digits is glibc's own `ENOMEM`,
+                // which it gives when its text buffer cannot grow.
+                let Some(d) = crate::stdlib::strtold_ld(text, &raw mut end) else {
+                    errno::set_errno(errno::ENOMEM);
+                    return Err(Stop::NoMem);
+                };
+                if p != 0 && !core::ptr::eq(end, text) {
+                    (p as *mut crate::x87::LongDouble).write_unaligned(d);
+                }
+            } else if flags & LONG != 0 {
+                let d = crate::stdlib::strtod(text, &raw mut end);
+                if p != 0 && !core::ptr::eq(end, text) {
+                    (p as *mut f64).write_unaligned(d);
                 }
             } else {
-                // %lf → f64
-                let p = ptr as *mut f64;
-                if !p.is_null() {
-                    // SAFETY: `%lf` promises a writable `double *`.
-                    unsafe {
-                        *p = val;
+                let d = crate::stdlib::strtof(text, &raw mut end);
+                if p != 0 && !core::ptr::eq(end, text) {
+                    (p as *mut f32).write_unaligned(d);
+                }
+            }
+        }
+        if core::ptr::eq(end, text) {
+            return Err(Stop::Conv);
+        }
+        if flags & SUPPRESS == 0 {
+            if p == 0 {
+                return Err(Stop::Conv);
+            }
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// `%[`: glibc's byte scanset -- a leading `]` or `-` is a member, `a-z`
+    /// a range only when `a <= z` (else three members), and a set with no
+    /// closing `]` a conversion error.
+    #[allow(clippy::too_many_lines)]
+    fn scanset(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        if I::U::WIDE {
+            return self.scanset_wide(flags, argpos, width);
+        }
+        let mut width = width;
+        let wide = flags & LONG != 0;
+        let size = if wide {
+            core::mem::size_of::<crate::wchar::WcharT>()
+        } else {
+            1
+        };
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, size)?;
+        }
+        let not_in = self.fpeek().byte() == b'^';
+        if not_in {
+            self.fnext();
+        }
+        let mut set = [false; 256];
+        let first = self.fpeek().byte();
+        let mut prev: u8 = 0;
+        if first == b']' || first == b'-' {
+            if let Some(slot) = set.get_mut(usize::from(first)) {
+                *slot = true;
+            }
+            self.fnext();
+            prev = first;
+        }
+        loop {
+            let fc = self.fnext().byte();
+            if fc == 0 {
+                return Err(Stop::Conv);
+            }
+            if fc == b']' {
+                break;
+            }
+            let next = self.fpeek().byte();
+            if fc == b'-' && next != 0 && next != b']' && prev != 0 && prev <= next {
+                // A range: from the member before the `-` up to, not
+                // including, the next; the next is added on its own turn.
+                let mut x = prev;
+                while x < next {
+                    if let Some(slot) = set.get_mut(usize::from(x)) {
+                        *slot = true;
+                    }
+                    x = x.wrapping_add(1);
+                }
+            } else {
+                if let Some(slot) = set.get_mut(usize::from(fc)) {
+                    *slot = true;
+                }
+            }
+            prev = fc;
+        }
+        let now = self.inp.read_in();
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut state = crate::wchar::MbstateT::new();
+        let mut used = 0usize;
+        loop {
+            if set.get(usize::from(c.byte())).copied().unwrap_or(false) == not_in {
+                self.inp.unget(c);
+                break;
+            }
+            if wide {
+                // glibc's byte-path `%l[`: every byte is tested against the
+                // set, and fed to `mbrtowc` one at a time; a character stored
+                // when its last byte arrives.  (glibc stores whatever
+                // `mbrtowc` left for an invalid sequence; this says EILSEQ.)
+                if flags & SUPPRESS == 0 {
+                    let mut wc: crate::wchar::WcharT = 0;
+                    let byte = c.byte();
+                    // SAFETY: one byte; the state is ours.
+                    let n = unsafe {
+                        crate::wchar::mbrtowc(&raw mut wc, &raw const byte, 1, &raw mut state)
+                    };
+                    if n == usize::MAX {
+                        errno::set_errno(errno::EILSEQ);
+                        return Err(Stop::Encode);
+                    }
+                    if n != usize::MAX.wrapping_sub(1) {
+                        // SAFETY: room for one more (grown below when `%m`).
+                        unsafe {
+                            out.cast::<crate::wchar::WcharT>().write_unaligned(wc);
+                            out = out.add(size);
+                        }
+                        used = used.wrapping_add(1);
                     }
                 }
-            }
-        } else {
-            // %f → f32, rounded straight from the digits.  Converting an f64
-            // afterwards would round twice, and two roundings are not one.
-            // `inf`/`nan` narrow exactly, so they need no such care.
-            let magnitude = match named {
-                Some(v) => v as f32,
-                None => report_erange(acc.to_f32()),
-            };
-            let val = if negative { -magnitude } else { magnitude };
-            let p = ptr as *mut f32;
-            if !p.is_null() {
-                // SAFETY: `%f` promises a writable `float *`.
+            } else if flags & SUPPRESS == 0 {
+                // SAFETY: as above.
                 unsafe {
-                    *p = val;
+                    *out = c.byte();
+                    out = out.add(1);
                 }
+                used = used.wrapping_add(1);
             }
-        }
-        ctx.assigned += 1;
-    }
-    true
-}
-
-/// Scan a `%[...]` scanset.
-///
-/// Reads characters from input that match (or don't match, if negated)
-/// the set of characters specified between the brackets.
-///
-/// - `%[abc]`: matches any of a, b, c.
-/// - `%[^abc]`: matches anything NOT in {a, b, c}.
-/// - `%[a-z]`: matches the range a through z.
-/// - `%[]abc]`: a leading `]` is part of the set (not the terminator).
-///
-/// The scanset is stored as a 256-bit bitmap (32 bytes) for O(1) lookup.
-#[allow(clippy::arithmetic_side_effects)]
-fn scan_scanset(ctx: &mut ScanCtx<'_, '_>, suppress: bool, width: usize) -> bool {
-    // %[ does NOT skip whitespace (like %c).
-
-    // Build the character class bitmap from the format string.
-    // 256 bits = 32 bytes, one bit per possible byte value.
-    let mut bitmap = [0u8; 32];
-    let mut negated = false;
-
-    // Check for negation.
-    if ctx.fmt_peek() == b'^' {
-        negated = true;
-        ctx.fmt_advance();
-    }
-
-    // A leading ']' right after '[' (or '[^') is part of the set,
-    // not the closing bracket.
-    if ctx.fmt_peek() == b']' {
-        let c = b']';
-        // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
-        if let Some(slot) = bitmap.get_mut((c >> 3) as usize) {
-            *slot |= 1u8 << (c & 7);
-        }
-        ctx.fmt_advance();
-    }
-
-    // Parse the rest of the scanset until ']' or end of format.
-    loop {
-        let c = ctx.fmt_peek();
-        if c == 0 || c == b']' {
-            break;
-        }
-
-        // Check for range: a-z.
-        let next1 = unsafe { *ctx.fmt.add(ctx.fi.wrapping_add(1)) };
-        let next2 = unsafe { *ctx.fmt.add(ctx.fi.wrapping_add(2)) };
-        if next1 == b'-' && next2 != b']' && next2 != 0 {
-            // Range c..next2 (inclusive).
-            let lo = c;
-            let hi = next2;
-            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-            let mut ch = lo;
-            loop {
-                // SAFETY: ch is u8 so ch >> 3 <= 31 < 32, always in bounds.
-                if let Some(slot) = bitmap.get_mut((ch >> 3) as usize) {
-                    *slot |= 1u8 << (ch & 7);
-                }
-                if ch == hi {
+            if flags & SUPPRESS == 0 && flags & MALLOC != 0 && used == cap {
+                out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+            }
+            if width > 0 {
+                width = width.wrapping_sub(1);
+                if width == 0 {
                     break;
                 }
-                ch = ch.wrapping_add(1);
             }
-            ctx.fmt_advance(); // skip start
-            ctx.fmt_advance(); // skip '-'
-            ctx.fmt_advance(); // skip end
-        } else {
-            // Single character.
-            // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
-            if let Some(slot) = bitmap.get_mut((c >> 3) as usize) {
-                *slot |= 1u8 << (c & 7);
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
             }
-            ctx.fmt_advance();
         }
-    }
-
-    // Skip closing ']'.
-    if ctx.fmt_peek() == b']' {
-        ctx.fmt_advance();
-    }
-
-    // Now scan input using the bitmap.
-    if ctx.peek() == 0 {
-        return false;
-    }
-
-    let ptr = if suppress { 0 } else { ctx.next_arg() };
-    let dest = ptr as *mut u8;
-    let mut count: usize = 0;
-
-    while count < width {
-        let c = ctx.peek();
-        if c == 0 {
-            break;
+        if self.inp.read_in() == now {
+            return Err(Stop::Conv);
         }
-
-        // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
-        let in_set = bitmap
-            .get((c >> 3) as usize)
-            .is_some_and(|slot| slot & (1u8 << (c & 7)) != 0);
-        let matches = if negated { !in_set } else { in_set };
-
-        if !matches {
-            break;
-        }
-
-        if !suppress && !dest.is_null() {
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 && used == cap {
+                out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+            }
+            // SAFETY: room for the terminator.
             unsafe {
-                *dest.add(count) = c;
+                if wide {
+                    out.cast::<crate::wchar::WcharT>().write_unaligned(0);
+                } else {
+                    *out = 0;
+                }
+            }
+            if flags & MALLOC != 0 {
+                self.shrink(used.wrapping_add(1), size, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Store the wide character `c` in a `char` destination as `wscanf` does:
+    /// its multibyte encoding, as `wcrtomb` writes it -- `Ok(false)` if it has
+    /// none.  A `%m` buffer grows first when fewer bytes than that are left.
+    fn put_multibyte(
+        &mut self,
+        flags: u32,
+        c: I::U,
+        out: &mut *mut u8,
+        used: &mut usize,
+        cap: &mut usize,
+    ) -> Result<bool, Stop> {
+        let mut mb = [0u8; 4];
+        let Some(n) = crate::wchar::encode_wide(c.code().cast_signed(), &mut mb) else {
+            return Ok(false);
+        };
+        if flags & MALLOC != 0 {
+            while cap.saturating_sub(*used) < n {
+                *out = self.grow(*used, 1, cap).ok_or(Stop::NoMem)?;
             }
         }
-        ctx.advance();
-        count = count.wrapping_add(1);
-    }
-
-    if count == 0 {
-        return false;
-    }
-
-    // Null-terminate.
-    if !suppress && !dest.is_null() {
+        // SAFETY: room for `n` more bytes -- grown above for `%m`, else the
+        // caller's buffer, which C makes the caller size.
         unsafe {
-            *dest.add(count) = 0;
+            core::ptr::copy_nonoverlapping(mb.as_ptr(), *out, n);
+            *out = out.add(n);
+        }
+        *used = used.wrapping_add(n);
+        Ok(true)
+    }
+
+    /// End a `char` string conversion: the NUL, a `%m` buffer shrunk to fit,
+    /// one more assignment.
+    ///
+    /// `wscanf`'s `%s` and `%[` are where glibc differs: it writes
+    /// `wcrtomb(buf, L'\0')`'s bytes -- which, stateless, are the NUL -- and
+    /// then a NUL after them, one byte more than the string and its
+    /// terminator.  This writes the terminator alone: the byte after it is
+    /// the caller's, and a buffer sized as C sizes it has no room for it.
+    fn end_string(&mut self, flags: u32, out: *mut u8, used: usize, cap: usize) -> Step {
+        let (mut out, mut cap) = (out, cap);
+        if flags & MALLOC != 0 && used == cap {
+            out = self.grow(used, 1, &mut cap).ok_or(Stop::NoMem)?;
+        }
+        // SAFETY: room for the terminator.
+        unsafe { *out = 0 };
+        if flags & MALLOC != 0 {
+            self.shrink(used.wrapping_add(1), 1, cap);
+        }
+        self.strptr = core::ptr::null_mut();
+        self.done = self.done.saturating_add(1);
+        Ok(())
+    }
+
+    /// `wscanf`'s `%c`: `width` wide characters (1 without one), each stored
+    /// as its multibyte encoding, no terminator.  glibc encodes only what it
+    /// stores, so a suppressed one is never refused; a stored one with no
+    /// encoding is an input error there -- `EOF` if nothing was assigned yet.
+    fn conv_c_multibyte(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let mut width = if width == -1 { 1 } else { width };
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, 1)?;
+        }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut used = 0usize;
+        loop {
+            if flags & SUPPRESS == 0
+                && !self.put_multibyte(flags, c, &mut out, &mut used, &mut cap)?
+            {
+                errno::set_errno(errno::EILSEQ);
+                return Err(Stop::Input);
+            }
+            width = width.saturating_sub(1);
+            if width <= 0 {
+                break;
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            if flags & MALLOC != 0 {
+                self.shrink(used, 1, cap);
+            }
+            self.strptr = core::ptr::null_mut();
+            self.done = self.done.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// `wscanf`'s `%s`: wide characters up to whitespace, stored as their
+    /// multibyte encodings and terminated.  A stored one with no encoding is
+    /// an encoding error -- `EILSEQ`, and the count so far -- where `%c`'s is
+    /// an input error: glibc's two answers, kept.
+    fn conv_s_multibyte(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let mut width = width;
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, 1)?;
+        }
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut used = 0usize;
+        loop {
+            if c.space() {
+                self.inp.unget(c);
+                break;
+            }
+            if flags & SUPPRESS == 0
+                && !self.put_multibyte(flags, c, &mut out, &mut used, &mut cap)?
+            {
+                errno::set_errno(errno::EILSEQ);
+                return Err(Stop::Encode);
+            }
+            if width > 0 {
+                width = width.wrapping_sub(1);
+                if width == 0 {
+                    break;
+                }
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if flags & SUPPRESS == 0 {
+            self.end_string(flags, out, used, cap)?;
+        }
+        Ok(())
+    }
+
+    /// `wscanf`'s `%[`.  A wide set is not made into a table -- it would be
+    /// too large -- but searched in the format for each character, as glibc
+    /// searches it ([`in_wide_set`]).  `%l[` stores the wide characters as
+    /// they came, `%[` their multibyte encodings (an encoding error for one
+    /// with none, as `%s`).  No character matched is a conversion error.
+    #[allow(clippy::too_many_lines)]
+    fn scanset_wide(&mut self, flags: u32, argpos: usize, width: i64) -> Step {
+        let long = flags & LONG != 0;
+        let size = if long {
+            core::mem::size_of::<crate::wchar::WcharT>()
+        } else {
+            1
+        };
+        let mut cap = 100usize;
+        let mut out = core::ptr::null_mut::<u8>();
+        if flags & SUPPRESS == 0 {
+            out = self.string_arg(flags, argpos, cap, size)?;
+        }
+        let not_in = self.fpeek().byte() == b'^';
+        if not_in {
+            self.fnext();
+        }
+        // The set: from here up to the `]` that ends it; a `]` first is in it.
+        let tw = self.f;
+        if self.fpeek().byte() == b']' {
+            self.fnext();
+        }
+        loop {
+            let fc = self.fnext();
+            if fc == I::U::NUL {
+                return Err(Stop::Conv);
+            }
+            if fc.byte() == b']' {
+                break;
+            }
+        }
+        // SAFETY: the cursor is just past that `]`, which is in the format.
+        let twend = unsafe { self.f.sub(1) };
+        let mut width = width;
+        let now = self.inp.read_in();
+        let mut c = self.inp.get().ok_or(Stop::Input)?;
+        let mut used = 0usize;
+        loop {
+            // SAFETY: `tw..twend` is the set, inside the live format.
+            if unsafe { in_wide_set(tw, twend, c) } == not_in {
+                self.inp.unget(c);
+                break;
+            }
+            if flags & SUPPRESS == 0 {
+                if long {
+                    // SAFETY: room for one more (grown below when `%m`).
+                    unsafe {
+                        out.cast::<crate::wchar::WcharT>()
+                            .write_unaligned(c.code().cast_signed());
+                        out = out.add(size);
+                    }
+                    used = used.wrapping_add(1);
+                    if flags & MALLOC != 0 && used == cap {
+                        out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+                    }
+                } else if !self.put_multibyte(flags, c, &mut out, &mut used, &mut cap)? {
+                    errno::set_errno(errno::EILSEQ);
+                    return Err(Stop::Encode);
+                }
+            }
+            if width > 0 {
+                width = width.wrapping_sub(1);
+                if width == 0 {
+                    break;
+                }
+            }
+            match self.inp.get() {
+                Some(n) => c = n,
+                None => break,
+            }
+        }
+        if self.inp.read_in() == now {
+            return Err(Stop::Conv);
+        }
+        if flags & SUPPRESS == 0 {
+            if long {
+                if flags & MALLOC != 0 && used == cap {
+                    out = self.grow(used, size, &mut cap).ok_or(Stop::NoMem)?;
+                }
+                // SAFETY: room for the terminator.
+                unsafe { out.cast::<crate::wchar::WcharT>().write_unaligned(0) };
+                if flags & MALLOC != 0 {
+                    self.shrink(used.wrapping_add(1), size, cap);
+                }
+                self.strptr = core::ptr::null_mut();
+                self.done = self.done.saturating_add(1);
+            } else {
+                self.end_string(flags, out, used, cap)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `c` is in the wide scanset `tw..twend`, by glibc's search.  A
+/// `-` that is neither first nor last, between two characters of which the
+/// first is not above the second (compared unsigned), is a range: the
+/// characters after the first up to and including the second -- the first
+/// was matched on its own turn.  Anything else is itself.
+///
+/// # Safety
+///
+/// `tw..twend` lies inside a live format, and `twend` is its `]`.
+unsafe fn in_wide_set<U: Unit>(tw: *const U, twend: *const U, c: U) -> bool {
+    let signed = |u: U| u.code().cast_signed();
+    let mut runp = tw;
+    while runp < twend {
+        // SAFETY: `runp < twend`, so it and the character after it -- at most
+        // the `]` -- are in the format.
+        let (here, next, next_is_end) = unsafe { (*runp, *runp.add(1), runp.add(1) == twend) };
+        if here.byte() == b'-' && next != U::NUL && !next_is_end && runp != tw {
+            // SAFETY: `runp` is past `tw`, so the character before it is too.
+            let prev = unsafe { *runp.sub(1) };
+            if prev.code() <= next.code() {
+                // glibc counts `wc` from `prev + 1` to `next`, signed.
+                if signed(prev) < signed(c) && signed(c) <= signed(next) {
+                    return true;
+                }
+                // SAFETY: `runp + 1 < twend`, so `runp + 2 <= twend`.
+                runp = unsafe { runp.add(2) };
+                continue;
+            }
+        }
+        if here == c {
+            return true;
+        }
+        // SAFETY: `runp < twend`.
+        runp = unsafe { runp.add(1) };
+    }
+    false
+}
+
+/// UTF-8's length for a lead byte (1 for anything else, so a stray byte is
+/// matched on its own).
+fn utf8_len(b: u8) -> usize {
+    match b {
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => 1,
+    }
+}
+
+/// Store an integer through `p` at the width `flags` name: `long long` or
+/// `long` (both 64 bits), `short`, `char`, or `int`.
+fn store_int(p: u64, flags: u32, v: u64) {
+    // SAFETY: the caller's pointer, of the type its modifier names; stored
+    // unaligned because it came from C.
+    #[allow(clippy::cast_possible_truncation)]
+    unsafe {
+        if flags & (LONGDBL | LONG) != 0 {
+            (p as *mut u64).write_unaligned(v);
+        } else if flags & SHORT != 0 {
+            (p as *mut u16).write_unaligned(v as u16);
+        } else if flags & CHAR != 0 {
+            (p as *mut u8).write_unaligned(v as u8);
+        } else {
+            (p as *mut u32).write_unaligned(v as u32);
         }
     }
-    if !suppress {
-        ctx.assigned += 1;
-    }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -2508,5 +3301,1289 @@ mod tests {
         // SAFETY: a null va_list must be rejected, not dereferenced.
         let n = unsafe { vsscanf(b"42\0".as_ptr(), b"%d\0".as_ptr(), core::ptr::null_mut()) };
         assert_eq!(n, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // The port of glibc's engine: through a stream, and glibc's answers
+    // -----------------------------------------------------------------------
+
+    /// A `va_list` over `ptrs`, as `sscanf_va` builds one, handed to `f`.
+    fn with_va(ptrs: &[u64], f: impl FnOnce(*mut VaList) -> i32) -> i32 {
+        let mut reg = [0u8; 176];
+        let mut overflow = [0u8; 512];
+        for (i, &v) in ptrs.iter().take(6).enumerate() {
+            reg[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, &v) in ptrs.iter().skip(6).enumerate() {
+            overflow[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        f(&raw mut va)
+    }
+
+    fn fscanf_va(stream: *mut u8, fmt: &[u8], ptrs: &[u64]) -> i32 {
+        with_va(ptrs, |ap| unsafe { vfscanf(stream, fmt.as_ptr(), ap) })
+    }
+
+    /// A read-only stream over `data`.
+    fn reading(data: &mut [u8]) -> *mut u8 {
+        let s = unsafe {
+            crate::stdio_mem::fmemopen(data.as_mut_ptr().cast(), data.len(), b"r\0".as_ptr())
+        };
+        assert!(!s.is_null());
+        s
+    }
+
+    fn line(buf: &[u8]) -> &[u8] {
+        let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        &buf[..n]
+    }
+
+    /// The bug the port was for: `12 34` on one line is two numbers, and a
+    /// `%d` leaves the rest of the line in the stream.
+    #[test]
+    fn fscanf_reads_through_the_stream() {
+        let mut data = *b"12 34\n56";
+        let s = reading(&mut data);
+        let (mut a, mut b) = (0i32, 0i32);
+        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), 1);
+        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut b as u64]), 1);
+        assert_eq!((a, b), (12, 34));
+        let mut rest = [0u8; 16];
+        assert!(!crate::stdio::fgets(rest.as_mut_ptr(), 16, s).is_null());
+        assert_eq!(
+            line(&rest),
+            b"\n",
+            "what %d did not use is still there for fgets"
+        );
+        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), 1);
+        assert_eq!(a, 56);
+        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), -1, "EOF");
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    #[test]
+    fn fscanf_spans_lines() {
+        let mut data = *b"1\n\n  2\n";
+        let s = reading(&mut data);
+        let (mut a, mut b) = (0i32, 0i32);
+        assert_eq!(
+            fscanf_va(s, b"%d%d\0", &[&raw mut a as u64, &raw mut b as u64]),
+            2
+        );
+        assert_eq!((a, b), (1, 2));
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    #[test]
+    fn fscanf_leaves_the_character_it_stopped_at() {
+        let mut data = *b"42abc\n";
+        let s = reading(&mut data);
+        let mut a = 0i32;
+        assert_eq!(fscanf_va(s, b"%d\0", &[&raw mut a as u64]), 1);
+        assert_eq!(crate::stdio::fgetc(s), i32::from(b'a'));
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    /// A stream can hold a NUL; a string cannot.
+    #[test]
+    fn fscanf_reads_a_nul_as_a_character() {
+        let mut data = *b"a\0b c";
+        let s = reading(&mut data);
+        let mut word = [0xffu8; 8];
+        assert_eq!(fscanf_va(s, b"%s\0", &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(&word[..4], b"a\0b\0");
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    #[test]
+    fn fscanf_refuses_a_write_only_stream_and_a_wide_one() {
+        let mut p: *mut u8 = core::ptr::null_mut();
+        let mut n = 0usize;
+        let w = unsafe { crate::stdio_mem::open_memstream(&raw mut p, &raw mut n) };
+        let mut a = 0i32;
+        errno::set_errno(0);
+        assert_eq!(fscanf_va(w, b"%d\0", &[&raw mut a as u64]), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        // glibc's ARGCHECK sets errno alone: ferror answers 0 after it
+        // (posix/tools/oracle/wscanf_stream_oracle.c, byte_writeonly).
+        assert_eq!(crate::stdio::ferror(w), 0);
+        assert_eq!(crate::stdio::fclose(w), 0);
+        unsafe { crate::malloc::free(p) };
+        let mut data = *b"5";
+        let s = reading(&mut data);
+        assert_eq!(crate::stdio::fwide(s, 1), 1);
+        assert_eq!(
+            fscanf_va(s, b"%d\0", &[&raw mut a as u64]),
+            -1,
+            "a wide stream"
+        );
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    /// `%hd` stores a `short` and `%hhd` a `char` -- the old engine stored
+    /// four bytes for both, over whatever followed.
+    #[test]
+    fn h_and_hh_store_only_their_width() {
+        let mut shorts = [0x7777u16; 2];
+        assert_eq!(
+            sscanf_va(
+                b"300\0".as_ptr(),
+                b"%hd\0".as_ptr(),
+                &[shorts.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(shorts, [300, 0x7777]);
+        let mut bytes = [0x77u8; 4];
+        assert_eq!(
+            sscanf_va(
+                b"300\0".as_ptr(),
+                b"%hhu\0".as_ptr(),
+                &[bytes.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(
+            bytes,
+            [44, 0x77, 0x77, 0x77],
+            "300 as an unsigned char is 44"
+        );
+        let mut n = [0x77u8; 2];
+        assert_eq!(
+            sscanf_va(
+                b"abc\0".as_ptr(),
+                b"abc%hhn\0".as_ptr(),
+                &[n.as_mut_ptr() as u64]
+            ),
+            0
+        );
+        assert_eq!(n, [3, 0x77]);
+    }
+
+    /// Out-of-range integers saturate, as `strtol` makes them.
+    #[test]
+    fn integers_saturate_as_strtol_does() {
+        let mut v: i64 = 0;
+        errno::set_errno(0);
+        assert_eq!(
+            sscanf_va(
+                b"99999999999999999999\0".as_ptr(),
+                b"%ld\0".as_ptr(),
+                &[&raw mut v as u64]
+            ),
+            1
+        );
+        assert_eq!(v, i64::MAX);
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+    }
+
+    /// `%m` allocates; an `EOF` before the first assignment frees what it
+    /// allocated and leaves NULL, as glibc does.
+    #[test]
+    fn m_allocates_and_is_freed_on_eof() {
+        let mut a: *mut u8 = core::ptr::null_mut();
+        let mut b: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            sscanf_va(
+                b"hello world\0".as_ptr(),
+                b"%ms %ms\0".as_ptr(),
+                &[&raw mut a as u64, &raw mut b as u64]
+            ),
+            2
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(a.cast()) }.to_bytes(),
+            b"hello"
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(b.cast()) }.to_bytes(),
+            b"world"
+        );
+        unsafe {
+            crate::malloc::free(a);
+            crate::malloc::free(b);
+        }
+        let long = [b'q'; 500];
+        let mut input = long.to_vec();
+        input.push(0);
+        let mut c: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            sscanf_va(input.as_ptr(), b"%ms\0".as_ptr(), &[&raw mut c as u64]),
+            1
+        );
+        assert_eq!(
+            unsafe { core::ffi::CStr::from_ptr(c.cast()) }
+                .to_bytes()
+                .len(),
+            500,
+            "grown past 100"
+        );
+        unsafe { crate::malloc::free(c) };
+        let mut d: *mut u8 = 7 as *mut u8;
+        assert_eq!(
+            sscanf_va(b"\0".as_ptr(), b"%ms\0".as_ptr(), &[&raw mut d as u64]),
+            -1
+        );
+        assert!(d.is_null(), "freed and cleared");
+        let mut e: *mut u8 = core::ptr::null_mut();
+        assert_eq!(
+            sscanf_va(b"xyz\0".as_ptr(), b"%3mc\0".as_ptr(), &[&raw mut e as u64]),
+            1
+        );
+        assert_eq!(unsafe { core::slice::from_raw_parts(e, 3) }, b"xyz");
+        unsafe { crate::malloc::free(e) };
+    }
+
+    #[test]
+    fn p_reads_a_pointer_and_nil() {
+        let mut p: usize = 99;
+        assert_eq!(
+            sscanf_va(b"0x1234\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]),
+            1
+        );
+        assert_eq!(p, 0x1234);
+        assert_eq!(
+            sscanf_va(b"(nil)\0".as_ptr(), b"%p\0".as_ptr(), &[&raw mut p as u64]),
+            1
+        );
+        assert_eq!(p, 0);
+        let mut word = [0u8; 8];
+        assert_eq!(
+            sscanf_va(
+                b"(nix)\0".as_ptr(),
+                b"%p%s\0".as_ptr(),
+                &[&raw mut p as u64, word.as_mut_ptr() as u64]
+            ),
+            0,
+            "not (nil): a matching failure"
+        );
+    }
+
+    #[test]
+    fn positional_arguments() {
+        let (mut a, mut b) = (0i32, 0i32);
+        assert_eq!(
+            sscanf_va(
+                b"1 2\0".as_ptr(),
+                b"%2$d %1$d\0".as_ptr(),
+                &[&raw mut a as u64, &raw mut b as u64]
+            ),
+            2
+        );
+        assert_eq!((a, b), (2, 1));
+    }
+
+    #[test]
+    fn b_reads_binary() {
+        let mut v = 0u32;
+        assert_eq!(
+            sscanf_va(b"101\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]),
+            1
+        );
+        assert_eq!(v, 5);
+        assert_eq!(
+            sscanf_va(b"0b110\0".as_ptr(), b"%b\0".as_ptr(), &[&raw mut v as u64]),
+            1
+        );
+        assert_eq!(v, 6);
+        let mut i = 0i32;
+        let mut word = [0u8; 8];
+        assert_eq!(
+            sscanf_va(
+                b"0b11\0".as_ptr(),
+                b"%i%s\0".as_ptr(),
+                &[&raw mut i as u64, word.as_mut_ptr() as u64]
+            ),
+            2
+        );
+        assert_eq!(
+            (i, line(&word)),
+            (0, &b"b11"[..]),
+            "%i takes no 0b outside C23 mode"
+        );
+    }
+
+    #[test]
+    fn wide_conversions_store_wchar_t() {
+        let mut w = [0x5555i32; 8];
+        assert_eq!(
+            sscanf_va(
+                "é€x y\0".as_ptr(),
+                b"%ls\0".as_ptr(),
+                &[w.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(&w[..4], &[0xe9, 0x20ac, i32::from(b'x'), 0]);
+        let mut c = [0i32; 2];
+        assert_eq!(
+            sscanf_va("€\0".as_ptr(), b"%lc\0".as_ptr(), &[c.as_mut_ptr() as u64]),
+            1
+        );
+        assert_eq!(c[0], 0x20ac);
+        let mut s = [0i32; 8];
+        assert_eq!(
+            sscanf_va(
+                "éé-\0".as_ptr(),
+                b"%l[^-]\0".as_ptr(),
+                &[s.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(&s[..3], &[0xe9, 0xe9, 0]);
+        errno::set_errno(0);
+        assert_eq!(
+            sscanf_va(
+                b"\xff\0".as_ptr(),
+                b"%lc\0".as_ptr(),
+                &[c.as_mut_ptr() as u64]
+            ),
+            0
+        );
+        assert_eq!(errno::get_errno(), errno::EILSEQ);
+    }
+
+    /// Where glibc's one-character pushback consumes what a look-ahead
+    /// engine would have left.
+    #[test]
+    fn glibc_consumes_what_it_looked_at() {
+        let mut x = 7u32;
+        let mut word = [0u8; 16];
+        let two = |x: *mut u32, w: *mut u8| [x as u64, w as u64];
+        assert_eq!(
+            sscanf_va(
+                b"0xZ\0".as_ptr(),
+                b"%x%s\0".as_ptr(),
+                &two(&raw mut x, word.as_mut_ptr())
+            ),
+            2
+        );
+        assert_eq!(
+            (x, line(&word)),
+            (0, &b"Z"[..]),
+            "%x consumes 0x before finding no digit"
+        );
+        let (n, v, rest) = scan_hex("1ex", b"%lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, 1.0, "x"), "the e is consumed");
+        let (n, v, rest) = scan_hex("nan(1)", b"%lf%s\0");
+        assert!(v.is_nan());
+        assert_eq!(
+            (n, rest.as_str()),
+            (2, "(1)"),
+            "glibc's scanf reads no nan payload"
+        );
+        let (n, _, _) = scan_hex("infinx", b"%lf%s\0");
+        assert_eq!(n, 0, "infin is consumed and is no number");
+        let (n, v, rest) = scan_hex("infx", b"%lf%s\0");
+        assert_eq!((n, v, rest.as_str()), (2, f64::INFINITY, "x"));
+    }
+
+    #[test]
+    fn scansets_are_glibcs() {
+        let mut word = [0u8; 16];
+        assert_eq!(
+            sscanf_va(
+                b"z-a!\0".as_ptr(),
+                b"%[z-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(line(&word), b"z-a", "a reversed range is three members");
+        assert_eq!(
+            sscanf_va(
+                b"b\0".as_ptr(),
+                b"%[z-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            0
+        );
+        assert_eq!(
+            sscanf_va(
+                b"abc\0".as_ptr(),
+                b"%[abc\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            0,
+            "no closing ]"
+        );
+        // A leading `]` is a member -- and then `]-^` is a range from `]` to
+        // `^`, which has no `-` in it, as glibc reads it.
+        assert_eq!(
+            sscanf_va(
+                b"]-^x\0".as_ptr(),
+                b"%[]-^]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(line(&word), b"]");
+        // A leading `-` is a member, and so is a trailing one.
+        assert_eq!(
+            sscanf_va(
+                b"-a-b\0".as_ptr(),
+                b"%[-a]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(line(&word), b"-a-");
+        assert_eq!(
+            sscanf_va(
+                b"a-b\0".as_ptr(),
+                b"%[a-]\0".as_ptr(),
+                &[word.as_mut_ptr() as u64]
+            ),
+            1
+        );
+        assert_eq!(line(&word), b"a-");
+    }
+
+    /// A NULL destination is a conversion error, as glibc's `STRING_ARG`
+    /// makes it for strings (and not a write through NULL).
+    #[test]
+    fn a_null_destination_stops_the_scan() {
+        let mut b = 0i32;
+        assert_eq!(
+            sscanf_va(
+                b"1 2\0".as_ptr(),
+                b"%d %d\0".as_ptr(),
+                &[0, &raw mut b as u64]
+            ),
+            0
+        );
+        assert_eq!(b, 0);
+        assert_eq!(sscanf_va(b"ab\0".as_ptr(), b"%s\0".as_ptr(), &[0]), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // The wide family: glibc's answers
+    // -----------------------------------------------------------------------
+
+    use crate::wchar::WcharT;
+
+    fn swscanf_va(input: &[WcharT], fmt: &[WcharT], ptrs: &[u64]) -> i32 {
+        with_va(ptrs, |ap| unsafe {
+            vswscanf(input.as_ptr(), fmt.as_ptr(), ap)
+        })
+    }
+
+    fn fwscanf_va(stream: *mut u8, fmt: &[WcharT], ptrs: &[u64]) -> i32 {
+        with_va(ptrs, |ap| unsafe { vfwscanf(stream, fmt.as_ptr(), ap) })
+    }
+
+    /// `s` as a wide C string.
+    fn wide(s: &str) -> Vec<WcharT> {
+        s.chars().map(|c| c as WcharT).chain([0]).collect()
+    }
+
+    /// One `swscanf` call glibc answered: (name, format, input, the kinds
+    /// of the arguments it is given, glibc's line).
+    type WscanfCase = (
+        &'static str,
+        &'static [u32],
+        &'static [u32],
+        &'static str,
+        &'static str,
+    );
+
+    // Generated by posix/tools/oracle/wscanf_harness.py from glibc 2.39's swscanf
+    // under WSL, C.UTF-8: (name, format, input, kinds, glibc's line).
+    const GLIBC_WSCANF: &[WscanfCase] = &[
+        ("d", &[0x25, 0x64], &[0x34, 0x32], "i", "d ret=1 errno=0 42"),
+        (
+            "d_two",
+            &[0x25, 0x64, 0x20, 0x25, 0x64],
+            &[0x31, 0x30, 0x20, 0x32, 0x30],
+            "i i",
+            "d_two ret=2 errno=0 10 20",
+        ),
+        (
+            "d_sign",
+            &[0x25, 0x64],
+            &[0x2d, 0x31, 0x37],
+            "i",
+            "d_sign ret=1 errno=0 -17",
+        ),
+        (
+            "d_space",
+            &[0x25, 0x64],
+            &[0x20, 0x20, 0x20, 0x31, 0x32, 0x33],
+            "i",
+            "d_space ret=1 errno=0 123",
+        ),
+        (
+            "d_stop",
+            &[0x25, 0x64],
+            &[0x31, 0x32, 0x61, 0x62, 0x63],
+            "i",
+            "d_stop ret=1 errno=0 12",
+        ),
+        (
+            "x",
+            &[0x25, 0x78],
+            &[0x30, 0x78, 0x31, 0x66],
+            "i",
+            "x ret=1 errno=0 31",
+        ),
+        (
+            "x_bare",
+            &[0x25, 0x78],
+            &[0x30, 0x78, 0x67],
+            "i",
+            "x_bare ret=1 errno=0 0",
+        ),
+        (
+            "i_octal",
+            &[0x25, 0x69],
+            &[0x30, 0x31, 0x30],
+            "i",
+            "i_octal ret=1 errno=0 8",
+        ),
+        (
+            "i_hex",
+            &[0x25, 0x69],
+            &[0x30, 0x78, 0x31, 0x30],
+            "i",
+            "i_hex ret=1 errno=0 16",
+        ),
+        (
+            "u_neg",
+            &[0x25, 0x75],
+            &[0x2d, 0x31],
+            "u",
+            "u_neg ret=1 errno=0 4294967295",
+        ),
+        (
+            "hhd",
+            &[0x25, 0x68, 0x68, 0x64],
+            &[0x33, 0x30, 0x30],
+            "hhi",
+            "hhd ret=1 errno=0 44",
+        ),
+        (
+            "hd",
+            &[0x25, 0x68, 0x64],
+            &[0x37, 0x30, 0x30, 0x30, 0x30],
+            "hi",
+            "hd ret=1 errno=0 4464",
+        ),
+        (
+            "ld",
+            &[0x25, 0x6c, 0x64],
+            &[
+                0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30, 0x31, 0x32,
+            ],
+            "li",
+            "ld ret=1 errno=0 123456789012",
+        ),
+        (
+            "d_width",
+            &[0x25, 0x32, 0x64, 0x25, 0x64],
+            &[0x31, 0x32, 0x33, 0x34, 0x35],
+            "i i",
+            "d_width ret=2 errno=0 12 345",
+        ),
+        (
+            "p_nil",
+            &[0x25, 0x70],
+            &[0x28, 0x6e, 0x69, 0x6c, 0x29],
+            "p",
+            "p_nil ret=1 errno=0 0",
+        ),
+        (
+            "p_hex",
+            &[0x25, 0x70],
+            &[0x30, 0x78, 0x31, 0x30],
+            "p",
+            "p_hex ret=1 errno=0 10",
+        ),
+        (
+            "d_wide_digit",
+            &[0x25, 0x64],
+            &[0x661],
+            "i",
+            "d_wide_digit ret=0 errno=0 1431655765",
+        ),
+        (
+            "f",
+            &[0x25, 0x66],
+            &[0x33, 0x2e, 0x35],
+            "f",
+            "f ret=1 errno=0 40600000",
+        ),
+        (
+            "lf",
+            &[0x25, 0x6c, 0x66],
+            &[0x2d, 0x32, 0x65, 0x33],
+            "lf",
+            "lf ret=1 errno=0 c09f400000000000",
+        ),
+        (
+            "Lf_inf",
+            &[0x25, 0x4c, 0x66],
+            &[0x69, 0x6e, 0x66],
+            "Lf",
+            "Lf_inf ret=1 errno=0 0000000000000080ff7f",
+        ),
+        (
+            "f_nan",
+            &[0x25, 0x66],
+            &[0x6e, 0x61, 0x6e],
+            "f",
+            "f_nan ret=1 errno=0 7fc00000",
+        ),
+        (
+            "lf_infinity",
+            &[0x25, 0x6c, 0x66],
+            &[0x69, 0x6e, 0x66, 0x69, 0x6e, 0x69, 0x74, 0x79],
+            "lf",
+            "lf_infinity ret=1 errno=0 7ff0000000000000",
+        ),
+        (
+            "la_hex",
+            &[0x25, 0x6c, 0x61],
+            &[0x30, 0x78, 0x31, 0x70, 0x34],
+            "lf",
+            "la_hex ret=1 errno=0 4030000000000000",
+        ),
+        (
+            "f_e",
+            &[0x25, 0x66],
+            &[0x31, 0x65],
+            "f",
+            "f_e ret=1 errno=0 3f800000",
+        ),
+        (
+            "f_dot",
+            &[0x25, 0x66],
+            &[0x2e, 0x35],
+            "f",
+            "f_dot ret=1 errno=0 3f000000",
+        ),
+        (
+            "s",
+            &[0x25, 0x73],
+            &[0x61, 0x62, 0x63, 0x20, 0x64, 0x65, 0x66],
+            "s",
+            "s ret=1 errno=0 61626300005555555555555555555555",
+        ),
+        (
+            "s_utf8",
+            &[0x25, 0x73],
+            &[0x68, 0xe9, 0x6c, 0x6c, 0x6f, 0x20, 0x77],
+            "s",
+            "s_utf8 ret=1 errno=0 68c3a96c6c6f00005555555555555555",
+        ),
+        (
+            "s_width",
+            &[0x25, 0x33, 0x73],
+            &[0x61, 0x62, 0x63, 0x64, 0x65, 0x66],
+            "s",
+            "s_width ret=1 errno=0 61626300005555555555555555555555",
+        ),
+        (
+            "s_euro_width",
+            &[0x25, 0x32, 0x73],
+            &[0x20ac, 0x20ac, 0x78],
+            "s",
+            "s_euro_width ret=1 errno=0 e282ace282ac00005555555555555555",
+        ),
+        (
+            "ls",
+            &[0x25, 0x6c, 0x73],
+            &[0x61, 0x62, 0x20ac, 0x20, 0x63, 0x64],
+            "ls",
+            "ls ret=1 errno=0 61.62.20ac.0.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "c",
+            &[0x25, 0x63],
+            &[0xe9],
+            "c",
+            "c ret=1 errno=0 c3a95555555555555555555555555555",
+        ),
+        (
+            "c3",
+            &[0x25, 0x33, 0x63],
+            &[0x61, 0xe9, 0x20ac],
+            "c",
+            "c3 ret=1 errno=0 61c3a9e282ac55555555555555555555",
+        ),
+        (
+            "c_space",
+            &[0x25, 0x63],
+            &[0x20, 0x78],
+            "c",
+            "c_space ret=1 errno=0 20555555555555555555555555555555",
+        ),
+        (
+            "lc",
+            &[0x25, 0x6c, 0x63],
+            &[0x20ac],
+            "lc",
+            "lc ret=1 errno=0 20ac.55555555.55555555.55555555.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "lc2",
+            &[0x25, 0x32, 0x6c, 0x63],
+            &[0x61, 0x1f600],
+            "lc",
+            "lc2 ret=1 errno=0 61.1f600.55555555.55555555.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "suppress_s",
+            &[0x25, 0x2a, 0x73, 0x25, 0x73],
+            &[0x61, 0x20, 0x62],
+            "s",
+            "suppress_s ret=1 errno=0 62000055555555555555555555555555",
+        ),
+        (
+            "ms",
+            &[0x25, 0x6d, 0x73],
+            &[0x68, 0xe9, 0x6c, 0x6c, 0x6f],
+            "ms",
+            "ms ret=1 errno=0 68c3a96c6c6f00",
+        ),
+        (
+            "mls",
+            &[0x25, 0x6d, 0x6c, 0x73],
+            &[0x78, 0x20ac, 0x79],
+            "mls",
+            "mls ret=1 errno=0 78.20ac.79.0",
+        ),
+        (
+            "mc",
+            &[0x25, 0x6d, 0x33, 0x63],
+            &[0x61, 0xe9, 0x62],
+            "ms",
+            "mc ret=0 errno=0 untouched",
+        ),
+        (
+            "s_surrogate",
+            &[0x25, 0x73],
+            &[0x61, 0xd800, 0x62],
+            "s",
+            "s_surrogate ret=0 errno=EILSEQ 61555555555555555555555555555555",
+        ),
+        (
+            "c_surrogate",
+            &[0x25, 0x63],
+            &[0xd800],
+            "c",
+            "c_surrogate ret=-1 errno=EILSEQ 55555555555555555555555555555555",
+        ),
+        (
+            "c_surrogate_second",
+            &[0x25, 0x64, 0x20, 0x25, 0x63],
+            &[0x35, 0x20, 0xd800],
+            "i c",
+            "c_surrogate_second ret=1 errno=EILSEQ 5 55555555555555555555555555555555",
+        ),
+        (
+            "suppressed_surrogate",
+            &[0x25, 0x2a, 0x73, 0x20, 0x25, 0x64],
+            &[0xd800, 0x20, 0x37],
+            "i",
+            "suppressed_surrogate ret=1 errno=0 7",
+        ),
+        (
+            "lc_surrogate",
+            &[0x25, 0x6c, 0x63],
+            &[0xd800],
+            "lc",
+            "lc_surrogate ret=1 errno=0 d800.55555555.55555555.55555555.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "ls_surrogate",
+            &[0x25, 0x6c, 0x73],
+            &[0x61, 0xd800],
+            "ls",
+            "ls_surrogate ret=1 errno=0 61.d800.0.55555555.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "set_surrogate",
+            &[0x25, 0x5b, 0x5e, 0x2c, 0x5d],
+            &[0x61, 0xd800, 0x2c],
+            "s",
+            "set_surrogate ret=0 errno=EILSEQ 61555555555555555555555555555555",
+        ),
+        (
+            "set",
+            &[0x25, 0x5b, 0x61, 0x62, 0x63, 0x5d],
+            &[0x61, 0x62, 0x63, 0x64],
+            "s",
+            "set ret=1 errno=0 61626300005555555555555555555555",
+        ),
+        (
+            "set_not",
+            &[0x25, 0x5b, 0x5e, 0x2c, 0x5d],
+            &[0x78, 0x2c, 0x79],
+            "s",
+            "set_not ret=1 errno=0 78000055555555555555555555555555",
+        ),
+        (
+            "set_bracket_first",
+            &[0x25, 0x5b, 0x5d, 0x61, 0x5d],
+            &[0x5d, 0x61, 0x5d, 0x62],
+            "s",
+            "set_bracket_first ret=1 errno=0 5d615d00005555555555555555555555",
+        ),
+        (
+            "set_range",
+            &[0x25, 0x5b, 0x61, 0x2d, 0x63, 0x5d],
+            &[0x61, 0x62, 0x63, 0x64],
+            "s",
+            "set_range ret=1 errno=0 61626300005555555555555555555555",
+        ),
+        (
+            "set_descending",
+            &[0x25, 0x5b, 0x63, 0x2d, 0x61, 0x5d],
+            &[0x61, 0x2d, 0x63, 0x62],
+            "s",
+            "set_descending ret=1 errno=0 612d6300005555555555555555555555",
+        ),
+        (
+            "set_dash_first",
+            &[0x25, 0x5b, 0x2d, 0x61, 0x5d],
+            &[0x2d, 0x61, 0x2d, 0x62],
+            "s",
+            "set_dash_first ret=1 errno=0 2d612d00005555555555555555555555",
+        ),
+        (
+            "set_dash_last",
+            &[0x25, 0x5b, 0x61, 0x2d, 0x5d],
+            &[0x61, 0x2d, 0x62],
+            "s",
+            "set_dash_last ret=1 errno=0 612d0000555555555555555555555555",
+        ),
+        (
+            "set_wide_range",
+            &[0x25, 0x6c, 0x5b, 0xe9, 0x2d, 0xeb, 0x5d],
+            &[0xe9, 0xea, 0xeb, 0xec],
+            "ls",
+            "set_wide_range ret=1 errno=0 e9.ea.eb.0.55555555.55555555.55555555.55555555",
+        ),
+        (
+            "set_euro",
+            &[0x25, 0x5b, 0x20ac, 0x5d],
+            &[0x20ac, 0x20ac, 0x78],
+            "s",
+            "set_euro ret=1 errno=0 e282ace282ac00005555555555555555",
+        ),
+        (
+            "set_width",
+            &[0x25, 0x32, 0x5b, 0x61, 0x2d, 0x7a, 0x5d],
+            &[0x61, 0x62, 0x63],
+            "s",
+            "set_width ret=1 errno=0 61620000555555555555555555555555",
+        ),
+        (
+            "set_none",
+            &[0x25, 0x5b, 0x61, 0x5d],
+            &[0x62],
+            "s",
+            "set_none ret=0 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "set_unclosed",
+            &[0x25, 0x5b, 0x61, 0x62, 0x63],
+            &[0x61, 0x62, 0x63],
+            "s",
+            "set_unclosed ret=0 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "set_empty_input",
+            &[0x25, 0x5b, 0x61, 0x5d],
+            &[],
+            "s",
+            "set_empty_input ret=-1 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "set_malloc",
+            &[0x25, 0x6d, 0x5b, 0x61, 0x2d, 0x7a, 0x5d],
+            &[0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x31],
+            "ms",
+            "set_malloc ret=1 errno=0 68656c6c6f00",
+        ),
+        (
+            "set_range_start_self",
+            &[0x25, 0x5b, 0x62, 0x2d, 0x64, 0x5d],
+            &[0x61, 0x62, 0x64],
+            "s",
+            "set_range_start_self ret=0 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "lit",
+            &[0x61, 0x25, 0x64],
+            &[0x61, 0x35],
+            "i",
+            "lit ret=1 errno=0 5",
+        ),
+        (
+            "lit_miss",
+            &[0x61, 0x25, 0x64],
+            &[0x62, 0x35],
+            "i",
+            "lit_miss ret=0 errno=0 1431655765",
+        ),
+        (
+            "lit_utf8",
+            &[0xe9, 0x25, 0x64],
+            &[0xe9, 0x35],
+            "i",
+            "lit_utf8 ret=1 errno=0 5",
+        ),
+        (
+            "lit_utf8_after_space",
+            &[0x20, 0xe9, 0x25, 0x64],
+            &[0x20, 0x20, 0xe9, 0x35],
+            "i",
+            "lit_utf8_after_space ret=1 errno=0 5",
+        ),
+        (
+            "lit_after_conv",
+            &[0x25, 0x64, 0xe9, 0x25, 0x64],
+            &[0x31, 0xe9, 0x32],
+            "i i",
+            "lit_after_conv ret=2 errno=0 1 2",
+        ),
+        (
+            "percent",
+            &[0x25, 0x25, 0x25, 0x64],
+            &[0x25, 0x37],
+            "i",
+            "percent ret=1 errno=0 7",
+        ),
+        (
+            "percent_space",
+            &[0x25, 0x25, 0x20, 0x25, 0x64],
+            &[0x25, 0x20, 0x37],
+            "i",
+            "percent_space ret=1 errno=0 7",
+        ),
+        (
+            "n",
+            &[0x25, 0x64, 0x25, 0x6e],
+            &[0x31, 0x32, 0x78],
+            "i n",
+            "n ret=1 errno=0 12 2",
+        ),
+        (
+            "n_wide",
+            &[0x25, 0x73, 0x25, 0x6e],
+            &[0xe9, 0xe9, 0x20, 0x78],
+            "s n",
+            "n_wide ret=1 errno=0 c3a9c3a9000055555555555555555555 2",
+        ),
+        (
+            "n_after_space",
+            &[0x25, 0x64, 0x20, 0x25, 0x6e],
+            &[0x35, 0x20, 0x20, 0x20, 0x78],
+            "i n",
+            "n_after_space ret=1 errno=0 5 4",
+        ),
+        (
+            "space_end",
+            &[0x25, 0x64, 0x20],
+            &[0x35, 0x20, 0x20, 0x20],
+            "i",
+            "space_end ret=1 errno=0 5",
+        ),
+        (
+            "eof",
+            &[0x25, 0x64],
+            &[],
+            "i",
+            "eof ret=-1 errno=0 1431655765",
+        ),
+        (
+            "eof_space",
+            &[0x25, 0x64],
+            &[0x20, 0x20, 0x20],
+            "i",
+            "eof_space ret=-1 errno=0 1431655765",
+        ),
+        (
+            "partial",
+            &[0x25, 0x64, 0x20, 0x25, 0x64],
+            &[0x31],
+            "i i",
+            "partial ret=1 errno=0 1 1431655765",
+        ),
+        (
+            "s_eof",
+            &[0x25, 0x73],
+            &[],
+            "s",
+            "s_eof ret=-1 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "c_eof",
+            &[0x25, 0x63],
+            &[],
+            "c",
+            "c_eof ret=-1 errno=0 55555555555555555555555555555555",
+        ),
+        (
+            "pos",
+            &[0x25, 0x32, 0x24, 0x64, 0x20, 0x25, 0x31, 0x24, 0x64],
+            &[0x31, 0x20, 0x32],
+            "i i",
+            "pos ret=2 errno=0 2 1",
+        ),
+    ];
+
+    /// One destination of the oracle's kinds, filled as the oracle fills its
+    /// own: 0x55 throughout, or 1 in a `%m` pointer, meaning untouched.
+    #[repr(C, align(16))]
+    struct Slot([u8; 256]);
+
+    impl Slot {
+        fn new(kind: &str) -> Self {
+            let mut s = Slot([0x55; 256]);
+            if kind.starts_with('m') {
+                s.0[..8].copy_from_slice(&1u64.to_ne_bytes());
+            }
+            s
+        }
+    }
+
+    fn hex_bytes(b: &[u8]) -> String {
+        use core::fmt::Write as _;
+        b.iter().fold(String::new(), |mut s, x| {
+            let _ = write!(s, "{x:02x}"); // a String takes every write
+            s
+        })
+    }
+
+    fn hex_wide(w: &[i32]) -> String {
+        let parts: Vec<String> = w.iter().map(|&x| format!("{:x}", x as u32)).collect();
+        parts.join(".")
+    }
+
+    fn errno_name(e: i32) -> &'static str {
+        match e {
+            0 => "0",
+            e if e == errno::EILSEQ => "EILSEQ",
+            e if e == errno::EINVAL => "EINVAL",
+            e if e == errno::EBADF => "EBADF",
+            _ => "other",
+        }
+    }
+
+    /// A slot as the oracle prints one of its kind (`wscanf_harness.py`'s
+    /// docstring); a `%m` string is freed once printed.
+    fn render(kind: &str, slot: &Slot) -> String {
+        let b = &slot.0;
+        let u32_at = u32::from_ne_bytes(b[..4].try_into().unwrap());
+        let u64_at = u64::from_ne_bytes(b[..8].try_into().unwrap());
+        match kind {
+            "i" | "n" => format!(" {}", u32_at as i32),
+            "hhi" => format!(" {}", b[0] as i8),
+            "hi" => format!(" {}", i16::from_ne_bytes(b[..2].try_into().unwrap())),
+            "li" => format!(" {}", u64_at as i64),
+            "u" => format!(" {u32_at}"),
+            "p" => format!(" {u64_at:x}"),
+            "f" => format!(" {u32_at:08x}"),
+            "lf" => format!(" {u64_at:016x}"),
+            "Lf" => format!(" {}", hex_bytes(&b[..10])),
+            "s" | "c" => format!(" {}", hex_bytes(&b[..16])),
+            "ls" | "lc" => {
+                let w: Vec<i32> = b[..32]
+                    .chunks_exact(4)
+                    .map(|c| i32::from_ne_bytes(c.try_into().unwrap()))
+                    .collect();
+                format!(" {}", hex_wide(&w))
+            }
+            "ms" | "mls" => match u64_at {
+                1 => " untouched".to_string(),
+                0 => " null".to_string(),
+                p => {
+                    let text = if kind == "ms" {
+                        let s = p as *mut u8;
+                        let n = unsafe { crate::string::strlen(s) } + 1;
+                        hex_bytes(unsafe { core::slice::from_raw_parts(s, n) })
+                    } else {
+                        let s = p as *mut i32;
+                        let mut n = 0;
+                        while unsafe { *s.add(n) } != 0 {
+                            n += 1;
+                        }
+                        hex_wide(unsafe { core::slice::from_raw_parts(s, n + 1) })
+                    };
+                    unsafe { crate::malloc::free(p as *mut u8) };
+                    format!(" {text}")
+                }
+            },
+            other => panic!("no kind {other}"),
+        }
+    }
+
+    /// glibc's line, less the one place this library is not glibc's on
+    /// purpose (`Engine::end_string`): after the terminator of a wide `%s` or
+    /// `%[`, glibc writes a second NUL, one byte more than the string and its
+    /// terminator.  Here that byte is untouched -- 0x55.
+    fn without_second_nul(glibc: &str, kinds: &[&str]) -> String {
+        let mut tokens: Vec<String> = glibc.split(' ').map(String::from).collect();
+        for (k, kind) in kinds.iter().enumerate() {
+            if *kind != "s" {
+                continue;
+            }
+            let t = &mut tokens[3 + k];
+            let pairs: Vec<String> = (0..t.len() / 2)
+                .map(|i| t[2 * i..2 * i + 2].to_string())
+                .collect();
+            if let Some(z) = pairs.iter().position(|p| p == "00") {
+                if pairs.get(z + 1).is_some_and(|p| p == "00") {
+                    t.replace_range(2 * (z + 1)..2 * (z + 2), "55");
+                }
+            }
+        }
+        tokens.join(" ")
+    }
+
+    /// glibc 2.39's `swscanf`, case by case (`posix/tools/oracle/wscanf_harness.py`):
+    /// every return, `errno`, and every byte written -- the 0x55 around them
+    /// shows where writing stopped.
+    #[test]
+    fn wscanf_is_glibcs() {
+        let mut failures = Vec::new();
+        for &(name, fmt, input, kinds, glibc) in GLIBC_WSCANF {
+            let fmt: Vec<WcharT> = fmt.iter().map(|&c| c as WcharT).chain([0]).collect();
+            let input: Vec<WcharT> = input.iter().map(|&c| c as WcharT).chain([0]).collect();
+            let kinds: Vec<&str> = kinds.split(' ').collect();
+            let mut slots: Vec<Slot> = kinds.iter().map(|k| Slot::new(k)).collect();
+            let ptrs: Vec<u64> = slots.iter_mut().map(|s| s.0.as_mut_ptr() as u64).collect();
+            errno::set_errno(0);
+            let r = swscanf_va(&input, &fmt, &ptrs);
+            let e = errno::get_errno();
+            let mut line = format!("{name} ret={r} errno={}", errno_name(e));
+            for (kind, slot) in kinds.iter().zip(&slots) {
+                line.push_str(&render(kind, slot));
+            }
+            let want = without_second_nul(glibc, &kinds);
+            if line != want {
+                failures.push(format!("{name}:\n  glibc {want}\n  ours  {line}"));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Through a stream, as glibc reads one
+    /// (`posix/tools/oracle/wscanf_stream_oracle.c`, `through` and
+    /// `giveback`): what a call does not use is still there for the next --
+    /// including a three-byte character that stopped a number, all three
+    /// bytes given back.
+    #[test]
+    fn fwscanf_reads_through_the_stream_and_gives_back_a_wide_character() {
+        let mut data = *b"12 \xc3\xa9\xe2\x82\xac 34\nrest";
+        let s = reading(&mut data);
+        let (mut a, mut b) = (0i32, 0i32);
+        let mut w = [0 as WcharT; 8];
+        let ptrs = [&raw mut a as u64, w.as_mut_ptr() as u64, &raw mut b as u64];
+        assert_eq!(fwscanf_va(s, &wide("%d %ls %d"), &ptrs), 3);
+        assert_eq!((a, b), (12, 34));
+        assert_eq!(&w[..3], &[0xe9, 0x20ac, 0]);
+        assert_eq!(unsafe { crate::wchar::fgetwc(s) }, 0x0a);
+        assert_eq!(crate::stdio::fclose(s), 0);
+
+        let mut data = *b"5\xe2\x82\xac";
+        let s = reading(&mut data);
+        assert_eq!(fwscanf_va(s, &wide("%d"), &[&raw mut a as u64]), 1);
+        assert_eq!(a, 5);
+        assert_eq!(unsafe { crate::wchar::fgetwc(s) }, 0x20ac);
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    /// A byte stream answers `EOF` and keeps its orientation, `errno`
+    /// untouched; a write-only one is `EBADF`, with no stream error -- glibc's
+    /// `ORIENT` then `ARGCHECK` (`bytestream`, `writeonly`).
+    #[test]
+    fn fwscanf_refuses_a_byte_stream_and_a_write_only_one() {
+        let mut data = *b"12";
+        let s = reading(&mut data);
+        assert_eq!(crate::stdio::fgetc(s), i32::from(b'1'));
+        let mut a = 0i32;
+        errno::set_errno(0);
+        assert_eq!(fwscanf_va(s, &wide("%d"), &[&raw mut a as u64]), -1);
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!((a, crate::stdio::fwide(s, 0)), (0, -1));
+        assert_eq!(crate::stdio::fclose(s), 0);
+
+        let mut p: *mut u8 = core::ptr::null_mut();
+        let mut n = 0usize;
+        let w = unsafe { crate::stdio_mem::open_memstream(&raw mut p, &raw mut n) };
+        assert_eq!(fwscanf_va(w, &wide("%d"), &[&raw mut a as u64]), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(crate::stdio::ferror(w), 0);
+        assert_eq!(crate::stdio::fclose(w), 0);
+        unsafe { crate::malloc::free(p) };
+    }
+
+    /// A byte sequence that is no character ends the input where it stands:
+    /// `EILSEQ` and a stream error, what came before it kept -- and a
+    /// mismatch leaves its character to be read (`badutf8_mid`,
+    /// `badutf8_first`, `mismatch`).
+    #[test]
+    fn fwscanf_ends_at_a_sequence_that_is_no_character() {
+        let mut data = *b"ab\xffcd";
+        let s = reading(&mut data);
+        let mut word = [0x55u8; 16];
+        errno::set_errno(0);
+        assert_eq!(fwscanf_va(s, &wide("%s"), &[word.as_mut_ptr() as u64]), 1);
+        assert_eq!(errno::get_errno(), errno::EILSEQ);
+        assert_eq!(&word[..3], b"ab\0");
+        assert_eq!(crate::stdio::ferror(s), 1);
+        assert_eq!(crate::stdio::fclose(s), 0);
+
+        let mut data = *b"\xff";
+        let s = reading(&mut data);
+        let mut a = 7i32;
+        errno::set_errno(0);
+        assert_eq!(fwscanf_va(s, &wide("%d"), &[&raw mut a as u64]), -1);
+        assert_eq!((errno::get_errno(), a), (errno::EILSEQ, 7));
+        assert_eq!(crate::stdio::ferror(s), 1);
+        assert_eq!(crate::stdio::fclose(s), 0);
+
+        let mut data = *b"x";
+        let s = reading(&mut data);
+        errno::set_errno(0);
+        assert_eq!(fwscanf_va(s, &wide("%d"), &[&raw mut a as u64]), 0);
+        assert_eq!((errno::get_errno(), a), (0, 7));
+        assert_eq!(unsafe { crate::wchar::fgetwc(s) }, WcharT::from(b'x'));
+        assert_eq!(crate::stdio::fclose(s), 0);
+    }
+
+    /// The arguments glibc's `ARGCHECK` and §1115 cover: NULL `fmt` is
+    /// `EINVAL`, a NULL string `EFAULT`, a NULL stream `EBADF`, a NULL
+    /// `va_list` `EOF`.
+    #[test]
+    fn wscanf_refuses_null_arguments() {
+        let (fmt, input) = (wide("%d"), wide("5"));
+        let mut a = 0i32;
+        errno::set_errno(0);
+        let r = with_va(&[&raw mut a as u64], |ap| unsafe {
+            vswscanf(input.as_ptr(), core::ptr::null(), ap)
+        });
+        assert_eq!((r, errno::get_errno()), (-1, errno::EINVAL));
+        let r = with_va(&[&raw mut a as u64], |ap| unsafe {
+            vswscanf(core::ptr::null(), fmt.as_ptr(), ap)
+        });
+        assert_eq!((r, errno::get_errno()), (-1, errno::EFAULT));
+        errno::set_errno(0);
+        let r = with_va(&[&raw mut a as u64], |ap| unsafe {
+            vfwscanf(core::ptr::null_mut(), fmt.as_ptr(), ap)
+        });
+        assert_eq!((r, errno::get_errno()), (-1, errno::EBADF));
+        let r = unsafe { vswscanf(input.as_ptr(), fmt.as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(a, 0);
     }
 }

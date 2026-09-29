@@ -154,6 +154,104 @@ pub struct Timeval {
 }
 
 // ---------------------------------------------------------------------------
+// Timeouts, as the kernel keeps them
+// ---------------------------------------------------------------------------
+
+/// Nanoseconds in a second.
+const NSEC_PER_SEC: i64 = 1_000_000_000;
+/// Microseconds in a second.
+const USEC_PER_SEC: i64 = 1_000_000;
+/// [`NSEC_PER_SEC`], for the `u128` arithmetic of a deadline.
+const NSEC_PER_SEC_WIDE: u128 = 1_000_000_000;
+
+/// A timeout as Linux keeps one: its `timespec64`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    sec: i64,
+    nsec: i64,
+}
+
+impl Span {
+    const ZERO: Self = Self { sec: 0, nsec: 0 };
+
+    /// Linux's `timespec64_valid`: seconds not negative, and nanoseconds in
+    /// `0..NSEC_PER_SEC`.  `poll_select_set_timeout` refuses anything else
+    /// with `EINVAL`.
+    const fn valid(self) -> bool {
+        self.sec >= 0 && self.nsec >= 0 && self.nsec < NSEC_PER_SEC
+    }
+
+    const fn is_zero(self) -> bool {
+        self.sec == 0 && self.nsec == 0
+    }
+
+    /// When this span ends, as a time on the monotonic clock in nanoseconds,
+    /// counted from `now_ns`.  In `u128`, so that no span a `timespec` can
+    /// hold overflows it; Linux saturates instead (`timespec64_add_safe`).
+    fn end_from(self, now_ns: u64) -> u128 {
+        let sec = u128::from(self.sec.unsigned_abs());
+        let nsec = u128::from(self.nsec.unsigned_abs());
+        u128::from(now_ns)
+            .saturating_add(sec.saturating_mul(NSEC_PER_SEC_WIDE))
+            .saturating_add(nsec)
+    }
+
+    /// What is left at `now_ns` of a span that ends at `end`, never negative
+    /// -- `poll_select_finish`'s arithmetic.
+    fn left(end: u128, now_ns: u64) -> Self {
+        let rest = end.saturating_sub(u128::from(now_ns));
+        Self {
+            sec: i64::try_from(rest / NSEC_PER_SEC_WIDE).unwrap_or(i64::MAX),
+            // Below NSEC_PER_SEC, so it always fits.
+            nsec: i64::try_from(rest % NSEC_PER_SEC_WIDE).unwrap_or(0),
+        }
+    }
+
+    /// A `timespec` as `pselect` and `ppoll` hand it to the kernel; `None`
+    /// when it is not `timespec64_valid`, which is `EINVAL`.
+    fn of_timespec(ts: crate::stat::Timespec) -> Option<Self> {
+        let span = Self {
+            sec: ts.tv_sec,
+            nsec: ts.tv_nsec,
+        };
+        span.valid().then_some(span)
+    }
+}
+
+/// `select`'s timeval as glibc 2.39 hands it on (sysdeps/unix/sysv/linux/
+/// select.c): the microseconds are read into a 32-bit `int` -- glibc's own
+/// truncation, kept -- a negative second or microsecond count is `EINVAL`
+/// before anything else is looked at, and whole seconds of microseconds carry
+/// into the seconds, saturating at the longest timeout there is.  `None` is
+/// the `EINVAL`.
+fn select_span(tv: Timeval) -> Option<Span> {
+    // glibc: `int32_t us = timeout->tv_usec;`
+    #[allow(clippy::cast_possible_truncation)]
+    let usec = i64::from(tv.tv_usec as i32);
+    if tv.tv_sec < 0 || usec < 0 {
+        return None;
+    }
+    let carry = usec / USEC_PER_SEC;
+    Some(match tv.tv_sec.checked_add(carry) {
+        Some(sec) => Span {
+            sec,
+            nsec: (usec % USEC_PER_SEC).saturating_mul(1000),
+        },
+        None => Span {
+            sec: i64::MAX,
+            nsec: NSEC_PER_SEC - 1,
+        },
+    })
+}
+
+/// The monotonic clock, in nanoseconds.  A clock read cannot fail on the
+/// target; on the host this is the syscall layer's refusal, which no timed
+/// wait in a host test depends on.
+fn now_ns() -> u64 {
+    syscall0(SYS_CLOCK_MONOTONIC) as u64
+}
+
+// ---------------------------------------------------------------------------
 // fd_set manipulation macros (as functions)
 // ---------------------------------------------------------------------------
 
@@ -235,9 +333,8 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 /// events (see module docs for rationale).
 ///
 /// - `timeout == 0`: return immediately (non-blocking check).
-/// - `timeout > 0`: sleep for `timeout` milliseconds, then check.
-/// - `timeout == -1`: sleep briefly (10ms) and check — avoids hanging
-///   indefinitely since we can't do kernel-level event waiting yet.
+/// - `timeout > 0`: wait up to `timeout` milliseconds.
+/// - `timeout < 0`: wait until a descriptor is ready.
 ///
 /// Returns the number of fds with non-zero `revents`, or -1 on error.
 ///
@@ -259,6 +356,23 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 /// `fds` must point to an array of at least `nfds` `Pollfd` entries.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i32 {
+    // Linux's `poll`: a negative timeout waits for ever, and any other is
+    // milliseconds (`poll_select_set_timeout(ms / 1000, ms % 1000 * 1e6)`).
+    let span = (timeout >= 0).then(|| Span {
+        sec: i64::from(timeout / 1000),
+        nsec: i64::from(timeout % 1000).saturating_mul(1_000_000),
+    });
+    // SAFETY: forwarded from this function's contract.
+    unsafe { poll_until(fds, nfds, span) }
+}
+
+/// The body of [`poll`] and [`ppoll`] (Linux's `do_sys_poll`): wait up to
+/// `span` -- `None` for ever -- for an event on `fds`.
+///
+/// # Safety
+///
+/// As [`poll`].
+unsafe fn poll_until(fds: *mut Pollfd, nfds: NfdsT, span: Option<Span>) -> i32 {
     // Sleep interval: 10ms (balance between responsiveness and CPU).
     const POLL_INTERVAL_NS: u64 = 10_000_000;
 
@@ -278,13 +392,9 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
     }
 
     // Poll in a loop: check readiness, if nothing ready sleep briefly,
-    // repeat until timeout expires or an fd becomes ready.
-    let deadline_ns = if timeout > 0 {
-        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-        now.saturating_add(u64::from(timeout as u32).saturating_mul(1_000_000))
-    } else {
-        0
-    };
+    // repeat until the span ends or an fd becomes ready.  The clock is read
+    // only for a span that is not zero: a zero one polls once.
+    let end = span.filter(|s| !s.is_zero()).map(|s| s.end_from(now_ns()));
 
     loop {
         let mut ready_count: i32 = 0;
@@ -347,15 +457,14 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             return ready_count;
         }
 
-        // Non-blocking (timeout == 0): return immediately.
-        if timeout == 0 {
+        // A zero span polls once.
+        if span.is_some_and(Span::is_zero) {
             return 0;
         }
 
-        // Check deadline for positive timeouts.
-        if timeout > 0 {
-            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-            if now >= deadline_ns {
+        // Has the span ended?
+        if let Some(end) = end {
+            if u128::from(now_ns()) >= end {
                 return 0; // Timeout expired.
             }
         }
@@ -372,8 +481,13 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
 /// Like `poll`, but with a `timespec` timeout and optional signal mask.
 ///
 /// The `sigmask` parameter is ignored (our OS doesn't deliver signals).
-/// Converts the `timespec` to a millisecond timeout for the underlying
-/// `poll` implementation.
+///
+/// The timeout is judged first, as Linux's `ppoll` judges it before it looks
+/// at `nfds` or `fds`: a `timespec` outside `timespec64_valid` -- a negative
+/// second or nanosecond count, or a billion nanoseconds or more -- is
+/// `EINVAL`.  glibc passes the kernel a copy, so it is not written back.
+/// Until 2026-09-26 it was converted to milliseconds without being judged:
+/// a negative timeout waited 1 ms, and one past `i32::MAX` ms was cut to it.
 ///
 /// # Safety
 ///
@@ -387,34 +501,19 @@ pub unsafe extern "C" fn ppoll(
     tspec: *const crate::stat::Timespec,
     _sigmask: *const u64,
 ) -> i32 {
-    let tms: i32 = if tspec.is_null() {
-        -1 // Infinite wait.
+    let span = if tspec.is_null() {
+        None // Infinite wait.
     } else {
         // SAFETY: tspec is non-null and points to valid Timespec.
-        let ts = unsafe { &*tspec };
-        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
-            0 // Explicit {0,0} = non-blocking poll.
-        } else {
-            // Convert to milliseconds, rounding up so sub-ms timeouts
-            // don't collapse to 0 (which poll treats as non-blocking).
-            let ms = ts
-                .tv_sec
-                .saturating_mul(1_000)
-                .saturating_add((ts.tv_nsec.saturating_add(999_999)) / 1_000_000);
-            if ms > i64::from(i32::MAX) {
-                i32::MAX
-            } else if ms <= 0 {
-                1
-            }
-            // Ensure non-zero for non-zero input.
-            else {
-                ms as i32
-            }
-        }
+        let Some(span) = Span::of_timespec(unsafe { *tspec }) else {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        };
+        Some(span)
     };
 
-    // Delegate to poll.
-    unsafe { poll(fds, nfds, tms) }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { poll_until(fds, nfds, span) }
 }
 
 /// Check fd readiness based on handle kind.
@@ -594,21 +693,29 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
 /// - `exceptfds`: fds to check for exceptional conditions (always
 ///   empty on return — we don't generate OOB/exception events).
 /// - `timeout`: NULL = block indefinitely, {0,0} = non-blocking,
-///   otherwise sleep for the specified duration.
+///   otherwise wait up to the specified duration.
 ///
 /// Returns the total number of ready fds across all sets, or -1 on error.
 ///
 /// # Linux semantics
 ///
-/// Errno precedence (matches `fs/select.c::core_sys_select`):
+/// Errno precedence (glibc 2.39's `select`, then `fs/select.c`):
 ///
-/// 1. `nfds < 0` → EINVAL.
-/// 2. `nfds > max_fds` → **silently clamped** (NOT EINVAL).  Linux
+/// 1. The timeout, first, by glibc: a negative second or microsecond count
+///    → EINVAL, before anything else is looked at.  Microseconds past a
+///    second carry into the seconds; they are read as a 32-bit `int`, as
+///    glibc reads them.
+/// 2. `nfds < 0` → EINVAL.
+/// 3. `nfds > max_fds` → **silently clamped** (NOT EINVAL).  Linux
 ///    clamps `n` to the process's `fdt->max_fds`; we clamp to
 ///    `FD_SETSIZE`, which equals `fdtable::MAX_FDS` (256) so no fd in
 ///    our table can ever sit beyond the clamp.
-/// 3. The `timeout` pointer is dereferenced only after the nfds check.
 /// 4. An fd that is set in any input mask but not open → EBADF.
+///
+/// On every return, `*timeout` holds what is left of the wait -- Linux's
+/// update, which glibc's `select` hands back -- and a zero timeout stays
+/// zero.  Until 2026-09-26 the timeout was judged after `nfds`, a negative
+/// one was a zero one, and it was never written back.
 ///
 /// # Safety
 ///
@@ -621,15 +728,67 @@ pub unsafe extern "C" fn select(
     exceptfds: *mut FdSet,
     timeout: *mut Timeval,
 ) -> i32 {
+    let span = if timeout.is_null() {
+        None
+    } else {
+        // SAFETY: non-null, and by the caller's contract a `timeval`.
+        let Some(span) = select_span(unsafe { *timeout }) else {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        };
+        Some(span)
+    };
+    // SAFETY: forwarded from this function's contract.
+    let (ret, left) = unsafe { select_until(nfds, readfds, writefds, exceptfds, span) };
+    // Linux leaves what was not slept in the timeout (`poll_select_finish`),
+    // and glibc's `select` hands it back, on every return.
+    if let Some(left) = left {
+        // SAFETY: the `timeval` read above, which is the caller's to write.
+        unsafe {
+            *timeout = Timeval {
+                tv_sec: left.sec,
+                tv_usec: left.nsec / 1000,
+            };
+        }
+    }
+    ret
+}
+
+/// The body of [`select`] and [`pselect`] (Linux's `core_sys_select`, then
+/// `poll_select_finish`): wait up to `span` -- `None` for ever -- and answer,
+/// with what is left of the span: all of a zero one, which Linux does not
+/// update, and the rest of any other.  `select` writes it back; `pselect`
+/// does not.
+///
+/// # Safety
+///
+/// As [`select`].
+unsafe fn select_until(
+    nfds: i32,
+    readfds: *mut FdSet,
+    writefds: *mut FdSet,
+    exceptfds: *mut FdSet,
+    span: Option<Span>,
+) -> (i32, Option<Span>) {
     // Sleep interval for polling: 10ms (balance responsiveness vs CPU).
     const POLL_INTERVAL_NS: u64 = 10_000_000;
+
+    // The span starts before the count is judged, as Linux's does
+    // (`poll_select_set_timeout` runs first); the clock is read only for a
+    // span that is not zero.
+    let end = span.filter(|s| !s.is_zero()).map(|s| s.end_from(now_ns()));
+    let left = || match end {
+        Some(end) => Some(Span::left(end, now_ns())),
+        // No timeout, or a zero one.
+        None => span,
+    };
 
     // Phase 155: only `nfds < 0` is EINVAL.  `nfds > FD_SETSIZE` is
     // silently clamped, matching Linux's `core_sys_select` (fs/select.c)
     // which sets `n = max_fds` when the caller's `n` exceeds it.
     if nfds < 0 {
         errno::set_errno(errno::EINVAL);
-        return -1;
+        return (-1, left());
     }
     // Clamp nfds to FD_SETSIZE.  Our fdtable cannot hold an fd >=
     // FD_SETSIZE, so iterating past it would just check unset bits.
@@ -640,34 +799,6 @@ pub unsafe extern "C" fn select(
     } else {
         nfds
     };
-
-    // Compute deadline from timeout.
-    // NULL = block indefinitely, {0,0} = non-blocking poll.
-    let is_nonblocking: bool;
-    let deadline_ns: u64;
-
-    if timeout.is_null() {
-        // Block indefinitely — no deadline.
-        is_nonblocking = false;
-        deadline_ns = u64::MAX;
-    } else {
-        // SAFETY: caller guarantees timeout validity.
-        let tv = unsafe { &*timeout };
-        if tv.tv_sec == 0 && tv.tv_usec == 0 {
-            // {0,0} = non-blocking (check once, return immediately).
-            is_nonblocking = true;
-            deadline_ns = 0;
-        } else {
-            is_nonblocking = false;
-            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-            // Convert to nanoseconds, rounding up to ensure we don't
-            // treat sub-millisecond timeouts as instant polls.
-            let timeout_ns = (tv.tv_sec.max(0) as u64)
-                .saturating_mul(1_000_000_000)
-                .saturating_add((tv.tv_usec.max(0) as u64).saturating_mul(1_000));
-            deadline_ns = now.saturating_add(timeout_ns);
-        }
-    }
 
     // Capture input sets before the loop — we clear and rebuild output sets
     // each iteration.
@@ -719,7 +850,7 @@ pub unsafe extern "C" fn select(
             let Some(entry) = fdtable::get_fd(fd) else {
                 // Invalid fd in the set — error per POSIX.
                 errno::set_errno(errno::EBADF);
-                return -1;
+                return (-1, left());
             };
 
             let (readable, writable, hangup, error) = check_readiness(entry.kind, entry.handle);
@@ -750,19 +881,18 @@ pub unsafe extern "C" fn select(
 
         // If any fds are ready, return immediately.
         if ready_count > 0 {
-            return ready_count;
+            return (ready_count, left());
         }
 
-        // Non-blocking: return immediately even if nothing ready.
-        if is_nonblocking {
-            return 0;
+        // A zero span polls once.
+        if span.is_some_and(Span::is_zero) {
+            return (0, left());
         }
 
-        // Check deadline for timed waits.
-        if deadline_ns != u64::MAX {
-            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-            if now >= deadline_ns {
-                return 0; // Timeout expired.
+        // Has the span ended?
+        if let Some(end) = end {
+            if u128::from(now_ns()) >= end {
+                return (0, Some(Span::ZERO)); // Timeout expired.
             }
         }
 
@@ -792,8 +922,11 @@ fn is_set_in(fd: i32, set: &FdSet) -> bool {
 
 /// POSIX pselect — select() with nanosecond timeout and signal mask.
 ///
-/// Stub: ignores the signal mask and delegates to select() with
-/// converted timeout.
+/// Ignores the signal mask.  The timeout is judged first, as Linux's
+/// `pselect6` judges it before `nfds`: a `timespec` outside
+/// `timespec64_valid` is `EINVAL`.  glibc passes the kernel a copy, so the
+/// caller's `timespec` -- `const` in POSIX -- is not written back.  Until
+/// 2026-09-26 it was converted to a `timeval` without being judged.
 ///
 /// # Safety
 ///
@@ -807,26 +940,19 @@ pub unsafe extern "C" fn pselect(
     timeout: *const crate::stat::Timespec,
     _sigmask: *const u8, // sigset_t* — ignored
 ) -> i32 {
-    if timeout.is_null() {
-        // NULL timeout → delegate to select with NULL timeout.
-        return unsafe { select(nfds, readfds, writefds, exceptfds, core::ptr::null_mut()) };
-    }
-
-    // Convert timespec to timeval (ceiling division for ns→µs so a
-    // non-zero sub-microsecond timeout doesn't become non-blocking {0,0}).
-    // SAFETY: timeout is non-null, caller guarantees validity.
-    let ts = unsafe { &*timeout };
-    // Ceiling division: ns→µs so a non-zero sub-microsecond timeout
-    // doesn't become non-blocking {0,0}.  tv_nsec is in [0, 999_999_999]
-    // so adding 999 cannot overflow i64.
-    #[allow(clippy::arithmetic_side_effects)]
-    let usec = (ts.tv_nsec + 999) / 1000;
-    let mut tv = Timeval {
-        tv_sec: ts.tv_sec,
-        tv_usec: usec,
+    let span = if timeout.is_null() {
+        None
+    } else {
+        // SAFETY: timeout is non-null, caller guarantees validity.
+        let Some(span) = Span::of_timespec(unsafe { *timeout }) else {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        };
+        Some(span)
     };
 
-    unsafe { select(nfds, readfds, writefds, exceptfds, &raw mut tv) }
+    // SAFETY: forwarded from this function's contract.
+    unsafe { select_until(nfds, readfds, writefds, exceptfds, span) }.0
 }
 
 // ---------------------------------------------------------------------------
@@ -1975,5 +2101,138 @@ mod tests {
         assert_eq!(fdtable::MAX_FDS, 256);
         // And it equals FD_SETSIZE (Phase 155 invariant).
         assert_eq!(fdtable::MAX_FDS, FD_SETSIZE);
+    }
+
+    // -- Timeouts (glibc 2.39's wrappers, Linux 6.6's fs/select.c) ------
+
+    fn tv(tv_sec: i64, tv_usec: i64) -> Timeval {
+        Timeval { tv_sec, tv_usec }
+    }
+
+    fn ts(tv_sec: i64, tv_nsec: i64) -> crate::stat::Timespec {
+        crate::stat::Timespec { tv_sec, tv_nsec }
+    }
+
+    fn select_none(nfds: i32, timeout: *mut Timeval) -> i32 {
+        // SAFETY: NULL sets, and a live timeval or NULL.
+        unsafe {
+            select(
+                nfds,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                timeout,
+            )
+        }
+    }
+
+    /// glibc's select reads the microseconds as an `int`, refuses a
+    /// negative count of either unit, and carries whole seconds.
+    #[test]
+    fn select_span_is_glibcs() {
+        let span = |sec, nsec| Some(Span { sec, nsec });
+        assert_eq!(select_span(tv(1, 2_500_000)), span(3, 500_000_000));
+        assert_eq!(select_span(tv(0, 999_999)), span(0, 999_999_000));
+        assert_eq!(select_span(tv(0, 0)), span(0, 0));
+        assert_eq!(select_span(tv(-1, 0)), None);
+        assert_eq!(select_span(tv(0, -1)), None);
+        // Saturating, as glibc's overflow check does.
+        assert_eq!(
+            select_span(tv(i64::MAX, 1_000_000)),
+            span(i64::MAX, 999_999_999)
+        );
+        // The 32-bit read: 2^32 + 5 is 5, and 2^31 is negative.
+        assert_eq!(select_span(tv(0, (1i64 << 32) + 5)), span(0, 5_000));
+        assert_eq!(select_span(tv(0, 1i64 << 31)), None);
+    }
+
+    /// The timeout is glibc's to judge, before `nfds`, and an EINVAL leaves
+    /// it as it was.  A negative one was a zero one until 2026-09-26.
+    #[test]
+    fn select_judges_the_timeout_before_nfds() {
+        for (sec, usec) in [(-1, 0), (0, -1), (i64::MIN, 0)] {
+            let mut t = tv(sec, usec);
+            crate::errno::set_errno(0);
+            assert_eq!(select_none(4, &raw mut t), -1, "{sec} {usec}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!((t.tv_sec, t.tv_usec), (sec, usec), "not written back");
+        }
+        // And a bad timeout beats a bad count.
+        let mut t = tv(0, -5);
+        crate::errno::set_errno(0);
+        assert_eq!(select_none(-1, &raw mut t), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// A zero timeout polls once, and what is written back is zero -- the
+    /// 32-bit read turns 2^32 microseconds into none at all.
+    #[test]
+    fn select_writes_a_zero_timeout_back_as_zero() {
+        let mut t = tv(0, 1i64 << 32);
+        assert_eq!(select_none(8, &raw mut t), 0);
+        assert_eq!((t.tv_sec, t.tv_usec), (0, 0));
+    }
+
+    /// What is left is never negative, and a span's end is exact.
+    #[test]
+    fn span_end_and_left() {
+        let s = Span {
+            sec: 1,
+            nsec: 500_000_000,
+        };
+        let end = s.end_from(10);
+        assert_eq!(end, 1_500_000_010);
+        assert_eq!(
+            Span::left(end, 10),
+            Span {
+                sec: 1,
+                nsec: 500_000_000
+            }
+        );
+        assert_eq!(
+            Span::left(end, 1_000_000_010),
+            Span {
+                sec: 0,
+                nsec: 500_000_000
+            }
+        );
+        assert_eq!(Span::left(end, u64::MAX), Span::ZERO);
+        let longest = Span {
+            sec: i64::MAX,
+            nsec: 999_999_999,
+        };
+        assert_eq!(Span::left(longest.end_from(0), 0), longest);
+    }
+
+    /// pselect and ppoll: the kernel judges the timespec before `nfds` and
+    /// `fds`.  Neither judged it until 2026-09-26: a negative ppoll timeout
+    /// waited 1 ms.
+    #[test]
+    fn pselect_and_ppoll_judge_the_timespec_first() {
+        for bad in [ts(-1, 0), ts(0, -1), ts(0, 1_000_000_000), ts(5, i64::MAX)] {
+            crate::errno::set_errno(0);
+            // SAFETY: NULL sets and a live timespec.
+            let r = unsafe {
+                pselect(
+                    -1,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    &raw const bad,
+                    core::ptr::null(),
+                )
+            };
+            assert_eq!((r, crate::errno::get_errno()), (-1, crate::errno::EINVAL));
+            crate::errno::set_errno(0);
+            // SAFETY: a NULL fds that ppoll must not reach.
+            let r = unsafe { ppoll(core::ptr::null_mut(), 1, &raw const bad, core::ptr::null()) };
+            assert_eq!((r, crate::errno::get_errno()), (-1, crate::errno::EINVAL));
+        }
+        // A valid one hands on to the rest: here, poll's NULL fds.
+        let zero = ts(0, 0);
+        crate::errno::set_errno(0);
+        // SAFETY: as above.
+        let r = unsafe { ppoll(core::ptr::null_mut(), 1, &raw const zero, core::ptr::null()) };
+        assert_eq!((r, crate::errno::get_errno()), (-1, crate::errno::EFAULT));
     }
 }

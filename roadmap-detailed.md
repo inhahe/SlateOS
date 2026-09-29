@@ -3574,10 +3574,11 @@ _Typst as OS-level library (Rust crate, ~30MB). LaTeX as installable package for
 
 ### 6.8 Hot-Reload for Updates
 
-- [ ] Userspace services: restart with new version (no reboot)
+- [ ] Userspace services: restart with new version (no reboot) -- the default for every service; a state hand-over only by per-service opt-in, where a restart would be visible (design-decisions §1126)
 - [ ] Kernel modules/drivers: unload old, load new
 - [ ] Shared libraries: update via generation-based package manager, restart affected services
-- [ ] NOT hot-reloadable: core kernel code (scheduler, memory manager, syscall dispatch)
+- [ ] NOT hot-reloadable: core kernel code (scheduler, memory manager, syscall dispatch) -- *in place*, still true; **superseded 2026-09-27 for the kernel as a whole** by design-decisions §1126: the kernel is replaced whole, not patched
+- [ ] Kernel: replace the running kernel whole -- freeze, hand-over records in the ABI's terms, jump to the new image, rebuild, thaw; falls back to the old kernel if the rebuild fails; shares its freeze and records with `power.hibernate` (§1126; lane A, `requests/d-a-replace-the-running-kernel-without-a-reboot.md`)
 - [ ] Rollback any update, permanently disable or retry later
 
 ### 6.9 ABI Stability

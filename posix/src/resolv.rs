@@ -1,13 +1,45 @@
-//! `<resolv.h>` — DNS resolver stubs.
+// Offsets in this file index DNS messages and names whose lengths are
+// bounded by the protocol -- labels of at most 63 bytes, names of at most
+// 255, headers of 12, messages of at most 64 KiB -- and every slice access
+// that could miss goes through `get`/`get_mut`; the few fixed header offsets
+// index a buffer checked to hold a header.  clippy cannot see across those
+// checks.
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+//! `<resolv.h>` — the DNS resolver: glibc 2.39's interface and name rules
+//! over musl's transport.
 //!
-//! Provides stubs for `res_init`, `res_query`, `res_search`,
-//! `res_mkquery`, `res_send`, `dn_expand`, `dn_comp`, `dn_skipname`,
-//! `ns_get16`, `ns_get32`, `ns_put16`, `ns_put32`.
+//! `getaddrinfo` asks the kernel's network stack for addresses
+//! (`SYS_DNS_RESOLVE`); everything else a program wants from DNS -- mail
+//! exchangers, service records, text records, any record type at all --
+//! goes through these calls, which speak DNS to the nameservers in
+//! `/etc/resolv.conf` over UDP and, for answers too big for a datagram, TCP.
+//! Until 2026-09-26 `res_query`, `res_search`, `res_mkquery` and `res_send`
+//! checked their arguments and returned `ENOSYS`
+//! (`known-issues.md` → `B-D-RES-QUERY-WAS-ENOSYS`).
 //!
-//! Our OS does not yet have a full DNS resolver stack.  These stubs
-//! satisfy link-time references and return appropriate errors.
-//! Programs needing DNS should use `getaddrinfo()` (in socket.rs),
-//! which may be backed by a userspace resolver when available.
+//! - **Configuration** is glibc's `resolv.conf`: `nameserver` (IPv4, up to
+//!   three), `domain` and `search`, and `options ndots: timeout: attempts:
+//!   rotate use-vc no-tld-query trust-ad`; the `LOCALDOMAIN` and `RES_OPTIONS`
+//!   environment variables override it, and with no domain the host name's
+//!   own domain is searched.  No nameserver means the local one, 127.0.0.1.
+//!   It lands in `_res` (`__res_state()`), where a program may change it
+//!   before querying, as glibc lets it.
+//! - **Names** are converted as glibc's `ns_name_*` functions convert them:
+//!   `\.` and `\DDD` escapes both ways, labels of up to 63 bytes, names of up
+//!   to 255, compression pointers followed -- forward ones included -- and
+//!   written by `dn_comp` against its table of earlier names.
+//! - **Queries** go to every nameserver at once and are sent again at
+//!   intervals until the timeout, musl's way; the first acceptable answer
+//!   wins.  A server's `SERVFAIL`, `NOTIMP` or `REFUSED` is waited past, as
+//!   glibc moves on to the next server.  A truncated answer is asked again
+//!   over TCP.
+//! - **`res_query`** turns the answer's code into `h_errno` as glibc does,
+//!   and **`res_search`** is glibc's search: `ndots`, the search list, the
+//!   trailing dot, `RES_DEFNAMES`/`RES_DNSRCH`/`RES_NOTLDQUERY`.
+//!
+//! Not done: IPv6 nameservers (read, and skipped), `sortlist`, EDNS0,
+//! `HOSTALIASES`, DNSSEC.  `_res` is one per process, as in musl; glibc's is
+//! one per thread.
 
 use crate::errno;
 
@@ -15,7 +47,7 @@ use crate::errno;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Maximum DNS name length.
+/// Maximum DNS name length, as text.
 pub const MAXDNAME: usize = 1025;
 /// Maximum compressed DNS name length in a packet.
 pub const MAXCDNAME: usize = 255;
@@ -28,6 +60,8 @@ pub const HFIXEDSZ: usize = 12;
 pub const QFIXEDSZ: usize = 4;
 /// DNS resource record fixed size.
 pub const RRFIXEDSZ: usize = 10;
+/// The largest UDP answer a plain query expects.
+pub const PACKETSZ: usize = 512;
 
 /// DNS class: Internet.
 pub const C_IN: i32 = 1;
@@ -54,131 +88,2018 @@ pub const T_TXT: i32 = 16;
 pub const T_AAAA: i32 = 28;
 /// DNS type: SRV (service locator).
 pub const T_SRV: i32 = 33;
+/// DNS type: NULL (the completion record of a `NS_NOTIFY_OP`).
+pub const T_NULL: i32 = 10;
 /// DNS type: ANY (any type).
 pub const T_ANY: i32 = 255;
 
 /// DNS operation: Standard query.
 pub const QUERY: i32 = 0;
-/// DNS operation: Inverse query.
+/// DNS operation: Inverse query -- which glibc no longer builds.
 pub const IQUERY: i32 = 1;
+/// DNS operation: zone change notification.
+pub const NS_NOTIFY_OP: i32 = 4;
+
+/// Response codes.
+const NOERROR: u8 = 0;
+/// Only the tests name it: it is `NO_RECOVERY`, like every code but the
+/// three `judge` singles out.
+#[cfg(test)]
+const FORMERR: u8 = 1;
+const SERVFAIL: u8 = 2;
+const NXDOMAIN: u8 = 3;
+const NOTIMP: u8 = 4;
+const REFUSED: u8 = 5;
+
+/// Nameservers `_res` holds.
+pub const MAXNS: usize = 3;
+/// Search-list domains `_res` holds.
+pub const MAXDNSRCH: usize = 6;
+/// `sortlist` entries `_res` holds.
+pub const MAXRESOLVSORT: usize = 10;
+/// Default per-attempt timeout, seconds.
+pub const RES_TIMEOUT: i32 = 5;
+/// Default attempts.
+pub const RES_DFLRETRY: i32 = 2;
+/// The largest `ndots`.
+pub const RES_MAXNDOTS: i32 = 15;
+/// The largest `timeout`.
+pub const RES_MAXRETRANS: i32 = 30;
+/// The largest `attempts`.
+pub const RES_MAXRETRY: i32 = 5;
+
+/// `_res.options`: the state has been initialised.
+pub const RES_INIT: u64 = 0x0000_0001;
+/// Debug output (accepted, unused).
+pub const RES_DEBUG: u64 = 0x0000_0002;
+/// Use TCP ("virtual circuit") for every query.
+pub const RES_USEVC: u64 = 0x0000_0008;
+/// Ignore truncation (accepted, unused).
+pub const RES_IGNTC: u64 = 0x0000_0020;
+/// Ask for recursion (the RD bit).
+pub const RES_RECURSE: u64 = 0x0000_0040;
+/// Search the default domain for a name with no dots.
+pub const RES_DEFNAMES: u64 = 0x0000_0080;
+/// Search the search list for a name with dots.
+pub const RES_DNSRCH: u64 = 0x0000_0200;
+/// Rotate among the nameservers.
+pub const RES_ROTATE: u64 = 0x0000_4000;
+/// Never query a dot-free name as it stands.
+pub const RES_NOTLDQUERY: u64 = 0x0010_0000;
+/// Set the AD bit in queries.
+pub const RES_TRUSTAD: u64 = 0x0400_0000;
+/// The options a fresh state starts with.
+pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
+
+/// `h_errno` for an error that is not the resolver's (see `errno`).
+pub const NETDB_INTERNAL: i32 = -1;
 
 // ---------------------------------------------------------------------------
-// res_init
+// _res
 // ---------------------------------------------------------------------------
 
-/// `res_init` — initialize the resolver.
-///
-/// Stub: always returns 0 (success) but does nothing.
-/// Per convention, `res_init` initializes the resolver state from
-/// `/etc/resolv.conf`.
+/// `struct __res_state` -- glibc's and musl's layout, 568 bytes, which is
+/// what `_res` (`(*__res_state())`) names in a C program.
+#[repr(C)]
+pub struct ResState {
+    /// Per-attempt timeout, seconds.
+    pub retrans: i32,
+    /// Attempts.
+    pub retry: i32,
+    /// `RES_*` flags.
+    pub options: u64,
+    /// Nameservers in `nsaddr_list`.
+    pub nscount: i32,
+    /// The nameservers.
+    pub nsaddr_list: [crate::socket::SockaddrIn; MAXNS],
+    /// The last query id (unused here).
+    pub id: u16,
+    /// The search list: pointers into `defdname`, NULL-terminated.
+    pub dnsrch: [*mut u8; MAXDNSRCH + 1],
+    /// The search list's strings, each NUL-terminated.
+    pub defdname: [u8; 256],
+    /// Debug filter (unused).
+    pub pfcode: u64,
+    /// `ndots:4, nsort:4, ipv6_unavail:1` -- C bit-fields, from bit 0.
+    pub bits: u32,
+    /// `sortlist` (unused).
+    pub sort_list: [[u32; 2]; MAXRESOLVSORT],
+    /// Hooks (unused).
+    pub qhook: *mut u8,
+    /// Hooks (unused).
+    pub rhook: *mut u8,
+    /// The state's own `h_errno` (glibc keeps it too).
+    pub res_h_errno: i32,
+    /// Unused.
+    pub _vcsock: i32,
+    /// Unused.
+    pub _flags: u32,
+    /// glibc's `_u` union (unused).
+    pub _u: [u64; 7],
+}
+
+const _: () = {
+    assert!(size_of::<ResState>() == 568);
+    assert!(core::mem::offset_of!(ResState, nsaddr_list) == 20);
+    assert!(core::mem::offset_of!(ResState, dnsrch) == 72);
+    assert!(core::mem::offset_of!(ResState, defdname) == 128);
+    assert!(core::mem::offset_of!(ResState, bits) == 392);
+    assert!(core::mem::offset_of!(ResState, res_h_errno) == 496);
+};
+
+impl ResState {
+    const ZERO: Self = Self {
+        retrans: 0,
+        retry: 0,
+        options: 0,
+        nscount: 0,
+        nsaddr_list: [SIN_ZERO; MAXNS],
+        id: 0,
+        dnsrch: [core::ptr::null_mut(); MAXDNSRCH + 1],
+        defdname: [0; 256],
+        pfcode: 0,
+        bits: 0,
+        sort_list: [[0; 2]; MAXRESOLVSORT],
+        qhook: core::ptr::null_mut(),
+        rhook: core::ptr::null_mut(),
+        res_h_errno: 0,
+        _vcsock: -1,
+        _flags: 0,
+        _u: [0; 7],
+    };
+
+    fn ndots(&self) -> usize {
+        (self.bits & 0xf) as usize
+    }
+}
+
+/// An all-zero `sockaddr_in`.
+const SIN_ZERO: crate::socket::SockaddrIn = crate::socket::SockaddrIn {
+    sin_family: 0,
+    sin_port: 0,
+    sin_addr: crate::socket::InAddr { s_addr: 0 },
+    sin_zero: [0; 8],
+};
+
+crate::perprocess::process_global! {
+    /// The process's resolver state.  Per-thread on the host, so tests do
+    /// not configure each other's.
+    fn res_storage() -> ResState = ResState::ZERO;
+}
+
+/// `__res_state` -- `_res`, the resolver state, which C reaches through
+/// `#define _res (*__res_state())`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __res_state() -> *mut ResState {
+    res_storage()
+}
+
+/// The state, initialised if nothing has initialised it yet -- glibc's
+/// `__resolv_context_get`.
+fn state() -> &'static mut ResState {
+    // SAFETY: the process's (host: the thread's) resolver state; the
+    // resolver is not reentrant against itself, as in glibc.
+    let st = unsafe { &mut *res_storage() };
+    if st.options & RES_INIT == 0 {
+        load_state(st);
+    }
+    st
+}
+
+// ---------------------------------------------------------------------------
+// resolv.conf
+// ---------------------------------------------------------------------------
+
+/// What `resolv.conf` (and the environment) said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Conf {
+    /// IPv4 nameservers, network byte order.
+    ns: [[u8; 4]; MAXNS],
+    nns: usize,
+    /// The search list, as its domains, in order.
+    search: [[u8; 64]; MAXDNSRCH],
+    search_len: [usize; MAXDNSRCH],
+    nsearch: usize,
+    ndots: i32,
+    timeout: i32,
+    attempts: i32,
+    options: u64,
+}
+
+impl Conf {
+    const DEFAULT: Self = Self {
+        ns: [[0; 4]; MAXNS],
+        nns: 0,
+        search: [[0; 64]; MAXDNSRCH],
+        search_len: [0; MAXDNSRCH],
+        nsearch: 0,
+        ndots: 1,
+        timeout: RES_TIMEOUT,
+        attempts: RES_DFLRETRY,
+        options: RES_DEFAULT,
+    };
+
+    /// Replace the search list with the blank-separated domains in `list`
+    /// (a `search` line, or `LOCALDOMAIN`).
+    fn set_search(&mut self, list: &[u8]) {
+        self.nsearch = 0;
+        for word in list
+            .split(|&c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')
+            .filter(|w| !w.is_empty())
+        {
+            if self.nsearch == MAXDNSRCH {
+                break;
+            }
+            let Some(slot) = self.search.get_mut(self.nsearch) else {
+                break;
+            };
+            // A domain that does not fit a search slot cannot be searched.
+            let Some(dst) = slot.get_mut(..word.len()) else {
+                continue;
+            };
+            dst.copy_from_slice(word);
+            if let Some(len) = self.search_len.get_mut(self.nsearch) {
+                *len = word.len();
+            }
+            self.nsearch += 1;
+        }
+    }
+
+    /// Apply an `options` line's words (or `RES_OPTIONS`).
+    fn set_options(&mut self, words: &[u8]) {
+        for w in words
+            .split(|&c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')
+            .filter(|w| !w.is_empty())
+        {
+            let number = |prefix: &[u8]| -> Option<i32> {
+                let digits = w.strip_prefix(prefix)?;
+                let mut n: i32 = 0;
+                for &d in digits {
+                    if !d.is_ascii_digit() {
+                        break;
+                    }
+                    n = n.saturating_mul(10).saturating_add(i32::from(d - b'0'));
+                }
+                digits.first().filter(|d| d.is_ascii_digit())?;
+                Some(n)
+            };
+            if let Some(n) = number(b"ndots:") {
+                self.ndots = n.min(RES_MAXNDOTS);
+            } else if let Some(n) = number(b"timeout:") {
+                self.timeout = n.clamp(1, RES_MAXRETRANS);
+            } else if let Some(n) = number(b"attempts:") {
+                self.attempts = n.clamp(1, RES_MAXRETRY);
+            } else if w == b"rotate" {
+                self.options |= RES_ROTATE;
+            } else if w == b"use-vc" {
+                self.options |= RES_USEVC;
+            } else if w == b"no-tld-query" {
+                self.options |= RES_NOTLDQUERY;
+            } else if w == b"trust-ad" {
+                self.options |= RES_TRUSTAD;
+            }
+            // debug, edns0, single-request, inet6 and the rest: accepted
+            // and ignored, as unknown options are in glibc.
+        }
+    }
+}
+
+/// Parse `resolv.conf`'s text.  `host_domain` is the domain part of the
+/// host name, the default search list when the file names none.
+fn parse_conf(text: &[u8], host_domain: &[u8]) -> Conf {
+    let mut c = Conf::DEFAULT;
+    let mut saw_search = false;
+    for line in text.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        // A comment starts with `;` or `#` in the first column.
+        if matches!(line.first(), Some(b';' | b'#') | None) {
+            continue;
+        }
+        let key_end = line
+            .iter()
+            .position(|&b| b == b' ' || b == b'\t')
+            .unwrap_or(line.len());
+        let (key, rest) = line.split_at(key_end);
+        let rest = rest.trim_ascii();
+        match key {
+            b"nameserver" => {
+                let addr = rest
+                    .split(|&b| b == b' ' || b == b'\t')
+                    .next()
+                    .unwrap_or(&[]);
+                if c.nns < MAXNS {
+                    if let (Some(ip), Some(slot)) = (parse_ipv4(addr), c.ns.get_mut(c.nns)) {
+                        *slot = ip;
+                        c.nns += 1;
+                    }
+                }
+            }
+            b"domain" => {
+                // `domain` names the one domain to search.
+                let d = rest
+                    .split(|&b| b == b' ' || b == b'\t')
+                    .next()
+                    .unwrap_or(&[]);
+                c.set_search(d);
+                saw_search = true;
+            }
+            b"search" => {
+                c.set_search(rest);
+                saw_search = true;
+            }
+            b"options" => c.set_options(rest),
+            _ => {}
+        }
+    }
+    if !saw_search && !host_domain.is_empty() {
+        c.set_search(host_domain);
+    }
+    c
+}
+
+/// A dotted-quad IPv4 address, or `None` (IPv6 and anything else).
+fn parse_ipv4(s: &[u8]) -> Option<[u8; 4]> {
+    let mut out = [0u8; 4];
+    let mut parts = s.split(|&b| b == b'.');
+    for slot in &mut out {
+        let p = parts.next()?;
+        if p.is_empty() || p.len() > 3 || !p.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let v = p.iter().fold(0u32, |a, &d| a * 10 + u32::from(d - b'0'));
+        *slot = u8::try_from(v).ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+/// Read a whole small file into `buf`; the bytes read.
+fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+    let fd = crate::file::open(
+        path.as_ptr(),
+        crate::fcntl::O_RDONLY | crate::fcntl::O_CLOEXEC,
+        0,
+    );
+    if fd < 0 {
+        return None;
+    }
+    let mut n = 0usize;
+    while let Some(rest) = buf.get_mut(n..) {
+        if rest.is_empty() {
+            break;
+        }
+        let r = crate::file::read(fd, rest.as_mut_ptr(), rest.len());
+        let Ok(r) = usize::try_from(r) else {
+            break;
+        };
+        if r == 0 {
+            break;
+        }
+        n += r;
+    }
+    // A read-only descriptor's close cannot lose anything.
+    let _ = crate::file::close(fd);
+    Some(n)
+}
+
+/// An environment variable's bytes.
+fn env(name: &[u8]) -> Option<&'static [u8]> {
+    // SAFETY: `name` is NUL-terminated; the value is a NUL-terminated
+    // string that lives as long as the environment.
+    unsafe {
+        let v = crate::environ::getenv(name.as_ptr());
+        if v.is_null() {
+            return None;
+        }
+        Some(core::slice::from_raw_parts(v, crate::string::strlen(v)))
+    }
+}
+
+/// Load `resolv.conf` and the environment into `st`, glibc's `res_init`.
+fn load_state(st: &mut ResState) {
+    let mut text = [0u8; 4096];
+    let n = read_file(b"/etc/resolv.conf\0", &mut text).unwrap_or(0);
+    let mut host = [0u8; 256];
+    let host_domain = if crate::unistd::gethostname(host.as_mut_ptr(), host.len()) == 0 {
+        let len = host.iter().position(|&b| b == 0).unwrap_or(host.len());
+        let name = host.get(..len).unwrap_or(&[]);
+        name.iter()
+            .position(|&b| b == b'.')
+            .and_then(|dot| name.get(dot + 1..))
+            .unwrap_or(&[])
+    } else {
+        &[]
+    };
+    let mut c = parse_conf(text.get(..n).unwrap_or(&[]), host_domain);
+    if let Some(d) = env(b"LOCALDOMAIN\0") {
+        c.set_search(d);
+    }
+    if let Some(o) = env(b"RES_OPTIONS\0") {
+        c.set_options(o);
+    }
+    if c.nns == 0 {
+        c.ns[0] = [127, 0, 0, 1];
+        c.nns = 1;
+    }
+    store_conf(st, &c);
+}
+
+/// Write a `Conf` into `_res`.
+fn store_conf(st: &mut ResState, c: &Conf) {
+    st.retrans = c.timeout;
+    st.retry = c.attempts;
+    st.options = c.options | RES_INIT;
+    st.nscount = i32::try_from(c.nns).unwrap_or(0);
+    for (slot, ip) in st.nsaddr_list.iter_mut().zip(c.ns.iter()) {
+        *slot = crate::socket::SockaddrIn {
+            sin_family: crate::socket::AF_INET as u16,
+            sin_port: 53u16.to_be(),
+            sin_addr: crate::socket::InAddr {
+                s_addr: u32::from_ne_bytes(*ip),
+            },
+            sin_zero: [0; 8],
+        };
+    }
+    st.bits = (st.bits & !0xf) | (c.ndots.clamp(0, RES_MAXNDOTS) as u32);
+    st.defdname = [0; 256];
+    st.dnsrch = [core::ptr::null_mut(); MAXDNSRCH + 1];
+    let mut at = 0usize;
+    for i in 0..c.nsearch {
+        let (Some(dom), Some(&len)) = (c.search.get(i), c.search_len.get(i)) else {
+            break;
+        };
+        let Some(dst) = st.defdname.get_mut(at..at + len + 1) else {
+            break;
+        };
+        if let (Some(body), Some(src)) = (dst.get_mut(..len), dom.get(..len)) {
+            body.copy_from_slice(src);
+        }
+        if let Some(slot) = st.dnsrch.get_mut(i) {
+            *slot = st.defdname.as_mut_ptr().wrapping_add(at);
+        }
+        at += len + 1;
+    }
+}
+
+/// The nameservers and timing a query uses, from `_res`.
+struct Servers {
+    addrs: [crate::socket::SockaddrIn; MAXNS],
+    n: usize,
+    timeout_ms: u64,
+    attempts: u64,
+    tcp_only: bool,
+}
+
+fn servers(st: &ResState) -> Servers {
+    let n = usize::try_from(st.nscount).unwrap_or(0).min(MAXNS);
+    let mut addrs = st.nsaddr_list;
+    if st.options & RES_ROTATE != 0 && n > 1 {
+        // glibc rotates one step per query; which server leads is all that
+        // matters, since every one is asked.
+        if let Some(a) = addrs.get_mut(..n) {
+            a.rotate_left(1);
+        }
+    }
+    Servers {
+        addrs,
+        n,
+        timeout_ms: u64::try_from(st.retrans.clamp(1, RES_MAXRETRANS)).unwrap_or(5) * 1000,
+        attempts: u64::try_from(st.retry.clamp(1, RES_MAXRETRY)).unwrap_or(2),
+        tcp_only: st.options & RES_USEVC != 0,
+    }
+}
+
+/// `res_init` -- (re)read `resolv.conf` and the environment into `_res`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_init() -> i32 {
+    // SAFETY: as in `state`.
+    load_state(unsafe { &mut *res_storage() });
     0
 }
 
-/// `__res_init` — glibc alias for `res_init`.
+/// `__res_init` -- glibc alias for `res_init`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __res_init() -> i32 {
     res_init()
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for resolver argument validation
+// Names: glibc's ns_name_* functions
 // ---------------------------------------------------------------------------
 
-/// Length of a null-terminated `dname`, walked at most `cap` bytes.
-///
-/// Returns `Some(len)` where `len` is the number of bytes before the
-/// terminating NUL, or `None` if no NUL was found in the first `cap`
-/// bytes (i.e. the name is over-long or unterminated).
-///
-/// `dname` must be non-null.
-fn dname_len_capped(dname: *const u8, cap: usize) -> Option<usize> {
-    let mut i: usize = 0;
-    while i < cap {
-        // SAFETY: caller ensures non-null; we walk no further than cap.
-        if unsafe { *dname.add(i) } == 0 {
-            return Some(i);
+/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
+/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
+/// and `_`, the first not starting with `-`.  The DNS module asks about
+/// nothing else.
+pub(crate) fn res_hnok(dn: &[u8]) -> bool {
+    if !dn.iter().all(|&c| c > b' ' && c <= b'~') {
+        return false;
+    }
+    let mut wire = [0u8; 255];
+    let Ok((n, _)) = name_pton(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    if wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-') {
+        return false;
+    }
+    let mut i = 0usize;
+    while let Some(&len) = wire.get(i) {
+        if len == 0 {
+            break;
         }
-        i = i.wrapping_add(1);
+        let label = wire.get(i + 1..i + 1 + usize::from(len)).unwrap_or(&[]);
+        if !label
+            .iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        {
+            return false;
+        }
+        i += 1 + usize::from(len);
+    }
+    true
+}
+
+/// `ns_name_pton`: text to an uncompressed wire name in `dst`; the bytes
+/// written, and whether the text was fully qualified.  `Err` is glibc's
+/// `EMSGSIZE`.
+fn name_pton(src: &[u8], dst: &mut [u8]) -> Result<(usize, bool), ()> {
+    let mut label = 0usize; // index of the current label's length byte
+    let mut bp = 1usize; // next byte to write
+    if dst.is_empty() {
+        return Err(());
+    }
+    let mut i = 0usize;
+    let mut escaped = false;
+    while let Some(&c0) = src.get(i) {
+        if c0 == 0 {
+            break;
+        }
+        i += 1;
+        let mut c = c0;
+        if escaped {
+            if c.is_ascii_digit() {
+                let d2 = *src.get(i).ok_or(())?;
+                let d3 = *src.get(i + 1).ok_or(())?;
+                if !d2.is_ascii_digit() || !d3.is_ascii_digit() {
+                    return Err(());
+                }
+                i += 2;
+                let n =
+                    u32::from(c - b'0') * 100 + u32::from(d2 - b'0') * 10 + u32::from(d3 - b'0');
+                c = u8::try_from(n).map_err(|_| ())?;
+            }
+            escaped = false;
+        } else if c == b'\\' {
+            escaped = true;
+            continue;
+        } else if c == b'.' {
+            let len = bp - label - 1;
+            if len > MAXLABEL {
+                return Err(());
+            }
+            *dst.get_mut(label).ok_or(())? = len as u8;
+            // Fully qualified?
+            if matches!(src.get(i), None | Some(0)) {
+                if len != 0 {
+                    *dst.get_mut(bp).ok_or(())? = 0;
+                    bp += 1;
+                }
+                if bp > MAXCDNAME {
+                    return Err(());
+                }
+                return Ok((bp, true));
+            }
+            if len == 0 || src.get(i) == Some(&b'.') {
+                return Err(());
+            }
+            label = bp;
+            bp += 1;
+            continue;
+        }
+        *dst.get_mut(bp).ok_or(())? = c;
+        bp += 1;
+    }
+    if escaped {
+        return Err(());
+    }
+    let len = bp - label - 1;
+    if len > MAXLABEL {
+        return Err(());
+    }
+    *dst.get_mut(label).ok_or(())? = len as u8;
+    if len != 0 {
+        *dst.get_mut(bp).ok_or(())? = 0;
+        bp += 1;
+    }
+    if bp > MAXCDNAME {
+        return Err(());
+    }
+    Ok((bp, false))
+}
+
+/// glibc's `special`: characters `ns_name_ntop` escapes with a backslash.
+fn special(c: u8) -> bool {
+    matches!(c, b'"' | b'.' | b';' | b'\\' | b'(' | b')' | b'@' | b'$')
+}
+
+/// `ns_name_ntop`: an uncompressed wire name to NUL-terminated text in
+/// `dst`; the bytes written with the NUL.  The root is `"."`.
+fn name_ntop(src: &[u8], dst: &mut [u8]) -> Result<usize, ()> {
+    let mut dn = 0usize;
+    let mut cp = 0usize;
+    let mut put = |dn: &mut usize, b: u8| -> Result<(), ()> {
+        *dst.get_mut(*dn).ok_or(())? = b;
+        *dn += 1;
+        Ok(())
+    };
+    loop {
+        let l = usize::from(*src.get(cp).ok_or(())?);
+        cp += 1;
+        if l == 0 {
+            break;
+        }
+        if l >= 64 {
+            return Err(());
+        }
+        if dn != 0 {
+            put(&mut dn, b'.')?;
+        }
+        for _ in 0..l {
+            let c = *src.get(cp).ok_or(())?;
+            cp += 1;
+            if special(c) {
+                put(&mut dn, b'\\')?;
+                put(&mut dn, c)?;
+            } else if !(0x21..0x7f).contains(&c) {
+                put(&mut dn, b'\\')?;
+                put(&mut dn, b'0' + c / 100)?;
+                put(&mut dn, b'0' + (c % 100) / 10)?;
+                put(&mut dn, b'0' + c % 10)?;
+            } else {
+                put(&mut dn, c)?;
+            }
+        }
+    }
+    if dn == 0 {
+        put(&mut dn, b'.')?;
+    }
+    put(&mut dn, 0)?;
+    Ok(dn)
+}
+
+/// `ns_name_unpack`: the name at `msg[at..]`, compression pointers
+/// followed, into `dst` uncompressed; the bytes the name occupies at `at`.
+fn name_unpack(msg: &[u8], at: usize, dst: &mut [u8]) -> Result<usize, ()> {
+    if at >= msg.len() {
+        return Err(());
+    }
+    let mut srcp = at;
+    let mut dstp = 0usize;
+    let mut len: Option<usize> = None;
+    let mut checked = 0usize;
+    loop {
+        let n = *msg.get(srcp).ok_or(())?;
+        srcp += 1;
+        if n == 0 {
+            break;
+        }
+        match n & 0xc0 {
+            0 => {
+                let n = usize::from(n);
+                // `n + 1 >=` covers the NUL written at the end.
+                if n + 1 >= dst.len() - dstp || n > msg.len() - srcp {
+                    return Err(());
+                }
+                checked += n + 1;
+                *dst.get_mut(dstp).ok_or(())? = n as u8;
+                dstp += 1;
+                dst.get_mut(dstp..dstp + n)
+                    .ok_or(())?
+                    .copy_from_slice(msg.get(srcp..srcp + n).ok_or(())?);
+                dstp += n;
+                srcp += n;
+            }
+            0xc0 => {
+                let lo = *msg.get(srcp).ok_or(())?;
+                if len.is_none() {
+                    len = Some(srcp + 1 - at);
+                }
+                let target = (usize::from(n & 0x3f) << 8) | usize::from(lo);
+                if target >= msg.len() {
+                    return Err(());
+                }
+                srcp = target;
+                checked += 2;
+                // Having looked at the whole message, there must be a loop.
+                if checked >= msg.len() {
+                    return Err(());
+                }
+            }
+            _ => return Err(()),
+        }
+    }
+    *dst.get_mut(dstp).ok_or(())? = 0;
+    // Not `unwrap_or(srcp - at)`: that subtracts even when a pointer set
+    // `len`, and a pointer back into the message leaves `srcp` behind `at`
+    // -- an overflow, a panic in a debug build, in every compressed answer.
+    Ok(match len {
+        Some(l) => l,
+        None => srcp - at,
+    })
+}
+
+/// glibc's `dn_find`: the offset from `msg` of a name among the `dnptrs`
+/// entries -- or a suffix of one -- equal to the wire name at `domain`,
+/// compared without case.
+///
+/// # Safety
+///
+/// `msg` and every pointer in `dnptrs[..count]` point into one readable
+/// message, and `domain` to a valid uncompressed wire name.
+unsafe fn dn_find(
+    domain: *const u8,
+    msg: *const u8,
+    dnptrs: *const *mut u8,
+    count: usize,
+) -> Option<usize> {
+    for k in 0..count {
+        // SAFETY: the caller's contract.
+        let mut sp = unsafe { *dnptrs.add(k) }.cast_const();
+        loop {
+            // SAFETY: as above -- names in the message are well formed.
+            let first = unsafe { *sp };
+            let off = (sp as usize).wrapping_sub(msg as usize);
+            if first == 0 || first & 0xc0 != 0 || off >= 0x4000 {
+                break;
+            }
+            let mut dn = domain;
+            let mut cp = sp;
+            let found = 'cmp: loop {
+                // SAFETY: as above.
+                let n = unsafe { *cp };
+                cp = cp.wrapping_add(1);
+                if n == 0 {
+                    break 'cmp false;
+                }
+                match n & 0xc0 {
+                    0 => {
+                        // SAFETY: as above.
+                        if n != unsafe { *dn } {
+                            break 'cmp false;
+                        }
+                        dn = dn.wrapping_add(1);
+                        for _ in 0..n {
+                            // SAFETY: as above.
+                            let (a, b) = unsafe { (*dn, *cp) };
+                            if !a.eq_ignore_ascii_case(&b) {
+                                break 'cmp false;
+                            }
+                            dn = dn.wrapping_add(1);
+                            cp = cp.wrapping_add(1);
+                        }
+                        // SAFETY: as above.
+                        let (a, b) = unsafe { (*dn, *cp) };
+                        if a == 0 && b == 0 {
+                            break 'cmp true;
+                        }
+                        if a == 0 {
+                            break 'cmp false;
+                        }
+                    }
+                    0xc0 => {
+                        // SAFETY: as above.
+                        let lo = unsafe { *cp };
+                        cp = msg.wrapping_add((usize::from(n & 0x3f) << 8) | usize::from(lo));
+                    }
+                    _ => break 'cmp false,
+                }
+            };
+            if found {
+                return Some(off);
+            }
+            // SAFETY: as above.
+            sp = sp.wrapping_add(usize::from(unsafe { *sp }) + 1);
+        }
     }
     None
 }
 
-/// Validate a DNS domain-name argument for `res_query`/`res_search`/
-/// `res_mkquery`.
+/// `ns_name_pack`: the uncompressed wire name `src` into `dst`, compressed
+/// against the names `dnptrs` lists; the bytes written.  With `lastdnptr`,
+/// the new name is added to the list.  glibc's algorithm, over glibc's
+/// pointer table.
 ///
-/// Returns `Ok(())` if `dname` is non-NULL, non-empty, and at most
-/// `MAXDNAME` bytes long.  Sets errno and returns `Err(())` otherwise:
+/// # Safety
 ///
-/// * NULL pointer       -> `EFAULT`
-/// * empty string       -> `EINVAL`  (libresolv treats `""` as invalid)
-/// * length > MAXDNAME  -> `EINVAL`  (Linux resolver caps at MAXDNAME)
-fn validate_dname(dname: *const u8) -> Result<(), ()> {
-    if dname.is_null() {
-        errno::set_errno(errno::EFAULT);
+/// `dst` is writable for `dstsiz` bytes; `dnptrs` is NULL or glibc's table
+/// (the message start, then names in it, then NULL) whose array ends at
+/// `lastdnptr`.
+unsafe fn name_pack(
+    src: &[u8],
+    dst: *mut u8,
+    dstsiz: usize,
+    dnptrs: *mut *mut u8,
+    lastdnptr: *mut *mut u8,
+) -> Result<usize, ()> {
+    // The table: its message, and where its list ends.
+    let mut msg: *const u8 = core::ptr::null();
+    let mut list: *mut *mut u8 = core::ptr::null_mut();
+    let mut count = 0usize;
+    if !dnptrs.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe {
+            msg = (*dnptrs).cast_const();
+            if !msg.is_null() {
+                list = dnptrs.add(1);
+                while !(*list.add(count)).is_null() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    // The name is legal.
+    let mut total = 0usize;
+    let mut i = 0usize;
+    loop {
+        let n = usize::from(*src.get(i).ok_or(())?);
+        if n >= 64 {
+            return Err(());
+        }
+        total += n + 1;
+        if total > MAXCDNAME {
+            return Err(());
+        }
+        i += n + 1;
+        if n == 0 {
+            break;
+        }
+    }
+    // The names this call may point at: those listed when it began, not the
+    // one it adds (glibc fixes `lpp` before packing).
+    let searchable = count;
+    let mut out = 0usize;
+    let mut first = true;
+    let mut added: Option<usize> = None;
+    let mut srcp = 0usize;
+    let fail = |added: Option<usize>| {
+        if let Some(k) = added {
+            // SAFETY: `k` is where this call wrote its entry.
+            unsafe { *list.add(k) = core::ptr::null_mut() };
+        }
+        Err(())
+    };
+    loop {
+        let n = usize::from(*src.get(srcp).ok_or(())?);
+        if n != 0 && !msg.is_null() {
+            // SAFETY: the caller's contract; `src[srcp..]` is a legal name.
+            if let Some(off) = unsafe { dn_find(src.as_ptr().add(srcp), msg, list, searchable) } {
+                if dstsiz - out <= 1 {
+                    return fail(added);
+                }
+                // SAFETY: two bytes of `dst` remain.
+                unsafe {
+                    *dst.add(out) = 0xc0 | (off >> 8) as u8;
+                    *dst.add(out + 1) = (off & 0xff) as u8;
+                }
+                return Ok(out + 2);
+            }
+            // Not found: remember where this name starts.
+            let pos = (dst as usize).wrapping_add(out).wrapping_sub(msg as usize);
+            let room = !lastdnptr.is_null()
+                && (list.wrapping_add(count) as usize)
+                    < (lastdnptr as usize).wrapping_sub(size_of::<*mut u8>());
+            if room && pos < 0x4000 && first {
+                // SAFETY: `room` says the slot and the NULL after it are
+                // inside the table.
+                unsafe {
+                    *list.add(count) = dst.add(out);
+                    *list.add(count + 1) = core::ptr::null_mut();
+                }
+                added = Some(count);
+                count += 1;
+                first = false;
+            }
+        }
+        if n + 1 > dstsiz - out {
+            return fail(added);
+        }
+        // SAFETY: `n + 1` bytes of `dst` remain, and of `src` (checked above).
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().add(srcp), dst.add(out), n + 1);
+        }
+        srcp += n + 1;
+        out += n + 1;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// dn_expand / dn_skipname / dn_comp
+// ---------------------------------------------------------------------------
+
+/// `dn_expand` -- the compressed name at `comp_dn`, in the message
+/// `[msg, eomorig)`, as text in `exp_dn` (`length` bytes); the bytes the
+/// name occupies at `comp_dn`, or -1 with `EMSGSIZE`.
+///
+/// glibc's `ns_name_uncompress`, then the root's `"."` made `""`: special
+/// characters come back escaped (`\.`, `\DDD`), and compression pointers
+/// may point forward (only a loop is refused).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn dn_expand(
+    msg: *const u8,
+    eomorig: *const u8,
+    comp_dn: *const u8,
+    exp_dn: *mut u8,
+    length: i32,
+) -> i32 {
+    let result = (|| {
+        let msg_len = (eomorig as usize).checked_sub(msg as usize).ok_or(())?;
+        if msg.is_null() || exp_dn.is_null() {
+            return Err(());
+        }
+        let at = (comp_dn as usize).checked_sub(msg as usize).ok_or(())?;
+        // SAFETY: the caller's contract: `[msg, eomorig)` is the message.
+        let whole = unsafe { core::slice::from_raw_parts(msg, msg_len) };
+        let mut tmp = [0u8; MAXCDNAME];
+        let n = name_unpack(whole, at, &mut tmp)?;
+        let cap = usize::try_from(length).map_err(|_| ())?;
+        // SAFETY: the caller's contract: `exp_dn` holds `length` bytes.
+        let out = unsafe { core::slice::from_raw_parts_mut(exp_dn, cap) };
+        name_ntop(&tmp, out)?;
+        if out.first() == Some(&b'.') {
+            if let Some(b) = out.get_mut(0) {
+                *b = 0;
+            }
+        }
+        i32::try_from(n).map_err(|_| ())
+    })();
+    result.unwrap_or_else(|()| {
+        errno::set_errno(errno::EMSGSIZE);
+        -1
+    })
+}
+
+/// `dn_skipname` -- the bytes the compressed name at `comp_dn` occupies
+/// (a pointer ends it, as two bytes), or -1 with `EMSGSIZE`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn dn_skipname(comp_dn: *const u8, eom: *const u8) -> i32 {
+    let avail = (eom as usize).saturating_sub(comp_dn as usize);
+    if comp_dn.is_null() {
+        errno::set_errno(errno::EMSGSIZE);
+        return -1;
+    }
+    // SAFETY: the caller's contract: `[comp_dn, eom)` is readable.
+    let s = unsafe { core::slice::from_raw_parts(comp_dn, avail) };
+    let mut cp = 0usize;
+    while let Some(&n) = s.get(cp) {
+        cp += 1;
+        if n == 0 {
+            return i32::try_from(cp).unwrap_or(-1);
+        }
+        match n & 0xc0 {
+            0 => {
+                if s.len() - cp < usize::from(n) {
+                    break;
+                }
+                cp += usize::from(n);
+            }
+            0xc0 => {
+                if cp == s.len() {
+                    break;
+                }
+                return i32::try_from(cp + 1).unwrap_or(-1);
+            }
+            _ => break,
+        }
+    }
+    errno::set_errno(errno::EMSGSIZE);
+    -1
+}
+
+/// `dn_comp` -- the text name `exp_dn` into `comp_dn` (`length` bytes),
+/// compressed against the names in `dnptrs`; the bytes written, or -1 with
+/// `EMSGSIZE`.  glibc's `ns_name_compress`: until 2026-09-26 this wrote no
+/// compression pointers, left `dnptrs` alone, and did not unescape.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn dn_comp(
+    exp_dn: *const u8,
+    comp_dn: *mut u8,
+    length: i32,
+    dnptrs: *mut *mut u8,
+    lastdnptr: *mut *mut u8,
+) -> i32 {
+    let result = (|| {
+        if exp_dn.is_null() || comp_dn.is_null() {
+            return Err(());
+        }
+        // SAFETY: the caller's contract: a NUL-terminated name.
+        let text = unsafe { core::slice::from_raw_parts(exp_dn, crate::string::strlen(exp_dn)) };
+        let mut tmp = [0u8; MAXCDNAME];
+        name_pton(text, &mut tmp)?;
+        let cap = usize::try_from(length).map_err(|_| ())?;
+        // SAFETY: the caller's contract for `comp_dn`, `dnptrs`, `lastdnptr`.
+        let n = unsafe { name_pack(&tmp, comp_dn, cap, dnptrs, lastdnptr) }?;
+        i32::try_from(n).map_err(|_| ())
+    })();
+    result.unwrap_or_else(|()| {
+        errno::set_errno(errno::EMSGSIZE);
+        -1
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ns_get16 / ns_get32 / ns_put16 / ns_put32
+// ---------------------------------------------------------------------------
+
+/// `ns_get16` -- a 16-bit value in network byte order, as the `unsigned`
+/// the header declares.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_get16(src: *const u8) -> u32 {
+    if src.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees at least 2 bytes.
+    let b = unsafe { core::ptr::read_unaligned(src.cast::<[u8; 2]>()) };
+    u32::from(u16::from_be_bytes(b))
+}
+
+/// `ns_get32` -- a 32-bit value in network byte order, as the `unsigned
+/// long` the header declares.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_get32(src: *const u8) -> u64 {
+    if src.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees at least 4 bytes.
+    let b = unsafe { core::ptr::read_unaligned(src.cast::<[u8; 4]>()) };
+    u64::from(u32::from_be_bytes(b))
+}
+
+/// `ns_put16` -- the low 16 bits of `val` in network byte order.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_put16(val: u32, dst: *mut u8) {
+    if dst.is_null() {
+        return;
+    }
+    // The header's `unsigned`; the field is 16 bits, as in C's `*cp++ = s`.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = val as u16;
+    // SAFETY: caller guarantees at least 2 bytes.
+    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 2]>(), v.to_be_bytes()) };
+}
+
+/// `ns_put32` -- the low 32 bits of `val` in network byte order.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_put32(val: u64, dst: *mut u8) {
+    if dst.is_null() {
+        return;
+    }
+    // The header's `unsigned long`; the field is 32 bits.
+    #[allow(clippy::cast_possible_truncation)]
+    let v = val as u32;
+    // SAFETY: caller guarantees at least 4 bytes.
+    unsafe { core::ptr::write_unaligned(dst.cast::<[u8; 4]>(), v.to_be_bytes()) };
+}
+
+// ---------------------------------------------------------------------------
+// ns_initparse / ns_parserr / ns_skiprr / ns_name_uncompress
+// ---------------------------------------------------------------------------
+
+/// The longest name `ns_parserr` writes, as text: `NS_MAXDNAME`.
+pub const NS_MAXDNAME: usize = 1025;
+
+/// `ns_sect`: the question section (`ns_s_qd`, also `ns_s_zn`).
+pub const NS_S_QD: i32 = 0;
+/// The answer section (`ns_s_an`, also `ns_s_pr`).
+pub const NS_S_AN: i32 = 1;
+/// The authority section (`ns_s_ns`, also `ns_s_ud`).
+pub const NS_S_NS: i32 = 2;
+/// The additional section (`ns_s_ar`).
+pub const NS_S_AR: i32 = 3;
+/// One past the last section (`ns_s_max`): the handle between parses.
+pub const NS_S_MAX: i32 = 4;
+
+/// A message taken apart for [`ns_parserr`] (`ns_msg`). The C header's
+/// field names begin with `_`; the layout is what matters, and
+/// `abi_layout.rs` holds it to musl's.
+#[repr(C)]
+pub struct NsMsg {
+    /// The message, and its end.
+    pub msg: *const u8,
+    /// One past the message's last byte.
+    pub eom: *const u8,
+    /// The header's id.
+    pub id: u16,
+    /// The header's flags word.
+    pub flags: u16,
+    /// Each section's record count.
+    pub counts: [u16; 4],
+    /// Each section's first record, NULL for an empty section.
+    pub sections: [*const u8; 4],
+    /// The section the next record is read from; `NS_S_MAX` for none.
+    pub sect: i32,
+    /// The number of that record in its section; -1 for none.
+    pub rrnum: i32,
+    /// Where that record begins.
+    pub msg_ptr: *const u8,
+}
+
+/// One record, as [`ns_parserr`] fills it (`ns_rr`).
+#[repr(C)]
+pub struct NsRr {
+    /// The owner name, as text, NUL-terminated ("" for the root).
+    pub name: [u8; NS_MAXDNAME],
+    /// The record type.
+    pub type_: u16,
+    /// The record class.
+    pub rr_class: u16,
+    /// The time to live; 0 for a question.
+    pub ttl: u32,
+    /// The length of `rdata`; 0 for a question.
+    pub rdlength: u16,
+    /// The record's data, in the message; NULL for a question.
+    pub rdata: *const u8,
+}
+
+/// Where one of the header's flags lives in its flags word (`struct
+/// _ns_flagdata`), for the `ns_msg_getflag` macro.
+#[repr(C)]
+pub struct NsFlagData {
+    /// The flag's bits.
+    pub mask: i32,
+    /// How far to shift them down.
+    pub shift: i32,
+}
+
+/// The header's flags, in `ns_flag`'s order -- `qr`, `opcode`, `aa`, `tc`,
+/// `rd`, `ra`, `z`, `ad`, `cd`, `rcode` -- and six unused: the table
+/// `ns_msg_getflag` reads.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static _ns_flagdata: [NsFlagData; 16] = {
+    const fn f(mask: i32, shift: i32) -> NsFlagData {
+        NsFlagData { mask, shift }
+    }
+    [
+        f(0x8000, 15),
+        f(0x7800, 11),
+        f(0x0400, 10),
+        f(0x0200, 9),
+        f(0x0100, 8),
+        f(0x0080, 7),
+        f(0x0040, 6),
+        f(0x0020, 5),
+        f(0x0010, 4),
+        f(0x000f, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+        f(0, 0),
+    ]
+};
+
+/// Fail with `err`: -1, and `errno` set.
+fn ns_fail(err: i32) -> i32 {
+    errno::set_errno(err);
+    -1
+}
+
+/// The big-endian 16-bit value `off` bytes past `p`.
+///
+/// # Safety
+///
+/// `p + off` and the byte after it are readable.
+unsafe fn get16_at(p: *const u8, off: usize) -> u16 {
+    // SAFETY: the caller's contract.
+    u16::from_be_bytes(unsafe { core::ptr::read_unaligned(p.add(off).cast::<[u8; 2]>()) })
+}
+
+/// Whether `n` bytes from `off` bytes past `from` reach past `eom`: glibc's
+/// `ptr + n > eom`, without forming the pointer.
+fn past(from: *const u8, off: usize, n: usize, eom: *const u8) -> bool {
+    let room = (eom as usize).saturating_sub(from as usize);
+    off.checked_add(n).is_none_or(|end| end > room)
+}
+
+/// `ns_skiprr` -- the bytes `count` records of `section` take from `ptr`
+/// (a question is a name and four bytes; any other record a name, ten bytes
+/// and its data), or -1 with `EMSGSIZE` when they run past `eom` or a name
+/// is malformed. A `count` of 0 or less is 0 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ns_skiprr(ptr: *const u8, eom: *const u8, section: i32, count: i32) -> i32 {
+    let mut off = 0usize;
+    for _ in 0..count.max(0) {
+        let Ok(b) = usize::try_from(dn_skipname(ptr.wrapping_add(off), eom)) else {
+            return ns_fail(errno::EMSGSIZE);
+        };
+        // The name, then the type and class.
+        off = off.saturating_add(b).saturating_add(4);
+        if section != NS_S_QD {
+            // The TTL and the data's length must be there to read.
+            if past(ptr, off, 6, eom) {
+                return ns_fail(errno::EMSGSIZE);
+            }
+            // SAFETY: the six bytes at `off` are before `eom` (checked).
+            let rdlength = unsafe { get16_at(ptr, off + 4) };
+            off = off.saturating_add(6).saturating_add(usize::from(rdlength));
+        }
+    }
+    if past(ptr, off, 0, eom) {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    i32::try_from(off).unwrap_or_else(|_| ns_fail(errno::EMSGSIZE))
+}
+
+/// Put `h` at the start of `sect`, or between parses for `NS_S_MAX`
+/// (glibc's `setsection`).
+fn set_section(h: &mut NsMsg, sect: i32) {
+    h.sect = sect;
+    match usize::try_from(sect).ok().and_then(|s| h.sections.get(s)) {
+        Some(&start) if sect != NS_S_MAX => {
+            h.rrnum = 0;
+            h.msg_ptr = start;
+        }
+        _ => {
+            h.rrnum = -1;
+            h.msg_ptr = core::ptr::null();
+        }
+    }
+}
+
+/// `ns_initparse` -- take the `msglen`-byte message at `msg` apart into
+/// `handle`: its header, and where each section's records begin. 0, or -1
+/// with `EMSGSIZE` when the header is short, a section's records run past
+/// the end or are malformed, or bytes are left over after the last. A NULL
+/// `handle`, or a NULL `msg` with a header to read, is `EFAULT` (§303).
+///
+/// # Safety
+///
+/// `msg` is readable for `msglen` bytes; `handle` is NULL or writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_initparse(msg: *const u8, msglen: i32, handle: *mut NsMsg) -> i32 {
+    if handle.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // A negative length puts the end before the start: nothing can be read.
+    let len = usize::try_from(msglen).unwrap_or(0);
+    let eom = msg.wrapping_add(len);
+    // SAFETY: non-null, the caller's to fill.
+    let h = unsafe { &mut *handle };
+    h.msg = msg;
+    // glibc's `msg + msglen`, before the start for a negative length.
+    h.eom = msg.wrapping_offset(isize::try_from(msglen).unwrap_or(0));
+    if len < 12 {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    if msg.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // SAFETY: the twelve header bytes are inside the message.
+    unsafe {
+        h.id = get16_at(msg, 0);
+        h.flags = get16_at(msg, 2);
+        for (i, count) in h.counts.iter_mut().enumerate() {
+            *count = get16_at(msg, 4 + 2 * i);
+        }
+    }
+    let mut off = 12usize;
+    for i in 0..4usize {
+        let count = h.counts.get(i).copied().unwrap_or(0);
+        let slot = h.sections.get_mut(i);
+        if count == 0 {
+            if let Some(s) = slot {
+                *s = core::ptr::null();
+            }
+            continue;
+        }
+        let at = msg.wrapping_add(off);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let b = ns_skiprr(at, eom, i as i32, i32::from(count));
+        let Ok(b) = usize::try_from(b) else {
+            return -1; // ns_skiprr's errno
+        };
+        if let Some(s) = slot {
+            *s = at;
+        }
+        off = off.saturating_add(b);
+    }
+    if off != len {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    set_section(h, NS_S_MAX);
+    0
+}
+
+/// `ns_parserr` -- record `rrnum` of `section` into `rr`, as glibc 2.39's
+/// reads it: 0, or -1 with `errno`. `rrnum` -1 is the handle's next record;
+/// a section that is none, or a record number outside the section, is
+/// `ENODEV`; a record that runs past the end, or a name that cannot be
+/// expanded, `EMSGSIZE`. The handle keeps its place, so reading a section
+/// in order walks it once; after the last record it stays at the section's
+/// end (glibc's `++rrnum > count` never moves it on). A NULL `handle` or
+/// `rr` is `EFAULT` (§303).
+///
+/// # Safety
+///
+/// `handle` is NULL or one `ns_initparse` filled, whose message is still
+/// there; `rr` is NULL or writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_parserr(
+    handle: *mut NsMsg,
+    section: i32,
+    rrnum: i32,
+    rr: *mut NsRr,
+) -> i32 {
+    if handle.is_null() || rr.is_null() {
+        return ns_fail(errno::EFAULT);
+    }
+    // SAFETY: non-null; the caller's.
+    let (h, rr) = unsafe { (&mut *handle, &mut *rr) };
+    let Some(count) = usize::try_from(section)
+        .ok()
+        .filter(|&s| s < 4)
+        .and_then(|s| h.counts.get(s).copied())
+    else {
+        return ns_fail(errno::ENODEV);
+    };
+    if section != h.sect {
+        set_section(h, section);
+    }
+    let rrnum = if rrnum == -1 { h.rrnum } else { rrnum };
+    if rrnum < 0 || rrnum >= i32::from(count) {
+        return ns_fail(errno::ENODEV);
+    }
+    if rrnum < h.rrnum {
+        set_section(h, section);
+    }
+    if rrnum > h.rrnum {
+        let Ok(b) = usize::try_from(ns_skiprr(h.msg_ptr, h.eom, section, rrnum - h.rrnum)) else {
+            return -1; // ns_skiprr's errno
+        };
+        h.msg_ptr = h.msg_ptr.wrapping_add(b);
+        h.rrnum = rrnum;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let b = dn_expand(
+        h.msg,
+        h.eom,
+        h.msg_ptr,
+        rr.name.as_mut_ptr(),
+        NS_MAXDNAME as i32,
+    );
+    let Ok(b) = usize::try_from(b) else {
+        return -1; // dn_expand's EMSGSIZE
+    };
+    // The handle moves on as each field is read, and a field is stored as
+    // soon as it is read, before the next bounds check -- glibc's order, so
+    // a record that fails half-way leaves what glibc's would.
+    h.msg_ptr = h.msg_ptr.wrapping_add(b);
+    if past(h.msg_ptr, 0, 4, h.eom) {
+        return ns_fail(errno::EMSGSIZE);
+    }
+    // SAFETY: the four bytes at `msg_ptr` are before the end (checked).
+    unsafe {
+        rr.type_ = get16_at(h.msg_ptr, 0);
+        rr.rr_class = get16_at(h.msg_ptr, 2);
+    }
+    h.msg_ptr = h.msg_ptr.wrapping_add(4);
+    if section == NS_S_QD {
+        rr.ttl = 0;
+        rr.rdlength = 0;
+        rr.rdata = core::ptr::null();
+    } else {
+        if past(h.msg_ptr, 0, 6, h.eom) {
+            return ns_fail(errno::EMSGSIZE);
+        }
+        // SAFETY: the six bytes at `msg_ptr` are before the end (checked).
+        unsafe {
+            rr.ttl = u32::from_be_bytes(core::ptr::read_unaligned(h.msg_ptr.cast::<[u8; 4]>()));
+            rr.rdlength = get16_at(h.msg_ptr, 4);
+        }
+        h.msg_ptr = h.msg_ptr.wrapping_add(6);
+        if past(h.msg_ptr, 0, usize::from(rr.rdlength), h.eom) {
+            return ns_fail(errno::EMSGSIZE);
+        }
+        rr.rdata = h.msg_ptr;
+        h.msg_ptr = h.msg_ptr.wrapping_add(usize::from(rr.rdlength));
+    }
+    h.rrnum = h.rrnum.saturating_add(1);
+    if h.rrnum > i32::from(count) {
+        set_section(h, section.saturating_add(1));
+    }
+    0
+}
+
+/// `ns_name_uncompress` -- the compressed name at `src`, in the message
+/// `[msg, eom)`, as text in `dst` (`dstsiz` bytes): the bytes the name
+/// occupies at `src`, or -1 with `EMSGSIZE`. The root is ".", unlike
+/// [`dn_expand`]'s "".
+///
+/// # Safety
+///
+/// `[msg, eom)` is readable and `src` inside it; `dst` is writable for
+/// `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_uncompress(
+    msg: *const u8,
+    eom: *const u8,
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+) -> i32 {
+    let result = (|| {
+        if msg.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let msg_len = (eom as usize).checked_sub(msg as usize).ok_or(())?;
+        let at = (src as usize).checked_sub(msg as usize).ok_or(())?;
+        // SAFETY: the caller's contract: `[msg, eom)` is the message.
+        let whole = unsafe { core::slice::from_raw_parts(msg, msg_len) };
+        let mut wire = [0u8; MAXCDNAME];
+        let n = name_unpack(whole, at, &mut wire)?;
+        // No name's text is longer than four bytes for each of its 255,
+        // so a bigger buffer is only ever used this far.
+        let cap = dstsiz.min(4 * MAXCDNAME + 2);
+        // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+        let out = unsafe { core::slice::from_raw_parts_mut(dst, cap) };
+        name_ntop(&wire, out)?;
+        i32::try_from(n).map_err(|_| ())
+    })();
+    result.unwrap_or_else(|()| ns_fail(errno::EMSGSIZE))
+}
+
+// ---------------------------------------------------------------------------
+// res_mkquery
+// ---------------------------------------------------------------------------
+
+/// glibc's `__res_context_mkquery`, into `buf`: the query's length.
+fn mkquery(
+    st: &ResState,
+    op: i32,
+    dname: &[u8],
+    class: i32,
+    type_: i32,
+    data: Option<&[u8]>,
+    buf: &mut [u8],
+) -> Result<usize, ()> {
+    let class = u16::try_from(class).map_err(|_| ())?;
+    let type_ = u16::try_from(type_).map_err(|_| ())?;
+    if buf.len() < HFIXEDSZ {
         return Err(());
     }
-    match dname_len_capped(dname, MAXDNAME.wrapping_add(1)) {
-        Some(0) => {
-            errno::set_errno(errno::EINVAL);
-            Err(())
+    let header = buf.get_mut(..HFIXEDSZ).ok_or(())?;
+    header.fill(0);
+    let id = (crate::random::arc4random() & 0xffff) as u16;
+    header[..2].copy_from_slice(&id.to_be_bytes());
+    let op_bits = u8::try_from(op & 0xf).map_err(|_| ())?;
+    header[2] = (op_bits << 3) | u8::from(st.options & RES_RECURSE != 0);
+    header[3] = if st.options & RES_TRUSTAD != 0 {
+        0x20
+    } else {
+        0
+    };
+    let extra = match op {
+        QUERY => QFIXEDSZ,
+        NS_NOTIFY_OP => QFIXEDSZ + if data.is_some() { RRFIXEDSZ } else { 0 },
+        _ => return Err(()),
+    };
+    let room = buf.len().checked_sub(HFIXEDSZ + extra).ok_or(())?;
+    let mut wire = [0u8; MAXCDNAME];
+    name_pton(dname, &mut wire)?;
+    let mut ptrs: [*mut u8; 20] = [core::ptr::null_mut(); 20];
+    ptrs[0] = buf.as_mut_ptr();
+    let last = ptrs.as_mut_ptr().wrapping_add(ptrs.len());
+    // SAFETY: `buf[HFIXEDSZ..]` holds `room` bytes past the fixed parts;
+    // the table is glibc's shape and inside `ptrs`.
+    let n = unsafe {
+        name_pack(
+            &wire,
+            buf.as_mut_ptr().add(HFIXEDSZ),
+            room,
+            ptrs.as_mut_ptr(),
+            last,
+        )
+    }?;
+    let mut at = HFIXEDSZ + n;
+    let mut put16 = |at: &mut usize, v: u16| -> Result<(), ()> {
+        buf.get_mut(*at..*at + 2)
+            .ok_or(())?
+            .copy_from_slice(&v.to_be_bytes());
+        *at += 2;
+        Ok(())
+    };
+    put16(&mut at, type_)?;
+    put16(&mut at, class)?;
+    // qdcount = 1
+    buf.get_mut(4..6)
+        .ok_or(())?
+        .copy_from_slice(&1u16.to_be_bytes());
+    if op == NS_NOTIFY_OP {
+        if let Some(d) = data {
+            // The completion domain, as an additional record.
+            let mut w2 = [0u8; MAXCDNAME];
+            name_pton(d, &mut w2)?;
+            let room2 = buf.len().checked_sub(at + RRFIXEDSZ).ok_or(())?;
+            // SAFETY: as above.
+            let n2 = unsafe {
+                name_pack(
+                    &w2,
+                    buf.as_mut_ptr().add(at),
+                    room2,
+                    ptrs.as_mut_ptr(),
+                    last,
+                )
+            }?;
+            at += n2;
+            let rr = buf.get_mut(at..at + RRFIXEDSZ).ok_or(())?;
+            rr.fill(0);
+            rr[..2].copy_from_slice(&(T_NULL as u16).to_be_bytes());
+            rr[2..4].copy_from_slice(&class.to_be_bytes());
+            at += RRFIXEDSZ;
+            buf.get_mut(10..12)
+                .ok_or(())?
+                .copy_from_slice(&1u16.to_be_bytes());
         }
-        Some(len) if len > MAXDNAME => {
-            errno::set_errno(errno::EINVAL);
-            Err(())
+    }
+    Ok(at)
+}
+
+/// `res_mkquery` -- build a query message in `buf`: its length, or -1.
+///
+/// glibc 2.39's: `op` is `QUERY` or `NS_NOTIFY_OP` (`IQUERY` is no longer
+/// built); `class` and `type` are 16-bit; the name follows `dn_comp`'s
+/// rules; the id is random; the RD bit follows `RES_RECURSE`, the AD bit
+/// `RES_TRUSTAD`.  `newrr` is unused, as in glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_mkquery(
+    op: i32,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    data: *const u8,
+    _datalen: i32,
+    _newrr: *const u8,
+    buf: *mut u8,
+    buflen: i32,
+) -> i32 {
+    let Ok(len) = usize::try_from(buflen) else {
+        return -1;
+    };
+    if buf.is_null() || len < HFIXEDSZ || dname.is_null() {
+        return -1;
+    }
+    // SAFETY: the caller's contract: NUL-terminated strings, and `buf`
+    // holds `buflen` bytes.
+    let (name, data, out) = unsafe {
+        (
+            core::slice::from_raw_parts(dname, crate::string::strlen(dname)),
+            (!data.is_null())
+                .then(|| core::slice::from_raw_parts(data, crate::string::strlen(data))),
+            core::slice::from_raw_parts_mut(buf, len),
+        )
+    };
+    match mkquery(state(), op, name, class, type_, data, out) {
+        Ok(n) => i32::try_from(n).unwrap_or(-1),
+        Err(()) => -1,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// res_send: the transport
+// ---------------------------------------------------------------------------
+
+/// What a query's exchange with the nameservers needs from the network --
+/// so the algorithm can be tested against a scripted one.
+trait Transport {
+    /// Send the query to server `i` over UDP.
+    fn send_udp(&mut self, i: usize, q: &[u8]);
+    /// Wait up to `ms` for a datagram: its length and the server it came
+    /// from (`None` if not from one of ours), or `None` if nothing came.
+    fn recv_udp(&mut self, buf: &mut [u8], ms: u64) -> Option<(usize, Option<usize>, bool)>;
+    /// Ask server `i` over TCP, within `ms`: the answer's full length (which
+    /// may exceed `buf`), or `None`.
+    fn tcp(&mut self, i: usize, q: &[u8], buf: &mut [u8], ms: u64) -> Option<usize>;
+    /// Milliseconds on a monotonic clock.
+    fn now_ms(&mut self) -> u64;
+}
+
+/// How an answer's code is taken (glibc's `send_dg`): usable, or a server's
+/// refusal to wait past.
+fn usable_rcode(rcode: u8) -> bool {
+    !matches!(rcode, SERVFAIL | NOTIMP | REFUSED)
+}
+
+/// Ask every server, again every `timeout / attempts`, until one gives a
+/// usable answer or the time runs out: the answer's full length, or the
+/// errno: `ETIMEDOUT` if some server answered unusably, else
+/// `ECONNREFUSED` -- glibc's pair.  A truncated answer is asked again over
+/// TCP.  musl's `__res_msend`, for one query.
+fn exchange(
+    t: &mut dyn Transport,
+    sv: &Servers,
+    q: &[u8],
+    answer: &mut [u8],
+) -> Result<usize, i32> {
+    if sv.n == 0 {
+        return Err(errno::ECONNREFUSED);
+    }
+    if sv.tcp_only {
+        for i in 0..sv.n {
+            if let Some(n) = t.tcp(i, q, answer, sv.timeout_ms) {
+                return Ok(n);
+            }
         }
-        Some(_) => Ok(()),
-        None => {
-            // No NUL within MAXDNAME+1 bytes — definitionally over-long.
-            errno::set_errno(errno::EINVAL);
-            Err(())
+        return Err(errno::ECONNREFUSED);
+    }
+    let retry = (sv.timeout_ms / sv.attempts).max(1);
+    let t0 = t.now_ms();
+    let mut sent_at: Option<u64> = None;
+    let mut heard_something = false;
+    let mut servfail_retries = 2u32;
+    loop {
+        let now = t.now_ms();
+        if now.wrapping_sub(t0) >= sv.timeout_ms {
+            break;
+        }
+        if sent_at.is_none_or(|s| now.wrapping_sub(s) >= retry) {
+            for i in 0..sv.n {
+                t.send_udp(i, q);
+            }
+            sent_at = Some(now);
+            servfail_retries = 2;
+        }
+        let waited = now.wrapping_sub(sent_at.unwrap_or(now));
+        let Some((n, from, truncated)) = t.recv_udp(answer, retry.saturating_sub(waited).max(1))
+        else {
+            continue;
+        };
+        // Not from a server we asked, too short to identify, or another
+        // query's answer: ignore it.
+        let Some(server) = from else { continue };
+        if n < 4 || answer.get(..2) != q.get(..2) {
+            continue;
+        }
+        heard_something = true;
+        let rcode = answer.get(3).map_or(SERVFAIL, |b| b & 0xf);
+        if !usable_rcode(rcode) {
+            if rcode == SERVFAIL && servfail_retries > 0 {
+                servfail_retries -= 1;
+                t.send_udp(server, q);
+            }
+            continue;
+        }
+        let tc = answer.get(2).is_some_and(|b| b & 0x02 != 0);
+        if tc || truncated {
+            let left = sv
+                .timeout_ms
+                .saturating_sub(t.now_ms().wrapping_sub(t0))
+                .max(1);
+            if let Some(full) = t.tcp(server, q, answer, left) {
+                return Ok(full);
+            }
+            continue;
+        }
+        return Ok(n);
+    }
+    Err(if heard_something {
+        errno::ETIMEDOUT
+    } else {
+        errno::ECONNREFUSED
+    })
+}
+
+/// The real network: one UDP socket, a TCP connection per fallback.
+struct Net {
+    udp: i32,
+    servers: [crate::socket::SockaddrIn; MAXNS],
+    n: usize,
+}
+
+impl Net {
+    fn open(sv: &Servers) -> Result<Self, i32> {
+        let fd = crate::socket::socket(
+            crate::socket::AF_INET,
+            crate::socket::SOCK_DGRAM | crate::socket::SOCK_NONBLOCK | crate::socket::SOCK_CLOEXEC,
+            0,
+        );
+        if fd < 0 {
+            return Err(errno::get_errno());
+        }
+        Ok(Self {
+            udp: fd,
+            servers: sv.addrs,
+            n: sv.n,
+        })
+    }
+
+    fn poll_one(fd: i32, events: i16, ms: u64) -> bool {
+        let mut p = crate::poll::Pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ms = i32::try_from(ms).unwrap_or(i32::MAX);
+        // SAFETY: one valid `Pollfd`.
+        unsafe { crate::poll::poll(&raw mut p, 1, ms) > 0 && p.revents & events != 0 }
+    }
+
+    fn sockaddr(&self, i: usize) -> *const crate::socket::Sockaddr {
+        self.servers
+            .get(i)
+            .map_or(core::ptr::null(), |s| core::ptr::from_ref(s).cast())
+    }
+}
+
+impl Drop for Net {
+    fn drop(&mut self) {
+        // Nothing was written that a close could lose.
+        let _ = crate::file::close(self.udp);
+    }
+}
+
+const SIN_LEN: crate::socket::SocklenT =
+    size_of::<crate::socket::SockaddrIn>() as crate::socket::SocklenT;
+
+impl Transport for Net {
+    fn send_udp(&mut self, i: usize, q: &[u8]) {
+        // SAFETY: `q` and the address are valid; a lost datagram is one
+        // the retry sends again.
+        let _ = unsafe {
+            crate::socket::sendto(
+                self.udp,
+                q.as_ptr(),
+                q.len(),
+                crate::socket::MSG_NOSIGNAL,
+                self.sockaddr(i),
+                SIN_LEN,
+            )
+        };
+    }
+
+    fn recv_udp(&mut self, buf: &mut [u8], ms: u64) -> Option<(usize, Option<usize>, bool)> {
+        if !Self::poll_one(self.udp, crate::poll::POLLIN, ms) {
+            return None;
+        }
+        let mut from = SIN_ZERO;
+        let mut len = SIN_LEN;
+        // SAFETY: `buf` and `from` are valid for their lengths.
+        let r = unsafe {
+            crate::socket::recvfrom(
+                self.udp,
+                buf.as_mut_ptr(),
+                buf.len(),
+                0,
+                (&raw mut from).cast(),
+                &raw mut len,
+            )
+        };
+        let n = usize::try_from(r).ok()?;
+        let server =
+            self.servers.get(..self.n)?.iter().position(|s| {
+                s.sin_addr.s_addr == from.sin_addr.s_addr && s.sin_port == from.sin_port
+            });
+        // A server truncating an answer sets TC; a datagram cut by our
+        // buffer (which is at least 512 bytes, the size a server may send a
+        // plain query) cannot happen, and reads as TC-less and whole.
+        Some((n, server, false))
+    }
+
+    fn tcp(&mut self, i: usize, q: &[u8], buf: &mut [u8], ms: u64) -> Option<usize> {
+        let fd = crate::socket::socket(
+            crate::socket::AF_INET,
+            crate::socket::SOCK_STREAM | crate::socket::SOCK_CLOEXEC,
+            0,
+        );
+        if fd < 0 {
+            return None;
+        }
+        let result = (|| {
+            // SAFETY: a valid address.
+            if unsafe { crate::socket::connect(fd, self.sockaddr(i), SIN_LEN) } != 0 {
+                return None;
+            }
+            let qlen = u16::try_from(q.len()).ok()?.to_be_bytes();
+            for part in [&qlen[..], q] {
+                let mut sent = 0usize;
+                while let Some(rest) = part.get(sent..).filter(|r| !r.is_empty()) {
+                    // SAFETY: `rest` is valid.
+                    let r = unsafe {
+                        crate::socket::send(
+                            fd,
+                            rest.as_ptr(),
+                            rest.len(),
+                            crate::socket::MSG_NOSIGNAL,
+                        )
+                    };
+                    sent += usize::try_from(r).ok().filter(|&r| r > 0)?;
+                }
+            }
+            let read_exact = |dst: &mut [u8]| -> Option<()> {
+                let mut got = 0usize;
+                while let Some(rest) = dst.get_mut(got..).filter(|r| !r.is_empty()) {
+                    if !Self::poll_one(fd, crate::poll::POLLIN, ms) {
+                        return None;
+                    }
+                    // SAFETY: `rest` is valid.
+                    let r = unsafe { crate::socket::recv(fd, rest.as_mut_ptr(), rest.len(), 0) };
+                    got += usize::try_from(r).ok().filter(|&r| r > 0)?;
+                }
+                Some(())
+            };
+            let mut lenb = [0u8; 2];
+            read_exact(&mut lenb)?;
+            let alen = usize::from(u16::from_be_bytes(lenb));
+            if alen < HFIXEDSZ {
+                return None;
+            }
+            // Keep what fits; report the whole length, as glibc does.
+            let keep = alen.min(buf.len());
+            read_exact(buf.get_mut(..keep)?)?;
+            Some(alen)
+        })();
+        // Nothing unsent remains that a close could lose.
+        let _ = crate::file::close(fd);
+        result
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        let t = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
+        u64::try_from(t.tv_sec).unwrap_or(0) * 1000
+            + u64::try_from(t.tv_nsec / 1_000_000).unwrap_or(0)
+    }
+}
+
+/// Send a query and receive its answer into `answer`: the answer's full
+/// length (which may exceed `answer`), or the errno.
+fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
+    let sv = servers(st);
+    if answer.len() < PACKETSZ {
+        // Receive into a whole datagram's room, keep what fits (musl).
+        let mut tmp = [0u8; PACKETSZ];
+        let n = send_query(st, q, &mut tmp)?;
+        let keep = n.min(answer.len()).min(tmp.len());
+        if let (Some(dst), Some(src)) = (answer.get_mut(..keep), tmp.get(..keep)) {
+            dst.copy_from_slice(src);
+        }
+        return Ok(n);
+    }
+    let mut net = Net::open(&sv)?;
+    exchange(&mut net, &sv, q, answer)
+}
+
+/// `res_send` -- send the query `msg` and receive its answer: the answer's
+/// length -- all of it, even past `anslen`, so a caller can tell a
+/// truncated copy -- or -1 with `errno`: `ESRCH` with no nameserver,
+/// `EINVAL` for an answer buffer shorter than a header (glibc's two
+/// checks), `ECONNREFUSED` when no server answered at all, `ETIMEDOUT` when
+/// none answered usably in time.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_send(msg: *const u8, msglen: i32, answer: *mut u8, anslen: i32) -> i32 {
+    let st = state();
+    if st.nscount <= 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    let (Ok(qlen), Ok(alen)) = (usize::try_from(msglen), usize::try_from(anslen)) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    if alen < HFIXEDSZ {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if msg.is_null() || answer.is_null() {
+        // glibc would fault reading or writing them.
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    let (q, a) = unsafe {
+        (
+            core::slice::from_raw_parts(msg, qlen),
+            core::slice::from_raw_parts_mut(answer, alen),
+        )
+    };
+    match send_query(st, q, a) {
+        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        Err(e) => {
+            errno::set_errno(e);
+            -1
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// res_query / res_search
+// res_query / res_querydomain / res_search
 // ---------------------------------------------------------------------------
 
-/// `res_query` — make a DNS query.
-///
-/// Phase 69: previously returned -1+ENOSYS for every call.  Now
-/// validates arguments first so buggy callers (DNS clients that
-/// don't go through `getaddrinfo`) see Linux-matching errnos:
-///
-/// 1. `dname == NULL`                  -> `EFAULT`
-/// 2. `*dname == 0` (empty name)       -> `EINVAL`
-/// 3. dname longer than `MAXDNAME`     -> `EINVAL`
-/// 4. `anslen <= 0`                    -> `EINVAL`
-/// 5. `answer == NULL && anslen > 0`   -> `EFAULT`
-/// 6. otherwise                        -> `ENOSYS`
-///
-/// `class` and `type_` are not validated — Linux's libresolv passes
-/// them through to the wire packet and lets the upstream server
-/// reject unknown values.  Inventing EINVAL paths for unknown
-/// class/type would diverge from glibc/musl.
+/// How glibc's `__res_context_query` judges an answer: `Ok` if it answers,
+/// else the `h_errno`.
+fn judge(answer: &[u8]) -> Result<(), i32> {
+    let rcode = answer.get(3).map_or(SERVFAIL, |b| b & 0xf);
+    let ancount = answer
+        .get(6..8)
+        .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
+    if rcode == NOERROR && ancount != 0 {
+        return Ok(());
+    }
+    Err(match rcode {
+        NXDOMAIN => crate::socket::HOST_NOT_FOUND,
+        SERVFAIL => crate::socket::TRY_AGAIN,
+        NOERROR => crate::socket::NO_DATA,
+        _ => crate::socket::NO_RECOVERY, // FORMERR, NOTIMP, REFUSED and the rest
+    })
+}
+
+/// A query for `name`: the answer's length, or `Err` with `h_errno` (and
+/// `errno` for a send failure) set.
+fn query(
+    st: &ResState,
+    name: &[u8],
+    class: i32,
+    type_: i32,
+    answer: &mut [u8],
+) -> Result<usize, ()> {
+    let mut q = [0u8; HFIXEDSZ + QFIXEDSZ + MAXCDNAME + 1];
+    let Ok(ql) = mkquery(st, QUERY, name, class, type_, None, &mut q) else {
+        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
+        return Err(());
+    };
+    let q = q.get(..ql).unwrap_or(&[]);
+    // A buffer too short for the header is answered through a whole one,
+    // and gets what fits.
+    let mut local = [0u8; PACKETSZ];
+    let small = answer.len() < HFIXEDSZ;
+    let (sent, verdict) = {
+        let buf: &mut [u8] = if small { &mut local } else { &mut *answer };
+        let sent = send_query(st, q, buf);
+        let verdict = judge(buf);
+        (sent, verdict)
+    };
+    if small {
+        let keep = answer.len();
+        if let (Some(dst), Some(src)) = (answer.get_mut(..keep), local.get(..keep)) {
+            dst.copy_from_slice(src);
+        }
+    }
+    match sent {
+        Err(e) => {
+            errno::set_errno(e);
+            crate::socket::set_h_errno(crate::socket::TRY_AGAIN);
+            Err(())
+        }
+        Ok(n) => match verdict {
+            Ok(()) => Ok(n),
+            Err(h) => {
+                crate::socket::set_h_errno(h);
+                Err(())
+            }
+        },
+    }
+}
+
+/// The caller's name and answer buffer, or -1 (the `EFAULT` glibc would
+/// fault into).
+fn args<'a>(name: *const u8, answer: *mut u8, anslen: i32) -> Option<(&'a [u8], &'a mut [u8])> {
+    let len = usize::try_from(anslen).unwrap_or(0);
+    if name.is_null() || (answer.is_null() && len > 0) {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        Some((
+            core::slice::from_raw_parts(name, crate::string::strlen(name)),
+            if answer.is_null() {
+                &mut []
+            } else {
+                core::slice::from_raw_parts_mut(answer, len)
+            },
+        ))
+    }
+}
+
+/// `res_query` -- query for `name` as it stands: the answer's length, or -1
+/// with `h_errno`: `HOST_NOT_FOUND` (no such name), `NO_DATA` (no record of
+/// that type), `TRY_AGAIN` (no server answered, or `SERVFAIL`),
+/// `NO_RECOVERY` (a refusal, or a name that cannot be sent).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_query(
     dname: *const u8,
-    _class: i32,
-    _type_: i32,
+    class: i32,
+    type_: i32,
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    if validate_dname(dname).is_err() {
+    let Some((name, buf)) = args(dname, answer, anslen) else {
         return -1;
-    }
-    if anslen <= 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if answer.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    errno::set_errno(errno::ENOSYS);
-    -1
+    };
+    query(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
 /// `__res_query` — glibc alias for `res_query`.
@@ -193,9 +2114,209 @@ pub extern "C" fn __res_query(
     res_query(dname, class, type_, answer, anslen)
 }
 
-/// `res_search` — search DNS with domain search list.
-///
-/// Stub: delegates to `res_query`.
+/// `name.domain` (or `name` without a trailing dot, for no domain), glibc's
+/// `__res_context_querydomain`: `None` past `MAXDNAME`.
+fn join(name: &[u8], domain: Option<&[u8]>, out: &mut [u8; MAXDNAME]) -> Option<usize> {
+    match domain {
+        None => {
+            let n = name.strip_suffix(b".").unwrap_or(name);
+            if name.len() >= MAXDNAME {
+                return None;
+            }
+            out.get_mut(..n.len())?.copy_from_slice(n);
+            Some(n.len())
+        }
+        Some(d) => {
+            let total = name.len() + 1 + d.len();
+            if total >= MAXDNAME {
+                return None;
+            }
+            out.get_mut(..name.len())?.copy_from_slice(name);
+            *out.get_mut(name.len())? = b'.';
+            out.get_mut(name.len() + 1..total)?.copy_from_slice(d);
+            Some(total)
+        }
+    }
+}
+
+fn querydomain(
+    st: &ResState,
+    name: &[u8],
+    domain: Option<&[u8]>,
+    class: i32,
+    type_: i32,
+    answer: &mut [u8],
+) -> Result<usize, ()> {
+    let mut full = [0u8; MAXDNAME];
+    let Some(n) = join(name, domain, &mut full) else {
+        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
+        return Err(());
+    };
+    query(st, full.get(..n).unwrap_or(&[]), class, type_, answer)
+}
+
+/// `res_querydomain` -- query for `name.domain`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_querydomain(
+    name: *const u8,
+    domain: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    let Some((name, buf)) = args(name, answer, anslen) else {
+        return -1;
+    };
+    // SAFETY: the caller's contract: NULL or a NUL-terminated string.
+    let domain = (!domain.is_null())
+        .then(|| unsafe { core::slice::from_raw_parts(domain, crate::string::strlen(domain)) });
+    querydomain(state(), name, domain, class, type_, buf)
+        .map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+}
+
+/// What one query of a search came to: the answer's length, or its
+/// `h_errno`, whether the send failed with `ECONNREFUSED`, and whether the
+/// answer was a `SERVFAIL`.
+type Attempt = Result<usize, (i32, bool, bool)>;
+
+/// glibc's `__res_context_search`: `domain` is `None` for the name as it
+/// stands.  The first answer, or `Err` with the `h_errno` to report.
+fn search_with(
+    name: &[u8],
+    ndots: usize,
+    options: u64,
+    domains: &[&[u8]],
+    mut attempt: impl FnMut(Option<&[u8]>) -> Attempt,
+) -> Result<usize, i32> {
+    // Counted once per search, over a name of a few dozen bytes; the
+    // `bytecount` crate's SIMD is not worth a dependency of the C library.
+    #[allow(clippy::naive_bytecount)]
+    let dots = name.iter().filter(|&&c| c == b'.').count();
+    let trailing_dot = name.last() == Some(&b'.');
+    let mut last_h = crate::socket::HOST_NOT_FOUND; // if nothing is queried
+    let mut saved: Option<i32> = None;
+    let mut tried_as_is = false;
+    if dots >= ndots || trailing_dot {
+        match attempt(None) {
+            Ok(n) => return Ok(n),
+            Err((h, _, _)) => {
+                if trailing_dot {
+                    return Err(h);
+                }
+                saved = Some(h);
+                last_h = h;
+                tried_as_is = true;
+            }
+        }
+    }
+    let mut searched = false;
+    let mut root_on_list = false;
+    let mut got_nodata = false;
+    let mut got_servfail = false;
+    if (dots == 0 && options & RES_DEFNAMES != 0)
+        || (dots != 0 && !trailing_dot && options & RES_DNSRCH != 0)
+    {
+        for d in domains {
+            searched = true;
+            // "name." -- the root -- for a domain written "." or "".
+            let d = d.strip_prefix(b".").unwrap_or(d);
+            if d.is_empty() {
+                root_on_list = true;
+            }
+            match attempt(Some(d)) {
+                Ok(n) => return Ok(n),
+                Err((h, refused, servfail)) => {
+                    last_h = h;
+                    if refused {
+                        return Err(crate::socket::TRY_AGAIN);
+                    }
+                    let keep_going = match h {
+                        crate::socket::NO_DATA => {
+                            got_nodata = true;
+                            true
+                        }
+                        crate::socket::HOST_NOT_FOUND => true,
+                        crate::socket::TRY_AGAIN if servfail => {
+                            got_servfail = true;
+                            true
+                        }
+                        _ => false,
+                    };
+                    // Without RES_DNSRCH, one domain (RES_DEFNAMES's).
+                    if !keep_going || options & RES_DNSRCH == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (dots != 0 || !searched || options & RES_NOTLDQUERY == 0) && !(tried_as_is || root_on_list) {
+        match attempt(None) {
+            Ok(n) => return Ok(n),
+            Err((h, _, _)) => last_h = h,
+        }
+    }
+    Err(if let Some(h) = saved {
+        h
+    } else if got_nodata {
+        crate::socket::NO_DATA
+    } else if got_servfail {
+        crate::socket::TRY_AGAIN
+    } else {
+        last_h
+    })
+}
+
+fn search(
+    st: &ResState,
+    name: &[u8],
+    class: i32,
+    type_: i32,
+    answer: &mut [u8],
+) -> Result<usize, ()> {
+    let mut domains: [&[u8]; MAXDNSRCH] = [&[]; MAXDNSRCH];
+    let mut nd = 0usize;
+    for p in st.dnsrch.iter().take(MAXDNSRCH) {
+        if p.is_null() {
+            break;
+        }
+        // SAFETY: `dnsrch` points into `defdname`, NUL-terminated.
+        let d = unsafe {
+            core::slice::from_raw_parts(p.cast_const(), crate::string::strlen(p.cast_const()))
+        };
+        if let Some(slot) = domains.get_mut(nd) {
+            *slot = d;
+            nd += 1;
+        }
+    }
+    let result = search_with(
+        name,
+        st.ndots(),
+        st.options,
+        domains.get(..nd).unwrap_or(&[]),
+        |domain| {
+            errno::set_errno(0);
+            querydomain(st, name, domain, class, type_, answer).map_err(|()| {
+                let servfail = answer.get(3).is_some_and(|b| b & 0xf == SERVFAIL);
+                (
+                    crate::socket::get_h_errno(),
+                    errno::get_errno() == errno::ECONNREFUSED,
+                    servfail,
+                )
+            })
+        },
+    );
+    result.map_err(crate::socket::set_h_errno)
+}
+
+/// `res_search` -- query for `name` through the search list, glibc's way:
+/// as it stands first if it has `ndots` dots or ends in a dot, then with
+/// each search domain (`RES_DNSRCH`; just the first with only
+/// `RES_DEFNAMES`), then as it stands if not yet tried (unless
+/// `RES_NOTLDQUERY` and it has no dots).  The first answer wins; otherwise
+/// `h_errno` is the as-is query's, else `NO_DATA` if any domain had the
+/// name, else `TRY_AGAIN` for a server failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_search(
     dname: *const u8,
@@ -204,7 +2325,10 @@ pub extern "C" fn res_search(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    res_query(dname, class, type_, answer, anslen)
+    let Some((name, buf)) = args(dname, answer, anslen) else {
+        return -1;
+    };
+    search(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
 }
 
 /// `__res_search` — glibc alias for `res_search`.
@@ -220,500 +2344,6 @@ pub extern "C" fn __res_search(
 }
 
 // ---------------------------------------------------------------------------
-// res_mkquery
-// ---------------------------------------------------------------------------
-
-/// `res_mkquery` — construct a DNS query message.
-///
-/// Phase 69: previously returned -1+ENOSYS for every call.  Now
-/// validates arguments before reporting ENOSYS:
-///
-/// 1. `op` is not `QUERY` or `IQUERY`  -> `EINVAL`
-/// 2. `dname` validation               -> `EFAULT`/`EINVAL` (see
-///    `validate_dname`)
-/// 3. `buf == NULL`                    -> `EFAULT`
-/// 4. `buflen < HFIXEDSZ`              -> `EINVAL`  (header alone
-///    won't fit, so no valid packet can be produced)
-/// 5. otherwise                        -> `ENOSYS`
-///
-/// `class`, `type_`, and the inverse-query `data`/`newrr` pointers
-/// are not validated.  `data == NULL` with `datalen == 0` is the
-/// normal case for forward queries and must be accepted.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn res_mkquery(
-    op: i32,
-    dname: *const u8,
-    _class: i32,
-    _type_: i32,
-    _data: *const u8,
-    _datalen: i32,
-    _newrr: *const u8,
-    buf: *mut u8,
-    buflen: i32,
-) -> i32 {
-    if op != QUERY && op != IQUERY {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if validate_dname(dname).is_err() {
-        return -1;
-    }
-    if buf.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if i64::from(buflen) < (HFIXEDSZ as i64) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    errno::set_errno(errno::ENOSYS);
-    -1
-}
-
-// ---------------------------------------------------------------------------
-// res_send
-// ---------------------------------------------------------------------------
-
-/// `res_send` — send a pre-formatted DNS query.
-///
-/// Phase 69: previously returned -1+ENOSYS for every call.  Now
-/// validates arguments first:
-///
-/// 1. `msg == NULL`              -> `EFAULT`
-/// 2. `msglen < HFIXEDSZ`        -> `EINVAL`  (a DNS message must
-///    contain at least a 12-byte header to be parseable)
-/// 3. `anslen <= 0`              -> `EINVAL`
-/// 4. `answer == NULL`           -> `EFAULT`  (anslen > 0 by step 3)
-/// 5. otherwise                  -> `ENOSYS`
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn res_send(msg: *const u8, msglen: i32, answer: *mut u8, anslen: i32) -> i32 {
-    if msg.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if i64::from(msglen) < (HFIXEDSZ as i64) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if anslen <= 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if answer.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    errno::set_errno(errno::ENOSYS);
-    -1
-}
-
-// ---------------------------------------------------------------------------
-// DNS name wire format helpers
-// ---------------------------------------------------------------------------
-//
-// Wire format:
-//   each label is a length byte (0..=63) followed by that many label
-//   bytes; a zero length byte terminates the name; a length byte with
-//   the top two bits set (0b11_xxxxxx) is a compression pointer whose
-//   low 6 bits plus the next byte give a 14-bit offset from the start
-//   of the message.
-
-/// Cap on the number of compression-pointer hops we follow in a single
-/// expansion before declaring a malformed packet.  Each hop must
-/// produce at least one label or the terminator, so 64 is plenty for
-/// any well-formed name (max 255 octets total).
-const MAX_DN_HOPS: usize = 64;
-
-// ---------------------------------------------------------------------------
-// dn_expand
-// ---------------------------------------------------------------------------
-
-/// `dn_expand` — expand a compressed domain name from a DNS packet.
-///
-/// `msg` points to the start of the packet, `eomorig` to its
-/// one-past-the-end byte, `comp_dn` to the start of the compressed
-/// name (somewhere within `[msg, eomorig)`), and `exp_dn` to a buffer
-/// of `length` bytes that receives the dotted, null-terminated
-/// expanded name.
-///
-/// The return value is the number of bytes consumed from `comp_dn`
-/// *at its original position* — i.e. without following any compression
-/// pointers, so the caller can advance past the encoded name in the
-/// packet.  Returns -1 on malformed input or buffer overflow.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dn_expand(
-    msg: *const u8,
-    eomorig: *const u8,
-    comp_dn: *const u8,
-    exp_dn: *mut u8,
-    length: i32,
-) -> i32 {
-    if msg.is_null() || eomorig.is_null() || comp_dn.is_null() || exp_dn.is_null() {
-        return -1;
-    }
-    if length <= 0 {
-        return -1;
-    }
-    let cap = length as usize;
-    // SAFETY: caller contract — msg <= eomorig as range bounds.
-    let msg_len: usize = unsafe { eomorig.offset_from(msg) } as usize;
-    let Some(start_off) = offset_of(msg, comp_dn, msg_len) else {
-        return -1;
-    };
-
-    let mut original_bytes: usize = 0; // bytes consumed at the start position
-    let mut followed_pointer = false;
-    let mut off = start_off;
-    let mut out_pos: usize = 0;
-    let mut hops: usize = 0;
-
-    loop {
-        if hops > MAX_DN_HOPS {
-            return -1;
-        }
-        if off >= msg_len {
-            return -1;
-        }
-        // SAFETY: msg + off is within [msg, eomorig).
-        let b = unsafe { *msg.add(off) };
-        if (b & 0xc0) == 0xc0 {
-            // Pointer.
-            if off.wrapping_add(1) >= msg_len {
-                return -1;
-            }
-            let lo = unsafe { *msg.add(off.wrapping_add(1)) };
-            let new_off = (((b & 0x3f) as usize) << 8) | (lo as usize);
-            if !followed_pointer {
-                original_bytes = off.wrapping_add(2).wrapping_sub(start_off);
-                followed_pointer = true;
-            }
-            // Pointers must point backward in a well-formed packet (RFC
-            // 1035): require strictly less than the current offset to
-            // ensure progress.
-            if new_off >= off {
-                return -1;
-            }
-            off = new_off;
-            hops = hops.wrapping_add(1);
-            continue;
-        }
-        if (b & 0xc0) != 0 {
-            // Reserved label type.
-            return -1;
-        }
-        if b == 0 {
-            // End of name.
-            if !followed_pointer {
-                original_bytes = off.wrapping_add(1).wrapping_sub(start_off);
-            }
-            // Write null terminator.
-            if out_pos >= cap {
-                return -1;
-            }
-            // SAFETY: out_pos < cap and exp_dn covers cap bytes.
-            unsafe {
-                *exp_dn.add(out_pos) = 0;
-            }
-            // If we emitted no labels (root name "."), still null-terminate.
-            return original_bytes as i32;
-        }
-        let label_len = b as usize;
-        if label_len > 63 {
-            return -1;
-        }
-        if off.wrapping_add(1).wrapping_add(label_len) > msg_len {
-            return -1;
-        }
-        // Emit '.' separator if this isn't the first label.
-        if out_pos > 0 {
-            if out_pos.wrapping_add(1) >= cap {
-                return -1;
-            }
-            // SAFETY: index in bounds.
-            unsafe {
-                *exp_dn.add(out_pos) = b'.';
-            }
-            out_pos = out_pos.wrapping_add(1);
-        }
-        // Emit label bytes.  Need room for label + later null terminator
-        // (we'll check for that later when we finish; for now just
-        // reserve at least one byte for the terminator).
-        if out_pos.wrapping_add(label_len).wrapping_add(1) > cap {
-            return -1;
-        }
-        let mut k: usize = 0;
-        while k < label_len {
-            // SAFETY: both pointers are within their respective buffers.
-            let c = unsafe { *msg.add(off.wrapping_add(1).wrapping_add(k)) };
-            unsafe {
-                *exp_dn.add(out_pos.wrapping_add(k)) = c;
-            }
-            k = k.wrapping_add(1);
-        }
-        out_pos = out_pos.wrapping_add(label_len);
-        off = off.wrapping_add(1).wrapping_add(label_len);
-    }
-}
-
-/// Compute `target - base` in bytes if `target` is within
-/// `[base, base + base_len]`, else None.  Avoids the wrap-around hazard
-/// of `offset_from` when the pointers come from unrelated allocations.
-fn offset_of(base: *const u8, target: *const u8, base_len: usize) -> Option<usize> {
-    let b = base as usize;
-    let t = target as usize;
-    if t < b {
-        return None;
-    }
-    let off = t.wrapping_sub(b);
-    if off > base_len {
-        return None;
-    }
-    Some(off)
-}
-
-// ---------------------------------------------------------------------------
-// dn_skipname
-// ---------------------------------------------------------------------------
-
-/// `dn_skipname` — return the number of bytes a compressed domain name
-/// occupies in the wire packet.
-///
-/// `comp_dn` points at the start of the name, `eom` at the one-past-end
-/// byte of the packet.  Following compression pointers is *not*
-/// required: a pointer counts as two bytes and stops the walk.
-/// Returns -1 on malformed input.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dn_skipname(comp_dn: *const u8, eom: *const u8) -> i32 {
-    if comp_dn.is_null() || eom.is_null() {
-        return -1;
-    }
-    let Some(avail) = offset_of(comp_dn, eom, usize::MAX) else {
-        return -1;
-    };
-    let mut off: usize = 0;
-    loop {
-        if off >= avail {
-            return -1;
-        }
-        // SAFETY: off < avail and comp_dn covers avail bytes.
-        let b = unsafe { *comp_dn.add(off) };
-        if (b & 0xc0) == 0xc0 {
-            // 2-byte pointer ends the name.
-            if off.wrapping_add(2) > avail {
-                return -1;
-            }
-            return off.wrapping_add(2) as i32;
-        }
-        if (b & 0xc0) != 0 {
-            // Reserved label type.
-            return -1;
-        }
-        if b == 0 {
-            return off.wrapping_add(1) as i32;
-        }
-        let label_len = b as usize;
-        if label_len > 63 {
-            return -1;
-        }
-        off = off.wrapping_add(1).wrapping_add(label_len);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// dn_comp
-// ---------------------------------------------------------------------------
-
-/// `dn_comp` — compress a dotted domain name into wire format.
-///
-/// `exp_dn` is a null-terminated dotted name (e.g. `"www.example.com\0"`).
-/// `comp_dn` receives the wire-format encoding, which is at most
-/// `length` bytes.  Returns the number of bytes written, or -1 on
-/// error (invalid input or insufficient buffer).
-///
-/// `dnptrs` / `lastdnptr` describe a (caller-managed) table of pointers
-/// to previously-emitted names within the same packet, used for
-/// compression.  This implementation ignores them — DNS allows but
-/// doesn't require compression, and emitting uncompressed names is
-/// always correct.  When non-null, our implementation still respects
-/// the convention that `*dnptrs == NULL` means "no entries yet" and
-/// `dnptrs == NULL` itself means "no compression please".
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dn_comp(
-    exp_dn: *const u8,
-    comp_dn: *mut u8,
-    length: i32,
-    _dnptrs: *mut *mut u8,
-    _lastdnptr: *mut *mut u8,
-) -> i32 {
-    if exp_dn.is_null() || comp_dn.is_null() || length <= 0 {
-        return -1;
-    }
-    let cap = length as usize;
-    if cap < 1 {
-        return -1;
-    }
-
-    // Handle empty input ("") or root-only input ("."): emit a single
-    // zero terminator (the root-domain wire encoding).
-    // SAFETY: caller contract — exp_dn is null-terminated.
-    let first = unsafe { *exp_dn };
-    if first == 0 {
-        unsafe {
-            *comp_dn = 0;
-        }
-        return 1;
-    }
-    if first == b'.' {
-        // SAFETY: previous byte was '.', not null, so checking the next
-        // byte is bounded by the caller's null terminator at some point.
-        let second = unsafe { *exp_dn.add(1) };
-        if second == 0 {
-            unsafe {
-                *comp_dn = 0;
-            }
-            return 1;
-        }
-        // Otherwise it's a leading dot followed by more text — invalid.
-        return -1;
-    }
-
-    let mut in_pos: usize = 0;
-    let mut label_start: usize = 0;
-    let mut label_len_pos: usize = 0;
-    let mut out_pos: usize = 1; // reserve byte 0 for the first label's length
-
-    loop {
-        // SAFETY: caller contract — exp_dn is null-terminated.
-        let b = unsafe { *exp_dn.add(in_pos) };
-        if b == 0 || b == b'.' {
-            let label_len = in_pos.wrapping_sub(label_start);
-            if label_len == 0 {
-                // Empty intermediate label ("a..b") or trailing-non-root
-                // emptiness is invalid.  Trailing "." (e.g. "a.b.") at
-                // the very end is allowed: detect it by peeking past.
-                if b == b'.' {
-                    return -1;
-                }
-                // b == 0 and label_len == 0: this is the legitimate
-                // "trailing dot" case — we already advanced past a '.'
-                // and now hit the null terminator.  Emit terminator
-                // (no length byte needed since we already reserved one
-                // we now have to undo).  We must back off out_pos by 1.
-                out_pos = out_pos.wrapping_sub(1);
-                // SAFETY: out_pos < cap (we checked before reserving).
-                unsafe {
-                    *comp_dn.add(out_pos) = 0;
-                }
-                return out_pos.wrapping_add(1) as i32;
-            }
-            if label_len > 63 {
-                return -1;
-            }
-            // SAFETY: label_len_pos < cap because we reserved it.
-            unsafe {
-                *comp_dn.add(label_len_pos) = label_len as u8;
-            }
-            if b == 0 {
-                // Final terminator.
-                if out_pos.wrapping_add(1) > cap {
-                    return -1;
-                }
-                // SAFETY: out_pos < cap.
-                unsafe {
-                    *comp_dn.add(out_pos) = 0;
-                }
-                return out_pos.wrapping_add(1) as i32;
-            }
-            // b == '.': advance to next label; reserve its length byte.
-            in_pos = in_pos.wrapping_add(1);
-            label_start = in_pos;
-            label_len_pos = out_pos;
-            if out_pos.wrapping_add(1) > cap {
-                return -1;
-            }
-            out_pos = out_pos.wrapping_add(1);
-            continue;
-        }
-        // Copy the character into the label body.
-        if out_pos.wrapping_add(1) > cap {
-            return -1;
-        }
-        // SAFETY: out_pos < cap by the check above.
-        unsafe {
-            *comp_dn.add(out_pos) = b;
-        }
-        out_pos = out_pos.wrapping_add(1);
-        in_pos = in_pos.wrapping_add(1);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ns_get16 / ns_get32 / ns_put16 / ns_put32
-// ---------------------------------------------------------------------------
-
-/// `ns_get16` — get a 16-bit value from network byte order.
-///
-/// Reads a big-endian 16-bit value from the buffer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_get16(src: *const u8) -> u16 {
-    if src.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees at least 2 bytes.
-    let b0 = u16::from(unsafe { *src });
-    let b1 = u16::from(unsafe { *src.add(1) });
-    (b0 << 8) | b1
-}
-
-/// `ns_get32` — get a 32-bit value from network byte order.
-///
-/// Reads a big-endian 32-bit value from the buffer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_get32(src: *const u8) -> u32 {
-    if src.is_null() {
-        return 0;
-    }
-    // SAFETY: caller guarantees at least 4 bytes.
-    let b0 = u32::from(unsafe { *src });
-    let b1 = u32::from(unsafe { *src.add(1) });
-    let b2 = u32::from(unsafe { *src.add(2) });
-    let b3 = u32::from(unsafe { *src.add(3) });
-    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-}
-
-/// `ns_put16` — put a 16-bit value in network byte order.
-///
-/// Writes a big-endian 16-bit value to the buffer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_put16(val: u16, dst: *mut u8) {
-    if dst.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees at least 2 bytes.
-    unsafe {
-        *dst = (val >> 8) as u8;
-        *dst.add(1) = val as u8;
-    }
-}
-
-/// `ns_put32` — put a 32-bit value in network byte order.
-///
-/// Writes a big-endian 32-bit value to the buffer.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ns_put32(val: u32, dst: *mut u8) {
-    if dst.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees at least 4 bytes.
-    unsafe {
-        *dst = (val >> 24) as u8;
-        *dst.add(1) = (val >> 16) as u8;
-        *dst.add(2) = (val >> 8) as u8;
-        *dst.add(3) = val as u8;
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -721,1234 +2351,930 @@ pub extern "C" fn ns_put32(val: u32, dst: *mut u8) {
 mod tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // Constants
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_dns_name_limits() {
-        assert_eq!(MAXDNAME, 1025);
-        assert_eq!(MAXCDNAME, 255);
-        assert_eq!(MAXLABEL, 63);
+    fn pton(s: &[u8]) -> Result<(Vec<u8>, bool), ()> {
+        let mut out = [0u8; MAXCDNAME];
+        let (n, q) = name_pton(s, &mut out)?;
+        Ok((out[..n].to_vec(), q))
     }
 
-    #[test]
-    fn test_dns_sizes() {
-        assert_eq!(HFIXEDSZ, 12);
-        assert_eq!(QFIXEDSZ, 4);
-        assert_eq!(RRFIXEDSZ, 10);
+    fn ntop(wire: &[u8]) -> Result<Vec<u8>, ()> {
+        let mut out = [0u8; 1100];
+        let n = name_ntop(wire, &mut out)?;
+        Ok(out[..n - 1].to_vec())
     }
 
-    #[test]
-    fn test_dns_classes() {
-        assert_eq!(C_IN, 1);
-        assert_eq!(C_CH, 3);
-        assert_eq!(C_ANY, 255);
-    }
+    const WWW: &[u8] = b"\x03www\x07example\x03com\x00";
+
+    // -- names --
 
     #[test]
-    fn test_dns_types() {
-        assert_eq!(T_A, 1);
-        assert_eq!(T_AAAA, 28);
-        assert_eq!(T_CNAME, 5);
-        assert_eq!(T_MX, 15);
-        assert_eq!(T_NS, 2);
-        assert_eq!(T_PTR, 12);
-        assert_eq!(T_SOA, 6);
-        assert_eq!(T_SRV, 33);
-        assert_eq!(T_TXT, 16);
-        assert_eq!(T_ANY, 255);
-    }
-
-    #[test]
-    fn test_dns_operations() {
-        assert_eq!(QUERY, 0);
-        assert_eq!(IQUERY, 1);
-    }
-
-    // -----------------------------------------------------------------------
-    // res_init
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_res_init_returns_zero() {
-        assert_eq!(res_init(), 0);
-    }
-
-    #[test]
-    fn test_res_init_alias() {
-        assert_eq!(__res_init(), 0);
-    }
-
-    #[test]
-    fn test_res_init_multiple_calls() {
-        // Should be safe to call multiple times.
-        for _ in 0..5 {
-            assert_eq!(res_init(), 0);
+    fn test_pton() {
+        assert_eq!(pton(b"www.example.com"), Ok((WWW.to_vec(), false)));
+        assert_eq!(pton(b"www.example.com."), Ok((WWW.to_vec(), true)));
+        assert_eq!(pton(b""), Ok((vec![0], false)));
+        assert_eq!(pton(b"."), Ok((vec![0], true)));
+        assert_eq!(pton(b"a\\.b.c"), Ok((b"\x03a.b\x01c\x00".to_vec(), false)));
+        assert_eq!(pton(b"\\065bc"), Ok((b"\x03Abc\x00".to_vec(), false)));
+        for bad in [&b"a..b"[..], b".a", b"a\\", b"\\25", b"\\256", b"a.."] {
+            assert_eq!(pton(bad), Err(()), "{bad:?}");
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // res_query
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_res_query_enosys() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_res_query_null_dname() {
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_res_query_alias() {
-        let mut buf = [0u8; 64];
-        let ret = __res_query(
-            b"test\0".as_ptr(),
-            C_IN,
-            T_AAAA,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-    }
-
-    // -----------------------------------------------------------------------
-    // res_search
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_res_search_enosys() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_search(
-            b"host\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_res_search_alias() {
-        let mut buf = [0u8; 64];
-        let ret = __res_search(
-            b"x\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-    }
-
-    // -----------------------------------------------------------------------
-    // res_mkquery
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_res_mkquery_enosys() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_mkquery(
-            QUERY,
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // res_send
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_res_send_enosys() {
-        crate::errno::set_errno(0);
-        let query = [0u8; 32];
-        let mut answer = [0u8; 512];
-        let ret = res_send(
-            query.as_ptr(),
-            query.len() as i32,
-            answer.as_mut_ptr(),
-            answer.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // -----------------------------------------------------------------------
-    // dn_expand / dn_comp / dn_skipname
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // dn_comp / dn_expand / dn_skipname
-    // -----------------------------------------------------------------------
-
-    /// Helper: invoke dn_comp on a dotted C-string.
-    fn comp(s: &[u8], out: &mut [u8]) -> i32 {
-        // s must be null-terminated.
-        assert!(s.last() == Some(&0), "input must be null-terminated");
-        dn_comp(
-            s.as_ptr(),
-            out.as_mut_ptr(),
-            out.len() as i32,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        )
-    }
-
-    /// Helper: invoke dn_expand on a packet, starting at the given offset.
-    fn expand(packet: &[u8], start: usize, out: &mut [u8]) -> i32 {
-        let msg = packet.as_ptr();
-        // SAFETY: msg + packet.len() is one-past-end of the slice.
-        let eom = unsafe { msg.add(packet.len()) };
-        // SAFETY: msg + start is within [msg, eom].
-        let comp_dn = unsafe { msg.add(start) };
-        dn_expand(msg, eom, comp_dn, out.as_mut_ptr(), out.len() as i32)
-    }
-
-    #[test]
-    fn test_dn_comp_null_inputs_return_neg1() {
-        let mut out = [0u8; 64];
-        assert_eq!(
-            dn_comp(
-                core::ptr::null(),
-                out.as_mut_ptr(),
-                out.len() as i32,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            ),
-            -1
-        );
-        let name = b"x\0";
-        assert_eq!(
-            dn_comp(
-                name.as_ptr(),
-                core::ptr::null_mut(),
-                64,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            ),
-            -1
-        );
-    }
-
-    #[test]
-    fn test_dn_comp_simple_name() {
-        let mut out = [0u8; 64];
-        let n = comp(b"x\0", &mut out);
-        assert_eq!(n, 3);
-        assert_eq!(&out[..3], &[1, b'x', 0]);
-    }
-
-    #[test]
-    fn test_dn_comp_multi_label() {
-        let mut out = [0u8; 64];
-        let n = comp(b"www.example.com\0", &mut out);
-        assert_eq!(n, 17);
-        assert_eq!(
-            &out[..17],
-            &[
-                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
-                b'm', 0
-            ]
-        );
-    }
-
-    #[test]
-    fn test_dn_comp_trailing_dot() {
-        // "a.b." should encode the same as "a.b": 5 bytes.
-        let mut out = [0u8; 64];
-        let n = comp(b"a.b.\0", &mut out);
-        assert_eq!(n, 5);
-        assert_eq!(&out[..5], &[1, b'a', 1, b'b', 0]);
-    }
-
-    #[test]
-    fn test_dn_comp_root_dot() {
-        // "." is the root domain, encoded as a single zero byte.
-        let mut out = [0u8; 64];
-        let n = comp(b".\0", &mut out);
-        assert_eq!(n, 1);
-        assert_eq!(out[0], 0);
-    }
-
-    #[test]
-    fn test_dn_comp_empty_input() {
-        // Empty input ("") encodes the same as the root domain.
-        let mut out = [0u8; 64];
-        let n = comp(b"\0", &mut out);
-        assert_eq!(n, 1);
-        assert_eq!(out[0], 0);
-    }
-
-    #[test]
-    fn test_dn_comp_double_dot_rejected() {
-        // Empty intermediate labels are invalid.
-        let mut out = [0u8; 64];
-        let n = comp(b"a..b\0", &mut out);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_comp_leading_dot_rejected() {
-        // Leading '.' followed by more text is invalid.
-        let mut out = [0u8; 64];
-        let n = comp(b".a\0", &mut out);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_comp_buffer_too_small() {
-        // "abc" needs 5 bytes; give it 4.
-        let mut out = [0u8; 4];
-        let n = comp(b"abc\0", &mut out);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_comp_label_too_long() {
-        // A 64-byte label is invalid (max is 63).
-        let mut input = [b'a'; 65];
-        input[64] = 0;
-        let mut out = [0u8; 128];
-        let n = comp(&input, &mut out);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_comp_max_label_ok() {
-        // 63-byte labels are at the limit but still valid.
-        let mut input = [b'a'; 64];
-        input[63] = 0;
-        let mut out = [0u8; 128];
-        let n = comp(&input, &mut out);
-        assert_eq!(n, 65);
-        assert_eq!(out[0], 63);
-        assert_eq!(out[64], 0);
-    }
-
-    #[test]
-    fn test_dn_expand_null_inputs_return_neg1() {
-        let mut out = [0u8; 64];
-        let ret = dn_expand(
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null(),
-            out.as_mut_ptr(),
-            out.len() as i32,
-        );
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_expand_uncompressed_roundtrip() {
-        // Build a packet that is just a single uncompressed name.
-        let mut packet = [0u8; 32];
-        let n = comp(b"www.example.com\0", &mut packet);
-        assert_eq!(n, 17);
-        let mut out = [0u8; 64];
-        let ret = expand(&packet[..n as usize], 0, &mut out);
-        assert_eq!(ret, 17);
-        // Output must be a null-terminated "www.example.com".
-        let z = out.iter().position(|&b| b == 0).unwrap();
-        assert_eq!(&out[..z], b"www.example.com");
-    }
-
-    #[test]
-    fn test_dn_expand_single_label_roundtrip() {
-        let mut packet = [0u8; 16];
-        let n = comp(b"abc\0", &mut packet);
-        assert_eq!(n, 5);
-        let mut out = [0u8; 32];
-        let ret = expand(&packet[..n as usize], 0, &mut out);
-        assert_eq!(ret, 5);
-        let z = out.iter().position(|&b| b == 0).unwrap();
-        assert_eq!(&out[..z], b"abc");
-    }
-
-    #[test]
-    fn test_dn_expand_root_roundtrip() {
-        // Root domain is a single zero byte.
-        let packet = [0u8; 1];
-        let mut out = [0u8; 16];
-        let ret = expand(&packet, 0, &mut out);
-        assert_eq!(ret, 1);
-        // Empty dotted name => first byte of out is null.
-        assert_eq!(out[0], 0);
-    }
-
-    #[test]
-    fn test_dn_expand_follows_pointer() {
-        // Packet layout:
-        //   off 0: [3, 'a', 'b', 'c', 0]   uncompressed name
-        //   off 5: [0xc0, 0x00]            pointer back to offset 0
-        let packet = [3u8, b'a', b'b', b'c', 0, 0xc0, 0x00];
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 5, &mut out);
-        assert_eq!(ret, 2); // pointer occupies 2 bytes at original position
-        let z = out.iter().position(|&b| b == 0).unwrap();
-        assert_eq!(&out[..z], b"abc");
-    }
-
-    #[test]
-    fn test_dn_expand_chained_pointers() {
-        // Pointers must point strictly backward.
-        //   off 0: [1, 'x', 0]
-        //   off 3: [1, 'y', 0xc0, 0x00]    name = "y.x" via pointer
-        //   off 7: [0xc0, 0x03]            pointer to off 3
-        let packet = [1u8, b'x', 0, 1, b'y', 0xc0, 0x00, 0xc0, 0x03];
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 7, &mut out);
-        assert_eq!(ret, 2);
-        let z = out.iter().position(|&b| b == 0).unwrap();
-        assert_eq!(&out[..z], b"y.x");
-    }
-
-    #[test]
-    fn test_dn_expand_forward_pointer_rejected() {
-        // Pointer pointing forward (or to itself) is malformed.
-        let packet = [0xc0u8, 0x02, 1, b'x', 0];
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 0, &mut out);
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_expand_self_pointer_rejected() {
-        let packet = [0xc0u8, 0x00];
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 0, &mut out);
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_expand_reserved_label_type_rejected() {
-        // 0x40 = 0b01_xxxxxx, 0x80 = 0b10_xxxxxx are reserved.
-        for &bad in &[0x40u8, 0x80u8] {
-            let packet = [bad, 0, 0];
-            let mut out = [0u8; 32];
-            let ret = expand(&packet, 0, &mut out);
-            assert_eq!(ret, -1);
-        }
-    }
-
-    #[test]
-    fn test_dn_expand_oversize_label_rejected() {
-        // Length 64 is invalid (max label is 63).
-        // 64 = 0x40 which is actually a reserved type, so use a length that
-        // claims to extend past the packet instead.
-        let packet = [5u8, b'a', b'b', 0]; // claims 5 bytes but only 2 available
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 0, &mut out);
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_expand_missing_terminator_rejected() {
-        // No zero terminator and no pointer.
-        let packet = [3u8, b'a', b'b', b'c'];
-        let mut out = [0u8; 32];
-        let ret = expand(&packet, 0, &mut out);
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_expand_output_buffer_too_small() {
-        let mut packet = [0u8; 32];
-        let n = comp(b"www.example.com\0", &mut packet);
-        // Need 16 bytes for "www.example.com\0", give it 8.
-        let mut out = [0u8; 8];
-        let ret = expand(&packet[..n as usize], 0, &mut out);
-        assert_eq!(ret, -1);
-    }
-
-    #[test]
-    fn test_dn_skipname_null_inputs() {
-        assert_eq!(dn_skipname(core::ptr::null(), core::ptr::null()), -1);
-    }
-
-    #[test]
-    fn test_dn_skipname_simple_name() {
-        let packet = [3u8, b'a', b'b', b'c', 0];
-        // SAFETY: pointer arithmetic within the slice.
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, 5);
-    }
-
-    #[test]
-    fn test_dn_skipname_pointer_counts_as_2() {
-        let packet = [0xc0u8, 0x00];
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, 2);
-    }
-
-    #[test]
-    fn test_dn_skipname_label_then_pointer() {
-        // [1, 'a', 0xc0, 0x00]: 1-byte length + 1-byte data + 2-byte pointer
-        let packet = [1u8, b'a', 0xc0, 0x00];
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, 4);
-    }
-
-    #[test]
-    fn test_dn_skipname_truncated_rejected() {
-        // 2-byte payload claimed but only 1 byte available.
-        let packet = [2u8, b'a'];
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_skipname_reserved_label_rejected() {
-        let packet = [0x40u8, 0];
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, -1);
-    }
-
-    #[test]
-    fn test_dn_skipname_missing_terminator_rejected() {
-        let packet = [3u8, b'a', b'b', b'c'];
-        let eom = unsafe { packet.as_ptr().add(packet.len()) };
-        let n = dn_skipname(packet.as_ptr(), eom);
-        assert_eq!(n, -1);
-    }
-
-    // -----------------------------------------------------------------------
-    // ns_get16 / ns_get32
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_ns_get16_basic() {
-        let buf = [0x01u8, 0x00]; // big-endian 256
-        assert_eq!(ns_get16(buf.as_ptr()), 256);
-    }
-
-    #[test]
-    fn test_ns_get16_zero() {
-        let buf = [0x00u8, 0x00];
-        assert_eq!(ns_get16(buf.as_ptr()), 0);
-    }
-
-    #[test]
-    fn test_ns_get16_max() {
-        let buf = [0xFFu8, 0xFF];
-        assert_eq!(ns_get16(buf.as_ptr()), 0xFFFF);
-    }
-
-    #[test]
-    fn test_ns_get16_null() {
-        assert_eq!(ns_get16(core::ptr::null()), 0);
-    }
-
-    #[test]
-    fn test_ns_get32_basic() {
-        let buf = [0x00u8, 0x00, 0x01, 0x00]; // big-endian 256
-        assert_eq!(ns_get32(buf.as_ptr()), 256);
-    }
-
-    #[test]
-    fn test_ns_get32_large() {
-        let buf = [0x7Fu8, 0xFF, 0xFF, 0xFF]; // big-endian 2147483647
-        assert_eq!(ns_get32(buf.as_ptr()), 0x7FFFFFFF);
-    }
-
-    #[test]
-    fn test_ns_get32_null() {
-        assert_eq!(ns_get32(core::ptr::null()), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // ns_put16 / ns_put32
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_ns_put16_basic() {
-        let mut buf = [0u8; 2];
-        ns_put16(256, buf.as_mut_ptr());
-        assert_eq!(buf, [0x01, 0x00]);
-    }
-
-    #[test]
-    fn test_ns_put16_zero() {
-        let mut buf = [0xFFu8; 2];
-        ns_put16(0, buf.as_mut_ptr());
-        assert_eq!(buf, [0x00, 0x00]);
-    }
-
-    #[test]
-    fn test_ns_put16_max() {
-        let mut buf = [0u8; 2];
-        ns_put16(0xFFFF, buf.as_mut_ptr());
-        assert_eq!(buf, [0xFF, 0xFF]);
-    }
-
-    #[test]
-    fn test_ns_put16_null_no_crash() {
-        ns_put16(42, core::ptr::null_mut());
-    }
-
-    #[test]
-    fn test_ns_put32_basic() {
-        let mut buf = [0u8; 4];
-        ns_put32(256, buf.as_mut_ptr());
-        assert_eq!(buf, [0x00, 0x00, 0x01, 0x00]);
-    }
-
-    #[test]
-    fn test_ns_put32_max() {
-        let mut buf = [0u8; 4];
-        ns_put32(0xFFFFFFFF, buf.as_mut_ptr());
-        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
-    }
-
-    #[test]
-    fn test_ns_put32_null_no_crash() {
-        ns_put32(42, core::ptr::null_mut());
-    }
-
-    // -----------------------------------------------------------------------
-    // ns_get / ns_put roundtrip
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_ns_16_roundtrip() {
-        for val in [0u16, 1, 255, 256, 1000, 0x1234, 0xFFFF] {
-            let mut buf = [0u8; 2];
-            ns_put16(val, buf.as_mut_ptr());
-            assert_eq!(ns_get16(buf.as_ptr()), val, "roundtrip failed for {val}");
-        }
-    }
-
-    #[test]
-    fn test_ns_32_roundtrip() {
-        for val in [0u32, 1, 0xFF, 0x100, 0x12345678, 0xDEADBEEF, 0xFFFFFFFF] {
-            let mut buf = [0u8; 4];
-            ns_put32(val, buf.as_mut_ptr());
-            assert_eq!(ns_get32(buf.as_ptr()), val, "roundtrip failed for {val}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Workflow
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_init_then_query_workflow() {
-        // Typical usage: init → query.
-        let ret = res_init();
-        assert_eq!(ret, 0);
-
-        let mut buf = [0u8; 512];
-        let qret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(qret, -1); // query fails (no resolver)
-    }
-
-    // -----------------------------------------------------------------
-    // Phase 69 — resolver argument validators
-    // -----------------------------------------------------------------
-
-    // --- dname_len_capped helper ---
-
-    #[test]
-    fn test_dname_len_capped_finds_terminator() {
-        let s = b"abc\0";
-        assert_eq!(dname_len_capped(s.as_ptr(), 16), Some(3));
-    }
-
-    #[test]
-    fn test_dname_len_capped_empty_string() {
-        let s = b"\0";
-        assert_eq!(dname_len_capped(s.as_ptr(), 16), Some(0));
-    }
-
-    #[test]
-    fn test_dname_len_capped_no_terminator() {
-        // 8 'a's, no NUL — capped at 8 should return None.
-        let s = [b'a'; 8];
-        assert_eq!(dname_len_capped(s.as_ptr(), 8), None);
-    }
-
-    #[test]
-    fn test_dname_len_capped_exact_terminator_at_cap() {
-        // String fits exactly: "abc\0" with cap=4 finds NUL at index 3.
-        let s = b"abc\0";
-        assert_eq!(dname_len_capped(s.as_ptr(), 4), Some(3));
-    }
-
-    // --- res_query per-error-class ---
-
-    #[test]
-    fn test_res_query_null_dname_efault() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_query_empty_dname_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            b"\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_query_overlong_dname_einval() {
-        // MAXDNAME+1 'a's, then NUL.  validate_dname caps the walk at
-        // MAXDNAME+1 and rejects.
-        let mut name = [b'a'; MAXDNAME + 2];
-        name[MAXDNAME + 1] = 0;
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(name.as_ptr(), C_IN, T_A, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_query_zero_anslen_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(b"example.com\0".as_ptr(), C_IN, T_A, buf.as_mut_ptr(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_query_negative_anslen_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(b"example.com\0".as_ptr(), C_IN, T_A, buf.as_mut_ptr(), -1);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_query_null_answer_efault() {
-        crate::errno::set_errno(0);
-        let ret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null_mut(),
-            512,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_query_valid_reaches_enosys() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // --- res_query ordering ---
-
-    #[test]
-    fn test_res_query_null_dname_beats_zero_anslen() {
-        // dname is checked before anslen.
-        crate::errno::set_errno(0);
-        let ret = res_query(core::ptr::null(), C_IN, T_A, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_query_empty_dname_beats_zero_anslen() {
-        crate::errno::set_errno(0);
-        let ret = res_query(b"\0".as_ptr(), C_IN, T_A, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_query_zero_anslen_beats_null_answer() {
-        // anslen <= 0 is reported as EINVAL before we check answer ptr.
-        crate::errno::set_errno(0);
-        let ret = res_query(b"x\0".as_ptr(), C_IN, T_A, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    // --- res_search (delegates to res_query) ---
-
-    #[test]
-    fn test_res_search_null_dname_efault() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_search(
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_search_empty_dname_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_search(
-            b"\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    // --- res_mkquery per-error-class ---
-
-    fn mkquery_valid(buf: &mut [u8]) -> i32 {
-        res_mkquery(
-            QUERY,
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        )
-    }
-
-    #[test]
-    fn test_res_mkquery_bad_op_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        // op=42 is neither QUERY nor IQUERY.
-        let ret = res_mkquery(
-            42,
-            b"x\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_mkquery_iquery_op_accepted() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_mkquery(
-            IQUERY,
-            b"x\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        // Valid op + valid args reaches the ENOSYS sentinel.
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_res_mkquery_null_dname_efault() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_mkquery(
-            QUERY,
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_mkquery_empty_dname_einval() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_mkquery(
-            QUERY,
-            b"\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_mkquery_null_buf_efault() {
-        crate::errno::set_errno(0);
-        let ret = res_mkquery(
-            QUERY,
-            b"x\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            512,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_mkquery_buflen_too_small_einval() {
-        // buflen=11 is less than HFIXEDSZ=12.
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 16];
-        let ret = res_mkquery(
-            QUERY,
-            b"x\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            11,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_mkquery_valid_reaches_enosys() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = mkquery_valid(&mut buf);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // --- res_mkquery ordering ---
-
-    #[test]
-    fn test_res_mkquery_bad_op_beats_null_dname() {
-        // op check fires before dname validation.
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_mkquery(
-            99,
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_mkquery_dname_beats_null_buf() {
-        // dname validation fires before buf check.
-        crate::errno::set_errno(0);
-        let ret = res_mkquery(
-            QUERY,
-            core::ptr::null(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            512,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    // --- res_send per-error-class ---
-
-    #[test]
-    fn test_res_send_null_msg_efault() {
-        crate::errno::set_errno(0);
-        let mut buf = [0u8; 512];
-        let ret = res_send(core::ptr::null(), 32, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_send_msglen_too_small_einval() {
-        crate::errno::set_errno(0);
-        let msg = [0u8; 32];
-        let mut buf = [0u8; 512];
-        let ret = res_send(msg.as_ptr(), 11, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_send_zero_anslen_einval() {
-        crate::errno::set_errno(0);
-        let msg = [0u8; 32];
-        let mut buf = [0u8; 512];
-        let ret = res_send(msg.as_ptr(), 32, buf.as_mut_ptr(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_res_send_null_answer_efault() {
-        crate::errno::set_errno(0);
-        let msg = [0u8; 32];
-        let ret = res_send(msg.as_ptr(), 32, core::ptr::null_mut(), 512);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_send_valid_reaches_enosys() {
-        crate::errno::set_errno(0);
-        let msg = [0u8; 32];
-        let mut buf = [0u8; 512];
-        let ret = res_send(
-            msg.as_ptr(),
-            msg.len() as i32,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // --- res_send ordering ---
-
-    #[test]
-    fn test_res_send_null_msg_beats_short_msglen() {
-        crate::errno::set_errno(0);
-        let ret = res_send(core::ptr::null(), 4, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-    }
-
-    #[test]
-    fn test_res_send_short_msglen_beats_zero_anslen() {
-        crate::errno::set_errno(0);
-        let msg = [0u8; 4];
-        let ret = res_send(msg.as_ptr(), 4, core::ptr::null_mut(), 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    // --- real-world workflows ---
-
-    #[test]
-    fn test_workflow_dig_style_query() {
-        // A dig-style tool calls res_init, then res_query for an A
-        // record.  With validators in place, the query reaches
-        // ENOSYS — not some silent garbage that the tool would parse
-        // as a real DNS response.
-        assert_eq!(res_init(), 0);
-        let mut buf = [0u8; 1024];
-        crate::errno::set_errno(0);
-        let ret = res_query(
-            b"www.example.org\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_workflow_mkquery_then_send() {
-        // A custom resolver builds a packet via res_mkquery, then
-        // sends it via res_send.  Both should fail with ENOSYS.
-        let mut packet = [0u8; 512];
-        crate::errno::set_errno(0);
-        let n = res_mkquery(
-            QUERY,
-            b"host.local\0".as_ptr(),
-            C_IN,
-            T_AAAA,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            packet.as_mut_ptr(),
-            packet.len() as i32,
-        );
-        assert_eq!(n, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-
-        // Pretend we somehow got a packet.  res_send must also reject
-        // it (ENOSYS), not silently succeed.
-        let mut answer = [0u8; 512];
-        crate::errno::set_errno(0);
-        let s = res_send(
-            packet.as_ptr(),
-            packet.len() as i32,
-            answer.as_mut_ptr(),
-            answer.len() as i32,
-        );
-        assert_eq!(s, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    // --- buggy callers ---
-
-    #[test]
-    fn test_buggy_res_query_with_uninitialised_dname() {
-        // A caller forgot to fill the dname buffer, leaving it all
-        // NUL bytes.  Linux rejects an empty name with EINVAL.
-        crate::errno::set_errno(0);
-        let dname = [0u8; 64];
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            dname.as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_buggy_res_query_with_unterminated_dname() {
-        // A caller passes a buffer with no NUL anywhere.  Treat as
-        // over-long: EINVAL.
-        crate::errno::set_errno(0);
-        let dname = [b'a'; MAXDNAME + 2]; // no NUL
-        let mut buf = [0u8; 512];
-        let ret = res_query(
-            dname.as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_buggy_res_mkquery_with_tiny_buf() {
-        // Caller miscomputes the buffer size as smaller than even
-        // the header.  Must produce EINVAL, not write garbage.
-        crate::errno::set_errno(0);
+        let long_label = [b'x'; 64];
+        assert_eq!(pton(&long_label), Err(()));
+        assert!(pton(&[b'x'; 63]).is_ok());
+        // 255 bytes of wire name at most.
+        let long: Vec<u8> = core::iter::repeat_n(&b"abcdefghi."[..], 26)
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(pton(&long), Err(()));
+    }
+
+    #[test]
+    fn test_ntop() {
+        assert_eq!(ntop(WWW), Ok(b"www.example.com".to_vec()));
+        assert_eq!(ntop(b"\x00"), Ok(b".".to_vec()));
+        assert_eq!(ntop(b"\x03a.b\x01c\x00"), Ok(b"a\\.b.c".to_vec()));
+        assert_eq!(ntop(b"\x02\x01@\x00"), Ok(b"\\001\\@".to_vec()));
+        assert_eq!(ntop(b"\x40"), Err(()), "a compression pointer");
         let mut tiny = [0u8; 4];
-        let ret = res_mkquery(
-            QUERY,
-            b"h\0".as_ptr(),
-            C_IN,
-            T_A,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            tiny.as_mut_ptr(),
-            tiny.len() as i32,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(name_ntop(WWW, &mut tiny), Err(()));
     }
 
     #[test]
-    fn test_buggy_res_send_with_empty_message() {
-        // Caller passes a 0-byte message (forgot to fill the header).
-        crate::errno::set_errno(0);
-        let msg = [0u8; 4];
-        let mut buf = [0u8; 512];
-        let ret = res_send(msg.as_ptr(), 0, buf.as_mut_ptr(), buf.len() as i32);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_pton_ntop_roundtrip() {
+        for name in [&b"a\\.b.c"[..], b"\\001\\@x", b"example.org", b"\\\\.\\\""] {
+            let (wire, _) = pton(name).expect("pton");
+            assert_eq!(ntop(&wire).expect("ntop"), name);
+        }
+    }
+
+    #[test]
+    fn test_unpack_follows_pointers() {
+        // "example.com" at 12, then "www" + a pointer to 12, at 25.
+        let mut msg = vec![0u8; 12];
+        msg.extend_from_slice(b"\x07example\x03com\x00");
+        msg.extend_from_slice(b"\x03www\xc0\x0c");
+        let mut out = [0u8; MAXCDNAME];
+        assert_eq!(name_unpack(&msg, 25, &mut out), Ok(6));
+        assert_eq!(&out[..WWW.len()], WWW);
+        // A pointer that points forward is followed too.
+        let mut fwd = vec![0u8; 12];
+        fwd.extend_from_slice(b"\x03www\xc0\x12");
+        fwd.extend_from_slice(b"\x07example\x03com\x00");
+        assert_eq!(name_unpack(&fwd, 12, &mut out), Ok(6));
+        assert_eq!(&out[..WWW.len()], WWW);
+        // A loop, a pointer out of the message, a reserved label type, a
+        // start past the end.
+        assert_eq!(name_unpack(b"\xc0\x00", 0, &mut out), Err(()));
+        assert_eq!(name_unpack(b"\xc0\x40", 0, &mut out), Err(()));
+        assert_eq!(name_unpack(b"\x80", 0, &mut out), Err(()));
+        assert_eq!(name_unpack(b"\x00", 1, &mut out), Err(()));
+    }
+
+    #[test]
+    fn test_dn_expand_and_skipname() {
+        let mut msg = vec![0u8; 12];
+        msg.extend_from_slice(b"\x07example\x03com\x00");
+        msg.extend_from_slice(b"\x03www\xc0\x0c");
+        msg.push(0);
+        let base = msg.as_ptr();
+        let end = base.wrapping_add(msg.len());
+        let mut out = [0u8; 64];
+        let n = dn_expand(base, end, base.wrapping_add(25), out.as_mut_ptr(), 64);
+        assert_eq!(n, 6);
+        assert_eq!(&out[..16], b"www.example.com\0");
+        // The root reads as "".
+        let n = dn_expand(base, end, base.wrapping_add(31), out.as_mut_ptr(), 64);
+        assert_eq!((n, out[0]), (1, 0));
+        errno::set_errno(0);
+        assert_eq!(
+            dn_expand(base, end, base.wrapping_add(25), out.as_mut_ptr(), 5),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+        assert_eq!(dn_skipname(base.wrapping_add(12), end), 13);
+        assert_eq!(dn_skipname(base.wrapping_add(25), end), 6);
+        errno::set_errno(0);
+        assert_eq!(
+            dn_skipname(base.wrapping_add(12), base.wrapping_add(15)),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+    }
+
+    #[test]
+    fn test_dn_comp_compresses_against_the_table() {
+        let mut msg = [0u8; 128];
+        let base = msg.as_mut_ptr();
+        let mut ptrs: [*mut u8; 8] = [core::ptr::null_mut(); 8];
+        ptrs[0] = base;
+        let last = ptrs.as_mut_ptr().wrapping_add(ptrs.len());
+        // The first name has nothing to point at, and is remembered.
+        let n1 = dn_comp(
+            b"www.example.com\0".as_ptr(),
+            base.wrapping_add(12),
+            100,
+            ptrs.as_mut_ptr(),
+            last,
+        );
+        assert_eq!(n1, 17);
+        assert_eq!(&msg[12..29], WWW);
+        assert_eq!(ptrs[1], msg.as_mut_ptr().wrapping_add(12));
+        // The second shares "example.com" -- matched without case.
+        let at = 12 + 17;
+        let n2 = dn_comp(
+            b"MAIL.Example.COM\0".as_ptr(),
+            msg.as_mut_ptr().wrapping_add(at),
+            100,
+            ptrs.as_mut_ptr(),
+            last,
+        );
+        assert_eq!(n2, 7);
+        assert_eq!(&msg[at..at + 7], b"\x04MAIL\xc0\x10");
+        // A whole-name match is one pointer.
+        let at2 = at + 7;
+        let n3 = dn_comp(
+            b"www.example.com\0".as_ptr(),
+            msg.as_mut_ptr().wrapping_add(at2),
+            100,
+            ptrs.as_mut_ptr(),
+            last,
+        );
+        assert_eq!(n3, 2);
+        assert_eq!(&msg[at2..at2 + 2], b"\xc0\x0c");
+    }
+
+    #[test]
+    fn test_dn_comp_without_a_table_and_its_errors() {
+        let mut out = [0u8; 32];
+        let none = core::ptr::null_mut();
+        assert_eq!(
+            dn_comp(b"a.b\0".as_ptr(), out.as_mut_ptr(), 32, none, none),
+            5
+        );
+        assert_eq!(&out[..5], b"\x01a\x01b\x00");
+        assert_eq!(dn_comp(b"\0".as_ptr(), out.as_mut_ptr(), 32, none, none), 1);
+        errno::set_errno(0);
+        assert_eq!(
+            dn_comp(b"a.b\0".as_ptr(), out.as_mut_ptr(), 4, none, none),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+        assert_eq!(
+            dn_comp(b"a..b\0".as_ptr(), out.as_mut_ptr(), 32, none, none),
+            -1
+        );
+    }
+
+    // -- res_mkquery --
+
+    fn fresh_state() -> ResState {
+        let mut st = ResState::ZERO;
+        let mut c = Conf::DEFAULT;
+        c.ns[0] = [192, 0, 2, 53];
+        c.nns = 1;
+        store_conf(&mut st, &c);
+        st
+    }
+
+    #[test]
+    fn test_mkquery() {
+        let st = fresh_state();
+        let mut buf = [0u8; 64];
+        let n = mkquery(&st, QUERY, b"www.example.com", C_IN, T_MX, None, &mut buf).expect("query");
+        assert_eq!(n, HFIXEDSZ + WWW.len() + 4);
+        assert_eq!(buf[2], 0x01, "QUERY with RD");
+        assert_eq!(buf[3], 0, "no AD without trust-ad");
+        assert_eq!(&buf[4..12], &[0, 1, 0, 0, 0, 0, 0, 0], "one question");
+        assert_eq!(&buf[12..12 + WWW.len()], WWW);
+        assert_eq!(&buf[n - 4..n], &[0, 15, 0, 1]);
+        // 16-bit types, which musl refuses above 255.
+        assert!(mkquery(&st, QUERY, b"x", C_IN, 257, None, &mut buf).is_ok());
+        assert_eq!(
+            mkquery(&st, QUERY, b"x", C_IN, 65536, None, &mut buf),
+            Err(())
+        );
+        assert_eq!(mkquery(&st, QUERY, b"x", -1, T_A, None, &mut buf), Err(()));
+        assert_eq!(
+            mkquery(&st, IQUERY, b"x", C_IN, T_A, None, &mut buf),
+            Err(())
+        );
+        assert_eq!(
+            mkquery(
+                &st,
+                QUERY,
+                b"www.example.com",
+                C_IN,
+                T_A,
+                None,
+                &mut buf[..20]
+            ),
+            Err(())
+        );
+        let mut norec = fresh_state();
+        norec.options &= !RES_RECURSE;
+        norec.options |= RES_TRUSTAD;
+        mkquery(&norec, QUERY, b"x", C_IN, T_A, None, &mut buf).expect("query");
+        assert_eq!((buf[2], buf[3]), (0, 0x20));
+    }
+
+    #[test]
+    fn test_mkquery_notify_with_data() {
+        let st = fresh_state();
+        let mut buf = [0u8; 128];
+        let n = mkquery(
+            &st,
+            NS_NOTIFY_OP,
+            b"example.com",
+            C_IN,
+            T_SOA,
+            Some(b"a.example.com"),
+            &mut buf,
+        )
+        .expect("notify");
+        assert_eq!(buf[2], (4 << 3) | 1);
+        assert_eq!(&buf[10..12], &[0, 1], "one additional record");
+        // The completion domain points into the question's name.
+        let q_end = 12 + 13 + 4;
+        assert_eq!(&buf[q_end..q_end + 4], b"\x01a\xc0\x0c");
+        assert_eq!(n, q_end + 4 + RRFIXEDSZ);
+    }
+
+    #[test]
+    fn test_res_mkquery_entry() {
+        let mut buf = [0u8; 64];
+        let none = core::ptr::null();
+        let name = b"a.b\0".as_ptr();
+        assert_eq!(
+            res_mkquery(QUERY, name, C_IN, T_A, none, 0, none, buf.as_mut_ptr(), 64),
+            12 + 5 + 4
+        );
+        assert_eq!(
+            res_mkquery(QUERY, name, C_IN, T_A, none, 0, none, buf.as_mut_ptr(), 11),
+            -1
+        );
+        assert_eq!(
+            res_mkquery(QUERY, none, C_IN, T_A, none, 0, none, buf.as_mut_ptr(), 64),
+            -1
+        );
+    }
+
+    // -- resolv.conf --
+
+    #[test]
+    fn test_parse_conf() {
+        let text = b"# comment\r\n; another\nnameserver 10.0.0.1\nnameserver ::1\n\
+nameserver 10.0.0.2 # tail\nnameserver 10.0.0.3\nnameserver 10.0.0.4\n\
+search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc trust-ad\n";
+        let c = parse_conf(text, b"host.example");
+        assert_eq!(c.nns, 3, "IPv6 skipped, and four is one too many");
+        assert_eq!(c.ns[..3], [[10, 0, 0, 1], [10, 0, 0, 2], [10, 0, 0, 3]]);
+        assert_eq!(c.nsearch, 2);
+        assert_eq!(&c.search[0][..c.search_len[0]], b"a.example");
+        assert_eq!(&c.search[1][..c.search_len[1]], b"b.example");
+        assert_eq!((c.ndots, c.timeout, c.attempts), (3, RES_MAXRETRANS, 1));
+        let flags = RES_ROTATE | RES_USEVC | RES_TRUSTAD;
+        assert_eq!(c.options & flags, flags);
+        // The last of `domain` and `search` wins; with neither, the host's
+        // domain is searched.
+        let c = parse_conf(b"search one\ndomain two\n", b"");
+        assert_eq!((c.nsearch, &c.search[0][..3]), (1, &b"two"[..]));
+        let c = parse_conf(b"nameserver 1.2.3.4\n", b"corp.example");
+        assert_eq!(&c.search[0][..c.search_len[0]], b"corp.example");
+        let c = parse_conf(b"options ndots:99\n", b"");
+        assert_eq!(c.ndots, RES_MAXNDOTS);
+    }
+
+    #[test]
+    fn test_parse_ipv4() {
+        assert_eq!(parse_ipv4(b"127.0.0.1"), Some([127, 0, 0, 1]));
+        for bad in [
+            &b"256.0.0.1"[..],
+            b"1.2.3",
+            b"1.2.3.4.5",
+            b"::1",
+            b"1.2.3.a",
+            b"",
+        ] {
+            assert_eq!(parse_ipv4(bad), None);
+        }
+    }
+
+    #[test]
+    fn test_store_conf_fills_res() {
+        let mut st = ResState::ZERO;
+        let mut c = parse_conf(
+            b"nameserver 10.1.2.3\nsearch x.example y.example\noptions ndots:2\n",
+            b"",
+        );
+        c.timeout = 3;
+        store_conf(&mut st, &c);
+        assert_eq!((st.nscount, st.retrans, st.retry, st.ndots()), (1, 3, 2, 2));
+        assert_eq!(st.options, RES_DEFAULT | RES_INIT);
+        assert_eq!(st.nsaddr_list[0].sin_port, 53u16.to_be());
+        assert_eq!(
+            st.nsaddr_list[0].sin_addr.s_addr.to_ne_bytes(),
+            [10, 1, 2, 3]
+        );
+        // SAFETY: `dnsrch[0]` points at a 9-byte domain in `defdname`.
+        let d0 = unsafe { core::slice::from_raw_parts(st.dnsrch[0], 9) };
+        assert_eq!(d0, b"x.example");
+        assert!(st.dnsrch[2].is_null());
+    }
+
+    // -- the exchange --
+
+    /// A scripted network: each UDP send is recorded; `replies` are handed
+    /// out by `recv_udp` in order, each after its delay.
+    struct Fake {
+        now: u64,
+        sends: Vec<usize>,
+        replies: Vec<(u64, Vec<u8>, Option<usize>)>,
+        tcp_answer: Option<Vec<u8>>,
+        tcp_calls: usize,
+    }
+
+    impl Fake {
+        fn new(replies: Vec<(u64, Vec<u8>, Option<usize>)>) -> Self {
+            Self {
+                now: 0,
+                sends: Vec::new(),
+                replies,
+                tcp_answer: None,
+                tcp_calls: 0,
+            }
+        }
+    }
+
+    impl Transport for Fake {
+        fn send_udp(&mut self, i: usize, _q: &[u8]) {
+            self.sends.push(i);
+        }
+        fn recv_udp(&mut self, buf: &mut [u8], ms: u64) -> Option<(usize, Option<usize>, bool)> {
+            if self.replies.is_empty() {
+                self.now += ms;
+                return None;
+            }
+            let (delay, pkt, from) = self.replies.remove(0);
+            if delay > ms {
+                self.replies.insert(0, (delay - ms, pkt, from));
+                self.now += ms;
+                return None;
+            }
+            self.now += delay;
+            buf[..pkt.len()].copy_from_slice(&pkt);
+            Some((pkt.len(), from, false))
+        }
+        fn tcp(&mut self, _i: usize, _q: &[u8], buf: &mut [u8], _ms: u64) -> Option<usize> {
+            self.tcp_calls += 1;
+            let a = self.tcp_answer.clone()?;
+            let keep = a.len().min(buf.len());
+            buf[..keep].copy_from_slice(&a[..keep]);
+            Some(a.len())
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    const Q: &[u8] = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00";
+
+    fn reply(id: [u8; 2], flags2: u8, rcode: u8, ancount: u16) -> Vec<u8> {
+        let mut r = vec![id[0], id[1], 0x81 | flags2, 0x80 | rcode];
+        r.extend_from_slice(&[0, 1]);
+        r.extend_from_slice(&ancount.to_be_bytes());
+        r.extend_from_slice(&[0, 0, 0, 0]);
+        r
+    }
+
+    fn two_servers() -> Servers {
+        Servers {
+            addrs: [SIN_ZERO; MAXNS],
+            n: 2,
+            timeout_ms: 5000,
+            attempts: 2,
+            tcp_only: false,
+        }
+    }
+
+    #[test]
+    fn test_exchange_takes_the_first_usable_answer() {
+        let mut t = Fake::new(vec![
+            (10, reply([0x99, 0x99], 0, 0, 1), Some(0)), // another query's
+            (10, reply([0x12, 0x34], 0, 0, 1), None),    // not from our server
+            (10, reply([0x12, 0x34], 0, REFUSED, 0), Some(0)),
+            (10, reply([0x12, 0x34], 0, NXDOMAIN, 0), Some(1)),
+        ]);
+        let mut ans = [0u8; 512];
+        assert_eq!(exchange(&mut t, &two_servers(), Q, &mut ans), Ok(12));
+        assert_eq!(ans[3] & 0xf, NXDOMAIN);
+        assert_eq!(t.sends, vec![0, 1], "every server, once");
+    }
+
+    #[test]
+    fn test_exchange_resends_on_servfail_and_at_intervals() {
+        let mut t = Fake::new(vec![
+            (10, reply([0x12, 0x34], 0, SERVFAIL, 0), Some(1)),
+            (3000, reply([0x12, 0x34], 0, 0, 2), Some(0)),
+        ]);
+        let mut ans = [0u8; 512];
+        assert_eq!(exchange(&mut t, &two_servers(), Q, &mut ans), Ok(12));
+        // Both at 0, server 1 again after its SERVFAIL, both again at 2500.
+        assert_eq!(t.sends, vec![0, 1, 1, 0, 1]);
+    }
+
+    #[test]
+    fn test_exchange_falls_back_to_tcp_on_truncation() {
+        let mut t = Fake::new(vec![(5, reply([0x12, 0x34], 0x02, 0, 1), Some(0))]);
+        let mut big = reply([0x12, 0x34], 0, 0, 9);
+        big.resize(700, 7);
+        t.tcp_answer = Some(big);
+        let mut ans = [0u8; 512];
+        assert_eq!(
+            exchange(&mut t, &two_servers(), Q, &mut ans),
+            Ok(700),
+            "the whole length"
+        );
+        assert_eq!(t.tcp_calls, 1);
+        assert_eq!(ans[7], 9);
+    }
+
+    #[test]
+    fn test_exchange_errors() {
+        let mut ans = [0u8; 512];
+        let mut silent = Fake::new(vec![]);
+        assert_eq!(
+            exchange(&mut silent, &two_servers(), Q, &mut ans),
+            Err(errno::ECONNREFUSED)
+        );
+        assert!(silent.now >= 5000);
+        let mut refusing = Fake::new(vec![(1, reply([0x12, 0x34], 0, REFUSED, 0), Some(0))]);
+        assert_eq!(
+            exchange(&mut refusing, &two_servers(), Q, &mut ans),
+            Err(errno::ETIMEDOUT)
+        );
+        let mut vc = Fake::new(vec![]);
+        vc.tcp_answer = Some(reply([0x12, 0x34], 0, 0, 1));
+        let sv = Servers {
+            tcp_only: true,
+            ..two_servers()
+        };
+        assert_eq!(exchange(&mut vc, &sv, Q, &mut ans), Ok(12));
+        assert!(vc.sends.is_empty());
+    }
+
+    #[test]
+    fn test_judge() {
+        assert_eq!(judge(&reply([0, 0], 0, 0, 1)), Ok(()));
+        assert_eq!(judge(&reply([0, 0], 0, 0, 0)), Err(crate::socket::NO_DATA));
+        assert_eq!(
+            judge(&reply([0, 0], 0, NXDOMAIN, 0)),
+            Err(crate::socket::HOST_NOT_FOUND)
+        );
+        assert_eq!(
+            judge(&reply([0, 0], 0, SERVFAIL, 0)),
+            Err(crate::socket::TRY_AGAIN)
+        );
+        for rc in [FORMERR, NOTIMP, REFUSED, 9] {
+            assert_eq!(
+                judge(&reply([0, 0], 0, rc, 0)),
+                Err(crate::socket::NO_RECOVERY)
+            );
+        }
+    }
+
+    // -- res_search --
+
+    /// Record the names tried; answer the one named `hit`, if any.
+    fn run_search(
+        name: &[u8],
+        ndots: usize,
+        options: u64,
+        domains: &[&[u8]],
+        hit: Option<&str>,
+        miss: i32,
+    ) -> (Result<usize, i32>, Vec<String>) {
+        let mut tried = Vec::new();
+        let r = search_with(name, ndots, options, domains, |d| {
+            let full = match d {
+                None => {
+                    String::from_utf8_lossy(name.strip_suffix(b".").unwrap_or(name)).into_owned()
+                }
+                Some(d) => format!(
+                    "{}.{}",
+                    String::from_utf8_lossy(name),
+                    String::from_utf8_lossy(d)
+                ),
+            };
+            tried.push(full.clone());
+            if hit == Some(full.as_str()) {
+                Ok(1)
+            } else {
+                Err((miss, false, false))
+            }
+        });
+        (r, tried)
+    }
+
+    #[test]
+    fn test_search_order() {
+        let doms: &[&[u8]] = &[b"a.example", b"b.example"];
+        let nf = crate::socket::HOST_NOT_FOUND;
+        // No dots, ndots 1: the domains, then the name as it stands.
+        let (r, t) = run_search(b"host", 1, RES_DEFAULT, doms, None, nf);
+        assert_eq!(t, ["host.a.example", "host.b.example", "host"]);
+        assert_eq!(r, Err(nf));
+        // Enough dots: as it stands first.
+        let (_, t) = run_search(b"x.y", 1, RES_DEFAULT, doms, None, nf);
+        assert_eq!(t, ["x.y", "x.y.a.example", "x.y.b.example"]);
+        // A trailing dot: only as it stands.
+        let (_, t) = run_search(b"x.y.", 1, RES_DEFAULT, doms, None, nf);
+        assert_eq!(t, ["x.y"]);
+        // RES_DEFNAMES alone: one domain.
+        let (_, t) = run_search(b"host", 1, RES_DEFNAMES, doms, None, nf);
+        assert_eq!(t, ["host.a.example", "host"]);
+        // RES_NOTLDQUERY: a dot-free name is never tried bare.
+        let (_, t) = run_search(b"host", 1, RES_DEFAULT | RES_NOTLDQUERY, doms, None, nf);
+        assert_eq!(t, ["host.a.example", "host.b.example"]);
+        // The first answer wins.
+        let (r, t) = run_search(b"host", 1, RES_DEFAULT, doms, Some("host.a.example"), nf);
+        assert_eq!((r, t.len()), (Ok(1), 1));
+    }
+
+    #[test]
+    fn test_search_verdicts() {
+        let doms: &[&[u8]] = &[b"a.example", b"b.example"];
+        // NO_DATA keeps searching, and is what is reported.
+        let (r, t) = run_search(b"host", 1, RES_DEFAULT, doms, None, crate::socket::NO_DATA);
+        assert_eq!((r, t.len()), (Err(crate::socket::NO_DATA), 3));
+        // Anything else stops the domains, but the bare name is still tried.
+        let (r, t) = run_search(
+            b"host",
+            1,
+            RES_DEFAULT,
+            doms,
+            None,
+            crate::socket::NO_RECOVERY,
+        );
+        assert_eq!(t, ["host.a.example", "host"]);
+        assert_eq!(r, Err(crate::socket::NO_RECOVERY));
+        // A refused connection gives up at once, as TRY_AGAIN.
+        let r = search_with(b"host", 1, RES_DEFAULT, doms, |_| {
+            Err((crate::socket::TRY_AGAIN, true, false))
+        });
+        assert_eq!(r, Err(crate::socket::TRY_AGAIN));
+        // The root on the list stands for the bare name.
+        let root: &[&[u8]] = &[b"."];
+        let (_, t) = run_search(
+            b"host",
+            1,
+            RES_DEFAULT,
+            root,
+            None,
+            crate::socket::HOST_NOT_FOUND,
+        );
+        assert_eq!(t, ["host."]);
+    }
+
+    #[test]
+    fn test_join() {
+        let mut out = [0u8; MAXDNAME];
+        assert_eq!(join(b"www", Some(b"example.com"), &mut out), Some(15));
+        assert_eq!(&out[..15], b"www.example.com");
+        assert_eq!(join(b"www.example.com.", None, &mut out), Some(15));
+        assert_eq!(join(&[b'x'; 1020], Some(b"abcd"), &mut out), None);
+    }
+
+    // -- the entry points on the host --
+
+    #[test]
+    fn test_res_init_defaults_on_the_host() {
+        // The host has no /etc/resolv.conf to read: glibc's defaults.
+        assert_eq!(res_init(), 0);
+        // SAFETY: this thread's state.
+        let st = unsafe { &*__res_state() };
+        assert_eq!(st.nscount, 1);
+        assert_eq!(
+            st.nsaddr_list[0].sin_addr.s_addr.to_ne_bytes(),
+            [127, 0, 0, 1]
+        );
+        assert_eq!(
+            (st.retrans, st.retry, st.ndots()),
+            (RES_TIMEOUT, RES_DFLRETRY, 1)
+        );
+        assert_eq!(st.options & RES_DEFAULT, RES_DEFAULT);
+        assert!(st.options & RES_INIT != 0);
+    }
+
+    #[test]
+    fn test_res_send_arguments() {
+        let _ = res_init();
+        let mut ans = [0u8; 512];
+        errno::set_errno(0);
+        assert_eq!(res_send(Q.as_ptr(), 12, ans.as_mut_ptr(), 11), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "a buffer shorter than a header"
+        );
+        errno::set_errno(0);
+        assert_eq!(res_send(core::ptr::null(), 12, ans.as_mut_ptr(), 512), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // SAFETY: this thread's state.
+        unsafe { (*__res_state()).nscount = 0 };
+        errno::set_errno(0);
+        assert_eq!(res_send(Q.as_ptr(), 12, ans.as_mut_ptr(), 512), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH, "no nameserver");
+        let _ = res_init();
+    }
+
+    /// The host has no sockets: a query fails as a send failure does --
+    /// TRY_AGAIN, with the socket's errno.
+    #[test]
+    fn test_res_query_without_a_network() {
+        let _ = res_init();
+        let mut ans = [0u8; 512];
+        crate::socket::set_h_errno(0);
+        assert_eq!(
+            res_query(b"example.com\0".as_ptr(), C_IN, T_A, ans.as_mut_ptr(), 512),
+            -1
+        );
+        assert_eq!(crate::socket::get_h_errno(), crate::socket::TRY_AGAIN);
+        crate::socket::set_h_errno(0);
+        errno::set_errno(0);
+        assert_eq!(
+            res_query(core::ptr::null(), C_IN, T_A, ans.as_mut_ptr(), 512),
+            -1
+        );
+        assert_eq!(
+            (crate::socket::get_h_errno(), errno::get_errno()),
+            (NETDB_INTERNAL, errno::EFAULT)
+        );
+        // A name that cannot be sent is NO_RECOVERY, before any network.
+        let mut name = vec![b'x'; 70];
+        name.push(0);
+        assert_eq!(
+            res_query(name.as_ptr(), C_IN, T_A, ans.as_mut_ptr(), 512),
+            -1
+        );
+        assert_eq!(crate::socket::get_h_errno(), crate::socket::NO_RECOVERY);
+    }
+
+    #[test]
+    fn test_res_state_layout() {
+        assert_eq!(size_of::<ResState>(), 568);
+    }
+
+    #[test]
+    fn test_ns_get_put() {
+        let mut b = [0u8; 4];
+        ns_put16(0x1234, b.as_mut_ptr());
+        assert_eq!(&b[..2], &[0x12, 0x34]);
+        assert_eq!(ns_get16(b.as_ptr()), 0x1234);
+        ns_put32(0xdead_beef, b.as_mut_ptr());
+        assert_eq!(b, [0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(ns_get32(b.as_ptr()), 0xdead_beef);
+        assert_eq!(ns_get16(core::ptr::null()), 0);
+        // The header's wider types: only the field's own bits are written.
+        ns_put16(0x1_2345, b.as_mut_ptr());
+        assert_eq!(&b[..2], &[0x23, 0x45]);
+        ns_put32(0x1_0000_0001, b.as_mut_ptr());
+        assert_eq!(b, [0, 0, 0, 1]);
+    }
+
+    /// A pointer back to a name that ends before the pointer: the length is
+    /// the pointer's two bytes. `name_unpack` used to subtract its position
+    /// from the start regardless, which overflowed -- a panic in a debug
+    /// build -- on every such name, the common shape of a DNS answer.
+    #[test]
+    fn a_pointer_back_to_an_earlier_name_is_two_bytes() {
+        let mut m = std::vec![0u8; 12];
+        m.extend_from_slice(b"\x01a\x00"); // 12..15: "a"
+        m.extend_from_slice(b"\xff\xff"); // filler
+        m.extend_from_slice(&[0xc0, 12]); // 17: a pointer to 12
+        let mut out = [0u8; 64];
+        let base = m.as_ptr();
+        // SAFETY: `m` is the message; `out` holds 64 bytes.
+        let n = dn_expand(
+            base,
+            base.wrapping_add(m.len()),
+            base.wrapping_add(17),
+            out.as_mut_ptr(),
+            64,
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&out[..2], b"a\0");
+    }
+
+    // -- ns_initparse / ns_parserr / ns_skiprr / ns_name_uncompress --
+
+    /// glibc's answers (`posix/tools/oracle/ns_harness.py`): the messages,
+    /// then one call a line; the harness's docstring has the format.
+    const NS_ORACLE: &str = include_str!("ns_oracle.txt");
+
+    /// A name as the harness prints one: `\xHH` outside `!`..`~` and for
+    /// `\`, and `\x` alone for the empty name.
+    fn ns_text(b: &[u8]) -> String {
+        if b.is_empty() {
+            return "\\x".into();
+        }
+        let mut s = String::new();
+        for &c in b {
+            if !(0x21..=0x7e).contains(&c) || c == b'\\' {
+                s.push_str(&format!("\\x{c:02x}"));
+            } else {
+                s.push(char::from(c));
+            }
+        }
+        s
+    }
+
+    /// A pointer as an offset into `m`, `-` for NULL, `?` outside it.
+    fn ns_off(p: *const u8, m: &[u8]) -> String {
+        let base = m.as_ptr() as usize;
+        if p.is_null() {
+            "-".into()
+        } else if (p as usize) >= base && (p as usize) <= base + m.len() {
+            (p as usize - base).to_string()
+        } else {
+            "?".into()
+        }
+    }
+
+    fn ns_handle(h: &NsMsg, m: &[u8]) -> String {
+        let mut s = format!("{} {}", h.id, h.flags);
+        for c in h.counts {
+            s.push_str(&format!(" {c}"));
+        }
+        for p in h.sections {
+            s.push_str(&format!(" {}", ns_off(p, m)));
+        }
+        s.push_str(&format!(" {} {} {}", h.sect, h.rrnum, ns_off(h.msg_ptr, m)));
+        s
+    }
+
+    fn empty_ns_msg() -> NsMsg {
+        NsMsg {
+            msg: core::ptr::null(),
+            eom: core::ptr::null(),
+            id: 0,
+            flags: 0,
+            counts: [0; 4],
+            sections: [core::ptr::null(); 4],
+            sect: 0,
+            rrnum: 0,
+            msg_ptr: core::ptr::null(),
+        }
+    }
+
+    #[test]
+    fn ns_parsing_answers_as_glibc_does() {
+        let mut msgs: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        let mut handles: std::collections::BTreeMap<String, NsMsg> = Default::default();
+        let mut bad = Vec::new();
+        let mut calls = 0;
+        for line in NS_ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            if let Some(rest) = line.strip_prefix("M ") {
+                let (name, hex) = rest.split_once(' ').unwrap();
+                let bytes = if hex == "-" {
+                    Vec::new()
+                } else {
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                        .collect()
+                };
+                msgs.insert(name.into(), bytes);
+                continue;
+            }
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let w: Vec<&str> = lhs.split(' ').collect();
+            let m = &msgs[w[1]];
+            errno::set_errno(1234);
+            let got = match w[0] {
+                "I" => {
+                    let mut h = empty_ns_msg();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    // SAFETY: the message and a handle of this frame's.
+                    let rc = unsafe { ns_initparse(m.as_ptr(), m.len() as i32, &raw mut h) };
+                    let err = errno::get_errno();
+                    let mut s = format!("{rc} {err}");
+                    if rc == 0 {
+                        s.push(' ');
+                        s.push_str(&ns_handle(&h, m));
+                        handles.insert(w[1].into(), h);
+                    }
+                    s
+                }
+                "P" => {
+                    let (sect, rrnum) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                    let h = handles.get_mut(w[1]).unwrap();
+                    // SAFETY: an all-zero record is a valid one: bytes, and
+                    // a NULL pointer.
+                    let mut rr: NsRr = unsafe { core::mem::zeroed() };
+                    // SAFETY: a handle `ns_initparse` filled over a message
+                    // still in `msgs`; a record of this frame's.
+                    let rc = unsafe { ns_parserr(h, sect, rrnum, &raw mut rr) };
+                    let err = errno::get_errno();
+                    let mut s = format!("{rc} {err}");
+                    if rc == 0 {
+                        let n = rr.name.iter().position(|&b| b == 0).unwrap();
+                        s.push_str(&format!(
+                            " {} {} {} {} {} {}",
+                            ns_text(&rr.name[..n]),
+                            rr.type_,
+                            rr.rr_class,
+                            rr.ttl,
+                            rr.rdlength,
+                            ns_off(rr.rdata, m)
+                        ));
+                    }
+                    s.push_str(" ; ");
+                    s.push_str(&ns_handle(h, m));
+                    s
+                }
+                "K" => {
+                    let (off, sect, count, eom): (usize, i32, i32, usize) = (
+                        w[2].parse().unwrap(),
+                        w[3].parse().unwrap(),
+                        w[4].parse().unwrap(),
+                        w[5].parse().unwrap(),
+                    );
+                    let rc = ns_skiprr(
+                        m.as_ptr().wrapping_add(off),
+                        m.as_ptr().wrapping_add(eom),
+                        sect,
+                        count,
+                    );
+                    format!("{rc} {}", errno::get_errno())
+                }
+                "U" => {
+                    let (off, size): (usize, usize) =
+                        (w[2].parse().unwrap(), w[3].parse().unwrap());
+                    let mut out = [0u8; 1100];
+                    // SAFETY: the message; `out` holds more than `size`.
+                    let rc = unsafe {
+                        ns_name_uncompress(
+                            m.as_ptr(),
+                            m.as_ptr().wrapping_add(m.len()),
+                            m.as_ptr().wrapping_add(off),
+                            out.as_mut_ptr(),
+                            size,
+                        )
+                    };
+                    let mut s = format!("{rc} {}", errno::get_errno());
+                    if rc >= 0 {
+                        let n = out.iter().position(|&b| b == 0).unwrap();
+                        s.push(' ');
+                        s.push_str(&ns_text(&out[..n]));
+                    }
+                    s
+                }
+                other => panic!("no such line: {other}"),
+            };
+            calls += 1;
+            if got != want {
+                bad.push(format!("{line}\n    ours {got}"));
+            }
+        }
+        assert!(calls > 120, "only {calls} calls");
+        assert!(
+            bad.is_empty(),
+            "{} of {calls} differ:\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn ns_calls_refuse_what_glibc_would_fault_on() {
+        let m = [0u8; 12];
+        // SAFETY: NULLs are what is tested.
+        unsafe {
+            assert_eq!(ns_initparse(m.as_ptr(), 12, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+            let mut h = empty_ns_msg();
+            assert_eq!(ns_initparse(core::ptr::null(), 12, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+            // Too short to hold a header: EMSGSIZE, before `msg` is read.
+            assert_eq!(ns_initparse(core::ptr::null(), 0, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+            assert_eq!(ns_initparse(m.as_ptr(), -5, &raw mut h), -1);
+            assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+            assert_eq!(ns_initparse(m.as_ptr(), 12, &raw mut h), 0);
+            assert_eq!(ns_parserr(&raw mut h, 0, 0, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn ns_flagdata_is_the_headers_flag_table() {
+        // qr, opcode, aa, tc, rd, ra, z, ad, cd, rcode of a response's 0x8583.
+        let flags = 0x8583;
+        let get = |f: usize| (flags & _ns_flagdata[f].mask) >> _ns_flagdata[f].shift;
+        assert_eq!(
+            (0..10).map(get).collect::<Vec<_>>(),
+            [1, 0, 1, 0, 1, 1, 0, 0, 0, 3]
+        );
     }
 }

@@ -84,6 +84,145 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## D-Q5 — [D] Chinese, Japanese and Korean text conversion needs about a megabyte of tables. Build them into every program that converts text, or load them from files? — Status: OPEN (raised 2026-09-28)
+
+**In short:** the C library's `iconv` (the function programs call to
+convert text between character sets -- say from an old Japanese e-mail's
+Shift-JIS into UTF-8) now handles every character set that uses one byte a
+character, 221 of them, with their tables built into the library. What is
+left is Chinese, Japanese and Korean, whose character sets need two or more
+bytes a character and tables of thousands of entries each: about 0.7 MB for
+all of them even stored compactly, one direction only. The question is
+whether that megabyte goes inside every program that uses `iconv`, or into
+files the library reads the first time a program asks for one of these sets.
+
+**Terms used below.** *Statically linked*: the library's code and data are
+copied into each program, as all programs here are today; there is no shared
+copy on disk. *Multibyte set*: a character set with more than one byte for
+some characters -- EUC-JP, Shift-JIS, EUC-KR, GBK, GB18030, Big5,
+ISO-2022-JP, and IBM's double-byte mainframe sets. *mmap*: reading a file by
+mapping it into memory, so every program using it shares one copy in RAM.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Built in, as the one-byte sets are (design-decisions §1117): the reading half stored, the writing half built when `iconv_open` first opens the set | Every program that calls `iconv` grows by about 0.7 MB on disk, and each open multibyte converter takes about 80 KB of memory and a few milliseconds to open. Nothing else to install; works on any disk layout. |
+| **B.** Table files in the system image (`/usr/lib/iconv/`, one per set), read with mmap the first time a program opens that set -- what glibc does with its converter modules | Programs stay their current size; all of them share one copy of a table in RAM. The files must be on the disk: a program on a system without them is told the set is not available, as glibc says when its modules are missing. |
+| **C.** A, until the C library can be a shared library (`libc.so`, one copy for every program), then nothing more to do | Same as A today; the per-program cost disappears when shared libraries arrive -- which design.txt plans ("within one system generation, apps share .so files") but nothing has built. |
+
+**If never answered:** nothing gets worse -- these sets are refused today, as
+they have been. It blocks Chinese, Japanese and Korean conversion in every C
+program (a mail reader, `iconv -f SHIFT_JIS`, a text editor opening a legacy
+file). The single-byte sets are unaffected.
+
+**Claude's recommendation:** **B.** A megabyte in every program that happens
+to convert text is the wrong place for data that most of them will never
+touch, and sharing one mapped copy is how every mature system does it
+(glibc's modules, ICU's data file). The files are made by the same generator
+that makes the built-in tables today, and lane D's image recipe installs
+them. If shared libraries arrive later, B still costs nothing extra.
+
+**Where it bites:** `posix/src/iconv.rs` (the converters, whichever way the
+tables arrive), `posix/tools/gen_iconv_*.py` (the tables),
+`scripts/create-ext4-rootfs.sh` (installing them, for B).
+
+## D-Q4 — [D] Background services that run before anyone signs in need passwords too. Where should they keep them? — Status: OPEN (raised 2026-09-27)
+
+**In short:** some programs that run in the background need a password to do
+their job, and must do it while nobody is signed in: dynamic DNS (keeping a
+web address such as `myhome.duckdns.org` pointed at a home network) needs the
+DNS provider's password; a scheduled backup to another computer needs that
+computer's password; joining Wi-Fi at startup needs the network's passphrase.
+The password manager cannot give them one at startup: each user's store is
+locked with that user's own master password, so until they sign in and unlock
+it, nothing can read it -- even a program you have allowed to (your C-Q25
+answer). These passwords need a home a background service can reach at
+startup, and the choice is how well that home is protected.
+
+**Terms used below.** *Background service*: a program the system starts at
+boot, before any sign-in (the backup scheduler and the dynamic-DNS updater are
+two). *Encrypted at rest*: stored scrambled, so reading the disk directly -- a
+stolen laptop, or the disk moved to another machine -- shows nothing useful.
+*TPM*: a security chip in most PCs that keeps a key and hands it over only to
+this machine's own, unmodified startup. *Capability*: a permission a program
+holds as a token, as in C-Q25's "a capability key specifically for this".
+
+| Option | *What changes:* |
+|---|---|
+| **A.** A file only the service can read -- what Linux does for Wi-Fi (`/etc/wpa_supplicant/wpa_supplicant.conf`) and NetworkManager's saved networks | Works at startup, simple. The password is stored unscrambled, guarded by who may open the file: other programs on the running system cannot read it, but anyone who reads the disk directly can -- unless the whole disk is encrypted, which then covers it (the kernel has a volume-encryption module, `fs::diskencrypt`; nothing encrypts the system disk with it yet). |
+| **B.** A *system* section of the password manager, unlocked at startup with a key the TPM keeps, readable by services holding a capability for it -- C-Q25's idea, extended to startup | Encrypted at rest even without whole-disk encryption, and one place to see and revoke every stored service password. Needs TPM support, which does not exist yet; on a machine without a TPM the unlocking key must sit on disk, which makes it A with extra steps. |
+| **C.** No stored passwords for background services -- they run only while their owner is signed in and has unlocked the password manager, reading it through C-Q25's capability | Nothing new to protect. Dynamic DNS, backups to another computer and Wi-Fi at startup stop whenever nobody is signed in -- which for a home server is all the time. |
+
+**If never answered:** nothing gets worse today -- no background service
+stores a password yet. It blocks the part of the dynamic-DNS updater that signs
+in to the provider (`requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`);
+the rest of it can be built meanwhile.
+
+**Claude's recommendation:** **A now, B when a TPM-backed store exists.** A is
+what every Linux system does for these same passwords, and whole-disk
+encryption, once the system disk uses it, gives A the at-rest protection B
+would. The service, not Settings, writes the file (Settings hands it the
+password and the service checks Settings may), and each service reads its
+passwords through one small function -- so moving to B later changes that
+function and nothing else.
+
+**Where it bites:** `services/dyndns` (lane D, not yet written); lane E's
+Dynamic DNS page in `apps/settings/src/remote.rs`, which would hand the
+password to the service rather than store it in the password manager; later,
+Wi-Fi at startup (`userspace/wpa`, lane B) and backups to another computer
+(`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+
+## D-Q3 — [D] Programs cannot share memory, message queues or named semaphores with each other. Where should the shared ones live? — Status: OPEN (raised 2026-09-26)
+
+**In short:** Unix programs often cooperate through things they open by name:
+a block of shared memory, a queue of messages, a named counter that makes one
+program wait for another. Here each of those is private to the program that
+opened it — two programs opening the same name each get their own — and the
+system cannot yet give two programs the same writable memory at all. So a
+database whose worker programs share memory (PostgreSQL works exactly this
+way) cannot run, and a message one program queues is never seen by another.
+Making them shared needs a home outside any one program; which home?
+
+**What exists now**, all of it in the C library (libc: the library every
+program links for these calls), per program:
+
+| Family | Calls | State |
+|---|---|---|
+| POSIX shared memory | `shm_open` + `mmap(MAP_SHARED)` | a file under `/dev/shm`, but the kernel refuses writable shared file mappings (`ENOSYS`, design-decisions §23) |
+| POSIX named semaphores (counters programs wait on) | `sem_open` | a table inside libc |
+| POSIX message queues | `mq_open`, `mq_send` | a table inside libc: 8 queues of 32 small messages |
+| System V (the older Unix interface for all three) | `shmget`, `msgget`, `semget` | tables inside libc |
+| Locks placed in shared memory | `PTHREAD_PROCESS_SHARED` | refused (`ENOTSUP`): the kernel's futex (its wait/wake primitive) cannot wake across programs yet — requested of lane A |
+
+**The question.** Every option below first needs the kernel to share writable
+memory between programs — anonymous and file-backed `MAP_SHARED` (a mapping
+two programs see the same bytes through). That part is lane A's and not in
+question. What is in question is where the *named objects* live:
+
+| Option | *What changes:* |
+|---|---|
+| **A.** In the kernel, as Linux does | All six families work between programs; each call is a kernel call. The kernel gains three new kinds of object. |
+| **B.** In a service program (an `ipcd`) | All six work between programs; libc asks the service over the system's message channels, so every send or receive costs a round trip through it. The kernel gains nothing beyond shared memory. |
+| **C.** In libc, over shared files — glibc's own design for named semaphores | All six work between programs; each object is a file under `/dev/shm`, mapped into every program that opens it, waits sleep on shared futexes. No new kernel objects and no service; file permissions decide who may open what. A program that dies halfway through an update can leave that one queue stuck, as a crashed lock holder can anywhere. |
+| **D.** Leave it | Programs that use these only within themselves keep working; nothing can share them. |
+
+**If never answered:** safe for everything in the tree today (nothing here
+shares these between programs), but it blocks every port that does —
+PostgreSQL, anything using `sem_open` between programs, daemons built on
+message queues. It does not get worse on its own.
+
+**Claude's recommendation:** **C.** It is how glibc already builds named
+semaphores, it keeps the kernel as small as the design asks (only scheduling,
+memory, IPC primitives and capabilities in the kernel), and its only kernel
+needs — shared writable memory and cross-program futexes — are needed by every
+option anyway. A stays available for System V message queues if a port turns
+out to need kernel-side behaviour C cannot give. Meanwhile lane D keeps the
+single-program versions correct.
+
+**Where it bites:** `posix/src/mqueue.rs`, `posix/src/semaphore.rs`
+(`sem_open`), `posix/src/sysv_*.rs`, `posix/src/mman.rs` (`shm_open`); lane A:
+`kernel/src/mm` (shared mappings) and `kernel/src/ipc/futex.rs`
+(`requests/d-a-futexes-keyed-by-physical-page-for-process-shared-objects.md`).
+
 ## F-Q3 — [F] Screenshots: how does a program get permission to read what is on the screen? — Status: OPEN (raised 2026-09-27)
 
 **In short:** the screenshot tool cannot take screenshots, because no program

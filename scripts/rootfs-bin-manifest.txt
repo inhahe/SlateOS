@@ -70,6 +70,10 @@
 ar
 awk
 logrotate
+# powerctl: the desktop's Shut down, Restart, Sleep and Hibernate, and the
+# login screen's power buttons, run /bin/powerctl (userspace/powerctl) --
+# requests/c-d-ship-powerctl-in-the-image.md.
+powerctl
 #
 # ALIASES. A line `name = producer` creates `name` as a second name for an
 # already-listed binary. Multi-call programs read argv[0] -- our `ar` is

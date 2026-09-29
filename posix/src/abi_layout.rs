@@ -169,6 +169,91 @@ pub(crate) fn abi_asserts() -> String {
         ss_size
     );
 
+    // --- <ucontext.h>: the context getcontext records and a signal handler
+    // receives -------------------------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::UcontextT,
+        "ucontext_t",
+        "ucontext.h",
+        uc_flags,
+        uc_link,
+        uc_stack,
+        uc_mcontext,
+        uc_sigmask,
+        fpregs_mem as "__fpregs_mem"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::McontextT,
+        "mcontext_t",
+        "ucontext.h",
+        gregs,
+        fpregs,
+        reserved1 as "__reserved1"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ucontext::Fpstate,
+        "struct _fpstate",
+        "ucontext.h",
+        cwd,
+        swd,
+        ftw,
+        fop,
+        rip,
+        rdp,
+        mxcsr,
+        mxcr_mask,
+        st as "_st",
+        xmm as "_xmm",
+        padding
+    );
+
+    // --- threads: the cleanup record musl's pthread_cleanup_push declares --
+    abi!(out, hdrs, crate::pthread::Ptcb, "struct __ptcb", "pthread.h",
+         f as "__f", x as "__x", next as "__next");
+
+    // --- search: the table of hsearch_r's own ------------------------------
+    abi!(out, hdrs, crate::search::HsearchData, "struct hsearch_data", "search.h",
+         tab as "__tab", unused1 as "__unused1", unused2 as "__unused2");
+    // ...and the entry hsearch and hsearch_r take and hand back.
+    abi!(
+        out,
+        hdrs,
+        crate::search::Entry,
+        "ENTRY",
+        "search.h",
+        key,
+        data
+    );
+
+    // --- DNS messages: ns_initparse's handle, ns_parserr's record ----------
+    abi!(out, hdrs, crate::resolv::NsMsg, "ns_msg", "arpa/nameser.h",
+         msg as "_msg", eom as "_eom", id as "_id", flags as "_flags", counts as "_counts",
+         sections as "_sections", sect as "_sect", rrnum as "_rrnum", msg_ptr as "_msg_ptr");
+    abi!(out, hdrs, crate::resolv::NsRr, "ns_rr", "arpa/nameser.h",
+         name as "name", type_ as "type", rr_class as "rr_class", ttl as "ttl",
+         rdlength as "rdlength", rdata as "rdata");
+    abi!(out, hdrs, crate::resolv::NsFlagData, "struct _ns_flagdata", "arpa/nameser.h",
+         mask as "mask", shift as "shift");
+
+    // --- time: ftime's result -------------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::time::Timeb,
+        "struct timeb",
+        "sys/timeb.h",
+        time,
+        millitm,
+        timezone,
+        dstflag
+    );
+
     // --- terminals ---------------------------------------------------------
     abi!(out, hdrs, crate::ioctl::Termios, "struct termios", "termios.h",
          c_iflag, c_oflag, c_cflag, c_lflag, c_line, c_cc,
@@ -351,6 +436,23 @@ pub(crate) fn abi_asserts() -> String {
         "pthread_cond_t",
         "pthread.h"
     );
+    // C11's `mtx_t` and `cnd_t` are musl's `pthread_mutex_t` and
+    // `pthread_cond_t` under other names (`threads.rs` passes them straight
+    // to the pthread functions), so their sizes must agree too.
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadMutexT,
+        "mtx_t",
+        "threads.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pthread::PthreadCondT,
+        "cnd_t",
+        "threads.h"
+    );
     abi!(
         out,
         hdrs,
@@ -373,11 +475,26 @@ pub(crate) fn abi_asserts() -> String {
         "pthread.h"
     );
     abi!(out, hdrs, crate::semaphore::SemT, "sem_t", "semaphore.h");
-    // Two independent `CpuSetT` definitions exist -- `pthread::CpuSetT` with a
-    // `__bits` field and `sched::CpuSetT` with a `bits` field. Both are
-    // checked, because a duplicate type is exactly the thing that drifts.
-    abi!(out, hdrs, crate::pthread::CpuSetT, "cpu_set_t", "sched.h");
+    // One `cpu_set_t`: pthread.rs's copy, with its `__bits` field, went on
+    // 2026-09-27, and its affinity calls take sched.rs's.
     abi!(out, hdrs, crate::sched::CpuSetT, "cpu_set_t", "sched.h");
+    // `__opcode` is a bit-field, which `offsetof` cannot name; the size and
+    // every field around it pin it.
+    abi!(
+        out,
+        hdrs,
+        crate::fenv::FenvT,
+        "fenv_t",
+        "fenv.h",
+        control_word as "__control_word",
+        status_word as "__status_word",
+        tags as "__tags",
+        eip as "__eip",
+        cs_selector as "__cs_selector",
+        data_offset as "__data_offset",
+        data_selector as "__data_selector",
+        mxcsr as "__mxcsr",
+    );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
     abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
@@ -545,6 +662,14 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::socket::InAddr,
+        "struct in_addr",
+        "netinet/in.h",
+        s_addr
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Sockaddr,
         "struct sockaddr",
         "sys/socket.h",
@@ -606,7 +731,35 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
-        crate::unistd::Mntent,
+        crate::sysv_sem::SemidDs,
+        "struct semid_ds",
+        "sys/sem.h",
+        sem_perm,
+        sem_otime,
+        sem_ctime,
+        sem_nsems
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_sem::Seminfo,
+        "struct seminfo",
+        "sys/sem.h",
+        semmap,
+        semmni,
+        semmns,
+        semmnu,
+        semmsl,
+        semopm,
+        semume,
+        semusz,
+        semvmx,
+        semaem
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::mntent::Mntent,
         "struct mntent",
         "mntent.h",
         mnt_fsname,
@@ -615,6 +768,17 @@ pub(crate) fn abi_asserts() -> String {
         mnt_opts,
         mnt_freq,
         mnt_passno
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::stdio::CookieIoFunctions,
+        "cookie_io_functions_t",
+        "stdio.h",
+        read,
+        write,
+        seek,
+        close
     );
 
     // --- more by-value types, and the rest of the ordinary libc surface -----
@@ -699,6 +863,46 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::inet::EtherAddr,
+        "struct ether_addr",
+        "net/ethernet.h",
+        ether_addr_octet
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Servent,
+        "struct servent",
+        "netdb.h",
+        s_name,
+        s_aliases,
+        s_port,
+        s_proto
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Protoent,
+        "struct protoent",
+        "netdb.h",
+        p_name,
+        p_aliases,
+        p_proto
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Netent,
+        "struct netent",
+        "netdb.h",
+        n_name,
+        n_aliases,
+        n_addrtype,
+        n_net
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Hostent,
         "struct hostent",
         "netdb.h",
@@ -721,6 +925,51 @@ pub(crate) fn abi_asserts() -> String {
         ifa_netmask,
         ifa_broadaddr,
         ifa_data
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::SockaddrLl,
+        "struct sockaddr_ll",
+        "netpacket/packet.h",
+        sll_family,
+        sll_protocol,
+        sll_ifindex,
+        sll_hatype,
+        sll_pkttype,
+        sll_halen,
+        sll_addr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::RtnlLinkStats,
+        "struct rtnl_link_stats",
+        "linux/if_link.h",
+        rx_packets,
+        tx_packets,
+        rx_bytes,
+        tx_bytes,
+        rx_errors,
+        tx_errors,
+        rx_dropped,
+        tx_dropped,
+        multicast,
+        collisions,
+        rx_length_errors,
+        rx_over_errors,
+        rx_crc_errors,
+        rx_frame_errors,
+        rx_fifo_errors,
+        rx_missed_errors,
+        tx_aborted_errors,
+        tx_carrier_errors,
+        tx_fifo_errors,
+        tx_heartbeat_errors,
+        tx_window_errors,
+        rx_compressed,
+        tx_compressed,
+        rx_nohandler
     );
     abi!(
         out,
@@ -821,6 +1070,21 @@ pub(crate) fn abi_asserts() -> String {
         msg_qbytes,
         msg_lspid,
         msg_lrpid
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_msg::Msginfo,
+        "struct msginfo",
+        "sys/msg.h",
+        msgpool,
+        msgmap,
+        msgmax,
+        msgmnb,
+        msgmni,
+        msgssz,
+        msgtql,
+        msgseg
     );
     abi!(
         out,

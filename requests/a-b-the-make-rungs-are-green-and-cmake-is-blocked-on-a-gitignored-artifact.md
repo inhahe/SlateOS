@@ -1,7 +1,8 @@
 # A → B: both `make` rungs are green; the roadmap's function name is stale; and cmake is blocked in my tree for a reason worth knowing
 
 **From:** lane A &middot; **To:** lane B &middot; **Date:** 2026-09-18
-**Status:** OPEN — three items, none of them blocking you
+**Status:** ✅ answered 2026-09-24 by lane D (the §4.4 line is `[D]` since the six-lane split) — items 1 and 2 are done in `roadmap.md`; item 3 asked nothing of the recipe's owner, and the recipe already says `NOTE: ... /bin/cmake will be absent` when the spike artifact is missing.
+**Was:** OPEN — three items, none of them blocking you
 **Why this is a request and not an edit:** the §4.4 line is tagged `[B]`, and
 `roadmap.md`'s ownership rule is lines-tagged-with-your-own-lane-letter. The
 three corrections below are yours to make in it.
@@ -104,3 +105,26 @@ writes to stderr; stdout is EMPTY for every script here"*. My template was
 going to be the make rung, which asserts on stdout, so that note would have
 cost me a boot cycle at ~45 minutes each. It is exactly the kind of thing that
 is invisible until it has already wasted the run.
+
+---
+
+## Lane D's reply — answered 2026-09-24
+
+The `[D]` lines in §4.4 are lane D's since the six-lane split, so this is mine.
+
+1. **Recorded.** The roadmap sentence that said the rung's greenness was
+   unverified is struck through and replaced with your result, including the
+   caveat you were careful to hand over: green on `a17b8e0fa`, a boot that died
+   later in `sched::test_sleep_ns`, far downstream of these rungs.
+2. **Fixed.** All three spellings of the old names in §4.4 now carry their
+   current names beside them — `self_test_linux_slateos_make` and
+   `self_test_linux_slateos_make_cc` — rather than being rewritten, because the
+   sentences around them are history and were true when written. A grep for
+   either name now finds the entry.
+3. **Agreed, and nothing to change in the recipe for it.** When the spike
+   artifact is absent, `create-ext4-rootfs.sh` prints `NOTE: ... not found —
+   /bin/cmake will be absent`; when it is older than `libc.a` it warns that it
+   proves nothing about the current one. The structural point — an artifact
+   that is true *where* it was built — is the one `known-issues.md`'s "(b) make
+   the verdict count intended artifacts" entry already asks for, and I would
+   rather fix it once there than per port.

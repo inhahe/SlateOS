@@ -8,8 +8,11 @@
 // Key limits
 // ---------------------------------------------------------------------------
 
-/// Maximum number of thread-specific data keys.
-pub const PTHREAD_KEYS_MAX: u32 = 1024;
+/// Maximum number of thread-specific data keys: musl's 128, which is what
+/// `pthread_key_create` allows (`pthread.rs`'s `KEYS_MAX`) and what the
+/// header a C program compiles against says.  It was glibc's 1024 until
+/// 2026-09-27, promising eight times the keys the library hands out.
+pub const PTHREAD_KEYS_MAX: u32 = 128;
 /// Maximum number of destructor iterations at thread exit.
 pub const PTHREAD_DESTRUCTOR_ITERATIONS: u32 = 4;
 
@@ -59,12 +62,12 @@ pub const PTHREAD_CANCELED: usize = usize::MAX; // (void*)-1
 // Thread stack limits
 // ---------------------------------------------------------------------------
 
-/// Minimum thread stack size (bytes, PTHREAD_STACK_MIN on Linux).
-pub const PTHREAD_STACK_MIN: u32 = 16384;
-/// Default thread stack size (bytes, glibc default).
-pub const PTHREAD_STACK_DEFAULT: u32 = 8388608; // 8 MiB
-/// Default thread guard page size (bytes).
-pub const PTHREAD_GUARD_DEFAULT: u32 = 4096;
+/// Minimum thread stack size in bytes: musl's 2048.  A C program's
+/// `<limits.h>` says 2048, so `pthread_attr_setstacksize(&a,
+/// PTHREAD_STACK_MIN + margin)` must succeed; it was glibc's 16384 until
+/// 2026-09-27, which refused every such request below 16 KiB.  A stack is
+/// still at least one 16 KiB page: `pthread_create` rounds the size up.
+pub const PTHREAD_STACK_MIN: u32 = 2048;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -74,9 +77,10 @@ pub const PTHREAD_GUARD_DEFAULT: u32 = 4096;
 mod tests {
     use super::*;
 
+    /// musl's `<limits.h>` (probed 2026-09-27).
     #[test]
     fn test_keys_max() {
-        assert_eq!(PTHREAD_KEYS_MAX, 1024);
+        assert_eq!(PTHREAD_KEYS_MAX, 128);
     }
 
     #[test]
@@ -119,18 +123,9 @@ mod tests {
         assert_eq!(PTHREAD_CANCELED, usize::MAX);
     }
 
+    /// musl's `<limits.h>` (probed 2026-09-27).
     #[test]
     fn test_stack_min() {
-        assert_eq!(PTHREAD_STACK_MIN, 16384);
-    }
-
-    #[test]
-    fn test_stack_default_gt_min() {
-        assert!(PTHREAD_STACK_DEFAULT > PTHREAD_STACK_MIN);
-    }
-
-    #[test]
-    fn test_guard_default() {
-        assert_eq!(PTHREAD_GUARD_DEFAULT, 4096);
+        assert_eq!(PTHREAD_STACK_MIN, 2048);
     }
 }

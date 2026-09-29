@@ -525,46 +525,15 @@ fn store_set(pid: i32, resource: i32, new_limit: *const Rlimit) -> Result<(), i3
 /// Stores the soft and hard limits for `resource` in `*rlp`.
 /// Returns 0 on success, -1 on error.
 ///
-/// Validation order matches Linux's `SYSCALL_DEFINE2(getrlimit)`
-/// (`kernel/sys.c`): the kernel calls `do_prlimit(current, resource,
-/// NULL, &value)` *first* — which validates `resource >= RLIM_NLIMITS`
-/// → `-EINVAL` — and only then does `copy_to_user(rlim, &value, ...)`,
-/// which can fail with `-EFAULT`. A buggy caller passing both a bad
-/// resource ordinal and a NULL pointer therefore observes `EINVAL`
-/// on Linux, not `EFAULT`. We pin that same order so userspace
-/// (libc's `getrlimit(3)` wrapper, Python's `resource.getrlimit`)
-/// sees identical errno on either malformed-input combination.
-///
-/// `setrlimit` uses the opposite order (EFAULT before EINVAL)
-/// because Linux's `SYSCALL_DEFINE2(setrlimit)` does
-/// `copy_from_user(&new_rlim, ...)` before `do_prlimit` — so the
-/// asymmetry in this file mirrors Linux's asymmetric kernel code.
+/// glibc 2.39 on x86-64 has no `getrlimit` of its own: it is
+/// `prlimit64(0, resource, NULL, rlp)` (sysdeps/unix/sysv/linux/
+/// getrlimit64.c), and so is this -- [`prlimit`] with no new limit.  A bad
+/// `resource` is `EINVAL`; a NULL `rlp` is a request for nothing, which
+/// succeeds.  It was `EFAULT` until 2026-09-26, the answer of Linux's old
+/// `getrlimit` system call, which glibc does not make.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
-    // Linux validates the resource ordinal inside do_prlimit BEFORE
-    // ever touching the userspace pointer (copy_to_user is the last
-    // step, on the success path). Match that ordering.
-    if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // The null check stays here rather than being left to the kernel, which
-    // answers `InvalidArgument` for a null buffer.  POSIX owes `EFAULT` for a
-    // bad pointer, so libc must catch null itself; the kernel's code is right
-    // for the native ABI and wrong for this one.
-    if rlp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    match store_get(0, resource, rlp) {
-        Ok(()) => 0,
-        Err(e) => {
-            errno::set_errno(e);
-            -1
-        }
-    }
+    prlimit(0, resource, core::ptr::null(), rlp)
 }
 
 /// Set resource limits.
@@ -572,6 +541,12 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 /// Updates the soft and hard limits for `resource`.  The new soft
 /// limit must not exceed the hard limit.
 /// Returns 0 on success, -1 on error.
+///
+/// Like glibc 2.39's on x86-64 (setrlimit64.c), this is
+/// `prlimit(0, resource, rlp, NULL)`: a bad `resource` is `EINVAL` and a
+/// NULL `rlp` changes nothing and succeeds.  Until 2026-09-26 a NULL `rlp`
+/// was `EFAULT`, ahead of the resource, which is the order of Linux's old
+/// `setrlimit` system call -- one glibc does not make.
 ///
 /// `RLIMIT_NOFILE` is enforced for real — the kernel's fd-install path
 /// refuses a descriptor at or above the soft limit, so lowering it lowers
@@ -601,23 +576,7 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 ///   limit is always permitted.  See design-decisions.md §707.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
-    if rlp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    match store_set(0, resource, rlp) {
-        Ok(()) => 0,
-        Err(e) => {
-            errno::set_errno(e);
-            -1
-        }
-    }
+    prlimit(0, resource, rlp, core::ptr::null_mut())
 }
 
 // ---------------------------------------------------------------------------
@@ -885,17 +844,82 @@ pub extern "C" fn nice(inc: i32) -> i32 {
     new_val
 }
 
+/// Whether `which`/`who` names exactly the calling process -- the one target
+/// the native nice calls reach: `SYS_PROCESS_GET_NICE` and
+/// `SYS_PROCESS_SET_NICE` take no process argument and act on the caller
+/// alone.
+///
+/// Anything else is `Err(errno)`, because acting on the caller instead -- what
+/// these functions did until 2026-09-27 -- reported a change to one process
+/// that had happened to another
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`):
+///
+/// - another process: `ESRCH` if there is none by that pid, as Linux says;
+///   `EPERM` if there is, since this library cannot reach it;
+/// - a process group or a user, the caller's own included: `EPERM` (or
+///   `ESRCH` for a group with no member).  On Linux these name every process
+///   in the group or of the user, so doing it to the caller alone would be the
+///   same false success in part.
+///
+/// Linux's order is kept: `which` is checked before this, and the target is
+/// found before any permission test (`kernel/sys.c`, `sys_setpriority`).
+fn prio_target_is_caller(which: i32, who: u32) -> Result<(), i32> {
+    match which {
+        PRIO_PROCESS => {
+            if who == 0 {
+                return Ok(());
+            }
+            // Above `i32::MAX` it cannot be a pid.
+            let Ok(pid) = crate::types::PidT::try_from(who) else {
+                return Err(errno::ESRCH);
+            };
+            if pid == crate::process::getpid() {
+                return Ok(());
+            }
+            Err(target_exists_errno(crate::signal::kill(pid, 0)))
+        }
+        PRIO_PGRP => match crate::types::PidT::try_from(who) {
+            // The caller's own group: it exists, and the caller is in it.
+            Ok(0) => Err(errno::EPERM),
+            Ok(pgrp) if pgrp == crate::process::getpgrp() => Err(errno::EPERM),
+            // `kill(-pgrp, 0)` asks whether the group has a member.
+            Ok(pgrp) => Err(target_exists_errno(crate::signal::kill(
+                pgrp.wrapping_neg(),
+                0,
+            ))),
+            Err(_) => Err(errno::ESRCH),
+        },
+        // Whether another user has a process this library cannot tell, and a
+        // refusal is the true half of either answer.
+        _ => Err(errno::EPERM),
+    }
+}
+
+/// The errno for a target that is not the caller, from the `kill(…, 0)` probe
+/// that looked for it: `ESRCH` if nothing is there, `EPERM` if something is.
+fn target_exists_errno(probe: i32) -> i32 {
+    if probe < 0 && errno::get_errno() == errno::ESRCH {
+        errno::ESRCH
+    } else {
+        errno::EPERM
+    }
+}
+
 /// Get the scheduling priority of a process, process group, or user.
 ///
 /// Returns the nice value (which can be negative), so callers must
 /// clear errno before calling and check it after.  On SlateOS this reads the
-/// caller's real kernel nice via `SYS_PROCESS_GET_NICE` (`who` targeting other
-/// processes is not modelled by the native path — the calling process's value
-/// is returned regardless).
+/// caller's real kernel nice via `SYS_PROCESS_GET_NICE`, which is the only
+/// process it can read: any other target fails, as [`prio_target_is_caller`]
+/// says.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
+pub extern "C" fn getpriority(which: i32, who: u32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = prio_target_is_caller(which, who) {
+        errno::set_errno(e);
         return -1;
     }
     errno::set_errno(0); // Clear errno — return value can be negative.
@@ -906,7 +930,10 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 ///
 /// On SlateOS this installs the nice value in the kernel via
 /// `SYS_PROCESS_SET_NICE`, which re-prioritises the process's tasks — the
-/// change is real, not merely stored.  Returns 0 on success, -1 on error.
+/// change is real, not merely stored.  That call reaches the caller only, so
+/// any other target fails (`ESRCH` or `EPERM`, [`prio_target_is_caller`])
+/// rather than renicing the caller in its place.  Returns 0 on success, -1 on
+/// error.
 ///
 /// Phase 169 / §314: Linux's `sys_setpriority` calls `set_one_prio` on each
 /// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
@@ -922,9 +949,13 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 /// observable by callers that switch on errno.  Equivalent or higher
 /// nice values (lowering priority) are always allowed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
+pub extern "C" fn setpriority(which: i32, who: u32, prio: i32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = prio_target_is_caller(which, who) {
+        errno::set_errno(e);
         return -1;
     }
     let val = prio.clamp(-20, 19);
@@ -947,7 +978,8 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 /// If `new_limit` is non-null, sets the new limit.
 /// If `old_limit` is non-null, stores the old limit.
 ///
-/// Argument-domain validation (Linux-matching):
+/// Argument-domain validation (Linux-matching, in `prlimit64`'s order):
+///   - `new_limit` unreadable (outside user memory) → `EFAULT`, first.
 ///   - `pid < 0` → `-1` with `ESRCH`.  Linux's `find_get_task_by_vpid`
 ///     can't resolve a negative pid; the syscall surface reports it as
 ///     ESRCH (no such process), not EINVAL.
@@ -958,6 +990,9 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 ///     NULL)` is a malformed call and must report it.
 ///   - If `new_limit` is non-NULL: `rlim_cur <= rlim_max` is enforced and
 ///     violation is `EINVAL`.
+///   - `old_limit` is written last, and only if everything before it
+///     succeeded -- a refused new limit leaves it untouched, which it did
+///     not until 2026-09-26.
 ///
 /// ## `pid` is honoured now
 ///
@@ -981,10 +1016,10 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 /// nothing — the caller named *itself* and its own record is gone — and for
 /// the negative-pid domain error above, which names no process at all.
 ///
-/// Linux's `prlimit64` does distinguish the two, and
-/// `crate::linux_rlimit`'s shim goes on doing so, because reproducing
-/// Linux's observable behaviour is that layer's entire job.  This one is not
-/// obliged to inherit the leak.  See design-decisions.md §707.
+/// Linux's `prlimit64` does distinguish the two, and the kernel's Linux-ABI
+/// `prlimit64` (`kernel/src/syscall/linux.rs`) goes on doing so, because
+/// reproducing Linux's observable behaviour is that layer's entire job.  This
+/// one is not obliged to inherit the leak.  See design-decisions.md §707.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
     pid: i32,
@@ -992,39 +1027,64 @@ pub extern "C" fn prlimit(
     new_limit: *const Rlimit,
     old_limit: *mut Rlimit,
 ) -> i32 {
+    let fail = |e: i32| -> i32 {
+        errno::set_errno(e);
+        -1
+    };
+    // `copy_from_user(&new64, new_rlim, ...)`, first of all.
+    let new = if new_limit.is_null() {
+        None
+    } else {
+        if !crate::uio::access_ok(new_limit.addr(), size_of::<Rlimit>()) {
+            return fail(errno::EFAULT);
+        }
+        // SAFETY: a non-NULL limit of the caller's, in user memory.
+        Some(unsafe { new_limit.read_unaligned() })
+    };
+
     // pid: 0 means "self", positive means a real pid.  Negative is
     // never a valid pid value — report it as ESRCH ("no such process").
     if pid < 0 {
-        errno::set_errno(errno::ESRCH);
-        return -1;
+        return fail(errno::ESRCH);
     }
 
-    // Validate resource ordinal up front so a malformed call with both
-    // pointers NULL still fails loudly.
+    // `do_prlimit`'s first check.  (Upstream looks the task up and asks its
+    // permission first; here those are the kernel's, asked by the calls
+    // below, so a foreign pid with a bad resource is EINVAL rather than
+    // EPERM.)
     if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+        return fail(errno::EINVAL);
     }
 
-    // Get old limit first (if requested).  Note this goes to `store_get`
-    // rather than to `getrlimit`, which would hard-code pid 0 and throw the
-    // caller's choice away — that discard is exactly what this call stopped
-    // doing.
+    // The limit before any change -- which is also what asks the kernel
+    // whether this caller may look at `pid` at all.  Note this goes to
+    // `store_get` rather than to `getrlimit`, which would hard-code pid 0 and
+    // throw the caller's choice away.
+    let mut old = Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if let Err(e) = store_get(pid, resource, &raw mut old) {
+        return fail(e);
+    }
+
+    if let Some(new) = new {
+        if let Err(e) = store_set(pid, resource, &raw const new) {
+            // Refused: the caller's old-limit buffer is not touched, as
+            // `do_prlimit` fails before it copies anything out.
+            return fail(e);
+        }
+    }
+
+    // `copy_to_user(old_rlim, ...)`, last -- after the new limit is in
+    // force, as upstream orders it.
     if !old_limit.is_null() {
-        if let Err(e) = store_get(pid, resource, old_limit) {
-            errno::set_errno(e);
-            return -1;
+        if !crate::uio::access_ok(old_limit.addr(), size_of::<Rlimit>()) {
+            return fail(errno::EFAULT);
         }
+        // SAFETY: a non-NULL limit buffer of the caller's, in user memory.
+        unsafe { old_limit.write_unaligned(old) };
     }
-
-    // Set new limit (if requested).
-    if !new_limit.is_null() {
-        if let Err(e) = store_set(pid, resource, new_limit) {
-            errno::set_errno(e);
-            return -1;
-        }
-    }
-
     0
 }
 
@@ -1163,11 +1223,12 @@ mod tests {
     }
 
     #[test]
-    fn getrlimit_null_pointer() {
+    fn getrlimit_null_pointer_asks_for_nothing() {
+        // glibc: prlimit64(0, res, NULL, NULL) -- nothing to copy, 0.
         reset_global_state();
-        let ret = getrlimit(RLIMIT_STACK, core::ptr::null_mut());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(getrlimit(RLIMIT_STACK, core::ptr::null_mut()), 0);
+        assert_eq!(errno::get_errno(), 0);
     }
 
     #[test]
@@ -1332,10 +1393,56 @@ mod tests {
     }
 
     #[test]
-    fn setrlimit_null_pointer() {
+    fn setrlimit_null_pointer_changes_nothing() {
         reset_global_state();
-        let ret = setrlimit(RLIMIT_CPU, core::ptr::null());
-        assert_eq!(ret, -1);
+        let mut before = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(getrlimit(RLIMIT_CPU, &raw mut before), 0);
+        assert_eq!(setrlimit(RLIMIT_CPU, core::ptr::null()), 0);
+        let mut after = Rlimit {
+            rlim_cur: 1,
+            rlim_max: 1,
+        };
+        assert_eq!(getrlimit(RLIMIT_CPU, &raw mut after), 0);
+        assert_eq!(
+            (after.rlim_cur, after.rlim_max),
+            (before.rlim_cur, before.rlim_max)
+        );
+    }
+
+    #[test]
+    fn a_refused_new_limit_leaves_the_old_limit_buffer_alone() {
+        // do_prlimit fails before prlimit64 copies anything out.
+        reset_global_state();
+        let bad = Rlimit {
+            rlim_cur: 10,
+            rlim_max: 5,
+        };
+        let mut old = Rlimit {
+            rlim_cur: 0xAAAA,
+            rlim_max: 0xBBBB,
+        };
+        errno::set_errno(0);
+        assert_eq!(prlimit(0, RLIMIT_CPU, &raw const bad, &raw mut old), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!((old.rlim_cur, old.rlim_max), (0xAAAA, 0xBBBB));
+    }
+
+    #[test]
+    fn prlimit_limit_pointers_outside_user_memory_efault() {
+        reset_global_state();
+        let kernel = (1usize << 63) as *mut Rlimit;
+        errno::set_errno(0);
+        assert_eq!(prlimit(-1, 9999, kernel, core::ptr::null_mut()), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EFAULT,
+            "the new limit is read first"
+        );
+        errno::set_errno(0);
+        assert_eq!(prlimit(0, RLIMIT_CPU, core::ptr::null(), kernel), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
@@ -1447,18 +1554,76 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// The caller, by 0 or by its own pid, is the one target the native call
+    /// reaches.
     #[test]
-    fn getpriority_all_valid_which_values() {
+    fn priority_calls_reach_the_caller_by_zero_or_by_pid() {
         reset_global_state();
-        nice(3);
-        for &which in &[PRIO_PROCESS, PRIO_PGRP, PRIO_USER] {
-            let val = getpriority(which, 0);
-            assert_eq!(
-                val, 3,
-                "getpriority with which={which} should return nice value"
-            );
-            assert_eq!(errno::get_errno(), 0);
+        let me = u32::try_from(crate::process::getpid()).expect("a pid is positive");
+        assert_eq!(setpriority(PRIO_PROCESS, me, 6), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 6);
+        assert_eq!(setpriority(PRIO_PROCESS, 0, 4), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, me), 4);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    /// Another process is refused, never renicing the caller in its place:
+    /// the bug `requests/e-ad-renicing-another-process-renices-the-caller.md`
+    /// reported -- `renice -p <pid>` changed `renice` and said it had changed
+    /// `<pid>`.  On the host the probe finds no such process, so `ESRCH`; on
+    /// SlateOS a live one is `EPERM`.
+    #[test]
+    fn priority_calls_refuse_another_process() {
+        reset_global_state();
+        nice(2);
+        let me = crate::process::getpid();
+        let other = u32::try_from(if me == 1 { 2 } else { 1 }).expect("positive");
+        errno::set_errno(0);
+        assert_eq!(setpriority(PRIO_PROCESS, other, 15), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 2, "the caller is untouched");
+        errno::set_errno(0);
+        assert_eq!(getpriority(PRIO_PROCESS, other), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+        // Not a pid at all.
+        errno::set_errno(0);
+        assert_eq!(setpriority(PRIO_PROCESS, u32::MAX, 15), -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    /// A group or a user names more than the caller on Linux, the caller's own
+    /// included, so it is refused rather than done to the caller alone.
+    #[test]
+    fn priority_calls_refuse_groups_and_users() {
+        reset_global_state();
+        nice(1);
+        let own_pgrp = u32::try_from(crate::process::getpgrp()).expect("positive");
+        for (which, who) in [
+            (PRIO_PGRP, 0),
+            (PRIO_PGRP, own_pgrp),
+            (PRIO_USER, 0),
+            (PRIO_USER, 1000),
+        ] {
+            errno::set_errno(0);
+            assert_eq!(setpriority(which, who, 10), -1, "which={which} who={who}");
+            assert_eq!(errno::get_errno(), errno::EPERM, "which={which} who={who}");
+            errno::set_errno(0);
+            assert_eq!(getpriority(which, who), -1, "which={which} who={who}");
+            assert_eq!(errno::get_errno(), errno::EPERM, "which={which} who={who}");
         }
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 1, "the caller is untouched");
+    }
+
+    /// Linux checks `which` first: a bad one is `EINVAL` whatever `who` is.
+    #[test]
+    fn priority_calls_check_which_before_who() {
+        reset_global_state();
+        errno::set_errno(0);
+        assert_eq!(setpriority(999, 12345, 5), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(getpriority(-1, 12345), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -----------------------------------------------------------------------
@@ -2256,9 +2421,10 @@ mod tests {
     // a bad resource and a NULL pointer therefore observes EINVAL on
     // Linux, not EFAULT.
     //
-    // setrlimit is intentionally NOT reordered: Linux's
-    // `SYSCALL_DEFINE2(setrlimit)` does `copy_from_user` first, so
-    // EFAULT-before-EINVAL is the correct asymmetry for that syscall.
+    // Since 2026-09-26 both are glibc's -- prlimit64 with the other pointer
+    // NULL -- so a NULL pointer is nothing asked, and only the resource can
+    // be wrong.  (setrlimit used to keep the old setrlimit system call's
+    // EFAULT-before-EINVAL, a call glibc on x86-64 does not make.)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2293,13 +2459,13 @@ mod tests {
     }
 
     #[test]
-    fn test_getrlimit_phase112_efault_only_when_resource_valid() {
-        // Valid resource + NULL pointer: resource check passes -> EFAULT.
+    fn test_getrlimit_phase112_valid_resource_with_null_is_nothing_asked() {
+        // Valid resource + NULL pointer: glibc's prlimit64 has nothing to
+        // copy, so 0.
         reset_global_state();
         errno::set_errno(0);
         let ret = getrlimit(RLIMIT_STACK, core::ptr::null_mut());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(ret, 0);
     }
 
     #[test]
@@ -2340,26 +2506,17 @@ mod tests {
     }
 
     #[test]
-    fn test_getrlimit_phase112_setrlimit_keeps_efault_before_einval() {
-        // setrlimit MUST keep the inverted order (EFAULT before EINVAL)
-        // because Linux's setrlimit does copy_from_user before
-        // do_prlimit. Pin that: bad resource + NULL pointer -> EFAULT.
+    fn test_getrlimit_phase112_setrlimit_null_with_bad_resource_is_einval() {
+        // glibc's setrlimit is prlimit64 with the new limit given: NULL is
+        // nothing to copy, so do_prlimit's resource check speaks: EINVAL.
+        // (Linux's old setrlimit system call copied first, and said EFAULT;
+        // glibc on x86-64 does not make that call.)
         reset_global_state();
-        errno::set_errno(0);
-        let ret = setrlimit(-1, core::ptr::null());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
-    }
-
-    #[test]
-    fn test_getrlimit_phase112_setrlimit_efault_at_nlimits_too() {
-        // Same asymmetry confirmation: invalid resource at the boundary
-        // + NULL pointer -> EFAULT (not EINVAL) for setrlimit.
-        reset_global_state();
-        errno::set_errno(0);
-        let ret = setrlimit(RLIMIT_NLIMITS as i32, core::ptr::null());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        for res in [-1, RLIMIT_NLIMITS as i32] {
+            errno::set_errno(0);
+            assert_eq!(setrlimit(res, core::ptr::null()), -1, "{res}");
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 
     #[test]
@@ -3400,9 +3557,32 @@ mod tests {
             reset_global_state();
             drop_cap_sys_resource();
             errno::set_errno(0);
-            // NULL pointer + would-be-raise intent: NULL wins → EFAULT.
-            assert_eq!(setrlimit(RLIMIT_CPU, core::ptr::null()), -1);
+            // A limit the kernel could not read -- here, one in the kernel
+            // half -- is EFAULT before any capability is asked about.
+            let unreadable = 0xFFFF_8000_0000_0000_usize as *const Rlimit;
+            assert_eq!(setrlimit(RLIMIT_CPU, unreadable), -1);
             assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// NULL is not a fault: glibc's `setrlimit` is `prlimit64(0,
+        /// resource, rlim, NULL)`, and a NULL new limit asks the kernel to
+        /// set nothing -- 0, with or without the capability.  It was EFAULT
+        /// here (B-D-RLIMIT-NULL-WAS-EFAULT).
+        #[test]
+        fn test_setrlimit_null_sets_nothing() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 7, 70);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            assert_eq!(setrlimit(RLIMIT_CPU, core::ptr::null()), 0);
+            assert_eq!(errno::get_errno(), 0);
+            let mut now = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut now), 0);
+            assert_eq!((now.rlim_cur, now.rlim_max), (7, 70), "unchanged");
         }
 
         /// EINVAL on a bad resource ordinal must beat the cap probe.
@@ -3851,10 +4031,11 @@ mod tests {
         }
 
         /// prlimit's get-old + set-new path: when the set fails with
-        /// EPERM, the old buffer should still have been populated
-        /// (Linux fills the old buffer before attempting the set).
+        /// EPERM, the caller's old buffer is left alone -- `prlimit64`
+        /// copies the old limit out only `if (!ret && old_rlim)`, after a
+        /// set that succeeded.  (This test used to say the opposite.)
         #[test]
-        fn test_setrlimit_phase179_prlimit_get_old_succeeds_set_eperm() {
+        fn test_setrlimit_phase179_prlimit_set_eperm_leaves_old_alone() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_FSIZE, 50, 100);
@@ -3870,9 +4051,7 @@ mod tests {
             errno::set_errno(0);
             assert_eq!(prlimit(0, RLIMIT_FSIZE, &new, &mut old), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
-            // old should have been populated with the pre-call value.
-            assert_eq!(old.rlim_cur, 50);
-            assert_eq!(old.rlim_max, 100);
+            assert_eq!((old.rlim_cur, old.rlim_max), (0, 0), "untouched");
         }
     }
 }

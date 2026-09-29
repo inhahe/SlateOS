@@ -79,6 +79,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-kshell-rungs-vs-bash.py` | Check rung 115's assertions against real bash, exactly as written. |
 | `scripts/check-lane-signals.py` | Cross-lane operational signalling, over the one directory all lanes share. |
 | `scripts/check-libc-abi.py` | Check our `#[repr(C)]` types against musl's headers, using musl as the oracle. |
+| `scripts/check-libc-declared.py` | Refuse a function musl's headers declare that `libc.a` does not define. |
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
@@ -167,6 +168,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/ed-diff.sh` | Differential test: our ed against GNU ed. |
 | `scripts/env-diff.sh` | Differential test: our `env` against GNU env. |
 | `scripts/espeak-spike/run.sh` | Cross-compile eSpeak NG and link it against SlateOS's own libc.a. |
+| `scripts/espeak-spike/slatelink.sh` | Relink eSpeak NG's already-built objects against the CURRENT libc.a. |
 | `scripts/expand-diff.sh` | Differential test: our expand against GNU expand. |
 | `scripts/expr-diff.sh` | Differential test: our expr against GNU expr, both run inside WSL. |
 | `scripts/extfloat-cases.py` | Generate cases for `scripts/extfloat-diff.sh`. |
@@ -414,4 +416,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_404 scripts._
+_406 scripts._

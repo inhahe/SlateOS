@@ -148,6 +148,12 @@ tree-sitter-typescript:
   texts:
     - tree-sitter-typescript-LICENSE
 
+tree-sitter-xml:
+  version: 0.7.0
+  licence: MIT
+  texts:
+    - tree-sitter-xml-LICENSE
+
 tree-sitter-yaml:
   version: 0.7.2
   licence: MIT

@@ -13,6 +13,7 @@ pub(crate) mod c;
 pub(crate) mod cpp;
 pub(crate) mod css;
 pub(crate) mod diff;
+pub(crate) mod dtd;
 pub(crate) mod go;
 pub(crate) mod html;
 pub(crate) mod ini;
@@ -29,6 +30,7 @@ pub(crate) mod rust;
 pub(crate) mod toml;
 pub(crate) mod tsx;
 pub(crate) mod typescript;
+pub(crate) mod xml;
 pub(crate) mod yaml;
 
 /// The generated file for a grammar, in a module of its own. `$scanner`,
@@ -89,13 +91,14 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 23] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 25] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
             ("cpp", &super::cpp::generated::TABLES),
             ("css", &super::css::generated::TABLES),
             ("diff", &super::diff::generated::TABLES),
+            ("dtd", &super::dtd::generated::TABLES),
             ("go", &super::go::generated::TABLES),
             ("html", &super::html::generated::TABLES),
             ("ini", &super::ini::generated::TABLES),
@@ -115,6 +118,7 @@ mod tests {
             ("toml", &super::toml::generated::TABLES),
             ("tsx", &super::tsx::generated::TABLES),
             ("typescript", &super::typescript::generated::TABLES),
+            ("xml", &super::xml::generated::TABLES),
             ("yaml", &super::yaml::generated::TABLES),
         ];
         for (name, tables) in grammars {

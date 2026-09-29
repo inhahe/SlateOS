@@ -309,6 +309,19 @@ fn html_is_coloured_as_its_tests_say() {
     check("HTML", "html", 38, &[]);
 }
 
+/// **XML is coloured as its grammar's highlight tests say.**
+#[test]
+fn xml_is_coloured_as_its_tests_say() {
+    check("XML", "xml", 10, &[]);
+}
+
+/// **A document type definition is coloured as its grammar's highlight
+/// tests say.**
+#[test]
+fn dtd_is_coloured_as_its_tests_say() {
+    check("DTD", "dtd", 10, &[]);
+}
+
 /// **JavaScript is coloured as its grammar's highlight tests say** --
 /// tagged templates in the language their tag names, and names by where
 /// each was declared (`variables.js`), among them.

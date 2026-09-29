@@ -76,6 +76,9 @@ fn examples(text: &str) -> Vec<Example> {
         i += 1;
         while i < lines.len() && !is_equals(lines[i]) {
             match lines[i].trim() {
+                // A blank line between the name and the attributes, as
+                // XML's corpus has, is no part of either.
+                "" => {}
                 ":error" => error = true,
                 ":skip" => skip = true,
                 attribute if attribute.starts_with(":language(") && attribute.ends_with(')') => {
@@ -167,10 +170,11 @@ fn has_fields(sexp: &str) -> bool {
         .any(|pair| is_field(pair[0]) && pair[1].starts_with('('))
 }
 
-/// Run every example in `grammars/<dir>/corpus/` but those `not_built`
+/// Run every example in `grammars/<dir>/corpus/` but those `left_out`
 /// names (`(file, example)`), answering how many ran and the failures -- a
-/// `not_built` name no example has among them.
-fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<String>) {
+/// `left_out` name no example has among them. An example is left out only
+/// for a reason given where it is listed.
+fn run(language: &str, dir: &str, left_out: &[(&str, &str)]) -> (usize, Vec<String>) {
     let lang = Language::for_injection(language).expect("a language");
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -186,7 +190,7 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
     let mut other = tree_sitter::Parser::new();
     let mut ran = 0;
     let mut failures = Vec::new();
-    let mut left_out = vec![false; not_built.len()];
+    let mut found_out = vec![false; left_out.len()];
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a corpus file");
         // Its path under the corpus, `c/types.txt` -- kept as it is:
@@ -198,11 +202,11 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
             if example.skip {
                 continue;
             }
-            if let Some(at) = not_built
+            if let Some(at) = left_out
                 .iter()
                 .position(|&(f, title)| name == std::path::Path::new(f) && title == example.name)
             {
-                left_out[at] = true;
+                found_out[at] = true;
                 continue;
             }
             ran += 1;
@@ -262,10 +266,10 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
             }
         }
     }
-    for (&(file, name), found) in not_built.iter().zip(left_out) {
+    for (&(file, name), found) in left_out.iter().zip(found_out) {
         if !found {
             failures.push(format!(
-                "{file}: {name}: left out as not built, but there is no such example"
+                "{file}: {name}: left out, but there is no such example"
             ));
         }
     }
@@ -291,10 +295,10 @@ fn corpus_files(dir: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// Every example of `language`'s corpus but those `not_built` parses as
+/// Every example of `language`'s corpus but those `left_out` parses as
 /// upstream's grammar parses it, and at least `at_least` of them ran.
-fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)]) {
-    let (ran, failures) = run(language, dir, not_built);
+fn check(language: &str, dir: &str, at_least: usize, left_out: &[(&str, &str)]) {
+    let (ran, failures) = run(language, dir, left_out);
     assert!(ran >= at_least, "{language}: only {ran} examples ran");
     assert!(
         failures.is_empty(),
@@ -401,6 +405,21 @@ fn css_passes_its_corpus() {
 #[test]
 fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
+}
+
+/// **XML's grammar and DTD's -- their tables, lexers and ported scanners --
+/// parse the package's corpus as upstream's do**, save one example: the
+/// corpus has `<?bar is ?> invalid?>` inside an element be an error, where
+/// XML reads an instruction (`<?bar is ?>`) and then text -- which the port
+/// follows, as `grammars/xml.rs` says.
+#[test]
+fn xml_passes_its_corpus() {
+    check(
+        "XML",
+        "xml",
+        21,
+        &[("errors.txt", "Invalid processing instruction")],
+    );
 }
 
 /// **The YAML grammar -- tables, lexers and its large ported scanner --
@@ -517,7 +536,7 @@ fn the_corpus_format_is_read() {
     assert_eq!(without_fields("(a x: (b) (c))"), "(a (b) (c))");
 }
 
-/// **An example left out must exist**: a name in a `not_built` list that no
+/// **An example left out must exist**: a name in a `left_out` list that no
 /// example of the corpus has is a failure, so the list cannot outlive the
 /// examples it names -- and one that does exist is not run.
 #[test]

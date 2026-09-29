@@ -19,6 +19,7 @@ const GRAMMARS: &[&str] = &[
     "cpp",
     "css",
     "diff",
+    "dtd",
     "go",
     "html",
     "ini",
@@ -35,6 +36,7 @@ const GRAMMARS: &[&str] = &[
     "toml",
     "tsx",
     "typescript",
+    "xml",
     "yaml",
 ];
 

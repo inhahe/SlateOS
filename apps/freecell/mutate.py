@@ -345,8 +345,8 @@ MUTATIONS = [
     ),
     (
         "a key release is played as if it were a press",
-        "            pressed: true,\n            ..\n        }) => app.state.handle_key(*key, *modifiers),",
-        "            ..\n        }) => app.state.handle_key(*key, *modifiers),",
+        "        Event::Key(key) if key.pressed => app.key(key),",
+        "        Event::Key(key) => app.key(key),",
         ["a_key_press_reaches_the_game_and_a_release_does_not"],
     ),
     (
@@ -538,6 +538,54 @@ MUTATIONS = [
         "        let held = modifiers.ctrl || modifiers.alt || modifiers.super_key;",
         "        let held = modifiers.ctrl || modifiers.alt;",
         [HELD],
+    ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(key) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ['the_list_of_keys_reaches_the_window', 'every_advertised_key_does_something', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ['the_list_of_keys_reaches_the_window'],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(key) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ['the_list_of_keys_reaches_the_window', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a key under the list reaches the table',
+        '                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        if help::raises(key) {',
+        '                self.show_help = false;\n            }\n        }\n        if help::raises(key) {',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            self.show_help = false;\n            return EventResult::Consumed;\n        }\n        if button != MouseButton::Left {',
+        '        if button != MouseButton::Left {',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a click leaves the list up',
+        '        if self.show_help {\n            self.show_help = false;\n            return EventResult::Consumed;\n        }\n        if button != MouseButton::Left {',
+        '        if self.show_help {\n            return EventResult::Consumed;\n        }\n        if button != MouseButton::Left {',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the strip does not name F1',
+        '            Self::Keys => "F1  Keys",',
+        '            Self::Keys => "Keys",',
+        ['the_list_of_keys_reaches_the_window'],
+    ),
+    (
+        "the strip's F1 button presses nothing",
+        '            Self::Keys => Key::F1,',
+        '            Self::Keys => Key::F9,',
+        ['the_list_of_keys_reaches_the_window'],
     ),
 ]
 

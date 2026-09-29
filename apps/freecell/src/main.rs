@@ -27,7 +27,7 @@
 //! reports each frame, records a hit box for everything it draws, and answers
 //! keys and clicks through one body the tests drive too.
 
-use gamechrome::{Chrome, HistoryKey, cards};
+use gamechrome::{Chrome, HistoryKey, cards, help};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -177,11 +177,20 @@ enum Control {
     Undo,
     Auto,
     NewGame,
+    /// The list of every key: the strip has room for four, and the game
+    /// answers eighteen.
+    Keys,
 }
 
 impl Control {
     /// Every control, in the order they are drawn.
-    const ALL: [Self; 4] = [Self::Free, Self::Undo, Self::Auto, Self::NewGame];
+    const ALL: [Self; 5] = [
+        Self::Free,
+        Self::Undo,
+        Self::Auto,
+        Self::NewGame,
+        Self::Keys,
+    ];
 
     /// What the strip says this control does.
     const fn label(self) -> &'static str {
@@ -190,6 +199,7 @@ impl Control {
             Self::Undo => "Z  Undo",
             Self::Auto => "A  Auto",
             Self::NewGame => "N  New",
+            Self::Keys => "F1  Keys",
         }
     }
 
@@ -205,9 +215,37 @@ impl Control {
             Self::Undo => Key::Z,
             Self::Auto => Key::A,
             Self::NewGame => Key::N,
+            Self::Keys => Key::F1,
         }
     }
 }
+
+/// Every key the game answers, on the list F1 raises.
+///
+/// The game had no list, and its strip had room for four keys and not the
+/// history's -- Ctrl+Y and Alt+Z, which the operator's answer to C-Q24 added
+/// (`design-decisions.md` §1416) -- nor the arrows, Tab, Enter or Escape.
+/// **Each row is a key the game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    (
+        "Arrows",
+        "Move between the cells, the foundations and the columns",
+    ),
+    ("Tab", "The next row of piles"),
+    ("Enter / Space", "Pick up the card, or put it down"),
+    ("Esc", "Put the card back"),
+    ("F", "Put the card in a free cell"),
+    ("Z / Ctrl+Z", "Take back a move, and what it sent home"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The table before / after this, on any branch",
+    ),
+    ("A", "Send home every card that can go"),
+    ("N", "Deal a new game"),
+    ("F1 / ?", "This list"),
+];
 
 // ── Layout ──────────────────────────────────────────────────────────
 
@@ -2068,6 +2106,9 @@ struct FreeCell {
     /// read against. A click has to be measured against the picture the player
     /// was looking at, which is the one the last `render` drew.
     size: (f32, f32),
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// card moved under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl FreeCell {
@@ -2084,7 +2125,25 @@ impl FreeCell {
         Self {
             state: GameState::new(seed),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         }
+    }
+
+    /// A key, as the window and the strip's buttons both press it: the list
+    /// of keys first -- modal while it is up, so nothing reaches the table
+    /// under it -- and then the game.
+    fn key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.show_help {
+            if help::closes(key) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(key) {
+            self.show_help = true;
+            return EventResult::Consumed;
+        }
+        self.state.handle_key(key.key, key.modifiers)
     }
 
     /// The size the next frame will be drawn at, and the next click read
@@ -2100,7 +2159,19 @@ impl FreeCell {
 
     /// Draw one frame at this size.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
-        self.state.frame(w, h)
+        let mut f = self.state.frame(w, h);
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.state.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
+        f
     }
 
     /// Act on a click at window coordinates, by asking the frame what was drawn
@@ -2110,6 +2181,12 @@ impl FreeCell {
     /// are the ones the drawing pass recorded, so a control that moved cannot
     /// leave its hit box behind.
     fn click(&mut self, x: f32, y: f32, button: MouseButton) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the card under it is one the player cannot see.
+        if self.show_help {
+            self.show_help = false;
+            return EventResult::Consumed;
+        }
         if button != MouseButton::Left {
             return EventResult::Ignored;
         }
@@ -2143,7 +2220,12 @@ impl FreeCell {
                 let Some(control) = Control::ALL.get(usize::from(i)) else {
                     return EventResult::Ignored;
                 };
-                self.state.handle_key(control.key(), Modifiers::default())
+                self.key(&KeyEvent {
+                    key: control.key(),
+                    pressed: true,
+                    modifiers: Modifiers::default(),
+                    text: String::new(),
+                })
             }
             // The chrome. A click here is answered -- it does nothing, but it
             // does not fall through to whatever is behind it either.
@@ -2170,12 +2252,7 @@ impl FreeCell {
 /// the same key the window delivers.
 fn handle_event(app: &mut FreeCell, event: &Event) -> EventResult {
     match event {
-        Event::Key(KeyEvent {
-            key,
-            modifiers,
-            pressed: true,
-            ..
-        }) => app.state.handle_key(*key, *modifiers),
+        Event::Key(key) if key.pressed => app.key(key),
         Event::Mouse(MouseEvent {
             x,
             y,
@@ -4436,7 +4513,7 @@ mod tests {
         // returned nothing at all.
         let mut app = app();
         assert_eq!(
-            app.key_at(&probe::press(Key::F1), FreeCell::SIZE),
+            app.key_at(&probe::press(Key::F9), FreeCell::SIZE),
             EventResult::Ignored
         );
     }
@@ -4517,6 +4594,126 @@ mod tests {
                 "{control:?} and its key left different move counts"
             );
         }
+    }
+
+    /// Tables chosen so that between them every key on the list of keys
+    /// has work: a fresh deal, a move made (Ctrl+Z, Alt+Z), and one taken
+    /// back (Ctrl+Y, Alt+Shift+Z).
+    fn list_states() -> Vec<FreeCell> {
+        let moved = || {
+            let mut state = empty_game();
+            state.tableau[0].push(card(Suit::Hearts, Rank::Five));
+            assert!(state.try_tableau_to_freecell(0));
+            state
+        };
+        let mut undone = moved();
+        assert!(undone.undo());
+        vec![app(), app_with(moved()), app_with(undone)]
+    }
+
+    /// **Every key the list of keys advertises is one the game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed through the window's own
+    /// route, rather than matched against a table beside it here. The
+    /// property is "some table answers this key": Ctrl+Y has nothing to make
+    /// again until a move is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|a| probe::key(a, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 19, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at its opening size, joined.
+    fn drawn_texts(app: &FreeCell) -> String {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; the strip names it, and its button raises it.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut app = app();
+        let before = drawn_texts(&app);
+        assert!(!before.contains(help::CLOSES), "up before anybody asked");
+        assert!(before.contains("F1  Keys"), "the strip does not name F1");
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&app).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+        probe::click(
+            &mut app,
+            Target::Control(byte(control_index(Control::Keys))),
+        );
+        assert!(
+            app.show_help,
+            "the strip's F1 button did not raise the list"
+        );
+    }
+
+    /// **While the list of keys is up, the table takes nothing**: a card
+    /// moved under the list would be one the player cannot see. A click
+    /// puts the list away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut app = app();
+        probe::key(&mut app, &probe::press(Key::F1));
+        let seen = |a: &FreeCell| {
+            (
+                a.state.move_count,
+                a.state.focus,
+                a.state.free_cells,
+                a.state.foundation_total(),
+            )
+        };
+        let before = seen(&app);
+        // Checked after each key, not once after all of them: N deals a new
+        // game, which would put back whatever a key before it moved.
+        for key in [Key::Right, Key::Space, Key::F, Key::A, Key::Z, Key::N] {
+            assert_eq!(
+                probe::key(&mut app, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(app.show_help, "{key:?} put the list away");
+            assert_eq!(seen(&app), before, "{key:?} reached the table");
+        }
+        probe::click(&mut app, Target::Column(0));
+        assert!(!app.show_help, "a click did not put the list away");
+        assert_eq!(seen(&app), before, "the click played");
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(!app.show_help, "Enter did not put the list away");
+        assert_eq!(seen(&app), before, "Enter played as it closed");
     }
 
     #[test]

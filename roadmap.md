@@ -2037,7 +2037,7 @@ live.
   used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
-  systemd units), Java, JavaScript (JSX included), JSON, Makefiles, Markdown (block and inline), Python,
+  systemd units), Java, JavaScript (JSX included), JSON, Lua, Makefiles, Markdown (block and inline), Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
@@ -2055,7 +2055,7 @@ live.
   A bracket's partner is found in the tree, a language inside another's
   in its own (`Highlighter::brackets`): a bracket in a string or a comment
   is none. **Next:** more languages as the editor meets them (SQL for the
-  database viewer, Lua, PowerShell, linker scripts).
+  database viewer, PowerShell, linker scripts).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

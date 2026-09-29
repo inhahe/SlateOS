@@ -460,6 +460,14 @@ fn ilogbl_raw(x: L) -> i32 {
         let lz = m.leading_zeros() as i32;
         return -0x3FFF + 1 - lz;
     }
+    if m >> 63 == 0 {
+        // An encoding the x87 refuses -- an unnormal, a pseudo-infinity or a
+        // pseudo-NaN: glibc's `e_ilogbl.S` hands it to `fxtract`, which
+        // raises invalid and makes a NaN of it, whose exponent `fistp`
+        // stores as FP_ILOGBNAN.
+        raise_invalid();
+        return FP_ILOGBNAN;
+    }
     if e == 0x7FFF {
         raise_invalid();
         return if m << 1 != 0 { FP_ILOGBNAN } else { i32::MAX };
@@ -467,16 +475,14 @@ fn ilogbl_raw(x: L) -> i32 {
     e - 0x3FFF
 }
 
-/// The exponent as a long double (musl's `logbl`).
+/// The exponent as a long double: glibc's x86 `logbl`, which is the unit's
+/// `fxtract` -- `-inf` and divide-by-zero for a zero, `+inf` for an
+/// infinity, a NaN quieted, and for an encoding the unit refuses (an
+/// unnormal, a pseudo-infinity or a pseudo-NaN) its NaN, with invalid.
+/// musl's bit arithmetic, which this was, answered those as numbers.
 #[must_use]
 pub fn logbl(x: L) -> L {
-    if !x.is_finite() {
-        return x * x;
-    }
-    if x.is_zero() {
-        return -(ONE / (x * x));
-    }
-    L::from_i64(i64::from(ilogbl_raw(x)))
+    x.fxtract().1
 }
 
 /// The fractional part, and the integral part through `iptr` (musl's

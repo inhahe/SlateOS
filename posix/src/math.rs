@@ -941,17 +941,22 @@ pub const FP_ILOGB0: i32 = i32::MIN;
 /// `FP_ILOGBNAN`: glibc's value on x86-64, `INT_MIN` too.
 pub const FP_ILOGBNAN: i32 = i32::MIN;
 
-/// glibc's `w_ilogb_template.c`: `EDOM` for the three answers that are not
-/// an exponent -- zero, NaN, infinity.
+/// glibc's `w_ilogb_template.c`: `EDOM` and invalid for the three answers
+/// that are not an exponent -- zero, NaN, infinity. (The vendored libm's
+/// `ilogb` raises nothing; until 2026-09-28 neither did this, which the math
+/// oracle, recording `errno` but not the flags, could not see. The C23
+/// oracle's `llogb` rows, which record both, did.)
 fn ilogb_errno(r: i32) -> i32 {
     if r == FP_ILOGB0 || r == FP_ILOGBNAN || r == i32::MAX {
         set(errno::EDOM);
+        // The return value only reports an argument outside FE_ALL_EXCEPT.
+        let _ = crate::fenv::feraiseexcept(crate::fenv::FE_INVALID);
     }
     r
 }
 
 /// The exponent of `x`: `FP_ILOGB0` for zero, `FP_ILOGBNAN` for a NaN,
-/// `INT_MAX` for an infinity, each with `EDOM`. The crate answers musl's
+/// `INT_MAX` for an infinity, each with `EDOM` and invalid. The crate answers musl's
 /// values, which are these (`INT_MIN`, `INT_MIN`, `INT_MAX`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ilogb(x: f64) -> i32 {

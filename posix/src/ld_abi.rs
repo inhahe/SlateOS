@@ -51,6 +51,8 @@
 /// | `i_l` | `I f(L)` (or `N f(L)`) | `(*const L) -> I` |
 /// | `d_dl` | `D f(D, L)` | `(*const L, D) -> D` |
 /// | `f_fl` | `F f(F, L)` | `(*const L, F) -> F` |
+/// | `n_lii` | `N f(L, I, I)` | `(*const L, I, I) -> N` |
+/// | `i_pl` | `I f(P, L)` | `(P, *const L) -> I` |
 /// | `cl_cl` | `C f(C)` | `(*const C, *mut C)` |
 /// | `cl_clcl` | `C f(C, C)` | `(*const C, *const C, *mut C)` |
 /// | `cl_llll` | `C f(L, L, L, L)` | `(*const L, *const L, *const L, *const L, *mut C)` |
@@ -205,6 +207,25 @@ macro_rules! ld_c {
     };
     (f_fl $c:literal => $rust:ident) => {
         $crate::ld_c!(i_l $c => $rust);
+    };
+    // fromfpl(x, round, width) and its three kin: round and width arrive in
+    // edi and esi and move one register on, to make room for x's address;
+    // the intmax_t comes back in rax, so a tail jump.
+    (n_lii $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "mov edx, esi",
+            "mov esi, edi",
+            "lea rdi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // setpayloadl(x, payload): the pointer stays in rdi, the payload's
+    // address goes in rsi; the int comes back in eax.
+    (i_pl $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "lea rsi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
     };
     // A complex result: 32 bytes of slot and 8 to realign; the argument
     // starts at the caller's first stack slot, now at 48.

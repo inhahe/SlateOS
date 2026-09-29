@@ -175153,7 +175153,7 @@ glibc's `errno` (design-decisions §1132).
 **Tests:** `math::tests::every_answer_is_glibcs_or_within_its_error` replays
 23,113 calls answered by glibc 2.39 under WSL (`posix/tools/oracle/math_harness.py`).
 
-## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions done 2026-09-28: posix/src/mathl.rs, §1134; the 22 `long double` complex functions remain)**
+## D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX — `<fenv.h>`, the `long double` functions and `<complex.h>` do not exist (lane D, 2026-09-27) — **Status: FIXED 2026-09-28 -- the 22 `long double` complex functions were the last (`posix/src/complexl.rs`; D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS). Before that: OPEN (`<fenv.h>` done 2026-09-27: posix/src/fenv.rs, glibc's x86-64 fenv; `<complex.h>` done 2026-09-28 but for its `long double` functions: posix/src/complex.rs, FreeBSD's msun; the `long double` functions done 2026-09-28: posix/src/mathl.rs, §1134; the 22 `long double` complex functions remain)**
 
 **In short:** three parts of C's maths are missing from the C library, so a C
 program that uses them does not link: changing or reading the rounding mode
@@ -175482,7 +175482,7 @@ numbers there, no argument can land near it: about 16 integers deep for
 double, 20 for long double. For float, CORE-MATH's correctly rounded
 `lgammaf` (MIT) is a ready alternative.
 
-## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99)**
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the narrowing functions, `clog10` and the `long double` Bessel functions remain)**
 
 **In short:** a C program that calls one of the functions below does not
 link. None is in C99; they are C23 additions, GNU extensions, or the `long
@@ -175495,10 +175495,10 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 | `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | **done 2026-09-28** (`complexl.rs`): FreeBSD msun's `ld80` versions where it has them, `complex.rs`'s `double` algorithms carried to 80 bits for `ccoshl`, `csinhl`, `ctanhl` and their circular twins, glibc's `cpowl`; with `__mulxc3` and `__divxc3`, which a C compiler calls for `long double complex` `*` and `/` and which were missing too |
 | GNU complex | `clog10` `clog10f` `clog10l` | `clog`, divided by `ln 10` with glibc's care near `|z| = 1` |
 | `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | musl has none; FreeBSD msun has no `ld80` Bessel either; glibc's are LGPL -- needs its own derivation (Cephes' `j0l` family is the usual permissive source) |
-| C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | exact functions, IEEE 754-2019 section 5.3 and 9.7 -- short, and testable bit for bit against glibc |
-| C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | the `double` and `float` ones exist -- but as **compiler_builtins' weak exports**, never checked against glibc; this work should define all twelve in `math.rs`/`mathl.rs`, with oracle rows |
+| C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | **done 2026-09-28** (`c23math.rs`): glibc's code, bit for bit, down to the x87 encodings it refuses |
+| C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | **done 2026-09-28**, all twelve (`c23math.rs`, with oracle rows): the `double` and `float` ones are ours now, where they were compiler_builtins' weak exports |
 | C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | one rounding into the narrower type: round-to-odd in the wider one, then round |
-| XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28) |
+| XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28; `scalbl` the same day, `c23math.rs`: glibc's x87 `e_scalbl.S`, operation for operation) |
 | fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
 
 `matherr` (an SVID hook glibc keeps only for old binaries) is deliberately

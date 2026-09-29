@@ -394,6 +394,80 @@ fn every_table_is_laid_out_as_c_lays_it_out() {
 
 /// **The Rust names every table, the lexers and the language**, in the terms
 /// `gui/syntax`'s `ffi` module provides.
+/// **An older generator's reductions read as a newer one's**: `.name =`
+/// arguments in place of the last two, each defaulting to 0 -- the same
+/// action table either way.
+#[test]
+fn an_older_generators_reductions_read_as_a_newer_ones() {
+    let newer = parse(MINI).unwrap();
+    let older = MINI.replace(
+        "REDUCE(sym_document, 1, -1, 1)",
+        "REDUCE(sym_document, 1, .dynamic_precedence = -1, .production_id = 1)",
+    );
+    assert_ne!(older, MINI, "the premise: the sample has the reduction");
+    let older = parse(&older).unwrap();
+    assert_eq!(blob(&older, "parse_actions"), blob(&newer, "parse_actions"));
+    let bare =
+        parse(&MINI.replace("REDUCE(sym_document, 1, -1, 1)", "REDUCE(sym_document, 1)")).unwrap();
+    let actions = blob(&bare, "parse_actions");
+    assert_eq!(
+        &actions[6 * 8..7 * 8],
+        [1, 1, 3, 0, 0, 0, 0, 0],
+        "reduce, zeros"
+    );
+    let only_production = parse(&MINI.replace(
+        "REDUCE(sym_document, 1, -1, 1)",
+        "REDUCE(sym_document, 1, .production_id = 1)",
+    ))
+    .unwrap();
+    let actions = blob(&only_production, "parse_actions");
+    assert_eq!(&actions[6 * 8..7 * 8], [1, 1, 3, 0, 0, 0, 1, 0]);
+    // A field this does not know, or names where none belong, is refused.
+    for bad in [
+        "REDUCE(sym_document, 1, .precedence = 1)",
+        "REDUCE(sym_document, 1, -1, 1, .production_id = 1)",
+    ] {
+        assert!(
+            parse(&MINI.replace("REDUCE(sym_document, 1, -1, 1)", bad)).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+/// **An older generator's lexers read the end of the text**: its
+/// `START_LEXER` reads `eof` itself, so a main lexer with no `eof =` line
+/// is an older generator's, and all its lexers are made to read it -- where
+/// a newer one's keyword lexer without the line does not.
+#[test]
+fn an_older_generators_lexers_read_the_end() {
+    let reads =
+        |rust: &str, name: &str| -> bool { rust.contains(&format!("{name}_default, true)")) };
+    let newer = parse(MINI).unwrap().render("mini").rust;
+    assert!(reads(&newer, "lex_main") && reads(&newer, "lex_keywords"));
+    // An older file: neither lexer has the line.
+    let older_text = MINI.replace("eof = lexer->eof(lexer);", "");
+    assert_eq!(
+        MINI.matches("eof = lexer->eof(lexer);").count(),
+        2,
+        "the premise"
+    );
+    let older = parse(&older_text).unwrap().render("mini").rust;
+    assert!(reads(&older, "lex_main"), "{older}");
+    assert!(reads(&older, "lex_keywords"), "{older}");
+    // A newer file whose keyword lexer does without it: that one does not.
+    let second = MINI.rfind("eof = lexer->eof(lexer);").unwrap();
+    let keywords_without = format!(
+        "{}{}",
+        &MINI[..second],
+        &MINI[second..].replacen("eof = lexer->eof(lexer);", "", 1)
+    );
+    let rust = parse(&keywords_without).unwrap().render("mini").rust;
+    assert!(
+        reads(&rust, "lex_main") && !reads(&rust, "lex_keywords"),
+        "{rust}"
+    );
+}
+
 #[test]
 fn the_rust_names_every_table_the_lexers_and_the_language() {
     let out = parse(MINI).unwrap().render("mini");

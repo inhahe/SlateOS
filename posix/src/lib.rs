@@ -347,6 +347,7 @@ mod accounts_oracle;
 pub mod aio;
 pub mod alloca;
 pub mod assert;
+pub mod besl;
 pub mod c23math;
 pub mod compiler_rt;
 pub mod complex;

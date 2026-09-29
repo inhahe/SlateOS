@@ -1899,8 +1899,9 @@ const LOG2E_LO: L = L::from_bits(0xBFBE, 0x82F0025F2DC582EE);
 const LOG2_10D_HI: L = L::from_bits(0x4000, 0xD49A784BCD1B8AFE);
 const LOG2_10D_LO: L = L::from_bits(0x3FBF, 0x9257EDFE9B5FB69A);
 
-/// `a + b` as `(s, e)`, `s = rn(a + b)`, `s + e = a + b` exactly (Knuth).
-fn two_sum(a: L, b: L) -> (L, L) {
+/// `a + b` as `(s, e)`, `s = rn(a + b)`, `s + e = a + b` exactly (Knuth) --
+/// `besl.rs`'s double-long-double arithmetic's too.
+pub(crate) fn two_sum(a: L, b: L) -> (L, L) {
     let s = a + b;
     let bb = s - a;
     let e = (a - (s - bb)) + (b - bb);

@@ -39,6 +39,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `iconv_hand_harness.py` | `posix/src/iconv_hand_oracle.txt` (every byte of the 25 hand-written single-byte sets, each encoder checked to be its decoder turned round) | `iconv.rs`, `include_str!` |
 | `tcvn_harness.py` (cases: `tcvn_cases.py`) | a table, pasted as `GLIBC_TCVN` | `iconv.rs` |
 | `prefix_harness.py` (cases: `prefix_cases.py`) | a table, pasted as `GLIBC_PREFIX` | `iconv.rs` |
+| `tscii_harness.py` (cases: `tscii_cases.py`) | a table, pasted as `GLIBC_TSCII` | `iconv.rs` |
 | `wscanf_harness.py` | a table, pasted as `GLIBC_WSCANF` | `scanf.rs` |
 | `wscanf_stream_oracle.c` | eight lines, quoted in its header | `scanf.rs`, asserted by hand |
 | `addr_harness.py` (`addr_cases.py`, `addr_oracle.c`) | a table, pasted as `GLIBC` | `inet.rs` |

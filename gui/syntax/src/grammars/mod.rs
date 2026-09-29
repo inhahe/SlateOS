@@ -78,3 +78,44 @@ macro_rules! generated {
     };
 }
 pub(crate) use generated;
+
+#[cfg(test)]
+mod tests {
+    /// **Every table of every grammar inflates to its length**: the tables
+    /// are carried deflated, and one that did not inflate would be a grammar
+    /// that reads nothing.
+    #[test]
+    fn every_table_inflates_to_its_length() {
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 20] = [
+            ("ada", &super::ada::generated::TABLES),
+            ("bash", &super::bash::generated::TABLES),
+            ("c", &super::c::generated::TABLES),
+            ("cpp", &super::cpp::generated::TABLES),
+            ("css", &super::css::generated::TABLES),
+            ("go", &super::go::generated::TABLES),
+            ("html", &super::html::generated::TABLES),
+            ("java", &super::java::generated::TABLES),
+            ("javascript", &super::javascript::generated::TABLES),
+            ("jsdoc", &super::jsdoc::generated::TABLES),
+            ("json", &super::json::generated::TABLES),
+            ("markdown", &super::markdown::generated::TABLES),
+            (
+                "markdown_inline",
+                &super::markdown_inline::generated::TABLES,
+            ),
+            ("python", &super::python::generated::TABLES),
+            ("regex", &super::regex::generated::TABLES),
+            ("rust", &super::rust::generated::TABLES),
+            ("toml", &super::toml::generated::TABLES),
+            ("tsx", &super::tsx::generated::TABLES),
+            ("typescript", &super::typescript::generated::TABLES),
+            ("yaml", &super::yaml::generated::TABLES),
+        ];
+        for (name, tables) in grammars {
+            assert!(tables.len() > 5, "{name}");
+            for (i, table) in tables.iter().enumerate() {
+                assert!(table.inflates(), "{name}: table {i}");
+            }
+        }
+    }
+}

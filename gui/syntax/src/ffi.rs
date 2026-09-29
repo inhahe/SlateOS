@@ -249,9 +249,51 @@ pub fn set_contains(ranges: &[(i32, i32)], c: i32) -> bool {
         .is_ok()
 }
 
-/// A table's bytes, aligned for any of the rows it holds.
-#[repr(C, align(8))]
-pub struct Aligned<T: ?Sized>(pub T);
+/// A grammar's table as its generated file carries it: deflated (RFC 1951,
+/// raw), and how long it is inflated.
+pub struct Deflated {
+    /// The deflated bytes.
+    pub bytes: &'static [u8],
+    /// How many bytes they inflate to.
+    pub len: usize,
+}
+
+impl Deflated {
+    /// The table, inflated into memory aligned for any row it holds -- a
+    /// `TSParseActionEntry`'s eight bytes at most -- which is kept for the
+    /// life of the process, as the runtime needs a grammar's tables to be:
+    /// each grammar's are inflated once, the first time it is asked for.
+    ///
+    /// Bytes that do not inflate to `len` -- a broken build, which the tests
+    /// rule out for every table of every grammar -- give `len` zeros: a
+    /// grammar that reads nothing, rather than a table shorter than the
+    /// runtime will read.
+    #[must_use]
+    pub fn inflate(&self) -> *const u8 {
+        let mut words = vec![0u64; self.len.div_ceil(8)];
+        if let Ok(bytes) = deflate::inflate_limited(self.bytes, self.len)
+            && bytes.len() == self.len
+        {
+            for (word, chunk) in words.iter_mut().zip(bytes.chunks(8)) {
+                let mut eight = [0u8; 8];
+                if let Some(into) = eight.get_mut(..chunk.len()) {
+                    into.copy_from_slice(chunk);
+                }
+                // The bytes in the order they came: native order, which
+                // is little-endian here (a big-endian build does not
+                // compile).
+                *word = u64::from_ne_bytes(eight);
+            }
+        }
+        Box::leak(words.into_boxed_slice()).as_ptr().cast::<u8>()
+    }
+
+    /// Whether the bytes inflate to exactly `len` of them.
+    #[cfg(test)]
+    pub fn inflates(&self) -> bool {
+        deflate::inflate_limited(self.bytes, self.len).is_ok_and(|b| b.len() == self.len)
+    }
+}
 
 /// A row of the parse actions: `TSParseActionEntry`, eight bytes, read only
 /// by the runtime.
@@ -374,10 +416,15 @@ pub struct TSLanguage {
 #[repr(transparent)]
 pub struct SyncLanguage(pub TSLanguage);
 
-// SAFETY: every pointer in a grammar's `TSLanguage` points at an immutable
-// static -- its tables, its names, its functions -- and the runtime only
-// reads through them; reading from several threads at once is sound.
+// SAFETY: every pointer in a grammar's `TSLanguage` points at memory nothing
+// writes to and nothing frees -- its tables, inflated once and kept for the
+// life of the process; its names and functions, statics -- and the runtime
+// only reads through them: reading from several threads at once is sound.
 unsafe impl Sync for SyncLanguage {}
+
+// SAFETY: as for `Sync`: the pointers are to memory that outlives every
+// thread and is never written, so the struct may move to another thread.
+unsafe impl Send for SyncLanguage {}
 
 /// A grammar's symbol or field names: pointers to C string literals.
 #[repr(transparent)]
@@ -401,21 +448,22 @@ macro_rules! lexer_entry {
 }
 pub(crate) use lexer_entry;
 
-/// The handle the runtime takes a grammar by, for the `LANGUAGE` static a
+/// The handle the runtime takes a grammar by, for the `language()` a
 /// generated file defines.
 macro_rules! language_fn {
     () => {
-        extern "C" fn language() -> *const () {
-            (&raw const LANGUAGE).cast()
+        extern "C" fn language_raw() -> *const () {
+            core::ptr::from_ref(language()).cast()
         }
 
         /// The grammar, as the runtime takes it.
         pub(crate) fn language_fn() -> tree_sitter_language::LanguageFn {
-            // SAFETY: `language` returns a pointer to a static `TSLanguage`,
-            // laid out as `tree_sitter/parser.h` lays it out and valid for
-            // the life of the process -- what the runtime asks of the
-            // function a `LanguageFn` wraps.
-            unsafe { tree_sitter_language::LanguageFn::from_raw(language) }
+            // SAFETY: `language_raw` returns a pointer to a `TSLanguage`
+            // built once and kept for the life of the process, its tables
+            // inflated into memory kept as long, laid out as
+            // `tree_sitter/parser.h` lays it out -- what the runtime asks of
+            // the function a `LanguageFn` wraps.
+            unsafe { tree_sitter_language::LanguageFn::from_raw(language_raw) }
         }
     };
 }

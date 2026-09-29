@@ -1487,6 +1487,55 @@ impl SettingsState {
         self.datetime = datetimesettings::DateTimeFile::load();
     }
 
+    /// Read the settings file called `name` again after the desktop said it
+    /// changed -- set in the desktop's own panels, in another Settings window,
+    /// by the program it belongs to, or by hand (§1418, §1434). Only that
+    /// file: a file this window does not show is not read.
+    ///
+    /// Each file is saved whole, from the copy read here. Read at startup
+    /// only, that copy went stale, and the next change on any of its pages
+    /// wrote it over whatever had changed meanwhile.
+    ///
+    /// Nothing is written and nothing is flagged for the compositor: this is
+    /// the file's news, not the user's change, and writing it back would race
+    /// whoever wrote it. Whether anything this window shows changed.
+    fn reread(&mut self, name: &str) -> bool {
+        if name == appearance::CONFIG_NAME {
+            let before = self.appearance.settings.clone();
+            self.load_appearance();
+            before != self.appearance.settings
+        } else if name == inputsettings::CONFIG_NAME {
+            let before = self.input.settings.clone();
+            self.load_input();
+            before != self.input.settings
+        } else if name == notifsettings::CONFIG_NAME {
+            let before = self.notif.settings.clone();
+            self.load_notifications();
+            before != self.notif.settings
+        } else if name == datetimesettings::CONFIG_NAME {
+            let before = self.datetime.settings.clone();
+            self.load_datetime();
+            before != self.datetime.settings
+        } else if name == lockscreen::CONFIG_NAME {
+            let before = self.lock_after_minutes;
+            self.lock_after_minutes = lockscreen::stored_minutes();
+            before != self.lock_after_minutes
+        } else if name == lockscreen::CLOCK_CONFIG {
+            let before = (self.lock_clock_seconds, self.lock_clock_date);
+            (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
+            before != (self.lock_clock_seconds, self.lock_clock_date)
+        } else if name == associations::CONFIG_NAME {
+            let before = (
+                std::mem::take(&mut self.default_apps),
+                std::mem::take(&mut self.default_app_categories),
+            );
+            self.refresh_default_apps();
+            before.0 != self.default_apps || before.1 != self.default_app_categories
+        } else {
+            false
+        }
+    }
+
     /// Read the machine's real accounts from the system account database.
     ///
     /// Separate from [`SettingsState::new`] and called by `main`, the same as
@@ -5998,6 +6047,17 @@ impl SettingsState {
     /// click, and — because each save schedules a notification — would have the
     /// compositor re-read its colours every time a slider moved.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A settings file changed and the desktop says so. Answered ahead of
+        // the snapshot, so a file read again is not taken for the user's
+        // change and written straight back over whoever wrote it -- and ahead
+        // of the dialogs, which would otherwise be handed it while they are up.
+        if let Event::SettingsChanged { group } = event {
+            return if self.reread(group.file_name()) {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
         let before = self.snapshot();
         let result = self.dispatch_event(event);
         let changed = self.changed_since(&before);
@@ -7760,6 +7820,164 @@ mod tests {
             assert!(
                 saved.additional_clocks.iter().all(|c| !c.visible),
                 "the clock's switch did not reach the file"
+            );
+        });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &str) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name.as_bytes()).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **A file changed elsewhere is read again, and not written back**
+    /// (§1434). Settings saves `appearance.yaml` whole, from the copy it read
+    /// at startup: a change made meanwhile -- by the desktop's own panel,
+    /// another Settings window, or by hand -- was written over by the next
+    /// change on any Personalization page. Read again when the desktop says
+    /// so, the next change keeps it.
+    ///
+    /// The re-read writes nothing and asks the compositor for nothing: it is
+    /// the file's news, not the user's change. Another file's announcement is
+    /// not this one's.
+    #[test]
+    fn a_file_changed_elsewhere_is_read_again_and_not_written_back() {
+        settingsfile::testing::with_scratch_config("settings-reread", |_| {
+            let mut first = SettingsState::new();
+            first.load_appearance();
+            let mut second = SettingsState::new();
+            second.load_appearance();
+            second.current_page = SettingsPage::Themes;
+
+            // The first window turns the night light on.
+            assert!(!first.appearance.settings.night_light);
+            first.appearance.settings.night_light = true;
+            first.save_appearance();
+
+            assert_eq!(
+                second.handle_event(&announce(inputsettings::CONFIG_NAME)),
+                EventResult::Ignored
+            );
+            assert!(
+                !second.appearance.settings.night_light,
+                "another file's announcement read this one"
+            );
+            assert_eq!(
+                second.handle_event(&announce(appearance::CONFIG_NAME)),
+                EventResult::Consumed
+            );
+            assert!(
+                second.appearance.settings.night_light,
+                "the change did not reach the other window"
+            );
+            assert!(
+                !second.take_appearance_change(),
+                "the file read again was written back"
+            );
+            assert_eq!(
+                second.handle_event(&announce(appearance::CONFIG_NAME)),
+                EventResult::Ignored,
+                "a file read again unchanged changed the window"
+            );
+
+            // The second window's own change keeps the first's.
+            let light = center_of(&second, RowHit::Select(SelectId::ThemeMode, 1))
+                .expect("the Themes page draws its cards");
+            second.handle_event(&Event::Mouse(MouseEvent {
+                x: light.0,
+                y: light.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            let saved = appearance::AppearanceFile::load().settings;
+            assert_eq!(saved.theme_mode, ThemeMode::Light);
+            assert!(
+                saved.night_light,
+                "the other window's change was written over"
+            );
+        });
+    }
+
+    /// **Every file Settings shows is followed**, each by its own
+    /// announcement: the one a change was written to is read, and it alone.
+    #[test]
+    fn every_file_settings_shows_is_read_again_when_it_changes() {
+        settingsfile::testing::with_scratch_config("settings-reread-each", |_| {
+            let mut other = SettingsState::new();
+            other.load_input();
+            other.load_notifications();
+            other.load_datetime();
+            let mut app = SettingsState::new();
+            app.load_input();
+            app.load_notifications();
+            app.load_datetime();
+            app.load_lock_delay();
+            app.refresh_default_apps();
+
+            other.input.settings.mouse.double_click_ms += 100;
+            other.save_input();
+            other.notif.settings.quiet_hours.enabled = !other.notif.settings.quiet_hours.enabled;
+            other.save_notifications();
+            other.datetime.settings.show_seconds = !other.datetime.settings.show_seconds;
+            other.save_datetime();
+            let minutes = lockscreen::CHOICES
+                .iter()
+                .copied()
+                .find(|&m| m != app.lock_after_minutes)
+                .expect("a second delay to choose");
+            lockscreen::store_minutes(minutes).expect("the scratch config is writable");
+            let clock = (!app.lock_clock_seconds, !app.lock_clock_date);
+            lockscreen::store_clock(clock.0, clock.1).expect("the scratch config is writable");
+            let mut doc = settingsfile::load(associations::CONFIG_NAME);
+            doc.set_str(&["associations", "txt"], "/usr/bin/chosen-editor");
+            settingsfile::store(associations::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            // Whether `app` shows what `other` wrote to the file named.
+            type Shows = fn(&SettingsState, &SettingsState) -> bool;
+            let checks: [(&str, Shows); 6] = [
+                (inputsettings::CONFIG_NAME, |a, o| {
+                    a.input.settings == o.input.settings
+                }),
+                (notifsettings::CONFIG_NAME, |a, o| {
+                    a.notif.settings == o.notif.settings
+                }),
+                (datetimesettings::CONFIG_NAME, |a, o| {
+                    a.datetime.settings == o.datetime.settings
+                }),
+                (lockscreen::CONFIG_NAME, |a, _| {
+                    a.lock_after_minutes == lockscreen::stored_minutes()
+                }),
+                (lockscreen::CLOCK_CONFIG, |a, _| {
+                    (a.lock_clock_seconds, a.lock_clock_date) == lockscreen::stored_clock()
+                }),
+                (associations::CONFIG_NAME, |a, _| {
+                    a.default_apps
+                        .iter()
+                        .any(|entry| entry.program == "/usr/bin/chosen-editor")
+                }),
+            ];
+            for (at, &(name, matches)) in checks.iter().enumerate() {
+                assert!(
+                    !matches(&app, &other),
+                    "{name} matched before it was announced: nothing tested"
+                );
+                assert_eq!(
+                    app.handle_event(&announce(name)),
+                    EventResult::Consumed,
+                    "{name}"
+                );
+                for &(later, unread) in checks.iter().skip(at + 1) {
+                    assert!(!unread(&app, &other), "{name}'s announcement read {later}");
+                }
+                assert!(matches(&app, &other), "{name} was not read again");
+            }
+            assert!(!app.take_input_change(), "input.yaml was written back");
+            assert!(
+                !app.take_notifications_change(),
+                "notifications.yaml was written back"
             );
         });
     }

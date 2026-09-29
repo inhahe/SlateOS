@@ -237,6 +237,108 @@ MUTATIONS = [
         "    if true {",
         ["a_long_title_is_cut_with_an_ellipsis"],
     ),
+    (
+        'an announced settings file is not read again',
+        '            return if self.reread(group.file_name()) {',
+        '            return if false && self.reread(group.file_name()) {',
+        ['a_file_changed_elsewhere_is_read_again_and_not_written_back', 'every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'a settings file read again is written back',
+        '            self.load_appearance();\n            before != self.appearance.settings',
+        '            self.load_appearance();\n            self.save_appearance();\n            before != self.appearance.settings',
+        ['a_file_changed_elsewhere_is_read_again_and_not_written_back'],
+    ),
+    (
+        "one file's announcement reads another too",
+        '            self.load_input();\n            before != self.input.settings',
+        '            self.load_input();\n            self.load_appearance();\n            before != self.input.settings',
+        ['a_file_changed_elsewhere_is_read_again_and_not_written_back'],
+    ),
+    (
+        'appearance.yaml is not read again when announced',
+        '        if name == appearance::CONFIG_NAME {',
+        '        if name == "" {',
+        ['a_file_changed_elsewhere_is_read_again_and_not_written_back'],
+    ),
+    (
+        'input.yaml is not read again when announced',
+        '        } else if name == inputsettings::CONFIG_NAME {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'notifications.yaml is not read again when announced',
+        '        } else if name == notifsettings::CONFIG_NAME {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'datetime.yaml is not read again when announced',
+        '        } else if name == datetimesettings::CONFIG_NAME {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'session.yaml is not read again when announced',
+        '        } else if name == lockscreen::CONFIG_NAME {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'lockscreen.yaml is not read again when announced',
+        '        } else if name == lockscreen::CLOCK_CONFIG {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'fileassoc.yaml is not read again when announced',
+        '        } else if name == associations::CONFIG_NAME {',
+        '        } else if name == "" {',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'appearance.yaml read again says it changed nothing',
+        '            before != self.appearance.settings\n',
+        '            false\n',
+        ['a_file_changed_elsewhere_is_read_again_and_not_written_back'],
+    ),
+    (
+        'input.yaml read again says it changed nothing',
+        '            before != self.input.settings\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'notifications.yaml read again says it changed nothing',
+        '            before != self.notif.settings\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'datetime.yaml read again says it changed nothing',
+        '            before != self.datetime.settings\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'session.yaml read again says it changed nothing',
+        '            before != self.lock_after_minutes\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'lockscreen.yaml read again says it changed nothing',
+        '            before != (self.lock_clock_seconds, self.lock_clock_date)\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
+    (
+        'fileassoc.yaml read again says it changed nothing',
+        '            before.0 != self.default_apps || before.1 != self.default_app_categories\n',
+        '            false\n',
+        ['every_file_settings_shows_is_read_again_when_it_changes'],
+    ),
 ]
 
 if __name__ == "__main__":

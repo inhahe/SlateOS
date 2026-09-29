@@ -172908,12 +172908,19 @@ and some will turn out to match only Ctrl chords (that is the separate
 AltGr item, a Ctrl shortcut matched on Ctrl alone). Done before it: the ten
 games of the redo-tree pass, paint and the whiteboard (2026-09-29).
 
-**The fix**, per program: after the program's own chords (Ctrl+S, Alt+Z,
-Alt+Left) and before its bare bindings, a key that
-`textline::is_command(key.modifiers)` calls a command -- Ctrl or Alt alone, or
-anything with the Windows key -- is not taken. AltGr, which arrives as
-Ctrl+Alt, is not a command and goes on: a letter it types is typed. A test
-per program presses a bound letter with Alt and with the Windows key and
+**The fix**, per program, after the program's own chords (Ctrl+S, Alt+Z,
+Alt+Left) and before its bare bindings -- one of two rules, by what the
+binding matches:
+
+- **On the key** (`Key::R => reset`): only a plain key, nothing held but
+  Shift -- `textline::is_plain`. AltGr+R types a character on some layouts,
+  or none, and is not R.
+- **On the letter typed** (hangman's guess, paint's tool letters): not a
+  command -- `!textline::is_command`, which is Ctrl or Alt alone or
+  anything with the Windows key. AltGr is not a command and counts by what
+  it types.
+
+A test per program presses a bound key with Alt and with the Windows key and
 finds nothing changed. The terminal is the exception: Alt+letter is the
 shell's (sent as Escape and the letter) and only the Windows key's chords
 stay out.

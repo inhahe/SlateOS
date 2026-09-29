@@ -155,6 +155,30 @@ MUTATIONS = [
         "    for ch in typed.chars() {",
         [TYPING],
     ),
+    (
+        'a key held with Ctrl is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.alt && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'a key held with Alt is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.ctrl && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'a key held with the Windows key is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    !modifiers.ctrl && !modifiers.alt',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        'AltGr is plain',
+        '    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key',
+        '    modifiers.ctrl == modifiers.alt && !modifiers.super_key',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
 ]
 
 if __name__ == "__main__":

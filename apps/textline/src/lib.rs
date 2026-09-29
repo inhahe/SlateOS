@@ -22,7 +22,8 @@
 //! It also says, for any program, whether a keystroke is a command or typing
 //! ([`is_ctrl_chord`], [`is_command`], [`types_into_field`]), which is not
 //! obvious from the event: a command arrives carrying its letter as text, and
-//! AltGr arrives looking like a command.
+//! AltGr arrives looking like a command. And whether a key is plain enough
+//! for a binding on the key itself ([`is_plain`]).
 
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::FontWeightHint;
@@ -60,6 +61,21 @@ pub const fn is_ctrl_chord(modifiers: Modifiers) -> bool {
 #[must_use]
 pub const fn is_command(modifiers: Modifiers) -> bool {
     modifiers.super_key || modifiers.ctrl != modifiers.alt
+}
+
+/// Whether a key held with `modifiers` is plain: nothing held with it but
+/// Shift, if anything. What a binding on the key itself answers -- the
+/// stopwatch's R, a game's N -- before it acts.
+///
+/// Stricter than `!`[`is_command`], which lets AltGr through because AltGr
+/// types: a binding on the *letter typed* counts AltGr+E by the `e` it
+/// typed. A binding on the *key* cannot tell what AltGr made of it -- AltGr+R
+/// is `®` on one layout and nothing on another -- so AltGr+R is not R. Alt's
+/// chords are the window's and the Windows key's the desktop's, and each
+/// arrives carrying its key: without this, Alt+R reset a running stopwatch.
+#[must_use]
+pub const fn is_plain(modifiers: Modifiers) -> bool {
+    !modifiers.ctrl && !modifiers.alt && !modifiers.super_key
 }
 
 /// Whether `key` types into a text field: a press that is not a command
@@ -418,6 +434,9 @@ mod tests {
             let held = m(ctrl, alt, windows);
             assert_eq!(is_ctrl_chord(held), chord, "chord: {held:?}");
             assert_eq!(is_command(held), command, "command: {held:?}");
+            // Plain is nothing held at all: AltGr, not a command, is not
+            // plain either.
+            assert_eq!(is_plain(held), !(ctrl || alt || windows), "plain: {held:?}");
             let press = KeyEvent {
                 key: Key::A,
                 pressed: true,
@@ -428,6 +447,7 @@ mod tests {
         }
         // Shift changes none of it.
         assert!(!is_command(Modifiers::shift()));
+        assert!(is_plain(Modifiers::shift()));
         assert!(is_ctrl_chord(Modifiers {
             shift: true,
             ..Modifiers::ctrl()

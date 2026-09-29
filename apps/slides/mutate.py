@@ -588,6 +588,18 @@ MUTATIONS = [
         "",
         ["an_opened_deck_cannot_be_undone_into_the_one_before"],
     ),
+    (
+        "a box refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["a_box_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a box types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["a_box_takes_altgr_letters_and_no_commands_letter"],
+    ),
 ]
 
 if __name__ == "__main__":

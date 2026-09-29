@@ -3314,6 +3314,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "statehistory",
+ "textline",
  "unsaved",
  "yamldoc",
 ]

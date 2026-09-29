@@ -14,6 +14,10 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 
 SRC = Path(__file__).parent / "src" / "main.rs"
 
+TREE = "a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z"
+CTRL_Y = "ctrl_y_and_ctrl_shift_z_make_a_move_again_and_a_win_again"
+HELD = "a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_boards"
+
 # (name, old, new, [tests that must fail])
 MUTATIONS = [
     # ── Layout ──────────────────────────────────────────────────────
@@ -268,10 +272,15 @@ MUTATIONS = [
     ),
     (
         "undo spends the entry's id as a position",
-        "        let Some(idx) = self.index_of(entry.block) else {\n"
+        "    fn shift(&mut self, id: usize, dir: Direction) -> bool {\n"
+        "        let Some(idx) = self.index_of(id) else {\n"
         "            return false;\n"
         "        };",
-        "        let idx = entry.block;",
+        "    fn shift(&mut self, id: usize, dir: Direction) -> bool {\n"
+        "        let idx = id;\n"
+        "        let Some(_) = self.index_of(id) else {\n"
+        "            return false;\n"
+        "        };",
         [
             "undo_moves_the_block_the_move_moved",
             "undo_unwinds_a_run_of_moves_in_order",
@@ -319,28 +328,36 @@ MUTATIONS = [
         # move you could not take back.
         "undo is refused once the puzzle is solved",
         "    pub fn undo(&mut self) -> bool {\n"
-        "        let Some(entry) = self.undo_stack.pop_back() else {",
+        "        let Some(entry) = self.history.undo() else {",
         "    pub fn undo(&mut self) -> bool {\n"
         "        if self.is_won() {\n"
         "            return false;\n"
         "        }\n"
-        "        let Some(entry) = self.undo_stack.pop_back() else {",
+        "        let Some(entry) = self.history.undo() else {",
         ["undoing_the_winning_move_un_wins"],
     ),
     (
-        "the undo stack has no cap",
-        "        if self.undo_stack.len() >= MAX_UNDO {\n"
-        "            self.undo_stack.pop_front();\n"
-        "        }\n",
-        "",
-        ["the_undo_stack_stops_at_its_cap"],
+        "the undo history keeps past its cap",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {",
+        "const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO + 100) {",
+        [
+            "the_undo_stack_stops_at_its_cap",
+            "the_undo_cap_drops_the_oldest_move_not_the_newest",
+        ],
     ),
     (
-        "the undo cap drops the newest move instead of the oldest",
-        "            self.undo_stack.pop_front();",
-        "            self.undo_stack.pop_back();",
-        ["the_undo_cap_drops_the_oldest_move_not_the_newest"],
+        "the cap is ten moves more",
+        "const MAX_UNDO: usize = 1000;",
+        "const MAX_UNDO: usize = 1010;",
+        [
+            "the_undo_stack_stops_at_its_cap",
+            "the_undo_cap_drops_the_oldest_move_not_the_newest",
+        ],
     ),
+    # Which end the cap drops is the toolkit's tree's to test now: the stack's
+    # `pop_front` it replaced was the game's own line, and so was its row.
+    # `the_undo_cap_drops_the_oldest_move_not_the_newest` still reads it from
+    # the game.
     (
         # `shifted` refuses Up and Left on its own (they fail in
         # `checked_add_signed`); Down and Right are refused only here.
@@ -388,7 +405,7 @@ MUTATIONS = [
         "        self.blocks.clone_from(&self.initial_blocks);\n"
         "        self.selected = None;\n"
         "        self.moves = 0;\n"
-        "        self.undo_stack.clear();",
+        "        self.history.clear();",
         "        self.blocks.clone_from(&self.initial_blocks);\n"
         "        self.selected = None;\n"
         "        self.moves = 0;",
@@ -401,16 +418,102 @@ MUTATIONS = [
         "a new puzzle inherits the old one's move count",
         "        self.selected = None;\n"
         "        self.moves = 0;\n"
-        "        self.undo_stack.clear();\n"
+        "        self.history.clear();\n"
         "    }\n"
         "\n"
         "    /// Build an arbitrary position",
         "        self.selected = None;\n"
-        "        self.undo_stack.clear();\n"
+        "        self.history.clear();\n"
         "    }\n"
         "\n"
         "    /// Build an arbitrary position",
         ["changing_puzzle_clears_the_move_count_and_the_undo_stack"],
+    ),
+    # ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────
+    (
+        "ctrl+z is not an undo",
+        "                HistoryKey::Undo => self.undo(),",
+        "                HistoryKey::Undo => false,",
+        [CTRL_Y],
+    ),
+    (
+        "ctrl+y is not a redo",
+        "                HistoryKey::Redo => self.redo(),",
+        "                HistoryKey::Redo => self.undo(),",
+        [CTRL_Y],
+    ),
+    (
+        "alt+z goes forward",
+        "                HistoryKey::Earlier => self.earlier(),",
+        "                HistoryKey::Earlier => self.later(),",
+        [TREE],
+    ),
+    (
+        "alt+shift+z goes back",
+        "                HistoryKey::Later => self.later(),",
+        "                HistoryKey::Later => self.earlier(),",
+        [TREE],
+    ),
+    (
+        "redo undoes",
+        "        let Some(entry) = self.history.redo() else {",
+        "        let Some(entry) = self.history.undo() else {",
+        [CTRL_Y, TREE],
+    ),
+    (
+        "alt+z only undoes",
+        "        let steps = self.history.earlier();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.undo().map(Travel::Undo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "alt+shift+z only redoes",
+        "        let steps = self.history.later();",
+        "        let steps: Vec<Travel<UndoEntry>> =\n"
+        "            self.history.redo().map(Travel::Redo).into_iter().collect();",
+        [TREE],
+    ),
+    (
+        "a journey takes its steps back the wrong way",
+        "                Travel::Undo(entry) => self.take_back(entry),",
+        "                Travel::Undo(entry) => self.make_again(entry),",
+        [TREE],
+    ),
+    (
+        "a move made again is not counted",
+        "        if !self.shift(entry.block, entry.direction) {\n"
+        "            return false;\n"
+        "        }\n"
+        "        self.moves = self.moves.saturating_add(1);",
+        "        if !self.shift(entry.block, entry.direction) {\n"
+        "            return false;\n"
+        "        }",
+        [CTRL_Y],
+    ),
+    (
+        "a move made again goes back the way it came",
+        "        if !self.shift(entry.block, entry.direction) {",
+        "        if !self.shift(entry.block, entry.direction.reverse()) {",
+        [CTRL_Y],
+    ),
+    (
+        "a held key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {\n            return EventResult::Ignored;\n        }\n",
+        "",
+        [HELD],
+    ),
+    (
+        "a key held with the Windows key is a bare key",
+        "        if m.ctrl || m.alt || m.super_key {",
+        "        if m.ctrl || m.alt {",
+        [HELD],
+    ),
+    (
+        "the header says undo can go when it cannot",
+        '            if self.history.can_undo() { "yes" } else { "no" }',
+        '            if true { "yes" } else { "no" }',
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
     # ── Pointer ─────────────────────────────────────────────────────
     (
@@ -817,4 +920,4 @@ MUTATIONS = [
 ]
 
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "klotski", timeout=120))
+    sys.exit(sweep(SRC, MUTATIONS, "klotski", timeout=120, only=sys.argv[1:] or None))

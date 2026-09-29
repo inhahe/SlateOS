@@ -73,7 +73,7 @@
 //!    could no longer be unwound to the start. It is a `VecDeque` now, and the
 //!    header shows the count so the loss is at least visible.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -84,8 +84,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
-use std::collections::VecDeque;
 use std::process::ExitCode;
 
 // ── Colours ─────────────────────────────────────────────────────────
@@ -177,6 +177,11 @@ const WIN_COL: usize = 1;
 /// longer be unwound to the opening position — which is why the header shows
 /// the count.
 const MAX_UNDO: usize = 1000;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 const WINDOW_WIDTH: f32 = 480.0;
 const WINDOW_HEIGHT: f32 = 700.0;
@@ -787,7 +792,7 @@ impl Layout {
 /// a `Prev` button for it, so it was reachable by mouse and invisible to the
 /// keyboard.
 const FOOTER_LINES: [&str; 2] = [
-    "Enter: select   Arrows: move   Z: undo",
+    "Enter: select   Arrows: move   Z: undo   Ctrl+Y: redo",
     "N/Tab: next   P: prev   R: restart   1-7: puzzle",
 ];
 
@@ -805,7 +810,10 @@ pub struct Klotski {
     /// The selected block's **id**, for the same reason undo entries carry one.
     selected: Option<usize>,
     moves: usize,
-    undo_stack: VecDeque<UndoEntry>,
+    /// Every move made, as a tree (C-Q24, `design-decisions.md` §1416): a
+    /// move made after an undo keeps the moves undone as a branch, reached
+    /// with Alt+Z.
+    history: UndoHistory<UndoEntry>,
     current_puzzle: usize,
     /// The opening position, for restart.
     initial_blocks: Vec<Block>,
@@ -836,7 +844,7 @@ impl Klotski {
             blocks: Vec::new(),
             selected: None,
             moves: 0,
-            undo_stack: VecDeque::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             current_puzzle: 0,
             initial_blocks: Vec::new(),
             next_id: 1,
@@ -883,7 +891,7 @@ impl Klotski {
         self.initial_blocks.clone_from(&self.blocks);
         self.selected = None;
         self.moves = 0;
-        self.undo_stack.clear();
+        self.history.clear();
     }
 
     /// Build an arbitrary position, for tests that need one a real puzzle is
@@ -904,14 +912,14 @@ impl Klotski {
         self.initial_blocks.clone_from(&self.blocks);
         self.selected = None;
         self.moves = 0;
-        self.undo_stack.clear();
+        self.history.clear();
     }
 
     pub fn restart_puzzle(&mut self) {
         self.blocks.clone_from(&self.initial_blocks);
         self.selected = None;
         self.moves = 0;
-        self.undo_stack.clear();
+        self.history.clear();
     }
 
     pub fn next_puzzle(&mut self) {
@@ -950,8 +958,8 @@ impl Klotski {
     }
 
     #[must_use]
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
     #[must_use]
@@ -1068,11 +1076,7 @@ impl Klotski {
         block.row = row;
         block.col = col;
         self.moves = self.moves.saturating_add(1);
-
-        if self.undo_stack.len() >= MAX_UNDO {
-            self.undo_stack.pop_front();
-        }
-        self.undo_stack.push_back(UndoEntry {
+        self.history.record(UndoEntry {
             block: id,
             direction: dir,
         });
@@ -1083,23 +1087,82 @@ impl Klotski {
     ///
     /// Allowed after a win, which is the whole point: the winning move is the
     /// one you are most likely to want back, and because winning is derived
-    /// from the board, undoing it un-wins with no second fact to correct.
+    /// from the board, undoing it un-wins with no second fact to correct --
+    /// and redoing it wins again.
     pub fn undo(&mut self) -> bool {
-        let Some(entry) = self.undo_stack.pop_back() else {
+        let Some(entry) = self.history.undo() else {
             return false;
         };
-        let Some(idx) = self.index_of(entry.block) else {
+        self.take_back(entry)
+    }
+
+    /// Make the move last taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z. Returns whether there was one.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.history.redo() else {
+            return false;
+        };
+        self.make_again(entry)
+    }
+
+    /// The position reached just before this one, on whichever branch --
+    /// Alt+Z: the way back to moves undone and then played over.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// The position reached just after this one -- Alt+Shift+Z.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoEntry>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(entry) => self.take_back(entry),
+                Travel::Redo(entry) => self.make_again(entry),
+            };
+        }
+        moved
+    }
+
+    /// Slide `entry`'s block back the way it came, uncounting the move.
+    fn take_back(&mut self, entry: UndoEntry) -> bool {
+        if !self.shift(entry.block, entry.direction.reverse()) {
+            return false;
+        }
+        self.moves = self.moves.saturating_sub(1);
+        true
+    }
+
+    /// Slide `entry`'s block the way it went again, counting the move.
+    fn make_again(&mut self, entry: UndoEntry) -> bool {
+        if !self.shift(entry.block, entry.direction) {
+            return false;
+        }
+        self.moves = self.moves.saturating_add(1);
+        true
+    }
+
+    /// Slide the block with id `id` one cell `dir`, if it is there and the
+    /// cell is on the board. The history's own moves: it holds no move the
+    /// board refused, so none is checked against the other blocks here.
+    fn shift(&mut self, id: usize, dir: Direction) -> bool {
+        let Some(idx) = self.index_of(id) else {
             return false;
         };
         let Some(block) = self.blocks.get_mut(idx) else {
             return false;
         };
-        let Some((row, col)) = block.shifted(entry.direction.reverse()) else {
+        let Some((row, col)) = block.shifted(dir) else {
             return false;
         };
         block.row = row;
         block.col = col;
-        self.moves = self.moves.saturating_sub(1);
         true
     }
 
@@ -1197,7 +1260,12 @@ impl Klotski {
         // replaced drew both at `total_width - PADDING - 100.0`, a guess at how
         // wide "Moves: 1234" would turn out to be.
         let moves = format!("Moves: {}", self.moves);
-        let undo = format!("Undo: {}", self.undo_stack.len());
+        // Whether undo can go. The history is a tree and keeps no count of how
+        // far (requests/e-c-undohistory-could-say-how-far-undo-and-redo-go.md).
+        let undo = format!(
+            "Undo: {}",
+            if self.history.can_undo() { "yes" } else { "no" }
+        );
         let left = l.header.x + l.pad;
         let right = l.header.right() - l.pad;
 
@@ -1423,7 +1491,7 @@ impl Klotski {
                 continue;
             }
             let live = match target {
-                Target::Undo => !self.undo_stack.is_empty(),
+                Target::Undo => self.history.can_undo(),
                 _ => true,
             };
             let size = (r.h * 0.45).clamp(7.0, l.font);
@@ -1638,6 +1706,29 @@ impl Klotski {
         // `pressed` decides whether this is a key going down or coming back
         // up. Reading only `key` runs every binding twice per press.
         if !ev.pressed {
+            return EventResult::Ignored;
+        }
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        if let Some(key) = HistoryKey::of(ev) {
+            let moved = match key {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        // Any other key held with Ctrl, Alt or the Windows key is not the
+        // board's. The letters asked for no modifier at all, but the arrows,
+        // Enter, Space, Tab and Escape asked for nothing: Windows+Up slid a
+        // block, and AltGr+Enter chose one.
+        let m = ev.modifiers;
+        if m.ctrl || m.alt || m.super_key {
             return EventResult::Ignored;
         }
         let plain = ev.modifiers == guitk::event::Modifiers::NONE;
@@ -2257,7 +2348,15 @@ mod tests {
         for key in [Key::Enter, Key::Down, Key::Enter] {
             probe::key(&mut moved, &probe::press(key));
         }
-        vec![Klotski::new(), moved]
+        // A move made and taken back, so redo has work: the block at (3,1)
+        // goes down in the opening position. Made through the game rather than
+        // the keys above, which select whichever block comes first and may
+        // move nothing -- a bare `Z` answers either way, and could not tell.
+        let mut undone = Klotski::new();
+        let id = undone.block_at(3, 1).expect("no block at (3,1)");
+        assert!(undone.move_block(id, Direction::Down));
+        assert!(undone.undo());
+        vec![Klotski::new(), moved, undone]
     }
 
     fn game() -> Klotski {
@@ -2574,7 +2673,7 @@ mod tests {
         let expect: [(&str, &[&str], Pass); 2] = [
             (
                 "header",
-                &["Klotski", "#1: Heng Dao Li Ma", "Moves: 0", "Undo: 0"],
+                &["Klotski", "#1: Heng Dao Li Ma", "Moves: 0", "Undo: no"],
                 Klotski::draw_header,
             ),
             ("footer", &FOOTER_LINES, Klotski::draw_footer),
@@ -2781,8 +2880,8 @@ mod tests {
             }
         }
         assert!(
-            !g.undo_stack.is_empty(),
-            "nothing moved, so the undo counter is still one digit wide"
+            g.can_undo(),
+            "nothing moved, so the undo word is the narrower \"no\""
         );
         for &(w, h) in WINDOWS {
             let mut f = Frame::new(w, h);
@@ -3653,6 +3752,119 @@ mod tests {
         );
     }
 
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────────
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    fn places(g: &Klotski) -> Vec<(usize, usize, usize)> {
+        g.blocks().iter().map(|b| (b.id, b.row, b.col)).collect()
+    }
+
+    /// **A move made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_move_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut g = game();
+        let opening = places(&g);
+        let a = g.block_at(3, 1).expect("no block at (3,1)");
+        let b = g.block_at(3, 2).expect("no block at (3,2)");
+        assert!(g.move_block(a, Direction::Down));
+        let first = places(&g);
+        assert!(g.undo());
+        assert!(g.move_block(b, Direction::Down));
+        let second = places(&g);
+        assert!(!g.redo(), "redo went onto the branch left");
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(places(&g), first, "the move undone was lost");
+        assert_eq!(g.moves(), 1);
+        probe::key(&mut g, &held(false, true, false, Key::Z));
+        assert_eq!(places(&g), opening);
+        assert_eq!(g.moves(), 0);
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        assert_eq!(places(&g), second);
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, true, Key::Z)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z make the move again -- and the winning move
+    /// wins again**, winning being read off the board. There was no redo.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_make_a_move_again_and_a_win_again() {
+        let mut g = one_move_from_winning();
+        let big = g.block_at(2, 1).expect("no block at (2,1)");
+        assert!(g.move_block(big, Direction::Down));
+        assert!(g.is_won());
+        probe::key(&mut g, &held(true, false, false, Key::Z));
+        assert!(!g.is_won(), "Ctrl+Z did not take the winning move back");
+        assert_eq!(
+            probe::key(&mut g, &held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert!(g.is_won(), "Ctrl+Y did not make the winning move again");
+        assert_eq!(g.moves(), 1);
+        probe::key(&mut g, &held(true, false, false, Key::Z));
+        probe::key(&mut g, &held(true, false, true, Key::Z));
+        assert!(g.is_won(), "Ctrl+Shift+Z did not make it again");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is not the board's.**
+    /// The letters asked for no modifier; the arrows asked for nothing, so
+    /// Windows+Down slid the chosen block, and AltGr+Z (ż on a Polish
+    /// keyboard) is no undo.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_boards() {
+        let windows = |key| {
+            probe::press_with(
+                key,
+                guitk::event::Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            )
+        };
+        let mut g = game();
+        let a = g.block_at(3, 1).expect("no block at (3,1)");
+        assert!(g.move_block(a, Direction::Down));
+        assert!(g.undo());
+        g.selected = Some(a);
+        let before = places(&g);
+        for event in [
+            windows(Key::Down),
+            held(false, true, false, Key::Down),
+            held(true, true, false, Key::Down),
+            held(true, true, false, Key::Y),
+            windows(Key::Z),
+        ] {
+            assert_eq!(
+                probe::key(&mut g, &event),
+                EventResult::Ignored,
+                "{event:?}"
+            );
+        }
+        assert_eq!(places(&g), before, "a held key moved a block");
+    }
+
     #[test]
     fn undo_unwinds_a_run_of_moves_in_order() {
         let mut g = game();
@@ -3663,7 +3875,12 @@ mod tests {
         assert!(g.move_block(a, Direction::Down));
         assert!(g.move_block(b, Direction::Down));
         assert_eq!(g.moves(), 2);
-        while g.undo() {}
+        // Bounded: an undo that never ran out would hang the suite.
+        for _ in 0..10 {
+            if !g.undo() {
+                break;
+            }
+        }
         let back: Vec<(usize, usize, usize)> =
             g.blocks().iter().map(|b| (b.id, b.row, b.col)).collect();
         assert_eq!(
@@ -3748,9 +3965,9 @@ mod tests {
     fn a_move_advances_the_counter_and_the_undo_depth() {
         let mut g = game();
         let id = g.block_at(3, 1).expect("no block at (3,1)");
-        assert_eq!((g.moves(), g.undo_depth()), (0, 0));
+        assert_eq!((g.moves(), g.can_undo()), (0, false));
         assert!(g.move_block(id, Direction::Down));
-        assert_eq!((g.moves(), g.undo_depth()), (1, 1));
+        assert_eq!((g.moves(), g.can_undo()), (1, true));
     }
 
     #[test]
@@ -3764,15 +3981,19 @@ mod tests {
         );
         let after: Vec<(usize, usize)> = g.blocks().iter().map(|b| (b.row, b.col)).collect();
         assert_eq!(before, after, "a refused move moved something");
-        assert_eq!((g.moves(), g.undo_depth()), (0, 0));
+        assert_eq!((g.moves(), g.can_undo()), (0, false));
     }
 
     #[test]
     fn the_undo_stack_stops_at_its_cap() {
+        // Written out, not read from `MAX_UNDO`: a test that counts to the
+        // constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 1000;
         let mut g = game();
         let id = g.block_at(3, 1).expect("no block at (3,1)");
         // Shuffle one block up and down until well past the cap.
-        for _ in 0..(MAX_UNDO + 20) {
+        for _ in 0..(CAP + 20) {
             if !g.move_block(id, Direction::Down) {
                 break;
             }
@@ -3781,11 +4002,16 @@ mod tests {
             }
         }
         assert!(
-            g.moves() > MAX_UNDO,
+            g.moves() > CAP,
             "only got {} moves in, so the cap was never reached",
             g.moves()
         );
-        assert_eq!(g.undo_depth(), MAX_UNDO, "the undo stack grew past its cap");
+        // Counted by undoing: the history is a tree and keeps no count.
+        let mut undone = 0;
+        while undone <= CAP && g.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP, "the undo history grew past its cap");
     }
 
     #[test]
@@ -3808,7 +4034,9 @@ mod tests {
                 Direction::Up
             }
         };
-        let total = MAX_UNDO + 200;
+        // Written out, not read from `MAX_UNDO` (`known-issues.md` lesson 52).
+        const CAP: usize = 1000;
+        let total = CAP + 200;
 
         let mut g = game();
         g.position(&[(BlockKind::Small, 0, 0)]);
@@ -3816,18 +4044,22 @@ mod tests {
         for i in 0..total {
             assert!(g.move_block(id, walk(i)), "move {i} was refused");
         }
-        assert_eq!(g.undo_depth(), MAX_UNDO, "the cap did not hold");
 
         // Where a block that had only ever made the moves the stack still holds
         // would be: the position reached by the walk up to the oldest of them.
         let mut reference = game();
         reference.position(&[(BlockKind::Small, 0, 0)]);
         let rid = reference.blocks()[0].id;
-        for i in 0..(total - MAX_UNDO) {
+        for i in 0..(total - CAP) {
             assert!(reference.move_block(rid, walk(i)));
         }
 
-        while g.undo() {}
+        // Bounded: an undo that never ran out would hang the suite.
+        let mut undone = 0;
+        while undone <= total && g.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP, "the cap did not hold");
         assert_eq!(
             (g.blocks()[0].row, g.blocks()[0].col),
             (reference.blocks()[0].row, reference.blocks()[0].col),
@@ -3836,7 +4068,7 @@ mod tests {
         );
         assert_eq!(
             g.moves(),
-            total - MAX_UNDO,
+            total - CAP,
             "the counter did not come back with the board"
         );
     }
@@ -4126,7 +4358,7 @@ mod tests {
         assert!(g.move_block(id, Direction::Down));
         probe::click(&mut g, Target::Undo);
         assert_eq!(g.moves(), 0, "the undo button did not undo");
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
     }
 
     #[test]
@@ -4175,7 +4407,7 @@ mod tests {
             opening, back,
             "restart did not restore the opening position"
         );
-        assert_eq!((g.moves(), g.undo_depth()), (0, 0));
+        assert_eq!((g.moves(), g.can_undo()), (0, false));
         assert_eq!(g.selected(), None);
     }
 
@@ -4208,8 +4440,8 @@ mod tests {
         assert!(g.move_block(id, Direction::Down));
         probe::click(&mut g, Target::Next);
         assert_eq!(
-            (g.moves(), g.undo_depth(), g.selected()),
-            (0, 0, None),
+            (g.moves(), g.can_undo(), g.selected()),
+            (0, false, None),
             "the new puzzle inherited the old one's history"
         );
     }
@@ -4228,7 +4460,7 @@ mod tests {
             let before = (
                 probe_game.current_puzzle(),
                 probe_game.moves(),
-                probe_game.undo_depth(),
+                probe_game.can_undo(),
                 probe_game
                     .blocks()
                     .iter()
@@ -4239,7 +4471,7 @@ mod tests {
             let after = (
                 probe_game.current_puzzle(),
                 probe_game.moves(),
-                probe_game.undo_depth(),
+                probe_game.can_undo(),
                 probe_game
                     .blocks()
                     .iter()

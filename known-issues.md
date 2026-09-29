@@ -176113,8 +176113,12 @@ generator's output as well as this older one's (`gui/tsgrammar`).
 
 ### [C] TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS -- 2026-09-29
 
-**Status:** OPEN -- lane C's next task after the motion policy
-(design-decisions §1446).
+**Status:** the colours FIXED 2026-09-29 (lane C): the daemon keeps the
+palette `theme_changed` hands it and draws every toast and the centre from
+its roles, checked in both modes by `palette_check::assert_drawn_from`
+(`everything_is_drawn_from_the_palette`). What its faintest labels were
+drawn in (`overlay0`, not meant to carry text) is now `subtext0`. The second
+half below -- nothing starts it -- is open question C-Q32.
 
 **In short:** the notification daemon -- the pop-up toasts and the
 notification centre, `gui/notifications` -- draws in a fixed copy of the dark

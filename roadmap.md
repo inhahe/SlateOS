@@ -2585,8 +2585,13 @@ word; text inside them that says "lane C" is history.
     the e-book library, fourteen more) have the same lost update and are
     not announced: `known-issues.md` "[E] Two windows of one program",
     E-Q5;
-  - four programs read the one list of programs, `gui/programs`, instead of
-    their own (`c-e-read-the-one-list-of-programs.md`, the operator's C-Q20);
+  - ~~four programs read the one list of programs, `gui/programs`, instead of
+    their own (`c-e-read-the-one-list-of-programs.md`, the operator's C-Q20)~~
+    **done 2026-09-29**: the launcher, Settings' Default Apps page (every
+    job and what does it), the file manager (the default when nothing is
+    chosen, Open With) and File Associations; the three copies of "installed
+    programs with SlateOS's behind them" are asked of lane C as one
+    (`e-c-the-installed-and-built-in-programs-belong-in-gui-programs.md`);
   - an About page in Settings that shows the third-party notices
     (`c-e-show-the-third-party-notices.md`);
   - the controls' shapes: a picker in Settings, the programs' own text

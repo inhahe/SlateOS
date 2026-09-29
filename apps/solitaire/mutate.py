@@ -590,6 +590,42 @@ MUTATIONS = [
         "            if key == Key::N {",
         ["a_win_undone_and_redone_is_lost_and_won_again"],
     ),
+    (
+        'F1 does not raise the list',
+        '        && help::raises(key)\n    {\n        app.show_help = true;',
+        '        && false\n    {\n        app.show_help = true;',
+        ['the_list_of_keys_reaches_the_window', 'every_advertised_key_does_something', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ['the_list_of_keys_reaches_the_window'],
+    ),
+    (
+        'nothing puts the list away',
+        '                if help::closes(key) {\n                    app.show_help = false;',
+        '                if false {\n                    app.show_help = false;',
+        ['the_list_of_keys_reaches_the_window', 'the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a key under the list reaches the table',
+        '                return if key.pressed {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                };\n',
+        '',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'a click under the list plays',
+        '            }) => {\n                app.show_help = false;\n                return EventResult::Consumed;\n            }\n',
+        '            }) => {}\n',
+        ['the_list_of_keys_is_the_windows_while_it_is_up'],
+    ),
+    (
+        'the header does not say how to raise the list',
+        'const HEADER_KEYS: &str = "N:New  Z:Undo  A:Auto  F1:All keys";',
+        'const HEADER_KEYS: &str = "N:New  Z:Undo  Ctrl+Y:Redo  A:Auto";',
+        ['the_list_of_keys_reaches_the_window'],
+    ),
 ]
 
 if __name__ == "__main__":

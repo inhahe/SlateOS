@@ -25,7 +25,7 @@
 
 use std::process::ExitCode;
 
-use gamechrome::{Chrome, HistoryKey, cards};
+use gamechrome::{Chrome, HistoryKey, cards, help};
 use guitk::color::Color;
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1377,7 +1377,7 @@ impl GameState {
                 let drawn = label_in(
                     f,
                     help,
-                    "N:New  Z:Undo  Ctrl+Y:Redo  A:Auto",
+                    HEADER_KEYS,
                     Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim),
                 );
                 f.hit(Target::Help, drawn);
@@ -1852,11 +1852,41 @@ fn union(a: Rect, b: Rect) -> Rect {
 // ── Application ─────────────────────────────────────────────────────
 
 /// The solitaire application: the game, and the size the window last gave it.
+/// The keys the header names: the few a game is played with, and the one
+/// that lists the rest.
+const HEADER_KEYS: &str = "N:New  Z:Undo  A:Auto  F1:All keys";
+
+/// Every key the game answers, on the list F1 raises.
+///
+/// The game had no list, and its header had room for four keys and not the
+/// history's -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24
+/// added (`design-decisions.md` §1416) -- nor the arrows, Tab, Enter or
+/// Escape. **Each row is a key the game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows", "Move between the piles and down a column"),
+    ("Tab / Shift+Tab", "The next / previous pile"),
+    ("Enter / Space", "Pick up the card, or put it down"),
+    ("Esc", "Put the card back"),
+    ("Z / Ctrl+Z", "Take back a move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The table before / after this, on any branch",
+    ),
+    ("A", "Send home every card that can go"),
+    ("N", "Deal a new game"),
+    ("F1 / ?", "This list"),
+];
+
 struct SolitaireApp {
     state: GameState,
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against. It exists for that and nothing else.
     size: (f32, f32),
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// card moved under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl SolitaireApp {
@@ -1864,6 +1894,7 @@ impl SolitaireApp {
         Self {
             state: GameState::new(42),
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            show_help: false,
         }
     }
 
@@ -1872,7 +1903,19 @@ impl SolitaireApp {
     }
 
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
-        self.state.frame(w, h)
+        let mut f = self.state.frame(w, h);
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.state.palette,
+                (w, h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
+        }
+        f
     }
 
     /// Route a click to the pile it landed on.
@@ -1951,6 +1994,37 @@ impl SolitaireApp {
 /// One route from an event to the game, shared by the window and the tests,
 /// so a test cannot exercise a path the window does not take.
 fn handle_event(app: &mut SolitaireApp, event: &Event) -> EventResult {
+    // The list of keys is modal: what raised it, Escape, Enter or a click
+    // put it away, and nothing reaches the table under it.
+    if app.show_help {
+        match event {
+            Event::Key(key) => {
+                if help::closes(key) {
+                    app.show_help = false;
+                }
+                return if key.pressed {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                };
+            }
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(_),
+                ..
+            }) => {
+                app.show_help = false;
+                return EventResult::Consumed;
+            }
+            // A resize still resizes, below.
+            _ => {}
+        }
+    }
+    if let Event::Key(key) = event
+        && help::raises(key)
+    {
+        app.show_help = true;
+        return EventResult::Consumed;
+    }
     match event {
         Event::Key(KeyEvent {
             key,
@@ -2829,8 +2903,9 @@ mod tests {
             Response::Idle,
             "a key coming back up changes nothing"
         );
+        // F9, not F1: F1 raises the list of keys.
         assert_eq!(
-            app.on_event(&Event::Key(probe::press(Key::F1))),
+            app.on_event(&Event::Key(probe::press(Key::F9))),
             Response::Idle,
             "a key the game has no use for must not cost a repaint"
         );
@@ -3919,6 +3994,113 @@ mod tests {
             shift,
             super_key: false,
         }
+    }
+
+    /// Tables chosen so that between them every key on the list of keys
+    /// has work: a fresh deal, a move made (Ctrl+Z, Alt+Z), and one taken
+    /// back (Ctrl+Y, Alt+Shift+Z).
+    fn list_states() -> Vec<SolitaireApp> {
+        let with = |state: GameState| SolitaireApp {
+            state,
+            ..SolitaireApp::new()
+        };
+        let mut moved = five_between_two_sixes();
+        assert!(moved.try_tableau_to_tableau(0, 0, 1));
+        let mut undone = five_between_two_sixes();
+        assert!(undone.try_tableau_to_tableau(0, 0, 1));
+        assert!(undone.undo());
+        vec![SolitaireApp::new(), with(moved), with(undone)]
+    }
+
+    /// **Every key the list of keys advertises is one the game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed through the window's own
+    /// route, rather than matched against a table beside it here. The
+    /// property is "some table answers this key": Ctrl+Y has nothing to make
+    /// again until a move is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|a| probe::key(a, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 19, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at its opening size, joined.
+    fn drawn_texts(app: &SolitaireApp) -> String {
+        app.frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the header says how to raise it.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut app = SolitaireApp::new();
+        let before = drawn_texts(&app);
+        assert!(!before.contains(help::CLOSES), "up before anybody asked");
+        assert!(
+            before.contains("F1"),
+            "the header does not say F1: {before}"
+        );
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&app);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&app).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the table takes nothing**: a card
+    /// moved under the card of keys would be one the player cannot see. A
+    /// click puts the list away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut app = SolitaireApp::new();
+        probe::key(&mut app, &probe::press(Key::F1));
+        let seen = |a: &SolitaireApp| (a.state.move_count, a.state.stock.len(), a.state.focus);
+        let before = seen(&app);
+        for key in [Key::Space, Key::Right, Key::A, Key::N, Key::Z] {
+            assert_eq!(
+                probe::key(&mut app, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(app.show_help, "{key:?} put the list away");
+        }
+        assert_eq!(seen(&app), before, "a key reached the table");
+        probe::click(&mut app, Target::Stock);
+        assert!(!app.show_help, "a click did not put the list away");
+        assert_eq!(seen(&app), before, "the click dealt from the stock");
+        probe::key(&mut app, &probe::press(Key::F1));
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert!(!app.show_help, "Enter did not put the list away");
+        assert_eq!(seen(&app), before, "Enter played as it closed");
     }
 
     /// A red five on a hidden king in column 0, and a black six to go on in

@@ -120,7 +120,7 @@
 //!     was wrong. One arm now turns a key into an axis and a delta, and the
 //!     move rule decides the rest.
 
-use gamechrome::Chrome;
+use gamechrome::{Chrome, HistoryKey};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -131,8 +131,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::surface::Surface;
 use guitk::text;
+use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
-use std::collections::VecDeque;
 use std::process::ExitCode;
 
 // ── Colours ─────────────────────────────────────────────────────────
@@ -267,9 +267,13 @@ const PLAYER_LABEL: char = 'X';
 const BLOCKER_LABELS: &str = "ABCDEFGHIJKLMNOPQRSTUVWYZ";
 
 /// Moves kept for undo. Past this the oldest is dropped and the game can no
-/// longer be unwound to the opening jam — which is why the header shows the
-/// depth.
+/// longer be unwound to the opening jam.
 const MAX_UNDO: usize = 1000;
+/// [`MAX_UNDO`] as the history takes it.
+const UNDO_LIMIT: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MAX_UNDO) {
+    Some(limit) => limit,
+    None => core::num::NonZeroUsize::MIN,
+};
 
 const WINDOW_WIDTH: f32 = 640.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -915,7 +919,7 @@ impl Layout {
 /// The keyboard reminder, in the order the footer draws it. The second line is
 /// the one dropped first when the footer has room for only one.
 const FOOTER_LINES: [&str; 2] = [
-    "Enter: select   Arrows: slide   Z: undo",
+    "Enter: select   Arrows: slide   Z: undo   Ctrl+Y: redo",
     "N/Tab: next   B: prev   R: restart   P: puzzles",
 ];
 
@@ -925,7 +929,10 @@ pub struct RushHour {
     /// The selected car's **id**, for the same reason undo entries carry one.
     selected: Option<usize>,
     moves: usize,
-    undo_stack: VecDeque<UndoEntry>,
+    /// Every slide made, as a tree (C-Q24, `design-decisions.md` §1416): a
+    /// slide made after an undo keeps the slides undone as a branch, reached
+    /// with Alt+Z.
+    history: UndoHistory<UndoEntry>,
     current_puzzle: usize,
     /// The next id to hand out. Starts at 1 and never restarts, so no id is
     /// ever equal to the position of the vehicle holding it.
@@ -956,7 +963,7 @@ impl RushHour {
             vehicles: Vec::new(),
             selected: None,
             moves: 0,
-            undo_stack: VecDeque::new(),
+            history: UndoHistory::new(UNDO_LIMIT),
             current_puzzle: 0,
             next_id: 1,
             sheet_open: false,
@@ -1028,7 +1035,7 @@ impl RushHour {
 
         self.selected = None;
         self.moves = 0;
-        self.undo_stack.clear();
+        self.history.clear();
         self.sheet_open = false;
         self.sheet_cursor = index;
     }
@@ -1069,8 +1076,8 @@ impl RushHour {
     }
 
     #[must_use]
-    pub fn undo_depth(&self) -> usize {
-        self.undo_stack.len()
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
     }
 
     #[must_use]
@@ -1099,7 +1106,7 @@ impl RushHour {
         self.vehicles.clear();
         self.selected = None;
         self.moves = 0;
-        self.undo_stack.clear();
+        self.history.clear();
         let mut id = self.next_id;
         let mut take_id = || {
             let out = id;
@@ -1293,6 +1300,81 @@ impl RushHour {
         if !self.can_slide(id, delta) {
             return false;
         }
+        if !self.shift(id, delta) {
+            return false;
+        }
+        self.history.record(UndoEntry { vehicle: id, delta });
+        self.moves = self.moves.saturating_add(1);
+        true
+    }
+
+    /// Take back the last slide. Allowed after a win, because winning is a fact
+    /// about where the red car is and undoing moves it back.
+    pub fn undo(&mut self) -> bool {
+        let Some(entry) = self.history.undo() else {
+            return false;
+        };
+        self.take_back(entry)
+    }
+
+    /// Make the slide last taken back again, on the branch the game is on --
+    /// Ctrl+Y or Ctrl+Shift+Z. A redo of the winning slide wins again: winning
+    /// is read off where the red car is.
+    pub fn redo(&mut self) -> bool {
+        let Some(entry) = self.history.redo() else {
+            return false;
+        };
+        self.make_again(entry)
+    }
+
+    /// The position reached just before this one, on whichever branch --
+    /// Alt+Z: the way back to slides undone and then played over.
+    pub fn earlier(&mut self) -> bool {
+        let steps = self.history.earlier();
+        self.travel(steps)
+    }
+
+    /// The position reached just after this one -- Alt+Shift+Z.
+    pub fn later(&mut self) -> bool {
+        let steps = self.history.later();
+        self.travel(steps)
+    }
+
+    /// Take the steps a journey through the history hands back, in order.
+    fn travel(&mut self, steps: Vec<Travel<UndoEntry>>) -> bool {
+        let moved = !steps.is_empty();
+        for step in steps {
+            match step {
+                Travel::Undo(entry) => self.take_back(entry),
+                Travel::Redo(entry) => self.make_again(entry),
+            };
+        }
+        moved
+    }
+
+    /// Slide `entry`'s car back the way it came, uncounting the slide.
+    fn take_back(&mut self, entry: UndoEntry) -> bool {
+        if !self.shift(entry.vehicle, entry.delta.saturating_neg()) {
+            return false;
+        }
+        self.moves = self.moves.saturating_sub(1);
+        true
+    }
+
+    /// Slide `entry`'s car the way it went again, counting the slide.
+    fn make_again(&mut self, entry: UndoEntry) -> bool {
+        if !self.shift(entry.vehicle, entry.delta) {
+            return false;
+        }
+        self.moves = self.moves.saturating_add(1);
+        true
+    }
+
+    /// Move the car with id `id` `delta` cells along its own axis, if it is
+    /// there and the cells are on the yard. The one place a car moves:
+    /// `slide` has checked the way is clear first, and the history holds no
+    /// slide the yard refused.
+    fn shift(&mut self, id: usize, delta: isize) -> bool {
         let Some(index) = self.index_of(id) else {
             return false;
         };
@@ -1313,42 +1395,6 @@ impl RushHour {
                 v.row = row;
             }
         }
-        self.undo_stack.push_back(UndoEntry { vehicle: id, delta });
-        if self.undo_stack.len() > MAX_UNDO {
-            self.undo_stack.pop_front();
-        }
-        self.moves = self.moves.saturating_add(1);
-        true
-    }
-
-    /// Take back the last slide. Allowed after a win, because winning is a fact
-    /// about where the red car is and undoing moves it back.
-    pub fn undo(&mut self) -> bool {
-        let Some(entry) = self.undo_stack.pop_back() else {
-            return false;
-        };
-        let Some(index) = self.index_of(entry.vehicle) else {
-            return false;
-        };
-        let Some(v) = self.vehicles.get_mut(index) else {
-            return false;
-        };
-        let back = entry.delta.saturating_neg();
-        match v.orientation {
-            Orientation::Horizontal => {
-                let Some(col) = v.col.checked_add_signed(back) else {
-                    return false;
-                };
-                v.col = col;
-            }
-            Orientation::Vertical => {
-                let Some(row) = v.row.checked_add_signed(back) else {
-                    return false;
-                };
-                v.row = row;
-            }
-        }
-        self.moves = self.moves.saturating_sub(1);
         true
     }
 
@@ -1491,7 +1537,12 @@ impl RushHour {
         // out to be — and the title was drawn at the left with no limit at all,
         // so in a narrow window the two were painted through each other.
         let moves_text = format!("Moves: {}", self.moves);
-        let undo_text = format!("Undo: {}", self.undo_stack.len());
+        // Whether undo can go. The history is a tree and keeps no count of how
+        // far (requests/e-c-undohistory-could-say-how-far-undo-and-redo-go.md).
+        let undo_text = format!(
+            "Undo: {}",
+            if self.history.can_undo() { "yes" } else { "no" }
+        );
         let moves = Label {
             text: &moves_text,
             size: l.font,
@@ -1692,7 +1743,7 @@ impl RushHour {
                 continue;
             }
             let live = match target {
-                Target::Undo => !self.undo_stack.is_empty(),
+                Target::Undo => self.history.can_undo(),
                 _ => true,
             };
             let size = (r.h * 0.4).clamp(7.0, l.small);
@@ -2061,6 +2112,29 @@ impl RushHour {
         }
         if self.sheet_open {
             return self.handle_sheet_key(ev);
+        }
+        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
+        // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
+        if let Some(key) = HistoryKey::of(ev) {
+            let moved = match key {
+                HistoryKey::Undo => self.undo(),
+                HistoryKey::Redo => self.redo(),
+                HistoryKey::Earlier => self.earlier(),
+                HistoryKey::Later => self.later(),
+            };
+            return if moved {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
+        // Any other key held with Ctrl, Alt or the Windows key is not the
+        // yard's. The letters asked for no modifier at all, but the arrows,
+        // Enter, Space, Tab and Escape asked for nothing: Windows+Right slid
+        // the chosen car, and AltGr and Alt did too.
+        let m = ev.modifiers;
+        if m.ctrl || m.alt || m.super_key {
+            return EventResult::Ignored;
         }
         let plain = ev.modifiers == guitk::event::Modifiers::NONE;
         if let Some(index) = digit(ev.key)
@@ -3833,7 +3907,7 @@ mod tests {
         let expect: [(&str, &[&str], Pass); 2] = [
             (
                 "header",
-                &["Rush Hour", "#1: Beginner", "Moves: 0", "Undo: 0"],
+                &["Rush Hour", "#1: Beginner", "Moves: 0", "Undo: no"],
                 RushHour::draw_header,
             ),
             ("footer", &FOOTER_LINES, RushHour::draw_footer),
@@ -4205,8 +4279,8 @@ mod tests {
         );
         assert!(drawn.iter().any(|t| t == "Moves: 1"), "{drawn:?}");
         assert!(
-            drawn.iter().any(|t| t == "Undo: 1"),
-            "the header does not show the undo depth: {drawn:?}"
+            drawn.iter().any(|t| t == "Undo: yes"),
+            "the header does not say undo can go: {drawn:?}"
         );
     }
 
@@ -4702,7 +4776,7 @@ mod tests {
             .collect();
         assert_eq!(now, opening);
         assert_eq!(g.moves(), 0);
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
         assert_eq!(g.selected(), None);
     }
 
@@ -4896,7 +4970,7 @@ mod tests {
         let id = player_id(&g);
         assert!(g.slide(id, 3));
         assert_eq!(g.moves(), 1);
-        assert_eq!(g.undo_depth(), 1);
+        assert!(g.can_undo());
     }
 
     #[test]
@@ -4906,7 +4980,7 @@ mod tests {
         let id = player_id(&g);
         assert!(!g.slide(id, -1));
         assert_eq!(g.moves(), 0);
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
     }
 
     #[test]
@@ -4918,7 +4992,7 @@ mod tests {
         assert!(g.undo());
         assert_eq!(g.player().unwrap().col, 0);
         assert_eq!(g.moves(), 0);
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
     }
 
     #[test]
@@ -4946,15 +5020,132 @@ mod tests {
 
     #[test]
     fn the_undo_stack_forgets_its_oldest_move_at_the_cap() {
+        // Written out, not read from `MAX_UNDO`: a test that counts to the
+        // constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 1000;
         let mut g = game();
         g.position(0, &[]);
         let id = player_id(&g);
-        for _ in 0..MAX_UNDO {
+        for _ in 0..CAP {
             assert!(g.slide(id, 1));
             assert!(g.slide(id, -1));
         }
-        assert_eq!(g.undo_depth(), MAX_UNDO);
-        assert_eq!(g.moves(), MAX_UNDO * 2);
+        assert_eq!(g.moves(), CAP * 2);
+        // Counted by undoing, bounded: the history keeps no count.
+        let mut undone = 0;
+        while undone <= CAP * 2 && g.undo() {
+            undone += 1;
+        }
+        assert_eq!(undone, CAP, "the undo history grew past its cap");
+    }
+
+    // ── The history: a tree, walked with Alt+Z (C-Q24) ──────────────────
+
+    fn held(ctrl: bool, alt: bool, shift: bool, key: Key) -> KeyEvent {
+        probe::press_with(
+            key,
+            guitk::event::Modifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key: false,
+            },
+        )
+    }
+
+    fn red_col(g: &RushHour) -> usize {
+        g.player().expect("no red car").col
+    }
+
+    /// **A slide made after an undo starts a branch, and the undone one is
+    /// kept**: redo follows the new branch, and Alt+Z walks back through
+    /// every position there has been, in the order each was reached;
+    /// Alt+Shift+Z comes forward again.
+    #[test]
+    fn a_slide_after_an_undo_keeps_the_undone_one_reachable_with_alt_z() {
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        assert!(g.undo());
+        assert!(g.slide(id, 2));
+        assert!(!g.redo(), "redo went onto the branch left");
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, false, Key::Z)),
+            EventResult::Consumed
+        );
+        assert_eq!(red_col(&g), 1, "the slide undone was lost");
+        probe::key(&mut g, &held(false, true, false, Key::Z));
+        assert_eq!((red_col(&g), g.moves()), (0, 0));
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        probe::key(&mut g, &held(false, true, true, Key::Z));
+        assert_eq!((red_col(&g), g.moves()), (2, 1));
+        assert_eq!(
+            probe::key(&mut g, &held(false, true, true, Key::Z)),
+            EventResult::Ignored,
+            "past the newest position"
+        );
+    }
+
+    /// **Ctrl+Y and Ctrl+Shift+Z make the slide again -- and the winning
+    /// slide wins again**, winning being where the red car is. There was no
+    /// redo.
+    #[test]
+    fn ctrl_y_and_ctrl_shift_z_make_a_slide_again_and_a_win_again() {
+        let mut g = one_slide_from_winning();
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        assert!(g.is_won());
+        probe::key(&mut g, &held(true, false, false, Key::Z));
+        assert!(!g.is_won(), "Ctrl+Z did not take the winning slide back");
+        assert_eq!(
+            probe::key(&mut g, &held(true, false, false, Key::Y)),
+            EventResult::Consumed
+        );
+        assert!(g.is_won(), "Ctrl+Y did not make the winning slide again");
+        assert_eq!(g.moves(), 1);
+        probe::key(&mut g, &held(true, false, false, Key::Z));
+        probe::key(&mut g, &held(true, false, true, Key::Z));
+        assert!(g.is_won(), "Ctrl+Shift+Z did not make it again");
+    }
+
+    /// **A key held with AltGr, Alt or the Windows key is not the yard's.**
+    /// The letters asked for no modifier; the arrows asked for nothing, so
+    /// Windows+Right slid the chosen car, and AltGr+Z (ż on a Polish
+    /// keyboard) is no undo.
+    #[test]
+    fn a_key_held_with_altgr_alt_or_the_windows_key_is_not_the_yards() {
+        let windows = |key| {
+            probe::press_with(
+                key,
+                guitk::event::Modifiers {
+                    ctrl: false,
+                    alt: false,
+                    shift: false,
+                    super_key: true,
+                },
+            )
+        };
+        let mut g = game();
+        g.position(0, &[]);
+        let id = player_id(&g);
+        assert!(g.slide(id, 1));
+        g.selected = Some(id);
+        for event in [
+            windows(Key::Right),
+            held(false, true, false, Key::Right),
+            held(true, true, false, Key::Right),
+            held(true, true, false, Key::Z),
+            windows(Key::Z),
+        ] {
+            assert_eq!(
+                probe::key(&mut g, &event),
+                EventResult::Ignored,
+                "{event:?}"
+            );
+        }
+        assert_eq!((red_col(&g), g.moves()), (1, 1), "a held key moved the car");
     }
 
     // ── Winning ────────────────────────────────────────────────────
@@ -5394,7 +5585,7 @@ mod tests {
         let id = labelled(&g, 'B');
         assert!(g.slide(id, 1));
         probe::key(&mut g, &probe::press(Key::Z));
-        assert_eq!(g.undo_depth(), 0);
+        assert!(!g.can_undo());
 
         probe::key(&mut g, &probe::press(Key::N));
         assert_eq!(g.current_puzzle(), 1);

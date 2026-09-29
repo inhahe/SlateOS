@@ -117,6 +117,10 @@ pub struct Language {
     /// The injection query: the stretches of its text written in another
     /// language. Empty for none.
     injections: &'static str,
+    /// The locals query: where its names are declared and where they are
+    /// used, so that a use is coloured as its declaration is. Empty for
+    /// none.
+    locals: &'static str,
     /// Where in [`LANGUAGES`] it is: its compiled queries' slot.
     index: usize,
 }
@@ -166,6 +170,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::bash::generated::language_fn,
         highlights: grammars::bash::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 0,
     },
     Language {
@@ -177,6 +182,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::c::generated::language_fn,
         highlights: grammars::c::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 1,
     },
     Language {
@@ -188,6 +194,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::css::generated::language_fn,
         highlights: grammars::css::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 2,
     },
     Language {
@@ -199,6 +206,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::javascript::generated::language_fn,
         highlights: grammars::javascript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
+        locals: grammars::javascript::LOCALS,
         index: 3,
     },
     Language {
@@ -210,6 +218,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::json::generated::language_fn,
         highlights: grammars::json::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 4,
     },
     Language {
@@ -221,6 +230,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::markdown::generated::language_fn,
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
+        locals: "",
         index: 5,
     },
     Language {
@@ -232,6 +242,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::python::generated::language_fn,
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 6,
     },
     Language {
@@ -243,6 +254,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::rust::generated::language_fn,
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
+        locals: "",
         index: 7,
     },
     Language {
@@ -255,6 +267,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::toml::generated::language_fn,
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 8,
     },
     Language {
@@ -266,6 +279,7 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::yaml::generated::language_fn,
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
+        locals: "",
         index: 9,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
@@ -278,18 +292,106 @@ static LANGUAGES: [Language; 11] = [
         grammar: grammars::markdown_inline::generated::language_fn,
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
+        locals: "",
         index: 10,
     },
 ];
 
 /// A language's queries, compiled: the highlight query with what each of
-/// its captures paints, and the injection query with the captures it is
-/// read by.
+/// its captures paints, and the injection and locals queries with the
+/// captures they are read by.
 pub(crate) struct Compiled {
     pub(crate) highlights: tree_sitter::Query,
     /// What each highlight capture paints, by capture index.
     pub(crate) paints: Vec<Paint>,
+    /// Whether each highlight pattern leaves alone a name found declared --
+    /// `(#is-not? local)` -- by pattern index.
+    pub(crate) non_local: Vec<bool>,
+    /// How deep the highlight query's patterns go: the most node patterns
+    /// any one nests inside another ([`pattern_depth`]).
+    pub(crate) depth: usize,
     pub(crate) injections: Option<Injections>,
+    pub(crate) locals: Option<LocalsQuery>,
+}
+
+impl Compiled {
+    /// What highlight capture `index` paints.
+    pub(crate) fn paint(&self, index: u32) -> Paint {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.paints.get(i))
+            .copied()
+            .unwrap_or(Paint::Skip)
+    }
+
+    /// Whether highlight pattern `pattern` leaves a local alone.
+    pub(crate) fn is_non_local(&self, pattern: usize) -> bool {
+        self.non_local.get(pattern).copied().unwrap_or(false)
+    }
+}
+
+/// How deep `query`'s patterns go: the most node patterns -- `(kind ...)`
+/// -- any one of them nests inside another, 0 for a query of lone nodes. A
+/// pattern matches a node's children, never deeper, so every node a
+/// pattern captures is at most this many levels below the node it matches
+/// from -- or one more, for a pattern of siblings with no parent named.
+/// Groups, alternations, predicates, fields, anchors, quantifiers and
+/// captures nest nothing; strings and comments are passed over.
+pub(crate) fn pattern_depth(query: &str) -> usize {
+    // Each open bracket: whether it is a node pattern's.
+    let mut open: Vec<bool> = Vec::new();
+    let mut deepest = 0;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            ';' => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '(' => {
+                while chars.next_if(|c| c.is_whitespace()).is_some() {}
+                let node = chars
+                    .peek()
+                    .is_some_and(|&c| c.is_alphanumeric() || c == '_');
+                open.push(node);
+                if node {
+                    let nodes = open.iter().filter(|&&n| n).count();
+                    deepest = deepest.max(nodes.saturating_sub(1));
+                }
+            }
+            '[' => open.push(false),
+            ')' | ']' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    deepest
+}
+
+/// A locals query, and which of its captures say what: a scope, a name's
+/// declaration, the value a declaration gives it (a use inside which is
+/// not of it), and a name's use.
+pub(crate) struct LocalsQuery {
+    pub(crate) query: tree_sitter::Query,
+    pub(crate) scope: Option<u32>,
+    pub(crate) definition: Option<u32>,
+    pub(crate) definition_value: Option<u32>,
+    pub(crate) reference: Option<u32>,
 }
 
 /// An injection query, and which of its captures are the injected text and
@@ -448,6 +550,15 @@ impl Language {
                 .iter()
                 .map(|name| Paint::for_capture(name))
                 .collect();
+            let non_local = (0..highlights.pattern_count())
+                .map(|i| {
+                    highlights
+                        .property_predicates(i)
+                        .iter()
+                        .any(|(p, positive)| !*positive && &*p.key == "local")
+                })
+                .collect();
+            let depth = pattern_depth(self.highlights);
             let injections = if self.injections.is_empty() {
                 None
             } else {
@@ -458,10 +569,25 @@ impl Language {
                     query,
                 })
             };
+            let locals = if self.locals.is_empty() {
+                None
+            } else {
+                let query = self.compile(self.locals, "the locals query")?;
+                Some(LocalsQuery {
+                    scope: query.capture_index_for_name("local.scope"),
+                    definition: query.capture_index_for_name("local.definition"),
+                    definition_value: query.capture_index_for_name("local.definition-value"),
+                    reference: query.capture_index_for_name("local.reference"),
+                    query,
+                })
+            };
             Ok(Compiled {
                 highlights,
                 paints,
+                non_local,
+                depth,
                 injections,
+                locals,
             })
         })
         .as_ref()
@@ -545,7 +671,20 @@ mod tests {
                     l.name
                 );
             }
+            assert_eq!(c.locals.is_some(), !l.locals.is_empty(), "{}", l.name);
+            if let Some(q) = &c.locals {
+                assert!(
+                    q.scope.is_some() && q.definition.is_some() && q.reference.is_some(),
+                    "{}: a locals query without scopes, declarations and uses",
+                    l.name
+                );
+            }
         }
+        // JavaScript's builtins are left alone where the name is declared.
+        let js = Language::named("javascript").unwrap().compiled().unwrap();
+        assert!(js.non_local.iter().filter(|&&n| n).count() >= 2);
+        let rust = Language::named("rust").unwrap().compiled().unwrap();
+        assert!(rust.non_local.iter().all(|&n| !n));
     }
 
     /// **A file is known by its extension or its name**, as bytes and in
@@ -603,6 +742,38 @@ mod tests {
         assert_eq!(found("#!/usr/bin/perl"), None);
         assert_eq!(found("import os"), None);
         assert_eq!(found("#!"), None);
+    }
+
+    /// **A query's depth is how far its node patterns nest**: groups,
+    /// alternations, predicates, fields and captures nest nothing, and
+    /// brackets inside strings and comments are not brackets.
+    #[test]
+    fn a_querys_depth_is_how_far_its_nodes_nest() {
+        for (query, depth) in [
+            ("", 0),
+            ("(identifier) @variable", 0),
+            ("((identifier) @constant (#match? @constant \"^[A-Z]\"))", 0),
+            ("[(true) (false)] @constant", 0),
+            ("(call_expression function: (identifier) @function)", 1),
+            (
+                "(call_expression function: (member_expression property: (property_identifier) @m))",
+                2,
+            ),
+            ("(a (b (c (d))))", 3),
+            ("( a ( b ))", 1),
+            ("(_ (_) @x)", 1),
+            ("(a [(b (c)) (d)])", 2),
+            ("(a \"(\" @p (b)) ; (x (y (z (w))))", 1),
+            ("(a \"\\\"(\" (b))", 1),
+            (
+                "(formal_parameters (object_pattern (pair_pattern value: (identifier) @p)))",
+                3,
+            ),
+        ] {
+            assert_eq!(pattern_depth(query), depth, "{query}");
+        }
+        let js = Language::named("javascript").unwrap().compiled().unwrap();
+        assert_eq!(js.depth, 3);
     }
 
     /// **Languages are found by name in any case, and are equal only to

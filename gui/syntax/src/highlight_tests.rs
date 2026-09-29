@@ -290,19 +290,11 @@ fn css_is_coloured_as_its_tests_say() {
 }
 
 /// **JavaScript is coloured as its grammar's highlight tests say** --
-/// tagged templates in the language their tag names among them -- but for
-/// `variables.js`, whose names are coloured by where each was declared.
+/// tagged templates in the language their tag names, and names by where
+/// each was declared (`variables.js`), among them.
 #[test]
 fn javascript_is_coloured_as_its_tests_say() {
-    check(
-        "JavaScript",
-        "javascript",
-        29,
-        &[(
-            "variables.js",
-            "colours a name by where it was declared (locals.scm), which the highlighter does not read yet",
-        )],
-    );
+    check("JavaScript", "javascript", 55, &[]);
 }
 
 /// **Python is coloured as its grammar's highlight tests say.**

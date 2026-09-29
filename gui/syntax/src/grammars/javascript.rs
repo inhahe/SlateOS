@@ -67,6 +67,11 @@ pub(crate) const HIGHLIGHTS: &str = concat!(
 /// grammar for, and so stay in JavaScript's colours.
 pub(crate) const INJECTIONS: &str = include_str!("../../grammars/javascript/injections.scm");
 
+/// The locals query, as published: functions, arrow functions, methods and
+/// blocks are scopes; a parameter, a destructured name and a declared
+/// variable are declarations; every name may be a use.
+pub(crate) const LOCALS: &str = include_str!("../../grammars/javascript/locals.scm");
+
 /// The external tokens, in the grammar's order.
 #[derive(Clone, Copy)]
 enum Token {

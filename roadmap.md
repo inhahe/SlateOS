@@ -2031,7 +2031,9 @@ live.
   few milliseconds at a time, re-parsing only what an edit touched; colours
   from the grammars' own highlight queries through the theme, read as
   tree-sitter's own highlighter reads them (§1438, held to upstream's
-  highlight tests). **Grammars:** Bash (every shell script), C, CSS,
+  highlight tests), a name coloured as its declaration is where the
+  grammar says where names are declared (§1440: a parameter wherever it is
+  used). **Grammars:** Bash (every shell script), C, CSS,
   JavaScript (JSX included), JSON, Markdown (block and inline), Python,
   Rust, TOML and YAML (every settings file), each passing its authors' test
   corpus. **Injections** (a language inside another): a Markdown code fence

@@ -75,11 +75,17 @@ pub enum Highlight {
     Heading,
     /// A link or URL in a markup language.
     Link,
+    /// Text a change adds: a diff's `+` line.
+    Inserted,
+    /// Text a change takes away: a diff's `-` line.
+    Deleted,
+    /// Text a change alters: a context diff's `!` line.
+    Changed,
 }
 
 impl Highlight {
     /// How many kinds there are.
-    pub const COUNT: usize = 22;
+    pub const COUNT: usize = 25;
 
     /// Every kind, in declaration order -- which is [`index`](Self::index)'s.
     pub const ALL: [Self; Self::COUNT] = [
@@ -105,6 +111,9 @@ impl Highlight {
         Self::Tag,
         Self::Heading,
         Self::Link,
+        Self::Inserted,
+        Self::Deleted,
+        Self::Changed,
     ];
 
     /// Where this kind is in [`ALL`](Self::ALL).
@@ -139,6 +148,9 @@ impl Highlight {
             Self::Tag => "tag",
             Self::Heading => "heading",
             Self::Link => "link",
+            Self::Inserted => "inserted",
+            Self::Deleted => "deleted",
+            Self::Changed => "changed",
         }
     }
 
@@ -228,6 +240,18 @@ impl Highlight {
             ("text.reference", Some(Highlight::Link)),
             ("text.literal", Some(Highlight::String)),
             ("text.quote", Some(Highlight::Comment)),
+            // A change's lines, as diff grammars and editors name them.
+            ("diff.plus", Some(Highlight::Inserted)),
+            ("diff.add", Some(Highlight::Inserted)),
+            ("markup.inserted", Some(Highlight::Inserted)),
+            ("text.diff.add", Some(Highlight::Inserted)),
+            ("diff.minus", Some(Highlight::Deleted)),
+            ("diff.delete", Some(Highlight::Deleted)),
+            ("markup.deleted", Some(Highlight::Deleted)),
+            ("text.diff.delete", Some(Highlight::Deleted)),
+            ("diff.delta", Some(Highlight::Changed)),
+            ("diff.change", Some(Highlight::Changed)),
+            ("markup.changed", Some(Highlight::Changed)),
         ];
         let name = name.strip_prefix('@').unwrap_or(name);
         if name.starts_with('_') {
@@ -349,6 +373,12 @@ mod tests {
             ("punctuation.bracket", Some(Highlight::Punctuation)),
             ("comment.documentation", Some(Highlight::Comment)),
             ("text.title", Some(Highlight::Heading)),
+            ("diff.plus", Some(Highlight::Inserted)),
+            ("markup.inserted", Some(Highlight::Inserted)),
+            ("diff.minus", Some(Highlight::Deleted)),
+            ("diff.delete", Some(Highlight::Deleted)),
+            ("diff.delta", Some(Highlight::Changed)),
+            ("diffs", None),
             ("embedded", None),
             ("_name", None),
             ("", None),

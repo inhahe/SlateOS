@@ -842,6 +842,10 @@ impl SyntaxColors {
             Highlight::Operator => p.sky,
             Highlight::Punctuation => p.text.lerp(p.overlay0, 0.5),
             Highlight::Link => p.link,
+            // A change's lines in the hues that say gained, lost, altered.
+            Highlight::Inserted => p.green,
+            Highlight::Deleted => p.red,
+            Highlight::Changed => p.yellow,
         });
         Self { colors }
     }

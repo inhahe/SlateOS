@@ -4090,7 +4090,7 @@ mod tests {
                 checked = checked.saturating_add(1);
             }
         }
-        assert!(checked >= 20, "only {checked} keystrokes were checked");
+        assert!(checked >= 22, "only {checked} keystrokes were checked");
     }
 
     #[test]

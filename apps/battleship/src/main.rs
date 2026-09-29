@@ -1648,6 +1648,15 @@ fn label_in(f: &mut Frame<Target>, area: Rect, s: &str, ink: Ink) -> Rect {
 /// is the same key the window delivers.
 fn handle_event(app: &mut BattleshipApp, event: &Event) -> EventResult {
     match event {
+        // Every binding here is on the key itself, so a key is the game's
+        // only with nothing but Shift held: a chord with Ctrl, Alt or the
+        // Windows key is the window's or the desktop's, and it arrives
+        // carrying its key -- Alt+N dealt a new board over a game in play.
+        Event::Key(KeyEvent {
+            pressed: true,
+            modifiers,
+            ..
+        }) if !textline::is_plain(*modifiers) => EventResult::Ignored,
         Event::Key(KeyEvent {
             key, pressed: true, ..
         }) => app.handle_key(*key),
@@ -1699,15 +1708,16 @@ impl App for BattleshipApp {
         }
         // Escape closes the window. It used to deal a new board -- see
         // `handle_key` -- which is the one thing a player pressing Escape
-        // could least afford it to do.
-        if matches!(
-            event,
-            Event::Key(KeyEvent {
-                key: Key::Escape,
-                pressed: true,
-                ..
-            })
-        ) {
+        // could least afford it to do. Escape itself: Alt+Escape and the
+        // like are the desktop's (`handle_event`).
+        if let Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers,
+            ..
+        }) = event
+            && textline::is_plain(*modifiers)
+        {
             return Response::Exit;
         }
         match handle_event(self, event) {
@@ -3792,6 +3802,50 @@ mod tests {
         assert_eq!(app.phase, GamePhase::Firing, "Escape reset the game");
         assert_eq!(app.player_shots, shots, "Escape threw away the score");
         assert_eq!(app.player_fleet.ships, ships, "Escape unplaced the fleet");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is not the game's**:
+    /// Alt+N dealt a new board over a game in play, and Alt+Escape closed
+    /// the window, each chord arriving carrying its key.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_games() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = firing_app();
+        let (row, col, shots) = (app.cursor_row, app.cursor_col, app.player_shots);
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for key in [Key::N, Key::Enter, Key::Space, Key::Down, Key::Right] {
+                assert!(
+                    matches!(
+                        app.on_event(&Event::Key(probe::press_with(key, held))),
+                        Response::Idle
+                    ),
+                    "{held:?} {key:?} was taken"
+                );
+            }
+            assert!(
+                !matches!(
+                    app.on_event(&Event::Key(probe::press_with(Key::Escape, held))),
+                    Response::Exit
+                ),
+                "{held:?} Escape closed the window"
+            );
+        }
+        assert_eq!(app.phase, GamePhase::Firing, "a chord dealt a new board");
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (row, col),
+            "a chord moved the cursor"
+        );
+        assert_eq!(app.player_shots, shots, "a chord fired");
     }
 
     #[test]

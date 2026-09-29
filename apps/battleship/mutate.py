@@ -457,6 +457,18 @@ MUTATIONS = [
         "            FontWeightHint::Regular,\n            c.chrome.text,\n        );",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a key held with a modifier is the game's",
+        '        }) if !textline::is_plain(*modifiers) => EventResult::Ignored,',
+        '        }) if false => EventResult::Ignored,',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
+    (
+        'Escape with a modifier held closes the window',
+        '            && textline::is_plain(*modifiers)',
+        '            && true',
+        ['a_key_held_with_a_modifier_is_not_the_games'],
+    ),
 ]
 
 if __name__ == "__main__":

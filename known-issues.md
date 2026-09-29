@@ -175591,7 +175591,7 @@ numbers there, no argument can land near it: about 16 integers deep for
 double, 20 for long double. For float, CORE-MATH's correctly rounded
 `lgammaf` (MIT) is a ready alternative.
 
-## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the `long double` Bessel functions remain)**
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the six `long double` Bessel functions 2026-09-29, `posix/src/besl.rs`, written from the mathematics (design-decisions §1140): 13,338 of 13,339 values mpmath's correctly rounded ones in all four directions, glibc's special values, flags and `errno` at 8,136 calls. Left: `fegetmode` and `fesetmode`, which wait on musl's headers)**
 
 **In short:** a C program that calls one of the functions below does not
 link. None is in C99; they are C23 additions, GNU extensions, or the `long
@@ -175603,7 +175603,7 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 |---|---|---|
 | `long double` complex | `cabsl` `cacosl` `cacoshl` `cargl` `casinl` `casinhl` `catanl` `catanhl` `ccosl` `ccoshl` `cexpl` `cimagl` `clogl` `conjl` `cpowl` `cprojl` `creall` `csinl` `csinhl` `csqrtl` `ctanl` `ctanhl` | **done 2026-09-28** (`complexl.rs`): FreeBSD msun's `ld80` versions where it has them, `complex.rs`'s `double` algorithms carried to 80 bits for `ccoshl`, `csinhl`, `ctanhl` and their circular twins, glibc's `cpowl`; with `__mulxc3` and `__divxc3`, which a C compiler calls for `long double complex` `*` and `/` and which were missing too |
 | GNU complex | `clog10` `clog10f` `clog10l` | **done 2026-09-28**: glibc's `s_clog10_template.c`, its exact `x^2 + y^2 - 1` near `|z| = 1` included |
-| `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | musl has none; FreeBSD msun has no `ld80` Bessel either; glibc's are LGPL -- needs its own derivation (Cephes' `j0l` family is the usual permissive source) |
+| `long double` Bessel | `j0l` `j1l` `jnl` `y0l` `y1l` `ynl` | **done 2026-09-29** (`besl.rs`): musl and FreeBSD have none and glibc's are LGPL, so derived here -- Miller's recurrence and the Neumann series to 48, Hankel's expansion in phase and amplitude past it, Taylor series about each zero below 48, all in double-long-double arithmetic and rounded once (§1140), 3 to 31 microseconds a call; from order 512 Debye's expansions (D-POSIX-BESSEL-HUGE-ORDERS-ARE-SLOW, fixed) |
 | C23, all three precisions | `nextup` `nextdown` `llogb` `canonicalize` `fromfp` `fromfpx` `ufromfp` `ufromfpx` `getpayload` `setpayload` `setpayloadsig` `totalorder` `totalordermag` `fmaxmag` `fminmag` `fmaximum_mag` `fminimum_mag` `fmaximum_mag_num` `fminimum_mag_num` (each with `f` and `l`) | **done 2026-09-28** (`c23math.rs`): glibc's code, bit for bit, down to the x87 encodings it refuses |
 | C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | **done 2026-09-28**, all twelve (`c23math.rs`, with oracle rows): the `double` and `float` ones are ours now, where they were compiler_builtins' weak exports |
 | C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | **done 2026-09-28** (`narrow.rs`): round-to-odd in the wider one, then round, as glibc's `math-narrow.h` |
@@ -176057,3 +176057,29 @@ modules) as well as Limine's -- a second boot protocol, which is lane A's
 call. If it lands, the two refusals go, and the installer can offer an entry
 that loads the kernel directly -- the one way to boot Slate OS from a GRUB
 started through the BIOS. Not filed as a request: nothing waits on it.
+
+## D-POSIX-BESSEL-HUGE-ORDERS-ARE-SLOW — `jnl` and `ynl` take time in proportion to the order where the answer is neither under- nor overflowing: seconds at an order of ten million, minutes at 2^31 (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 -- from order 512, Debye's expansions away from the turning point, 12 to 20 microseconds a call in a release build; from order 2048 within 32 n^(1/3) of it too, a recurrence crossing from where they hold, at most about 6 ms (order 2^31); between, the recurrences, which cost no more there (under 0.2 ms); every value the correctly rounded one in all four directions at orders 600 to 2^31 - 1 (mpmath's recurrences at 80 digits, and Debye's sums beyond 2^16), and in agreement with the recurrences they replace and with the Wronskian at orders to 2^31**
+
+**In short:** the `long double` Bessel functions of order `n` (`jnl(n, x)`
+and `ynl(n, x)`, `posix/src/besl.rs`) compute their answer by stepping
+through every order from 0 or 1 up to `n` (or down from just above it). For
+the orders programs use -- up to a few hundred -- that is microseconds. For
+a huge order with `x` near `n` or past it -- the only place such an answer
+is neither zero nor infinite -- it is about a million steps a second: at
+`n` = 10^6 a quarter of a second, at `n` = 2^31 some minutes. glibc steps
+the same way (18 seconds for `jnl(2147483647, 1)`, in plain precision and
+with the wrong sign), so nothing that worked before is slower; but a
+function should not take minutes on any argument.
+
+**Where:** `posix/src/besl.rs` -- `jn_scaled`'s forward recurrence and
+`jn_miller`, and `yn_scaled`. Everywhere else the cost is bounded: an
+answer Debye's estimate puts past the range returns at once.
+
+**The proper fix:** Debye's asymptotic expansions for large orders, in
+both of their forms -- `x = n sec(beta)` past the turning point, `x = n
+sech(alpha)` before it -- whose Debye polynomials `u_k` a generator can
+write as exact rationals; and across the turning point, where neither
+converges, a short recurrence from a Debye value on the far side (upward
+for `Y`, Miller's downward for `J`), about `n^(1/3)` steps. The same
+double-long-double arithmetic and the same oracle (mpmath, which evaluates
+large orders directly) test it.

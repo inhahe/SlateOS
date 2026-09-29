@@ -242,6 +242,34 @@ pub(crate) fn toward_zero_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> (T, bool
     (r, raised & FE_INEXACT != 0)
 }
 
+/// `f(args)` with both units' environments held -- every flag cleared,
+/// every exception masked, rounding to nearest, the x87 unit at its full
+/// 64-bit precision -- and then both put back exactly as they were, so the
+/// flags `f` raised are dropped: glibc's `libc_feholdexcept_setround_387
+/// (FE_TONEAREST)` and its SSE twin, without the update. For the `long
+/// double` Bessel functions ([`crate::besl`]), which compute in
+/// double-long-double arithmetic -- whose error-free sums and products are
+/// error-free only to nearest and at 64 bits, whose every operation is
+/// inexact and whose negligible terms may underflow -- and which raise their
+/// result's own flags by rounding it once, in the caller's environment,
+/// afterwards. `f` is pinned between the switches as in [`in_nearest`].
+pub(crate) fn quietly_in_nearest_x87<A, T>(args: A, f: impl FnOnce(A) -> T) -> T {
+    let mut env = FenvT::default();
+    fnstenv(&mut env);
+    let mut held = env;
+    // The flags, the error summary and busy: what `fnclex` clears.
+    held.status_word &= !0x80ff;
+    // Every exception masked (0x3f), 64-bit precision (0x300), to nearest.
+    held.control_word = (held.control_word | 0x33f) & !0xc00;
+    fldenv(&held);
+    let csr = stmxcsr();
+    ldmxcsr((csr | 0x1f80) & !(0x3f | MXCSR_ROUNDING));
+    let r = core::hint::black_box(f(core::hint::black_box(args)));
+    ldmxcsr(csr);
+    fldenv(&env);
+    r
+}
+
 /// Whether the SSE unit -- every `double` and `float` operation -- rounds to
 /// nearest, the default. One `stmxcsr`: the math functions ask it on every
 /// call, and nearly every call answers yes.

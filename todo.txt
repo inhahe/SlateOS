@@ -59081,11 +59081,14 @@ is already waiting, not whether the setter exists.
   posix/tools/gen_iconv_8bit.py), and CP1255, CP1258 and TCVN5712-1
   (posix/src/iconv_combining.rs, read out of glibc's cp1255.c, cp1258.c
   and tcvn5712-1.c by posix/tools/gen_iconv_combining.py) convert as glibc
-  2.39's (B-D-ICONV-HAD-THREE-CHARSETS); every other name is refused with
-  EINVAL.  Next, by how often programs ask: the rest of the 8-bit sets glibc
-  writes by hand -- ARMSCII-8, ISO_6937 and T.61 (two-byte diacritics),
-  ISO646's national variants, and the rest of iconvdata/Makefile's
-  `modules` that are neither
+  2.39's (B-D-ICONV-HAD-THREE-CHARSETS), and since 2026-09-28 the 25
+  single-byte sets glibc writes by hand whose converters are their
+  charmaps -- iso646.c's 23 national variants, ISO_11548-1 and ARMSCII-8
+  (iconv_8bit.rs, checked against glibc's own converters by
+  posix/tools/oracle/iconv_hand_harness.py); every other name is refused
+  with EINVAL.  Next, by how often programs ask: the two-byte-diacritic
+  sets T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110, then TSCII (stateful),
+  and the rest of iconvdata/Makefile's `modules` that are neither
   generated nor multibyte; then the East Asian multibyte sets (EUC-JP,
   SHIFT_JIS, EUC-KR, GBK/GB18030, BIG5, ISO-2022-JP), whose tables run to
   megabytes -- and whose size in every program that links iconv is its own

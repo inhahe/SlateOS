@@ -15,6 +15,7 @@
 //! | `ASCII` (`ANSI_X3.4-1968`) | seven bits; the C locale's character set, and so the empty name's |
 //! | `ISO-8859-1` | Latin-1 |
 //! | `ISO-8859-2` to `-16`, `CP1250` to `CP1257` (`WINDOWS-1252` and the rest), `KOI8-R`, `KOI8-U`, `IBM437`, `IBM850`, `MACINTOSH`, EBCDIC (`IBM037`, `IBM500`) and the rest of glibc's 141 table-driven 8-bit sets ([`crate::iconv_8bit`]) | one byte a character, by glibc's table; a byte the table leaves out is invalid |
+//! | the 23 national variants of ISO 646 glibc's `iso646.c` serves (`BS_4730`, `DIN_66003`, `NF_Z_62-010`, `JIS_C6220-1969-RO` ...), `ISO_11548-1` (8-dot braille) and `ARMSCII-8` (Armenian), from the same tables | the same; five ARMSCII-8 bytes are second copies of ASCII punctuation, read and never written |
 //! | `UTF-16`, `UTF-32` | a byte-order mark written first, in the machine's order (FF FE on x86-64), and read if there is one; the machine's order without one |
 //! | `UTF-16LE`, `-16BE`, `-32LE`, `-32BE` | no mark written or read |
 //! | `UCS-2` | the machine's order, no mark; `UCS-2BE` the other order |
@@ -758,14 +759,16 @@ fn decode_table8(t: u16, s: &[u8]) -> Decoded {
 }
 
 /// Table `t` turned round, into `into`: its (code point, byte) pairs,
-/// sorted by code point for [`encode_table8`]; how many there are.
+/// sorted by code point for [`encode_table8`]; how many there are. A
+/// `decode_only` byte is left out: its code point is written as its other
+/// byte (ARMSCII-8's 0xA4 is read as U+0029, and U+0029 written 0x29).
 fn reverse_index(t: u16, into: &mut [(u16, u8); 256]) -> usize {
     let Some(table) = table8(t) else {
         return 0;
     };
     let mut n = 0;
     for (byte, &code) in (0u8..=255).zip(table.to_ucs.iter()) {
-        if byte == 0 || code != 0 {
+        if (byte == 0 || code != 0) && !table.decode_only.contains(&byte) {
             if let Some(slot) = into.get_mut(n) {
                 *slot = (code, byte);
                 n += 1;
@@ -3427,8 +3430,8 @@ mod tests {
         let tables = crate::iconv_8bit::TABLES;
         assert_eq!(
             tables.len(),
-            141,
-            "gen-8bit-modules and gen-8bit-gap-modules"
+            141 + 25,
+            "gen-8bit-modules and gen-8bit-gap-modules, and the hand-written 25"
         );
         let mut names: Vec<&[u8]> = NAMES.iter().map(|&(n, _)| n).collect();
         for (index, t) in tables.iter().enumerate() {
@@ -3443,8 +3446,19 @@ mod tests {
             for &(u, b) in reverse {
                 assert_eq!(t.to_ucs[usize::from(b)], u, "{first}");
             }
-            let assigned = (0..256).filter(|&b| b == 0 || t.to_ucs[b] != 0).count();
+            let assigned = (0u8..=255)
+                .filter(|&b| b == 0 || t.to_ucs[usize::from(b)] != 0)
+                .filter(|b| !t.decode_only.contains(b))
+                .count();
             assert_eq!(n, assigned, "{first}: a byte for every code point");
+            for &b in t.decode_only {
+                let u = t.to_ucs[usize::from(b)];
+                assert_ne!(u, 0, "{first}: decode-only 0x{b:02x} decodes");
+                assert!(
+                    reverse.iter().any(|&(c, other)| c == u && other != b),
+                    "{first}: decode-only 0x{b:02x}'s code point has a byte of its own"
+                );
+            }
             for &n in t.names {
                 assert_eq!(n.split(|&c| c == b'/').count(), 3, "{first}: two slashes");
                 assert!(!n.iter().any(u8::is_ascii_lowercase), "{first}: upper case");
@@ -3484,9 +3498,99 @@ mod tests {
                 (-1, EILSEQ, 0)
             };
             assert_eq!((r, e, left), want, "{name}: holes skipped");
+            // A decode-only byte comes back as its code point's own byte.
+            let back_want: Vec<u8> = assigned
+                .iter()
+                .map(|&b| {
+                    if t.decode_only.contains(&b) {
+                        let u = t.to_ucs[usize::from(b)];
+                        (0u8..=255)
+                            .find(|&o| t.to_ucs[usize::from(o)] == u && !t.decode_only.contains(&o))
+                            .unwrap()
+                    } else {
+                        b
+                    }
+                })
+                .collect();
             let (r, e, left, back) = run(name, "UTF-8", &utf8, 1024);
-            assert_eq!((r, e, left, back), (0, OK, 0, assigned), "{name}");
+            assert_eq!((r, e, left, back), (0, OK, 0, back_want), "{name}");
         }
+    }
+
+    /// glibc 2.39's hand-written single-byte sets, every byte decoded by its
+    /// own converter (`posix/tools/oracle/iconv_hand_harness.py`, which also
+    /// checks there that each encoder is its decoder turned round, less the
+    /// set's `.irreversible` bytes): `<name> <256 code points, or ->`.
+    const HAND_ORACLE: &str = include_str!("iconv_hand_oracle.txt");
+
+    /// iso646.c's 23 variants, ISO_11548-1 and ARMSCII-8 read every byte as
+    /// glibc's converters do, and write back as the harness found them to:
+    /// each code point as the byte that reads as it, but for ARMSCII-8's five
+    /// decode-only bytes.
+    #[test]
+    fn the_hand_written_8bit_sets_are_glibcs() {
+        let mut sets = 0;
+        for line in HAND_ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+        {
+            let mut words = line.split(' ');
+            let name = words.next().unwrap();
+            let glibc: Vec<&str> = words.collect();
+            assert_eq!(glibc.len(), 256, "{name}");
+            let mut key = name.as_bytes().to_vec();
+            key.extend_from_slice(b"//");
+            let Some(Charset::Table8(t)) = table8_named(&key) else {
+                panic!("{name}: no table");
+            };
+            let table = table8(t).unwrap();
+            let mut reverse = [(0u16, 0u8); 256];
+            let n = reverse_index(t, &mut reverse);
+            let reverse = &reverse[..n];
+            for (b, want) in (0u8..=255).zip(&glibc) {
+                let ours = match decode_table8(t, &[b]) {
+                    Decoded::Char(c, 1) => std::format!("{c:04x}"),
+                    Decoded::Illegal(1) => "-".into(),
+                    other => panic!("{name} 0x{b:02x}: {other:?}"),
+                };
+                assert_eq!(ours, *want, "{name}: byte 0x{b:02x}");
+                if *want != "-" {
+                    let u = u32::from_str_radix(want, 16).unwrap();
+                    let written = encode_table8(reverse, u);
+                    if table.decode_only.contains(&b) {
+                        assert_ne!(written, Some(b), "{name}: 0x{b:02x} is decode-only");
+                        assert!(written.is_some(), "{name}: U+{u:04X} has a byte");
+                    } else {
+                        assert_eq!(written, Some(b), "{name}: U+{u:04X}");
+                    }
+                }
+            }
+            sets += 1;
+        }
+        assert_eq!(sets, 25);
+        // And by name, through iconv_open: DIN 66003's Umlauts where ASCII has
+        // brackets, braille, and ARMSCII-8's second parenthesis read as the
+        // first and written as ASCII's.
+        #[rustfmt::skip]
+        let cases: &[OneWay] = &[
+            ("DIN_66003", b"[\\]{|}~", 0, OK, 0, "c384c396c39cc3a4c3b6c3bcc39f"),
+            ("ISO646-DE", b"@", 0, OK, 0, "c2a7"),
+            ("BS_4730", b"#", 0, OK, 0, "c2a3"),
+            ("ISO_11548-1", b"\x00\xff", 0, OK, 0, "e2a080e2a3bf"),
+            ("ARMSCII-8", b"\xa5\xa4\xb2", 0, OK, 0, "2829d4b1"),
+        ];
+        for &(from, input, r, e, left, hex) in cases {
+            assert_eq!(
+                run("UTF-8", from, input, 64),
+                (r, e, left, self::hex(hex)),
+                "{from}"
+            );
+        }
+        assert_eq!(
+            run("ARMSCII-8", "UTF-8", "()\u{531}".as_bytes(), 64),
+            (0, OK, 0, b"()\xb2".to_vec()),
+            "U+0028 and U+0029 written as ASCII's bytes"
+        );
     }
 
     #[test]

@@ -951,6 +951,7 @@ dependencies = [
  "scratchdir",
  "sha1",
  "sha2",
+ "textline",
 ]
 
 [[package]]

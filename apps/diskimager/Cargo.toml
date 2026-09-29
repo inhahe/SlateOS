@@ -25,6 +25,8 @@ oswindow = { path = "../../gui/window" }
 md5 = { path = "../../md5" }
 sha1 = { path = "../../sha1" }
 sha2 = { path = "../../sha2" }
+# `is_plain` and `is_ctrl_chord`: a key held with Alt or the Windows key is not the window's, and AltGr is not Ctrl.
+textline = { path = "../textline" }
 
 [dev-dependencies]
 # The file-open dialog is handed a real directory listing, so the tests that

@@ -1807,8 +1807,12 @@ live.
   the left with the search field at their foot, and a places column on the
   right -- who is signed in (the account's display name, from the login),
   Home, Documents, Pictures, Music, Downloads, Settings, a terminal, and the
-  power button at the foot. Next: the pinned programs as tiles, jump lists,
-  and a Shut down button with the rest behind a caret.
+  power button at the foot. The rest done 2026-09-26 and -27: jump lists (a
+  program's right-click menu starts with its desktop entry's actions),
+  "Shut down" in one click with the rest behind a caret (§1405), and the
+  pinned programs -- as rows, not tiles: the reference's stylesheet has a
+  tile grid its markup never uses, and draws its pins as rows like the rest
+  (`roadmap-detailed.md` → Start menu).
 
 - `[C]` **Icon themes, and the start menu drawn with them** -- done
   2026-09-26 (`design-decisions.md` §880). `appearance::icons` finds an icon

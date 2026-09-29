@@ -196,7 +196,7 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 |------|------|------|----------------------|
 | **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` |
 | **B** | `Lane B` | **Userland** | `userspace/**`, `init/**` |
-| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's six crates |
+| **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's crates (`gui/compositor`, `window`, `remote`, `font`, `imagecodec`, `vulkan`, `video`) |
 | **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` |
 | **E** | `Lane E` | **Applications** | `apps/**`, `randrange/**` |
 | **F** | `Lane F` | **Graphics Stack** | `gui/compositor/**`, `gui/window/**`, `gui/remote/**`, `gui/font/**`, `gui/imagecodec/**`, `gui/vulkan/**`, `gui/video/**` |
@@ -1909,13 +1909,16 @@ live.
   **Lane E:** Settings changes the look through `set_surface_style` rather than
   assigning the field (`requests/c-e-the-operators-answers-c-q15-c-q16-c-q17-c-q19-c-q21.md` §5).
 
-- `[C]` **One list of the installed programs, in userspace** -- open (C-Q20,
-  §1425). First an inventory of all four lists -- the kernel's
-  `fs::appregistry`, the shell's database, `apps/fileassoc`, and the per-role
-  defaults of the deleted `default_apps.rs` (git history) -- into one table,
-  nothing dropped; then a library under `gui/` holding all of it, read by the
-  shell; then Settings, the file manager and file associations (lane E); only
-  then does lane A remove the kernel's registry.
+- `[C]` **One list of the installed programs, in userspace** -- **lane C's
+  steps done 2026-09-27** (C-Q20, §1425, §1429). The inventory
+  (`gui/programs/INVENTORY.md`: fourteen sources, every item and where it went),
+  the library (`gui/programs`: fifteen programs as desktop entries, fifty type
+  defaults, fourteen roles), the file types carried into `guitk::filetypes`, the
+  kernel's default pins as the shell's first start, and the shell reading the
+  library. **Waiting on others:** lane E's Settings, file manager, File
+  Associations and launcher read it (`requests/c-e-read-the-one-list-of-programs.md`);
+  then lane A removes the kernel's lists. **Lane C, when lane E's 3275adc99 is
+  on `main`:** add `.oga` to the toolkit's table and to the inventory test.
 
 - `[C]` **Automatic sign-in, with a key held at start-up to choose** --
   **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:
@@ -1939,25 +1942,140 @@ live.
   event colour, Settings' accent).
 
 - `[C]` **A claim every lane sees when it starts a task outside its obvious
-  territory** -- open (the operator's C-Q20 suggestion, §1425). A shared record
-  in the git common directory, like the halts, so another lane can see at once
-  that a feature is being built; the `CLAUDE.md` wording that would make it a
-  rule goes to the operator.
+  territory** -- **done 2026-09-27** (the operator's C-Q20 suggestion, §1425):
+  `scripts/lane-claims.py` (`--claim`, `--check`, `--list`, `--release`), in
+  the git common directory beside the halts. The `CLAUDE.md` paragraph that
+  would make it a rule is put to the operator as C-Q31.
 
 - `[C]` **A program may ask the password manager for a password -- with a key
-  for it, and the user's consent** -- open (C-Q25, §1417). In the credential
-  service (`gui/credentials`): the request over the service's IPC, refused
-  without a capability granted for it, and a prompt naming the asking program
-  to allow or refuse. The capability's shape may need lane A.
+  for it, and the user's consent** -- open, **waiting on lane A for the
+  capability's shape** (C-Q25, §1417;
+  `requests/c-a-a-capability-to-ask-the-credential-service-for-a-password.md`).
+  In the credential service (`gui/credentials`): the request over the service's
+  IPC (`SYS_SERVICE_CONNECT`), refused without the capability, and a prompt
+  naming the asking program (`SYS_CHANNEL_PEER_CRED`) to allow or refuse. The
+  service today is an in-process model with no transport, and its vault waits on
+  the ported cipher and password hash (lane E's question to lane A).
 
 - `[C]` **A settings service that tells open windows when a setting
-  changes** -- open (C-Q26, §1418). Beside `gui/settingsfile`, never in front
-  of it: saving stays a program writing its own file.
+  changes** -- **done 2026-09-28** (C-Q26, §1418, §1434). Beside
+  `gui/settingsfile`, never in front of it: saving stays a program writing its
+  own file. Lane F's announcement carries a program's own file
+  (`AnnounceSettings`); lane C's `gui/settingswatch` watches the settings
+  folder (`libcall::inotify`) from a thread of the desktop shell and the shell
+  announces each file rewritten -- a rename at once, a file written in place
+  once it goes quiet, everything after lost events. `settingsfile` refuses a
+  name that could not be announced, by the one rule (`gui/settingsname`).
+  **Lane E:** the programs re-reading their own file when told
+  (`requests/c-e-a-changed-settings-file-is-announced-now.md`).
 
 - `[C]` **C-Q11: measure the whole-workspace check under the machine's normal
-  load, then decide the gate** -- open, waiting for the lanes to be running
-  again (`todo.txt`, lane C). The earlier figures (15 s to 49 s) were taken
-  with fewer lanes and fewer projects running.
+  load, then decide the gate** -- **done 2026-09-27** (`design-decisions.md`
+  §1430). Every boot test already compiles and lints the whole workspace for
+  Linux (90-181 s, about 2.4% of a boot test, under load), and it has caught
+  real cross-crate breaks; option A is in force, and nothing is added.
+
+- `[C]` **Dockable panels** -- done 2026-09-28. `guitk::dock`: an
+  application's panels in tab groups, the groups in nested splits, and the
+  user rearranging all of it by dragging tabs. A tab joins another group's
+  bar, splits a group on any side, or takes a column or row of the whole
+  dock. Panels open and close from a menu, the arrangement saves to one line
+  of a settings file and reads back even after a panel kind is dropped, and
+  the tab bars are the toolkit's own `TabView`, whose tab geometry became
+  public for it. **Lane E:** `requests/c-e-the-toolkit-has-a-dock.md`.
+
+- `[-]` `[C]` **The image carries the third-party notices its licences
+  require** -- lane C's part done 2026-09-28 (`design-decisions.md` §1433).
+  `scripts/gather-notices.py` collects every notice in the tree into one folder:
+  ported code named by a `licenses/notices.yaml`, vendored Rust crates by
+  their licence files, crates.io libraries from `Cargo.lock` and the registry
+  cache. `gui/notices` reads it, and `scripts/test-gather-notices.py` fails a
+  boot if a notice cannot be gathered or the Python writer and Rust reader
+  drift apart. **Still to do, in other lanes:** lane D runs the gatherer into
+  the image's `/usr/share/licenses`
+  (`requests/c-d-put-the-third-party-notices-in-the-image.md`); lane E shows
+  them on an About page in Settings (`requests/c-e-show-the-third-party-notices.md`),
+  after which lane C deletes the shell's orphaned `about.rs`; lane F writes
+  the manifests for `imagecodec` and `osfont`, and every lane adds one when it
+  ports code (`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`).
+
+- `[-]` `[C]` **A theme chooses the shapes of the controls** (the widget-style
+  axis, `roadmap-detailed.md` → *Tier 2 — Widget Styling*, `design-decisions.md`
+  §1435) -- the axis done 2026-09-28: a theme's `widget-style` section (button
+  radius, gloss and shadow; a field's radius, edge and focus mark; a check
+  box's radius; pill or checkbox for on/off; scrollbar width and whether it
+  hides), chosen as `theme.widget_style` apart from the colours, read with the
+  settings and carried on the palette to every control. The toolkit's
+  controls draw from it: the button, every toolkit text field (one drawer,
+  `guitk::field`), the check box, the switch (a box in the pill's room under
+  `toggle: checkbox`, in the shell's settings too) and the scrollbars
+  (`guitk::scrollbar::draw`, in a column every theme shares), and the shell's
+  own text fields; button padding through the alert dialog's layout. **Lane
+  E:** the Settings picker for the axis and its applications' own fields and
+  scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
+
+- `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
+  *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
+  chunked buffer with a line index, any file size), `guitk::codeedit`
+  (several carets, auto-indent, tab stops, indent/dedent, block/word/line
+  selection, bracket matching, find and replace with regular expressions --
+  the `regex` crate, §1436 -- and the undo tree) and `guitk::codeview`
+  (gutter, wrapping or sideways scrolling, the find bar, keys and pointer,
+  and a syntax highlighter's colours: `guitk::highlight`, the theme's
+  `syntax` section). **Lane E:** the two editors onto it
+  (`requests/c-e-the-toolkit-has-a-code-editor.md`).
+
+- `[-]` `[C]` **Syntax highlighting, tree-sitter's** (§1437) -- the
+  machinery done 2026-09-28: `gui/syntax`, the tree-sitter runtime as Rust
+  (`tree-sitter-c2rust`) and each grammar's `parser.c` converted to Rust at
+  build time (`gui/tsgrammar`), external scanners ported by hand; parsing a
+  few milliseconds at a time, re-parsing only what an edit touched; colours
+  from the grammars' own highlight queries through the theme, read as
+  tree-sitter's own highlighter reads them (§1438, held to upstream's
+  highlight tests). **Grammars:** C, CSS, JSON, Markdown (block and inline),
+  Python, Rust, TOML and YAML (every settings file), each passing its
+  authors' test corpus. **Injections** (a language inside another): a
+  Markdown code fence in the language it names, front matter as YAML or
+  TOML, every paragraph in Markdown's inline grammar, a Rust macro's body.
+  **Next:** shell, then JavaScript and HTML.
+
+- `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
+  and a night picture, or any number at any times: `wallpaper.schedule` in
+  `appearance.yaml`, each picture up from its time until the next's. The
+  shell changes it at each time, in its own zone, without being touched.
+  **Lane E:** a place for it on the Wallpaper page
+  (`requests/c-e-day-and-night-wallpapers-need-a-place-in-settings.md`).
+
+- `[C]` **A switch, checkboxes, radio buttons and a drop-down in the toolkit**
+  -- done 2026-09-27 (`design-decisions.md` §1432). The retained widget tree
+  declared checkboxes and radio buttons and nothing used it, so every program
+  drew its own. `guitk::switch` (moved from the desktop, where it had replaced
+  seventeen copies, and made a control: hover, focus ring, disabled, a generous
+  target), `guitk::checkbox` (two-state, and design.txt's yes/no/default
+  three-state box), `guitk::radio` (a group whose arrows choose and wrap;
+  emptied by a second click only where "none" is an answer) and
+  `guitk::dropdown` (the Aero reference's select; Windows' keys; its list
+  placed about the field, so it never opens over it). **Lane E:** the applications'
+  own (`requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`).
+
+- `[C]` **A slider you can drag, and targets larger than what is drawn** --
+  done 2026-09-27 (`design-decisions.md` §1431). `guitk::slider`: the
+  toolkit had declared a slider it never drew, and the desktop's could be
+  clicked but not dragged, and only on the track's exact pixels. Now a press
+  near the thumb takes hold where it pressed, a press on the track jumps
+  there, the keys and (while focused) the wheel move it, and it reports
+  `Changed` while dragged, `Confirmed` when let go, `Cancelled` on Escape.
+  `guitk::grab` is the rule for every draggable thing: a handle is a 24-pixel
+  target however small it is drawn (WCAG 2.5.8), an edge gets three pixels
+  either side. The notification pane's volume and brightness drag now.
+  The colour picker's parts and the file dialog's and tree view's scrollbar
+  thumbs take hold by the same rule (a thumb in a track grows along it only),
+  and fixing the colour picker found the first move of its RGB/HSV sliders
+  jumping the value. (`WidgetKind::Slider` is one of five widgets the unused
+  retained tree never drew -- `known-issues.md`
+  `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`.)
+  **Lane E:** the applications' own sliders
+  (`requests/c-e-the-toolkit-has-a-slider-now.md`).
 
 - `[C]` **One push button, the reference's** -- done 2026-09-27
   (`design-decisions.md` §1414). `guitk::button` draws the Aero reference's

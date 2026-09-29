@@ -1,0 +1,25 @@
+[package]
+name = "syntax"
+version = "0.1.0"
+edition = "2024"
+description = "Syntax highlighting for SlateOS's code editor: tree-sitter grammars, converted to Rust at build time, driving guitk::codeview"
+
+[dependencies]
+# The code view and the highlighter hook it drives (`guitk::highlight`).
+guitk = { path = "../toolkit" }
+
+# The tree-sitter runtime, transpiled from its C to Rust by c2rust and kept in
+# step with upstream (design-decisions 1437). Pure Rust: no C compiler for the
+# host tests, the Linux lint or SlateOS. Renamed so the code reads as
+# tree-sitter's own API, which it is -- the day a C toolchain is part of every
+# build, the published `tree-sitter` crate drops in here unchanged.
+tree-sitter = { package = "tree-sitter-c2rust", version = "0.25.2", default-features = false, features = ["std"] }
+# Where the runtime's `LanguageFn` lives: the handle a grammar is passed by.
+tree-sitter-language = "0.1.8"
+
+[build-dependencies]
+# Reads each grammar's generated parser.c and writes it as Rust (build.rs).
+tsgrammar = { path = "../tsgrammar" }
+
+[lints]
+workspace = true

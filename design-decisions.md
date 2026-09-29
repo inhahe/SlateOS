@@ -85072,6 +85072,31 @@ claim every lane can see at once (the same shared store the halts use); the
 change to `CLAUDE.md` that would make it a rule is put to the operator directly,
 because `CLAUDE.md` changes on the operator's own word, not on a relay.
 
+**As built (lane C, 2026-09-27): steps 1 and 2, and the shell's half of 3.**
+
+- **The inventory** is `gui/programs/INVENTORY.md`. There were fourteen sources,
+  not four: besides the four the question named, the kernel had eight more
+  modules with program or file-type data (`fs::defaultapps`,
+  `fs::associations`, `fs::mime`, `fs::filetype`, `fs::pinnedapps`,
+  `fs::startmenu`, `fs::applaunch`, and the empty `fs::openwith`/`fs::appstore`),
+  and the toolkit's file types and `gui/associations` hold the rest. Every item
+  is listed with where it now lives or why it does not; `tests/inventory.rs`
+  holds that to the code.
+- **The library** is `gui/programs` (the format is §1429): fifteen programs as
+  desktop entries, fifty type defaults, fourteen roles.
+- **Carried elsewhere:** 23 file extensions and nine kinds of content signature
+  into `guitk::filetypes`; the kernel's default pins into the shell's first
+  start. **Held back:** `.oga`, until lane E's File Associations test counts
+  audio types from the table (their 3275adc99), and nine file types the toolkit
+  had already decided to wait on.
+- **Read by the shell:** `launcher::builtin_app_database` is the library's list.
+  Found on the way: the shell's System Info row started `userspace/sysinfo`, the
+  command-line tool, rather than the window (`sysinfo-app`).
+- **Still to do:** lane E's programs read the library
+  (`requests/c-e-read-the-one-list-of-programs.md`), then lane A removes the
+  kernel's lists (`requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md`
+  item 1).
+
 ## 1426. A daily backup runs at its time whether or not anyone is signed in, and a missed one runs as soon as the machine is on again
 
 **Date:** 2026-09-27 &middot; **Decided by:** Operator (Claude recommended A, with a prompt for missed backups; the operator chose A without the prompt) &middot; **Lane:** C (the question), with D (the service), B (starting it) and E (the backup program)
@@ -85202,6 +85227,562 @@ program); the library's defaults are what stands behind them.
 
 **As built:** `gui/programs` (2026-09-27): fifteen entries, fifty type defaults,
 fourteen roles, and `INVENTORY.md` with the fourteen old sources item by item.
+
+## 1430. Every crate is already built before a merge; the check stays as it is and no second one is added (C-Q11)
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (operator-approved scope: the
+operator left C-Q11 to Claude, asking that the check's cost be measured under the
+machine's normal load and set against the time it has saved) &middot; **Lane:** C
+
+**In short:** C-Q11 asked whether something should build every crate before work
+is merged, after a shared-library change broke the lock screen and nothing
+noticed for a day. Something now does: every boot test -- which is required
+before anything reaches `main` -- compiles and lints the whole workspace for the
+Linux target (`clippy --workspace --exclude kernel --all-targets`), and a push
+also compiles the whole workspace for the host. It costs about two and a half
+percent of a boot test and has caught real breaks since. So the answer is
+option A, already in force; nothing is added.
+
+**Measured**, from lane C's boot logs, with other lanes running:
+
+| Run | The whole-workspace clippy | The whole boot test | Share |
+|---|---|---|---|
+| lane C, release boot | 181 s | 7,876 s (gates 6,228 s) | 2.3% |
+| lane C, debug boot | 90 s | 3,795 s (gates 2,903 s) | 2.4% |
+
+Earlier figures (15-49 s for `cargo check --workspace`, 2026-09-06) were
+taken with fewer lanes and projects running; the operator asked for the
+normal-load number, which this is. The cost is dominated by the gate phase's
+other checks, not by this one.
+
+**What it has saved.** It refuses a push or a boot the moment a crate anywhere
+stops compiling or linting, which is exactly the lock screen's failure. Commits
+that exist because it refused, among others: `3dd7a7e64` (lane C -- a toolkit
+type grew and broke `apps/finance`'s lint, a crate lane C never builds),
+`dc02d5189` (a record type's new fields broke literals elsewhere),
+`5bcc49e7d` and `8d35e6a88` (Linux-only lints in code the Windows host never
+compiles). Each of those would otherwise have reached `main` and cost every
+other lane a red boot -- about two and a half hours each -- to find.
+
+**Options, as C-Q11 put them:**
+
+| Option | Verdict |
+|---|---|
+| A. A whole-workspace check before a merge | **in force**, through the boot test and the push |
+| B. A nightly sweep that only reports | not needed: A catches the same breaks before they land rather than after |
+| C. "grep before claiming no caller changes" | still good practice; no longer the only defence |
+| D. Nothing | not the state of the tree |
+
+## 1431. The toolkit's slider: a press on the track jumps there, the wheel only while it has the keyboard, and a thumb is a 24-pixel target however small it is drawn
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** the toolkit has a slider now (`guitk::slider`), and three things
+about how it behaves could reasonably have gone the other way. Pressing on the
+track away from the thumb moves the thumb to where you pressed, rather than
+stepping it towards the press a page at a time. Turning the mouse wheel over a
+slider changes it only while the slider has the keyboard, so scrolling a page
+of settings does not change every slider it passes under the pointer. And the
+part you can take hold of is at least 24 pixels across, even where the thumb is
+drawn 12 and the track 4, so nobody has to aim at a line to move it.
+
+**1. A press on the track jumps there.** The alternatives:
+
+| Option | What a press on the track does |
+|---|---|
+| **Jump** (chosen) | the thumb goes to the press and is held there, so the press can become a drag |
+| Page | the thumb steps a page towards the press, repeating while held (the Win32 trackbar) |
+
+`roadmap-detailed.md` names "the click-to-jump region along its track", and it
+is what GTK ("primary button warps slider"), the web's range input and WinUI
+do. Paging is precise for a keyboardless user who wants exactly one page, but
+the keyboard already gives that (Page Up and Page Down), and paging makes the
+common gesture -- press where you want it and drag from there -- impossible.
+
+**2. The wheel only while the slider has the keyboard.** The alternatives:
+
+| Option | What a wheel turn over a slider does |
+|---|---|
+| **Only when focused** (chosen) | nothing unless the slider has the keyboard; then one notch is one step |
+| Whenever hovered | changes the slider the pointer is over (GTK 3's scale) |
+| Never | the wheel is not the slider's at all (Chrome's range input) |
+
+Hovered is the classic trap: a settings page scrolled with the wheel passes
+its sliders under a resting pointer, and each one it passes changes -- the
+scroll stops and the volume goes to zero. Never throws away a fine control
+for the user who has clicked into the slider. Focused keeps it for them and
+takes it from nobody else. The slider does not know focus, so the rule is
+where it can be kept: `handle_mouse` leaves the wheel alone, and `wheel` is a
+separate call a host makes only while the slider has the keyboard.
+
+**3. A handle is a 24-pixel target, an edge a 3-pixel margin.** `guitk::grab`
+states both. 24 is WCAG 2.2's success criterion 2.5.8, *Target Size
+(Minimum)*, which is the nearest thing to an agreed floor for a pointer
+target; a slider's drawn size (a 12-pixel thumb on a 4-pixel track) is well
+under it and does not need to be larger to be *seen*. An edge between two
+areas cannot grow like that -- the panes on both sides are clickable -- so a
+divider keeps the splitter's 3 pixels either side. A scrollbar's thumb is the
+third case: it runs in a track the scrollbar owns, so it grows along the track
+(a press just past its end takes hold of it rather than paging) but not across
+it, where the list is (`grab::in_track`); the scrollbar stays the width every
+desktop draws one. Where two handles' regions overlap, the press goes to the
+one drawn nearer. The numbers are in logical pixels, so they scale with
+everything else on a dense display.
+
+**What it reports** uses the colour picker's three words, so a host handles
+both alike: `Changed` while a drag moves the value (show it, do not save it),
+`Confirmed` when a drag is let go or a key or the wheel moves it (save it),
+`Cancelled` with the value it went back to when Escape abandons a drag. A drag
+that ends where it began confirms nothing, so a host that saves on `Confirmed`
+does not rewrite a file for a click that changed nothing.
+
+**Where it bites:** `gui/toolkit/src/slider.rs`, `gui/toolkit/src/grab.rs`; the
+desktop's notification pane is the first host of the slider, and the colour
+picker (`colorpicker.rs`) and the scrollbars of the file dialog and the tree
+view take hold by the same rule. Applications draw their own
+sliders and are asked to move onto this one in
+`requests/c-e-the-toolkit-has-a-slider-now.md`.
+
+## 1432. Checkboxes and radio buttons: a three-state box goes from "default" to "yes", and a radio group can be emptied only if it says so
+
+**Date:** 2026-09-27 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** the toolkit now draws checkboxes and radio buttons itself
+(`guitk::checkbox`, `guitk::radio`), and three things about how they behave
+had to be chosen. A checkbox that can be yes, no or "use the default" steps
+default, yes, no when clicked -- so the first click on a box left at the
+default says yes. A radio group can be put back to "nothing chosen" by
+clicking the chosen option again, but only a group that asks for that; in an
+ordinary group -- light or dark, a paper size -- the click does nothing,
+because "nothing" is not an answer there. And Space ticks a checkbox but Enter
+does not, because in a dialog Enter presses the button that finishes it.
+
+**1. The three-state order.** `design.txt`: "tristate checkboxes -- good for
+yes/no/default, 'default' is useful for cascading option overrides".
+
+| Option | From "default", a click gives |
+|---|---|
+| **Unchecked, partly, checked** (chosen; Qt's) | yes |
+| Unchecked, checked, partly (Win32's `BS_AUTO3STATE`) | no |
+
+A click on a checkbox means *yes* everywhere else, and an override box starts
+at "default", so the first click should say yes. The other kind of partly-set
+box -- a parent summarising children that disagree -- is not a three-state box
+at all: its "partly" is shown, never chosen, and a click sets or clears it
+(`Mode::TwoState`, `CheckState::toggled`, the rule the tree view already
+uses).
+
+**2. Going back to no radio choice.** `design.txt` asked for "a way for the
+user to go back to having no radio button selected", and doubted the only way
+it could think of: "clicking again on the currently selected one, which isn't
+a very good way".
+
+| Option | What a click on the chosen option does |
+|---|---|
+| **Clears it, in a group that opts in** (chosen) | nothing in an ordinary group; clears the choice in one built with `deselectable(true)` |
+| Always clears it | every group can be emptied by accident, including ones where empty means "no value" |
+| Never | a group with a meaningful "none" -- a filter, "any" -- needs a separate reset control |
+
+Clicking again is the only gesture that needs no extra control, and it is
+harmless exactly where emptiness means something. Where it does not, a click
+that quietly emptied the group would leave a setting with no value and no
+sign of why. In an opted-in group Space on the chosen option clears it too, so
+the keyboard can do what the pointer can. *If the operator wants a different
+gesture -- a small clear button, say -- it replaces this one without touching
+the groups that do not opt in.*
+
+**3. Space, not Enter, flips a checkbox.** Enter in a dialog presses its
+default button; a checkbox that took Enter would stop the dialog closing from
+the keyboard. The switch (`guitk::switch`) takes both, because a switch
+stands alone on a settings row and acts at once, where a checkbox is usually
+one field of a form.
+
+**Where it bites:** `gui/toolkit/src/checkbox.rs`, `gui/toolkit/src/radio.rs`.
+No program uses them yet; lane E's are asked to in
+`requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md`.
+
+## 1433. Third-party notices are gathered from the tree into the image, not compiled into one program
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C,
+with D (the image), E (the page that shows them) and every lane that ports
+code &middot; prompted by lane F,
+`requests/f-c-the-about-dialog-lists-no-third-party-notices.md`
+
+**In short:** Code copied or translated from other people's projects may only
+be shipped if their licence notices ship with it. Nothing in a SlateOS image
+carried them. Now every piece of third-party code in the source tree is listed
+in a small file beside its licence texts. A script gathers all of them, plus
+the crates.io libraries and the vendored Rust crates, into
+`/usr/share/licenses/` when the image is built. The screen that lists them
+reads that folder. The notices are gathered once, for the whole image, at the
+moment the image is made. No program has to embed them.
+
+**What is gathered, from where:**
+
+| Source | How it is found | What names it |
+|---|---|---|
+| Ported code (libjpeg-turbo, FreeType's auto-hinter, ...) | a `licenses/notices.yaml` manifest anywhere in the tree | the manifest, written by whoever ports the code |
+| Vendored Rust crates (`rustcrypto/*`, `rav1d`) | a Cargo package whose root holds `LICENSE*`, `COPYING*`, `NOTICE*` or `UNLICENSE*` files -- this project's own crates carry none | its `Cargo.toml` (`name`, `version`, `license`) |
+| crates.io libraries | every registry package in `Cargo.lock` | its own `Cargo.toml` and licence files, read from cargo's registry cache, which a build has already filled |
+
+The gathered folder holds `index.yaml` (one entry per component: name,
+version, licence, any sentence the licence requires to be shown, where in the
+tree it came from, and its text files), the texts themselves, and
+`NOTICES.txt`, everything in one file for a person reading it without the
+screen. `gui/notices` reads the index. `scripts/gather-notices.py` writes it.
+`scripts/test-gather-notices.py` keeps every boot honest, since the boot test
+runs every tooling suite: every manifest must parse, every text it names must
+exist, and every vendored and registry crate must have its texts.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Gather into the image at build time** (chosen) | covers everything the image holds, whichever program links it; fresh on every image; a crate adds its notice in its own directory, so no lane edits another's file; the texts are plain files a person can read | needs the image recipe to run the gatherer (lane D); a program that runs without the image's files shows no notices |
+| Each crate exports `THIRD_PARTY_NOTICES` (`include_str!`), the showing program gathers what it links (lane F's suggestion) | the text in the binary *is* the file in the tree; no build step | covers only what the showing program links: `rav1d` is in the video player, not in the settings program, and every crates.io dependency would need a crate of ours to export it; the showing program would have to depend on everything to show everything |
+| A crate whose build script walks the tree and embeds every manifest | covers the tree; no image step | cargo reruns a build script only when a file it names changes, and a *new* manifest in an existing crate is not a file it has named yet, so the list goes stale silently. Watching whole directories costs a scan of the repository on every build |
+
+**How it could be undone:** the manifests are the lasting part, and any of
+the other two designs can read them. Only the gatherer and the one reader
+would change.
+
+**What each lane is asked for:** lane D, to run the gatherer in the image
+recipe; lane E, to show the notices (the shell's orphaned About dialog is a
+screen you open, which §815 puts in `apps/settings`); lane F, to write
+manifests for `imagecodec` and `osfont` (`rav1d` is found automatically); every
+lane that ports code, to add a manifest when it does. The requests are
+`requests/c-d-put-the-third-party-notices-in-the-image.md`,
+`requests/c-e-show-the-third-party-notices.md` and
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`.
+
+## 1434. The settings watch runs inside the desktop shell, not as a service of its own
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (operator-approved scope:
+§1418 asks for a service beside the saving; where it runs is Claude's call)
+&middot; **Lane:** C
+
+**In short:** When a program saves its settings, its other open windows
+should show the change at once, and a hand edit should show at all. §1418
+asked for something that notices a settings file being rewritten and tells
+every window. It now runs as a thread of the desktop shell, which starts it
+when the session starts. It watches the settings folder and announces each
+changed file through the compositor. The plan filed with lane F called for a
+small separate program instead. Nothing here starts separate services yet, so
+that program would have had no way to be started.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **A thread in the desktop shell** (chosen) | the shell lives for the whole session, already holds the compositor connection the announcement travels on, and already runs worker threads that wake its loop (`PictureWorker`); nothing new has to start it | tied to the shell: if the shell stops, so do announcements -- though the desktop has then stopped too |
+| A separate program, `settingswatch`, the session starts | isolated: a fault in it cannot take the shell down | no mechanism starts a `gui/` service -- the clipboard program is started by nothing (C-Q29) -- so this would first need one, and a second connection to the compositor |
+| In the compositor (offered to lane F in the request) | one process fewer | lane F's to build, in the process whose failure takes every window down |
+
+**What stays easy to change:** the watching is a library, `gui/settingswatch`
+(the policy is pure and tested apart from the system calls), so a program of
+its own is a `main` around `settingswatch::run` once something can start one.
+
+**What it announces, and when:** SlateOS's inotify has no `IN_CLOSE_WRITE`,
+so a rename into place (how `settingsfile` saves) and a deletion are
+announced at once, a file written in place once it has been quiet for 250 ms,
+and after lost events every settings file in the folder. `settingsfile` now
+refuses a name the protocol could not announce, with the same rule
+(`gui/settingsname`), so every file it writes is one that can be.
+
+## 1435. A theme chooses the shapes of the controls as an axis of its own; colour, and anything that would move a click, stay out of it
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (operator-approved scope:
+`roadmap-detailed.md` → *Tier 2 — Widget Styling* asks for the axis and its
+four items; which settings it has, their spellings and their limits are
+Claude's call) &middot; **Lane:** C
+
+**In short:** A theme can now say how the controls are shaped, not only what
+colours they are: how round a button's corners are, how much room its label
+has and whether its face has the glassy brighter top, how a text box shows it
+is being typed in, how wide a scrollbar is and whether it stays out of the way,
+and whether an on/off setting is a pill or a tick box. The user picks which
+theme's shapes to use separately from its colours, the way icons already work.
+A few things were kept out on purpose: a theme cannot choose the colour of the
+"this is selected" ring (it could make it invisible), cannot make a scrollbar
+wider than the strip that answers the mouse, and under high contrast cannot
+keep the choices that make things harder to see.
+
+**The file.** A `widget-style` section in `theme.yaml`, named as the axis is
+in `meta.supports`; `theme.widget_style: <name>` in `appearance.yaml` chooses
+it, next to `theme.colors` and `theme.icons` (and named after the capability
+`ui.theme.widget_style`). The shipped `aero/theme.yaml` writes every setting
+out as the template:
+
+| Setting | Values | The built-in theme's | From |
+|---|---|---|---|
+| `button.radius` | 0-14 px (14 is a pill) | 4 | `.aero-srch-btn` |
+| `button.padding` | 4-24 px either side of the label | 14 | its `padding: 0 14px` |
+| `button.gloss` | the upper half a shade brighter | true | its gradient |
+| `button.shadow` | a soft shadow under it | false | it has none |
+| `field.radius` | 0-13 px | 3 | `.aero-srch-in` |
+| `field.border` | `box` or `underline` | box | its 1px border |
+| `field.focus` | `ring`, `glow` or `underline` | glow | `.aero-srch-in:focus` |
+| `check.radius` | 0-7 px (7 is a circle) | 2 | the toolkit's box |
+| `toggle` | `pill` or `checkbox` | pill | every switch drawn so far |
+| `scrollbar.width` | `thin` (6) or `normal` (10) | normal | the toolkit's 10 |
+| `scrollbar.visibility` | `always`, or `overlay` (a thin line until the pointer comes to it) | always | the browser's |
+
+As with colours, what a section leaves out is the built-in theme's, and a value
+that cannot be read costs that value and is listed for the theme's author. A
+radius past the roundest is drawn as the roundest, with a note, since that is
+plainly what was meant. Every measure is a whole number of pixels: a `Palette`
+carries the style and is compared for equality, so the style must be `Eq`.
+
+**How it reaches a control.** `AppearanceSettings::read_from` loads the chosen
+theme's section with the settings, as it loads the colours, and
+`Palette::from_settings` puts the result on the palette
+(`Palette::widget_style`). Every control is already handed a palette, so none
+needs a new argument, and every application gets the style with its colours
+through `oswindow`. The settings watcher's fingerprint covers the widget
+theme's file as it covers the colour theme's.
+
+**What was kept out, and why:**
+
+| Left out | Why | What would bring it in |
+|---|---|---|
+| **Focus colour** | a focus mark is drawn over grounds nobody can list in advance, so a theme's colour could be one that vanishes; `guitk::style::FOCUS_RING_WIDTH`'s note already refuses the hue as a user setting for this reason. The mark is always the accent, at least the user's focus width -- or red, on a field whose content is wrong: one signal, rather than a red edge inside a ring of the accent, which reads as a field both fine and wrong | nothing: this is the rule |
+| **Scrollbar colour** (the roadmap's item names it) | it is the colours axis's already: the thumb is `surface2`, whose documented job is "a scrollbar thumb" | nothing: a theme sets `surface2` |
+| **A field with no edge** | a well on a page of nearly its own shade is a field nobody can find; `underline` keeps a line where the typing goes | nothing |
+| **A scrollbar wider than its column, or one that takes no column** | the toolkit answers a click by laying a widget out again with any palette to hand -- "where things land does not depend on colour" -- so a style that moved a hit region would put the click somewhere other than the drawing. The column is the same in every theme; the style draws the bar inside it, and an overlaid bar is a thin line rather than nothing, still saying where the view is | a widget that keeps the style it last drew with for its clicks, as the dialogs will have to for padding |
+
+**High contrast.** A high-contrast scheme is chosen for need and replaces the
+colours whole. It keeps the theme's shapes -- round or square, pill or box, a
+user who needs contrast can see either -- but puts back the four choices that
+make a control show less plainly: no gloss (a second ground under a label), no
+shadow (a soft edge), a ring for focus (a glow or an underline says less), and
+a scrollbar that stays (`WidgetStyle::for_high_contrast`).
+
+**The alternatives for the model:**
+
+| Option | For | Against |
+|---|---|---|
+| **A fixed set of named settings per control** (chosen) | each is checked, bounded and documented; a theme cannot ask for what the toolkit cannot draw | a new look needs a new setting |
+| A CSS-like property sheet (`design.txt` 772 floats "a subset of CSS") | open-ended | `design.txt` itself records the recommendation against CSS; every property is a promise every control must keep, and themes are "pure data" that must not reach layout |
+| Free numbers for the scrollbar width | finer choice | the bar lives in a fixed column, so there is room for two looks -- thin, and the column itself -- and a theme gains nothing from a third |
+
+**Button padding, and why it could be let in.** A button's padding decides
+its width, and so where every button after it in a row begins -- exactly the
+kind of choice the "where things land" rule forbids a style. The one row that
+measures its buttons is the toolkit's alert dialog, and it already tests a
+click against the rectangles its last `render` recorded rather than against a
+second layout; so it adopts the palette's button style at the start of
+`render` and measures the row with it, and the click follows the drawing in
+any theme. (Kept out at first, then built the same day, once that was
+checked.)
+
+**What honours it:** the toolkit's button, its padding in the alert dialog's
+row; every toolkit text field, drawn
+by one function now (`guitk::field` -- the drop-down, the address bar, the
+input dialog, the Save box and the colour picker's hex field had each drawn
+their own, and had drifted); the check box; the switch, drawn as a box in
+the pill's room under `toggle: checkbox`, the shell's settings pages
+included; the file dialog's and the tree view's scrollbars
+(`guitk::scrollbar::draw`); and the shell's own text fields -- the Run box,
+the start menu's search, the login screen's password, the shortcut editor
+and an icon being renamed -- which now also draw their focus marks at the
+user's focus width, which the shell had never read. The start menu's search
+takes the theme's box but no focus mark: it has the keyboard whenever the
+menu is open, and the reference draws none. Still to follow: lane E's
+applications and Settings picker
+(`requests/c-e-a-theme-can-shape-the-controls.md`) -- each noted in
+`roadmap-detailed.md` → *Tier 2 — Widget Styling*.
+
+## 1436. The code editor's regular expressions are the `regex` crate's
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The code editor's find and replace can search for a pattern, not
+only for text -- "any word followed by a digit", say -- and put parts of what
+it found into the replacement. That needs a regular-expression engine. The
+toolkit now uses the one nearly every Rust program uses, the `regex` crate,
+rather than one written here. Only programs that search with it carry its code.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The `regex` crate** (chosen) | the engine upstream reviews, tests and fuzzes; linear-time matching, so no pattern can hang the editor; Unicode classes; `$1`/`${name}` replacements built in | four packages more in every build of the toolkit (`regex`, `regex-automata`, `regex-syntax`, `aho-corasick`); its code is linked only into programs that call it |
+| `regex-lite` | one package, smaller | fewer Unicode classes and slower -- for an editor searching source in any language, the full engine's classes are what "a letter" should mean |
+| An engine of our own | no dependency | "ours" is what §539 says not to trust over reviewed upstream code; a backtracking engine written quickly is how an editor hangs on a pathological pattern |
+| Lift `apps/regextester`'s Pike VM | already in the tree | it is lane E's application code, not a library; smaller syntax and less tested than the crate |
+
+**Bounded.** A compiled pattern is limited to 4 MiB (`REGEX_SIZE_LIMIT`), so a
+pathological one costs an error, not the machine.
+
+**Plain text stays `textfind`'s** -- the tree's one substring search, whose
+case folding keeps every offset in the text searched (its module docs record
+the three bugs eight copies of it shared). A match of nothing is never a
+match, in either mode.
+
+## 1437. Syntax highlighting is tree-sitter's, built with no C compiler: the transpiled runtime, and each grammar's parser.c converted to Rust at build time
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The code editor colours code the way most current editors do --
+with tree-sitter, which parses the file into a tree and re-parses only what an
+edit touched, and whose grammars already exist for nearly every language. Its
+parts are written in C, and this project builds with no C compiler. So the
+parser engine is the one already translated to Rust (a published crate), and
+each language's grammar -- itself a C file that tree-sitter's generator
+writes -- is translated to Rust when the editor is built, by a converter
+written for that shape of file. Each grammar's own test examples run against
+the translation, and pass, which is what says it parses as the original does.
+
+**Why tree-sitter at all.** `roadmap-detailed.md` asks for "syntax
+highlighting via tree-sitter integration". A regular-expression highlighter
+(TextMate/Sublime grammars, `syntect`) colours by line and does not know a
+file's structure; tree-sitter gives the tree too, which folding, outlines,
+selection by syntax and indentation will want.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Transpiled runtime + grammars converted at build time** (chosen) | pure Rust: builds for the host tests, the Linux lint and SlateOS alike; each grammar's `parser.c` stays verbatim (update = replace the file; diff against upstream any time); tables go in as bytes, so a 6 MB grammar compiles in seconds | a converter to maintain (`gui/tsgrammar`, ~1,400 lines with tests); each grammar's external scanner (`scanner.c`, hand-written C) is ported by hand; the runtime crate trails upstream (0.25.2 against 0.27) |
+| The published `tree-sitter` crate and grammar crates, compiled as C | upstream exactly | needs a C compiler in every build: none on this machine's gates, none for `x86_64-slateos` |
+| Grammars run as WebAssembly (tree-sitter's wasm support) | no conversion | a wasm runtime (wasmtime) in every program that highlights, far larger than the grammars |
+| Our own parser framework, or regex highlighting | no third-party runtime | not tree-sitter: every grammar written again, and no tree |
+
+**How it is known to be right.** Every grammar ships its authors' test corpus
+(`tree-sitter test`'s examples: an input and the tree it must parse to); the
+corpus runs here against the converted grammar with `tree-sitter test`'s own
+comparison (`gui/syntax/src/corpus.rs`), and all of them pass: JSON's 6
+examples, Rust's 151 and Python's 117. A converter bug or a scanner mistake fails them: mutating the
+ported scanners fails their corpora. The `TSLanguage` mirror's layout is pinned
+field by field, and the runtime is asked, through its own API, for the values
+at the far end of the struct (a grammar's name, supertypes, metadata).
+
+**The runtime's unsafety.** `tree-sitter-c2rust` is c2rust output: 22,000
+lines of raw-pointer Rust, as trustworthy as the C it translates -- which is
+the C every tree-sitter editor runs, fuzzed upstream. Our own `unsafe` is one
+module (`gui/syntax/src/ffi.rs`), each block with its argument.
+
+**Deviations from upstream, each documented where it is.** The scanner ports
+compare a character whole where the C truncated it to a byte (a real bug:
+`/* ... Ī/` ended a Rust comment), state their character classes rather than
+use the C locale's, and never read or write past a buffer where the C did.
+
+**Revisit when** a C toolchain is part of every build, including SlateOS's:
+then the published `tree-sitter` crate drops into `gui/syntax/Cargo.toml` (the
+dependency is already renamed to it) and the grammars can be compiled as
+upstream compiles them -- the converter and the scanner ports retire.
+
+## 1438. The highlighter settles a query's captures as tree-sitter's own highlighter does
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** A language's colouring rules (its *highlight query*: patterns
+that pick out pieces of the parsed code and name what they are) often say
+two things about the same text -- "every name is a variable", then "a name
+being called is a function". Which one wins decides whether code comes out
+coloured as the rules' authors meant. The code editor now settles this the
+way tree-sitter's own highlighter does, which is what those authors test
+their rules against: the later rule wins, and rules that start at the same
+place stack in the order they are written. The editor had kept the *first*
+rule, so every YAML key came out as a string and a Rust method call as a
+field. The grammars' own colouring tests now run here and pass.
+
+**The rules, each as tree-sitter-highlight 0.25 has them:**
+
+1. **Of one node's captures, the last pattern's wins.** A query lists the
+   general before the specific: Rust's has `(field_identifier) @property`
+   long before the method-call pattern that calls the same node
+   `@function.method`; YAML's makes every scalar `@string` before it makes a
+   key `@property`. (Tree-sitter's highlighter once kept the first; the
+   vendored queries are written for the last.)
+2. **Captures stack in the order they come**, by start and then by pattern:
+   a later pattern's capture that starts where an earlier one does goes on
+   top for its whole length, longer or shorter, and what is under it stays
+   hidden until it closes. TOML's query relies on it: `(pair (bare_key))
+   @property` -- the whole pair -- over `(bare_key) @type`, to make a key a
+   property. Flattening by containment instead (the shorter on top, which
+   the editor did) coloured every TOML key as a type.
+
+**Where it departs from tree-sitter's highlighter, on purpose:**
+
+| Question | Chosen | tree-sitter-highlight | Why |
+|---|---|---|---|
+| A capture whose name has no colour here (`@spell`, `@text.emphasis`) | takes no part; the node keeps what the other patterns said | if it is the node's last, the node is left uncoloured | we colour 22 kinds, not a theme's hundred names; blanking a node because its last name is one we lack (nvim-style `(comment) @comment @spell`) would lose colour the query did give it |
+| `@none` | paints the text plain, over what encloses it | a name like any other (no colour unless a theme has it) | Neovim's meaning, which the Markdown query (from nvim-treesitter) uses to keep a code fence's contents from showing the fence's literal colour |
+| An injected language's span starting where its host's does | the injected one on top | the host's on top, but an injection wins an identical range | an embedded language's colours are the point of injecting it; Neovim draws injected trees over their hosts |
+| What an injection's text leaves out, without `injection.include-children` | the node's *named* children only | every child | Markdown's block grammar lexes a paragraph's backticks and brackets as anonymous tokens of the paragraph's `inline` node; leaving them out handed the inline grammar fragments, and nothing inline was coloured. Named-only is Neovim's reading, whose queries these are (Helix spells it `injection.include-unnamed-children`) |
+
+**How it is known to be right.** Five of the vendored grammars ship
+highlight tests (`test/highlight/`: source files whose comments point at the
+line above -- `// ^ function` -- and name its capture), which upstream runs
+with `tree-sitter test` against tree-sitter-highlight. They are vendored
+under `gui/syntax/grammars/<name>/highlight/` and run against this
+highlighter (`gui/syntax/src/highlight_tests.rs`), their assertions read as
+`tree-sitter test` reads them and compared as the kinds the names paint: C,
+CSS, Python, TOML and YAML, 135 assertions, all passing. The
+first-pattern rule fails seven of them, in four of the five languages;
+flattening by containment fails TOML's key.
+
+**Revisit if** tree-sitter's highlighter changes its rule again (its source
+says what it does in the loop after "Once a highlighting pattern is found
+for the current node"), or if the toolkit gains a theme with capture names
+of its own, when the second table's first row should follow upstream.
+
+## 1439. A parse is given up for the work it has done, not the time it has taken
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** The code editor colours a file by parsing it a few milliseconds
+per frame. A grammar with a mistake in it could keep that going forever, so
+a parse that has gone on far too long is given up and the file stays in the
+colours it had. "Too long" was five seconds of wall-clock time -- and on a
+busy machine a perfectly ordinary file took that long, because the clock kept
+running while the editor waited its turn for the processor. Two of the
+highlighter's own tests failed that way while a boot test ran beside them.
+Now "too long" is counted in the parser's own work -- its steps and the
+characters its lexers read -- which a busy machine cannot inflate. Ordinary
+files never come near the limit; a runaway grammar still hits it.
+
+**What was measured** (`cargo test`, debug build, 2026-09-28): the
+runtime's steps (its progress callback fires once per hundred) and the
+characters every lexer stepped over (counted in `ffi::Lexer::advance_with`,
+which generated lexers and hand-ported scanners both go through), per byte of
+input:
+
+| Input | Steps / byte | Characters / byte |
+|---|---|---|
+| Real files: Rust (212 KB), Python (937 KB), C, TOML (`Cargo.lock`), YAML, CSS, JSON (199 KB), Markdown (`roadmap.md`, 2 MB) | 0.2 -- 1.4 | 1.0 -- 4.3 |
+| Each language fed another's file (Markdown as Rust, C, Python, CSS, TOML, YAML, JSON; Rust as Python, YAML, TOML, JSON, CSS, Markdown; ...) and 100 KB of random printable bytes | 0 -- 2.1 | 0 -- 3.4 |
+| 50,000 `(` as Rust, `{` as C, `"` as Python | 1.0 | 1.0 |
+| **10,000 `*` as Markdown** | 3.0 | **5,001** |
+
+The last is a scanner that reads the rest of the line again for every token
+of it: quadratic, 22 seconds in a debug build for 10 KB, and invisible to the
+runtime's step count. The limit is two million units, plus two hundred a
+byte -- more than twenty-five times the most any ordinary input needed -- so
+that line is given up after a fraction of a second, and every file above
+finishes.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Work: runtime steps + characters lexed** (chosen) | the same on any machine, however busy; tests of it are exact | counts what the runtime reports and what our lexers do, not everything the runtime does: error recovery spends time it does not count (TOML fed 200 KB of Markdown: 33 s in a debug build on 118,000 steps). That time is finite, so it ends -- it is only never *given up* |
+| Wall-clock time, as before, but longer | one number; bounds everything | still wrong under load, only less often; a long enough limit to be safe lets a quadratic scanner run for minutes |
+| The thread's CPU time | not stretched by waiting | no portable way to read it (`GetThreadTimes` ticks at 15.6 ms, `CLOCK_THREAD_CPUTIME_ID` is POSIX, SlateOS's is unknown); per-slice sums of coarse ticks drift |
+| Both work and a wall-clock backstop | bounds the uncounted too | the backstop brings the load problem back, for a case -- slow but finite error recovery -- where finishing is better than giving up |
+
+**Why no time limit at all is safe.** A loop that goes through the parser's
+steps reaches the progress callback, and is counted. A loop that never does
+-- inside one scanner call, or in runtime code between checks -- cannot be
+stopped by any limit checked in that callback, the clock included; the
+frame budget cannot stop it either. So a time limit adds nothing against a
+true runaway; it only gives up on slow finite parses, which are better
+finished.
+
+**Revisit if** a grammar is found whose ordinary files need more than two
+hundred units a byte (raise the rate, with the file as a test), or the
+runtime starts reporting more of its work (then count that too).
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

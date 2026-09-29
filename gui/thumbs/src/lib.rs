@@ -679,9 +679,10 @@ impl ThumbCategory {
         match ext.to_lowercase().as_str() {
             // Every raster format `imagecodec` reads, and SVG. TIFF joined on
             // 2026-09-25 with its decoder; a `.tif` used to be an "other" file.
-            "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "tif" | "tiff" => {
-                Self::Image
-            }
+            // AVIF on 2026-09-28, with lane F's (design-decisions 1333): an
+            // animated one is shown by its first frame, as a GIF is.
+            "bmp" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "tif" | "tiff"
+            | "avif" => Self::Image,
             "txt" | "log" | "md" | "rst" | "rs" | "py" | "c" | "h" | "cpp" | "js" | "ts"
             | "html" | "css" | "java" | "go" | "toml" | "yaml" | "json" | "xml" | "sh" | "cfg"
             | "ini" | "conf" => Self::Text,
@@ -2317,7 +2318,7 @@ mod tests {
     /// every one is under the default thumbnail size, is also the size of a
     /// thumbnail that was really decoded. A swatch or a placeholder is always
     /// the full square.
-    const EVERY_FORMAT: [(&str, &[u8], (u32, u32)); 6] = [
+    const EVERY_FORMAT: [(&str, &[u8], (u32, u32)); 7] = [
         (
             "gif_87a.gif",
             include_bytes!("../tests/data/gif_87a.gif"),
@@ -2348,6 +2349,12 @@ mod tests {
             "bmp_32_v3_fourth_byte.bmp",
             include_bytes!("../tests/data/bmp_32_v3_fourth_byte.bmp"),
             (13, 9),
+        ),
+        // With alpha, in an `idat` box rather than an `mdat`.
+        (
+            "avif_draw_points_idat.avif",
+            include_bytes!("../tests/data/avif_draw_points_idat.avif"),
+            (33, 11),
         ),
     ];
 

@@ -32,6 +32,10 @@ path = "src/bin/demo.rs"
 
 [dependencies]
 
+# Notices a settings file being rewritten, so the session can announce it to
+# every window (design-decisions 1418).
+settingswatch = { path = "../settingswatch" }
+
 # The FLAT glob matcher, for wallpaper exclusion patterns. Flat and not
 # the path-aware one in apps/backup because a rotation reads one folder,
 # so a pattern that could cross directories would have nothing to cross.
@@ -103,6 +107,9 @@ appearance = { path = "../appearance" }
 # The installed programs' desktop entries: what the start menu lists, under
 # which folder, with which picture, and how each starts.
 desktopentry = { path = "../desktopentry" }
+# SlateOS's own programs, as desktop entries: the one list of programs
+# (design-decisions 1425), which replaced the table the shell kept itself.
+programs = { path = "../programs" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the

@@ -6,11 +6,21 @@ description = "SlateOS GUI toolkit — widget library with Flexbox/Grid layout e
 
 [dependencies]
 osfont = { path = "../font" }
+# The name of a settings file, which `Event::SettingsChanged` carries; its
+# own crate so `settingsfile`, below the toolkit, applies the same rule.
+settingsname = { path = "../settingsname" }
 # How a file name that is not text is drawn (`display_os`): one rendering for
 # every widget that shows a name, and the terminal's. No widgets of its own.
 pathcodec = { path = "../pathcodec" }
 textfmt = { path = "../../textfmt" }
 textfind = { path = "../../textfind" }
+
+# Regular expressions for the code editor's find and replace
+# (`codeedit::FindQuery`, design-decisions 1436). The published crate, which
+# upstream reviews, tests and fuzzes, rather than an engine of ours; code an
+# application never searches with is not linked into it. Plain-text find is
+# `textfind`'s, above, whose case folding keeps offsets honest.
+regex = "1.13.1"
 
 # The shared TZ-rules engine, for the file dialog's Modified column. The libc's
 # `localtime`, the shell's `%(…)T` and the taskbar clock all render local time

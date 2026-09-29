@@ -59108,21 +59108,6 @@ is already waiting, not whether the setter exists.
   knows, so it can be glibc's iconv_prog over the libc's iconv -- asked in
   requests/d-b-the-iconv-program-can-run-on-the-libc.md.
 
-## Lane C — the toolkit's font cache follows the hinting setting (2026-09-26)
-
-- **Wire `FontSettings::hinting` into the toolkit's own `FontCache`.** Lane F
-  made hinting live in the compositor (lane-f 98dff3b7b, a port of FreeType's
-  light auto-hinter, on by default through the compositor's settings mapping).
-  Text the toolkit rasterizes itself -- into an application's own buffers --
-  is still drawn unhinted, so at small sizes it looks slightly different from
-  the same text drawn by the compositor. The fix: a
-  `guitk::text::set_rendering(hinting)` that calls
-  `FontCache::set_rendering(Rendering { hinting, .. })` on the process cache,
-  called from `appearance::FontSettings::apply` beside `set_font_family`, with
-  a test that the setting reaches the cache. **Trigger:** 98dff3b7b (the
-  `Rendering` type and `FontCache::set_rendering`) is on origin/main -- it
-  cannot be referenced before then. Told by lane F, 2026-09-26.
-
 ## Lane C — the start menu's Shut down button waits for programs to be asked to save (2026-09-26)
 
 - **Done 2026-09-26.** The power button reads "Shut down" and shuts down in
@@ -59147,27 +59132,6 @@ is already waiting, not whether the setter exists.
   object, before a shutdown or log out. Then: split `power_button_rect` into
   the main part (runs `PowerChoice::ShutDown`) and a caret (opens the power
   menu), with the menu's own list unchanged.
-
-## Lane C — C-Q11's measurement, under the machine's normal load (2026-09-27)
-
-- **Open.** The operator left C-Q11 (whether to check that every crate still
-  builds before a merge) to lane C, asking that the check's cost be measured
-  **while the machine carries its normal load** -- today that means all six
-  lanes and the operator's other projects running, which is heavier than when
-  the earlier figures (15-49 s) were taken -- and set against the time the
-  check has saved, or would have. A first attempt on 2026-09-27 was stopped
-  because the other lanes were down at the time, so it would have measured the
-  light case.
-  **Trigger:** the lanes are running again. **Then:** in `os-lane-c` (its own
-  target directory), time a warm-up `cargo check --workspace --target
-  x86_64-pc-windows-gnu` (not the gate's cost -- a gate runs warm), a no-op
-  check, a check after touching `gui/toolkit/src/lib.rs` (`guitk`, 144
-  dependents) and one after touching `quoting`'s (773 dependents, the widest
-  crate), sampling the CPU load alongside each; repeat at two or three times of
-  day; count, from `git log` and `known-issues.md`, the compile breaks
-  that reached `main` and what each cost the lanes that inherited it (a boot is
-  now about 2.5 hours); decide, and write the decision up as a
-  `design-decisions.md` entry (Decided by: Claude, operator-approved scope).
 
 ## Lane C — automatic sign-in: the chooser key and the start for repair (2026-09-27)
 

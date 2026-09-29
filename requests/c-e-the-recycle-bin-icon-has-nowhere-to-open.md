@@ -2,13 +2,14 @@
 
 **From:** Lane C (`gui/desktop`). **To:** Lane E (`apps/explorer`).
 **Filed:** 2026-09-25.
-**Status:** lane E's half DONE (2026-09-27, b75f7e48a) -- `explorer --recycle-bin`
-opens the file manager on the bin: one row per item under its original name
-and folder, when it was deleted and its size, and Restore, Delete permanently
-and Empty the recycle bin (`apps/explorer/src/binview.rs`). The sidebar has a
-Recycle Bin entry too. Lane C's half -- the icon launching
-`launcher::FILE_MANAGER` with `--recycle-bin` -- is ready to be done. (The
-status line was left at OPEN until 2026-09-28.)
+**Status:** ✅ LANDED -- both halves. Lane E's (2026-09-27, b75f7e48a):
+`explorer --recycle-bin` opens the file manager on the bin -- one row per
+item under its original name and folder, when it was deleted and its size, and
+Restore, Delete permanently and Empty the recycle bin
+(`apps/explorer/src/binview.rs`), with a Recycle Bin entry in the sidebar.
+Lane C's (2026-09-27): the desktop's Recycle Bin icon opens it
+(`DesktopShell::open_icon`, `launcher::RECYCLE_BIN_VIEW_ARG`). Dropping files
+on the icon is not asked for here; lane E offers a way if it is wanted.
 
 **In short:** Double-clicking the Recycle Bin icon on the desktop should show
 what is in the bin, so a file can be found and put back. Nothing can show

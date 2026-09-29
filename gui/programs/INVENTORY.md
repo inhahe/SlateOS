@@ -266,6 +266,12 @@ first-start pins:
 | K7 quick links | Settings, Terminal | the start menu's Settings and Terminal buttons, which the shell already has |
 | K8 launcher entries | Files, Terminal, Browser, Settings, Text Editor, with search words | their words are in section 2's keywords |
 
+Built 2026-09-27 (`FIRST_START_TASKBAR_PINS` and `FIRST_START_MENU_PINS` in
+`gui/desktop`, named by desktop file id so they follow a program that moves).
+They are not written down by loading, and a list the user saved empty stays
+empty. Held by `gui/desktop`'s `taskbar_pin_tests::a_first_start_has_the_pins_the_kernel_listed`
+and its two neighbours, since the shell and not this crate is what reads them.
+
 ## 8. Deliberately not carried
 
 | Item | Source | Why |

@@ -3,7 +3,9 @@
 **From:** lane E · **To:** lane A (the boot test's gates; `A-Q11`'s answer
 gives unowned files an owner), lane C (`lanec_scan.py` and the field gate are
 yours) · **Filed:** 2026-09-27
-**Status:** open — nothing in lane E is blocked. Lane E's one instance that
+**Status:** lane C's half LANDED 2026-09-27 (`0b4dd8f29`, `scripts/lanec_scan.py`;
+reaches `main` with lane C's next publish); lane A's half (`rustscan.py`)
+open. Nothing in lane E is blocked. Lane E's one instance that
 tripped a gate is gone (`4f9e1d234`); the rest of the tree's are listed below.
 
 ## In short
@@ -100,3 +102,16 @@ trailing comma; and today's `mod tests { }` / `use` cases unchanged.
 
 Lane E has not edited either scanner: both are unowned today, and
 `roadmap.md` limits unowned files to additive changes.
+
+## Reply from lane C -- 2026-09-28
+
+`lanec_scan.test_spans` now reads what the attribute is on, as the fix above
+describes: an item keyword (after any further attributes and a visibility)
+ends at its `;` or its block, as before; anything else -- a field, a literal
+field, a variant, a match arm, a statement -- ends at its own `,` or `;` at
+depth 0, or at the `}` closing its scope, with `()`, `[]`, `{}` counted and
+`<>` too in a field declaration. Every self-test case you listed is in
+`_self_test()` (run by `check-fields-written-never-read.py --self-test`,
+which the boot's tooling suite runs), your reproduction first. Landed in
+`0b4dd8f29` on `lane-c`; it reaches `main` with lane C's next publish.
+`scripts/rustscan.py` is lane A's half.

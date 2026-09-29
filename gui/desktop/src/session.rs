@@ -391,6 +391,10 @@ pub struct ShellSession<T: Transport> {
     /// The thread that decodes pictures, so a photograph's second of decoding
     /// is not a second the desktop stops drawing (`crate::pictures`).
     pictures: PictureWorker,
+    /// The names the settings watcher reports, each to be announced to every
+    /// window (`watch_settings`, design-decisions 1418). `None` until the
+    /// watch is started, which only a real session does.
+    settings_watch: Option<std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>>,
     /// Where installed programs' desktop entries are looked for.
     app_dirs: desktopentry::scan::DataDirs,
     /// Every entry file as it was at the last read (`app_dir_stamps`) --
@@ -781,6 +785,7 @@ impl<T: Transport> ShellSession<T> {
             wallpaper_image: None,
             wallpaper_uploaded: None,
             pictures: PictureWorker::spawn(picture_waker),
+            settings_watch: None,
             app_dirs: default_app_dirs(),
             app_dirs_seen: None,
             start_menu_was_open: false,
@@ -961,6 +966,12 @@ impl<T: Transport> ShellSession<T> {
         // Before the picture, the pixels the picture refers to — exactly as
         // `paint_background` does, and for the same reason.
         self.refresh_login_image()?;
+        // The user's focus width, for the password field's mark: pushed in
+        // here, where the screen is drawn and the settings are both to hand.
+        let focus_ring = self.shell.appearance.focus_ring_width();
+        if let Some(screen) = self.login.as_mut() {
+            screen.set_focus_ring_width(focus_ring);
+        }
         let Some(screen) = &self.login else {
             return Ok(());
         };
@@ -1457,6 +1468,81 @@ impl<T: Transport> ShellSession<T> {
         self.app_dirs = dirs;
         self.app_dirs_seen = None;
         self.refresh_installed_apps();
+    }
+
+    /// Tell every window when a settings file changes: watch `dir`, the
+    /// settings folder, on a thread of its own for the rest of the session,
+    /// and announce each file it reports (design-decisions 1418, C-Q26).
+    ///
+    /// A program saving its settings only writes its file; this is what makes
+    /// the change show at once in its other windows, and a hand edit show at
+    /// all. It is the operator's "not as the same function that saves": a
+    /// watch that could not start, or stops, loses the announcements and
+    /// nothing else -- every setting is still saved and still read the next
+    /// time its program starts -- so a failure is said once, on the error
+    /// stream, and the desktop goes on.
+    ///
+    /// Started by the desktop's `main` and not by `start`, so that no test
+    /// watches the folder of whoever runs it.
+    pub fn watch_settings(&mut self, dir: PathBuf) {
+        let (reports, names) = std::sync::mpsc::channel::<Vec<settingswatch::SettingsName>>();
+        // The loop's waker, so a report reaches a loop parked with nothing on
+        // the wire; without one a report waits for the loop's next pass.
+        let waker = self.events.waker().ok().flatten();
+        let started = std::thread::Builder::new()
+            .name("desktop-settings-watch".into())
+            .spawn(move || {
+                let outcome = settingswatch::run(&dir, |batch| {
+                    let delivered = reports.send(batch.to_vec()).is_ok();
+                    if let Some(waker) = &waker {
+                        waker.wake_by_ref();
+                    }
+                    // A session that has gone away has no one to tell.
+                    delivered
+                });
+                if let Err(e) = outcome {
+                    eprintln!(
+                        "desktop: a changed settings file will not reach open windows until they restart: {e}"
+                    );
+                }
+            });
+        if let Err(e) = started {
+            eprintln!("desktop: the settings watch could not start: {e}");
+            return;
+        }
+        self.settings_watch = Some(names);
+    }
+
+    /// Feed the watch's reports from `names` rather than from a thread: what
+    /// `watch_settings` does, less the watching, for a test.
+    #[cfg(test)]
+    pub(crate) fn watch_settings_from(
+        &mut self,
+        names: std::sync::mpsc::Receiver<Vec<settingswatch::SettingsName>>,
+    ) {
+        self.settings_watch = Some(names);
+    }
+
+    /// Announce every settings file the watch has reported since the last
+    /// pump, each once, answering whether there were any.
+    ///
+    /// # Errors
+    ///
+    /// As [`EventLoop::settings_file_changed`].
+    fn announce_settings(&mut self) -> Result<bool, Error<T>> {
+        let Some(watch) = &self.settings_watch else {
+            return Ok(false);
+        };
+        let mut names: Vec<settingswatch::SettingsName> = Vec::new();
+        for name in watch.try_iter().flatten() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        for name in &names {
+            self.events.settings_file_changed(*name)?;
+        }
+        Ok(!names.is_empty())
     }
 
     /// Adopt every picture the decoding thread has finished, answering whether
@@ -1967,6 +2053,7 @@ impl<T: Transport> ShellSession<T> {
         // Pictures the decoding thread finished while the loop was parked --
         // it woke the loop to say so -- or while it was busy.
         let mut worked = self.collect_pictures()?;
+        worked |= self.announce_settings()?;
         while let Some((window, event)) = self.events.poll()? {
             worked = true;
             self.dispatch(window, event)?;
@@ -2523,22 +2610,30 @@ impl<T: Transport> ShellSession<T> {
     /// switches between light and dark, and only one of them is a decision the
     /// user made.
     fn sync_wallpaper(&mut self) {
-        // A rotation folder wins over a fixed picture: a rotation *is* the
-        // wallpaper, and honouring both would leave the fixed picture visible
-        // in the settings file and never on the screen.
-        if let Some(folder) = self.shell.appearance.wallpaper_folder.clone() {
+        // A time-of-day schedule wins over a folder and a picture, and a
+        // rotation folder over a fixed picture: each *is* the wallpaper, and
+        // honouring two would leave one visible in the settings file and never
+        // on the screen.
+        let scheduled = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .map(Path::to_path_buf);
+        if scheduled.is_none()
+            && let Some(folder) = self.shell.appearance.wallpaper_folder.clone()
+        {
             self.sync_rotation(&folder);
             return;
         }
         if self.rotation_loaded.take().is_some() {
-            // Rotation was switched off. Fall through to the fixed picture,
-            // which the branch below applies -- but the slideshow has to go
-            // first or `tick` would keep advancing it underneath.
+            // Rotation was switched off, or a schedule took over. Fall through
+            // to the fixed or scheduled picture, which the branch below
+            // applies -- but the slideshow has to go first or `tick` would
+            // keep advancing it underneath.
             self.wallpaper.follow_desktop_base();
             self.dirty = true;
         }
 
-        let wanted = self.shell.appearance.wallpaper.clone();
+        let wanted = scheduled.or_else(|| self.shell.appearance.wallpaper.clone());
         match wanted.as_deref() {
             Some(path) => {
                 let fit = self.shell.appearance.wallpaper_fit;
@@ -3170,6 +3265,16 @@ impl<T: Transport> ShellSession<T> {
             self.adopt_appearance_change();
             self.events.appearance_changed()?;
         }
+        // A time-of-day wallpaper's edge: the picture for the new part of the
+        // day. Compared with what is up rather than remembered, so a picture
+        // changed by hand in between is put right on the next edge too.
+        let scheduled_edge = self
+            .shell
+            .scheduled_wallpaper(unix_now())
+            .is_some_and(|wanted| self.wallpaper.current_image_path() != Some(wanted));
+        if scheduled_edge {
+            self.sync_wallpaper();
+        }
 
         if moved {
             self.dirty = true;
@@ -3206,6 +3311,9 @@ impl<T: Transport> ShellSession<T> {
             .map(|ms| Duration::from_millis(ms.max(1)));
         let schedule = self.shell.next_schedule_change(unix_now());
         let theme = self.shell.next_theme_change(unix_now());
+        // A time-of-day wallpaper's next picture, on the wall clock -- the
+        // user wrote "18:00", not "six hours after I signed in".
+        let scheduled_wallpaper = self.shell.next_wallpaper_change(unix_now());
         // The wallpaper's next picture, or a dynamic one's next shade, on the
         // clock `step_frame` ticks it with. At least a millisecond: a
         // slideshow whose timer has not started is due *now*, and a wake-up
@@ -3227,10 +3335,18 @@ impl<T: Transport> ShellSession<T> {
             .shell
             .ending_due_in()
             .map(|ms| Duration::from_millis(ms.max(1)));
-        if let Some(delay) = [widget, schedule, theme, wallpaper, tooltip, ending]
-            .into_iter()
-            .flatten()
-            .min()
+        if let Some(delay) = [
+            widget,
+            schedule,
+            theme,
+            scheduled_wallpaper,
+            wallpaper,
+            tooltip,
+            ending,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
         {
             self.events.wake_after(self.panel.window, delay);
         }

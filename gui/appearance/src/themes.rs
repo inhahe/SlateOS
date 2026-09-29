@@ -9,7 +9,9 @@
 //! section per *axis* -- colours, window decorations, icons, cursors and so on
 //! -- each of which a user may take from a different theme. This module is the
 //! colours axis, together with the parts every axis will share: where themes
-//! are installed, how one is named, and how its file is read.
+//! are installed, how one is named, and how its file is read. The icons axis is
+//! [`crate::icons`]; the widget-style axis, the shapes of the toolkit's
+//! controls, is [`WidgetTheme`] and its `widget-style` section.
 //!
 //! # A theme on disk
 //!
@@ -63,6 +65,14 @@
 //! against one set of grounds, and mixing them into the other mode's would be
 //! neither.
 //!
+//! Two more pairs of sections colour what the desktop draws for programs:
+//! `terminal` and `terminal-light`, a terminal's sixteen colours and its own
+//! three (`guitk::palette::TERMINAL_ROLES`), and `syntax` and `syntax-light`,
+//! the colours of code in a code editor, one per kind of thing a highlighter
+//! tells apart -- `keyword`, `string`, `comment` and the rest
+//! (`guitk::highlight::Highlight`). Both default to the theme's own hues, so a
+//! theme that sets only `colors` still dresses its terminals and its code.
+//!
 //! # What a theme cannot do
 //!
 //! - **Choose the accent.** That is the user's own choice, made in Settings; a
@@ -96,7 +106,8 @@
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
 use guitk::color::Color;
-use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors};
+use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
+use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -106,6 +117,10 @@ use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use yamldoc::Document;
+
+mod widgets;
+
+pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
 /// chosen nothing else.
@@ -140,6 +155,17 @@ pub const TERMINAL_DARK_SECTION: &str = "terminal";
 
 /// The section holding a terminal's light-mode colours.
 pub const TERMINAL_LIGHT_SECTION: &str = "terminal-light";
+
+/// The section holding the dark-mode colours of code: one per kind of thing a
+/// highlighter tells apart (`guitk::palette::syntax_roles`).
+pub const SYNTAX_DARK_SECTION: &str = "syntax";
+
+/// The section holding the light-mode colours of code.
+pub const SYNTAX_LIGHT_SECTION: &str = "syntax-light";
+
+/// The section holding a theme's widget style: the shapes of the toolkit's
+/// controls ([`WidgetTheme`]). Named as the axis is in `meta.supports`.
+pub const WIDGET_SECTION: &str = "widget-style";
 
 /// The largest theme file that is read.
 ///
@@ -280,6 +306,8 @@ pub enum ThemeError {
     Unreadable(String),
     /// The file was read but sets no colours, in either mode.
     NoColors,
+    /// The file was read but has no usable `widget-style` section.
+    NoWidgetStyle,
 }
 
 impl fmt::Display for ThemeError {
@@ -295,6 +323,7 @@ impl fmt::Display for ThemeError {
             Self::NotText => f.write_str("has a file that is not text"),
             Self::Unreadable(why) => write!(f, "could not be read ({why})"),
             Self::NoColors => f.write_str("sets no colours"),
+            Self::NoWidgetStyle => f.write_str("sets no widget style"),
         }
     }
 }
@@ -333,6 +362,10 @@ pub struct ThemeFile {
     pub meta: ThemeMeta,
     /// The colours it sets.
     pub colors: ThemeColors,
+    /// The shapes of the controls its `widget-style` section sets, over the
+    /// built-in ones; `None` when it has no such section, or one that sets
+    /// nothing usable.
+    pub widget_style: Option<WidgetStyle>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -362,10 +395,14 @@ pub fn parse(text: &str) -> ThemeFile {
         light: read_colors(&doc, LIGHT_SECTION, &mut warnings),
         terminal_dark: read_terminal(&doc, TERMINAL_DARK_SECTION, &mut warnings),
         terminal_light: read_terminal(&doc, TERMINAL_LIGHT_SECTION, &mut warnings),
+        syntax_dark: read_syntax(&doc, SYNTAX_DARK_SECTION, &mut warnings),
+        syntax_light: read_syntax(&doc, SYNTAX_LIGHT_SECTION, &mut warnings),
     };
+    let widget_style = widgets::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
+        widget_style,
         warnings: warnings.finish(),
     }
 }
@@ -465,6 +502,11 @@ fn read_terminal(
     warnings: &mut Warnings,
 ) -> BTreeMap<String, Color> {
     read_section(doc, section, &TERMINAL_ROLES, "terminal colour", warnings)
+}
+
+/// The colours one `syntax` section sets, by kind of code.
+fn read_syntax(doc: &Document, section: &str, warnings: &mut Warnings) -> BTreeMap<String, Color> {
+    read_section(doc, section, &syntax_roles(), "kind of code", warnings)
 }
 
 /// The colours one section sets, by name: `roles` are the names it may use,
@@ -588,23 +630,47 @@ fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
     Ok(bytes)
 }
 
-/// What the colours read from `doc` depend on besides the document itself:
-/// the chosen theme's file -- where it was found, and what it holds. The
+/// What the settings read from `doc` depend on besides the document itself:
+/// the files of the themes chosen for the axes read with them -- the colours
+/// and the widget style -- where each was found, and what it holds. The
 /// dependency fingerprint of [`crate::watcher`].
 ///
-/// Empty for the built-in theme, whose colours are compiled in, and for a
-/// name that cannot be a theme. A theme that is not installed, or cannot be
-/// read, contributes that fact, so one appearing, disappearing or moving
-/// between the user's directory and the system's is a change as much as an
-/// edit is.
+/// A theme chosen for both axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
-    let Some(id) = crate::color_theme_name(doc) else {
-        return Vec::new();
-    };
-    if id == OsStr::new(BUILT_IN) || !is_valid_id(&id) {
+    let mut out = Vec::new();
+    let mut seen: Vec<OsString> = Vec::new();
+    for id in [crate::color_theme_name(doc), crate::widget_theme_name(doc)]
+        .into_iter()
+        .flatten()
+    {
+        if seen.contains(&id) {
+            continue;
+        }
+        let part = fingerprint_of(&id);
+        seen.push(id);
+        if part.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            // Between two themes' parts, so the pair is not read as one.
+            out.extend_from_slice(b"\0\0");
+        }
+        out.extend_from_slice(&part);
+    }
+    out
+}
+
+/// What reading the theme `id` depends on: its file's place and bytes.
+///
+/// Empty for the built-in theme, which is compiled in, and for a name that
+/// cannot be a theme. A theme that is not installed, or cannot be read,
+/// contributes that fact, so one appearing, disappearing or moving between the
+/// user's directory and the system's is a change as much as an edit is.
+fn fingerprint_of(id: &OsStr) -> Vec<u8> {
+    if id == OsStr::new(BUILT_IN) || !is_valid_id(id) {
         return Vec::new();
     }
-    let Some((dir, _)) = ThemeDirs::standard().find(&id) else {
+    let Some((dir, _)) = ThemeDirs::standard().find(id) else {
         return b"not installed".to_vec();
     };
     let file = dir.join(FILE_NAME);
@@ -778,6 +844,9 @@ pub struct ThemeInfo {
     pub has_dark: bool,
     /// Whether it sets light-mode colours.
     pub has_light: bool,
+    /// Whether it has a usable `widget-style` section: the shapes of the
+    /// toolkit's controls.
+    pub has_widget_style: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -792,6 +861,14 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_colors(&self) -> bool {
         self.problem.is_none() && (self.has_dark || self.has_light)
+    }
+
+    /// Whether it can be chosen for the widget-style axis: it was read, and
+    /// its `widget-style` section sets something -- or it is the built-in
+    /// theme, whose controls are compiled in.
+    #[must_use]
+    pub fn provides_widget_style(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_widget_style)
     }
 
     /// Whether it can be chosen for the icons axis: its folder holds an
@@ -894,15 +971,17 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             screenshots: Vec::new(),
             has_dark: true,
             has_light: true,
+            has_widget_style: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours and icons are
-    // compiled in: it covers both modes, draws every icon, and cannot fail to
-    // load.
+    // Whatever its file says, the built-in theme's colours, icons and controls
+    // are compiled in: it covers both modes, draws every icon and every
+    // control, and cannot fail to load.
     info.has_dark = true;
     info.has_light = true;
+    info.has_widget_style = true;
     info.problem = None;
     info
 }
@@ -935,6 +1014,7 @@ fn describe(
                 dir: Some(dir),
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
+                has_widget_style: file.widget_style.is_some(),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -950,6 +1030,7 @@ fn describe(
             screenshots: Vec::new(),
             has_dark: false,
             has_light: false,
+            has_widget_style: false,
             warnings: Vec::new(),
             problem: Some(err),
         },
@@ -1543,6 +1624,18 @@ colors:
                 Palette::for_mode(light).terminal,
                 "terminal, light = {light}"
             );
+            // And its syntax sections, on the same terms.
+            let syntax = file.colors.syntax_roles(light);
+            let missing: Vec<&str> = syntax_roles()
+                .into_iter()
+                .filter(|role| !syntax.contains_key(*role))
+                .collect();
+            assert_eq!(missing, Vec::<&str>::new(), "syntax, light = {light}");
+            assert_eq!(
+                themed.syntax,
+                Palette::for_mode(light).syntax,
+                "syntax, light = {light}"
+            );
         }
     }
 
@@ -1672,6 +1765,77 @@ colors:
             file.warnings
         );
         assert!(file.colors.terminal_dark.is_empty());
+    }
+
+    // ---- code ----
+
+    /// **A theme's `syntax` section sets the kinds it names**, the rest
+    /// follow the theme's hues, and light mode reads `syntax-light` -- and
+    /// whatever a theme chooses, code is drawn legibly.
+    #[test]
+    fn a_themes_syntax_section_sets_its_kinds_and_the_rest_follow_its_hues() {
+        use guitk::highlight::Highlight;
+        use guitk::theme::contrast_ratio;
+        let file = parse(
+            "colors:\n  mauve: \"#ff00ff\"\n  base: \"#101010\"\n\
+             syntax:\n  string: \"#00ff00\"\n  comment: \"#141414\"\n",
+        );
+        assert_eq!(file.warnings, Vec::<String>::new());
+        let p = Palette::for_theme(false, &file.colors);
+        assert_eq!(
+            p.syntax.get(Highlight::Keyword),
+            Color::rgb(0xff, 0, 0xff),
+            "keywords did not follow the theme's mauve"
+        );
+        assert_eq!(p.syntax.get(Highlight::String), Color::rgb(0, 0xff, 0));
+        // A comment nearly the page's own colour is held to the floor when
+        // drawn, not when read.
+        assert_eq!(
+            p.syntax.get(Highlight::Comment),
+            Color::rgb(0x14, 0x14, 0x14)
+        );
+        for kind in Highlight::ALL {
+            let ink = p.syntax_ink(kind);
+            assert!(
+                contrast_ratio(ink, p.base) >= guitk::palette::TEXT_CONTRAST_FLOOR,
+                "{kind} is unreadable: {ink:?} on {:?}",
+                p.base
+            );
+        }
+
+        let both = parse(
+            "colors:\n  red: \"#ff0000\"\ncolors-light:\n  red: \"#aa0000\"\n\
+             syntax:\n  keyword: \"#ff8800\"\nsyntax-light:\n  keyword: \"#884400\"\n",
+        );
+        assert_eq!(both.warnings, Vec::<String>::new());
+        assert_eq!(
+            Palette::for_theme(true, &both.colors)
+                .syntax
+                .get(Highlight::Keyword),
+            Color::rgb(0x88, 0x44, 0)
+        );
+        assert_eq!(
+            Palette::for_theme(false, &both.colors)
+                .syntax
+                .get(Highlight::Keyword),
+            Color::rgb(0xff, 0x88, 0)
+        );
+    }
+
+    /// **A name that is not a kind of code is reported**, and changes
+    /// nothing.
+    #[test]
+    fn a_syntax_name_that_is_no_kind_is_reported() {
+        let file = parse("syntax:\n  keywords: \"#800080\"\n  accent: \"#ff0000\"\n");
+        assert_eq!(file.warnings.len(), 2, "{:?}", file.warnings);
+        assert!(
+            file.warnings
+                .iter()
+                .all(|w| w.contains("no kind of code called")),
+            "{:?}",
+            file.warnings
+        );
+        assert!(file.colors.syntax_dark.is_empty());
     }
 
     // ---- where a user's themes are ----

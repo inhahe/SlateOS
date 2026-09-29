@@ -1,0 +1,13 @@
+[package]
+name = "settingsname"
+version = "0.1.0"
+edition = "2024"
+description = "The name of a SlateOS settings file, validated once for the file, the protocol and the watcher"
+
+# None, on purpose: `settingsfile` (below the toolkit) and `guitk` (whose
+# `Event` carries the name) both depend on this, and a dependency here would
+# be one of them depending on the other by the back door.
+[dependencies]
+
+[lints]
+workspace = true

@@ -101,6 +101,21 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// A box `width` by `height` of text at `font_size` and `weight`.
+    ///
+    /// Build one with this rather than naming every field: a field added
+    /// later -- the face, which a field of code wants fixed-pitch -- then
+    /// arrives with its default instead of breaking every caller's build.
+    #[must_use]
+    pub const fn new(width: f32, height: f32, font_size: f32, weight: FontWeightHint) -> Self {
+        Self {
+            width,
+            height,
+            font_size,
+            weight,
+        }
+    }
+
     /// The distance from one line to the next.
     #[must_use]
     pub fn line_height(&self) -> f32 {

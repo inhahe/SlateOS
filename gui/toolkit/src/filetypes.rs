@@ -514,6 +514,38 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         is_text: false,
         is_executable: false,
     },
+    // AVIF, and the HEIF family it is built on: pictures in an ISO Base Media
+    // container, the same `ftyp` box an MP4 opens with. `imagecodec` decodes
+    // AVIF (stills, grids and animated sequences, design-decisions §1333);
+    // nothing here decodes HEIC yet, but a HEIC is still a picture, and
+    // calling it one is what lets whatever opens it say so honestly.
+    FileTypeInfo {
+        extension: ".avif",
+        description: "AVIF Image",
+        mime_type: "image/avif",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".heic",
+        description: "HEIC Image",
+        mime_type: "image/heic",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".heif",
+        description: "HEIF Image",
+        mime_type: "image/heif",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
     FileTypeInfo {
         extension: ".tiff",
         description: "TIFF Image",
@@ -591,6 +623,17 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         extension: ".m4a",
         description: "MPEG-4 Audio",
         mime_type: "audio/mp4",
+        category: FileCategory::Audio,
+        icon_glyph: '\u{266A}',
+        is_text: false,
+        is_executable: false,
+    },
+    // Ogg's audio-only extension (RFC 5334): the same container as `.ogg`,
+    // named for audio whatever the codec inside -- Vorbis, Opus, FLAC.
+    FileTypeInfo {
+        extension: ".oga",
+        description: "Ogg Audio",
+        mime_type: "audio/ogg",
         category: FileCategory::Audio,
         icon_glyph: '\u{266A}',
         is_text: false,
@@ -1109,9 +1152,7 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
     // Carried from the kernel's `fs::mime` and `fs::filetype` when the
     // program lists became one (gui/programs/INVENTORY.md section 5).
     // The ones that are waiting on a decision are not here; see the test
-    // `the_kernels_types_this_table_waits_to_decide_are_still_absent`. `.oga`
-    // waits on `apps/fileassoc`, whose group test counts this table's audio
-    // types by hand (requests/c-e-a-test-that-counts-the-toolkits-audio-types.md).
+    // `the_kernels_types_this_table_waits_to_decide_are_still_absent`.
     FileTypeInfo {
         extension: ".bat",
         description: "Windows Batch File",
@@ -1537,6 +1578,41 @@ const MAGIC_TABLE: &[MagicSignature] = &[
         offset: 0x8001,
         extension: ".iso",
     },
+    // ISO Base Media pictures, told apart from video by the `ftyp` box's
+    // major brand, which follows the box type. Above the generic `ftyp`
+    // entry because the table answers with its first match: without these,
+    // every AVIF and HEIC photo was reported as an MP4 video. A sequence
+    // (`avis`) is still an AVIF file -- an animated picture, not a video.
+    //
+    // Only the major brand is read. A file whose major brand is the generic
+    // `mif1` but which lists `avif` among its compatible brands is reported
+    // as HEIF here -- still a picture, which is the error that matters;
+    // `imagecodec::avif::is_avif` reads the whole box and decodes it anyway.
+    MagicSignature {
+        bytes: b"ftypavif",
+        offset: 4,
+        extension: ".avif",
+    },
+    MagicSignature {
+        bytes: b"ftypavis",
+        offset: 4,
+        extension: ".avif",
+    },
+    MagicSignature {
+        bytes: b"ftypheic",
+        offset: 4,
+        extension: ".heic",
+    },
+    MagicSignature {
+        bytes: b"ftypheix",
+        offset: 4,
+        extension: ".heic",
+    },
+    MagicSignature {
+        bytes: b"ftypmif1",
+        offset: 4,
+        extension: ".heif",
+    },
     // ISO Base Media (MP4, MOV, M4A): an `ftyp` box.
     MagicSignature {
         bytes: b"ftyp",
@@ -1723,7 +1799,8 @@ mod tests {
     #[test]
     fn detect_image_extensions() {
         for ext in &[
-            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff", ".avif",
+            ".heic", ".heif",
         ] {
             assert_eq!(
                 detect_from_extension(ext).category,
@@ -1733,9 +1810,24 @@ mod tests {
         }
     }
 
+    /// **An `.oga` is Ogg audio**, as the kernel's table had it
+    /// (`audio/ogg`); it waited on `apps/fileassoc` counting the audio group
+    /// from this table rather than by hand, which lane E's 3275adc99 did.
+    #[test]
+    fn an_oga_is_ogg_audio() {
+        let info = detect_from_extension(".oga");
+        assert_eq!(
+            (info.mime_type, info.category),
+            ("audio/ogg", FileCategory::Audio)
+        );
+        assert_eq!(category_from_extension("oga"), FileCategory::Audio);
+    }
+
     #[test]
     fn detect_audio_extensions() {
-        for ext in &[".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma", ".m4a"] {
+        for ext in &[
+            ".mp3", ".wav", ".flac", ".ogg", ".oga", ".aac", ".wma", ".m4a",
+        ] {
             assert_eq!(
                 detect_from_extension(ext).category,
                 FileCategory::Audio,
@@ -1912,6 +2004,38 @@ mod tests {
         let header = b"\x00\x00\x00\x20ftypmp42";
         let info = detect_from_magic(header).expect("should detect MP4");
         assert_eq!(info.extension, ".mp4");
+    }
+
+    /// **A picture in an ISO Base Media box is a picture.** AVIF and HEIC open
+    /// with the same `ftyp` box as an MP4, and the brand after it is what
+    /// says which: every one of these was reported as MP4 video, so a photo
+    /// went to the video player.
+    #[test]
+    fn an_iso_media_picture_is_not_read_as_video() {
+        let ftyp = |brand: &[u8; 4]| {
+            let mut header = b"\x00\x00\x00\x1cftyp".to_vec();
+            header.extend_from_slice(brand);
+            header.extend_from_slice(b"\x00\x00\x00\x00mif1miaf");
+            detect_from_magic(&header).map(|info| (info.extension, info.mime_type, info.category))
+        };
+        let picture = |ext, mime| Some((ext, mime, FileCategory::Image));
+        assert_eq!(ftyp(b"avif"), picture(".avif", "image/avif"));
+        assert_eq!(
+            ftyp(b"avis"),
+            picture(".avif", "image/avif"),
+            "an animated AVIF is a picture"
+        );
+        assert_eq!(ftyp(b"heic"), picture(".heic", "image/heic"));
+        assert_eq!(ftyp(b"heix"), picture(".heic", "image/heic"));
+        assert_eq!(ftyp(b"mif1"), picture(".heif", "image/heif"));
+        // The control: video is still video, whatever its brand.
+        for brand in [b"isom", b"mp42", b"M4V ", b"qt  "] {
+            assert_eq!(
+                ftyp(brand).map(|(ext, _, category)| (ext, category)),
+                Some((".mp4", FileCategory::Video)),
+                "{brand:?}"
+            );
+        }
     }
 
     #[test]

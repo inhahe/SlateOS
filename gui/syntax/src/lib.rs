@@ -255,7 +255,7 @@ static LANGUAGES: [Language; 26] = [
         aliases: &["docker", "containerfile"],
         grammar: grammars::dockerfile::generated::language_fn,
         highlights: grammars::dockerfile::HIGHLIGHTS,
-        injections: "",
+        injections: grammars::dockerfile::INJECTIONS,
         locals: "",
         index: 6,
     },

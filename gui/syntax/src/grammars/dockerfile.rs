@@ -6,6 +6,10 @@
 //! the instruction's line and not yet ended, first to end first, saved with
 //! the parse's state.
 //!
+//! A `RUN` instruction's command is coloured as Bash, and so is the script
+//! of a `RUN <<EOF` -- by `injections.slateos.scm`, this crate's own, as the
+//! package publishes no injection query.
+//!
 //! # Where the port differs
 //!
 //! - **A heredoc ends at a line that is its delimiter**, the whole line, as
@@ -30,6 +34,12 @@ super::generated!("dockerfile", super::Scanner);
 
 /// The highlight query, as published.
 pub(crate) const HIGHLIGHTS: &str = include_str!("../../grammars/dockerfile/highlights.scm");
+
+/// The injection query, this crate's own -- the package publishes none: a
+/// `RUN` instruction's command in Bash, and the script of a `RUN <<EOF` too
+/// (`injections.slateos.scm` says which heredocs are scripts).
+pub(crate) const INJECTIONS: &str =
+    include_str!("../../grammars/dockerfile/injections.slateos.scm");
 
 /// The external tokens, in the grammar's order.
 #[derive(Clone, Copy)]

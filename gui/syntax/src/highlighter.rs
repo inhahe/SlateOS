@@ -3333,4 +3333,40 @@ mod tests {
         assert_eq!(at("c}", 0), Some(Highlight::Variable));
         assert_eq!(at(" b\"", 0), Some(Highlight::String));
     }
+
+    /// **A Dockerfile's RUN commands are Bash**, over their line
+    /// continuations, and so is a `RUN <<EOF` script; a heredoc fed to a
+    /// command, or copied into a file, stays the Dockerfile's text.
+    #[test]
+    fn a_dockerfiles_shell_is_coloured_as_bash() {
+        let text = concat!(
+            "FROM debian\n",
+            "RUN apt-get update && \\\n",
+            "    apt-get install -y curl\n",
+            "RUN <<EOF\n",
+            "if true; then\n",
+            "  echo hi\n",
+            "fi\n",
+            "EOF\n",
+            "RUN cat <<EOF\n",
+            "if data\n",
+            "EOF\n",
+            "COPY <<EOF /etc/x\n",
+            "if file\n",
+            "EOF\n",
+        );
+        let spans = highlighted(text, "dockerfile");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("RUN apt", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("apt-get update", 0), Some(Highlight::Function));
+        // Over the line continuation: the second command is Bash's too.
+        assert_eq!(at("apt-get install", 0), Some(Highlight::Function));
+        assert_eq!(at("if true", 0), Some(Highlight::Keyword));
+        assert_eq!(at("fi\n", 0), Some(Highlight::Keyword));
+        assert_eq!(at("echo hi", 0), Some(Highlight::Function));
+        // The delimiter is the Dockerfile's, not a command.
+        assert_eq!(at("EOF\nRUN cat", 0), Some(Highlight::Keyword));
+        assert_eq!(at("if data", 0), Some(Highlight::String));
+        assert_eq!(at("if file", 0), Some(Highlight::String));
+    }
 }

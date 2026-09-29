@@ -2051,7 +2051,11 @@ live.
   A diff's hunks are coloured in their files' languages, git's diffs and
   plain `diff -u`'s alike (§1444), an injected language's colours over its
   host's in the text it was given and a query's `priority` read (§1443).
-  **Next:** a Dockerfile's RUN commands in Bash.
+  A Dockerfile's RUN commands, and a `RUN <<EOF` script, are Bash.
+  **Next:** a bracket's partner found in the tree, not by counting (a
+  bracket in a string or a comment is no bracket); more languages as the
+  editor meets them (SQL for the database viewer, Lua, PowerShell, linker
+  scripts).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

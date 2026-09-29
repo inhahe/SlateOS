@@ -452,6 +452,36 @@ MUTATIONS = [
         "        Some(Duration::from_millis(16))",
         ["the_window_says_what_it_is"],
     ),
+    (
+        'a release is a keystroke',
+        '        if !event.pressed {\n            return;\n        }\n        // Every key but what is typed is taken plain',
+        '        // Every key but what is typed is taken plain',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works Escape, Tab, Backspace and Enter',
+        '            _ if !plain => {}\n',
+        '',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        "a command's letter is typed",
+        '        if textline::types_into_field(event)',
+        '        if event.types_text()',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
+    (
+        'a chord works the letter shortcuts',
+        '        if !plain {\n            return;\n        }\n        match event.key {\n            Key::N =>',
+        '        match event.key {\n            Key::N =>',
+        ['f1_raises_the_keys_and_a_chord_is_neither_a_shortcut_nor_typing'],
+    ),
 ]
 
 if __name__ == "__main__":

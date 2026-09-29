@@ -780,6 +780,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
 ]
 
 [[package]]

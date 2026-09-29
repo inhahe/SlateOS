@@ -469,7 +469,10 @@ mod tests {
         assert_eq!(Motion::STANDARD.duration_ms(150), 150);
         assert_eq!(Motion::new(300, Curve::EaseOut).duration_ms(150), 225);
         assert_eq!(Motion::new(100, Curve::Linear).duration_ms(300), 150);
-        // Rounded to the nearest: 1 * 50 / 200 is a quarter.
+        // Rounded to the nearest: 3 * 250 / 200 is 3.75, and 1 * 50 / 200 a
+        // quarter -- which is still a millisecond, not nothing.
+        assert_eq!(Motion::new(250, Curve::Linear).duration_ms(3), 4);
+        assert_eq!(Motion::new(250, Curve::Linear).duration_ms(1), 1);
         assert_eq!(Motion::new(50, Curve::Linear).duration_ms(3), 1);
         assert_eq!(Motion::new(50, Curve::Linear).duration_ms(1), 1);
         assert_eq!(Motion::STILL.duration_ms(150), 0);

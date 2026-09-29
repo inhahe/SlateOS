@@ -2157,12 +2157,19 @@ fn a_speed_of_off_moves_nothing_on_screen() {
         let (mut session, _desktop, _turn) = bound_session();
         session.load_appearance();
         let panel = session.panel().window();
+        // Loading asks for a frame of its own (quiet hours' edge); the
+        // question below is whether the overview asks for one.
+        session.events_mut().cancel_wake(panel);
 
         deliver(&mut session, panel, super_tab());
         assert!(session.shell().overview.visible, "Super+Tab did nothing");
         assert!(
             !session.shell().overview.is_fading(),
             "Off still faded the overview in"
+        );
+        assert!(
+            !session.events_mut().is_waking(panel),
+            "Off still armed the frame clock for a fade it did not run"
         );
         deliver(&mut session, panel, super_tab());
 

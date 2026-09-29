@@ -2203,6 +2203,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "textline",
  "unsaved",
  "yamldoc",
 ]

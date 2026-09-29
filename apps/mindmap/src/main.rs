@@ -3179,10 +3179,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
+                // AltGr+Z. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                self.edit_buffer.push_str(&key.text);
+                self.edit_buffer.extend(key.typed());
                 EventResult::Consumed
             }
         }
@@ -3212,11 +3215,13 @@ impl MindMapApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // As a node's text takes it: AltGr's letters, and no
+                // command's.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
                 let mut q = self.search_query.clone();
-                q.push_str(&key.text);
+                q.extend(key.typed());
                 self.set_search_query(q);
                 EventResult::Consumed
             }
@@ -4888,6 +4893,67 @@ mod tests {
         assert_eq!(app.search_query, "");
         app.handle_event(&press(Key::Escape));
         assert!(!app.show_search);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// **A node's text and the search box take what AltGr types, and no
+    /// command's letter.** AltGr arrives as Ctrl+Alt -- `ż` is AltGr+Z on a
+    /// Polish keyboard -- and both refused every key held with Ctrl. A
+    /// command carries its letter as text on a real machine (Ctrl+K arrives
+    /// as `k`, Alt+F as `f`), and both typed Alt's and the Windows key's.
+    #[test]
+    fn a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter() {
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let commands = [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ];
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        let seeded = app.edit_buffer.clone();
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the node"
+            );
+        }
+        assert_eq!(app.edit_buffer, format!("{seeded}\u{17c}"));
+        app.handle_event(&press(Key::Escape));
+
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(app.show_search);
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed
+        );
+        for (k, modifiers, text) in commands {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed into the search"
+            );
+        }
+        assert_eq!(app.search_query, "\u{17c}");
     }
 
     #[test]

@@ -485,6 +485,46 @@ MUTATIONS = [
         "const MAX_UNDO: usize = 210;",
         ["test_app_undo_stack_limit"],
     ),
+    (
+        "a node's text refuses what AltGr types",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a node's text takes a command's letter",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        "                if !key.types_text() {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                self.edit_buffer.extend(key.typed());",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the search box refuses what AltGr types",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the search box takes a command's letter",
+        "                if !textline::types_into_field(key) {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        "                if !key.types_text() {\n"
+        "                    return EventResult::Ignored;\n                }\n"
+        "                let mut q = self.search_query.clone();",
+        ["a_node_and_the_search_box_take_altgr_letters_and_no_commands_letter"],
+    ),
 ]
 
 if __name__ == "__main__":

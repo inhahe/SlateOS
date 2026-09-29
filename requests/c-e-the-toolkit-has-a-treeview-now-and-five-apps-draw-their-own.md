@@ -9,8 +9,10 @@ keyed by the empty name, folders by name), `flatten`, `FlatTreeRow`,
 moves them between it and the list, as a click on either does. Its `Target`
 stays `Copy` with one `Tree` variant, the pane finding its own row through
 `TreeView::handle_mouse`: a `TreeHit` in the frame would have cost the
-toolkit's `Probe` its `Copy` targets. Next: `jsonviewer`, whose selection
-is still a row number.
+toolkit's `Probe` its `Copy` targets. The other four say things with colour
+the tree cannot draw -- a value's kind, a device's status, a section's
+letter -- and wait on `requests/e-c-tree-rows-need-tones-and-a-badge.md`;
+`jsonviewer`, whose selection is still a row number, first.
 
 ## In short
 

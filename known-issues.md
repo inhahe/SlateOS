@@ -172877,3 +172877,43 @@ are not read again.
 **The fix** is the operator's choice (E-Q5): one window per program, a second
 launch bringing the first forward; or two windows allowed, each reading the
 file again before it writes and writing only its own change into it.
+
+### [E] A key held with Alt or the Windows key works a program's bare-key binding -- 2026-09-29
+
+**Status:** OPEN -- being fixed program by program (the roadmap's keys pass).
+
+**In short:** Many programs act on a plain letter: N for a new game, S for
+stop, a letter guessed in hangman. The compositor hands a chord its letter as
+text, and most of these programs never ask what was held with the key, so
+Alt+N, meant for the window, or Windows+S, meant for the desktop, does what N
+or S does. Paint's Alt+B chose the pencil; the whiteboard's Alt+R the
+rectangle.
+
+**Reproduce:** in hangman, press Alt+A: the letter A is guessed (so is it
+with Ctrl+A). In the stopwatch, Alt+R resets the running watch, as R does.
+
+**Where.** A survey of 2026-09-29 (a letter or digit matched with no
+modifier on its line or the three above, in a program whose code never reads
+`super_key` directly or through a helper) finds 60: asteroids, battleship,
+benchmark, calendar, clipmanager, compass, contacts, credmanager, crossword,
+dbviewer, defrag, devicemanager, diskimager, dots, ebook, email, explorer,
+fileassoc, filediff, finance, flashcards, hangman, jsonviewer, kanban,
+launcher, match3, mediaconvert, metronome, musicplayer, nonogram, pacman,
+pdfviewer, pinball, podcast, regextester, reminders, remotedesktop, reversi,
+rssreader, screenrecorder, screenshot, simon, snippets, soundrecorder,
+speedtest, startupmanager, stopwatch, sysmonitor, systemrestore, terminal,
+tmux, torrent, typingtutor, undelete, videoplayer, weather, wordle,
+wordsearch, worldclock, yahtzee. A heuristic both ways: each is to be read,
+and some will turn out to match only Ctrl chords (that is the separate
+AltGr item, a Ctrl shortcut matched on Ctrl alone). Done before it: the ten
+games of the redo-tree pass, paint and the whiteboard (2026-09-29).
+
+**The fix**, per program: after the program's own chords (Ctrl+S, Alt+Z,
+Alt+Left) and before its bare bindings, a key that
+`textline::is_command(key.modifiers)` calls a command -- Ctrl or Alt alone, or
+anything with the Windows key -- is not taken. AltGr, which arrives as
+Ctrl+Alt, is not a command and goes on: a letter it types is typed. A test
+per program presses a bound letter with Alt and with the Windows key and
+finds nothing changed. The terminal is the exception: Alt+letter is the
+shell's (sent as Escape and the letter) and only the Windows key's chords
+stay out.

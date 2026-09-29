@@ -2563,9 +2563,12 @@ word; text inside them that says "lane C" is history.
   counted 2026-09-28, most without asking whether the key is a command --
   and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
   text and test Ctrl somewhere without Alt (notes' body, and every field on
-  `TextInput::edit_key`, wait on the request above); the Alt/Super guard in
-  the programs not yet through it (paint, whiteboard, and the rest by
-  survey); Page Up/Down, Home/End and Ctrl+Home/End through
+  `TextInput::edit_key`, wait on the request above); the Alt/Super guard
+  (paint and the whiteboard done 2026-09-29; a survey of 2026-09-29 finds 60
+  more with a bare letter binding and no guard, listed in `known-issues.md`
+  "[E] A key held with Alt or the Windows key works a program's bare-key
+  binding", with the fix: `textline::is_command` before the bare bindings);
+  Page Up/Down, Home/End and Ctrl+Home/End through
   `guitk::listview::ListKey` for programs with lists of their own (done
   2026-09-29 for pomodoro's log, rush's puzzle sheet, sokoban's level menu
   and taskscheduler's task list and history -- which answered Home alone;
@@ -2592,13 +2595,19 @@ word; text inside them that says "lane C" is history.
     chosen, Open With) and File Associations; the three copies of "installed
     programs with SlateOS's behind them" are asked of lane C as one
     (`e-c-the-installed-and-built-in-programs-belong-in-gui-programs.md`);
-  - an About page in Settings that shows the third-party notices
-    (`c-e-show-the-third-party-notices.md`);
+  - ~~an About page in Settings that shows the third-party notices
+    (`c-e-show-the-third-party-notices.md`)~~ **done 2026-09-29**
+    (3ae172794): `settings --page about`, each notice's attribution on a
+    line of its own and its texts read when opened; lane C may delete
+    `gui/desktop/src/about.rs`;
   - the controls' shapes: a picker in Settings, the programs' own text
     fields and scrollbars, the user's focus width
     (`c-e-a-theme-can-shape-the-controls.md`);
-  - day and night wallpapers on Settings' Wallpaper page
-    (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`);
+  - ~~day and night wallpapers on Settings' Wallpaper page
+    (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
+    2026-09-29** (3a7073848): a morning and an evening picture, each with
+    its time, and the picture and the rotation saying when a schedule hides
+    them;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio
@@ -2612,7 +2621,8 @@ word; text inside them that says "lane C" is history.
     -- and the password manager's CSV export survives any password, the
     operator's own words "make sure you don't mess that up": the export
     quotes every field and is tested by round trip through a strict reader,
-    and the reply to lane B is owed;
+    answered in `e-b-the-password-export-survives-any-password.md`
+    (f3b7eef15);
   - standing: a notices manifest beside any code ported into a lane E crate
     (`c-abdef-third-party-code-needs-a-notices-manifest.md`).
   Done 2026-09-28: `safeio`'s rename on Windows while a scanner holds the

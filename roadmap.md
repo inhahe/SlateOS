@@ -2045,9 +2045,10 @@ live.
   an HTML page's scripts and styles, a C++ raw string in the language its
   delimiter names (`R"sql(...)sql"`), JavaScript's and TypeScript's regular
   expressions and JSDoc comments in grammars of their own.
-  **Next:** a diff's hunks in their files' languages (its injection query
-  needs the language a file's name says, and `#offset!`); XML and
-  Dockerfiles.
+  A diff's hunks are coloured in their files' languages, git's diffs and
+  plain `diff -u`'s alike (§1444), an injected language's colours over its
+  host's in the text it was given and a query's `priority` read (§1443).
+  **Next:** XML and Dockerfiles.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

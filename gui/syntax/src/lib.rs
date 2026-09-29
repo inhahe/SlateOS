@@ -56,6 +56,7 @@ mod corpus;
 )]
 mod highlight_tests;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -233,7 +234,7 @@ static LANGUAGES: [Language; 23] = [
         aliases: &["patch", "udiff"],
         grammar: grammars::diff::generated::language_fn,
         highlights: grammars::diff::HIGHLIGHTS,
-        injections: "",
+        injections: grammars::diff::INJECTIONS,
         locals: "",
         index: 5,
     },
@@ -460,6 +461,10 @@ static LANGUAGES: [Language; 23] = [
     },
 ];
 
+/// A capture's priority where its pattern sets none: Neovim's, whose
+/// directive `(#set! priority N)` is.
+pub(crate) const DEFAULT_PRIORITY: u16 = 100;
+
 /// A language's queries, compiled: the highlight query with what each of
 /// its captures paints, and the injection and locals queries with the
 /// captures they are read by.
@@ -470,6 +475,11 @@ pub(crate) struct Compiled {
     /// Whether each highlight pattern leaves alone a name found declared --
     /// `(#is-not? local)` -- by pattern index.
     pub(crate) non_local: Vec<bool>,
+    /// The priorities the highlight patterns set -- `(#set! priority 95)`,
+    /// or `(#set! @capture priority 95)` for one capture -- by pattern index
+    /// and capture index (none: every capture of the pattern). Most queries
+    /// set none.
+    pub(crate) priorities: HashMap<(usize, Option<u32>), u16>,
     /// How deep the highlight query's patterns go: the most node patterns
     /// any one nests inside another ([`pattern_depth`]).
     pub(crate) depth: usize,
@@ -478,6 +488,64 @@ pub(crate) struct Compiled {
 }
 
 impl Compiled {
+    /// `highlights`, compiled from `source`, read for what each capture
+    /// paints, which patterns leave locals alone, the priorities they set
+    /// and how deep they go; with the injection and locals queries.
+    pub(crate) fn new(
+        highlights: tree_sitter::Query,
+        source: &str,
+        injections: Option<Injections>,
+        locals: Option<LocalsQuery>,
+    ) -> Self {
+        let paints = highlights
+            .capture_names()
+            .iter()
+            .map(|name| Paint::for_capture(name))
+            .collect();
+        let non_local = (0..highlights.pattern_count())
+            .map(|i| {
+                highlights
+                    .property_predicates(i)
+                    .iter()
+                    .any(|(p, positive)| !*positive && &*p.key == "local")
+            })
+            .collect();
+        let mut priorities = HashMap::new();
+        for pattern in 0..highlights.pattern_count() {
+            for setting in highlights.property_settings(pattern) {
+                // Neovim reads the number as Lua's `tonumber` does; a
+                // priority that is not one is no priority.
+                let value = setting.value.as_deref().and_then(|v| v.parse::<u16>().ok());
+                if let (true, Some(value)) = (&*setting.key == "priority", value) {
+                    let capture = setting.capture_id.and_then(|c| u32::try_from(c).ok());
+                    priorities.insert((pattern, capture), value);
+                }
+            }
+        }
+        Self {
+            depth: pattern_depth(source),
+            highlights,
+            paints,
+            non_local,
+            priorities,
+            injections,
+            locals,
+        }
+    }
+
+    /// The priority of capture `capture` of highlight pattern `pattern`:
+    /// the capture's own, else its pattern's, else [`DEFAULT_PRIORITY`].
+    pub(crate) fn priority(&self, pattern: usize, capture: u32) -> u16 {
+        if self.priorities.is_empty() {
+            return DEFAULT_PRIORITY;
+        }
+        self.priorities
+            .get(&(pattern, Some(capture)))
+            .or_else(|| self.priorities.get(&(pattern, None)))
+            .copied()
+            .unwrap_or(DEFAULT_PRIORITY)
+    }
+
     /// What highlight capture `index` paints.
     pub(crate) fn paint(&self, index: u32) -> Paint {
         usize::try_from(index)
@@ -557,12 +625,13 @@ pub(crate) struct LocalsQuery {
     pub(crate) reference: Option<u32>,
 }
 
-/// An injection query, and which of its captures are the injected text and
-/// the name of its language.
+/// An injection query, and which of its captures are the injected text,
+/// the name of its language, and the name of a file whose language it is.
 pub(crate) struct Injections {
     pub(crate) query: tree_sitter::Query,
     pub(crate) content: Option<u32>,
     pub(crate) language: Option<u32>,
+    pub(crate) filename: Option<u32>,
 }
 
 /// What a highlight capture does to the text it covers.
@@ -708,20 +777,6 @@ impl Language {
         })?;
         slot.get_or_init(|| {
             let highlights = self.compile(self.highlights, "the highlight query")?;
-            let paints = highlights
-                .capture_names()
-                .iter()
-                .map(|name| Paint::for_capture(name))
-                .collect();
-            let non_local = (0..highlights.pattern_count())
-                .map(|i| {
-                    highlights
-                        .property_predicates(i)
-                        .iter()
-                        .any(|(p, positive)| !*positive && &*p.key == "local")
-                })
-                .collect();
-            let depth = pattern_depth(self.highlights);
             let injections = if self.injections.is_empty() {
                 None
             } else {
@@ -729,6 +784,7 @@ impl Language {
                 Some(Injections {
                     content: query.capture_index_for_name("injection.content"),
                     language: query.capture_index_for_name("injection.language"),
+                    filename: query.capture_index_for_name("injection.filename"),
                     query,
                 })
             };
@@ -744,14 +800,12 @@ impl Language {
                     query,
                 })
             };
-            Ok(Compiled {
+            Ok(Compiled::new(
                 highlights,
-                paints,
-                non_local,
-                depth,
+                self.highlights,
                 injections,
                 locals,
-            })
+            ))
         })
         .as_ref()
         .map_err(Clone::clone)

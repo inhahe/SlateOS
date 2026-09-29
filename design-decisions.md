@@ -84128,6 +84128,70 @@ subject of §1441.
 **Revisit if** tree-sitter-go reorders its query or ships highlight tests;
 then the published query is read as it is, and this file goes.
 
+## 1443. Injected colours win over their host's in the text they were given, and a pattern's priority is read
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** when one language sits inside another -- a Rust file's lines
+inside a diff, a code block inside Markdown, HTML inside a JavaScript
+template -- both colour the same text, and something has to decide which
+colour shows. Until now whichever started later won. That showed a diff's
+added line inside a Rust comment in the "added" colour instead of the
+comment's. Now a query's own word on importance (Neovim's `priority`)
+decides first; then the inner language wins over the outer, but only on
+the text the inner language was given to read; only then does the start
+order decide, as before.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Priority, then the inner language over the outer within the inner's own text, then start order** (chosen) | a diff's code coloured as code wherever it is, its `+` and `-` in their line's colour as the query asks; the holes in an injected language -- a template's `${...}`, a diff's markers, Markdown's `>` inside a quoted paragraph -- keep the outer language's colours | departs from tree-sitter's own highlighter, whose single stack the old rule copied event for event |
+| Start order only -- tree-sitter's highlighter, the old rule | exactly tree-sitter's behaviour | an outer colour starting inside an inner one hides it: a diff line's colour over the second line of a comment; and `priority` unread, so a diff's markers are drawn as punctuation, and once the code is coloured the change shows only on plain names |
+| Neovim's rule exactly: priority, then the inner language, nothing cut | the rule the diff's queries were written for | an inner node spanning a hole paints the hole: a comment the new file opens before a deleted line and closes after it paints the deleted line as a comment; an HTML attribute's string paints the JavaScript `${...}` inside it |
+
+**What `priority` is.** Neovim's directive `(#set! priority 95)` -- or
+`(#set! @capture priority 95)` for one capture: 100 where none is set;
+higher shows over lower wherever both are, however their nodes nest; among
+one node's captures, the higher beats a later pattern. Of the queries
+vendored, only the diff's sets one: on the `+` and `-` markers, to put them
+under their line's colour.
+
+**Revisit if** a query turns up that needs an outer language's colour over
+an inner one's inside the text the inner language was given.
+
+## 1444. A diff's hunks are read in their files' languages, flat diffs included
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** a diff of a Rust file now shows its code in Rust's colours:
+the lines the new file has (kept and added) read together as one piece of
+code, the old file's as another. The grammar's own rule for this finds
+hunks only under a `diff --git`-style line; a plain `diff -u` of two files
+has none, nor has `svn diff`, so a second rule of our own reads those. And
+a file named with a timestamp after it, as `diff -u` and `diff -r` name
+one, is known by its name alone.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The published query, plus `injections.flat.scm` of our own for diffs with no `diff` line; a header's name cut at a tab** (chosen) | git's diffs, `diff -u`'s, `diff -r`'s and `svn diff`'s all coloured | a query of our own to keep in step with the grammar's -- its patterns mirror the published ones, and tests hold both shapes |
+| The published query alone | nothing of our own | `diff -u` of two files -- the commonest diff outside git -- uncoloured; and a timestamped header names no language, so `diff -r`'s blocks lost their colours too |
+| No injection: the diff's own colours only | a change's colour on every character | the code unreadable as code |
+
+**Two readings of Neovim's directive `#offset!`.** It moves a range's ends
+by rows and columns. A column past a line's end goes on into the next line,
+the end of the line counting one column whether it is `\n` or `\r\n` -- so
+the query's `0 1 0 1`, meant to take in each line's newline, takes in all of
+a Windows file's `\r\n`; counted in bytes it would stop between the two, and
+a `//` comment would run on into the next line. And where Neovim keeps a
+capture whole when its offset would turn it inside out, it is dropped here:
+a text too short to trim has nothing in it to colour.
+
+**Revisit if** tree-sitter-diff gives a flat diff's hunks a block of their
+own -- the flat query then goes -- or publishes a reading of either.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

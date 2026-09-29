@@ -31,7 +31,12 @@
 //! names, a Rust macro's body in Rust. Those stretches are parsed with that
 //! language's grammar (only them: the parser is given their ranges) and
 //! coloured by its query, over the enclosing language's colours, to three
-//! levels deep. Drawing starts each stretch it finds, all of them within
+//! levels deep -- in the text it was given, where its colours show over
+//! its host's, whichever starts where; what it was not given, a diff line's
+//! `+` or a template's `${...}`, keeps its host's colours. (A query may
+//! move a stretch's ends, `#offset!`, and name its language by a file's,
+//! `@injection.filename`: Neovim's, as a diff's hunks need.) Drawing starts
+//! each stretch it finds, all of them within
 //! [`DRAW_BUDGET`] together; one that does not finish in it is carried on
 //! by [`work`](Highlighter::work) a slice at a time -- the view keeps asking
 //! while [`has_work`](Highlighter::has_work) says so -- and is coloured when
@@ -77,6 +82,13 @@
 //! whose name no kind answers to, `@text.emphasis`, takes no part: the
 //! node keeps what the other patterns said of it. What comes out is sorted,
 //! flat and within the range asked for, which is what the view draws.
+//!
+//! Before all that, a pattern may set its captures' priority, Neovim's
+//! `(#set! priority 95)` -- 100 where it sets none -- and over any one byte
+//! the highest priority shows: a diff's `+` under its line's colour. Then
+//! an injected language's colours over its host's, in the text it was given
+//! -- where Neovim, whose queries these mostly are, puts them too. Below
+//! both, the order above: tree-sitter's highlighter's, event for event.
 
 use core::cell::RefCell;
 use core::ops::Range;
@@ -92,7 +104,7 @@ use tree_sitter::{
     TextProvider, Tree,
 };
 
-use crate::{Compiled, Error, Injections, Language, LocalsQuery, Paint, ffi};
+use crate::{Compiled, DEFAULT_PRIORITY, Error, Injections, Language, LocalsQuery, Paint, ffi};
 
 /// How many languages deep injections go: Markdown's code fence in Markdown
 /// is two, a macro's body in that fence's Rust three.
@@ -467,6 +479,7 @@ fn settle_node(
             settling.take(
                 compiled.paint(capture.index),
                 compiled.is_non_local(m.pattern_index),
+                compiled.priority(m.pattern_index, capture.index),
             );
         }
     }
@@ -706,34 +719,55 @@ fn begin_locals(
 /// How one node's highlight captures settle, as tree-sitter's highlighter
 /// settles them: of those that paint, the last pattern's wins -- save that
 /// a local, a name found declared, is not painted by a pattern marked
-/// `(#is-not? local)` unless it is the node's first. (A capture of a name
-/// no kind answers to paints nothing and takes no part: see the module
-/// docs.)
+/// `(#is-not? local)` unless it is the node's first. A capture of a higher
+/// priority wins over the patterns after it, as Neovim has it. (A capture
+/// of a name no kind answers to paints nothing and takes no part: see the
+/// module docs.)
 #[derive(Clone, Copy, Debug, Default)]
 struct Settling {
     /// Whether the node is a local.
     local: bool,
     /// Whether a capture of it has come.
     seen: bool,
-    /// What the last capture that paints said.
+    /// What the winning capture that paints said, so far.
     paint: Option<Colour>,
+    /// That capture's priority.
+    priority: u16,
 }
 
 impl Settling {
-    /// The node's next capture: what it paints, and whether its pattern is
-    /// marked `(#is-not? local)`.
-    fn take(&mut self, paint: Paint, non_local: bool) {
+    /// The node's next capture: what it paints, whether its pattern is
+    /// marked `(#is-not? local)`, and its priority.
+    fn take(&mut self, paint: Paint, non_local: bool, priority: u16) {
         let first = !self.seen;
         self.seen = true;
         if self.local && non_local && !first {
             return;
         }
-        match paint {
-            Paint::Kind(kind) => self.paint = Some(Some(kind)),
-            Paint::Plain => self.paint = Some(None),
-            Paint::Skip => {}
+        let colour = match paint {
+            Paint::Kind(kind) => Some(kind),
+            Paint::Plain => None,
+            Paint::Skip => return,
+        };
+        // The first always: no priority is below 0, where it starts.
+        if priority >= self.priority {
+            self.paint = Some(colour);
+            self.priority = priority;
         }
     }
+}
+
+/// A span a node paints, and what ranks it against the others over the
+/// same bytes ([`flatten`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Span {
+    range: Range<usize>,
+    colour: Colour,
+    /// Its capture's priority: `(#set! priority N)`, or
+    /// [`DEFAULT_PRIORITY`].
+    priority: u16,
+    /// How deep in injections its language is: 0 for the text's own.
+    depth: usize,
 }
 
 /// One node's highlight captures, while they come.
@@ -747,12 +781,25 @@ struct Painting {
 }
 
 impl Painting {
-    /// The span the node paints, if it paints one.
-    fn span(self) -> Option<(Range<usize>, Colour)> {
-        let range = self.range;
-        self.uses
-            .or(self.settling.paint)
-            .map(|colour| (range, colour))
+    /// The span the node paints, if it paints one, `depth` deep in
+    /// injections.
+    fn span(self, depth: usize) -> Option<Span> {
+        let Self {
+            range,
+            uses,
+            settling,
+            ..
+        } = self;
+        uses.or(settling.paint).map(|colour| Span {
+            range,
+            colour,
+            priority: if settling.paint.is_some() {
+                settling.priority
+            } else {
+                DEFAULT_PRIORITY
+            },
+            depth,
+        })
     }
 }
 
@@ -1034,12 +1081,13 @@ impl Highlighter for SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     /// The captures of `tree` over `range`, in `compiled`'s language, then
-    /// those of each stretch it injects -- after them, so an injected
-    /// language's colours win over its host's where both colour a stretch.
-    /// `locals` is where the tree's names are declared and used, if its
-    /// language says; `depth` is how deep in injections this is, and
-    /// `deadline` when drawing stops parsing the stretches it finds (see
-    /// [`DRAW_BUDGET`]).
+    /// those of each stretch it injects, each cut to the text the stretch
+    /// was given: an injected language colours only what it read, and a
+    /// hole in that -- a diff line's marker, a template's `${...}` -- keeps
+    /// its host's colours. `locals` is where the tree's names are declared
+    /// and used, if its language says; `depth` is how deep in injections
+    /// this is, and `deadline` when drawing stops parsing the stretches it
+    /// finds (see [`DRAW_BUDGET`]).
     fn collect(
         &self,
         compiled: &'static Compiled,
@@ -1047,7 +1095,7 @@ impl SyntaxHighlighter {
         text: &TextBuffer,
         range: Range<usize>,
         (depth, deadline): (usize, Option<Instant>),
-        found: &mut Vec<(Range<usize>, Colour)>,
+        found: &mut Vec<Span>,
     ) {
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
@@ -1064,7 +1112,7 @@ impl SyntaxHighlighter {
             };
             let node = capture.node;
             if painting.as_ref().is_none_or(|p| p.id != node.id()) {
-                found.extend(painting.take().and_then(Painting::span));
+                found.extend(painting.take().and_then(|p| p.span(depth)));
                 let (local, uses) = locals.map_or((false, None), |l| l.of(node, tree, text));
                 painting = Some(Painting {
                     id: node.id(),
@@ -1080,10 +1128,11 @@ impl SyntaxHighlighter {
                 p.settling.take(
                     compiled.paint(capture.index),
                     compiled.is_non_local(m.pattern_index),
+                    compiled.priority(m.pattern_index, capture.index),
                 );
             }
         }
-        found.extend(painting.take().and_then(Painting::span));
+        found.extend(painting.take().and_then(|p| p.span(depth)));
         if depth >= MAX_INJECTION_DEPTH {
             return;
         }
@@ -1106,14 +1155,16 @@ impl SyntaxHighlighter {
             else {
                 continue;
             };
+            let mut spans = Vec::new();
             self.collect(
                 inner,
                 (&sub, sub_locals.as_deref()),
                 text,
                 within,
                 (depth.saturating_add(1), deadline),
-                found,
+                &mut spans,
             );
+            clip(spans, &ranges, found);
         }
     }
 
@@ -1287,7 +1338,11 @@ impl SyntaxHighlighter {
 /// The stretches `injections` finds in `tree` over `range`: each with its
 /// language and the ranges its text is in. A match with
 /// `injection.combined` is one document with every other match of its
-/// pattern and language (among those in `range`).
+/// pattern and language (among those in `range`). A stretch's language is
+/// named -- `injection.language`, set or captured -- or is the language of a
+/// file a capture names (`injection.filename`: a diff's file); a
+/// `#offset!` moves its ranges' ends, as Neovim's does, whose directive it
+/// is.
 fn injections_in(
     injections: &Injections,
     tree: &Tree,
@@ -1302,20 +1357,32 @@ fn injections_in(
     while let Some(m) = matches.next() {
         let settings = injections.query.property_settings(m.pattern_index);
         let setting = |key: &str| settings.iter().find(|p| &*p.key == key);
-        let mut name: Option<String> = setting("injection.language")
+        let mut language: Option<&'static Language> = setting("injection.language")
             .and_then(|p| p.value.as_deref())
-            .map(str::to_owned);
+            .and_then(Language::for_injection);
         let include_children = setting("injection.include-children").is_some();
         let is_combined = setting("injection.combined").is_some();
+        let offset = content_offset(&injections.query, m.pattern_index, injections.content);
         let mut ranges = Vec::new();
         for capture in m.captures {
+            let named = || text.slice(capture.node.byte_range()).ok();
             if Some(capture.index) == injections.language {
-                name = text.slice(capture.node.byte_range()).ok();
+                language = named().as_deref().and_then(Language::for_injection);
+            } else if Some(capture.index) == injections.filename {
+                language = named().as_deref().and_then(language_of_file);
             } else if Some(capture.index) == injections.content {
+                let first = ranges.len();
                 content_ranges(capture.node, include_children, &mut ranges);
+                if let Some(offset) = offset {
+                    let moved: Vec<tree_sitter::Range> = ranges
+                        .drain(first..)
+                        .filter_map(|r| offset_range(text, &r, offset))
+                        .collect();
+                    ranges.extend(moved);
+                }
             }
         }
-        let Some(language) = name.as_deref().and_then(Language::for_injection) else {
+        let Some(language) = language else {
             continue;
         };
         if ranges.is_empty() {
@@ -1338,6 +1405,133 @@ fn injections_in(
         out.push((language, ranges));
     }
     out
+}
+
+/// A pattern's `(#offset! @injection.content start-row start-column
+/// end-row end-column)`: how far to move its content's ends.
+fn content_offset(
+    query: &tree_sitter::Query,
+    pattern: usize,
+    content: Option<u32>,
+) -> Option<[i64; 4]> {
+    query.general_predicates(pattern).iter().find_map(|p| {
+        if &*p.operator != "offset!" {
+            return None;
+        }
+        let (tree_sitter::QueryPredicateArg::Capture(capture), numbers) = p.args.split_first()?
+        else {
+            return None;
+        };
+        if Some(*capture) != content {
+            return None;
+        }
+        let mut offset = [0i64; 4];
+        for (slot, arg) in offset.iter_mut().zip(numbers) {
+            let tree_sitter::QueryPredicateArg::String(n) = arg else {
+                return None;
+            };
+            *slot = n.parse().ok()?;
+        }
+        Some(offset)
+    })
+}
+
+/// The language of the file a diff's header names -- `b/src/main.rs` --
+/// by its name: the name alone where a tab ends it, as one does before
+/// `diff -u`'s timestamp (and git's after a name with a space in it), and
+/// out of the quotes git puts round a name with an odd character in it.
+/// (Neovim, whose query this is, reads the header's whole text, so misses a
+/// timestamped one.)
+fn language_of_file(header: &str) -> Option<&'static Language> {
+    let name = header.split_once('\t').map_or(header, |(name, _)| name);
+    let name = name
+        .strip_prefix('"')
+        .and_then(|n| n.strip_suffix('"'))
+        .unwrap_or(name);
+    Language::for_file(std::path::Path::new(name))
+}
+
+/// `range` moved by an `#offset!`'s rows and columns ([`moved`]), or none
+/// if its start would pass its end -- where Neovim leaves the capture
+/// whole, a text too short to trim having nothing in it to colour.
+fn offset_range(
+    text: &TextBuffer,
+    range: &tree_sitter::Range,
+    [start_row, start_column, end_row, end_column]: [i64; 4],
+) -> Option<tree_sitter::Range> {
+    let at = |byte| -> Option<Point> {
+        let (row, column) = text.point(byte).ok()?;
+        Some(Point { row, column })
+    };
+    let start_byte = moved(
+        text,
+        (range.start_byte, range.start_point),
+        start_row,
+        start_column,
+    )?;
+    let end_byte = moved(text, (range.end_byte, range.end_point), end_row, end_column)?;
+    (start_byte < end_byte).then_some(tree_sitter::Range {
+        start_byte,
+        end_byte,
+        start_point: at(start_byte)?,
+        end_point: at(end_byte)?,
+    })
+}
+
+/// The offset `rows` rows and `columns` columns from `byte`, which is at
+/// `point`: on the row `rows` away, at the point's column, then `columns`
+/// on -- back, if negative -- as Neovim, whose directive `#offset!` is,
+/// moves one: a column past a line's end goes on into the next line, the
+/// end of the line one column whichever it is, `\n` or `\r\n`. So the
+/// diff query's `0 1 0 1` takes in a line's end, all of it, and nothing of
+/// the next line. A column inside a character is taken to the character's
+/// far side; the text's ends hold it. `None` past the text's last row.
+fn moved(
+    text: &TextBuffer,
+    (byte, point): (usize, Point),
+    rows: i64,
+    columns: i64,
+) -> Option<usize> {
+    let (mut at, columns) = if rows == 0 {
+        (byte, columns)
+    } else {
+        let row = usize::try_from(i64::try_from(point.row).ok()?.checked_add(rows)?).ok()?;
+        let column = i64::try_from(point.column).ok()?.checked_add(columns)?;
+        (text.line_start(row)?, column)
+    };
+    let mut left = usize::try_from(columns.unsigned_abs()).unwrap_or(usize::MAX);
+    if columns > 0 {
+        let mut chars = text.chars(at).peekable();
+        while left > 0 {
+            let Some((from, c)) = chars.next() else {
+                break;
+            };
+            at = from.saturating_add(c.len_utf8());
+            if c == '\r' && chars.next_if(|&(_, next)| next == '\n').is_some() {
+                at = at.saturating_add(1);
+                left = left.saturating_sub(1);
+            } else {
+                left = left.saturating_sub(c.len_utf8());
+            }
+        }
+    } else {
+        let mut chars = text.chars_rev(at).peekable();
+        while left > 0 {
+            let Some((from, c)) = chars.next() else {
+                break;
+            };
+            at = from;
+            if c == '\n'
+                && let Some((from, _)) = chars.next_if(|&(_, before)| before == '\r')
+            {
+                at = from;
+                left = left.saturating_sub(1);
+            } else {
+                left = left.saturating_sub(c.len_utf8());
+            }
+        }
+    }
+    Some(at)
 }
 
 /// The ranges of `node`'s text an injection covers: all of it with
@@ -1380,20 +1574,57 @@ fn content_ranges(node: Node<'_>, include_children: bool, out: &mut Vec<tree_sit
     }
 }
 
-/// Stacked spans made flat -- cut to `within`. The spans are in the order
-/// the captures came, which is by where they start; each goes on top of
-/// those still open where it starts, and the one on top is what shows. So a
-/// node inside another wins where it is, and of two spans that start
-/// together the later pattern's is on top over its whole length, whether
-/// it is the shorter or the longer: TOML's `(pair (bare_key)) @property`
-/// colours a key over `(bare_key) @type` that way. A span stays open, and
-/// hidden, under one above it until that one closes. This is tree-sitter's
-/// highlighter's stack, event for event. A span of no kind paints plainly:
-/// nothing is emitted for it, and what it covers shows the text's own ink.
-fn flatten(mut spans: Vec<(Range<usize>, Colour)>, within: &Range<usize>) -> Vec<HighlightSpan> {
-    // Stable, so spans that start together keep the order they came in:
-    // the host's by pattern, then each injected language's over them.
-    spans.sort_by_key(|(r, _)| r.start);
+/// `spans`, an injected stretch's, cut to its `ranges` -- in order and
+/// apart, as the parser was given them -- into `out`: a span over a hole
+/// in the stretch, the text between two of its ranges, colours only the
+/// ranges on either side of it.
+fn clip(spans: Vec<Span>, ranges: &[tree_sitter::Range], out: &mut Vec<Span>) {
+    for span in spans {
+        let first = ranges.partition_point(|r| r.end_byte <= span.range.start);
+        for r in ranges.get(first..).unwrap_or_default() {
+            if r.start_byte >= span.range.end {
+                break;
+            }
+            let (start, end) = (
+                span.range.start.max(r.start_byte),
+                span.range.end.min(r.end_byte),
+            );
+            if start < end {
+                out.push(Span {
+                    range: start..end,
+                    ..span.clone()
+                });
+            }
+        }
+    }
+}
+
+/// Stacked spans made flat -- cut to `within`. Over each byte, of the spans
+/// over it, the one that shows is the one of the highest priority; of
+/// those, the one deepest in injections -- an injected language's colours
+/// over its host's, in the text it was given ([`clip`]); and of those, the
+/// one that started last, of spans that start together the one that came
+/// last -- the host's by pattern, then each injected language's. So a node
+/// inside another wins where it is, and of two spans that start together
+/// the later pattern's is on top over its whole length, whether it is the
+/// shorter or the longer: TOML's `(pair (bare_key)) @property` colours a
+/// key over `(bare_key) @type` that way. A span stays hidden under one
+/// above it until that one closes. Within one language and priority this
+/// is tree-sitter's highlighter's stack, event for event; the priority and
+/// the depth are Neovim's. A span of no kind paints plainly: nothing is
+/// emitted for it, and what it covers shows the text's own ink.
+fn flatten(mut spans: Vec<Span>, within: &Range<usize>) -> Vec<HighlightSpan> {
+    // Stable, so spans that start together keep the order they came in.
+    spans.sort_by_key(|s| s.range.start);
+    // Where each span opens and closes: (offset, opens, span).
+    let mut edges: Vec<(usize, bool, usize)> = Vec::with_capacity(spans.len().saturating_mul(2));
+    for (i, s) in spans.iter().enumerate() {
+        if s.range.start < s.range.end {
+            edges.push((s.range.start, true, i));
+            edges.push((s.range.end, false, i));
+        }
+    }
+    edges.sort_unstable_by_key(|&(at, opens, _)| (at, opens));
     let mut out: Vec<HighlightSpan> = Vec::new();
     let mut emit = |from: usize, to: usize, kind: Option<Highlight>| {
         let (from, to) = (from.max(within.start), to.min(within.end));
@@ -1408,31 +1639,28 @@ fn flatten(mut spans: Vec<(Range<usize>, Colour)>, within: &Range<usize>) -> Vec
             }),
         }
     };
-    // The spans open at `pos`, the top last: (end, kind).
-    let mut open: Vec<(usize, Option<Highlight>)> = Vec::new();
-    let mut pos = 0usize;
-    for (range, kind) in spans {
-        // Close what ends before this starts, from the top down, colouring
-        // up to each end; one still open stops it, whatever is under it (a
-        // span under one that outlasts it is closed with it, having shown
-        // nowhere past it).
-        while let Some(&(end, top)) = open.last() {
-            if end > range.start {
-                break;
+    // The spans open between one edge and the next, ranked: the last shows.
+    let mut open: std::collections::BTreeSet<(u16, usize, usize)> =
+        std::collections::BTreeSet::new();
+    let mut from = 0usize;
+    for group in edges.chunk_by(|a, b| a.0 == b.0) {
+        let Some(&(at, _, _)) = group.first() else {
+            continue;
+        };
+        if let Some(top) = open.last().and_then(|&(_, _, i)| spans.get(i)) {
+            emit(from, at, top.colour);
+        }
+        for &(_, opens, i) in group {
+            let Some(s) = spans.get(i) else {
+                continue;
+            };
+            if opens {
+                open.insert((s.priority, s.depth, i));
+            } else {
+                open.remove(&(s.priority, s.depth, i));
             }
-            emit(pos, end, top);
-            pos = pos.max(end);
-            open.pop();
         }
-        if let Some(&(_, top)) = open.last() {
-            emit(pos, range.start, top);
-        }
-        pos = pos.max(range.start);
-        open.push((range.end, kind));
-    }
-    while let Some((end, kind)) = open.pop() {
-        emit(pos, end, kind);
-        pos = pos.max(end);
+        from = at;
     }
     out
 }
@@ -1462,6 +1690,23 @@ mod tests {
             }
         }
         panic!("the highlighter still has work after every round of it");
+    }
+
+    /// `spans` -- each of the default priority, the text's own -- made
+    /// flat.
+    fn flat_of(spans: Vec<(Range<usize>, Colour)>, within: &Range<usize>) -> Vec<HighlightSpan> {
+        flatten(
+            spans
+                .into_iter()
+                .map(|(range, colour)| Span {
+                    range,
+                    colour,
+                    priority: DEFAULT_PRIORITY,
+                    depth: 0,
+                })
+                .collect(),
+            within,
+        )
     }
 
     /// The highlights of all of `text` in `language`, settled.
@@ -1705,7 +1950,7 @@ mod tests {
     #[test]
     fn nested_spans_are_flattened() {
         use Highlight::{Escape, Keyword, String as Str};
-        let flat = flatten(
+        let flat = flat_of(
             vec![
                 (0..10, Some(Str)),
                 (3..5, Some(Escape)),
@@ -1721,13 +1966,13 @@ mod tests {
             [(2..3, Str), (3..7, Escape), (7..10, Str), (12..13, Keyword)]
         );
         // A child as wide as its parent wins.
-        let same = flatten(vec![(0..4, Some(Str)), (0..4, Some(Keyword))], &(0..4));
+        let same = flat_of(vec![(0..4, Some(Str)), (0..4, Some(Keyword))], &(0..4));
         assert_eq!(same.len(), 1);
         assert_eq!(same[0].highlight, Keyword);
-        assert!(flatten(Vec::new(), &(0..9)).is_empty());
+        assert!(flat_of(Vec::new(), &(0..9)).is_empty());
         // Plain inside a string: the string on either side, nothing within;
         // and a keyword inside the plain part is still a keyword.
-        let plain = flatten(
+        let plain = flat_of(
             vec![(0..10, Some(Str)), (2..8, None), (4..6, Some(Keyword))],
             &(0..10),
         );
@@ -1745,7 +1990,7 @@ mod tests {
         use Highlight::{Keyword, Property, String as Str, Type};
         let flat =
             |spans: Vec<(Range<usize>, Option<Highlight>)>| -> Vec<(Range<usize>, Highlight)> {
-                flatten(spans, &(0..30))
+                flat_of(spans, &(0..30))
                     .into_iter()
                     .map(|s| (s.range, s.highlight))
                     .collect()
@@ -2253,31 +2498,18 @@ mod tests {
         let highlights_source = highlights;
         let highlights = tree_sitter::Query::new(&grammar, highlights).unwrap();
         let locals = tree_sitter::Query::new(&grammar, locals).unwrap();
-        let compiled: &'static Compiled = Box::leak(Box::new(Compiled {
-            paints: highlights
-                .capture_names()
-                .iter()
-                .map(|name| Paint::for_capture(name))
-                .collect(),
-            non_local: (0..highlights.pattern_count())
-                .map(|i| {
-                    highlights
-                        .property_predicates(i)
-                        .iter()
-                        .any(|(p, positive)| !*positive && &*p.key == "local")
-                })
-                .collect(),
-            depth: crate::pattern_depth(highlights_source),
+        let compiled: &'static Compiled = Box::leak(Box::new(Compiled::new(
             highlights,
-            injections: None,
-            locals: Some(LocalsQuery {
+            highlights_source,
+            None,
+            Some(LocalsQuery {
                 scope: locals.capture_index_for_name("local.scope"),
                 definition: locals.capture_index_for_name("local.definition"),
                 definition_value: locals.capture_index_for_name("local.definition-value"),
                 reference: locals.capture_index_for_name("local.reference"),
                 query: locals,
             }),
-        }));
+        )));
         let mut h = language.highlighter().unwrap();
         h.compiled = compiled;
         h
@@ -2727,17 +2959,16 @@ mod tests {
         let text = "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n";
         let spans = highlighted(text, "diff");
         let at = |needle, nth| colour_at(&spans, text, needle, nth);
-        // A line's marker is punctuation -- its `(#set! priority 95)`, which
-        // would put it under the line's colour, is Neovim's, and not read,
-        // as tree-sitter's own highlighter does not -- the rest of the line
-        // the change's colour.
-        assert_eq!(at("-old", 0), Some(Highlight::Punctuation), "{spans:?}");
+        // A line's marker is the line's colour -- its punctuation's
+        // `(#set! priority 95)` puts it under the line's 100 -- and so is
+        // the rest of the line.
+        assert_eq!(at("-old", 0), Some(Highlight::Deleted), "{spans:?}");
         assert_eq!(at("old\n", 0), Some(Highlight::Deleted));
-        assert_eq!(at("+new", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("+new", 0), Some(Highlight::Inserted));
         assert_eq!(at("new\n", 0), Some(Highlight::Inserted));
-        // The files' header lines: their markers punctuation, their names
-        // paths, the blank between a change's colour.
-        assert_eq!(at("--- a", 0), Some(Highlight::Punctuation));
+        // The files' header lines: their markers and the blank a change's
+        // colour, their names paths.
+        assert_eq!(at("--- a", 0), Some(Highlight::Deleted));
         assert_eq!(at(" a/x.txt\n+++", 0), Some(Highlight::Deleted));
         assert_eq!(at("a/x.txt\n+++", 0), Some(Highlight::String));
         assert_eq!(at(" b/x.txt\n@@", 0), Some(Highlight::Inserted));
@@ -2758,5 +2989,348 @@ mod tests {
         assert_eq!(at("OBJS =", 0), Some(Highlight::Constant));
         assert_eq!(at("OBJS)", 0), Some(Highlight::Constant));
         assert_eq!(at("all:", 0), Some(Highlight::Macro));
+    }
+
+    /// **A diff's hunks are coloured in their file's language**: a Rust
+    /// file's diff paints its lines as Rust -- the lines kept and added as
+    /// the new file, the ones taken away as the old -- each line's marker
+    /// left out, over the change's colours.
+    #[test]
+    fn a_diffs_hunks_are_coloured_in_their_files_language() {
+        let text = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n fn main() {\n-    let x = 1; // one\n+    let y = 2; // two\n }\n";
+        let spans = highlighted(text, "diff");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("fn main", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("let x", 0), Some(Highlight::Keyword));
+        assert_eq!(at("let y", 0), Some(Highlight::Keyword));
+        assert_eq!(at("// two", 0), Some(Highlight::Comment));
+        // The comment ends with its line: the next line's `}` is Rust's.
+        assert_eq!(at("}\n", 0), Some(Highlight::Punctuation));
+        // The markers stay the diff's: their lines' colours.
+        assert_eq!(at("-    let", 0), Some(Highlight::Deleted));
+        assert_eq!(at("+    let", 0), Some(Highlight::Inserted));
+    }
+
+    /// **A diff's hunk is one document for each side**: the lines the new
+    /// file has -- kept and added -- are read together, so a comment opened
+    /// on one line goes on over the next; the old file's lines likewise; and
+    /// neither side reads the other's lines.
+    #[test]
+    fn a_hunks_new_and_old_lines_are_each_one_document() {
+        let text = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,3 +1,3 @@\n /* one\n-let two\n+let three\n */\n@@ -9 +9 @@\n-/* gone\n+fn kept() {}\n@@ -20 +20 @@\n+/* new\n-fn old() {}\n";
+        let (spans, stretches) = diff_stretches(text);
+        // One document for each side of each hunk, each of its lines.
+        let lines = |needles: &[&str]| -> Vec<(usize, usize)> {
+            needles
+                .iter()
+                .map(|n| {
+                    // Past the newline before it and its marker, to
+                    // past its own newline.
+                    let at = text.find(n).unwrap();
+                    (at + 2, at + n.len() + 1)
+                })
+                .collect()
+        };
+        let mut expected = vec![
+            lines(&["\n /* one", "\n+let three", "\n */"]),
+            lines(&["\n /* one", "\n-let two", "\n */"]),
+            lines(&["\n-/* gone"]),
+            lines(&["\n+fn kept() {}"]),
+            lines(&["\n+/* new"]),
+            lines(&["\n-fn old() {}"]),
+        ];
+        expected.sort();
+        assert_eq!(stretches, expected);
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("let three", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("let two", 0), Some(Highlight::Comment));
+        assert_eq!(at("fn kept", 0), Some(Highlight::Keyword));
+        assert_eq!(at("fn old", 0), Some(Highlight::Keyword));
+    }
+
+    /// **A diff's plain code keeps the change's colour**: a name its
+    /// language does not colour shows the line's, inserted or deleted, the
+    /// language's colours over it where it has them.
+    #[test]
+    fn a_hunks_uncoloured_code_keeps_the_changes_colour() {
+        let text = "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1 @@\n-let old = 1;\n+let new = 2;\n";
+        let spans = highlighted(text, "diff");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("let new", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("new =", 0), Some(Highlight::Inserted));
+        assert_eq!(at("old =", 0), Some(Highlight::Deleted));
+    }
+
+    /// **A diff with `\r\n` line ends is read a line at a time**: each
+    /// line's end, both its bytes, ends the line in its language too -- a
+    /// comment stops at it rather than running on into the next line.
+    #[test]
+    fn a_crlf_diffs_lines_end_where_they_do() {
+        let text = "--- a/x.rs\r\n+++ b/x.rs\r\n@@ -1,3 +1,3 @@\r\n fn main() { // start\r\n+    let y = 2;\r\n }\r\n";
+        let spans = highlighted(text, "diff");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("// start", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("let y", 0), Some(Highlight::Keyword));
+    }
+
+    /// **A diff's file is known by its name alone**: a `diff -u` header's
+    /// timestamp, after a tab, is not part of it; nor are the quotes git
+    /// puts round an odd name; `/dev/null` -- a file added or deleted --
+    /// has no language.
+    #[test]
+    fn a_diff_headers_file_is_known_by_its_name() {
+        let named = |header| language_of_file(header).map(Language::name);
+        assert_eq!(named("b/src/main.rs"), Some("Rust"));
+        assert_eq!(named("a.c\t2024-01-01 12:00:00.000000000 +0000"), Some("C"));
+        assert_eq!(named("b/my file.py"), Some("Python"));
+        assert_eq!(named("\"b/caf\\303\\251.go\""), Some("Go"));
+        assert_eq!(named("/dev/null"), None);
+    }
+
+    /// **`#offset!` moves by columns, a line's end one of them**: forward
+    /// and back, over `\n` or `\r\n` alike, a character's bytes all taken
+    /// together, rows first, and held at the text's ends.
+    #[test]
+    fn an_offset_moves_by_columns_a_lines_end_one() {
+        let buffer = TextBuffer::from_text("ab\r\ncd\nh\u{e9}!");
+        let point = |byte| {
+            let (row, column) = buffer.point(byte).unwrap();
+            Point { row, column }
+        };
+        let go = |byte, rows, columns| moved(&buffer, (byte, point(byte)), rows, columns);
+        // From `b`: past it to its line's end, then over `\r\n`, whole.
+        assert_eq!(go(1, 0, 1), Some(2));
+        assert_eq!(go(1, 0, 2), Some(4));
+        assert_eq!(go(1, 0, 3), Some(5));
+        // Back over `\r\n` from `c`, and over `\n` from `h`.
+        assert_eq!(go(4, 0, -1), Some(2));
+        assert_eq!(go(7, 0, -1), Some(6));
+        // A row down keeps the column; the column goes on from there.
+        assert_eq!(go(1, 1, 0), Some(5));
+        assert_eq!(go(1, 1, 2), Some(7));
+        // `\u{e9}` is two bytes: a column into it is past it.
+        assert_eq!(go(8, 0, 1), Some(10));
+        // The text's ends hold; past its last row there is nothing.
+        assert_eq!(go(10, 0, 5), Some(11));
+        assert_eq!(go(1, 0, -5), Some(0));
+        assert_eq!(go(1, 3, 0), None);
+        // A range whose start passes its end is none.
+        let range = |start: usize, end: usize| tree_sitter::Range {
+            start_byte: start,
+            end_byte: end,
+            start_point: point(start),
+            end_point: point(end),
+        };
+        assert_eq!(offset_range(&buffer, &range(0, 2), [0, 1, 0, -1]), None);
+        let moved = offset_range(&buffer, &range(0, 2), [0, 1, 0, 1]).unwrap();
+        assert_eq!((moved.start_byte, moved.end_byte), (1, 4));
+        assert_eq!(moved.end_point, Point { row: 1, column: 0 });
+    }
+
+    /// The highlights of `text`, a diff, settled, and its injected
+    /// stretches' ranges, sorted.
+    fn diff_stretches(text: &str) -> (Vec<HighlightSpan>, Vec<Vec<(usize, usize)>>) {
+        let buffer = TextBuffer::from_text(text);
+        let mut h = Language::named("diff").unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        let spans = settled(&mut h, &buffer);
+        (spans, kept_stretches(&h))
+    }
+
+    /// **A diff with no `diff` line has its hunks coloured too**: `diff
+    /// -u`'s lines, which the grammar leaves flat, each hunk in the
+    /// language of the file named last before it -- a second hunk as well
+    /// as the first, a second file's in its own language -- and one
+    /// document for each side of each hunk, no more.
+    #[test]
+    fn a_flat_diffs_hunks_are_coloured_in_their_files_language() {
+        let text = "--- a/x.rs\t2024-01-01 00:00:00\n+++ b/x.rs\t2024-01-02 00:00:00\n@@ -1,2 +1,2 @@\n fn a() {\n-    let old = 1;\n+    let new = 2;\n@@ -10,2 +10,2 @@\n /* c\n+d */ fn e() {}\nIndex: y.py\n===================================================================\n--- y.py\t(revision 1)\n+++ y.py\t(working copy)\n@@ -1 +1 @@\n+def g(): pass\n";
+        let (spans, stretches) = diff_stretches(text);
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("let new", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("let old", 0), Some(Highlight::Keyword));
+        assert_eq!(at("d */", 0), Some(Highlight::Comment));
+        assert_eq!(at("fn e", 0), Some(Highlight::Keyword));
+        assert_eq!(at("def g", 0), Some(Highlight::Keyword));
+        // x.rs: its two hunks' new sides and their old sides; y.py: its
+        // hunk's new side (its old side has no lines).
+        assert_eq!(stretches.len(), 5, "{stretches:?}");
+    }
+
+    /// **Priority, then depth in injections, then order**: a span of a
+    /// higher priority shows over one of a lower wherever both are, however
+    /// they nest; of one priority, an injected language's over its host's,
+    /// wherever each starts; the order of starts decides only among equals.
+    #[test]
+    fn spans_rank_by_priority_then_depth_then_order() {
+        use Highlight::{Comment, Inserted, Keyword, Punctuation, String as Str};
+        let span = |range: Range<usize>, colour, priority, depth| Span {
+            range,
+            colour: Some(colour),
+            priority,
+            depth,
+        };
+        let flat = |spans: Vec<Span>| -> Vec<(Range<usize>, Highlight)> {
+            flatten(spans, &(0..20))
+                .into_iter()
+                .map(|s| (s.range, s.highlight))
+                .collect()
+        };
+        // A marker of priority 95 inside its line of 100: the line's.
+        assert_eq!(
+            flat(vec![
+                span(0..10, Inserted, 100, 0),
+                span(0..1, Punctuation, 95, 0)
+            ]),
+            [(0..10, Inserted)]
+        );
+        // An outer span of a higher priority hides one inside it.
+        assert_eq!(
+            flat(vec![span(0..10, Str, 110, 0), span(2..4, Keyword, 100, 0)]),
+            [(0..10, Str)]
+        );
+        // An injected comment begun before its host's line colours the
+        // whole line; a token of its own inside the comment goes on top.
+        assert_eq!(
+            flat(vec![
+                span(0..12, Comment, 100, 1),
+                span(4..10, Inserted, 100, 0),
+                span(6..8, Keyword, 100, 1),
+            ]),
+            [(0..6, Comment), (6..8, Keyword), (8..12, Comment)]
+        );
+        // The host shows where the injected language has nothing.
+        assert_eq!(
+            flat(vec![
+                span(4..10, Inserted, 100, 0),
+                span(6..8, Keyword, 100, 1)
+            ]),
+            [(4..6, Inserted), (6..8, Keyword), (8..10, Inserted)]
+        );
+        // Priority before depth: a host's span of a higher priority over an
+        // injected language's.
+        assert_eq!(
+            flat(vec![span(0..10, Str, 110, 0), span(2..4, Keyword, 100, 1)]),
+            [(0..10, Str)]
+        );
+        // A span of no width shows nowhere.
+        assert_eq!(
+            flat(vec![span(0..10, Str, 100, 0), span(3..3, Keyword, 100, 0)]),
+            [(0..10, Str)]
+        );
+    }
+
+    /// **An injected stretch's spans are cut to its ranges**: a span over
+    /// the text between two of them -- a hole -- colours only its sides;
+    /// one wholly in a hole, nothing.
+    #[test]
+    fn an_injected_stretchs_spans_are_cut_to_its_ranges() {
+        let range = |start_byte, end_byte| tree_sitter::Range {
+            start_byte,
+            end_byte,
+            start_point: Point {
+                row: 0,
+                column: start_byte,
+            },
+            end_point: Point {
+                row: 0,
+                column: end_byte,
+            },
+        };
+        let span = |range: Range<usize>| Span {
+            range,
+            colour: Some(Highlight::Comment),
+            priority: DEFAULT_PRIORITY,
+            depth: 1,
+        };
+        let mut out = Vec::new();
+        clip(
+            vec![span(2..14), span(6..7), span(15..16), span(3..3)],
+            &[range(0, 5), range(8, 10), range(12, 20)],
+            &mut out,
+        );
+        let got: Vec<Range<usize>> = out.into_iter().map(|s| s.range).collect();
+        assert_eq!(got, [2..5, 8..10, 12..14, 15..16]);
+    }
+
+    /// **A pattern's priority outranks the order of patterns and of
+    /// nodes**: `(#set! priority 105)` on an earlier pattern wins over a
+    /// later one for the same node, and on an outer node over the nodes
+    /// inside it; below 100 a node goes under its parent; and a capture's
+    /// own priority is read over its pattern's.
+    #[test]
+    fn a_patterns_priority_outranks_the_order() {
+        let text = "fn main() { let x = 1; }\n";
+        let colours = |highlights: &str| {
+            let buffer = TextBuffer::from_text(text);
+            let mut h = with_queries_for("rust", highlights, "");
+            h.reset(&buffer);
+            let spans = settled(&mut h, &buffer);
+            move |needle: &str| colour_at(&spans, text, needle, 0)
+        };
+        let at = colours("(identifier) @keyword\n(identifier) @function\n");
+        assert_eq!(at("main"), Some(Highlight::Function));
+        let at = colours("((identifier) @keyword (#set! priority 105))\n(identifier) @function\n");
+        assert_eq!(at("main"), Some(Highlight::Keyword));
+        let at = colours("((block) @comment (#set! priority 110))\n(identifier) @function\n");
+        assert_eq!(at("x ="), Some(Highlight::Comment));
+        assert_eq!(at("main"), Some(Highlight::Function));
+        let at = colours("(block) @comment\n((identifier) @function (#set! priority 95))\n");
+        assert_eq!(at("x ="), Some(Highlight::Comment));
+        assert_eq!(at("main"), Some(Highlight::Function));
+        let at = colours(
+            "((identifier) @keyword (#set! @keyword priority 105) (#set! priority 90))\n(identifier) @function\n",
+        );
+        assert_eq!(at("main"), Some(Highlight::Keyword));
+        // A priority that is not a number is none.
+        let at = colours("((identifier) @keyword (#set! priority high))\n(identifier) @function\n");
+        assert_eq!(at("main"), Some(Highlight::Function));
+    }
+
+    /// **A use coloured as its declaration has the default priority**,
+    /// though none of its own captures paints: it shows over the block
+    /// round it, as a node inside another does.
+    #[test]
+    fn a_use_coloured_as_its_declaration_has_the_default_priority() {
+        let text = "fn f() { let x = 1; x; }\n";
+        let buffer = TextBuffer::from_text(text);
+        let mut h = with_queries_for(
+            "rust",
+            "(block) @comment\n(let_declaration pattern: (identifier) @variable.parameter)\n(identifier) @spell\n",
+            "(block) @local.scope\n(let_declaration pattern: (identifier) @local.definition)\n(identifier) @local.reference\n",
+        );
+        h.reset(&buffer);
+        let spans = settled(&mut h, &buffer);
+        let at = |needle| colour_at(&spans, text, needle, 0);
+        assert_eq!(at("x;"), Some(Highlight::Parameter), "{spans:?}");
+        assert_eq!(at("1;"), Some(Highlight::Comment));
+    }
+
+    /// **An injected language colours only the text it was given**: a
+    /// comment the new file opens before a deleted line and closes after it
+    /// does not colour that line, which is the old file's -- plain there,
+    /// so in the deletion's colour.
+    #[test]
+    fn an_injected_language_colours_only_its_own_text() {
+        let text = "--- a/x.rs\n+++ b/x.rs\n@@ -1 +1,2 @@\n+/* a\n-y\n+*/\n";
+        let spans = highlighted(text, "diff");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("/* a", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("*/", 0), Some(Highlight::Comment));
+        assert_eq!(at("y\n", 0), Some(Highlight::Deleted));
+    }
+
+    /// **A template's `${...}` inside an injected attribute stays its
+    /// host's**: HTML's attribute string goes round the hole the
+    /// substitution makes in the HTML, not over it.
+    #[test]
+    fn a_hole_in_an_injected_stretch_keeps_its_hosts_colours() {
+        let text = "const t = html`<b class=\"a ${c} b\">x</b>`;\n";
+        let spans = highlighted(text, "javascript");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("a ${", 0), Some(Highlight::String), "{spans:?}");
+        assert_eq!(at("${", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("c}", 0), Some(Highlight::Variable));
+        assert_eq!(at(" b\"", 0), Some(Highlight::String));
     }
 }

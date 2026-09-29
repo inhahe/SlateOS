@@ -2152,27 +2152,40 @@ pub fn handle_event(state: &mut PlayerState, event: &Event) -> bool {
 
 /// Handle keyboard input.
 fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
+    // First: every key comes down and goes back up, and F1's release toggled
+    // the list off again as soon as its press had raised it.
+    if !key_event.pressed {
+        return false;
+    }
+    // Every key but a Ctrl chord and what is typed is taken plain: a chord
+    // with Alt or the Windows key is the window's or the desktop's and
+    // arrives carrying its key -- Alt+N skipped the track.
+    let plain = textline::is_plain(key_event.modifiers);
     // Ahead of the search box below: `F1` is not a character, and a reader
     // half-way through a query still wants the keys.
-    if key_event.key == Key::F1 {
+    if key_event.key == Key::F1 && plain {
         state.show_help = !state.show_help;
         return true;
     }
     if state.show_help {
         // Modal. Letting keys through would mean skipping a track the reader
         // cannot see.
-        if matches!(key_event.key, Key::Escape | Key::Enter | Key::F1) {
+        if plain && matches!(key_event.key, Key::Escape | Key::Enter | Key::F1) {
             state.show_help = false;
         }
         return true;
     }
 
-    if !key_event.pressed {
-        return false;
-    }
-
-    // Handle search input mode
+    // Handle search input mode: what a key typed -- AltGr's among it, not a
+    // command's letter, which a chord carries (Alt+X typed an `x`).
     if state.searching {
+        if textline::types_into_field(key_event) {
+            state.search_query.extend(key_event.typed());
+            return true;
+        }
+        if !plain {
+            return false;
+        }
         match key_event.key {
             Key::Escape => {
                 state.searching = false;
@@ -2187,43 +2200,54 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                 state.search_query.pop();
                 return true;
             }
-            _ => {
-                if key_event.types_text() {
-                    state.search_query.extend(key_event.typed());
-                    return true;
-                }
-            }
+            _ => {}
         }
+        return false;
+    }
+
+    // The Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt and types,
+    // and AltGr+S -- a Polish `ś` -- opened the save dialog.
+    if textline::is_ctrl_chord(key_event.modifiers) {
+        return match key_event.key {
+            // The two keys that make this a playlist editor rather than a
+            // viewer of whatever was compiled into it.
+            Key::O => {
+                state.picker_saves = false;
+                state.picker.open_to_read();
+                true
+            }
+            Key::S => {
+                state.picker_saves = true;
+                state.picker.open_to_write("playlist.m3u");
+                true
+            }
+            Key::F => {
+                state.searching = true;
+                state.search_query.clear();
+                true
+            }
+            _ => false,
+        };
+    }
+    if !plain {
         return false;
     }
 
     // Global keyboard shortcuts
     match key_event.key {
-        // The two keys that make this a playlist editor rather than a
-        // viewer of whatever was compiled into it.
-        Key::O if key_event.modifiers.ctrl => {
-            state.picker_saves = false;
-            state.picker.open_to_read();
-            true
-        }
-        Key::S if key_event.modifiers.ctrl => {
-            state.picker_saves = true;
-            state.picker.open_to_write("playlist.m3u");
-            true
-        }
         Key::Space => {
             state.toggle_play();
             true
         }
-        Key::N if !key_event.modifiers.ctrl => {
+        Key::N => {
             state.next_track();
             true
         }
-        Key::P if !key_event.modifiers.ctrl => {
+        Key::P => {
             state.prev_track();
             true
         }
-        Key::M if !key_event.modifiers.ctrl => {
+        Key::M => {
             state.toggle_mute();
             true
         }
@@ -2244,16 +2268,11 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
             state.seek_relative(SEEK_SECONDS);
             true
         }
-        Key::F if key_event.modifiers.ctrl => {
-            state.searching = true;
-            state.search_query.clear();
-            true
-        }
-        Key::S if !key_event.modifiers.ctrl => {
+        Key::S => {
             state.toggle_shuffle();
             true
         }
-        Key::R if !key_event.modifiers.ctrl => {
+        Key::R => {
             state.repeat_mode = state.repeat_mode.next();
             true
         }
@@ -2967,6 +2986,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **F1 raises the list of keys, down and up**: its release toggled the
+    /// list off as soon as its press had raised it, so on a real keyboard it
+    /// never showed. **A chord is neither a player key nor typing, and AltGr
+    /// types**: Alt+N skipped the track, Alt+Space played, AltGr+S -- a
+    /// Polish `ś` -- opened the save dialog, and Alt+X typed an `x` into the
+    /// search.
+    #[test]
+    fn f1_raises_the_keys_and_a_chord_is_neither_a_player_key_nor_typing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let key = |k: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        handle_key(&mut state, &pressed(Key::F1, false));
+        handle_key(&mut state, &guitk::probe::release(Key::F1));
+        assert!(state.show_help, "F1's release put the list away again");
+        handle_key(&mut state, &pressed(Key::Escape, false));
+        assert!(!state.show_help, "control: Escape closes the list");
+
+        let before = (
+            state.current_track_index,
+            state.playing,
+            state.muted,
+            state.shuffle,
+            state.volume,
+        );
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for k in [Key::N, Key::Space, Key::M, Key::S, Key::Minus, Key::F1] {
+                assert!(
+                    !handle_key(&mut state, &key(k, "", m)),
+                    "{m:?} {k:?} was taken"
+                );
+            }
+        }
+        let after = (
+            state.current_track_index,
+            state.playing,
+            state.muted,
+            state.shuffle,
+            state.volume,
+        );
+        assert_eq!(after, before, "a chord worked the player");
+        assert!(!state.picker.is_open(), "AltGr+S opened the save dialog");
+        assert!(!state.show_help, "a chord raised the list");
+
+        // The search types what a key typed.
+        handle_key(&mut state, &pressed(Key::F, true));
+        assert!(state.searching, "control: Ctrl+F searches");
+        handle_key(&mut state, &key(Key::X, "x", Modifiers::alt()));
+        handle_key(&mut state, &key(Key::X, "x", Modifiers::super_key()));
+        handle_key(&mut state, &key(Key::S, "ś", altgr));
+        assert_eq!(
+            state.search_query, "ś",
+            "the search typed a command or lost AltGr's ś"
+        );
+        // Its own keys are plain: Alt+Backspace and Alt+Escape leave it be.
+        handle_key(&mut state, &key(Key::Backspace, "", Modifiers::alt()));
+        handle_key(&mut state, &key(Key::Escape, "", Modifiers::alt()));
+        assert!(state.searching, "Alt+Escape ended the search");
+        assert_eq!(state.search_query, "ś", "Alt+Backspace deleted");
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**

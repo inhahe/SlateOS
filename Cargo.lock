@@ -2333,6 +2333,7 @@ dependencies = [
  "pathtext",
  "quoting",
  "safeio",
+ "textline",
 ]
 
 [[package]]

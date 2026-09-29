@@ -309,6 +309,36 @@ MAIN = [
         '            Some(irq) => format!("IRQ {irq}"),\n            None => "N/A".to_string(),',
         [IRQ, NOT_REPORTED],
     ),
+    (
+        'a chord raises the keys',
+        '    if key.key == Key::F1 && plain {',
+        '    if key.key == Key::F1 {',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '        if textline::types_into_field(key) {',
+        '        if key.types_text() {',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'a chord works the search box',
+        '            _ if !plain => {}\n',
+        '',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '    if textline::is_ctrl_chord(key.modifiers) {',
+        '    if key.modifiers.ctrl {',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
+    (
+        'a chord works the tree and the tabs',
+        '    if !plain {\n        return EventResult::Ignored;\n    }\n',
+        '',
+        ['a_chord_is_neither_a_key_of_the_window_nor_typing'],
+    ),
 ]
 
 TABLES = {

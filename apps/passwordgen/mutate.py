@@ -84,8 +84,8 @@ MUTATIONS = [
     ),
     (
         "the program's window keeps nothing",
-        "        self.keeps_settings = true;\n        let (rules, problems)",
-        "        self.keeps_settings = false;\n        let (rules, problems)",
+        "        self.keeps_settings = true;\n        self.read_settings();",
+        "        self.keeps_settings = false;\n        self.read_settings();",
         [KEPT],
     ),
     (
@@ -304,6 +304,36 @@ MUTATIONS = [
         "            return EventResult::Ignored;\n        }\n"
         "        // On the Rules tab",
         ["a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key"],
+    ),
+    (
+        'an announced change is not read',
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && false\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            && group.file_name() == CONFIG_NAME\n        {\n            return if self.reread_settings() {',
+        '            && !group.file_name().is_empty()\n        {\n            return if self.reread_settings() {',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a window that keeps no settings reads them',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let before = (self.policy.clone(), self.settings_problems.clone());',
+        '        let before = (self.policy.clone(), self.settings_problems.clone());',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        false',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed something when it did not',
+        '        before != (self.policy.clone(), self.settings_problems.clone())',
+        '        true',
+        ['a_rule_changed_in_one_window_reaches_the_others'],
     ),
 ]
 

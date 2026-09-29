@@ -1843,6 +1843,14 @@ impl PasswordApp {
     #[must_use]
     pub fn with_settings(mut self) -> Self {
         self.keeps_settings = true;
+        self.read_settings();
+        self
+    }
+
+    /// Read the rules from `passwordgen.yaml`, and say what in it could not
+    /// be used: when the window opens, and again whenever the desktop says
+    /// the file changed.
+    fn read_settings(&mut self) {
         let (rules, problems) = PasswordPolicy::from_settings(&settingsfile::load(CONFIG_NAME));
         self.policy = rules;
         if let Some(first) = problems.first() {
@@ -1856,7 +1864,19 @@ impl PasswordApp {
             });
         }
         self.settings_problems = problems;
-        self
+    }
+
+    /// Read the rules again after the desktop said `passwordgen.yaml`
+    /// changed -- another window's Rules tab, or a hand edit (§1418, §1434).
+    /// A window that keeps no settings, as a test's does not, reads none.
+    /// Whether what the window shows changed.
+    fn reread_settings(&mut self) -> bool {
+        if !self.keeps_settings {
+            return false;
+        }
+        let before = (self.policy.clone(), self.settings_problems.clone());
+        self.read_settings();
+        before != (self.policy.clone(), self.settings_problems.clone())
     }
 
     /// Move the Rules tab's cursor by `delta` rows.
@@ -1987,6 +2007,18 @@ impl PasswordApp {
 
     /// Route a compositor event into the app.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // The rules on disk changed and the desktop says so. Before the
+        // picker, which would take this as it takes every event but a
+        // resize: a change to the file is not an input the dialog owns.
+        if let Event::SettingsChanged { group } = event
+            && group.file_name() == CONFIG_NAME
+        {
+            return if self.reread_settings() {
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            };
+        }
         // The picker is modal and answers everything but a resize. Every key
         // on the generator tab produces a password, so a keystroke that fell
         // through to the tab behind would generate one while the user was
@@ -5018,6 +5050,80 @@ rejects: {:?}",
             let text = std::fs::read_to_string(dir.join("slateos").join("passwordgen.yaml"))
                 .unwrap_or_default();
             assert!(text.contains("shortest: 9"), "{text:?}");
+        });
+    }
+
+    /// **A rule changed in one window reaches the others**, when the desktop
+    /// says the file changed (§1434) -- while the export picker is up too,
+    /// which takes every other event. Another program's announcement is not
+    /// this one's; a window's own save announced back changes nothing; a
+    /// hand edit that cannot be used is said; a window that keeps no
+    /// settings reads none.
+    #[test]
+    fn a_rule_changed_in_one_window_reaches_the_others() {
+        settingsfile::testing::with_scratch_config("passwordgen-reread", |dir| {
+            let announce = |name: &[u8]| Event::SettingsChanged {
+                group: guitk::event::SettingsGroup::Program(
+                    guitk::event::SettingsName::new(name).expect("a settings name"),
+                ),
+            };
+            let file = dir.join("slateos").join("passwordgen.yaml");
+            let mut first = seeded_app().with_settings();
+            let mut second = seeded_app().with_settings();
+            first.handle_event(&press(Key::Num4));
+            first.handle_event(&press(Key::Right));
+            assert_eq!(first.policy.min_length, 9);
+            assert_eq!(
+                second.policy.min_length, 8,
+                "the second window changed untold"
+            );
+
+            assert_eq!(
+                second.handle_event(&announce(b"notes")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                second.policy.min_length, 8,
+                "another program's file was read"
+            );
+            assert_eq!(
+                second.handle_event(&announce(b"passwordgen")),
+                EventResult::Consumed
+            );
+            assert_eq!(second.policy.min_length, 9, "the rule did not reach it");
+            assert_eq!(
+                first.handle_event(&announce(b"passwordgen")),
+                EventResult::Ignored,
+                "a window's own save, announced back, changed what it shows"
+            );
+
+            std::fs::write(&file, "rules:\n  shortest: banana\n").expect("a hand edit");
+            second.handle_event(&announce(b"passwordgen"));
+            assert!(
+                !second.settings_problems.is_empty(),
+                "a value that cannot be used was not said"
+            );
+
+            // Under the export picker, which takes every other event.
+            second.handle_event(&press(Key::P));
+            second.handle_event(&ctrl(Key::E));
+            assert!(second.dialog.is_some(), "the picker did not come up");
+            std::fs::write(&file, "rules:\n  shortest: 12\n").expect("a hand edit");
+            second.handle_event(&announce(b"passwordgen"));
+            assert_eq!(
+                second.policy.min_length, 12,
+                "the picker swallowed the news"
+            );
+
+            let mut quiet = seeded_app();
+            assert_eq!(
+                quiet.handle_event(&announce(b"passwordgen")),
+                EventResult::Ignored
+            );
+            assert_eq!(
+                quiet.policy.min_length, 8,
+                "a window that keeps no rules read them"
+            );
         });
     }
 

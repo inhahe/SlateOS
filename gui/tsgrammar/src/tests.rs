@@ -297,6 +297,22 @@ fn blob<'g>(g: &'g Grammar, field: &str) -> &'g [u8] {
         .bytes
 }
 
+/// **A name is read as C reads a string, up to its first NUL**: Go's
+/// grammar names a token `"\0"`, which C -- and the runtime, which reads the
+/// names as C strings -- sees as the empty name.
+#[test]
+fn a_name_is_read_up_to_its_first_nul() {
+    for (name, read) in [(r#""\0""#, &b""[..]), (r#""a\0b""#, &b"a"[..])] {
+        let source = MINI.replace(
+            r#"[anon_sym_SEMI] = ";","#,
+            &format!("[anon_sym_SEMI] = {name},"),
+        );
+        assert_ne!(source, MINI);
+        let g = parse(&source).unwrap();
+        assert_eq!(g.symbol_names[1].as_deref(), Some(read), "{name}");
+    }
+}
+
 /// **Every table is read, and laid out as C lays out the generator's
 /// structs**, byte for byte.
 #[test]

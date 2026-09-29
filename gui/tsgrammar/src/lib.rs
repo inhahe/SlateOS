@@ -788,16 +788,16 @@ fn structs(
     Ok(out)
 }
 
-/// An array of strings (or `NULL`s), `len` long.
+/// An array of strings (or `NULL`s), `len` long -- each read as C reads a
+/// string, up to its first NUL: Go's grammar names a token `"\0"`, which C,
+/// and the runtime reading the names as C strings, sees as the empty name.
 fn strings(d: &Declared, len: usize, constants: &Constants) -> Result<Vec<Option<Vec<u8>>>, Error> {
     let mut out = vec![None; len];
     for (index, value) in cinit::elements(&d.init, constants, d.line)? {
         let text = match value {
             Init::Expr(Expr::Str(bytes)) => {
-                if bytes.contains(&0) {
-                    return Err(Error::at(d.line, "a name with a NUL in it"));
-                }
-                Some(bytes.clone())
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                Some(bytes.get(..end).unwrap_or_default().to_vec())
             }
             Init::Expr(Expr::Ident(n)) if n == "NULL" => None,
             _ => return Err(Error::at(d.line, "a name that is not a string")),

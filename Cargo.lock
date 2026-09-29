@@ -3797,6 +3797,7 @@ name = "textarea"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "textline",
 ]
 
 [[package]]

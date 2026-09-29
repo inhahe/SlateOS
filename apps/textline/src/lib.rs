@@ -18,17 +18,68 @@
 //! **What it does not do is draw, or decide focus.** The caller owns the
 //! rectangle, the colours and which field the keys go to, and asks this only
 //! what a key does to the field that has them.
+//!
+//! It also says, for any program, whether a keystroke is a command or typing
+//! ([`is_ctrl_chord`], [`is_command`], [`types_into_field`]), which is not
+//! obvious from the event: a command arrives carrying its letter as text, and
+//! AltGr arrives looking like a command.
 
-use guitk::event::{Key, KeyEvent};
+use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::FontWeightHint;
 use guitk::textinput::TextInput;
+
+/// Whether a key held with `modifiers` is a Ctrl chord -- Ctrl+S, Ctrl+A --
+/// rather than a character typed with AltGr: Ctrl without Alt, and without
+/// the Windows key.
+///
+/// Windows reports AltGr as Ctrl+Alt, and so does a remote desktop client
+/// running on it, and AltGr on a letter is how several layouts type a
+/// character: Polish `ą` is AltGr+A and `ś` AltGr+S, German `@` is AltGr+Q.
+/// A program that took every Ctrl+S as "save" would save each time a Polish
+/// user typed `ś`, and one that took every Ctrl+Q as "quit" would close when
+/// a German user typed an address. The toolkit's own fields decide it the
+/// same way (`guitk::textinput::TextInput::edit_key`).
+///
+/// A key held with the Windows key is the desktop's, chord or not:
+/// Ctrl+Windows+D is a desktop's "new virtual desktop", not a program's
+/// Ctrl+D.
+#[must_use]
+pub const fn is_ctrl_chord(modifiers: Modifiers) -> bool {
+    modifiers.ctrl && !modifiers.alt && !modifiers.super_key
+}
+
+/// Whether a key held with `modifiers` is a command rather than typing: Ctrl
+/// or Alt on its own, or anything with the Windows key.
+///
+/// Asked because the text does not say. The compositor hands a command its
+/// letter as text -- Ctrl+S arrives carrying `s`, Alt+F carrying `f` -- so a
+/// field that typed whatever text arrived would put an `s` in the document
+/// for every shortcut it did not itself know. The Windows key's chords are
+/// the desktop's. Ctrl and Alt held together are AltGr, as
+/// [`is_ctrl_chord`] explains, and type.
+#[must_use]
+pub const fn is_command(modifiers: Modifiers) -> bool {
+    modifiers.super_key || modifiers.ctrl != modifiers.alt
+}
+
+/// Whether `key` types into a text field: a press that is not a command
+/// ([`is_command`]) and produced a character other than a control character
+/// (`KeyEvent::types_text` -- Enter, Tab and Escape produce `\r`, `\t` and
+/// `\x1b` on most layouts, which are keys, not text).
+///
+/// What a field of a program's own should ask before it appends
+/// `key.typed()`.
+#[must_use]
+pub fn types_into_field(key: &KeyEvent) -> bool {
+    key.pressed && !is_command(key.modifiers) && key.types_text()
+}
 
 /// What one key did to a field.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LineEdit {
     /// Whether the key was one a field answers. A key it does not -- Tab,
-    /// Enter, Escape, a function key, a Ctrl chord other than A, C, X and V --
-    /// is the application's.
+    /// Enter, Escape, a function key, a Ctrl chord other than A, C, X and V,
+    /// a key held with Alt or the Windows key -- is the application's.
     pub handled: bool,
     /// What a copy or a cut took, for the application's clipboard.
     pub copied: Option<String>,
@@ -38,7 +89,8 @@ pub struct LineEdit {
 /// characters: the arrows move the caret (Shift extends the selection), Home
 /// and End go to the ends, Backspace and Delete delete, Ctrl+A selects
 /// everything, Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes `clipboard`, and
-/// typed text replaces the selection.
+/// typed text replaces the selection -- AltGr's among it, which arrives as
+/// Ctrl+Alt ([`is_ctrl_chord`]).
 ///
 /// `font_size` is the size the field's text is drawn at, which the caret
 /// needs to move visually through text that runs both ways.
@@ -50,7 +102,7 @@ pub fn apply_key(
     font_size: f32,
 ) -> LineEdit {
     let shift = key.modifiers.shift;
-    let ctrl = key.modifiers.ctrl;
+    let chord = is_ctrl_chord(key.modifiers);
     let mut copied = None;
     match key.key {
         Key::Left => input.move_cursor_left(shift, font_size, FontWeightHint::Regular),
@@ -59,21 +111,21 @@ pub fn apply_key(
         Key::End => input.move_end(shift),
         Key::Backspace => input.backspace(),
         Key::Delete => input.delete(),
-        Key::A if ctrl => input.select_all(),
-        Key::C if ctrl => {
+        Key::A if chord => input.select_all(),
+        Key::C if chord => {
             if input.has_selection() {
                 copied = Some(input.selected_text().to_string());
             }
         }
-        Key::X if ctrl => {
+        Key::X if chord => {
             if input.has_selection() {
                 copied = Some(input.selected_text().to_string());
                 input.delete_selection();
             }
         }
-        Key::V if ctrl => insert_limited(input, clipboard, capacity),
+        Key::V if chord => insert_limited(input, clipboard, capacity),
         _ => {
-            if ctrl || !key.text.chars().any(|c| !c.is_control()) {
+            if !types_into_field(key) {
                 return LineEdit::default();
             }
             insert_limited(input, &key.text, capacity);
@@ -129,6 +181,23 @@ mod tests {
     fn typed(text: &str) -> KeyEvent {
         key(Key::Unknown(0), text, false, false)
     }
+
+    fn held(k: Key, text: &str, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
 
     fn field(text: &str) -> TextInput {
         let mut input = TextInput::new();
@@ -255,5 +324,125 @@ mod tests {
         // A paste of nothing but a line break types nothing either.
         apply_key(&mut input, &key(Key::V, "v", true, false), 10, "\n", 13.0);
         assert_eq!(input.text(), "keep");
+    }
+
+    /// AltGr arrives as Ctrl+Alt, and on the four letters the field takes
+    /// as chords it types: Polish `ą` and `ć` are AltGr+A and AltGr+C, `ź`
+    /// is AltGr+X, and Hungarian `@` is AltGr+V.
+    #[test]
+    fn altgr_types_where_a_ctrl_chord_would_select_copy_cut_or_paste() {
+        let mut input = field("ab");
+        for (k, text) in [(Key::A, "\u{105}"), (Key::C, "\u{107}"), (Key::V, "@")] {
+            let done = apply_key(&mut input, &held(k, text, ALTGR), 10, "clip", 13.0);
+            assert!(done.handled, "AltGr+{k:?} was not the field's");
+            assert_eq!(done.copied, None, "AltGr+{k:?} copied");
+            assert!(!input.has_selection(), "AltGr+{k:?} selected");
+        }
+        assert_eq!(input.text(), "ab\u{105}\u{107}@");
+        // Over a selection it types, as any letter does, and hands nothing
+        // to the clipboard.
+        apply_key(&mut input, &key(Key::A, "a", true, false), 10, "", 13.0);
+        let done = apply_key(&mut input, &held(Key::X, "\u{17a}", ALTGR), 10, "", 13.0);
+        assert_eq!((done.copied, input.text()), (None, "\u{17a}"));
+    }
+
+    /// A command carries its letter as text, and types none of it: Ctrl+S
+    /// is `s`, Alt+F is `f`, and the Windows key's chords are the
+    /// desktop's -- with Ctrl and Alt too.
+    #[test]
+    fn a_command_types_nothing_though_it_carries_its_letter() {
+        let mut input = field("keep");
+        let windows = Modifiers::super_key();
+        let windows_altgr = Modifiers {
+            super_key: true,
+            ..ALTGR
+        };
+        let alt_shift = Modifiers {
+            shift: true,
+            ..Modifiers::alt()
+        };
+        for k in [
+            held(Key::S, "s", Modifiers::ctrl()),
+            held(Key::F, "f", Modifiers::alt()),
+            held(Key::F, "F", alt_shift),
+            held(Key::E, "e", windows),
+            held(Key::E, "\u{20ac}", windows_altgr),
+        ] {
+            let done = apply_key(&mut input, &k, 10, "", 13.0);
+            assert!(!done.handled, "{:?} {:?} was taken", k.modifiers, k.key);
+            assert_eq!(input.text(), "keep", "{:?} {:?} typed", k.modifiers, k.key);
+        }
+        // Alt on its own is not a chord of the field's either: Alt+A leaves
+        // the selection alone.
+        let done = apply_key(
+            &mut input,
+            &held(Key::A, "a", Modifiers::alt()),
+            10,
+            "",
+            13.0,
+        );
+        assert!(!done.handled);
+        assert!(!input.has_selection());
+        // Nor is Ctrl+A held with the Windows key: that is the desktop's.
+        let windows_ctrl = Modifiers {
+            super_key: true,
+            ..Modifiers::ctrl()
+        };
+        let done = apply_key(&mut input, &held(Key::A, "a", windows_ctrl), 10, "", 13.0);
+        assert!(!done.handled);
+        assert!(!input.has_selection());
+    }
+
+    /// The three questions a program asks, across every way Ctrl, Alt and
+    /// the Windows key can be held.
+    #[test]
+    fn a_chord_a_command_and_typing_by_modifiers() {
+        let m = |ctrl, alt, super_key| Modifiers {
+            shift: false,
+            ctrl,
+            alt,
+            super_key,
+        };
+        // (ctrl, alt, windows) -> (a Ctrl chord, a command)
+        let table = [
+            ((false, false, false), (false, false)),
+            ((true, false, false), (true, true)),
+            ((false, true, false), (false, true)),
+            ((true, true, false), (false, false)),
+            ((false, false, true), (false, true)),
+            ((true, false, true), (false, true)),
+            ((false, true, true), (false, true)),
+            ((true, true, true), (false, true)),
+        ];
+        for ((ctrl, alt, windows), (chord, command)) in table {
+            let held = m(ctrl, alt, windows);
+            assert_eq!(is_ctrl_chord(held), chord, "chord: {held:?}");
+            assert_eq!(is_command(held), command, "command: {held:?}");
+            let press = KeyEvent {
+                key: Key::A,
+                pressed: true,
+                modifiers: held,
+                text: "a".to_owned(),
+            };
+            assert_eq!(types_into_field(&press), !command, "types: {held:?}");
+        }
+        // Shift changes none of it.
+        assert!(!is_command(Modifiers::shift()));
+        assert!(is_ctrl_chord(Modifiers {
+            shift: true,
+            ..Modifiers::ctrl()
+        }));
+        // A release types nothing, and neither does a key whose only text is
+        // a control character.
+        let release = KeyEvent {
+            key: Key::A,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: "a".to_owned(),
+        };
+        assert!(!types_into_field(&release));
+        assert!(!types_into_field(&key(Key::Enter, "\r", false, false)));
+        assert!(!types_into_field(&key(Key::A, "", false, false)));
+        assert!(types_into_field(&typed("\u{e9}")));
     }
 }

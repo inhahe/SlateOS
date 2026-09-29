@@ -6,6 +6,7 @@ description = "SlateOS multi-line text field for applications: text, caret, sele
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+textline = { path = "../textline" }
 
 [lints]
 workspace = true

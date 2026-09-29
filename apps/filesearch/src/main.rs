@@ -1488,14 +1488,6 @@ const ROW_FONT: f32 = 12.0;
 /// Font size of the results table's header and its remaining cells.
 const ROW_FONT_SMALL: f32 = 11.0;
 
-/// Main file search application
-/// The keys this program answers, raised by `F1`.
-///
-/// `?` is not a second way in: the search box takes a typed query, so a `?`
-/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
-///
-/// The six sort chords are `Ctrl` plus the first letter of the column, which
-/// is the only reason they are letters rather than a menu.
 /// What the query's `ext:` and `in:` words narrowed a search to, for the
 /// status line -- so a search that found nothing because of them says so.
 fn narrowing(criteria: &SearchCriteria) -> String {
@@ -1513,6 +1505,13 @@ fn narrowing(criteria: &SearchCriteria) -> String {
     }
 }
 
+/// The keys this program answers, raised by `F1`.
+///
+/// `?` is not a second way in: the search box takes a typed query, so a `?`
+/// has somewhere to go -- the `apps/spreadsheet` case in design-decisions 863.
+///
+/// The six sort chords are `Ctrl` plus the first letter of the column, which
+/// is the only reason they are letters rather than a menu.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
     ("PageUp / PageDown", "A page of results"),
@@ -1537,6 +1536,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "This list"),
 ];
 
+/// Main file search application
 pub struct FileSearchApp {
     pub index: FileIndex,
     pub criteria: SearchCriteria,

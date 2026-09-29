@@ -4538,12 +4538,6 @@ mod tests {
         });
     }
 
-    /// The rectangle the renderer actually clipped the process rows to.
-    ///
-    /// Read out of the emitted commands rather than recomputed from the
-    /// constants. Recomputing is what makes a layout test worthless: it
-    /// re-derives the renderer's arithmetic and then checks the hit test
-    /// against *that*, so the two can drift together and the test still
     /// Every colour this app draws comes from the user's palette.
     ///
     /// The guard §822 expects each converted crate to adopt, and the reason
@@ -4577,6 +4571,12 @@ mod tests {
         }
     }
 
+    /// The rectangle the renderer actually clipped the process rows to.
+    ///
+    /// Read out of the emitted commands rather than recomputed from the
+    /// constants. Recomputing is what makes a layout test worthless: it
+    /// re-derives the renderer's arithmetic and then checks the hit test
+    /// against *that*, so the two can drift together and the test still
     /// passes. This asks the renderer what it drew.
     fn rows_clip(app: &ProcessExplorerState) -> (f32, f32) {
         app.render_tree()

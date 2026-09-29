@@ -5633,10 +5633,6 @@ about anything -- it drew {} text command(s)",
         }
     }
 
-    /// **The status bar says what the list is sorted by, and how to change it.**
-    ///
-    /// Without this the two keys are as unreachable as the fields were: the
-    /// sidebar shows its own selection, but nothing else on screen mentions
     /// **Every key the card advertises is answered by this window.**
     ///
     /// Two filter states, and the reason is the one that took longest to
@@ -5725,6 +5721,10 @@ about anything -- it drew {} text command(s)",
         );
     }
 
+    /// **The status bar says what the list is sorted by, and how to change it.**
+    ///
+    /// Without this the two keys are as unreachable as the fields were: the
+    /// sidebar shows its own selection, but nothing else on screen mentions
     /// the sort at all.
     #[test]
     fn the_status_bar_names_the_sort_and_its_keys() {

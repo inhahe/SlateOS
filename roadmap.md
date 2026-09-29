@@ -2426,15 +2426,33 @@ word; text inside them that says "lane C" is history.
   sticky notes' title typing lost its starting point on a second commit;
   paint's layer operations could not be undone; several cap tests counted
   to their own constant and unwound with unbounded loops.
-  **Still open -- the keys pass:** Ctrl+F4 closing the tab or document in
-  every program with tabs or documents; AltGr typing into the fields that
-  refuse any key with Ctrl held (diagram's labels, logviewer, notes, the
-  mind map's names and search, slides' boxes, sticky notes' title and
-  search); the Alt/Super guard in the programs not yet through it (paint,
-  whiteboard, and the rest by survey); Page Up/Down, Home/End and
-  Ctrl+Home/End through `guitk::listview::ListKey` for programs with lists
-  of their own; an F1 sheet for the games that have none (gomoku, klotski,
-  rush, sokoban), where Alt+Z can be named.
+  **The keys pass, part done** (2026-09-28). *AltGr typing:* the rule is
+  `apps/textline`'s -- `is_ctrl_chord` (Ctrl without Alt or the Windows key),
+  `is_command` (Ctrl or Alt alone, or the Windows key: a command, though on
+  real hardware it carries its letter as text), `types_into_field` -- and
+  `textline`, `textarea`, diagram's labels, logviewer's search, notes'
+  fields, the mind map's names and search, slides' boxes, passwordgen's
+  analyser, pomodoro's task, taskscheduler's form and sticky notes' title and
+  search ask it; passwordgen's Ctrl+C no longer clears the history. The
+  toolkit's own fields type a command's letter on real hardware:
+  `requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`.
+  *F1:* every game raises a list of keys with F1 or ? (`gamechrome::help`);
+  gomoku, klotski, rush, sokoban, solitaire, freecell and mahjong had none,
+  2048 and connect four answered only H. *Ctrl+F4:* the editor, named in its
+  menu.
+  **Still open:** Ctrl+F4 in the other programs with tabs or documents (by
+  survey); the rest of the typing sites -- 124 in `apps/` append typed text,
+  counted 2026-09-28, most without asking whether the key is a command --
+  and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
+  text and test Ctrl somewhere without Alt (notes' body, and every field on
+  `TextInput::edit_key`, wait on the request above); the Alt/Super guard in
+  the programs not yet through it (paint, whiteboard, and the rest by
+  survey); Page Up/Down, Home/End and Ctrl+Home/End through
+  `guitk::listview::ListKey` for programs with lists of their own (pomodoro's
+  log done; rush's and sokoban's lists of puzzles and levels, taskscheduler's
+  lists, logviewer's among the rest); a test pressing every row of 2048's
+  and connect four's sheets, whose tables mix rules with keys and need
+  splitting as towers' is.
 
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task

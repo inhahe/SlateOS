@@ -12,11 +12,16 @@ with its own undo) -- **the redo tree DONE 2026-09-28**: all twenty-two
 programs with an undo of their own keep it as a tree, with Ctrl+Z, Ctrl+Y or
 Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z (steps through your `UndoHistory`;
 whole states through lane E's `apps/statehistory` on top of it; the ten
-games read their keys through `gamechrome::HistoryKey`). **Open: the keys
-pass** -- Ctrl+F4, AltGr typing in the fields that refuse any key with Ctrl,
-the Page Up/Down / Home / End keys through `ListKey`, and F1 sheets for the
-games that have none (roadmap, lane E, "The editing keys and the redo tree
-in every program").
+games read their keys through `gamechrome::HistoryKey`). **The keys pass,
+part done 2026-09-28:** AltGr types in every field that refused any key with
+Ctrl, and a command's letter -- which a real machine sends with it -- in
+none of them (`apps/textline`'s rule; the toolkit's own fields are
+`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`);
+every game raises a list of keys with F1, the history's among them; the
+editor's Ctrl+F4. **Open:** Ctrl+F4 and the Page Up/Down / Home / End keys
+through `ListKey` in the rest, and the Ctrl shortcuts still matched on Ctrl
+alone (roadmap, lane E, "The editing keys and the redo tree in every
+program").
 
 **In short:** the operator decided three lane C questions on 2026-09-27
 (`design-decisions.md` §1416, §1417, §1418). Each has a part only lane E can

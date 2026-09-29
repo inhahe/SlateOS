@@ -2153,42 +2153,58 @@ mod gnu_strptime {
     /// `tm` must point to a valid `Tm`.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
-        if buf.is_null() || format.is_null() || tm.is_null() {
-            return core::ptr::null();
-        }
-        // SAFETY: the caller's NUL-terminated format.
-        let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
-        // SAFETY: the caller's `struct tm`, checked non-null.
-        let t = unsafe { &mut *tm };
-        let input = Input(buf);
-        let mut state = Parse::default();
-        let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
-            return core::ptr::null();
-        };
-        state.finish(t);
-        // SAFETY: `end` is within the input: the parse only moves past bytes
-        // it has read, and never past the terminator.
-        unsafe { buf.add(end) }
-    }
-
-    /// `strptime_l` -- [`strptime`] in a locale, which is always C's here
-    /// (`locale.rs`).
-    ///
-    /// # Safety
-    ///
-    /// As [`strptime`].
-    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    pub unsafe extern "C" fn strptime_l(
-        buf: *const u8,
-        format: *const u8,
-        tm: *mut Tm,
-        _loc: crate::locale::LocaleT,
-    ) -> *const u8 {
-        // SAFETY: forwarded.
-        unsafe { strptime(buf, format, tm) }
+        // SAFETY: this function's contract, which is the parse's.
+        unsafe { strptime_in_c_locale(buf, format, tm) }
     }
 }
-pub use gnu_strptime::{strptime, strptime_l};
+pub use gnu_strptime::strptime;
+
+/// What [`strptime`] and [`strptime_l`] do: parse `buf` by `format` into
+/// `*tm`, in the C locale, returning the end of what matched or NULL.
+///
+/// Out here rather than in `gnu_strptime` so that that archive member
+/// defines `strptime` alone: a program that brings its own `strptime`, as
+/// gnulib's do, then declines it and still has [`strptime_l`]
+/// (`scripts/check-libc-shape.py`, which found `strptime_l` beside it).
+///
+/// # Safety
+///
+/// As [`strptime`].
+unsafe fn strptime_in_c_locale(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
+    if buf.is_null() || format.is_null() || tm.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the caller's NUL-terminated format.
+    let fmt = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
+    // SAFETY: the caller's `struct tm`, checked non-null.
+    let t = unsafe { &mut *tm };
+    let input = Input(buf);
+    let mut state = Parse::default();
+    let Some(end) = parse(&input, 0, fmt, t, &mut state) else {
+        return core::ptr::null();
+    };
+    state.finish(t);
+    // SAFETY: `end` is within the input: the parse only moves past bytes it
+    // has read, and never past the terminator.
+    unsafe { buf.add(end) }
+}
+
+/// `strptime_l` -- [`strptime`] in a locale, which is always C's here
+/// (`locale.rs`).
+///
+/// # Safety
+///
+/// As [`strptime`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strptime_l(
+    buf: *const u8,
+    format: *const u8,
+    tm: *mut Tm,
+    _loc: crate::locale::LocaleT,
+) -> *const u8 {
+    // SAFETY: this function's contract.
+    unsafe { strptime_in_c_locale(buf, format, tm) }
+}
 
 /// The input of a `strptime` parse: a NUL-terminated string, read a byte
 /// at a time and never past its terminator -- every step forward is over a

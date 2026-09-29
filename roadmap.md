@@ -2403,6 +2403,39 @@ word; text inside them that says "lane C" is history.
   since its physics is measured in the table's own units: every game fits
   every window.
 
+- `[-]` `[E]` **The editing keys and the redo tree in every program** —
+  **C-Q24**, answered by the operator (`design-decisions.md` §1416;
+  `requests/c-e-the-operators-answers-to-c-q24-c-q25-c-q26.md` part 1).
+  **The redo tree, done** (2026-09-28): every program with an undo of its own
+  keeps it as a tree -- an edit after an undo keeps what was undone as a
+  branch -- with Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z
+  walking every state in the order it was reached. Programs that keep steps
+  use lane C's `guitk::undo::UndoHistory` (editor, markdown and hex editors,
+  renamer, sudoku, spreadsheet, whiteboard, mind map, sticky notes, towers,
+  klotski, rush, sokoban); programs that keep whole states use lane E's
+  `apps/statehistory` on top of it (paint, diagram, slides, 2048, connect
+  four, gomoku, solitaire, freecell, mahjong) -- the card games, mahjong and
+  the two with an opponent moved to whole states because a redo written by
+  hand would have been a second, forward copy of every rule their undo
+  already had wrong at the edges. The ten games read their keys through
+  `gamechrome::HistoryKey`. On the way: AltGr, which arrives as Ctrl+Alt,
+  was Ctrl in most of them (AltGr+Z, Polish's ż, undid), and nine let keys
+  held with Alt or the Windows key through to their bare-key bindings;
+  `statehistory` took an edit's `before` from the state an undo left rather
+  than the one the program was in (slides undid onto the wrong slide);
+  sticky notes' title typing lost its starting point on a second commit;
+  paint's layer operations could not be undone; several cap tests counted
+  to their own constant and unwound with unbounded loops.
+  **Still open -- the keys pass:** Ctrl+F4 closing the tab or document in
+  every program with tabs or documents; AltGr typing into the fields that
+  refuse any key with Ctrl held (diagram's labels, logviewer, notes, the
+  mind map's names and search, slides' boxes, sticky notes' title and
+  search); the Alt/Super guard in the programs not yet through it (paint,
+  whiteboard, and the rest by survey); Page Up/Down, Home/End and
+  Ctrl+Home/End through `guitk::listview::ListKey` for programs with lists
+  of their own; an F1 sheet for the games that have none (gomoku, klotski,
+  rush, sokoban), where Alt+Z can be named.
+
 - `[x]` `[E]` **`apps/terminal` runs the user's shell on a kernel
   pseudo-terminal** — 2026-09-24, the "interactive terminal" joint task
   above. `libcall::pty` (`spawn`, `set_window_size`, `try_wait`) over lane D's

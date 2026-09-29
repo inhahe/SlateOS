@@ -8,7 +8,15 @@ keep their settings (lockscreen, markdowneditor's auto-save, passwordgen's
 rules, the explorer's conflict choice). 4 DONE 2026-09-28: Settings says the
 screen can be locked "from the start menu's power menu, or with a shortcut
 if you set one". 1 (the editing keys and the redo tree in every program
-with its own undo -- about twenty-five) is open, and next after the games.
+with its own undo) -- **the redo tree DONE 2026-09-28**: all twenty-two
+programs with an undo of their own keep it as a tree, with Ctrl+Z, Ctrl+Y or
+Ctrl+Shift+Z, and Alt+Z / Alt+Shift+Z (steps through your `UndoHistory`;
+whole states through lane E's `apps/statehistory` on top of it; the ten
+games read their keys through `gamechrome::HistoryKey`). **Open: the keys
+pass** -- Ctrl+F4, AltGr typing in the fields that refuse any key with Ctrl,
+the Page Up/Down / Home / End keys through `ListKey`, and F1 sheets for the
+games that have none (roadmap, lane E, "The editing keys and the redo tree
+in every program").
 
 **In short:** the operator decided three lane C questions on 2026-09-27
 (`design-decisions.md` §1416, §1417, §1418). Each has a part only lane E can

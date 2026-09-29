@@ -2104,7 +2104,10 @@ impl PasswordApp {
 
         // Before the analyser branch: on that tab every printable key is the
         // password being measured, and Ctrl+E must not be typed into it.
-        if key.modifiers.ctrl && key.key == Key::E {
+        // Ctrl without Alt: AltGr arrives as Ctrl+Alt, and AltGr+E is `€` on
+        // most European keyboards -- a character of the password, not a
+        // way to the export dialog.
+        if textline::is_ctrl_chord(key.modifiers) && key.key == Key::E {
             return self.open_export_dialog();
         }
         if self.active_tab == ActiveTab::Analyzer {
@@ -2128,26 +2131,34 @@ impl PasswordApp {
                 Key::Tab => {}
                 // A dot for each character until asked: see
                 // `analyzer_revealed`.
-                Key::R if key.modifiers.ctrl => {
+                Key::R if textline::is_ctrl_chord(key.modifiers) => {
                     self.analyzer_revealed = !self.analyzer_revealed;
                     return EventResult::Consumed;
                 }
                 _ => {
                     // A control character is a key, not part of a password:
                     // an Enter that carries a "\r" must not be typed into it.
-                    if key.text.is_empty()
-                        || key.modifiers.ctrl
-                        || key.text.chars().any(char::is_control)
-                    {
+                    // What AltGr types is (`®` is AltGr+R on US
+                    // International); a command's letter, which it carries as
+                    // text, is not (`textline::types_into_field`).
+                    if !textline::types_into_field(key) {
                         return EventResult::Ignored;
                     }
                     let mut input = self.analyzer_input.clone();
-                    input.push_str(&key.text);
+                    input.extend(key.typed());
                     self.set_analyzer_input(&input);
                     self.analyze_input();
                     return EventResult::Consumed;
                 }
             }
+        }
+        // Every key from here on is a bare key, and one held with Ctrl, Alt
+        // or the Windows key is not this window's. Ctrl+C cleared the
+        // history as C does -- the key a user presses to copy a password --
+        // and Ctrl+P made a new one over the one on screen; the Windows
+        // key's are the desktop's, and AltGr types letters.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
         }
         // On the Rules tab the arrows and Space are the rules'. Everything
         // else means what it means on any tab.
@@ -4043,6 +4054,92 @@ rejects: {:?}",
         let mut app = seeded_app();
         app.clear_history();
         assert_eq!(app.handle_event(&press(Key::C)), EventResult::Ignored);
+    }
+
+    fn held(k: Key, modifiers: Modifiers, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        })
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **AltGr types into the analyser and runs no chord.** AltGr arrives
+    /// as Ctrl+Alt: `€` is AltGr+E on most European keyboards, and opened
+    /// the export dialog; `®` -- AltGr+R on US International -- showed the
+    /// password rather than going into it. A command carries its letter as
+    /// text on a real machine, and types none of it.
+    #[test]
+    fn altgr_types_into_the_analyser_and_runs_no_chord() {
+        let mut app = seeded_app();
+        // Something to export, or Ctrl+E would only say there is nothing.
+        app.handle_event(&press(Key::P));
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.active_tab, ActiveTab::Analyzer);
+        let revealed = app.analyzer_revealed;
+        for (k, text) in [(Key::E, "\u{20ac}"), (Key::R, "\u{ae}")] {
+            assert_eq!(
+                app.handle_event(&held(k, ALTGR, text)),
+                EventResult::Consumed,
+                "AltGr+{k:?} was not typed"
+            );
+        }
+        assert_eq!(app.analyzer_input, "\u{20ac}\u{ae}");
+        assert!(app.dialog.is_none(), "AltGr+E opened the export dialog");
+        assert_eq!(app.analyzer_revealed, revealed, "AltGr+R revealed it");
+        for (k, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::D, Modifiers::super_key(), "d"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(k, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{k:?} was typed"
+            );
+        }
+        assert_eq!(app.analyzer_input, "\u{20ac}\u{ae}");
+    }
+
+    /// **A key held with Ctrl, Alt or the Windows key is no bare key.**
+    /// Ctrl+C -- the key a user presses to copy a password -- cleared the
+    /// history as C does, and Ctrl+P made a new password over the one on
+    /// screen; AltGr, Alt and the Windows key did the same.
+    #[test]
+    fn a_key_held_with_ctrl_alt_or_the_windows_key_is_no_bare_key() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        let history = app.history.len();
+        let password = app.current_password.clone();
+        assert!(history > 0, "the test needs a history to clear");
+        for modifiers in [
+            Modifiers::ctrl(),
+            ALTGR,
+            Modifiers::alt(),
+            Modifiers::super_key(),
+        ] {
+            for k in [Key::C, Key::P] {
+                assert_eq!(
+                    app.handle_event(&held(k, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{k:?}"
+                );
+            }
+            assert_eq!(app.history.len(), history, "{modifiers:?}+C cleared it");
+            assert_eq!(app.current_password, password, "{modifiers:?}+P made one");
+        }
+        // Bare, C still clears.
+        assert_eq!(app.handle_event(&press(Key::C)), EventResult::Consumed);
+        assert!(app.history.is_empty());
     }
 
     #[test]

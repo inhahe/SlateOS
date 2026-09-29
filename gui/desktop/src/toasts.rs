@@ -191,6 +191,16 @@ impl Settle {
     fn is_moving(self) -> bool {
         self.progress < 1.0
     }
+
+    /// The highest it is drawn between now and the end of its easing: both
+    /// ends while it eases, where it rests once it does not.
+    fn highest(self) -> f32 {
+        if self.is_moving() {
+            self.from.max(self.to)
+        } else {
+            self.to
+        }
+    }
 }
 
 /// A toast placed: where it is drawn, in screen coordinates.
@@ -316,23 +326,17 @@ impl ToastStack {
 
     /// Give every toast its place: each one's bottom is the heights of those
     /// below it, and a toast whose place changed eases to the new one from
-    /// where it is drawn.
+    /// where it is drawn. (A newcomer's place is the bottom, where it starts:
+    /// it slides in from the side, never from above.)
     fn restack(&mut self) {
         let motion = self.motion;
         let mut below = 0.0_f32;
         for toast in self.shown.iter_mut().rev() {
             if (toast.settle.to - below).abs() > f32::EPSILON {
-                let drawn = toast.settle.now(motion);
-                toast.settle = if matches!(toast.phase, Phase::Arriving(p) if p <= 0.0) {
-                    // A newcomer is simply at its place: it slides in from
-                    // the side, not from wherever the stack was.
-                    Settle::at(below)
-                } else {
-                    Settle {
-                        from: drawn,
-                        to: below,
-                        progress: 0.0,
-                    }
+                toast.settle = Settle {
+                    from: toast.settle.now(motion),
+                    to: below,
+                    progress: 0.0,
                 };
             }
             below += toast.height + GAP;
@@ -461,30 +465,23 @@ impl ToastStack {
             .collect()
     }
 
-    /// The rectangle the stack needs on screen -- its toasts where they are
-    /// drawn and where they are going, their shadows, and the strip to the
-    /// screen's edge they slide through -- or `None` when nothing is shown.
-    /// The surface the toasts are drawn on is this.
+    /// The rectangle the stack needs on screen -- every toast wherever its
+    /// settling takes it, their shadows, and the strip to the screen's edge
+    /// they slide through -- or `None` when nothing is shown. The surface the
+    /// toasts are drawn on is this.
+    ///
+    /// Steady while the stack moves: a toast easing from one place to
+    /// another is covered at both ends for the whole of the easing, so the
+    /// surface is resized once when the stack changes, not every frame of the
+    /// change.
     #[must_use]
     pub fn extent(&self) -> Option<Rect> {
-        if self.shown.is_empty() {
-            return None;
-        }
-        let placed = self.placed();
-        let top_drawn = placed
+        let highest = self
+            .shown
             .iter()
-            .map(|p| p.rect.y)
-            .fold(f32::INFINITY, f32::min);
-        let top_going = self.bottom
-            - self
-                .shown
-                .iter()
-                .map(|t| t.settle.to + t.height)
-                .fold(0.0_f32, f32::max);
-        let top = top_drawn.min(top_going);
-        if !top.is_finite() {
-            return None;
-        }
+            .map(|t| t.settle.highest() + t.height)
+            .reduce(f32::max)?;
+        let top = self.bottom - highest;
         let left = self.screen_width - MARGIN - TOAST_WIDTH - SHADOW_ROOM;
         let top = (top - SHADOW_ROOM).max(0.0);
         Some(Rect::new(
@@ -1009,6 +1006,33 @@ mod tests {
                 assert!(p.rect.x >= e.x + SHADOW_ROOM - 0.01, "{step}");
             }
         }
+    }
+
+    /// **The extent is steady while the stack moves**: from the moment a
+    /// toast arrives or leaves until the stack has closed up, the surface is
+    /// the same size -- resized once per change, not every frame of it.
+    #[test]
+    fn the_extent_is_steady_while_the_stack_moves() {
+        let mut s = stack();
+        s.show(&notif(1, NotifPriority::Normal));
+        s.tick(SETTLED);
+        s.show(&notif(2, NotifPriority::Normal));
+        let growing = s.extent().unwrap();
+        for _ in 0..20 {
+            s.tick(10);
+            assert_eq!(s.extent().unwrap(), growing);
+        }
+        s.tick(SETTLED);
+        s.forget(2);
+        s.tick(250); // gone; the upper one starts down
+        assert!(s.is_moving());
+        let shrinking = s.extent().unwrap();
+        for _ in 0..10 {
+            s.tick(10);
+            assert_eq!(s.extent().unwrap(), shrinking);
+        }
+        s.tick(SETTLED);
+        assert!(s.extent().unwrap().h < shrinking.h, "never shrank back");
     }
 
     /// **Showing an update in place, forgetting, and clearing**: the same id

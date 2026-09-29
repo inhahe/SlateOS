@@ -126,16 +126,34 @@ MUTATIONS = [
         [PAGES],
     ),
     (
-        "the programs its list does not name are in the order they were found",
-        "            .cmp(&b.name.to_lowercase())",
-        "            .cmp(&a.name.to_lowercase())",
+        "the programs are listed in the order they were found",
+        "        .cmp(&b.name.to_lowercase())",
+        "        .cmp(&a.name.to_lowercase())",
         [BY_NAME],
     ),
     (
-        "the programs its list does not name are sorted with regard to case",
-        "        a.name\n            .to_lowercase()\n            .cmp(&b.name.to_lowercase())",
-        "        a.name\n            .clone()\n            .cmp(&b.name.clone())",
+        "the programs are sorted with regard to case",
+        "    a.name\n        .to_lowercase()\n        .cmp(&b.name.to_lowercase())",
+        "    a.name\n        .clone()\n        .cmp(&b.name.clone())",
         [BY_NAME],
+    ),
+    (
+        "the launcher offers none of the one list's programs",
+        '    let mut list = built_in_programs();\n    list.extend(commands());',
+        '    let mut list = Vec::new();\n    list.extend(commands());',
+        ['the_launcher_offers_the_one_list_of_programs'],
+    ),
+    (
+        'the launcher offers its commands and nothing else of its own',
+        '    let mut list = built_in_programs();\n    list.extend(commands());',
+        '    let mut list = built_in_programs();',
+        ['the_launcher_offers_the_one_list_of_programs'],
+    ),
+    (
+        "the built-in programs are listed in the library's order, not by name",
+        '    list.sort_by(by_name);\n    list\n}',
+        '    list.sort_by(by_name);\n    list.reverse();\n    list\n}',
+        ['the_launcher_offers_the_one_list_of_programs'],
     ),
 ]
 

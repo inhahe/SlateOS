@@ -478,12 +478,7 @@ fn installed_programs(
 /// arguments -- one of Settings' pages -- is not replaced: an entry for the
 /// program says nothing about the page.
 fn programs(mut installed: Vec<AppEntry>) -> Vec<AppEntry> {
-    installed.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.executable_path.cmp(&b.executable_path))
-    });
+    installed.sort_by(by_name);
     let file_name = |program: &str| Path::new(program).file_name().map(OsStr::to_os_string);
     let mut list = Vec::with_capacity(installed.len());
     for own in builtin_app_database() {
@@ -1356,150 +1351,51 @@ impl LauncherState {
 // Built-in application database
 // ============================================================================
 
-/// The default set of launchable apps and system commands.
 /// The power utility, `userspace/powerctl`: `powerctl shutdown`, `reboot`,
 /// `suspend`, `hibernate`. The desktop shell runs the same path.
 const POWERCTL: &str = "/bin/powerctl";
 
+/// Every item the launcher offers before anything is installed: SlateOS's own
+/// programs, then what it offers that is not a program.
 fn builtin_app_database() -> Vec<AppEntry> {
+    let mut list = built_in_programs();
+    list.extend(commands());
+    list
+}
+
+/// SlateOS's own programs, from the one list of programs
+/// (`programs::built_in`, design-decisions §1425) -- the list the start menu
+/// reads, so the two offer the same programs, started the same way. In name
+/// order, the order the first page shows them before anything is typed.
+///
+/// Until 2026-09-29 the launcher kept ten of its own: a second copy beside the
+/// start menu's, which agreed with it only because lane C built the library
+/// from the copies (`requests/c-e-read-the-one-list-of-programs.md`), and which
+/// had not heard of the archive manager, the calendar, the hex editor, the PDF
+/// viewer or the video player.
+fn built_in_programs() -> Vec<AppEntry> {
+    let mut list: Vec<AppEntry> = ::programs::built_in(None)
+        .iter()
+        .filter_map(AppEntry::from_desktop)
+        .collect();
+    list.sort_by(by_name);
+    list
+}
+
+/// The order programs are listed in: by name, whatever its case, then by the
+/// program -- the start menu's order (`DesktopShell::set_installed_apps`).
+fn by_name(a: &AppEntry, b: &AppEntry) -> std::cmp::Ordering {
+    a.name
+        .to_lowercase()
+        .cmp(&b.name.to_lowercase())
+        .then_with(|| a.executable_path.cmp(&b.executable_path))
+}
+
+/// What the launcher offers that is not a program: the power actions, the
+/// lock and Settings' pages -- things to do, which no desktop entry describes
+/// and the one list of programs does not hold.
+fn commands() -> Vec<AppEntry> {
     vec![
-        // Applications
-        AppEntry {
-            name: "Terminal".to_string(),
-            description: "Command-line terminal emulator".to_string(),
-            executable_path: "/usr/bin/terminal".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "shell".into(),
-                "console".into(),
-                "bash".into(),
-                "cli".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Text Editor".to_string(),
-            description: "Plain text and code editor".to_string(),
-            executable_path: "/usr/bin/editor".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "edit".into(),
-                "code".into(),
-                "write".into(),
-                "notepad".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "File Explorer".to_string(),
-            description: "Browse and manage files".to_string(),
-            executable_path: "/usr/bin/explorer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "files".into(),
-                "browse".into(),
-                "folder".into(),
-                "directory".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Calculator".to_string(),
-            description: "Scientific calculator".to_string(),
-            executable_path: "/usr/bin/calculator".to_string(),
-            args: Vec::new(),
-            keywords: vec!["math".into(), "calc".into(), "compute".into()],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Settings".to_string(),
-            description: "System preferences and configuration".to_string(),
-            executable_path: "/usr/bin/settings".to_string(),
-            args: Vec::new(),
-            keywords: vec!["config".into(), "preferences".into(), "options".into()],
-            category: Category::Setting,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "System Info".to_string(),
-            description: "Hardware and OS information".to_string(),
-            executable_path: "/usr/bin/sysinfo".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "hardware".into(),
-                "info".into(),
-                "about".into(),
-                "specs".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Process Explorer".to_string(),
-            description: "View and manage running processes".to_string(),
-            executable_path: "/usr/bin/procexplorer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "task".into(),
-                "manager".into(),
-                "processes".into(),
-                "kill".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Image Viewer".to_string(),
-            description: "View images and photos".to_string(),
-            executable_path: "/usr/bin/imageviewer".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "photo".into(),
-                "picture".into(),
-                "gallery".into(),
-                "png".into(),
-                "jpg".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Music Player".to_string(),
-            description: "Play music and audio files".to_string(),
-            executable_path: "/usr/bin/musicplayer".to_string(),
-            args: Vec::new(),
-            keywords: vec!["audio".into(), "song".into(), "mp3".into(), "media".into()],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
-        AppEntry {
-            name: "Screenshot".to_string(),
-            description: "Capture screen area or window".to_string(),
-            executable_path: "/usr/bin/screenshot".to_string(),
-            args: Vec::new(),
-            keywords: vec![
-                "capture".into(),
-                "snip".into(),
-                "screen".into(),
-                "grab".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            dir: None,
-        },
         // System commands
         // Power, through `powerctl` -- the program SlateOS has for it, and
         // what the start menu's power menu runs (lane C's request
@@ -3211,6 +3107,73 @@ mod tests {
             spawn_program(&command).is_err(),
             "it was started somewhere other than its entry's directory"
         );
+    }
+
+    /// **The programs the launcher offers are the one list's**
+    /// (`programs::built_in`, design-decisions §1425), each started as its
+    /// entry says, and every one of them -- the archive manager, the
+    /// calendar, the hex editor, the PDF and video players included, which
+    /// the launcher's own copy had not heard of. What it offers beside them
+    /// is its commands, none of which is a program the list holds.
+    #[test]
+    fn the_launcher_offers_the_one_list_of_programs() {
+        let launcher = LauncherState::new(1280.0, 800.0);
+        let library: Vec<AppEntry> = ::programs::built_in(None)
+            .iter()
+            .filter_map(AppEntry::from_desktop)
+            .collect();
+        assert!(
+            library.len() >= 15,
+            "the library has {} programs",
+            library.len()
+        );
+        for program in &library {
+            let offered = entry_named(&launcher, &program.name);
+            assert_eq!(
+                offered.executable_path, program.executable_path,
+                "{}",
+                program.name
+            );
+            assert_eq!(offered.args, program.args, "{}", program.name);
+        }
+        for name in [
+            "Archive Manager",
+            "Calendar",
+            "Hex Editor",
+            "PDF Viewer",
+            "Video Player",
+        ] {
+            assert!(
+                library.iter().any(|p| p.name == name),
+                "{name} is not in the library: {:?}",
+                library.iter().map(|p| &p.name).collect::<Vec<_>>()
+            );
+        }
+        let commands = commands();
+        assert_eq!(
+            launcher.apps.len(),
+            library.len() + commands.len(),
+            "the launcher offers something that is neither"
+        );
+        // The programs first, in name order: the first page before anything
+        // is typed.
+        let first: Vec<String> = launcher
+            .apps
+            .iter()
+            .take(library.len())
+            .map(|a| a.name.to_lowercase())
+            .collect();
+        assert!(
+            first.windows(2).all(|w| w[0] <= w[1]),
+            "the programs are not in name order: {first:?}"
+        );
+        for command in &commands {
+            assert!(
+                !library.iter().any(|p| p.name == command.name),
+                "{} is both a program and a command",
+                command.name
+            );
+        }
     }
 
     /// With nothing installed the launcher is its own list, in its order --

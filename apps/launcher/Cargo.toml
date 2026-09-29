@@ -17,6 +17,9 @@ oswindow = { path = "../../gui/window" }
 # (C-Q17, design-decisions §1423): the launcher finds what is installed rather
 # than keeping its own list of what might be.
 desktopentry = { path = "../../gui/desktopentry" }
+# SlateOS's own programs: the one list of them (C-Q20, design-decisions
+# §1425), which the start menu reads too, instead of a copy of its own.
+programs = { path = "../../gui/programs" }
 
 [dev-dependencies]
 scratchdir = { path = "../../userspace/scratchdir" }

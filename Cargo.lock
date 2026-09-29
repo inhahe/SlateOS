@@ -1798,6 +1798,7 @@ dependencies = [
  "desktopentry",
  "guitk",
  "oswindow",
+ "programs",
  "scratchdir",
 ]
 

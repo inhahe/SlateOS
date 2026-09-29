@@ -1284,6 +1284,9 @@ pub struct ExplorerState {
     /// pointer overwrite "Deleted 5 items, 2 failed" on its way past a button
     /// would lose the one line the user needed to read.
     hover_hint: String,
+    /// The folder whose columns are shown: set on entering a folder, so a
+    /// listing of the same one again keeps columns shown and not saved.
+    columns_folder: Option<PathBuf>,
     /// The context menu a right-click opened, if any.
     ///
     /// `guitk::menu::ContextMenu`, not a list drawn here: the shell already
@@ -1501,6 +1504,7 @@ impl ExplorerState {
             search_showing: None,
             search_origin: None,
             columns: ColumnManager::with_defaults(),
+            columns_folder: None,
             column_prefs: settingsfile::load(columnprefs::CONFIG_NAME),
             thumbs: ThumbnailCache::default_capacity(),
             thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
@@ -1956,7 +1960,18 @@ impl ExplorerState {
         // change?" with no answer a user can reach. Until the picker landed,
         // the guess was the only way any extra column ever appeared, which is
         // why it outlived the rule.
-        self.apply_saved_columns();
+        //
+        // On entering a folder, not on listing the same one again: a refresh,
+        // or the reload after a paste, is no reason to undo columns shown and
+        // not saved -- which it did, for a folder with a saved set. And the
+        // out-of-the-box set when nothing is saved: a folder with nothing of
+        // its own kept the columns of the folder before it.
+        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {
+            if !self.apply_saved_columns() {
+                self.columns.show_built_in();
+            }
+            self.columns_folder = Some(self.current_path.clone());
+        }
         self.queue_thumbnails();
     }
 
@@ -9277,6 +9292,71 @@ mod tests {
                 state.columns.visible_keys(),
                 vec!["size", "name"],
                 "the folder's saved columns were not applied, or not in order"
+            );
+        });
+    }
+
+    /// **A folder with nothing saved shows the out-of-the-box columns**, not
+    /// the columns of the folder before it: the saved set was applied on
+    /// entering a folder and nothing was applied when there was none.
+    #[test]
+    fn a_folder_with_nothing_saved_shows_the_built_in_columns() {
+        settingsfile::testing::with_scratch_config("explorer-built-in-columns", |_root| {
+            let scratch = temp_dir("built_in_columns");
+            let root = scratch.dir().to_path_buf();
+            let (saved, plain) = (root.join("saved"), root.join("plain"));
+            for dir in [&saved, &plain] {
+                fs::create_dir(dir).unwrap();
+                fs::write(dir.join("a.txt"), "x").unwrap();
+            }
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &saved,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut state = state_at(&saved);
+            assert_eq!(state.columns.visible_keys(), vec!["size", "name"]);
+            state.navigate_to(&plain);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["name", "size", "date_modified"],
+                "a folder with nothing saved kept the last folder's columns"
+            );
+            state.navigate_to(&saved);
+            assert_eq!(state.columns.visible_keys(), vec!["size", "name"]);
+        });
+    }
+
+    /// **Columns shown and not saved outlast a refresh** -- or the reload
+    /// after a paste. Listing the same folder again re-applied its saved set.
+    #[test]
+    fn columns_shown_and_not_saved_outlast_a_refresh() {
+        settingsfile::testing::with_scratch_config("explorer-refresh-columns", |_root| {
+            let scratch = temp_dir("refresh_columns");
+            let root = scratch.dir().to_path_buf();
+            fs::write(root.join("a.txt"), "x").unwrap();
+            let mut doc = settingsfile::load(columnprefs::CONFIG_NAME);
+            assert!(columnprefs::set_for_folder(
+                &mut doc,
+                &root,
+                &["size", "name"]
+            ));
+            settingsfile::store(columnprefs::CONFIG_NAME, &doc)
+                .expect("the scratch config is writable");
+
+            let mut state = state_at(&root);
+            state
+                .columns
+                .set_columns(vec![ColumnId::NAME, ColumnId::DATE_MODIFIED]);
+            state.activate_menu_item(MENU_REFRESH);
+            assert_eq!(
+                state.columns.visible_keys(),
+                vec!["name", "date_modified"],
+                "a refresh undid the columns shown"
             );
         });
     }

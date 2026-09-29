@@ -750,6 +750,30 @@ MAIN = [
         '',
         ['the_folders_own_order_comes_back_from_the_menu', 'your_own_order_is_offered_only_where_there_is_one'],
     ),
+    (
+        "a folder with nothing saved keeps the last folder's columns",
+        '            if !self.apply_saved_columns() {\n                self.columns.show_built_in();\n            }',
+        '            self.apply_saved_columns();',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'a refresh re-applies the saved columns',
+        '        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {',
+        '        if true {',
+        ['columns_shown_and_not_saved_outlast_a_refresh'],
+    ),
+    (
+        "entering a folder keeps the last folder's columns",
+        '        if self.columns_folder.as_deref() != Some(self.current_path.as_path()) {',
+        '        if self.columns_folder.is_none() {',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'the folder whose columns are shown is not recorded',
+        '            self.columns_folder = Some(self.current_path.clone());\n',
+        '',
+        ['columns_shown_and_not_saved_outlast_a_refresh'],
+    ),
 ]
 
 COLUMNS = [
@@ -814,6 +838,18 @@ COLUMNS = [
         '            left += width;\n',
         '',
         ['a_click_on_a_heading_sorts_by_it_and_again_the_other_way'],
+    ),
+    (
+        'the built-in set is not name, size, date modified',
+        '    pub const BUILT_IN: [ColumnId; 3] = [ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];',
+        '    pub const BUILT_IN: [ColumnId; 3] = [ColumnId::NAME, ColumnId::DATE_MODIFIED, ColumnId::SIZE];',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
+    ),
+    (
+        'showing the built-in set shows nothing new',
+        '        self.active_columns = Self::BUILT_IN.to_vec();\n',
+        '        let _ = Self::BUILT_IN;\n',
+        ['a_folder_with_nothing_saved_shows_the_built_in_columns'],
     ),
 ]
 

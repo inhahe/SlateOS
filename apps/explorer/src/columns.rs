@@ -446,8 +446,17 @@ impl ColumnManager {
         // column picker made "expands from there" something a user can
         // actually do; before that, trimming this would have taken away a
         // column nobody could put back.
-        mgr.active_columns = vec![ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];
+        mgr.active_columns = Self::BUILT_IN.to_vec();
         mgr
+    }
+
+    /// The out-of-the-box set: `roadmap-detailed.md` §4.1's "fixed and
+    /// minimal -- name, size, datetime modified".
+    pub const BUILT_IN: [ColumnId; 3] = [ColumnId::NAME, ColumnId::SIZE, ColumnId::DATE_MODIFIED];
+
+    /// Show the out-of-the-box set again, in its order.
+    pub fn show_built_in(&mut self) {
+        self.active_columns = Self::BUILT_IN.to_vec();
     }
 
     // ------------------------------------------------------------------

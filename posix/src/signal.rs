@@ -2326,25 +2326,87 @@ static SIGNAL_NAMES: [&[u8]; 32] = [
     b"Bad system call\0",          // 31 SIGSYS
 ];
 
-/// Unknown signal message buffer.
+/// Return a string describing a signal number: glibc's texts, and for a
+/// real-time signal "Real-time signal N", counted from this library's
+/// `SIGRTMIN` (32, where glibc's is 34: its thread library keeps 32 and 33,
+/// this one keeps none), and "Unknown signal N" for a number that is no
+/// signal's.
 ///
-/// Used when the signal number is out of range.  Not reentrant but
-/// matches POSIX specification.
-static UNKNOWN_SIGNAL: [u8; 32] = *b"Unknown signal\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-
-/// Return a string describing a signal number.
-///
-/// The returned pointer is valid until the next call to `strsignal`.
-/// Not thread-safe (matches POSIX spec).
+/// The numbered texts are in the calling thread's own buffer, valid until
+/// its next call; the others are static.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strsignal(signum: i32) -> *const u8 {
-    if signum >= 0
-        && (signum as usize) < SIGNAL_NAMES.len()
-        && let Some(name) = SIGNAL_NAMES.get(signum as usize)
+    if let Some(name) = usize::try_from(signum)
+        .ok()
+        .and_then(|i| SIGNAL_NAMES.get(i))
     {
         return name.as_ptr();
     }
-    UNKNOWN_SIGNAL.as_ptr()
+    // SAFETY: the calling thread's block, touched by no other thread.
+    let buf = unsafe { &mut (*crate::perthread::current()).strsignal };
+    if (SIGRTMIN..=SIGRTMAX).contains(&signum) {
+        crate::perthread::numbered(buf, "Real-time signal ", signum.wrapping_sub(SIGRTMIN))
+    } else {
+        crate::perthread::numbered(buf, "Unknown signal ", signum)
+    }
+}
+
+/// Each signal number's abbreviation, glibc's (`sigabbrev_np`): its `SIG*`
+/// constant's name without the `SIG`. None for 0, which is no signal.
+static SIGNAL_ABBREVS: [Option<&core::ffi::CStr>; 32] = [
+    None,
+    Some(c"HUP"),
+    Some(c"INT"),
+    Some(c"QUIT"),
+    Some(c"ILL"),
+    Some(c"TRAP"),
+    Some(c"ABRT"),
+    Some(c"BUS"),
+    Some(c"FPE"),
+    Some(c"KILL"),
+    Some(c"USR1"),
+    Some(c"SEGV"),
+    Some(c"USR2"),
+    Some(c"PIPE"),
+    Some(c"ALRM"),
+    Some(c"TERM"),
+    Some(c"STKFLT"),
+    Some(c"CHLD"),
+    Some(c"CONT"),
+    Some(c"STOP"),
+    Some(c"TSTP"),
+    Some(c"TTIN"),
+    Some(c"TTOU"),
+    Some(c"URG"),
+    Some(c"XCPU"),
+    Some(c"XFSZ"),
+    Some(c"VTALRM"),
+    Some(c"PROF"),
+    Some(c"WINCH"),
+    Some(c"POLL"),
+    Some(c"PWR"),
+    Some(c"SYS"),
+];
+
+/// `sigabbrev_np(sig)` -- `"INT"` for `SIGINT`; NULL for a number that is no
+/// signal's, and for a real-time signal's, which has none (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigabbrev_np(sig: i32) -> *const u8 {
+    usize::try_from(sig)
+        .ok()
+        .and_then(|i| SIGNAL_ABBREVS.get(i).copied().flatten())
+        .map_or(core::ptr::null(), |s| s.as_ptr().cast())
+}
+
+/// `sigdescr_np(sig)` -- [`strsignal`]'s text for a signal, `"Interrupt"` for
+/// `SIGINT`; NULL where [`sigabbrev_np`] is (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigdescr_np(sig: i32) -> *const u8 {
+    if sigabbrev_np(sig).is_null() {
+        core::ptr::null()
+    } else {
+        strsignal(sig)
+    }
 }
 
 /// Print a signal description to stderr.
@@ -6660,5 +6722,46 @@ mod tests {
         let ret = unsafe { sigismember(core::ptr::null(), -1) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// glibc 2.39's abbreviations and descriptions for every number from -2
+    /// to 69 (`strname_oracle.txt`), NULL for 0, for numbers that are no
+    /// signal's and for the real-time signals.
+    #[test]
+    fn signal_names_are_glibcs() {
+        use core::ffi::CStr;
+        const ORACLE: &str = include_str!("strname_oracle.txt");
+        let text = |p: *const u8| -> Option<String> {
+            // SAFETY: each returns NULL or a static NUL-terminated string.
+            (!p.is_null()).then(|| {
+                unsafe { CStr::from_ptr(p.cast()) }
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        let mut seen = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let (func, n) = lhs.split_once(' ').unwrap();
+            let n: i32 = n.parse().unwrap();
+            let want = (want != "NULL").then(|| want.trim_matches('"').to_string());
+            let got = match func {
+                "strsignal" => text(strsignal(n)),
+                "sigabbrev_np" => text(sigabbrev_np(n)),
+                "sigdescr_np" => text(sigdescr_np(n)),
+                _ => continue,
+            };
+            // The one difference, on purpose: a real-time signal is counted
+            // from this library's SIGRTMIN, 32, and glibc's is 34.
+            let want = if func == "strsignal" && (SIGRTMIN..=SIGRTMAX).contains(&n) {
+                Some(format!("Real-time signal {}", n - SIGRTMIN))
+            } else {
+                want
+            };
+            assert_eq!(got, want, "{func}({n})");
+            seen += 1;
+        }
+        assert_eq!(seen, 3 * 72, "the oracle's signal lines");
     }
 }

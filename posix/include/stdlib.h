@@ -49,6 +49,21 @@ char *fcvt(double, int, int *, int *);
 char *gcvt(double, int, char *);
 #endif
 
+#ifdef _SLATEOS_USE_MISC
+/* 4.4BSD's names for strtoll and strtoull. */
+long long          strtoq(const char *__restrict, char **__restrict, int);
+unsigned long long strtouq(const char *__restrict, char **__restrict, int);
+#endif
+
+#ifdef _GNU_SOURCE
+/* The conversions in a locale, which is always C's here -- the type
+ * spelled as musl's <stdlib.h> spells strtod_l's, not naming locale_t. */
+long               strtol_l(const char *__restrict, char **__restrict, int, struct __locale_struct *);
+unsigned long      strtoul_l(const char *__restrict, char **__restrict, int, struct __locale_struct *);
+long long          strtoll_l(const char *__restrict, char **__restrict, int, struct __locale_struct *);
+unsigned long long strtoull_l(const char *__restrict, char **__restrict, int, struct __locale_struct *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

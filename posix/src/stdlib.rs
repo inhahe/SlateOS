@@ -616,6 +616,92 @@ pub unsafe extern "C" fn strtod_l(
     unsafe { strtod(nptr, endptr) }
 }
 
+/// `strtol_l` -- [`strtol`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtol_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtol(nptr, endptr, base) }
+}
+
+/// `strtoul_l` -- [`strtoul`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoul_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoul(nptr, endptr, base) }
+}
+
+/// `strtoll_l` -- [`strtoll`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoll_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtoll(nptr, endptr, base) }
+}
+
+/// `strtoull_l` -- [`strtoull`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoull_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoull(nptr, endptr, base) }
+}
+
+/// `strtoq` -- 4.4BSD's name for [`strtoll`].
+///
+/// # Safety
+///
+/// As [`strtol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtoq(nptr: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { strtoll(nptr, endptr, base) }
+}
+
+/// `strtouq` -- 4.4BSD's name for [`strtoull`].
+///
+/// # Safety
+///
+/// As [`strtoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtouq(nptr: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { strtoull(nptr, endptr, base) }
+}
+
 /// `strtold_l(nptr, endptr, loc)` — `strtold` in an explicit locale, which
 /// is always C's here, as for [`strtod_l`].
 ///
@@ -6791,5 +6877,28 @@ mod tests {
         // SAFETY: `always_equal` reads neither pointer.
         let got = unsafe { bsearch(core::ptr::null(), base, 3, 0, Some(always_equal)) };
         assert_eq!(got.cast_const(), base);
+    }
+
+    /// The `_l` conversions and the BSD `q` names answer as the functions
+    /// they stand for, end pointer included.
+    #[test]
+    fn the_locale_and_q_forms_are_their_functions() {
+        let s = b"  -0x1Fg\0".as_ptr();
+        let (mut a, mut b): (*const u8, *const u8) = (core::ptr::null(), core::ptr::null());
+        // SAFETY: a NUL-terminated string; the end pointers are locals.
+        unsafe {
+            assert_eq!(strtol_l(s, &raw mut a, 16, 0), strtol(s, &raw mut b, 16));
+            assert_eq!(a, b);
+            assert_eq!(strtoll_l(s, core::ptr::null_mut(), 0, 0), -31);
+            assert_eq!(strtoq(s, core::ptr::null_mut(), 0), -31);
+            assert_eq!(
+                strtoul_l(s, core::ptr::null_mut(), 16, 0),
+                strtoul(s, core::ptr::null_mut(), 16)
+            );
+            assert_eq!(
+                strtoull_l(s, core::ptr::null_mut(), 16, 0),
+                strtouq(s, core::ptr::null_mut(), 16)
+            );
+        }
     }
 }

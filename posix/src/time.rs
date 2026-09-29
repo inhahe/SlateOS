@@ -2170,8 +2170,25 @@ mod gnu_strptime {
         // it has read, and never past the terminator.
         unsafe { buf.add(end) }
     }
+
+    /// `strptime_l` -- [`strptime`] in a locale, which is always C's here
+    /// (`locale.rs`).
+    ///
+    /// # Safety
+    ///
+    /// As [`strptime`].
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strptime_l(
+        buf: *const u8,
+        format: *const u8,
+        tm: *mut Tm,
+        _loc: crate::locale::LocaleT,
+    ) -> *const u8 {
+        // SAFETY: forwarded.
+        unsafe { strptime(buf, format, tm) }
+    }
 }
-pub use gnu_strptime::strptime;
+pub use gnu_strptime::{strptime, strptime_l};
 
 /// The input of a `strptime` parse: a NUL-terminated string, read a byte
 /// at a time and never past its terminator -- every step forward is over a
@@ -11588,6 +11605,32 @@ mod tests {
         assert_eq!(
             unsafe { crate::environ::unsetenv(c"DATEMSK".as_ptr().cast()) },
             0
+        );
+    }
+
+    /// `strptime_l` parses as `strptime` does.
+    #[test]
+    fn strptime_l_is_strptime() {
+        let mut a = zero_tm();
+        let mut b = zero_tm();
+        let input = b"2026-09-29 17:05:03\0".as_ptr();
+        let format = b"%Y-%m-%d %H:%M:%S\0".as_ptr();
+        // SAFETY: NUL-terminated strings; `Tm`s on the stack.
+        let (ra, rb) = unsafe {
+            (
+                strptime_l(input, format, &raw mut a, 0),
+                strptime(input, format, &raw mut b),
+            )
+        };
+        assert_eq!(ra, rb);
+        assert!(!ra.is_null());
+        assert_eq!(
+            (a.tm_year, a.tm_mon, a.tm_mday, a.tm_hour),
+            (126, 8, 29, 17)
+        );
+        assert_eq!(
+            (a.tm_min, a.tm_sec, a.tm_wday, a.tm_yday),
+            (b.tm_min, b.tm_sec, b.tm_wday, b.tm_yday)
         );
     }
 }

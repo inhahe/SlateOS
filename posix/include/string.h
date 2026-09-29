@@ -44,6 +44,21 @@ char *strcasestr(const char *, const char *);
 void *mempcpy(void *, const void *, size_t);
 #endif
 
+#ifdef _GNU_SOURCE
+/* The name of the E* constant an error number is ("EINVAL"), and strerror's
+ * text for it; NULL for a number that is no error's. */
+const char *strerrorname_np(int);
+const char *strerrordesc_np(int);
+/* The name of a signal without its SIG ("INT"), and strsignal's text for
+ * it; NULL for 0, a real-time signal and a number that is no signal's. */
+const char *sigabbrev_np(int);
+const char *sigdescr_np(int);
+/* The bytes exclusive-ored with 42, in place; and a string's bytes in a
+ * random order. */
+void *memfrob(void *, size_t);
+char *strfry(char *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

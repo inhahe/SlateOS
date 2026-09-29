@@ -1228,6 +1228,74 @@ pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
     }
 }
 
+/// `wcschrnul(s, wc)` -- [`wcschr`], but the terminating NUL rather than NULL
+/// where `wc` is not in `s` (a GNU extension).
+///
+/// # Safety
+///
+/// `s` must be a valid NUL-terminated wide string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcschrnul(s: *const WcharT, wc: WcharT) -> *const WcharT {
+    let mut i: usize = 0;
+    loop {
+        // SAFETY: within the caller's string, up to and including its NUL.
+        let c = unsafe { *s.add(i) };
+        if c == wc || c == 0 {
+            // SAFETY: as above.
+            return unsafe { s.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// `wcslcpy(dst, src, size)` -- [`crate::string::strlcpy`] for wide strings:
+/// at most `size - 1` characters copied, and a NUL after them if `size` is
+/// not 0. Returns `wcslen(src)`; a result not below `size` means the copy was
+/// cut short (glibc 2.38's, and the BSDs').
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` wide characters, and `src` a valid
+/// NUL-terminated wide string not overlapping it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcslcpy(dst: *mut WcharT, src: *const WcharT, size: usize) -> usize {
+    // SAFETY: the caller's NUL-terminated string.
+    let len = unsafe { wcslen(src) };
+    if size > 0 {
+        let n = len.min(size.wrapping_sub(1));
+        // SAFETY: `n < size`, within `dst`; `src` has `len >= n` characters.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, n);
+            *dst.add(n) = 0;
+        }
+    }
+    len
+}
+
+/// `wcslcat(dst, src, size)` -- [`crate::string::strlcat`] for wide strings:
+/// `src` appended to the wide string in `dst`'s `size` characters, cut short
+/// to fit with its NUL. Returns the length the whole would have had; where
+/// `dst` holds no NUL within `size`, `size + wcslen(src)`, and nothing is
+/// written (glibc 2.38's, and the BSDs').
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` wide characters, and `src` a valid
+/// NUL-terminated wide string not overlapping it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcslcat(dst: *mut WcharT, src: *const WcharT, size: usize) -> usize {
+    // SAFETY: at most `size` characters of `dst` are read.
+    let dlen = unsafe { wcsnlen(dst, size) };
+    // SAFETY: the caller's NUL-terminated string.
+    let slen = unsafe { wcslen(src) };
+    if dlen == size {
+        return size.wrapping_add(slen);
+    }
+    // SAFETY: `dlen < size`: the room left is `size - dlen`, one of it the NUL.
+    unsafe { wcslcpy(dst.add(dlen), src, size.wrapping_sub(dlen)) };
+    dlen.wrapping_add(slen)
+}
+
 /// Find the last occurrence of a wide character.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsrchr(s: *const WcharT, wc: WcharT) -> *const WcharT {
@@ -1588,6 +1656,99 @@ pub unsafe extern "C" fn wcstoull(
     unsafe { wcstoul(nptr, endptr, base) }
 }
 
+// The conversions in an explicit locale (GNU), which is always C's here --
+// see `locale.rs` -- and the 4.4BSD names for the `long long` ones.
+
+/// `wcstol_l` -- [`wcstol`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstol_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstol(nptr, endptr, base) }
+}
+
+/// `wcstoul_l` -- [`wcstoul`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoul_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoul(nptr, endptr, base) }
+}
+
+/// `wcstoll_l` -- [`wcstoll`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoll_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoll(nptr, endptr, base) }
+}
+
+/// `wcstoull_l` -- [`wcstoull`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoull_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoull(nptr, endptr, base) }
+}
+
+/// `wcstoq` -- 4.4BSD's name for [`wcstoll`].
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoq(nptr: *const WcharT, endptr: *mut *const WcharT, base: i32) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoll(nptr, endptr, base) }
+}
+
+/// `wcstouq` -- 4.4BSD's name for [`wcstoull`].
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstouq(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoull(nptr, endptr, base) }
+}
+
 /// A wide string as a source of bytes for the shared float scanner.
 ///
 /// Every character a float literal can contain is ASCII, so a wide character
@@ -1678,6 +1839,36 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
     if negative { -value } else { value }
 }
 
+/// `wcstod_l` -- [`wcstod`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstod`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstod_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> f64 {
+    // SAFETY: forwarded.
+    unsafe { wcstod(nptr, endptr) }
+}
+
+/// `wcstof_l` -- [`wcstof`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstof`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstof_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> f32 {
+    // SAFETY: forwarded.
+    unsafe { wcstof(nptr, endptr) }
+}
+
 /// `wcstold` — convert a wide string to `long double`.
 ///
 /// The wide sibling of [`crate::stdlib::strtold`], over the same scanner and
@@ -1725,6 +1916,34 @@ unsafe extern "C" fn __slate_ld_wcstold(
     unsafe { out.write(wcstold(nptr, endptr)) }
 }
 crate::ld_c!(l_pp "wcstold" => __slate_ld_wcstold);
+
+/// `wcstold_l` -- [`wcstold`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstold`].
+pub unsafe fn wcstold_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> crate::x87::LongDouble {
+    // SAFETY: forwarded.
+    unsafe { wcstold(nptr, endptr) }
+}
+
+/// `wcstold_l` for C, through the thunk: the result into `out`.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_wcstold_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    loc: crate::locale::LocaleT,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: as in `__slate_ld_wcstold`.
+    unsafe { out.write(wcstold_l(nptr, endptr, loc)) }
+}
+crate::ld_c!(l_ppp "wcstold_l" => __slate_ld_wcstold_l);
 
 /// Scan a float subject sequence from a wide string and set `*endptr`.
 ///
@@ -6052,5 +6271,106 @@ mod tests {
         assert_eq!(ret, 2);
         assert_eq!(buf[0], b'h' as WcharT);
         assert_eq!(buf[1], b'i' as WcharT);
+    }
+
+    /// `wcschrnul` finds as `wcschr` does, and the NUL where `wcschr` finds
+    /// nothing; searching for NUL finds the NUL.
+    #[test]
+    fn wcschrnul_ends_at_the_nul() {
+        let s: [WcharT; 4] = [b'a' as WcharT, b'b' as WcharT, b'c' as WcharT, 0];
+        let p = s.as_ptr();
+        // SAFETY: a NUL-terminated wide string.
+        unsafe {
+            assert_eq!(wcschrnul(p, b'b' as WcharT), p.add(1));
+            assert_eq!(wcschrnul(p, b'z' as WcharT), p.add(3));
+            assert_eq!(wcschrnul(p, 0), p.add(3));
+            assert!(wcschr(p, b'z' as WcharT).is_null());
+        }
+    }
+
+    /// `wcslcpy` and `wcslcat` as the BSDs' and glibc 2.38's: what fits, a NUL
+    /// always, and the length the whole would have had.
+    #[test]
+    fn wcslcpy_and_wcslcat_cut_short_and_say_so() {
+        let w = |s: &str| -> std::vec::Vec<WcharT> {
+            s.chars()
+                .map(|c| c as WcharT)
+                .chain(core::iter::once(0))
+                .collect()
+        };
+        let src = w("hello");
+        let mut dst: [WcharT; 4] = [7; 4];
+        // SAFETY: `dst` holds 4; `src` is NUL-terminated.
+        unsafe {
+            assert_eq!(wcslcpy(dst.as_mut_ptr(), src.as_ptr(), 4), 5, "cut short");
+            assert_eq!(&dst, &w("hel")[..]);
+            assert_eq!(
+                wcslcpy(dst.as_mut_ptr(), src.as_ptr(), 0),
+                5,
+                "size 0: nothing written"
+            );
+            assert_eq!(&dst, &w("hel")[..]);
+        }
+        let mut buf: [WcharT; 8] = [0; 8];
+        // SAFETY: `buf` holds 8.
+        unsafe {
+            assert_eq!(wcslcpy(buf.as_mut_ptr(), w("ab").as_ptr(), 8), 2);
+            assert_eq!(wcslcat(buf.as_mut_ptr(), w("cdef").as_ptr(), 8), 6);
+            assert_eq!(&buf[..7], &w("abcdef")[..]);
+            assert_eq!(
+                wcslcat(buf.as_mut_ptr(), w("ghij").as_ptr(), 8),
+                10,
+                "cut short"
+            );
+            assert_eq!(&buf, &w("abcdefg")[..]);
+            // No NUL within size: nothing written, size + wcslen(src).
+            let mut full: [WcharT; 3] = [b'x' as WcharT; 3];
+            assert_eq!(wcslcat(full.as_mut_ptr(), w("yz").as_ptr(), 3), 5);
+            assert_eq!(full, [b'x' as WcharT; 3]);
+        }
+    }
+
+    /// The `_l` conversions and the BSD `q` names answer as the functions
+    /// they stand for.
+    #[test]
+    fn the_locale_and_q_forms_are_their_functions() {
+        let num: std::vec::Vec<WcharT> = "-0x7fz".chars().map(|c| c as WcharT).chain([0]).collect();
+        let p = num.as_ptr();
+        let mut end_a: *const WcharT = core::ptr::null();
+        let mut end_b: *const WcharT = core::ptr::null();
+        // SAFETY: a NUL-terminated wide string; the end pointers are locals.
+        unsafe {
+            assert_eq!(
+                wcstol_l(p, &raw mut end_a, 16, 0),
+                wcstol(p, &raw mut end_b, 16)
+            );
+            assert_eq!(end_a, end_b);
+            assert_eq!(wcstoll_l(p, core::ptr::null_mut(), 0, 0), -0x7f);
+            assert_eq!(wcstoq(p, core::ptr::null_mut(), 0), -0x7f);
+            assert_eq!(
+                wcstoul_l(p, core::ptr::null_mut(), 16, 0),
+                wcstoul(p, core::ptr::null_mut(), 16)
+            );
+            assert_eq!(
+                wcstoull_l(p, core::ptr::null_mut(), 16, 0),
+                wcstouq(p, core::ptr::null_mut(), 16)
+            );
+        }
+        let f: std::vec::Vec<WcharT> = "2.5e3".chars().map(|c| c as WcharT).chain([0]).collect();
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                wcstod_l(f.as_ptr(), core::ptr::null_mut(), 0).to_bits(),
+                2500.0f64.to_bits()
+            );
+            assert_eq!(
+                wcstof_l(f.as_ptr(), core::ptr::null_mut(), 0).to_bits(),
+                2500.0f32.to_bits()
+            );
+            assert_eq!(
+                wcstold_l(f.as_ptr(), core::ptr::null_mut(), 0),
+                wcstold(f.as_ptr(), core::ptr::null_mut())
+            );
+        }
     }
 }

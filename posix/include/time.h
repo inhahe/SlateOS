@@ -46,6 +46,11 @@ struct timex;
 int clock_adjtime(clockid_t, struct timex *);
 #endif
 
+#ifdef _GNU_SOURCE
+/* strptime in a locale, which is always C's here. */
+char *strptime_l(const char *__restrict, const char *__restrict, struct tm *, locale_t);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

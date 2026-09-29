@@ -1807,7 +1807,18 @@ mod tests {
     fn the_window_is_drawn_in_the_users_colours() {
         for (light, cards) in LOOKS {
             let p = palette(light, cards);
-            let derived = [CORRECT, PRESENT, ABSENT, ANSWER_INKS.0, ANSWER_INKS.1];
+            // A lit header button's letter is `on_accent`, which is
+            // `readable_on(accent)`: a colour made from the accent, so it is
+            // declared -- today it happens to equal one of the palette's
+            // roles, and the check will not always take that on trust.
+            let derived = [
+                CORRECT,
+                PRESENT,
+                ABSENT,
+                ANSWER_INKS.0,
+                ANSWER_INKS.1,
+                p.on_accent(),
+            ];
             for (what, f) in every_look(&p) {
                 appearance::palette_check::assert_drawn_from(
                     &p,

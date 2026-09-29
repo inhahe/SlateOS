@@ -4564,10 +4564,13 @@ mod tests {
                 appearance::palette_check::assert_drawn_from(
                     &app.palette,
                     &app.render_tree().commands,
-                    // Nothing is computed here: every colour this app draws is
-                    // a role. If that stops being true, the right answer is
-                    // usually to name the role, not to widen this list.
-                    &[],
+                    // One colour is computed: End Process's label, the ink
+                    // `readable_on` gives its red. It happens to equal a
+                    // role of the dark palette today, which the check will
+                    // not always take on trust. Every other colour is a role;
+                    // if that stops being true, the right answer is usually
+                    // to name the role, not to widen this list.
+                    &[appearance::readable_on(app.palette.red)],
                     &format!("procexplorer {tab:?} (light={light})"),
                 );
             }

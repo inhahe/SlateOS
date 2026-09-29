@@ -2367,15 +2367,20 @@ mod tests {
     /// ringed in, not the palette's (the operator's C-Q16).
     #[test]
     fn the_window_is_drawn_in_the_users_colours() {
-        let mut derived = vec![
-            cards::FACE,
-            cards::RED,
-            cards::BLACK,
-            gamechrome::RIMS.0,
-            gamechrome::RIMS.1,
-        ];
         for (light, cards) in LOOKS {
             let p = palette(light, cards);
+            // Declared for each look on its own. The list used to gather
+            // every look's button colours as it went, so a light window was
+            // checked against the dark palette's too -- Mocha's surface1,
+            // the dark button's edge, declared as this game's own colour:
+            // the one shape of leftover the check exists to catch.
+            let mut derived = vec![
+                cards::FACE,
+                cards::RED,
+                cards::BLACK,
+                gamechrome::RIMS.0,
+                gamechrome::RIMS.1,
+            ];
             derived.extend(gamechrome::button_colours(
                 &p,
                 guitk::button::Kind::Plain,

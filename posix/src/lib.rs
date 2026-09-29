@@ -388,6 +388,7 @@ pub mod hosts;
 pub mod iconv;
 pub(crate) mod iconv_8bit;
 pub(crate) mod iconv_combining;
+pub(crate) mod iconv_prefix;
 pub(crate) mod iconv_translit;
 pub mod inet;
 pub mod inttypes;

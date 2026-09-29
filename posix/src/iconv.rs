@@ -15,6 +15,7 @@
 //! | `ASCII` (`ANSI_X3.4-1968`) | seven bits; the C locale's character set, and so the empty name's |
 //! | `ISO-8859-1` | Latin-1 |
 //! | `ISO-8859-2` to `-16`, `CP1250` to `CP1257` (`WINDOWS-1252` and the rest), `KOI8-R`, `KOI8-U`, `IBM437`, `IBM850`, `MACINTOSH`, EBCDIC (`IBM037`, `IBM500`) and the rest of glibc's 141 table-driven 8-bit sets ([`crate::iconv_8bit`]) | one byte a character, by glibc's table; a byte the table leaves out is invalid |
+//! | `T.61-8BIT` (`T.61`), `ISO_6937`, `ISO_6937-2`, `ANSI_X3.110` ([`crate::iconv_prefix`]) | one byte a character, or two for a letter with a diacritic: the diacritic's byte (0xC1-0xCF), then the letter's |
 //! | the 23 national variants of ISO 646 glibc's `iso646.c` serves (`BS_4730`, `DIN_66003`, `NF_Z_62-010`, `JIS_C6220-1969-RO` ...), `ISO_11548-1` (8-dot braille) and `ARMSCII-8` (Armenian), from the same tables | the same; five ARMSCII-8 bytes are second copies of ASCII punctuation, read and never written |
 //! | `UTF-16`, `UTF-32` | a byte-order mark written first, in the machine's order (FF FE on x86-64), and read if there is one; the machine's order without one |
 //! | `UTF-16LE`, `-16BE`, `-32LE`, `-32BE` | no mark written or read |
@@ -203,6 +204,10 @@ enum Charset {
     /// `UTF-7//`, or `imap`, `UTF-7-IMAP//`: stateful -- runs of base64
     /// between ASCII, with state kept between calls (see [`decode_utf7`]).
     Utf7 { imap: bool },
+    /// `T.61-8BIT//`, `ISO_6937//`, `ISO_6937-2//` or `ANSI_X3.110//`: its
+    /// index in [`crate::iconv_prefix::SETS`]. A character is a byte, or a
+    /// diacritic byte and the letter it goes on (see [`decode_prefixed`]).
+    Prefixed(u8),
     /// `CP1255//`, `CP1258//` or `TCVN5712-1//`: 8-bit, with combining marks the decoder
     /// composes with the letter before them -- kept back, from call to call,
     /// to see whether one follows -- and the encoder decomposes into (see
@@ -231,6 +236,7 @@ impl Charset {
             | Charset::Ascii
             | Charset::Latin1
             | Charset::Table8(_)
+            | Charset::Prefixed(_)
             | Charset::Utf7 { .. }
             | Charset::Combining(_) => 1,
             Charset::Ucs2 { .. } | Charset::Unicode | Charset::Utf16(_) => 2,
@@ -438,6 +444,7 @@ fn parse_spec(spec: &[u8]) -> (Option<Charset>, bool, bool) {
             .find(|(k, _)| *k == name)
             .map(|&(_, c)| c)
             .or_else(|| table8_named(name))
+            .or_else(|| prefixed_named(name))
             .or_else(|| combining_named(name))
     };
     (charset, translit, ignore)
@@ -790,6 +797,84 @@ fn encode_table8(reverse: &[(u16, u8)], c: u32) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110: a diacritic byte, then its letter
+// ---------------------------------------------------------------------------
+//
+// glibc writes these four by hand (iconvdata/t.61.c, iso_6937.c,
+// iso_6937-2.c, ansi_x3.110.c), each a byte table, a table of the pairs a
+// diacritic byte makes with the letter after it, and an encoder. The tables
+// are glibc's, read out of its running converters
+// (posix/tools/gen_iconv_prefix.py, which says why); the decoder's handling
+// of a bad pair is glibc's code, below.
+
+/// The first of the fifteen diacritic bytes: grave, acute, circumflex,
+/// tilde, macron, breve, dot above, diaeresis, ... in all four sets.
+const PREFIX_FIRST: u8 = 0xC1;
+/// The last.
+const PREFIX_LAST: u8 = 0xCF;
+
+/// The set a stripped name names, of these four.
+fn prefixed_named(name: &[u8]) -> Option<Charset> {
+    let at = crate::iconv_prefix::SETS
+        .iter()
+        .position(|s| s.names.contains(&name))?;
+    u8::try_from(at).ok().map(Charset::Prefixed)
+}
+
+/// glibc's decoder for the four, one character. A diacritic byte waits for
+/// the letter after it (`EINVAL` at the end of the input); a "letter"
+/// outside 0x20-0x7F refuses the diacritic byte alone, so that `//IGNORE`
+/// reads on from the byte after it, and a pair the table has no character
+/// for refuses both. A byte alone is its table's character, or refused.
+fn decode_prefixed(set: u8, s: &[u8]) -> Decoded {
+    let Some(table) = crate::iconv_prefix::SETS.get(usize::from(set)) else {
+        return Decoded::Illegal(1);
+    };
+    let Some(&b) = s.first() else {
+        return Decoded::Incomplete;
+    };
+    if (PREFIX_FIRST..=PREFIX_LAST).contains(&b) {
+        let Some(&c) = s.get(1) else {
+            return Decoded::Incomplete;
+        };
+        if !(0x20..0x80).contains(&c) {
+            return Decoded::Illegal(1);
+        }
+        let u = table
+            .pairs
+            .get(usize::from(b.wrapping_sub(PREFIX_FIRST)))
+            .and_then(|row| row.get(usize::from(c.wrapping_sub(0x20))))
+            .copied()
+            .unwrap_or(0);
+        return if u == 0 {
+            Decoded::Illegal(2)
+        } else {
+            Decoded::Char(u32::from(u), 2)
+        };
+    }
+    match table.single.get(usize::from(b)) {
+        Some(&0) if b != 0 => Decoded::Illegal(1),
+        Some(&u) => Decoded::Char(u32::from(u), 1),
+        None => Decoded::Illegal(1),
+    }
+}
+
+/// glibc's encoder for the four: the byte, or the diacritic byte and letter,
+/// the set writes `c` as -- the whole of what glibc's does, table and
+/// special cases alike, since the table was read out of it.
+fn encode_prefixed(set: u8, c: u32) -> Option<([u8; 2], usize)> {
+    let table = crate::iconv_prefix::SETS.get(usize::from(set))?;
+    let c = u16::try_from(c).ok()?;
+    let at = table.encode.binary_search_by_key(&c, |&(u, _, _)| u).ok()?;
+    let &(_, first, second) = table.encode.get(at)?;
+    Some(if second == 0 {
+        ([first, 0], 1)
+    } else {
+        ([first, second], 2)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The steps' loops
 // ---------------------------------------------------------------------------
 
@@ -1021,6 +1106,9 @@ fn decode_loop(
             None => Decoded::Incomplete,
         }),
         Charset::Table8(t) => generic_decode(input, out, ignore, 1, |s| decode_table8(t, s)),
+        Charset::Prefixed(set) => {
+            generic_decode(input, out, ignore, 1, |s| decode_prefixed(set, s))
+        }
         Charset::Ucs2 { reversed } => {
             generic_decode(input, out, ignore, 2, |s| decode_ucs2(s, reversed))
         }
@@ -1227,6 +1315,16 @@ fn encode_char(target: Target, c: u32, out: &mut [u8]) -> Encoded {
             None => Encoded::Unwritable,
         },
         Charset::Ascii | Charset::Latin1 => Encoded::Unwritable,
+        Charset::Prefixed(set) => match encode_prefixed(set, c) {
+            Some((bytes, n)) => match (out.get_mut(..n), bytes.get(..n)) {
+                (Some(dst), Some(src)) => {
+                    dst.copy_from_slice(src);
+                    Encoded::Wrote(n)
+                }
+                _ => Encoded::NoRoom,
+            },
+            None => Encoded::Unwritable,
+        },
         Charset::Combining(set) => match encode_combining(set, c) {
             Some((bytes, n)) => match (out.get_mut(..n), bytes.get(..n)) {
                 (Some(dst), Some(src)) => {
@@ -4974,6 +5072,530 @@ mod tests {
     fn tcvn5712_1_is_glibcs() {
         let failures = replay_glibc(GLIBC_TCVN);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    // Generated by posix/tools/oracle/prefix_harness.py from glibc 2.39's iconv under WSL:
+    // (name, to, from, chunks, outsize, reset, glibc's line).
+    const GLIBC_PREFIX: &[OracleCase] = &[
+        (
+            "t61_ascii",
+            "UTF-8",
+            "T.61",
+            &[&[0x48, 0x65, 0x6c, 0x6c, 0x6f]],
+            64,
+            "out",
+            "t61_ascii 0,0,5,48656c6c6f|0,0,",
+        ),
+        (
+            "t61_pair",
+            "UTF-8",
+            "T.61",
+            &[&[0xc2, 0x65, 0xc1, 0x41, 0xc8, 0x75]],
+            64,
+            "out",
+            "t61_pair 0,0,6,c3a9c380c3bc|0,0,",
+        ),
+        (
+            "t61_highs",
+            "UTF-8",
+            "T.61",
+            &[&[0xa1, 0xa3, 0xe0, 0xfb]],
+            64,
+            "out",
+            "t61_highs 0,0,4,c2a1c2a3e284a6c39f|0,0,",
+        ),
+        (
+            "t61_bad_letter_low",
+            "UTF-8",
+            "T.61",
+            &[&[0xc1, 0x10, 0x41]],
+            64,
+            "out",
+            "t61_bad_letter_low -1,EILSEQ,0,|0,0,",
+        ),
+        (
+            "t61_bad_letter_low_ignore",
+            "UTF-8//IGNORE",
+            "T.61",
+            &[&[0xc1, 0x10, 0x41]],
+            64,
+            "out",
+            "t61_bad_letter_low_ignore -1,EILSEQ,3,1041|0,0,",
+        ),
+        (
+            "t61_bad_letter_high_ignore",
+            "UTF-8//IGNORE",
+            "T.61",
+            &[&[0xc1, 0xc2, 0x65, 0x41]],
+            64,
+            "out",
+            "t61_bad_letter_high_ignore -1,EILSEQ,4,c3a941|0,0,",
+        ),
+        (
+            "t61_no_such_pair",
+            "UTF-8",
+            "T.61",
+            &[&[0x78, 0xc1, 0x42, 0x41]],
+            64,
+            "out",
+            "t61_no_such_pair -1,EILSEQ,1,78|0,0,",
+        ),
+        (
+            "t61_no_such_pair_ignore",
+            "UTF-8//IGNORE",
+            "T.61",
+            &[&[0x78, 0xc1, 0x42, 0x41]],
+            64,
+            "out",
+            "t61_no_such_pair_ignore -1,EILSEQ,4,7841|0,0,",
+        ),
+        (
+            "t61_no_such_byte_ignore",
+            "UTF-8//IGNORE",
+            "T.61",
+            &[&[0x61, 0xc0, 0x62]],
+            64,
+            "out",
+            "t61_no_such_byte_ignore -1,EILSEQ,3,6162|0,0,",
+        ),
+        (
+            "t61_diacritic_last",
+            "UTF-8",
+            "T.61",
+            &[&[0x61, 0xc1]],
+            64,
+            "out",
+            "t61_diacritic_last -1,EINVAL,1,61|0,0,",
+        ),
+        (
+            "t61_diacritic_across_calls",
+            "UTF-8",
+            "T.61",
+            &[&[0x61, 0xc1], &[0xc1, 0x65]],
+            64,
+            "out",
+            "t61_diacritic_across_calls -1,EINVAL,1,61;0,0,2,c3a8|0,0,",
+        ),
+        (
+            "t61_diacritic_alone",
+            "UTF-8",
+            "T.61",
+            &[&[0xc3]],
+            64,
+            "null",
+            "t61_diacritic_alone -1,EINVAL,0,|0,0,",
+        ),
+        (
+            "t61_every_byte_ignore",
+            "UTF-8//IGNORE",
+            "T.61",
+            &[&[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29,
+                0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
+                0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45,
+                0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f, 0x50, 0x51, 0x52, 0x53,
+                0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d, 0x5e, 0x5f, 0x60, 0x61,
+                0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6a, 0x6b, 0x6c, 0x6d, 0x6e, 0x6f,
+                0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d,
+                0x7e, 0x7f, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b,
+                0x8c, 0x8d, 0x8e, 0x8f, 0x90, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+                0x9a, 0x9b, 0x9c, 0x9d, 0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+                0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5,
+                0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd, 0xbe, 0xbf, 0xc0, 0xd0, 0xd1, 0xd2,
+                0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf, 0xe0,
+                0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xed, 0xee,
+                0xef, 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,
+                0xfd, 0xfe, 0xff,
+            ]],
+            1024,
+            "out",
+            "t61_every_byte_ignore -1,EILSEQ,241,000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212225262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5d5f6162636465666768696a6b6c6d6e6f707172737475767778797a7c7fc280c281c282c283c284c285c286c287c288c289c28ac28bc28cc28dc28ec28fc290c291c292c293c294c295c296c297c298c299c29ac29bc29cc29dc29ec29fc2a1c2a2c2a324c2a523c2a7c2a4c2abc2b0c2b1c2b2c2b3c397c2b5c2b6c2b7c3b7c2bbc2bcc2bdc2bec2bfe284a6c386c390c2aac4a6c4b2c4bfc581c398c592c2bac39ec5a6c58ac589c4b8c3a6c491c3b0c4a7c4b1c4b3c580c582c3b8c593c39fc3bec5a7c58b|0,0,",
+        ),
+        (
+            "t61_tight",
+            "UTF-8",
+            "T.61",
+            &[&[0x61, 0x62, 0xc2, 0x65]],
+            3,
+            "out",
+            "t61_tight -1,E2BIG,2,6162|0,0,",
+        ),
+        (
+            "t61_to_wchar",
+            "WCHAR_T",
+            "T.61",
+            &[&[0x61, 0xc2, 0x65]],
+            64,
+            "out",
+            "t61_to_wchar 0,0,3,61000000e9000000|0,0,",
+        ),
+        (
+            "t61_to_wchar_tight",
+            "WCHAR_T",
+            "T.61",
+            &[&[0x61, 0xc2, 0x65]],
+            4,
+            "out",
+            "t61_to_wchar_tight -1,E2BIG,1,61000000|0,0,",
+        ),
+        (
+            "t61_enc",
+            "T.61",
+            "UTF-8",
+            &[&[0xc3, 0x80, 0x20, 0xc3, 0xa9, 0x20, 0xc3, 0xbc]],
+            64,
+            "out",
+            "t61_enc 0,0,8,c14120c26520c875|0,0,",
+        ),
+        (
+            "t61_enc_singles",
+            "T.61",
+            "UTF-8",
+            &[&[0xc2, 0xa1, 0xc2, 0xa3, 0xce, 0xa9, 0xc3, 0x9f]],
+            64,
+            "out",
+            "t61_enc_singles -1,EILSEQ,4,a1a3|0,0,",
+        ),
+        (
+            "t61_enc_spacing_marks",
+            "T.61",
+            "UTF-8",
+            &[&[
+                0xcb, 0x87, 0xcb, 0x98, 0xcb, 0x99, 0xcb, 0x9a, 0xcb, 0x9b, 0xcb, 0x9d,
+            ]],
+            64,
+            "out",
+            "t61_enc_spacing_marks 0,0,12,cf20c620c720ca20ce20cd20|0,0,",
+        ),
+        (
+            "t61_enc_unwritable",
+            "T.61",
+            "UTF-8",
+            &[&[0x61, 0xe2, 0x82, 0xac, 0x62]],
+            64,
+            "out",
+            "t61_enc_unwritable -1,EILSEQ,1,61|0,0,",
+        ),
+        (
+            "t61_enc_unwritable_ignore",
+            "T.61//IGNORE",
+            "UTF-8",
+            &[&[0x61, 0xe2, 0x82, 0xac, 0x62]],
+            64,
+            "out",
+            "t61_enc_unwritable_ignore -1,EILSEQ,5,6162|0,0,",
+        ),
+        (
+            "t61_enc_translit",
+            "T.61//TRANSLIT",
+            "UTF-8",
+            &[&[
+                0x61, 0xe2, 0x82, 0xac, 0x20, 0xe2, 0x80, 0x9c, 0x62, 0xe2, 0x80, 0x9d,
+            ]],
+            64,
+            "out",
+            "t61_enc_translit 3,0,12,6145555220226222|0,0,",
+        ),
+        (
+            "t61_enc_tight",
+            "T.61",
+            "UTF-8",
+            &[&[0x61, 0xc3, 0xa9]],
+            2,
+            "out",
+            "t61_enc_tight -1,E2BIG,1,61|0,0,",
+        ),
+        (
+            "t61_enc_tag",
+            "T.61",
+            "UTF-8",
+            &[&[0x61, 0xf3, 0xa0, 0x81, 0x81, 0x62]],
+            64,
+            "out",
+            "t61_enc_tag 0,0,6,6162|0,0,",
+        ),
+        (
+            "t61_names",
+            "UTF-8",
+            "ISO-IR-103",
+            &[&[0xc2, 0x65]],
+            64,
+            "out",
+            "t61_names 0,0,2,c3a9|0,0,",
+        ),
+        (
+            "t61_names2",
+            "T.618BIT",
+            "UTF-8",
+            &[&[0xc3, 0xa9]],
+            64,
+            "out",
+            "t61_names2 0,0,2,c265|0,0,",
+        ),
+        (
+            "t61_names3",
+            "UTF-8",
+            "T.61-8BIT",
+            &[&[0xc2, 0x65]],
+            64,
+            "out",
+            "t61_names3 0,0,2,c3a9|0,0,",
+        ),
+        (
+            "iso6937_pairs",
+            "UTF-8",
+            "ISO_6937",
+            &[&[0xc3, 0x6f, 0xc4, 0x6e, 0xcf, 0x73, 0xcb, 0x63]],
+            64,
+            "out",
+            "iso6937_pairs 0,0,8,c3b4c3b1c5a1c3a7|0,0,",
+        ),
+        (
+            "iso6937_highs",
+            "UTF-8",
+            "ISO_6937",
+            &[&[0xa9, 0xd0, 0xd5, 0xdc, 0xac]],
+            64,
+            "out",
+            "iso6937_highs 0,0,5,e28098e28094e299aae2859be28690|0,0,",
+        ),
+        (
+            "iso6937_enc",
+            "ISO_6937",
+            "UTF-8",
+            &[&[0xc3, 0xb4, 0xc3, 0xb1, 0xc5, 0xa1, 0xc3, 0xa7]],
+            64,
+            "out",
+            "iso6937_enc 0,0,8,c36fc46ecf73cb63|0,0,",
+        ),
+        (
+            "iso6937_enc_specials",
+            "ISO_6937",
+            "UTF-8",
+            &[&[
+                0xe2, 0x80, 0x94, 0xe2, 0x80, 0x98, 0xe2, 0x80, 0x99, 0xe2, 0x80, 0x9c, 0xe2, 0x80,
+                0x9d, 0xe2, 0x84, 0xa2, 0xe2, 0x84, 0xa6, 0xe2, 0x85, 0x9b, 0xe2, 0x86, 0x90, 0xe2,
+                0x86, 0x93, 0xe2, 0x99, 0xaa,
+            ]],
+            64,
+            "out",
+            "iso6937_enc_specials 0,0,33,d0a9b9aabad4e0dcacafd5|0,0,",
+        ),
+        (
+            "iso6937_bad_letter_ignore",
+            "UTF-8//IGNORE",
+            "ISO_6937",
+            &[&[0xc2, 0x7f, 0xc2, 0x80, 0x65]],
+            64,
+            "out",
+            "iso6937_bad_letter_ignore -1,EILSEQ,5,c28065|0,0,",
+        ),
+        (
+            "iso6937_names",
+            "UTF-8",
+            "ISO6937",
+            &[&[0xc3, 0x6f]],
+            64,
+            "out",
+            "iso6937_names 0,0,2,c3b4|0,0,",
+        ),
+        (
+            "iso6937_names2",
+            "UTF-8",
+            "ISO-IR-156",
+            &[&[0xc3, 0x6f]],
+            64,
+            "out",
+            "iso6937_names2 0,0,2,c3b4|0,0,",
+        ),
+        (
+            "iso6937_names3",
+            "ISO_6937:1992",
+            "UTF-8",
+            &[&[0xc3, 0xb4]],
+            64,
+            "out",
+            "iso6937_names3 0,0,2,c36f|0,0,",
+        ),
+        (
+            "iso69372_decode_only",
+            "UTF-8",
+            "ISO_6937-2",
+            &[&[0x23, 0x24, 0xa6, 0xa8, 0xc4, 0x20, 0x7e]],
+            64,
+            "out",
+            "iso69372_decode_only 0,0,7,23c2a423c2a47e7e|0,0,",
+        ),
+        (
+            "iso69372_enc",
+            "ISO_6937-2",
+            "UTF-8",
+            &[&[0x23, 0xc2, 0xa4, 0x7e]],
+            64,
+            "out",
+            "iso69372_enc 0,0,4,a6a87e|0,0,",
+        ),
+        (
+            "iso69372_pairs",
+            "UTF-8",
+            "ISO_6937-2",
+            &[&[0xc2, 0x61, 0xc7, 0x7a]],
+            64,
+            "out",
+            "iso69372_pairs 0,0,4,c3a1c5bc|0,0,",
+        ),
+        (
+            "iso69372_names",
+            "UTF-8",
+            "ISO-IR-90",
+            &[&[0xc2, 0x61]],
+            64,
+            "out",
+            "iso69372_names 0,0,2,c3a1|0,0,",
+        ),
+        (
+            "iso69372_names2",
+            "CSISO90",
+            "UTF-8",
+            &[&[0xc3, 0xa1]],
+            64,
+            "out",
+            "iso69372_names2 0,0,2,c261|0,0,",
+        ),
+        (
+            "ansi_pairs",
+            "UTF-8",
+            "ANSI_X3.110",
+            &[&[0xc2, 0x61, 0xc8, 0x75]],
+            64,
+            "out",
+            "ansi_pairs 0,0,4,c3a1c3bc|0,0,",
+        ),
+        (
+            "ansi_enc_specials",
+            "ANSI_X3.110",
+            "UTF-8",
+            &[&[
+                0xe2, 0x94, 0x80, 0xe2, 0x94, 0x82, 0xe2, 0x94, 0xbc, 0xe2, 0x95, 0xb1, 0xe2, 0x95,
+                0xb2, 0xe2, 0x97, 0xa2, 0xe2, 0x97, 0xa3, 0xe2, 0x99, 0xaa,
+            ]],
+            64,
+            "out",
+            "ansi_enc_specials 0,0,24,d6d7e5d8d9dadbd5|0,0,",
+        ),
+        (
+            "ansi_enc",
+            "ANSI_X3.110",
+            "UTF-8",
+            &[&[0xc3, 0xa4, 0xc3, 0xb6, 0xc3, 0xbc]],
+            64,
+            "out",
+            "ansi_enc 0,0,6,c861c86fc875|0,0,",
+        ),
+        (
+            "ansi_names",
+            "UTF-8",
+            "NAPLPS",
+            &[&[0xc2, 0x61]],
+            64,
+            "out",
+            "ansi_names 0,0,2,c3a1|0,0,",
+        ),
+        (
+            "ansi_names2",
+            "UTF-8",
+            "ISO-IR-99",
+            &[&[0xc2, 0x61]],
+            64,
+            "out",
+            "ansi_names2 0,0,2,c3a1|0,0,",
+        ),
+        (
+            "ansi_names3",
+            "CSA_T500-1983",
+            "UTF-8",
+            &[&[0xc3, 0xa1]],
+            64,
+            "out",
+            "ansi_names3 0,0,2,c261|0,0,",
+        ),
+    ];
+
+    /// glibc 2.39's iconv for T.61, ISO_6937, ISO_6937-2 and ANSI_X3.110
+    /// (`posix/tools/oracle/prefix_harness.py`): what their tables cannot say
+    /// -- a diacritic byte before a bad letter, at the end of the input or
+    /// of a call, a pair with room for only one byte -- and each set's
+    /// special cases and names, replayed as `cp1255_and_cp1258_are_glibcs`
+    /// replays those two.
+    #[test]
+    fn the_diacritic_sets_are_glibcs() {
+        let failures = replay_glibc(GLIBC_PREFIX);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The four tables agree with themselves as the decoder and encoder use
+    /// them: every character written reads back as itself, every character
+    /// read but three is written as the bytes it was read from (ISO_6937-2's
+    /// 0x23, 0x24 and 0xC4 0x20 are read and never written), the diacritic
+    /// bytes read as nothing alone, and every name is one set's.
+    #[test]
+    fn the_diacritic_tables_are_whole() {
+        let mut names: Vec<&[u8]> = NAMES.iter().map(|&(n, _)| n).collect();
+        for t in crate::iconv_8bit::TABLES {
+            names.extend(t.names.iter().copied());
+        }
+        let mut decode_only = 0;
+        for (set, table) in crate::iconv_prefix::SETS.iter().enumerate() {
+            let set = u8::try_from(set).unwrap();
+            let first = std::string::String::from_utf8_lossy(table.names[0]);
+            assert!(
+                table.encode.windows(2).all(|w| w[0].0 < w[1].0),
+                "{first}: sorted"
+            );
+            for &(u, b1, b2) in table.encode {
+                let bytes: &[u8] = if b2 == 0 { &[b1] } else { &[b1, b2] };
+                assert_eq!(
+                    decode_prefixed(set, bytes),
+                    Decoded::Char(u32::from(u), bytes.len()),
+                    "{first}: U+{u:04X} is written as bytes that read as it"
+                );
+            }
+            for b in PREFIX_FIRST..=PREFIX_LAST {
+                assert_eq!(table.single[usize::from(b)], 0, "{first}: 0x{b:02x}");
+                assert_eq!(decode_prefixed(set, &[b]), Decoded::Incomplete, "{first}");
+            }
+            let mut read: Vec<(Vec<u8>, u16)> = Vec::new();
+            for b in 0u8..=255 {
+                if let Decoded::Char(u, 1) = decode_prefixed(set, &[b]) {
+                    read.push((vec![b], u16::try_from(u).unwrap()));
+                }
+            }
+            for b in PREFIX_FIRST..=PREFIX_LAST {
+                for c in 0x20u8..0x80 {
+                    if let Decoded::Char(u, 2) = decode_prefixed(set, &[b, c]) {
+                        read.push((vec![b, c], u16::try_from(u).unwrap()));
+                    }
+                }
+            }
+            for (bytes, u) in read {
+                match encode_prefixed(set, u32::from(u)) {
+                    Some((w, n)) if w[..n] == bytes[..] => {}
+                    Some(_) => decode_only += 1,
+                    None => panic!("{first}: U+{u:04X} is read and cannot be written"),
+                }
+            }
+            for &n in table.names {
+                assert_eq!(n.split(|&c| c == b'/').count(), 3, "{first}: two slashes");
+                names.push(n);
+            }
+        }
+        assert_eq!(decode_only, 3, "ISO_6937-2's three");
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "no name names two sets");
     }
 
     /// An oracle table's cases, call by call and then the reset: the cases

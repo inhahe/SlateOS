@@ -284,6 +284,18 @@ MUTATIONS = [
         "",
         [OPENED],
     ),
+    (
+        "a label refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["a_label_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a label types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["a_label_takes_altgr_letters_and_no_commands_letter"],
+    ),
 ]
 
 if __name__ == "__main__":

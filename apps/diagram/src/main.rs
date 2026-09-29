@@ -1103,10 +1103,14 @@ impl DiagramApp {
                 EventResult::Consumed
             }
             _ => {
-                if key.text.is_empty() || key.modifiers.ctrl {
+                // AltGr arrives as Ctrl+Alt and types -- Polish `ż` is
+                // AltGr+Z. A command carries its letter as text and types
+                // none of it: Ctrl or Alt on its own, the Windows key. Nor
+                // does a control character: Tab's `\t` is no part of a name.
+                if !textline::types_into_field(key) {
                     return EventResult::Ignored;
                 }
-                buf.push_str(&key.text);
+                buf.extend(key.typed());
                 self.editing = Some((target, buf));
                 EventResult::Consumed
             }
@@ -5254,6 +5258,59 @@ mod tests {
 
         let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
         assert!(node.label.ends_with("Pay"), "the label is {:?}", node.label);
+    }
+
+    /// **A label takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ż` is AltGr+Z on a Polish keyboard -- and was
+    /// refused with every key held with Ctrl. A command carries its letter
+    /// as text on a real machine (Ctrl+K arrives as `k`, Alt+F as `f`), and
+    /// Alt's and the Windows key's were typed; so was Tab's `\t`.
+    #[test]
+    fn a_label_takes_altgr_letters_and_no_commands_letter() {
+        let mut app = DiagramApp::new(800.0, 600.0);
+        let id = app.add_node(NodeShape::Rectangle, 100.0, 100.0);
+        app.selection.nodes = vec![id];
+        let before = app
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .expect("the node")
+            .label
+            .clone();
+        app.handle_event(&press(Key::F2));
+        let held = |key: Key, modifiers: Modifiers, text: &str| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let altgr = Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::NONE
+        };
+        assert_eq!(
+            app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
+            EventResult::Consumed,
+            "AltGr+Z was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+            (Key::Tab, Modifiers::NONE, "\t"),
+        ] {
+            assert_eq!(
+                app.handle_event(&held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        app.handle_event(&press(Key::Enter));
+        let node = app.nodes.iter().find(|n| n.id == id).expect("the node");
+        assert_eq!(node.label, format!("{before}\u{17c}"));
     }
 
     /// The status bar says the app is labelling, and how to stop.

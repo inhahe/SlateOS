@@ -17,6 +17,10 @@ oswindow = { path = "../../gui/window" }
 # truncates the target before writing it.
 safeio = { path = "../safeio" }
 
+# Whether a key types into a label or is a command: AltGr arrives as
+# Ctrl+Alt, and a command carries its letter as text.
+textline = { path = "../textline" }
+
 # A diagram's own file: YAML, as `apps/slides` keeps a deck -- the tree's
 # format for anything a person might open in an editor.
 yamldoc = { path = "../../yamldoc" }

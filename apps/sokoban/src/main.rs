@@ -104,7 +104,7 @@
 //!     has. No level could enter the arm, so no test could own it. The check is
 //!     gone and the invariant is asserted over the whole table instead.
 
-use gamechrome::{Chrome, HistoryKey};
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -903,11 +903,42 @@ pub fn first_visible(cursor: usize, count: usize, rows: usize) -> usize {
 }
 
 /// The keyboard reminder, per screen. The second line is the one dropped first
-/// when the footer has room for only one.
-const SELECT_FOOTER: [&str; 2] = ["Up/Down: choose   Enter: play", "1-9: jump to a level"];
+/// when the footer has room for only one, so each first line ends with the
+/// key to the rest.
+const SELECT_FOOTER: [&str; 2] = [
+    "Up/Down: choose   Enter: play   F1: all keys",
+    "1-9: jump to a level",
+];
 const PLAY_FOOTER: [&str; 2] = [
-    "Arrows/WASD: move   Z: undo   Ctrl+Y: redo   R: restart",
+    "Arrows/WASD: move   Z: undo   R: restart   F1: all keys",
     "Esc: menu   N: next level",
+];
+
+/// Every key this game answers, on either screen, on the list F1 raises.
+///
+/// The game had no list, and its footers had room for neither the history's
+/// keys -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24 added
+/// (`design-decisions.md` §1416) -- nor Home and End on the list of levels.
+/// **Each row is a key this game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Arrows / WASD", "Walk; walking into a box pushes it"),
+    ("Z / Ctrl+Z", "Take back a move"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Make it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The warehouse before / after this, on any branch",
+    ),
+    ("R", "Start this level again"),
+    ("N", "The next level"),
+    ("Esc", "Back to the list of levels"),
+    (
+        "Enter / Space",
+        "Play the chosen level, or the next once solved",
+    ),
+    ("Home / End", "The first / last level on the list"),
+    ("1-9", "Choose level 1 to 9 on the list"),
+    ("F1 / ?", "This list"),
 ];
 
 /// The buttons on each screen, in the order `Layout::button_rects` lays them
@@ -958,6 +989,9 @@ pub struct Sokoban {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// box pushed under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Default for Sokoban {
@@ -994,6 +1028,7 @@ impl Sokoban {
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            show_help: false,
         };
         // The table is validated at startup and is never empty, so level 0 is
         // always there; the answer is discarded because a game with no first
@@ -1419,6 +1454,17 @@ impl Sokoban {
         self.draw_footer(&mut f, &l);
         if self.screen == Screen::Playing && self.is_solved() {
             self.draw_win(&mut f, &l);
+        }
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
         }
         f
     }
@@ -2043,6 +2089,15 @@ impl Sokoban {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the warehouse under the card is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = ev.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -2068,6 +2123,18 @@ impl Sokoban {
         // Reading only `key` runs every binding twice per press.
         if !ev.pressed {
             return EventResult::Ignored;
+        }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the screen under it.
+        if self.show_help {
+            if help::closes(ev) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
+        if help::raises(ev) {
+            self.show_help = true;
+            return EventResult::Consumed;
         }
         // The history's keys, in the warehouse, read as every game reads them
         // (C-Q24): Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
@@ -2691,6 +2758,104 @@ mod tests {
         assert!(g.try_move(Direction::Right), "the winning push was refused");
         assert!(g.is_solved(), "the fixture did not actually solve");
         g
+    }
+
+    /// Games chosen so that between them every key on the list of keys has
+    /// work: the list of levels, a warehouse, a move made (Ctrl+Z, Alt+Z) and
+    /// one taken back (Ctrl+Y, Alt+Shift+Z).
+    fn list_states() -> Vec<Sokoban> {
+        let mut undone = solved();
+        assert!(undone.undo(), "the winning push could not be taken back");
+        vec![game(), playing(), solved(), undone]
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, rather than matched against
+    /// a table beside it here. The property is "some screen answers this
+    /// key": Home is the list's, R the warehouse's.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 28, "only {checked} keystrokes were checked");
+    }
+
+    /// Every string the window paints at the probe's size, joined.
+    fn drawn_texts(g: &Sokoban) -> String {
+        text_commands(&g.draw(SIZE))
+            .into_iter()
+            .map(|(s, ..)| s)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and each footer's first line says how to raise
+    /// it, so a window with room for one line still shows where the rest
+    /// are.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "up before anybody asked"
+        );
+        for line in [SELECT_FOOTER[0], PLAY_FOOTER[0]] {
+            assert!(line.contains("F1"), "{line:?} does not say F1");
+        }
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn_texts(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(
+            !drawn_texts(&g).contains(help::CLOSES),
+            "Escape did not close it"
+        );
+    }
+
+    /// **While the list of keys is up, the screen under it takes nothing**:
+    /// a box pushed under the card would be one the player cannot see. A
+    /// click puts the card away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = playing();
+        probe::key(&mut g, &probe::press(Key::F1));
+        let before = (g.moves, g.current, g.screen, g.player);
+        for key in [Key::Right, Key::D, Key::Z, Key::R, Key::N, Key::Num1] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        let now = (g.moves, g.current, g.screen, g.player);
+        assert_eq!(now, before, "a key reached the warehouse");
+        probe::click_background(&mut g);
+        assert!(!g.show_help, "a click did not put the list away");
+        let now = (g.moves, g.current, g.screen, g.player);
+        assert_eq!(now, before, "the click did something");
+        probe::key(&mut g, &probe::press(Key::F1));
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert!(!g.show_help, "Enter did not put the list away");
     }
 
     fn text_commands(f: &Frame<Target>) -> Vec<(String, f32, f32, f32, FontWeightHint)> {

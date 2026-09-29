@@ -1050,6 +1050,48 @@ MUTATIONS = [
         '                    if true { "yes" } else { "no" }',
         ["the_header_says_which_level_and_how_it_is_going"],
     ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(ev) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(ev) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a key under the list reaches the board',
+        '                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        if help::raises(ev) {',
+        '                self.show_help = false;\n            }\n        }\n        if help::raises(ev) {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        '        if false {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click leaves the list up',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n                self.show_help = false;',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        "the warehouse's footer does not say how to raise the list",
+        '    "Arrows/WASD: move   Z: undo   R: restart   F1: all keys",',
+        '    "Arrows/WASD: move   Z: undo   Ctrl+Y: redo   R: restart",',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
 ]
 
 if __name__ == "__main__":

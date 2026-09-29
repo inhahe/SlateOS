@@ -3593,6 +3593,33 @@ mod tests {
         assert_eq!(h.brackets(&buffer, 2), Brackets::Pair(2, 4));
     }
 
+    /// **Nushell is coloured as its query says**: its keywords, a builtin
+    /// command, a variable, a number, a comment, and a raw string -- read by
+    /// the ported scanner -- as a string between two marks.
+    #[test]
+    fn nushell_is_coloured_as_its_query_says() {
+        let text = "# say how big
+def size-of [path: string] {
+    let total = (ls $path | length)
+    if $total > 10 { r#'big'# } else { 'small' }
+}
+";
+        let spans = highlighted(text, "nushell");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("# say", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("def", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("let", 0), Some(Highlight::Keyword));
+        assert_eq!(at("if", 0), Some(Highlight::Keyword));
+        assert_eq!(at("ls", 0), Some(Highlight::Builtin), "{spans:?}");
+        assert_eq!(at("10", 0), Some(Highlight::Number));
+        // The raw string's text is a string; its `r#'` and `'#` are marks.
+        assert_eq!(at("big", 1), Some(Highlight::String), "{spans:?}");
+        assert_eq!(at("r#'", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("'#", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("'small'", 0), Some(Highlight::String));
+        assert_eq!(at("total", 1), Some(Highlight::Variable), "{spans:?}");
+    }
+
     /// **A linker script is coloured as its query says**: the commands'
     /// keywords, ld's own words, a label, a constant and a variable -- the
     /// query's `#lua-match?` patterns among them.

@@ -414,6 +414,13 @@ fn sql_passes_its_corpus() {
     check("SQL", "sql", 412, &[]);
 }
 
+/// **The Nushell grammar -- tables, lexers and its ported raw-string
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn nushell_passes_its_corpus() {
+    check("Nushell", "nu", 309, &[]);
+}
+
 /// **The PowerShell grammar -- tables, lexers and its ported
 /// statement-end scanner -- parses its whole corpus as upstream's does.**
 #[test]

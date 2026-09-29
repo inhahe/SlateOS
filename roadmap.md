@@ -2071,8 +2071,8 @@ live.
   shell script), C, C++, CSS, diffs (a change's lines in kinds of their
   own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
   systemd units), Java, JavaScript (JSX included), JSON, linker scripts
-  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), PowerShell, Python,
-  Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, TypeScript and TSX (§1441: their query after JavaScript's)
+  (known gaps: `known-issues.md`), Lua, Makefiles, Markdown (block and inline), Nushell (the default shell's scripts),
+  PowerShell, Python, Rust, SQL (PostgreSQL's, MySQL's and SQLite's in one grammar), TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   XML (SVG, XSLT, plists, project files) and YAML (every settings file),
   each passing its authors' test corpus (XML's save one example, which has
   valid XML be an error: `grammars/xml.rs`). **Injections** (a language inside another): a Markdown code fence

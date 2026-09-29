@@ -136,6 +136,12 @@ tree-sitter-markdown:
   texts:
     - tree-sitter-markdown-LICENSE
 
+tree-sitter-nu:
+  version: 0.0.1 (commit 4f577aaa735154f934594b598a69ed7b1b707cf6)
+  licence: MIT
+  texts:
+    - tree-sitter-nu-LICENSE
+
 tree-sitter-powershell:
   version: 0.26.4
   licence: MIT

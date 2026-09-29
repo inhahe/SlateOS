@@ -2014,6 +2014,24 @@ live.
   E:** the Settings picker for the axis and its applications' own fields and
   scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
+- `[-]` `[C]` **A theme sets how the desktop moves, and every moving thing
+  follows it** (`roadmap-detailed.md` → *Tier 3 — Animation Tuning*,
+  `design-decisions.md` §1446) -- the axis done 2026-09-29: a theme's
+  `animation` section (`enabled`; `duration-ms`, the standard transition every
+  one is stated against; `easing`: ease-out, linear or spring), chosen as
+  `theme.animation` apart from the other axes; the user's animation speed
+  scales it, and Off -- like `enabled: false` -- moves nothing. Carried on the
+  palette (`Palette::motion`) to the overview's fade, the notification pane,
+  the on-screen display, auto-hide, the animation manager and the toast
+  daemon, which until now ignored the speed setting outright: Off still faded
+  and slid them. A slide turned round mid-way starts from where it is drawn,
+  under every curve; the taskbar no longer jumps to hidden when the pointer
+  comes back mid-slide. **Lane E:** the Settings picker for the axis
+  (`requests/c-e-a-theme-can-set-the-motion.md`). **Lane F:** window
+  animations, when the compositor has them, take their curve from the
+  palette. **Lane C next:** the toast daemon's colours
+  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`).
+
 - `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
   *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
   chunked buffer with a line index, any file size), `guitk::codeedit`

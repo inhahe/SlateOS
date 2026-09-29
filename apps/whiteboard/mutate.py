@@ -214,6 +214,24 @@ MUTATIONS = [
         "const MAX_UNDO_STEPS: usize = 210;",
         ["test_undo_stack_limit"],
     ),
+    (
+        "a key held with Alt is the board's",
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        "a key held with the Windows key is the board's",
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.alt && !event.modifiers.ctrl {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
+    (
+        'AltGr is taken for Alt',
+        '        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {',
+        '        if event.modifiers.alt || event.modifiers.super_key {',
+        ['a_key_held_with_alt_or_the_windows_key_is_not_the_boards'],
+    ),
 ]
 
 if __name__ == "__main__":

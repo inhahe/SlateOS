@@ -2751,6 +2751,15 @@ impl WhiteboardApp {
             };
         }
 
+        // A key held with Alt alone, or with the Windows key, is not the
+        // board's: Alt's chords are the window's and the Windows key's the
+        // desktop's. They reached the tools -- a chord carries its letter as
+        // text, so Alt+R chose the rectangle -- and the arrows nudged.
+        // AltGr, which arrives as Ctrl+Alt, goes on: what it types is typed.
+        if (event.modifiers.alt && !event.modifiers.ctrl) || event.modifiers.super_key {
+            return false;
+        }
+
         match event.key {
             Key::Delete | Key::Backspace => {
                 if self.selection.is_empty() {
@@ -6573,6 +6582,41 @@ mod tests {
     /// nowhere until this card; the comment above `from_shortcut` said the
     /// toolbar's tooltips read them, and the word "tooltip" appeared exactly
     /// once in this crate, in that sentence.
+    /// **A key held with Alt or the Windows key is not the board's**: Alt+R
+    /// and Windows+E, whose letters a chord carries as text, chose the
+    /// rectangle and the eraser. AltGr goes on: a letter it types is typed.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_is_not_the_boards() {
+        let mut app = board();
+        let held = |key: Key, text: &str, ctrl: bool, alt: bool, win: bool| {
+            let mut modifiers = Modifiers::NONE;
+            modifiers.ctrl = ctrl;
+            modifiers.alt = alt;
+            modifiers.super_key = win;
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_string(),
+            })
+        };
+        let before = app.current_tool;
+        assert!(
+            !app.handle_event(&held(Key::R, "r", false, true, false)),
+            "Alt+R was taken"
+        );
+        assert!(
+            !app.handle_event(&held(Key::E, "e", false, false, true)),
+            "Windows+E was taken"
+        );
+        assert_eq!(app.current_tool, before, "a held key chose a tool");
+        assert!(
+            app.handle_event(&held(Key::E, "e", true, true, false)),
+            "AltGr's e was not typed"
+        );
+        assert_eq!(app.current_tool, Tool::Eraser);
+    }
+
     #[test]
     fn every_tool_letter_is_on_the_card_and_picks_its_tool() {
         let mut app = board();

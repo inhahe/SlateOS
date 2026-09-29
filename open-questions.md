@@ -84,6 +84,68 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## D-Q6 — [D] Some of the C library is translated from glibc, whose licence binds every program the library is built into. Keep it, or rewrite those parts? — Status: OPEN (raised 2026-09-28)
+
+**In short:** to make the C library behave exactly as Linux's (glibc)
+does, several parts of it were written by translating glibc's own source
+code into Rust, line by line -- most recently the Tamil character set,
+the new C23 maths functions and `clog10`. glibc's licence (the LGPL)
+allows that, on a condition: anyone who receives a program containing it
+must be able to rebuild that program with their own copy of the library.
+The C library is built into *every* program on SlateOS, so the condition
+reaches every program, ours and anyone else's. An earlier decision
+(design-decisions.md §1133) assumed the library should stay free of that
+condition and chose other sources for the complex-number functions; the
+translations since have not followed it. Which should hold?
+
+**Terms used below.** *LGPL*: the licence glibc is under -- free to use and
+change, but code derived from it stays under it, and a program containing
+it must let the user swap in their own build of that code. *Statically
+linked*: the library's code is copied into each program, as all programs
+here are today. *Clean-room rewrite*: writing the code again from the
+standards and from glibc's observable behaviour, without its source open --
+the tests that compare us with glibc (glibc as the *oracle*) stay exactly as
+they are, since running a program is not copying it.
+
+What is translated, as far as lane D knows:
+
+| Where | From glibc's | Since |
+|---|---|---|
+| `posix/src/iconv.rs`: the CP1255, CP1258 and TCVN converters' loops | `iconvdata/cp1255.c`, `cp1258.c`, `tcvn5712-1.c` | 2026-09-27, on `main` |
+| `posix/src/iconv.rs`: the T.61 / ISO 6937 / ANSI X3.110 decoder | `iconvdata/t.61.c` and kin | 2026-09-28, on `main` |
+| `posix/src/iconv.rs`: TSCII | `iconvdata/tscii.c` | 2026-09-28, on `main` |
+| `posix/src/c23math.rs`: `nextup` ... `fminimum_mag_num`, `scalbl` | `math/`, `sysdeps/ieee754/*`, `e_scalbl.S` | 2026-09-28, on `main` |
+| `posix/src/narrow.rs`: the narrowing functions' checks | `math/math-narrow.h` | 2026-09-28, on `main` |
+| `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
+
+(The character tables themselves -- which byte means which letter -- are
+facts read from glibc's data files and from running its converters, not
+code; they are not in question. And not everything follows glibc's
+source: the `long double` Bessel functions, `posix/src/besl.rs`, were
+written from the mathematics, with glibc only run to see its answers.)
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Keep the translations; honour the LGPL | The files above say they are LGPL. Every program built on the C library must be re-linkable by its user -- which means shipping the library's object files with the system, or making the C library a shared library (`libc.so`) as design.txt plans for later. Nothing is rewritten. |
+| **B.** Rewrite those parts clean-room; glibc stays the oracle, never the source | The library stays under whatever licence SlateOS chooses, with no condition on programs. The six parts are written again from the standards (C23, IEEE 754, the TSCII and ISO 6937 specifications) and must pass the same glibc-comparison tests they pass now; a rule is written down: glibc may be tested against, not read and copied. |
+| **C.** Decide before the first public release, not now | Work continues as it is; the table above is kept current; before anything is distributed as a binary, A or B is applied. |
+
+**If never answered:** nothing breaks and nothing is distributed yet; the
+cost of B grows with every further translation, and lane D will keep
+translating where glibc is the clearest description of the behaviour
+wanted.
+
+**Claude's recommendation:** **B.** The C library is the one piece of code
+every program contains; keeping it free of conditions is worth a few hours
+of rewriting, and the glibc comparison tests -- the part that actually
+guarantees glibc's behaviour -- stay unchanged, so the rewrites cannot drift
+from what the translations do today. Until you answer, new lane D work is
+written from the standards with glibc as the oracle only.
+
+**Where it bites:** the six places above; `design-decisions.md` §1133 (the
+earlier assumption); and every future port where glibc's behaviour is the
+target.
+
 ## D-Q5 — [D] Chinese, Japanese and Korean text conversion needs about a megabyte of tables. Build them into every program that converts text, or load them from files? — Status: OPEN (raised 2026-09-28)
 
 **In short:** the C library's `iconv` (the function programs call to

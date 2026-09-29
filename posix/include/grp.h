@@ -29,6 +29,9 @@ extern "C" {
 /* fgetgrent into the caller's storage. */
 int fgetgrent_r(FILE *__restrict, struct group *__restrict, char *__restrict, size_t,
                 struct group **__restrict);
+
+/* glibc declares it by default; musl's header only for _GNU_SOURCE. */
+struct group *fgetgrent(FILE *);
 #endif
 
 #ifdef _GNU_SOURCE

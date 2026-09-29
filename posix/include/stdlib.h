@@ -41,6 +41,14 @@ int on_exit(void (*)(int, void *), void *);
 char *canonicalize_file_name(const char *);
 #endif
 
+/* ecvt, fcvt and gcvt: glibc declares them by default, musl's header only
+ * for _GNU_SOURCE. */
+#ifdef _SLATEOS_USE_MISC
+char *ecvt(double, int, int *, int *);
+char *fcvt(double, int, int *, int *);
+char *gcvt(double, int, char *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -59,6 +59,10 @@ int malloc_trim(size_t);
 /* valloc, rounded up to whole pages. */
 void *pvalloc(size_t);
 
+/* realloc of an array, refusing an overflowing size: glibc declares it here
+ * as in <stdlib.h>; musl only there. */
+void *reallocarray(void *, size_t, size_t);
+
 #ifdef __cplusplus
 }
 #endif

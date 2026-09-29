@@ -41,6 +41,12 @@ int getprotobynumber_r(int, struct protoent *__restrict, char *__restrict, size_
 int getservent_r(struct servent *__restrict, char *__restrict, size_t, struct servent **__restrict);
 #endif
 
+/* The obsolete lookups, which POSIX.1-2008 dropped: glibc declares them
+ * whatever the feature macros ask for, musl's header not for POSIX.1-2008
+ * alone or strict ISO C. */
+struct hostent *gethostbyname(const char *);
+struct hostent *gethostbyaddr(const void *, socklen_t, int);
+
 #ifdef __cplusplus
 }
 #endif

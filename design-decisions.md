@@ -42784,6 +42784,15 @@ non-portable mutex names only the aliases of musl's own types are there
 (`PTHREAD_MUTEX_RECURSIVE_NP` ...), since this library has no adaptive
 mutex and its initialisers are musl's.
 
+**Widened too (2026-09-29, the same day):** where musl's own headers declare
+a name `libc.a` defines under narrower feature macros than glibc's --
+`fgetpwent` and `mempcpy` only for `_GNU_SOURCE` where glibc gives them by
+default, `strdup` and `gmtime_r` not for C23, which made them ISO C -- the
+overlay declares it again under glibc's (31 names; a redundant declaration
+of the same type is legal C), and the gate holds those to glibc's headers as
+it does the rest. `posix/tools/oracle/header_audit.py` finds them
+(known-issues.md -> D-POSIX-MUSL-HEADERS-DECLARE-NARROWER-THAN-GLIBCS).
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

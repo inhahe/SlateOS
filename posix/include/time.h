@@ -32,6 +32,20 @@ time_t timelocal(struct tm *);
 int getdate_r(const char *__restrict, struct tm *__restrict);
 #endif
 
+/* C23 made these ISO C; musl's header has them only for POSIX, and timegm
+ * for BSD. */
+#ifdef _SLATEOS_USE_C23
+struct tm *gmtime_r(const time_t *__restrict, struct tm *__restrict);
+struct tm *localtime_r(const time_t *__restrict, struct tm *__restrict);
+time_t timegm(struct tm *);
+#endif
+
+#ifdef _GNU_SOURCE
+struct timex;
+/* adjtimex on a clock: glibc declares it here, musl in <sys/timex.h>. */
+int clock_adjtime(clockid_t, struct timex *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

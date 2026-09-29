@@ -182,6 +182,20 @@ float       fminmagf(float, float);
 long double fminmagl(long double, long double);
 #endif
 
+/* 10 to a power: C23's, and ISO/IEC TS 18661-4's before it; musl's header
+ * has them only for _GNU_SOURCE. */
+#if defined(_SLATEOS_USE_C23) || defined(__STDC_WANT_IEC_60559_FUNCS_EXT__)
+double      exp10(double);
+float       exp10f(float);
+long double exp10l(long double);
+#endif
+
+/* lgammal with the sign of Gamma through its pointer, as lgamma_r: glibc
+ * declares it by default, musl's header only for _GNU_SOURCE. */
+#ifdef _SLATEOS_USE_MISC
+long double lgammal_r(long double, int *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

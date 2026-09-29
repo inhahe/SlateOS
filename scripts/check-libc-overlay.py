@@ -21,9 +21,11 @@ What it checks
    a program, as musl's are, and their warnings not its business;
    `_SLATEOS_OVERLAY_WARNINGS` makes them ordinary ones here, to be held to
    these warnings themselves.
-2. **The overlay declares exactly the reference's names**: nothing glibc 2.39
-   does not declare (a name no glibc program expects is a name a program may
-   itself be using), and nothing the reference lists that the overlay has
+2. **The overlay declares exactly the reference's names** -- those it adds to
+   musl's headers, and those musl's headers declare under narrower feature
+   macros than glibc's, which it declares again under glibc's: nothing glibc
+   2.39 does not declare (a name no glibc program expects is a name a program
+   may itself be using), and nothing the reference lists that the overlay has
    lost.
 3. **Each name is declared where glibc declares it** -- after including the
    header glibc declares it in, in exactly the CONFIGS glibc's is (KNOWN
@@ -118,6 +120,8 @@ TYPE_NAMES = {"__sigset_t": "sigset_t"}
 
 # How clang says a name is not declared -- for a library function it knows
 # the type of, "undeclared library function".
+# ... and that a word is a type's name, not an object's or a function's.
+TYPE_NAME = re.compile(r"unexpected type name '(\w+)'")
 UNDECLARED = re.compile(
     r"(?:use of undeclared identifier|call to undeclared (?:library )?function) '(\w+)'")
 FAILED_ASSERT = re.compile(r"@(\w+)@")
@@ -174,7 +178,7 @@ def visible(zig: str, header: str | list[str], names: list[str], flags: list[str
     missing = set()
     other = []
     for line in errors_of(diag):
-        m = UNDECLARED.search(line)
+        m = UNDECLARED.search(line) or TYPE_NAME.search(line)
         if m:
             missing.add(m.group(1))
         else:
@@ -228,13 +232,10 @@ def candidates(overlay: Path) -> list[str]:
 
 
 def overlay_names(zig: str, overlay: Path) -> set[str]:
-    """The names the overlay declares that musl's headers alone do not."""
-    heads = overlay_headers(overlay)
-    musl_heads = [h for h in heads if (musl_include(zig) / h).exists()]
-    cands = candidates(overlay)
-    with_overlay = visible(zig, heads, cands, WIDEST, overlay)
-    without = visible(zig, musl_heads, cands, WIDEST, None)
-    return with_overlay - without
+    """The names the overlay's own text declares: those it adds to musl's
+    headers, and those it declares under wider feature macros than musl's
+    headers do (glibc's, which musl's are narrower than for some)."""
+    return visible(zig, overlay_headers(overlay), candidates(overlay), WIDEST, overlay)
 
 
 def read_reference(path: Path) -> dict[str, tuple[str, frozenset[str], str]]:

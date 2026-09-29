@@ -49,6 +49,19 @@
 #define _SLATEOS_USE_IEC_60559_EXT 1
 #endif
 
+/* glibc's __USE_XOPEN2K8: POSIX.1-2008, which glibc's default includes (as
+ * musl's default _BSD_SOURCE stands for here). */
+#if defined(_SLATEOS_USE_MISC) || (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE + 0 >= 200809L) \
+    || (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE + 0 >= 700)
+#define _SLATEOS_USE_POSIX2008 1
+#endif
+
+/* __USE_XOPEN2K8XSI: its X/Open System Interfaces, which _GNU_SOURCE asks for
+ * in glibc. */
+#if defined(_GNU_SOURCE) || (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE + 0 >= 700)
+#define _SLATEOS_USE_XSI2008 1
+#endif
+
 /* The attributes glibc's declarations carry that change what a compiler says
  * about a call: a deprecation, and a printf format to check the arguments
  * against. */

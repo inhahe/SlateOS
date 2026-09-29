@@ -30,6 +30,10 @@ extern "C" {
 int fgetpwent_r(FILE *__restrict, struct passwd *__restrict, char *__restrict, size_t,
                 struct passwd **__restrict);
 int getpwent_r(struct passwd *__restrict, char *__restrict, size_t, struct passwd **__restrict);
+
+/* glibc declares these by default; musl's header only for _GNU_SOURCE. */
+struct passwd *fgetpwent(FILE *);
+int putpwent(const struct passwd *, FILE *);
 #endif
 
 #ifdef __cplusplus

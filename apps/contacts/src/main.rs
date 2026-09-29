@@ -4847,19 +4847,26 @@ impl ContactsApp {
         // `Ctrl` pair is handled -- never sees the keys that dismiss it. The
         // first version of this went there and `Escape` could not close the
         // card.
-        if event.key == Key::F1 {
+        //
+        // Every key but the Ctrl chords below and what is typed is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's, and arrives carrying its key -- Alt+N started a new
+        // contact, Alt+Delete deleted one and Alt+Enter saved the form.
+        let plain = textline::is_plain(event.modifiers);
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return;
         }
         if self.show_help {
             // Modal. Letting keys through would mean deleting a contact the
             // reader cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return;
         }
         match event.key {
+            _ if !plain => {}
             Key::Escape => {
                 if self.focus == Focus::None {
                     self.view = DetailView::Empty;
@@ -4903,9 +4910,12 @@ impl ContactsApp {
         // Printable text. `KeyEvent::text` is what the platform's keyboard
         // layout produced, shift and dead keys included; deriving a character
         // from the key code instead is what made a `+` impossible to type on
-        // any layout but the one the table was written for.
-        let typed = event.text.clone();
-        if !typed.is_empty() && !typed.chars().any(char::is_control) {
+        // any layout but the one the table was written for. Typed, not a
+        // command's letter -- a chord carries its letter as text, and Ctrl+S
+        // in a field typed an `s` instead of keeping the book -- and AltGr's
+        // characters among it.
+        if textline::types_into_field(event) {
+            let typed = event.text.clone();
             match self.focus {
                 Focus::Search => {
                     self.search_query.push_str(&typed);
@@ -4922,8 +4932,10 @@ impl ContactsApp {
 
         // The two that take a modifier come first: a guard on an or-pattern
         // applies to the whole of it, and `S` and `O` are already taken
-        // unmodified by Search and Cycle sort.
-        if event.modifiers.ctrl {
+        // unmodified by Search and Cycle sort. A Ctrl chord, not Ctrl held:
+        // AltGr arrives as Ctrl+Alt, and AltGr+S -- a Polish `ś` -- kept the
+        // book rather than typing.
+        if textline::is_ctrl_chord(event.modifiers) {
             match event.key {
                 // The book is kept as it changes, so there is nothing for
                 // Ctrl+S to save -- but it is the key people press to make
@@ -4941,7 +4953,10 @@ impl ContactsApp {
             return;
         }
 
-        // Nothing has the keyboard, so letters are shortcuts.
+        // Nothing has the keyboard, so letters are shortcuts -- plain ones.
+        if !plain {
+            return;
+        }
         match event.key {
             Key::N => self.start_new_contact(),
             Key::S => self.activate(Target::Search),
@@ -9547,6 +9562,60 @@ mod tests {
 
     fn press(app: &mut ContactsApp, key: Key) {
         app.handle_event(&key_event(key, false, ""), SIZE);
+    }
+
+    /// **A chord is neither a contacts key nor typing, and AltGr types**:
+    /// Alt+N started a new contact, Alt+Delete deleted the one showing and
+    /// Alt+Enter saved the form; in a field Ctrl+S typed an `s` rather than
+    /// keeping the book and Alt+W typed a `w`; and AltGr+S -- a Polish `ś` --
+    /// was taken for Ctrl+S.
+    #[test]
+    fn a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let held = |key: Key, text: &str, modifiers: Modifiers| {
+            Event::Key(KeyEvent {
+                key,
+                pressed: true,
+                modifiers,
+                text: text.to_owned(),
+            })
+        };
+        let mut app = ContactsApp::new();
+        let id = app.store.add_contact(Contact::new(0, "Ada", "Lovelace"));
+        app.view = DetailView::ViewContact(id);
+        for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [Key::N, Key::Delete, Key::E, Key::Escape, Key::F1, Key::Tab] {
+                app.handle_event(&held(key, "", m), SIZE);
+            }
+        }
+        assert_eq!(app.store.contact_count(), 1, "a chord deleted the contact");
+        assert_eq!(
+            app.view,
+            DetailView::ViewContact(id),
+            "a chord changed the view"
+        );
+        assert_eq!(app.focus, Focus::None, "a chord gave a field the keys");
+        assert!(!app.show_help, "a chord raised the keys");
+
+        // A new contact's form: chords type nothing and do not save it;
+        // AltGr's `ś` is typed; Ctrl+S keeps the book rather than typing.
+        press(&mut app, Key::N);
+        assert_eq!(app.focus, Focus::Field(FormField::FirstName));
+        app.handle_event(&held(Key::W, "w", Modifiers::alt()), SIZE);
+        app.handle_event(&held(Key::W, "w", Modifiers::super_key()), SIZE);
+        app.handle_event(&held(Key::Enter, "", Modifiers::alt()), SIZE);
+        assert_eq!(app.store.contact_count(), 1, "Alt+Enter saved the form");
+        app.handle_event(&held(Key::S, "ś", altgr), SIZE);
+        app.handle_event(&held(Key::S, "s", Modifiers::ctrl()), SIZE);
+        assert_eq!(
+            app.edit_first_name, "ś",
+            "the field typed a command or lost AltGr's ś"
+        );
+        assert!(!app.picker.is_open(), "a key opened a dialog");
     }
 
     fn typed_in(app: &mut ContactsApp, text: &str) {

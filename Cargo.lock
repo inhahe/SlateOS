@@ -610,6 +610,7 @@ dependencies = [
  "safeio",
  "settingsfile",
  "textfmt",
+ "textline",
  "unsaved",
 ]
 

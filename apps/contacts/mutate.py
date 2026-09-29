@@ -576,6 +576,36 @@ MUTATIONS = [
         "",
         ["ctrl_s_says_where_the_book_is_kept", "every_advertised_key_does_something"],
     ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works Escape, Tab, Backspace and Enter',
+        '            _ if !plain => {}\n',
+        '',
+        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        "a command's letter is typed",
+        '        if textline::types_into_field(event) {',
+        '        if event.types_text() {',
+        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl {',
+        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
+    (
+        'a chord works the letter shortcuts',
+        '        if !plain {\n            return;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_contacts_key_nor_typing_and_altgr_types'],
+    ),
 ]
 
 if __name__ == "__main__":

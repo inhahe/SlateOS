@@ -1764,6 +1764,23 @@ impl EbookApp {
         }
     }
 
+    /// Read the theme again after the desktop said `ebook.yaml` changed --
+    /// chosen in another window, or a hand edit (§1418, §1434). A reader that
+    /// keeps nothing reads nothing either, as at startup; a theme this does
+    /// not know is said, as at startup. Whether anything changed.
+    fn reread_theme(&mut self) -> bool {
+        if !self.keeps_settings {
+            return false;
+        }
+        let (theme, problem) = stored_theme(&settingsfile::load(CONFIG_NAME));
+        let mut changed = std::mem::replace(&mut self.theme, theme) != theme;
+        if let Some(problem) = problem {
+            changed |= self.status != problem;
+            self.status = problem;
+        }
+        changed
+    }
+
     /// Get current theme colors.
     pub fn theme_colors(&self) -> ThemeColors {
         ThemeColors::from_kind(self.theme, &self.palette)
@@ -3441,6 +3458,16 @@ impl App for EbookApp {
             }
             Event::Mouse(mouse) => {
                 if self.handle_mouse_event(mouse) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            // The theme chosen in another window, and the desktop says so:
+            // this window follows. Read at startup only, it kept the theme it
+            // opened with until it was opened again.
+            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {
+                if self.reread_theme() {
                     Response::Redraw
                 } else {
                     Response::Idle
@@ -6180,6 +6207,79 @@ mod tests {
                 !dir.join("slateos").join("ebook.yaml").exists(),
                 "a reader that keeps nothing wrote its theme"
             );
+        });
+    }
+
+    /// What the desktop sends every window when `name.yaml` changed.
+    fn announce(name: &[u8]) -> Event {
+        Event::SettingsChanged {
+            group: guitk::event::SettingsGroup::Program(
+                guitk::event::SettingsName::new(name).expect("a settings name"),
+            ),
+        }
+    }
+
+    /// **The theme chosen in one window reaches the others**, when the
+    /// desktop says `ebook.yaml` changed (§1434): read at startup only, the
+    /// others kept the theme they opened with. Another program's announcement
+    /// is not this one's; a window's own choice announced back changes
+    /// nothing; a theme written by hand that this does not know is said; a
+    /// deleted file gives the desktop's theme.
+    #[test]
+    fn the_theme_chosen_in_one_window_reaches_the_others() {
+        settingsfile::testing::with_scratch_config("ebook-theme-reread", |dir| {
+            let mut first = EbookApp::new();
+            let mut second = EbookApp::new();
+            first.toggle_theme();
+            assert_eq!(first.theme, ThemeKind::Sepia);
+
+            assert!(matches!(
+                second.on_event(&announce(b"notes")),
+                Response::Idle
+            ));
+            assert_eq!(second.theme, ThemeKind::System, "another file was read");
+            assert!(matches!(
+                second.on_event(&announce(b"ebook")),
+                Response::Redraw
+            ));
+            assert_eq!(second.theme, ThemeKind::Sepia, "the theme did not reach it");
+            assert!(
+                matches!(first.on_event(&announce(b"ebook")), Response::Idle),
+                "a window's own choice, announced back, changed it"
+            );
+
+            let file = dir.join("slateos").join("ebook.yaml");
+            std::fs::write(&file, "theme: purple\n").expect("write the file");
+            assert!(matches!(
+                second.on_event(&announce(b"ebook")),
+                Response::Redraw
+            ));
+            assert_eq!(second.theme, ThemeKind::System);
+            assert!(second.status.contains("purple"), "{:?}", second.status);
+
+            std::fs::remove_file(&file).expect("delete the file");
+            first.on_event(&announce(b"ebook"));
+            assert_eq!(
+                first.theme,
+                ThemeKind::System,
+                "a deleted file kept its theme"
+            );
+        });
+    }
+
+    /// A reader a test builds keeps no theme, so it follows none either: the
+    /// developer's own `ebook.yaml` is not what a test reads.
+    #[test]
+    fn a_reader_a_test_builds_follows_no_theme() {
+        settingsfile::testing::with_scratch_config("ebook-theme-reread-quiet", |_| {
+            let mut kept = EbookApp::new();
+            kept.toggle_theme();
+            let mut quiet = EbookApp::with_shelf(None);
+            assert!(matches!(
+                quiet.on_event(&announce(b"ebook")),
+                Response::Idle
+            ));
+            assert_eq!(quiet.theme, ThemeKind::System);
         });
     }
 

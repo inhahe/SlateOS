@@ -202,6 +202,48 @@ MAIN = [
         "                    if false {",
         [BUTTON],
     ),
+    (
+        'an announced theme is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        "every program's announcement is read as the reader's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a reader that keeps nothing follows the file',
+        '        if !self.keeps_settings {\n            return false;\n        }\n        let (theme, problem)',
+        '        let (theme, problem)',
+        ['a_reader_a_test_builds_follows_no_theme'],
+    ),
+    (
+        'a re-read keeps the theme it had',
+        '        let mut changed = std::mem::replace(&mut self.theme, theme) != theme;',
+        '        let mut changed = self.theme != theme;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a theme written by hand that the reader does not know is not said',
+        '            changed |= self.status != problem;\n            self.status = problem;',
+        '            changed |= self.status != problem;',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed && false\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
+    (
+        'a re-read always says it changed',
+        '        changed\n    }\n\n    /// Get current theme colors.',
+        '        changed || true\n    }\n\n    /// Get current theme colors.',
+        ['the_theme_chosen_in_one_window_reaches_the_others'],
+    ),
 ]
 
 TABLES = {

@@ -10,6 +10,12 @@ pathtext = { path = "../pathtext" }
 # apps/explorer and apps/settings each spelled the group name themselves. See
 # gui/associations/src/lib.rs.
 associations = { path = "../../gui/associations" }
+# The programs SlateOS knows, the types each opens and what opens a type
+# before anyone chooses (C-Q20, design-decisions §1425): this program's own
+# list of eight and its defaults by group were a second copy of it.
+programs = { path = "../../gui/programs" }
+# The installed programs' desktop entries, read as the start menu reads them.
+desktopentry = { path = "../../gui/desktopentry" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

@@ -204,6 +204,23 @@ MUTATIONS = [
         "                Key::Z if event.modifiers.shift => {\n                    self.undo();",
         ["ctrl_shift_z_redoes"],
     ),
+    (
+        "the history keeps ten actions more",
+        "const UNDO_STACK_LIMIT: usize = 200;",
+        "const UNDO_STACK_LIMIT: usize = 210;",
+        ["test_undo_manager_limit"],
+    ),
+    (
+        "undo on an empty history claims an action",
+        "        let action = self.history.undo()?;",
+        "        let action = self.history.undo().or(Some(UndoAction::CellEdit {\n"
+        "            sheet_idx: 0,\n"
+        "            addr: CellAddr::new(0, 0),\n"
+        "            old_cell: Cell::empty(),\n"
+        "            new_cell: Cell::empty(),\n"
+        "        }))?;",
+        ["test_undo_manager_limit"],
+    ),
 ]
 
 if __name__ == "__main__":

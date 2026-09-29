@@ -9846,8 +9846,12 @@ mod tests {
 
     #[test]
     fn test_undo_manager_limit() {
+        // Written out, not read from `UNDO_STACK_LIMIT`: a test that counts
+        // to the constant it checks counts to whatever the constant becomes
+        // (`known-issues.md` lesson 52).
+        const CAP: usize = 200;
         let mut um = UndoManager::new();
-        for i in 0..UNDO_STACK_LIMIT + 50 {
+        for i in 0..CAP + 50 {
             um.push_action(UndoAction::CellEdit {
                 sheet_idx: 0,
                 addr: CellAddr::new(i % 26, 0),
@@ -9855,12 +9859,13 @@ mod tests {
                 new_cell: Cell::empty(),
             });
         }
-        // The history keeps no count; counted by taking them all back.
+        // The history keeps no count; counted by taking them all back --
+        // bounded, for an undo that never ran out would hang the suite.
         let mut kept = 0;
-        while um.pop_undo().is_some() {
+        while kept <= CAP + 50 && um.pop_undo().is_some() {
             kept += 1;
         }
-        assert_eq!(kept, UNDO_STACK_LIMIT);
+        assert_eq!(kept, CAP);
     }
 
     // -- SpreadsheetApp tests --

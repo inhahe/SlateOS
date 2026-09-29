@@ -272,7 +272,9 @@ pub enum NotifPriority {
 }
 
 impl NotifPriority {
-    fn accent_color(self, p: &Palette) -> Color {
+    /// The stripe that marks a notification's priority, on its card here
+    /// and on its toast (`crate::toasts`).
+    pub(crate) fn accent_color(self, p: &Palette) -> Color {
         match self {
             Self::Low => p.overlay0,
             Self::Normal => p.blue,
@@ -1029,6 +1031,18 @@ impl NotificationPane {
     pub fn set_quick_setting(&mut self, setting: QuickSetting, value: bool) {
         if self.quick_settings.get(setting) != value {
             self.quick_settings.toggle(setting);
+        }
+    }
+
+    /// Mark the notification `id` read -- it was opened somewhere other than
+    /// its card here, from its toast. Answers whether there was one.
+    pub fn mark_read(&mut self, id: u64) -> bool {
+        match self.notifications.iter_mut().find(|n| n.id == id) {
+            Some(notif) => {
+                notif.read = true;
+                true
+            }
+            None => false,
         }
     }
 

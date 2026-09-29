@@ -128,6 +128,7 @@ pub mod startup_settings;
 pub mod storage_settings;
 pub mod taskbar;
 pub mod taskbar_autohide;
+pub mod toasts;
 pub mod touchpad;
 pub mod tray_dnd;
 pub mod update_settings;
@@ -2256,6 +2257,11 @@ pub struct DesktopShell {
     /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
     /// open flag. See `design-decisions.md` §493.
     pub notifications: notif_pane::NotificationPane,
+    /// The notifications popping up as they arrive, beside the pane that
+    /// holds them: [`notify`](Self::notify) files a notification in the pane
+    /// and shows it here (design-decisions §1447). Placed against the screen
+    /// and the taskbar on use (`sync_toast_place`), like the overlays.
+    pub toasts: toasts::ToastStack,
     /// Whether — and how much — notifications are being silenced right now.
     ///
     /// The single truth for Do Not Disturb. The pane's two quick-setting
@@ -2728,6 +2734,7 @@ impl DesktopShell {
             system_zone: Tz::utc(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
+            toasts: toasts::ToastStack::new(),
             focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
@@ -2814,6 +2821,7 @@ impl DesktopShell {
         // slide in progress lands where it was going.
         let motion = guitk::palette::PaletteSource::motion(&appearance);
         self.notifications.set_motion(motion);
+        self.toasts.set_motion(motion);
         self.osd.set_motion(motion);
         if motion.is_still() {
             self.overview.end_fade();
@@ -11213,6 +11221,10 @@ impl DesktopShell {
         // The pane's scrim dims the whole screen behind it, so a card left open
         // under it would be a card the user cannot read.
         self.shortcut_card_open = false;
+        // And the toasts go at once: what they show is in the pane, in front
+        // of the user, and a toast left over the pane's edge would cover a
+        // card of its own notification.
+        self.toasts.clear();
         self.notifications.show();
     }
 
@@ -11318,7 +11330,94 @@ impl DesktopShell {
             self.focus.record_suppressed();
             notif.silent = true;
         }
-        self.notifications.push_notification(notif)
+        // Popped up as it arrives -- unless silenced, which is exactly "do
+        // not show me", or unless the pane is open, where it is in front of
+        // the user already. The toast carries the id the pane files it
+        // under, so opening one marks the other read.
+        let pop_up =
+            (!notif.silent && !self.notifications.pane_state().is_visible()).then(|| notif.clone());
+        let id = self.notifications.push_notification(notif);
+        if let Some(mut shown) = pop_up {
+            shown.id = id;
+            self.toasts.show(&shown);
+        }
+        id
+    }
+
+    /// Put the toasts against the right edge of the screen, above the
+    /// taskbar. Pull-on-use, as [`sync_osd_screen`](Self::sync_osd_screen)
+    /// is and for its reason: the screen's size and the bar's thickness are
+    /// public fields anything may change.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a display dimension is exact in f32 for every size hardware produces"
+    )]
+    fn sync_toast_place(&mut self) {
+        let floor = self.taskbar_rect().y;
+        self.toasts.place(self.screen_width as f32, floor);
+    }
+
+    /// Advance the toasts by one frame's worth of time: their slides, their
+    /// settling, and their time on screen.
+    pub fn advance_toasts(&mut self, dt_ms: u64) {
+        self.sync_toast_place();
+        self.toasts.tick(dt_ms);
+    }
+
+    /// Where the toasts need to be drawn, in screen coordinates -- the surface
+    /// the session shows them on is this -- or `None` when none is showing.
+    pub fn toast_extent(&mut self) -> Option<Rect> {
+        self.sync_toast_place();
+        self.toasts.extent()
+    }
+
+    /// Draw the toasts, in screen coordinates, if any are showing.
+    #[must_use]
+    pub fn render_toasts(&self) -> Option<RenderTree> {
+        if !self.toasts.is_showing() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(
+            self.toasts
+                .render(&Palette::from_settings(&self.appearance)),
+        );
+        Some(tree)
+    }
+
+    /// A pointer event on the toasts' surface, in screen coordinates.
+    ///
+    /// A press on a toast opens its notification -- marks it read in the pane
+    /// and, when it names a program, asks for that program, as a press on its
+    /// card in the pane does -- and a press on its close button just closes
+    /// it, leaving the notification unread in the pane. Either way the toast
+    /// goes. A press between toasts is the stack's surface and nothing
+    /// else's, and is consumed.
+    pub fn handle_toast_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        self.sync_toast_place();
+        self.toasts.handle_mouse(event);
+        let mut launch = None;
+        for event in self.toasts.take_events() {
+            match event {
+                toasts::ToastEvent::Opened(id) => {
+                    self.notifications.mark_read(id);
+                    launch = self
+                        .notifications
+                        .notifications()
+                        .iter()
+                        .find(|n| n.id == id)
+                        .and_then(|n| n.action.clone())
+                        .or(launch);
+                }
+                toasts::ToastEvent::Closed(_) => {}
+            }
+        }
+        match launch {
+            // `PathBuf::from` at the edge, for `handle_mouse`'s reason: a
+            // notification's program comes from its sender as text.
+            Some(path) => ShellAction::Launch(hotkeys::Launch::program(PathBuf::from(path))),
+            None => ShellAction::Consumed,
+        }
     }
 
     /// Push the focus manager's mode back onto the pane's two switches.
@@ -11399,6 +11498,7 @@ impl DesktopShell {
                 // program the notification points at. A card with no action is
                 // a message, and reading it is the whole of the interaction.
                 NotifPaneEvent::NotificationClicked(id) => {
+                    self.toasts.forget(id);
                     // Last one wins, which is the same rule the mouse path
                     // already follows: one press produces at most one click
                     // event, so a second can only come from a drain that was
@@ -11425,9 +11525,10 @@ impl DesktopShell {
                 // closing. They are drained so the buffer stays bounded, and
                 // matched by name so that adding a variant is a compile error
                 // here rather than a silent no-op.
-                NotifPaneEvent::NotificationDismissed(_)
-                | NotifPaneEvent::ClearAll
-                | NotifPaneEvent::Closed => {}
+                // Its toast, if it has one, goes with it.
+                NotifPaneEvent::NotificationDismissed(id) => self.toasts.forget(id),
+                NotifPaneEvent::ClearAll => self.toasts.clear(),
+                NotifPaneEvent::Closed => {}
             }
         }
         launch

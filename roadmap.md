@@ -2014,6 +2014,21 @@ live.
   E:** the Settings picker for the axis and its applications' own fields and
   scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
+- `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
+  open question C-Q32) -- the shell's half done 2026-09-29: every
+  notification the desktop files pops up at the bottom-right corner above
+  the taskbar for a few seconds (low 4, normal 6, high 10; urgent until
+  closed), the pointer holding them, at most three stacked with the newest
+  nearest the bell; a press opens it (read, its program started), its close
+  button leaves it unread in the pane; nothing while Do Not Disturb silences
+  it, while the pane is open, or at the login screen. They slide along the
+  desktop's motion and wake the desktop once when their time is up, not
+  every frame. On a surface of their own the size of the stack, so a press
+  beside a toast reaches the window under it. **Next:** programs cannot send
+  a notification yet -- the channel is lane F's or lane D's to build, asked
+  for once C-Q32 settles which of the two notification systems stays (the
+  separate `gui/notifications` program is started by nothing).
+
 - `[-]` `[C]` **A theme sets how the desktop moves, and every moving thing
   follows it** (`roadmap-detailed.md` → *Tier 3 — Animation Tuning*,
   `design-decisions.md` §1446) -- the axis done 2026-09-29: a theme's

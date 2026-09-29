@@ -249,24 +249,27 @@ fn centre(r: Rect) -> (f32, f32) {
 // ---- the surfaces ----
 
 #[test]
-fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
+fn the_shell_opens_a_background_a_panel_a_menu_a_notifications_and_an_overlay_surface() {
     let (session, desktop, _turn) = session();
     let specs = created(&desktop);
-    assert_eq!(specs.len(), 5, "a shell is five surfaces, not one");
+    assert_eq!(specs.len(), 6, "a shell is six surfaces, not one");
 
     // The band each one is in is the load-bearing part: a taskbar in
     // `Layer::Normal` vanishes behind the first window the user opens.
     assert_eq!(specs[0].layer, oswindow::Layer::Background);
-    assert_eq!(specs[1].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[2].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[3].layer, oswindow::Layer::Overlay);
-    assert_eq!(specs[4].layer, oswindow::Layer::Overlay);
+    for spec in &specs[1..] {
+        assert_eq!(spec.layer, oswindow::Layer::Overlay, "{}", spec.title);
+    }
 
-    // The login screen is created *last* of the five, which is what puts it
-    // above the other three within the band. Order is the only thing that says
+    // The login screen is created *last* of the six, which is what puts it
+    // above the others within the band. Order is the only thing that says
     // so -- there is no layer above `Overlay` -- so it is asserted here rather
-    // than left to the reading order of `start`.
-    assert_eq!(specs[4].title, "Login");
+    // than left to the reading order of `start`. The notifications' surface
+    // comes after the menus' and before the overlays': a toast pops up over an
+    // open menu, and a volume report is read over a toast.
+    assert_eq!(specs[5].title, "Login");
+    assert_eq!(specs[3].title, "Notifications");
+    assert_eq!(specs[4].title, "Shell overlays");
 
     // None of them is a window in the ordinary sense.
     for spec in &specs {
@@ -285,8 +288,11 @@ fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     assert_eq!(specs[1].height, bar.h.round() as u32);
     assert_eq!((specs[0].width, specs[0].height), (2560, 1440));
     assert_eq!((specs[2].width, specs[2].height), (2560, 1440));
-    assert_eq!((specs[3].width, specs[3].height), (2560, 1440));
     assert_eq!((specs[4].width, specs[4].height), (2560, 1440));
+    assert_eq!((specs[5].width, specs[5].height), (2560, 1440));
+    // The notifications' surface is as big as the stack of toasts on it, and
+    // there are none yet.
+    assert_eq!((specs[3].width, specs[3].height), (1, 1));
 
     // And the origins the session will translate by say the same thing.
     assert_eq!(session.background().origin(), (0.0, 0.0));
@@ -313,9 +319,10 @@ fn only_the_overlay_surface_refuses_the_mouse() {
         .map(|s| s.title.as_str())
         .collect();
     assert_eq!(click_through, ["Shell overlays"]);
-    // And it is the last one created, so it is above the menus: an overlay is a
-    // report, and a report under the start menu is a report nobody reads.
-    assert!(specs[3].input_transparent);
+    // And it is created after the menus and the toasts, so it is above them:
+    // an overlay is a report, and a report under the start menu is a report
+    // nobody reads.
+    assert!(specs[4].input_transparent);
 }
 
 /// **What the settings watch reports is announced to every window, each file
@@ -4695,6 +4702,16 @@ fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
     session
         .wallpaper_mut()
         .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    // The harness refuses *every* request once told to, where a compositor
+    // refuses the one upload over its budget. The notice the refusal posts
+    // would pop up, and moving the toasts' surface into place is a request a
+    // real compositor grants and this harness refuses -- so the notice is
+    // kept quiet, which files it in the pane and shows nothing, and the test
+    // stays about the upload.
+    session
+        .shell_mut()
+        .focus
+        .set_mode(crate::focus_assist::FocusMode::TotalSilence);
     desktop.borrow_mut().refuse = Some("image budget exhausted".to_string());
 
     session
@@ -7574,4 +7591,221 @@ fn an_appearance_change_drops_the_icons_and_the_next_frame_sends_new_ones() {
             );
         }
     });
+}
+
+// ============================================================================
+// Notifications pop up (design-decisions 1447)
+// ============================================================================
+
+/// A notification from `app`, with `action` to launch when it is opened.
+fn toast_notif(app: &str, action: Option<&str>) -> crate::notif_pane::Notification {
+    crate::notif_pane::Notification {
+        id: 0,
+        app_name: app.to_owned(),
+        title: format!("From {app}"),
+        body: String::from("Something happened."),
+        timestamp: 0,
+        priority: crate::notif_pane::NotifPriority::Normal,
+        read: false,
+        action: action.map(str::to_owned),
+        silent: false,
+    }
+}
+
+/// A press at `(x, y)` on the screen, delivered to the toasts' surface in its
+/// own coordinates -- as the compositor would deliver it.
+fn press_toasts_at(session: &mut Session, x: f32, y: f32) {
+    let surface = session.toasts;
+    let (ox, oy) = surface.origin();
+    deliver(
+        session,
+        surface.window(),
+        guitk::event::Event::Mouse(guitk::event::MouseEvent {
+            x: x - ox,
+            y: y - oy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }),
+    );
+}
+
+/// **A notice the desktop posts pops up, slides in, waits its time without
+/// waking the desktop every frame, and goes** -- and the toasts' surface is
+/// mapped exactly while there is a toast.
+#[test]
+fn a_notice_pops_up_and_goes_by_itself() {
+    let (mut session, _desktop, _turn) = session();
+    let panel = session.panel().window();
+    assert!(!session.toasts_shown, "a surface up with no toast on it");
+
+    session.post_desktop_notice("Wallpaper could not be shown", "It is not a picture.");
+    session.finish_batch().expect("paint");
+    assert_eq!(session.shell().toasts.ids().len(), 1, "nothing popped up");
+    assert!(session.toasts_shown, "the toasts' surface was not mapped");
+    assert!(
+        session.events_mut().is_waking(panel),
+        "no frame for the slide"
+    );
+
+    // The slide in, then nothing moves: the next wake-up is the toast's time.
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.is_moving());
+    assert!(
+        session.events_mut().is_waking(panel),
+        "nothing woke the desktop for the toast's time to come up"
+    );
+    // Its time comes up: it slides out, and the surface goes with it.
+    frame(&mut session, 6_000);
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.is_showing(), "the toast never left");
+    assert!(
+        !session.toasts_shown,
+        "the surface stayed up with nothing on it"
+    );
+    // It is still in the pane, unread.
+    assert_eq!(session.shell().notifications.unread_count(), 1);
+}
+
+/// **The toasts' surface is exactly the stack**: where the shell says the
+/// toasts need to be drawn, at a whole pixel, and what is drawn on it is
+/// translated by that.
+#[test]
+fn the_toasts_surface_is_exactly_the_stack() {
+    let (mut session, _desktop, _turn) = session();
+    session.post_desktop_notice("One", "First.");
+    session.post_desktop_notice("Two", "Second.");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let extent = session
+        .shell_mut()
+        .toast_extent()
+        .expect("toasts are showing");
+    assert_eq!(session.toasts_at, Some(extent));
+    assert_eq!(
+        session.toasts.origin(),
+        (extent.x.round(), extent.y.round())
+    );
+    let screen_w = session.shell().screen_width as f32;
+    assert!((extent.x + extent.w - screen_w).abs() < 0.01);
+    assert!((extent.y + extent.h - session.shell().taskbar_rect().y).abs() < 0.01);
+}
+
+/// **A press on a toast opens its notification**: the program it names is
+/// asked for, the notification is read in the pane, and the toast goes. A
+/// press on its close button leaves the notification unread.
+#[test]
+fn a_press_on_a_toast_opens_its_notification() {
+    let (mut session, _desktop, _turn) = session();
+    let id = session
+        .shell_mut()
+        .notify(toast_notif("Mail", Some("/usr/bin/mail")));
+    session.finish_batch().expect("paint");
+    for _ in 0..30 {
+        frame(&mut session, 16);
+    }
+    let placed = session.shell().toasts.placed();
+    let (x, y) = centre(placed[0].rect);
+    press_toasts_at(&mut session, x, y);
+    let launched = session.take_launches();
+    assert_eq!(launched.len(), 1, "the program was not asked for");
+    assert_eq!(
+        launched[0],
+        crate::hotkeys::Launch::program("/usr/bin/mail")
+    );
+    let read = session
+        .shell()
+        .notifications
+        .notifications()
+        .iter()
+        .find(|n| n.id == id)
+        .map(|n| n.read);
+    assert_eq!(read, Some(true), "opening the toast did not read it");
+
+    // And the close button: gone, still unread.
+    let other = session.shell_mut().notify(toast_notif("Chat", None));
+    session.finish_batch().expect("paint");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let close = session
+        .shell()
+        .toasts
+        .placed()
+        .into_iter()
+        .find(|p| p.id == other)
+        .expect("the second toast")
+        .close;
+    press_toasts_at(&mut session, close.x + 2.0, close.y + 2.0);
+    assert!(session.take_launches().is_empty());
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    assert!(!session.shell().toasts.ids().contains(&other));
+    let unread = session
+        .shell()
+        .notifications
+        .notifications()
+        .iter()
+        .find(|n| n.id == other)
+        .map(|n| n.read);
+    assert_eq!(unread, Some(false), "closing a toast read its notification");
+}
+
+/// **Do Not Disturb files a notification and shows nothing**: silenced is
+/// exactly "do not show me".
+#[test]
+fn do_not_disturb_files_a_notification_and_pops_up_nothing() {
+    let (mut session, _desktop, _turn) = session();
+    session
+        .shell_mut()
+        .focus
+        .set_mode(crate::focus_assist::FocusMode::TotalSilence);
+    session.post_desktop_notice("Quiet", "Not now.");
+    session.finish_batch().expect("paint");
+    assert!(!session.shell().toasts.is_showing());
+    assert!(!session.toasts_shown);
+    assert_eq!(
+        posted(&session),
+        [("Quiet".to_owned(), "Not now.".to_owned())]
+    );
+}
+
+/// **Opening the pane takes the toasts away**, and what arrives while it is
+/// open is in it, not popped up over it.
+#[test]
+fn the_open_pane_takes_the_place_of_the_toasts() {
+    let (mut session, _desktop, _turn) = bound_session();
+    let panel = session.panel().window();
+    session.post_desktop_notice("Before", "Popped up.");
+    session.finish_batch().expect("paint");
+    assert!(session.shell().toasts.is_showing());
+    deliver(&mut session, panel, super_n());
+    assert!(session.shell().notifications.pane_state().is_visible());
+    assert!(
+        !session.shell().toasts.is_showing(),
+        "a toast over the pane"
+    );
+    session.post_desktop_notice("During", "In the pane.");
+    session.finish_batch().expect("paint");
+    assert!(
+        !session.shell().toasts.is_showing(),
+        "popped up over the pane"
+    );
+    assert_eq!(posted(&session).len(), 2);
+}
+
+/// **Nothing pops up on the login screen**: a notification's words are not
+/// for whoever is at it. It is filed, and waits.
+#[test]
+fn nothing_pops_up_on_the_login_screen() {
+    let (mut session, _desktop, _dir, _turn) = session_with_login();
+    assert!(session.is_locked());
+    session.post_desktop_notice("Private", "For the user only.");
+    session.finish_batch().expect("paint");
+    assert!(!session.toasts_shown, "a toast over the login screen");
+    assert_eq!(posted(&session).len(), 1);
 }

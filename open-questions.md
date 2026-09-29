@@ -612,6 +612,56 @@ costs the other two lanes their merges.
 the head-of-line witness entry: `socket.rs:356`, `netstack_client.rs:158`, and
 `services/netstack/src/main.rs:2594`.*
 
+## C-Q32 — [C] Programs cannot show a notification at all, and there were two half-built notification systems. Should the desktop shell be the one? — Status: OPEN (raised 2026-09-29; lane C has gone ahead with the recommendation, see below)
+
+**In short:** a program has no way to pop up "download finished" or "new
+mail" today. There were two unfinished pieces that each did half the job.
+The desktop shell has the notification pane (the list you open from the
+bell), Do Not Disturb and your notification rules. A separate notification
+program (`gui/notifications`) drew the pop-ups ("toasts") and kept a list of
+its own -- but nothing starts it, no program can reach it, it keeps its own
+Do Not Disturb that ignores your settings, and it had quiet hours of 22:00
+to 07:00 switched on for everyone. The question is which becomes the one
+system. Lane C has built the recommended answer's first half -- the shell
+now pops up its own notices -- because it is cheap to undo until programs
+can send anything.
+
+**What each has now:**
+
+| | The shell (`gui/desktop`) | The separate program (`gui/notifications`) |
+|---|---|---|
+| Runs in a booted system | yes | no -- nothing starts it |
+| Pop-ups (toasts) | **yes, since 2026-09-29** (§1447) | yes |
+| The list of past notifications | yes, from the bell | yes, a second one |
+| Your Do Not Disturb and per-program rules (Settings → Notifications) | yes | no -- a copy of its own |
+| Programs can send to it | no | no -- the message types exist, the channel does not |
+
+| Option | *What changes* |
+|---|---|
+| **A. The shell is the notification system** (recommended; its first half built) | pop-ups come from the shell, beside the pane and the bell they belong to; the separate program is retired; programs send to the shell |
+| **B. The separate program is the notification system** | it is started at login and shows the pop-ups and the list; the shell's pane becomes a view of that program's list, asked over a channel, and the shell's own pop-ups go |
+
+**For A:** one list, one Do Not Disturb, one set of rules -- the shell
+already has them working, and your settings already reach them. It is how
+Windows, GNOME and KDE do it: the shell shows notifications. **Against A:**
+the shell grows; if it crashes, notifications stop -- but the whole desktop
+has stopped then anyway.
+
+**For B:** notifications in a process of their own, isolated from the
+shell. **Against B:** the list, Do Not Disturb and the rules live in the
+shell today, so either they move or two processes keep one state in step
+over a channel -- the source of the "two copies drifted apart" bugs this
+tree has fixed many times.
+
+**Either way,** programs need a channel to send on, which is another lane's
+to build (the window system's protocol is lane F's, the services lane D's);
+lane C files that request once this is decided.
+
+**If it is never answered:** nothing breaks. The shell pops up its own
+notices now; what stays missing is programs' notifications, which need the
+channel above either way. Under B the pop-ups built for A are the drawing
+code the separate program would reuse.
+
 ## C-Q31 — [C] You suggested a lane say when it starts work outside its own part of the tree. The tool exists -- may `CLAUDE.md` make it a rule? — Status: OPEN (raised 2026-09-27)
 
 **In short:** answering C-Q20 you suggested that whenever a lane takes on a task

@@ -176118,7 +176118,8 @@ palette `theme_changed` hands it and draws every toast and the centre from
 its roles, checked in both modes by `palette_check::assert_drawn_from`
 (`everything_is_drawn_from_the_palette`). What its faintest labels were
 drawn in (`overlay0`, not meant to carry text) is now `subtext0`. The second
-half below -- nothing starts it -- is open question C-Q32.
+half below -- nothing starts it -- is open question C-Q32, and meanwhile the
+shell pops up notifications itself (design-decisions §1447).
 
 **In short:** the notification daemon -- the pop-up toasts and the
 notification centre, `gui/notifications` -- draws in a fixed copy of the dark

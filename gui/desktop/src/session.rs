@@ -13,18 +13,24 @@
 //! pointer and key events into shell calls, and sends the resulting intents
 //! back out as protocol requests.
 //!
-//! # The four surfaces, and why four
+//! # The surfaces, and why several
 //!
 //! A shell is not one window. Its parts sit in different bands of the stacking
 //! order, and the band is not advisory — a taskbar demoted to [`Layer::Normal`]
-//! disappears behind the first window the user opens.
+//! disappears behind the first window the user opens. Within a band, the order
+//! they are created in is the order they stack in, and the table is that order.
 //!
 //! | Surface | Layer | Covers | Draws |
 //! |---|---|---|---|
 //! | background | [`Layer::Background`] | the whole screen | the wallpaper |
 //! | panel | [`Layer::Overlay`] | [`DesktopShell::taskbar_rect`] | the taskbar |
 //! | popups | [`Layer::Overlay`] | the whole screen | start menu, power menu, calendar, Alt-Tab |
+//! | toasts | [`Layer::Overlay`] | the stack of toasts ([`DesktopShell::toast_extent`]) | notifications popping up |
 //! | osd | [`Layer::Overlay`], click-through | the whole screen | the volume and brightness overlays |
+//! | login | [`Layer::Overlay`] | the whole screen | the login screen, above everything |
+//!
+//! The toasts' surface is the one that moves: it is exactly the stack, so a
+//! press beside a toast reaches the window under it (design-decisions §1447).
 //!
 //! The popup surface is full-screen rather than menu-sized, and that is the
 //! whole mechanism behind click-outside-to-dismiss: a press on bare desktop
@@ -279,6 +285,17 @@ pub struct ShellSession<T: Transport> {
     /// Whether the overlay surface is currently mapped, tracked as
     /// `popups_shown` is and reconciled from `shell.osd.has_visible()`.
     osd_shown: bool,
+    /// The pop-up notifications' surface (`crate::toasts`): above the menus
+    /// and below the overlays, and exactly as big as the stack of toasts it
+    /// draws -- moved and sized with the stack by `paint_chrome`, so a press
+    /// beside a toast reaches the window under it rather than an invisible
+    /// sheet. Its origin changes with it.
+    toasts: Surface,
+    /// Whether the toasts' surface is mapped, reconciled as `osd_shown` is.
+    toasts_shown: bool,
+    /// Where the toasts' surface was last put, in screen coordinates, so it is
+    /// moved only when the stack's extent changes.
+    toasts_at: Option<crate::Rect>,
     /// The unconditional chords this session currently holds a grab on.
     ///
     /// Remembered rather than recomputed, because a rebind changes what
@@ -651,6 +668,21 @@ impl<T: Transport> ShellSession<T> {
             ))?,
             origin: (0.0, 0.0),
         };
+        // After the menus, so a notification pops up over whatever is open,
+        // and before the overlays, which are read over it. A pixel to begin
+        // with: `paint_chrome` puts it where the stack of toasts is and sizes
+        // it to that, and unmaps it while there are none.
+        let toasts = Surface {
+            window: events.create(chrome(
+                "Notifications",
+                1,
+                1,
+                (0, 0),
+                Layer::Overlay,
+                BlurKind::Notification,
+            ))?,
+            origin: (0.0, 0.0),
+        };
         // Last, so it is above the menus: an overlay is a heads-up report and
         // has to be readable over whatever is on screen, including a start menu
         // the user opened while the volume was still fading.
@@ -766,6 +798,10 @@ impl<T: Transport> ShellSession<T> {
             // the first `paint_chrome` has to unmap a surface the compositor
             // just mapped.
             osd_shown: true,
+            toasts,
+            // And again: no toast yet.
+            toasts_shown: true,
+            toasts_at: None,
             // Nothing is open on a fresh desktop, and nothing was grabbed above.
             escape_held: false,
             revision: 0,
@@ -1318,6 +1354,7 @@ impl<T: Transport> ShellSession<T> {
             .as_secs();
         // The id is discarded: nothing here ever needs to refer back to a
         // notice. It is a message, not a progress indicator to be updated.
+        let was_moving = self.anything_moving();
         let _ = self.shell.notify(notif_pane::Notification {
             id: 0,
             app_name: "Desktop".to_owned(),
@@ -1334,6 +1371,12 @@ impl<T: Transport> ShellSession<T> {
             silent: false,
         });
         self.dirty = true;
+        // It pops up, and an arrival is a slide nothing else may be waking the
+        // loop for -- a notice is often posted from a settings change, not
+        // from anything the user touched.
+        if !was_moving && self.anything_moving() {
+            self.arm_next_frame();
+        }
     }
 
     /// Tell the user when the colour theme they chose cannot be used.
@@ -2006,6 +2049,8 @@ impl<T: Transport> ShellSession<T> {
             self.send_frame(self.popups, &tree)?;
         }
 
+        self.paint_toasts()?;
+
         // The overlays, on their own surface and on their own schedule: an OSD
         // is not a popup and neither one's visibility implies anything about
         // the other's.
@@ -2037,6 +2082,47 @@ impl<T: Transport> ShellSession<T> {
         }
         if let Some(tree) = overlays {
             self.send_frame(self.osd, &tree)?;
+        }
+        Ok(())
+    }
+
+    /// Put the toasts' surface where the stack is, the size it is, mapped
+    /// while there is one -- and never while the machine is locked: a
+    /// notification's words are not for whoever is at the login screen -- and
+    /// draw the toasts on it.
+    fn paint_toasts(&mut self) -> Result<(), Error<T>> {
+        let extent = if self.is_locked() {
+            None
+        } else {
+            self.shell.toast_extent()
+        };
+        if let Some(rect) = extent
+            && self.toasts_at != Some(rect)
+        {
+            let (x, y) = (pos(rect.x), pos(rect.y));
+            if let Some(mut handle) = self.events.window_mut(self.toasts.window) {
+                handle.set_position(x, y)?;
+                handle.set_size(px(rect.w), px(rect.h))?;
+            }
+            // The whole pixel it was put at, so a press and a drawing are
+            // translated by exactly where the surface is.
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a position on a display is exact in f32"
+            )]
+            let origin = (x as f32, y as f32);
+            self.toasts.origin = origin;
+            self.toasts_at = Some(rect);
+        }
+        let showing = extent.is_some();
+        if showing != self.toasts_shown {
+            if let Some(mut handle) = self.events.window_mut(self.toasts.window) {
+                handle.set_visible(showing)?;
+            }
+            self.toasts_shown = showing;
+        }
+        if showing && let Some(tree) = self.shell.render_toasts() {
+            self.send_frame(self.toasts, &tree)?;
         }
         Ok(())
     }
@@ -2778,6 +2864,8 @@ impl<T: Transport> ShellSession<T> {
             Some(self.panel)
         } else if window == self.popups.window {
             Some(self.popups)
+        } else if window == self.toasts.window {
+            Some(self.toasts)
         } else if window == self.login_surface.window {
             Some(self.login_surface)
         } else if window == self.osd.window {
@@ -2845,8 +2933,17 @@ impl<T: Transport> ShellSession<T> {
         // its own callers (a brightness key, a caps-lock report) that this must
         // not have to learn about one at a time.
         let osd_was_visible = self.shell.osd.has_visible();
+        // And for the toasts: a notification can arrive, or a toast be pressed
+        // away, from anything handled here.
+        let toasts_were_moving = self.shell.toasts.is_moving();
         let is_tick = matches!(event, Event::Tick { .. });
         match event {
+            // A pointer on the toasts' surface is the toasts', and nothing else
+            // the shell draws is under it.
+            Event::Mouse(mouse) if surface.window == self.toasts.window => {
+                let action = self.shell.handle_toast_mouse(&surface.to_screen(&mouse));
+                self.act(action)?;
+            }
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
                 let outcome = self.shell.handle_hotkey(&key);
@@ -3017,6 +3114,12 @@ impl<T: Transport> ShellSession<T> {
         // from, so a keystroke landing mid-fade would silently shorten that
         // frame and make every animation on screen jump.
         if !osd_was_visible && self.shell.osd.has_visible() {
+            self.arm_next_frame();
+        }
+        // A toast that has just started to move -- one arriving, or one
+        // pressed away -- on the same terms: only on the transition.
+        if !toasts_were_moving && self.shell.toasts.is_moving() {
+            self.dirty = true;
             self.arm_next_frame();
         }
         Ok(())
@@ -3209,6 +3312,13 @@ impl<T: Transport> ShellSession<T> {
         // to saturate the `u32` above must not be quietly shortened to 49 days
         // when the whole point of that frame is to retire everything on screen.
         self.shell.advance_osd(elapsed_ms);
+        // The toasts' slides, settling and time on screen. Redrawn whenever
+        // there are any: a frame is only ticked while something moves or is
+        // due, and a toast's time coming up changes what is drawn.
+        if self.shell.toasts.is_showing() {
+            self.shell.advance_toasts(elapsed_ms);
+            self.dirty = true;
+        }
         // The programs a shut down is waiting for are listed once its grace
         // has run out, and the list is drawn by the next paint.
         if self.shell.tick_ending() {
@@ -3353,6 +3463,13 @@ impl<T: Transport> ShellSession<T> {
             .shell
             .ending_due_in()
             .map(|ms| Duration::from_millis(ms.max(1)));
+        // A toast sitting still until its time is up: the moment it starts to
+        // slide out. At least a millisecond, as the tooltip's.
+        let toast = self
+            .shell
+            .toasts
+            .next_due_in()
+            .map(|ms| Duration::from_millis(ms.max(1)));
         if let Some(delay) = [
             widget,
             schedule,
@@ -3361,6 +3478,7 @@ impl<T: Transport> ShellSession<T> {
             wallpaper,
             tooltip,
             ending,
+            toast,
         ]
         .into_iter()
         .flatten()
@@ -3386,6 +3504,9 @@ impl<T: Transport> ShellSession<T> {
             // towards. A term that only counted fades would leave a freshly
             // shown OSD on screen for ever on an otherwise idle desktop.
             || self.shell.osd.has_visible()
+            // A toast sliding or settling. One sitting still is not a reason
+            // for frames: its time coming up is a deadline, below.
+            || self.shell.toasts.is_moving()
             // Auto-hide only when it has something to do: a hide waiting on its
             // delay, or a slide in progress. `Hidden` and `Visible`-at-rest are
             // both false, so switching auto-hide on does not by itself cost the

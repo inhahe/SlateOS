@@ -1288,6 +1288,22 @@ impl Crossword {
         if !key.pressed {
             return EventResult::Ignored;
         }
+        // The puzzle's four Ctrl chords, asked as Ctrl chords: AltGr arrives
+        // as Ctrl+Alt and types, and AltGr+C checked the grid. Every other
+        // key is bound as itself -- a letter key fills its letter -- and is
+        // taken only with nothing but Shift held: a chord with Alt or the
+        // Windows key is the window's or the desktop's and arrives carrying
+        // its key, so Alt+E wrote an E into the grid.
+        if textline::is_ctrl_chord(key.modifiers) {
+            return if matches!(self.view, View::Playing) {
+                self.chord_in_puzzle(key)
+            } else {
+                EventResult::Ignored
+            };
+        }
+        if !textline::is_plain(key.modifiers) {
+            return EventResult::Ignored;
+        }
         match self.view {
             View::PuzzleSelect => self.key_in_menu(key),
             View::Playing => self.key_in_puzzle(key),
@@ -1320,19 +1336,21 @@ impl Crossword {
         }
     }
 
-    fn key_in_puzzle(&mut self, key: &KeyEvent) -> EventResult {
-        if key.modifiers.ctrl {
-            let button = match key.key {
-                Key::C => Button::Check,
-                Key::U => Button::Clear,
-                Key::R => Button::RevealLetter,
-                Key::W => Button::RevealWord,
-                _ => return EventResult::Ignored,
-            };
-            self.press(button);
-            return EventResult::Consumed;
-        }
+    /// A Ctrl chord while a puzzle is up: check, clear, reveal a letter,
+    /// reveal a word.
+    fn chord_in_puzzle(&mut self, key: &KeyEvent) -> EventResult {
+        let button = match key.key {
+            Key::C => Button::Check,
+            Key::U => Button::Clear,
+            Key::R => Button::RevealLetter,
+            Key::W => Button::RevealWord,
+            _ => return EventResult::Ignored,
+        };
+        self.press(button);
+        EventResult::Consumed
+    }
 
+    fn key_in_puzzle(&mut self, key: &KeyEvent) -> EventResult {
         let handled = match key.key {
             Key::Up => self.arrow((-1, 0), Direction::Down),
             Key::Down => self.arrow((1, 0), Direction::Down),
@@ -2756,6 +2774,44 @@ mod tests {
         cursor: (usize, usize),
         entries: Vec<Option<char>>,
         revealed: usize,
+    }
+
+    /// **A key held with a modifier is not the puzzle's, and AltGr is not
+    /// Ctrl**: Alt+E wrote an E into the grid, a chord arriving carrying its
+    /// key, Alt+Escape left the puzzle, and AltGr+C -- Ctrl+Alt, which types
+    /// -- checked the grid as Ctrl+C does. Ctrl+C still checks.
+    #[test]
+    fn a_key_held_with_a_modifier_is_not_the_puzzles() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = playing(0);
+        let before = snapshot(&app);
+        for held in [Modifiers::alt(), Modifiers::super_key(), altgr] {
+            for key in [
+                Key::E,
+                Key::C,
+                Key::R,
+                Key::Right,
+                Key::Space,
+                Key::Escape,
+                Key::F1,
+            ] {
+                assert_eq!(
+                    app.handle_event(&Event::Key(guitk::probe::press_with(key, held))),
+                    EventResult::Ignored,
+                    "{held:?} {key:?} was taken"
+                );
+            }
+        }
+        assert_eq!(snapshot(&app), before, "a chord changed the puzzle");
+        app.handle_event(&Event::Key(guitk::probe::press_with(
+            Key::C,
+            Modifiers::ctrl(),
+        )));
+        assert!(app.check_mode, "Ctrl+C no longer checks");
     }
 
     fn snapshot(app: &Crossword) -> Snapshot {

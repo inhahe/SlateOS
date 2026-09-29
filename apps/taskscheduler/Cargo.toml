@@ -11,5 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
 
+# Whether a key types into the form or is a command: AltGr arrives as
+# Ctrl+Alt, and a command carries its letter as text.
+textline = { path = "../textline" }
+
 [lints]
 workspace = true

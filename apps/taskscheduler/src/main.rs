@@ -3746,6 +3746,14 @@ impl SchedulerUI {
 
     /// Keys that act on the main window, with no dialog open.
     fn handle_key_main(&mut self, key: &KeyEvent) -> bool {
+        // A key held with Alt or the Windows key is not this window's: the
+        // Windows key's are the desktop's, and AltGr -- which arrives as
+        // Ctrl+Alt -- types a letter, which the main window has nowhere to
+        // put: AltGr+N (`ń` on a Polish keyboard) opened a new task as Ctrl+N
+        // does.
+        if key.modifiers.alt || key.modifiers.super_key {
+            return false;
+        }
         match key.key {
             Key::Tab => {
                 // The two tabs, not a focus ring: there is nothing else here
@@ -3815,13 +3823,17 @@ impl SchedulerUI {
                 _ => self.save_dialog(),
             },
             _ => {
-                // A keystroke with Ctrl or Alt held is a shortcut, not text:
-                // Ctrl-N while filling in the Name field must not put an `n`
-                // in it. Everything else goes through `KeyEvent::typed`, which
-                // is the layout's own answer to what was typed -- Enter, Tab
-                // and Escape all *produce* text on most layouts, and a field
-                // that appended `key.text` raw would fill with control bytes.
-                if key.modifiers.ctrl || key.modifiers.alt {
+                // A command is a shortcut, not text, though it carries its
+                // letter as text: Ctrl-N while filling in the Name field must
+                // not put an `n` in it, and nor may a key held with Alt or the
+                // Windows key. AltGr, which arrives as Ctrl+Alt, types -- `ł`
+                // is AltGr+L on a Polish keyboard
+                // (`textline::types_into_field`). What is typed goes through
+                // `KeyEvent::typed`, which is the layout's own answer to what
+                // was typed -- Enter, Tab and Escape all *produce* text on most
+                // layouts, and a field that appended `key.text` raw would fill
+                // with control bytes.
+                if !textline::types_into_field(key) {
                     return false;
                 }
                 let mut typed = false;
@@ -4095,6 +4107,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::event::Modifiers;
     use guitk::probe;
 
     // -- CronField tests ----------------------------------------------------
@@ -5676,6 +5689,77 @@ mod tests {
         probe::click(&mut ui, Target::DeleteConfirm);
         assert_eq!(ui.scheduler.list_tasks().len(), 2);
         assert_eq!(ui.selected_task_id, None);
+    }
+
+    fn held(key: Key, modifiers: Modifiers, text: &str) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        }
+    }
+
+    /// Ctrl+Alt, as Windows and a remote client on it report AltGr.
+    const ALTGR: Modifiers = Modifiers {
+        shift: false,
+        ctrl: true,
+        alt: true,
+        super_key: false,
+    };
+
+    /// **The form takes what AltGr types, and no command's letter.** AltGr
+    /// arrives as Ctrl+Alt -- `ł` is AltGr+L on a Polish keyboard -- and the
+    /// form refused every key held with Ctrl or Alt. The Windows key's
+    /// letters, which a real machine sends with the key, were typed.
+    #[test]
+    fn the_form_takes_altgr_letters_and_no_commands_letter() {
+        let mut ui = SchedulerUI::new();
+        probe::click(&mut ui, Target::Add);
+        assert_eq!(
+            probe::key(&mut ui, &held(Key::L, ALTGR, "\u{142}")),
+            EventResult::Consumed,
+            "AltGr+L was refused"
+        );
+        for (key, modifiers, text) in [
+            (Key::K, Modifiers::ctrl(), "k"),
+            (Key::F, Modifiers::alt(), "f"),
+            (Key::E, Modifiers::super_key(), "e"),
+        ] {
+            assert_eq!(
+                probe::key(&mut ui, &held(key, modifiers, text)),
+                EventResult::Ignored,
+                "{modifiers:?}+{key:?} was typed"
+            );
+        }
+        assert_eq!(ui.form.name, "\u{142}");
+    }
+
+    /// **A key held with Alt or the Windows key is not the main window's.**
+    /// AltGr+N -- `ń` on a Polish keyboard, arriving as Ctrl+Alt -- opened a
+    /// new task as Ctrl+N does; Alt+Delete and Windows+Delete asked to delete
+    /// the selected task, Alt+Enter opened it, and Alt+Space switched it off.
+    #[test]
+    fn a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows() {
+        let mut ui = ui_with_tasks(3);
+        probe::key(&mut ui, &probe::press(Key::Down));
+        let id = ui.selected_task_id.expect("Down selected a task");
+        let enabled = ui.scheduler.get_task(id).is_some_and(|t| t.enabled);
+        for modifiers in [ALTGR, Modifiers::alt(), Modifiers::super_key()] {
+            for key in [Key::N, Key::Delete, Key::Enter, Key::Space] {
+                assert_eq!(
+                    probe::key(&mut ui, &held(key, modifiers, "")),
+                    EventResult::Ignored,
+                    "{modifiers:?}+{key:?}"
+                );
+            }
+            assert_eq!(ui.dialog, UiDialog::None, "{modifiers:?} opened a dialog");
+            assert_eq!(
+                ui.scheduler.get_task(id).is_some_and(|t| t.enabled),
+                enabled,
+                "{modifiers:?}+Space switched the task"
+            );
+        }
     }
 
     /// A key release is not a second press. Acting on both edges would run

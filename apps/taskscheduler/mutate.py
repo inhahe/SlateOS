@@ -268,7 +268,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -291,7 +291,7 @@ MUTATIONS = [
         "                    x: PADDING,\n"
         "                    w: width - PADDING * 2.0,\n"
         "                    size: FONT_SIZE_SMALL,\n"
-        "                    color: COLOR_SUBTEXT,\n"
+        "                    color: self.palette.subtext0,\n"
         "                    weight: FontWeightHint::Regular,\n"
         "                },\n"
         "                format!(\"{hidden} more\"),\n"
@@ -324,7 +324,7 @@ MUTATIONS = [
         "                x: PADDING,\n"
         "                w: width - PADDING * 2.0,\n"
         "                size: FONT_SIZE_SMALL,\n"
-        "                color: COLOR_YELLOW,\n"
+        "                color: self.palette.yellow,\n"
         "                weight: FontWeightHint::Regular,\n"
         "            },\n"
         "            message.to_string(),\n"
@@ -333,7 +333,7 @@ MUTATIONS = [
         "            x: PADDING,\n"
         "            y: band.y + (bar_h - FONT_SIZE_SMALL) / 2.0,\n"
         "            text: message.to_string(),\n"
-        "            color: COLOR_YELLOW,\n"
+        "            color: self.palette.yellow,\n"
         "            font_size: FONT_SIZE_SMALL,\n"
         "            font_weight: FontWeightHint::Regular,\n"
         "            max_width: Some(width - PADDING * 2.0),\n"
@@ -436,6 +436,30 @@ MUTATIONS = [
         "            (centre_line(rect, FONT_SIZE), Some((text_x, rect.w)))\n"
         "        {",
         CONTAINMENT,
+    ),
+    (
+        "the form refuses what AltGr types",
+        "                if !textline::types_into_field(key) {",
+        "                if !textline::types_into_field(key) || key.modifiers.ctrl {",
+        ["the_form_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "the form types a command's letter",
+        "                if !textline::types_into_field(key) {",
+        "                if !key.types_text() {",
+        ["the_form_takes_altgr_letters_and_no_commands_letter"],
+    ),
+    (
+        "a key held with Alt or the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        match key.key {",
+        "        match key.key {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
+    ),
+    (
+        "a key held with the Windows key is the main window's",
+        "        if key.modifiers.alt || key.modifiers.super_key {\n            return false;\n        }\n        match key.key {",
+        "        if key.modifiers.alt {\n            return false;\n        }\n        match key.key {",
+        ["a_key_held_with_alt_or_the_windows_key_is_not_the_main_windows"],
     ),
 ]
 

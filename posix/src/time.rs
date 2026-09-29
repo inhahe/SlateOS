@@ -7325,7 +7325,10 @@ mod tests {
             let mut id: TimerT = TimerT::MAX;
             let ret = timer_create(clk, core::ptr::null(), &raw mut id);
             assert_eq!(ret, 0, "clock {clk} should be accepted");
-            assert!(id < MAX_TIMERS, "clock {clk}: a valid slot must be returned");
+            assert!(
+                id < MAX_TIMERS,
+                "clock {clk}: a valid slot must be returned"
+            );
             timer_delete(id);
         }
     }

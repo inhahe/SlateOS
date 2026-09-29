@@ -968,7 +968,6 @@ mod tests {
         assert!(!is_set_in(254, &set));
     }
 
-
     #[test]
     fn test_fd_set_boundary() {
         let mut set = FdSet {
@@ -1226,7 +1225,6 @@ mod tests {
         assert_eq!(set.fds_bits[3], 0);
     }
 
-
     #[test]
     fn test_fd_set_double_set() {
         let mut set = FdSet {
@@ -1236,7 +1234,6 @@ mod tests {
         fd_set_set(50, &raw mut set); // Idempotent.
         assert!(is_set_in(50, &set));
     }
-
 
     #[test]
     fn test_fd_set_zero_then_isset() {
@@ -1263,7 +1260,6 @@ mod tests {
             assert_eq!(*word, 0);
         }
     }
-
 
     // -- Pollfd init and layout --
 

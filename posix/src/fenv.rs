@@ -767,7 +767,11 @@ mod tests {
         feraiseexcept(FE_OVERFLOW);
         assert_eq!(fesetmode(&raw const saved), 0);
         assert_eq!(fegetround(), FE_DOWNWARD);
-        assert_eq!(stmxcsr() & MXCSR_ROUNDING, 0x2000, "the SSE unit rounds down too");
+        assert_eq!(
+            stmxcsr() & MXCSR_ROUNDING,
+            0x2000,
+            "the SSE unit rounds down too"
+        );
         assert_eq!(fnstcw() & 0x300, 0x200, "the x87 precision came back");
         assert_eq!(stmxcsr() & 0x8000, 0x8000, "and flush-to-zero");
         assert_eq!(
@@ -791,7 +795,11 @@ mod tests {
         assert_eq!(fnstcw(), 0x037f);
         assert_eq!(stmxcsr() & !0x3f, 0x1f80);
         assert_eq!(fegetround(), FE_TONEAREST);
-        assert_eq!(fetestexcept(FE_ALL_EXCEPT), FE_UNDERFLOW, "the flag is kept");
+        assert_eq!(
+            fetestexcept(FE_ALL_EXCEPT),
+            FE_UNDERFLOW,
+            "the flag is kept"
+        );
     }
 
     /// A mode or an environment no `fegetmode` or `fegetenv` made may have
@@ -801,7 +809,11 @@ mod tests {
     fn a_callers_mxcsr_is_held_to_the_bits_the_processor_has() {
         let _r = Restore::take();
         let writable = mxcsr_writable();
-        assert_eq!(writable & 0xffbf, 0xffbf, "every x86-64 processor has these");
+        assert_eq!(
+            writable & 0xffbf,
+            0xffbf,
+            "every x86-64 processor has these"
+        );
         assert_eq!(writable >> 16, 0, "and none above the sixteenth");
         feclearexcept(FE_ALL_EXCEPT);
         let bogus = FemodeT {

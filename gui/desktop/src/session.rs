@@ -2286,7 +2286,7 @@ impl<T: Transport> ShellSession<T> {
         self.sync_theme_problem();
         self.sync_wallpaper();
         self.sync_login_background();
-        self.sync_animation_speed();
+        self.sync_motion();
         self.sync_autohide();
         // The widget layout comes in on the same call. It is not an appearance
         // setting, but it is the same question -- "what did this user leave the
@@ -2325,13 +2325,13 @@ impl<T: Transport> ShellSession<T> {
     /// light/dark mode's edge asks for, which is the same question.
     fn adopt_appearance_change(&mut self) {
         if self.shell.poll_appearance() {
-            // The animation speed lives on this session's manager, not
-            // on the shell, so adopting the settings is two steps and
-            // the second is easy to forget. `sync_animation_speed` is
-            // cheap and unconditional rather than guarded on the speed
-            // having changed: a guard would be a second place that has
-            // to know which fields matter.
-            self.sync_animation_speed();
+            // The motion reaches this session's own animators -- the
+            // manager and auto-hide -- not through the shell, so adopting
+            // the settings is two steps and the second is easy to forget.
+            // `sync_motion` is cheap and unconditional rather than guarded
+            // on the motion having changed: a guard would be a second
+            // place that has to know which fields matter.
+            self.sync_motion();
             self.sync_autohide();
             self.sync_theme_problem();
             // And the wallpaper, on the same argument the comment
@@ -2725,15 +2725,19 @@ impl<T: Transport> ShellSession<T> {
         out
     }
 
-    /// Push the shell's animation speed into the manager that obeys it.
+    /// Push the desktop's motion -- the animation theme at the user's speed,
+    /// `Palette::motion` (design-decisions §1446) -- to the animators this
+    /// session owns: the animation manager and auto-hide. The shell's own --
+    /// the overview, the notification pane, the on-screen display -- take it
+    /// through `DesktopShell::set_appearance`.
     ///
-    /// `AnimationSpeed::multiplier()` is a *duration* multiplier -- 0.75 for
-    /// Fast, 1.5 for Slow, 0.0 for Off -- which is exactly what
-    /// [`AnimationManager::set_duration_scale`] takes, so nothing is converted
-    /// here and there is no second definition of what "slow" means.
-    fn sync_animation_speed(&mut self) {
-        self.animations
-            .set_duration_scale(self.shell.appearance.animation_speed.multiplier());
+    /// Everything here is one reading of the settings, so there is no second
+    /// definition of what "slow" means: the speed's multiplier is applied once,
+    /// by the palette source, and every animator scales by the result.
+    fn sync_motion(&mut self) {
+        let motion = self.shell.motion();
+        self.animations.set_motion(motion);
+        self.autohide.set_motion(motion);
     }
 
     /// Turn animations off, or back on, for accessibility.
@@ -3136,7 +3140,7 @@ impl<T: Transport> ShellSession<T> {
     /// session has a clock, so it puts the pane back where it started and lets
     /// the clock carry it. See `design-decisions.md` §520 and §562.
     fn begin_notifications_slide(&mut self) {
-        if self.animations.reduced_motion {
+        if self.animations.reduced_motion || self.shell.motion().is_still() {
             return;
         }
         self.shell.notifications.begin_slide();
@@ -3152,12 +3156,13 @@ impl<T: Transport> ShellSession<T> {
     /// by hand — gets a fully-open overview instead of one waiting for a frame
     /// that never comes. See `design-decisions.md` §520.
     fn begin_overview_fade(&mut self) {
-        if self.animations.reduced_motion {
+        let motion = self.shell.motion();
+        if self.animations.reduced_motion || motion.is_still() {
             return;
         }
         self.shell
             .overview
-            .begin_fade(self.shell.overview_config.fade_ms);
+            .begin_fade(motion, self.shell.overview_config.fade_ms);
         self.arm_next_frame();
     }
 

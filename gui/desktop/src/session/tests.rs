@@ -2138,6 +2138,138 @@ fn an_animation_speed_of_off_stops_the_shell_animating() {
     });
 }
 
+// ============================================================================
+// The desktop's motion reaches everything that moves
+// ============================================================================
+
+/// **A saved speed of Off moves nothing on screen.** It used to reach only the
+/// animation manager, which nothing on the desktop is drawn by: the overview
+/// still faded in and the notification pane still slid, at their own fixed
+/// lengths, whatever the user had chosen. Now Off is the still motion, and
+/// every animator is handed it.
+#[test]
+fn a_speed_of_off_moves_nothing_on_screen() {
+    settingsfile::testing::with_scratch_config("session-motion-off", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Off;
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        let panel = session.panel().window();
+
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.visible, "Super+Tab did nothing");
+        assert!(
+            !session.shell().overview.is_fading(),
+            "Off still faded the overview in"
+        );
+        deliver(&mut session, panel, super_tab());
+
+        deliver(&mut session, panel, super_n());
+        assert!(session.shell().notifications.pane_state().is_visible());
+        assert!(
+            !session.shell().notifications.is_sliding(),
+            "Off still slid the notification pane"
+        );
+        assert!(session.shell().osd.config.motion.is_still());
+        assert!(session.autohide.motion().is_still());
+    });
+}
+
+/// **A theme whose animation is off moves nothing either**, at the user's
+/// normal speed: the theme's `enabled: false` is the same still motion.
+#[test]
+fn a_still_animation_theme_moves_nothing_on_screen() {
+    settingsfile::testing::with_scratch_config("session-motion-theme", |root| {
+        let dir = settingsfile::testing::scratch_data_dir(root)
+            .join("slateos")
+            .join("themes")
+            .join("calm");
+        std::fs::create_dir_all(&dir).expect("the scratch directory is writable");
+        std::fs::write(
+            dir.join(appearance::themes::FILE_NAME),
+            "animation:
+  enabled: false
+",
+        )
+        .expect("the scratch directory is writable");
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_theme =
+            appearance::themes::AnimationTheme::load(std::ffi::OsStr::new("calm"));
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        assert!(session.shell().motion().is_still());
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.visible);
+        assert!(!session.shell().overview.is_fading());
+        assert!(!session.animations().has_active());
+    });
+}
+
+/// **A saved speed reaches every animator the desktop has** -- the overview's
+/// fade, the pane, the on-screen display, auto-hide and the manager -- as one
+/// motion: Slow is the built-in standard half again as long.
+#[test]
+fn the_saved_speed_reaches_every_animator() {
+    use guitk::motion::{Curve, Motion};
+    settingsfile::testing::with_scratch_config("session-motion-slow", |_root| {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Slow;
+        file.save().expect("save");
+
+        let (mut session, _desktop, _turn) = bound_session();
+        session.load_appearance();
+        let slow = Motion::new(300, Curve::EaseOut);
+        assert_eq!(session.shell().motion(), slow);
+        assert_eq!(session.shell().notifications.motion(), slow);
+        assert_eq!(session.shell().osd.config.motion, slow);
+        assert_eq!(session.autohide.motion(), slow);
+        assert!((session.animations().duration_scale() - 1.5).abs() < f32::EPSILON);
+
+        // The overview's fade is half again as long: still going where the
+        // standard one would have finished.
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.is_fading());
+        let fade_ms = session.shell().overview_config.fade_ms;
+        frame(&mut session, u64::from(fade_ms));
+        assert!(
+            session.shell().overview.is_fading(),
+            "Slow finished the fade in the standard time"
+        );
+    });
+}
+
+/// **Turning motion off mid-fade lands everything**: a fade or a slide in
+/// progress when the setting arrives is where it was going, not frozen
+/// part-way asking for frames.
+#[test]
+fn turning_motion_off_mid_fade_lands_everything() {
+    settingsfile::testing::with_scratch_config("session-motion-live", |_root| {
+        let (mut session, desktop, _turn) = bound_session();
+        session.load_appearance();
+        let panel = session.panel().window();
+        deliver(&mut session, panel, super_tab());
+        assert!(session.shell().overview.is_fading());
+
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.animation_speed = AnimationSpeed::Off;
+        file.save().expect("save");
+        announce(&desktop, session.panel(), SettingsGroup::Appearance);
+        session.pump().expect("pump");
+
+        assert!(!session.shell().overview.is_fading());
+        assert!(
+            (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
+            "the fade was left part-way"
+        );
+    });
+}
+
 // ---- taskbar auto-hide ----
 
 /// A session whose saved settings have auto-hide set to `on`.

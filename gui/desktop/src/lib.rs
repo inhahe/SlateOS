@@ -2808,6 +2808,16 @@ impl DesktopShell {
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        // How things move, to every animator the shell owns: the animation
+        // theme at the user's speed (design-decisions §1446). Pushed from here
+        // for the caret width's reason below. Under a still motion a fade or a
+        // slide in progress lands where it was going.
+        let motion = guitk::palette::PaletteSource::motion(&appearance);
+        self.notifications.set_motion(motion);
+        self.osd.set_motion(motion);
+        if motion.is_still() {
+            self.overview.end_fade();
+        }
         // Every icon is drawn again, in the new colours and the new theme's
         // pictures, under new ids; the old requests would only be a registry
         // of images the session has dropped.
@@ -2820,7 +2830,7 @@ impl DesktopShell {
         // `Palette`, and a palette is colours: 839 put the caret's width in
         // the appearance settings, not in the theme's colour table. Pushing it
         // from the one place that knows the settings changed is the same shape
-        // as `sync_animation_speed`, and for the same reason -- a second door
+        // as the motion above, and for the same reason -- a second door
         // the caller has to remember is a door somebody forgets.
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
@@ -2842,6 +2852,14 @@ impl DesktopShell {
         // After the store: the taskbar's thickness follows the scale just
         // set, and the icons must stay clear of the bar as it is drawn.
         self.sync_icon_area();
+    }
+
+    /// How the desktop's transitions move now: the animation theme at the
+    /// user's speed -- what a palette resolved from these settings carries as
+    /// `Palette::motion` (design-decisions §1446).
+    #[must_use]
+    pub fn motion(&self) -> guitk::motion::Motion {
+        guitk::palette::PaletteSource::motion(&self.appearance)
     }
 
     /// Load the user's saved appearance settings from disk and apply them.

@@ -57,6 +57,7 @@ use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::idseq::IdSeq;
+use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::slider::{Look, Placement, Response, Slider};
 use guitk::style::CornerRadii;
@@ -103,6 +104,11 @@ use notifsettings::Importance;
 
 /// Width of the notification pane in pixels.
 const PANE_WIDTH: f32 = 380.0;
+
+/// How long the pane takes to slide in or out, as designed: against the
+/// standard transition ([`Motion::STANDARD_MS`]), so the desktop's motion
+/// scales it with everything else that moves.
+const SLIDE_MS: u32 = 200;
 
 /// Maximum number of stored notifications.
 const MAX_NOTIFICATIONS: usize = 50;
@@ -452,7 +458,10 @@ pub enum PaneState {
 }
 
 impl PaneState {
-    /// Returns the fraction of the pane that is currently visible (0.0 = hidden, 1.0 = full).
+    /// How far through its slide the pane is, as a fraction open: 0.0 hidden,
+    /// 1.0 fully open, a slide's progress between -- in the slide's own time.
+    /// The pane is *drawn* at [`NotificationPane::shown`], which puts this
+    /// through the motion's curve.
     #[must_use]
     pub fn visibility(self) -> f32 {
         match self {
@@ -574,9 +583,10 @@ pub struct NotificationPane {
     hovered_notif: Option<usize>,
     /// Whether the settings sub-view is showing.
     show_settings: bool,
-    /// Animation speed (fraction per second).
-    anim_speed: f32,
-    /// How far out the pane was when [`show`](Self::show) or
+    /// How the slide moves: its length and its curve -- the desktop's
+    /// ([`set_motion`](Self::set_motion)).
+    motion: Motion,
+    /// How far out the pane was *drawn* when [`show`](Self::show) or
     /// [`hide`](Self::hide) last landed it on its destination.
     ///
     /// Only [`begin_slide`](Self::begin_slide) reads it, and only to reverse a
@@ -612,7 +622,7 @@ impl NotificationPane {
             current_time: 0,
             hovered_notif: None,
             show_settings: false,
-            anim_speed: 5.0, // complete slide in ~0.2s
+            motion: Motion::STANDARD,
             slide_from: 0.0,
             screen_height: DEFAULT_SCREEN_HEIGHT,
         }
@@ -641,7 +651,7 @@ impl NotificationPane {
     /// [`begin_slide`](Self::begin_slide) straight after this to play the
     /// animation, exactly as `ShellSession::begin_overview_fade` does.
     pub fn show(&mut self) {
-        self.slide_from = self.state.visibility();
+        self.slide_from = self.shown();
         self.state = PaneState::Visible;
         self.show_settings = false;
     }
@@ -661,7 +671,7 @@ impl NotificationPane {
             self.qs_slider_input(slot, Slider::cancel);
         }
         if self.state != PaneState::Hidden {
-            self.slide_from = self.state.visibility();
+            self.slide_from = self.shown();
             self.state = PaneState::Hidden;
             self.events.push(NotifPaneEvent::Closed);
         }
@@ -696,19 +706,69 @@ impl NotificationPane {
     /// smooth. `slide_from` is what the preceding [`show`](Self::show) or
     /// [`hide`](Self::hide) recorded on its way past.
     ///
+    /// The slide resumes from where the pane was *drawn*, not from where the
+    /// last slide's clock stood: under a curve that arrives and leaves at
+    /// different paces those are different places, and the slide starts at
+    /// the moment its own curve has the pane where it is
+    /// ([`Motion::when_arriving_at`]).
+    ///
     /// A no-op mid-slide: a second call must not restart an animation that is
     /// already playing, or a held key would leave the pane permanently at the
-    /// first frame.
+    /// first frame. A no-op, too, under a still motion, and where there is no
+    /// way to go -- a pane shown that was already all the way open.
     pub fn begin_slide(&mut self) {
+        if self.motion.is_still() {
+            return;
+        }
         self.state = match self.state {
-            // Already `slide_from` of the way in, so that much of the slide is
-            // done.
-            PaneState::Visible => PaneState::SlideIn(self.slide_from),
+            PaneState::Visible if self.slide_from < 1.0 => {
+                PaneState::SlideIn(self.motion.when_arriving_at(self.slide_from))
+            }
             // `SlideOut`'s progress counts *down* from full visibility, so the
             // part already played is the part not yet visible.
-            PaneState::Hidden => PaneState::SlideOut(1.0 - self.slide_from),
-            already_moving => already_moving,
+            PaneState::Hidden if self.slide_from > 0.0 => {
+                PaneState::SlideOut(self.motion.when_leaving_at(1.0 - self.slide_from))
+            }
+            unmoved => unmoved,
         };
+    }
+
+    /// Move as `motion` says from now on: the slide's length and its curve.
+    ///
+    /// Under a still motion a slide in progress lands where it was going: the
+    /// user has just asked for nothing to move, and finishing this one is a
+    /// stranger answer than being there.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
+        if motion.is_still() {
+            self.state = match self.state {
+                PaneState::SlideIn(_) => PaneState::Visible,
+                PaneState::SlideOut(_) => PaneState::Hidden,
+                at_rest => at_rest,
+            };
+        }
+    }
+
+    /// How the slide moves now.
+    #[must_use]
+    pub const fn motion(&self) -> Motion {
+        self.motion
+    }
+
+    /// How much of the pane is on screen, as it is drawn and hit-tested:
+    /// 0.0 hidden, 1.0 fully open.
+    ///
+    /// The slide's progress through the motion's curve, and never past fully
+    /// open: the pane is anchored to the screen's edge, and a spring that
+    /// carried it further would open a gap between the two.
+    #[must_use]
+    pub fn shown(&self) -> f32 {
+        match self.state {
+            PaneState::Hidden => 0.0,
+            PaneState::Visible => 1.0,
+            PaneState::SlideIn(p) => self.motion.arriving(p).min(1.0),
+            PaneState::SlideOut(p) => 1.0 - self.motion.leaving(p),
+        }
     }
 
     /// Whether a slide is playing, and so whether another frame is owed.
@@ -751,7 +811,17 @@ impl NotificationPane {
 
     /// Advance animation by `dt` seconds.
     pub fn tick(&mut self, dt: f32) {
-        let step = self.anim_speed * dt;
+        let duration_ms = self.motion.duration_ms(SLIDE_MS);
+        // Under a still motion whatever is sliding is where it was going.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a slide's milliseconds are far inside f32's exact range"
+        )]
+        let step = if duration_ms == 0 {
+            1.0
+        } else {
+            dt * 1000.0 / duration_ms as f32
+        };
         match self.state {
             PaneState::SlideIn(p) => {
                 let next = (p + step).min(1.0);
@@ -791,7 +861,7 @@ impl NotificationPane {
         // so this is where the scroll bound learns about it.
         self.note_screen_height(screen_height);
 
-        let vis = self.state.visibility();
+        let vis = self.shown();
         let pane_x = screen_width - PANE_WIDTH * vis;
 
         // A slider being dragged has the pointer until the button comes up,
@@ -1365,7 +1435,7 @@ impl NotificationPane {
             return Vec::new();
         }
 
-        let vis = self.state.visibility();
+        let vis = self.shown();
         let pane_x = screen_width - PANE_WIDTH * vis;
         let mut cmds = Vec::new();
 
@@ -3559,25 +3629,135 @@ mod tests {
     /// from the end it was heading for. Rewinding to zero instead would snap
     /// the pane fully open and then slide it out — a visible jump in exactly
     /// the case the animation exists to smooth.
+    ///
+    /// On screen, under every curve: an arrival and a departure are different
+    /// shapes, so where the slide's clock stood is not where the pane was
+    /// drawn, and the reversal starts from the drawing.
     #[test]
     fn a_slide_reversed_midway_resumes_from_the_position_on_screen() {
+        use guitk::motion::Curve;
+        for curve in Curve::ALL {
+            let mut pane = NotificationPane::new();
+            pane.set_motion(Motion::new(200, curve));
+            pane.show();
+            pane.begin_slide();
+            // A tenth of the slide: before a spring passes open, where the
+            // anchored pane would be drawn at open.
+            pane.tick(0.02);
+            let visible_before = pane.shown();
+            assert!(visible_before > 0.0 && visible_before < 1.0, "{curve:?}");
+
+            pane.hide();
+            pane.begin_slide();
+            assert!(
+                (pane.shown() - visible_before).abs() < 1e-4,
+                "{curve:?}: the pane must not jump when the slide reverses"
+            );
+            assert!(matches!(pane.pane_state(), PaneState::SlideOut(_)));
+
+            // And back again, from part-way out.
+            pane.tick(0.05);
+            let before = pane.shown();
+            pane.show();
+            pane.begin_slide();
+            assert!((pane.shown() - before).abs() < 1e-4, "{curve:?}");
+            assert!(matches!(pane.pane_state(), PaneState::SlideIn(_)));
+        }
+        // Linear, the clock and the drawing agree: half-way is half open.
         let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::new(200, guitk::motion::Curve::Linear));
         pane.show();
         pane.begin_slide();
-        pane.tick(0.1); // progress = 0.5
-        let visible_before = pane.pane_state().visibility();
-        assert!((visible_before - 0.5).abs() < 0.001);
-
+        pane.tick(0.1);
+        assert!((pane.shown() - 0.5).abs() < 0.001);
         pane.hide();
         pane.begin_slide();
-        assert!(
-            (pane.pane_state().visibility() - visible_before).abs() < 0.001,
-            "the pane must not jump when the slide reverses"
-        );
         match pane.pane_state() {
             PaneState::SlideOut(p) => assert!((p - 0.5).abs() < 0.001),
             other => panic!("Expected SlideOut, got {other:?}"),
         }
+    }
+
+    /// **The slide follows the desktop's motion**: its length scales with
+    /// the standard transition, and it is drawn along the curve -- ease-out
+    /// by default, seven-eighths open half-way.
+    #[test]
+    fn the_slide_follows_the_desktops_motion() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.begin_slide();
+        pane.tick(0.1);
+        assert_eq!(pane.pane_state(), PaneState::SlideIn(0.5));
+        assert!((pane.shown() - 0.875).abs() < 1e-5);
+
+        let mut slow = NotificationPane::new();
+        slow.set_motion(Motion::new(400, guitk::motion::Curve::Linear));
+        slow.show();
+        slow.begin_slide();
+        slow.tick(0.1);
+        match slow.pane_state() {
+            PaneState::SlideIn(p) => assert!((p - 0.25).abs() < 0.001),
+            other => panic!("Expected SlideIn, got {other:?}"),
+        }
+    }
+
+    /// **A spring never draws the pane past open**: it is anchored to the
+    /// screen's edge.
+    #[test]
+    fn a_spring_never_draws_the_pane_past_open() {
+        let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::new(200, guitk::motion::Curve::Spring));
+        pane.show();
+        pane.begin_slide();
+        while pane.is_sliding() {
+            pane.tick(0.01);
+            assert!(pane.shown() <= 1.0, "{:?}", pane.pane_state());
+        }
+        assert_eq!(pane.pane_state(), PaneState::Visible);
+    }
+
+    /// **Under a still motion nothing slides**: a rewind does nothing, and a
+    /// slide in progress when the motion stops lands where it was going.
+    #[test]
+    fn under_a_still_motion_nothing_slides() {
+        let mut pane = NotificationPane::new();
+        pane.set_motion(Motion::STILL);
+        pane.show();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Visible);
+        pane.hide();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Hidden);
+
+        let mut moving = NotificationPane::new();
+        moving.show();
+        moving.begin_slide();
+        moving.tick(0.05);
+        assert!(moving.is_sliding());
+        moving.set_motion(Motion::STILL);
+        assert_eq!(moving.pane_state(), PaneState::Visible);
+        moving.hide();
+        moving.begin_slide();
+        assert_eq!(moving.pane_state(), PaneState::Hidden);
+        // A tick under a still motion finishes anything left.
+        let mut left = NotificationPane::new();
+        left.show();
+        left.begin_slide();
+        left.motion = Motion::STILL;
+        left.tick(0.001);
+        assert_eq!(left.pane_state(), PaneState::Visible);
+    }
+
+    /// **Nothing to slide, no slide**: a pane shown while already open, or
+    /// hidden while already gone, is not rewound into a slide that goes
+    /// nowhere.
+    #[test]
+    fn nothing_to_slide_is_no_slide() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.show();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::Visible);
     }
 
     #[test]

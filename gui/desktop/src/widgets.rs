@@ -837,12 +837,7 @@ impl DesktopWidgetManager {
         Some((
             x,
             y,
-            textarea::Metrics {
-                width,
-                height,
-                font_size: NOTE_FONT_SIZE,
-                weight: FontWeightHint::Regular,
-            },
+            textarea::Metrics::new(width, height, NOTE_FONT_SIZE, FontWeightHint::Regular),
         ))
     }
 
@@ -1549,12 +1544,12 @@ impl DesktopWidgetManager {
                         area,
                         x,
                         y,
-                        metrics: textarea::Metrics {
+                        metrics: textarea::Metrics::new(
                             width,
                             height,
-                            font_size: NOTE_FONT_SIZE,
-                            weight: FontWeightHint::Regular,
-                        },
+                            NOTE_FONT_SIZE,
+                            FontWeightHint::Regular,
+                        ),
                         color: ink(p.text),
                         selection_bg: p.accent,
                         selection_fg: p.on_accent(),

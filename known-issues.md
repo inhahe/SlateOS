@@ -169095,9 +169095,35 @@ the module names them; or, if the shell should have a launcher dialog after
 all, wire this one and delete lane E's copy -- a question for the operator, not
 a cleanup. Deleting is the default, since the start menu's search does the job.
 
-## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27)
+## `TD-C-THE-PALETTE-REINTRODUCTION-HARNESS-HAS-ROTTED` (lane C, 2026-09-27) -- **FIXED 2026-09-27**
 
-**Status:** OPEN.
+**Status:** FIXED 2026-09-27, all three parts of the proper fix below.
+`--check` reports **1,451 defects, 0 stale, 0 ambiguous, 0 no-op**. (1) Every
+test that only stale entries proved is proven by a live one again. (2) Rather
+than retiring the remaining ~270 stale entries, each was **re-derived** at the
+site that now makes the same decision: most had rotted through a handful of
+tree-wide changes -- boxes became surfaces (`push_surface`; since §829 a card
+is outlined, not filled, so a frozen fill is the same call with that member of
+its paint replaced), glyphs became themed icons, hue text became inked
+(§837), captions moved from overlay0 to subtext0, the palette moved into the
+toolkit (§838), and the default shortcuts were cut back (§1416). Seven were
+retired instead, each leaving a `# RETIRED` record: duplicates of an edit
+another entry makes, or no-ops the design had since absorbed. Retiring was
+the cheaper option and the plan below chose it; re-deriving keeps what those
+entries uniquely proved, which is that a fixture reaches a branch (a
+hover-only button, an empty-list caption, a switcher edge case) -- retirement
+would have dropped exactly that. (3) `scripts/test-reintro-palette.py` holds
+the invariant on every boot (the boot test runs every `scripts/test-*.py`):
+the tree must check clean, and six controls prove `check()` still reports each
+kind of rot. Mutation-tested: a blind `check()`, a real rename in the tree
+and a crash on a deleted file each fail it.
+
+**Still to do, and tracked here until done:** a re-derived defect is checked
+to *apply*, not yet to be *caught*. Each batch is being run through the
+harness itself (`python scripts/reintro-palette.py <labels>`, ~3.5 min a
+defect, in a scratch worktree); a declaration a run shows to be wrong
+(`MISSING` or `UNDECLARED`) is corrected in the same pass. First results: the
+Run dialog's five and the widget layer's and the OSD's first batches.
 
 **In short:** `scripts/reintro-palette.py` proves the palette-conversion tests
 are real by putting each old colour back and checking a test fails. No gate
@@ -169108,14 +169134,52 @@ launcher's dialog), and their 400 entries were removed on 2026-09-27, since
 they can never apply. What is left: **1,459 defects, of which 308 no longer
 match the code they break and 3 match it ambiguously** (`--check`, 2026-09-27).
 
+**First repair pass, 2026-09-27: 296 stale.** Thirteen had only moved -- the
+palette went from `appearance` into the toolkit (design-decisions §838) while
+its tests stayed -- and now target `gui/toolkit/src/palette.rs`; the real sweep
+re-proved all thirteen. It also found **defect B had become a no-op**: the
+light palette's text inks are recomputed from `ink_sources` by the legibility
+floor, so copying the dark value into the `subtext1:` field changed nothing.
+B now copies it into `overlay0`, a role nothing recomputes, and is caught
+again. Four entries declared a test fewer than catch them; declared now. Of the
+296 left, a search of `gui/` finds 265 whose text no longer exists anywhere
+(the code was rewritten, and each needs its defect re-derived by hand) and the
+rest matching only generic lines in unrelated files.
+
 **Where:** `scripts/reintro-palette.py`; the stale entries are listed by
 `python scripts/reintro-palette.py --check`.
 
-**Proper fix:** repair each stale entry to the code as it now reads -- each is
-the proof that a named test catches a named regression, so dropping them
-wholesale loses that proof -- or retire those whose test is gone; then wire
-`--check` (seconds, no build) into the boot test's tooling suites, so the next
-rename that strands an entry fails a gate rather than going unnoticed for weeks.
+**Triaged, 2026-09-27 (later): what the stale entries still prove.** Counted
+per target file and per declared test, against the live entries:
+
+- **Every file but one still has live entries** proving its colour sweep (the
+  `every_colour_..._comes_from_its_palette` test each module carries) catches a
+  colour put back. That sweep checks *every* colour the module draws, so a
+  stale entry whose only declared test is the sweep adds nothing the live ones
+  do not already prove. The exception is `gui/desktop/src/run_dialog.rs`:
+  **five stale, none live**.
+- **31 tests are proven to bite only by stale entries** -- behaviour tests, not
+  sweeps: in `gui/desktop/src/lib.rs` eleven start-menu, power-menu and
+  window-switcher tests; `context_ext.rs`'s
+  `a_hovered_extensions_icon_follows_the_accent`; `osd.rs`'s
+  `every_pair_this_module_uses_to_tell_things_apart_stays_apart` and
+  `volume_icon_levels`; three in `widgets.rs`; three in `run_dialog.rs`; five
+  palette tests in `gui/appearance`; and one or two each in `calendar.rs`,
+  `datetime_settings.rs`, `login_screen.rs`, `startup_settings.rs` and
+  `wallpaper.rs`. Listed by the triage's script; rerun it to regenerate.
+- The work since the first pass added no stale entry: against `main` at
+  `08d0ef08d`, thirteen entries changed status, all from stale to live (the
+  retargets above).
+
+**Proper fix, now concrete:** (1) re-derive one entry for each of the 31 tests
+above -- a defect written against the code as it now reads, run through the
+harness to confirm the named test catches it -- and at least one for
+`run_dialog.rs`'s sweep; (2) retire the remaining ~270 stale entries, each
+leaving a one-line `# RETIRED 2026-..: stale; <file>'s sweep is proven by N
+live entries` in its place, which is the file's own convention and keeps the
+record; (3) wire `--check` (seconds, no build) into the boot test's tooling
+suites, so the next rename that strands an entry fails a gate rather than going
+unnoticed for weeks. (1) is the part with value; (2) and (3) are what keep it.
 
 ## `TD-C-THIRTY-EIGHT-CARD-TESTS-ASK-A-WEAKER-QUESTION-THAN-THEY-READ` (lane C, 2026-09-22)
 
@@ -172320,6 +172384,51 @@ old code.
 cannot be *copied* -- the one action fails and says why, and a move leaves
 that link where it was. The target OS makes links like any unix.
 
+## TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING (lane C, 2026-09-27)
+
+**Status:** OPEN
+
+**What.** `gui/toolkit/src/widget.rs` -- `Widget`, `WidgetKind` and
+`WidgetTree`, the toolkit's retained widget tree with its flexbox layout
+(`layout.rs`) -- has no program using it. `apps/diskimager`, `apps/filediff`
+and `apps/hexeditor` import `Widget`, `WidgetId` and `WidgetTree` and construct
+none; `apps/kanban` uses it in one test. Every window in the tree is drawn by
+the toolkit's component modules (`button`, `textinput`, `treeview`, `slider`,
+...) into a `Frame`, or by hand.
+
+Because nothing drives it, it has decayed without anyone seeing:
+
+- **Five declared widgets draw nothing and answer nothing:** `TextArea`,
+  `RadioButton`, `ScrollView`, `Slider` and `Image` fall through the render
+  match's `_ => {}`. A program that built a form with a slider in it would get
+  a blank space. (`Slider` was found while `guitk::slider` was written,
+  2026-09-27, `design-decisions.md` §1431 -- the component exists now; the
+  tree's variant does not use it.)
+- **It draws with its own colours, not the user's theme.** `render` takes no
+  `Palette`; widgets are drawn in `Style` colours with fixed defaults, and
+  `ProgressBar` fills with `#0078D7`, Windows' selection blue -- the colour the
+  palette conversion removed from everywhere else (838).
+- It routes no events for any program (see
+  `TD-C-EVERY-KEYSTROKE-WENT-TO-THE-LAST-TEXT-FIELD-IN-THE-WINDOW`, whose fix
+  noted that no application routes events through `WidgetTree::handle_event`).
+
+**Why it is not fixed in passing.** Making one variant real is not the fix:
+the tree has no palette to draw a themed slider with, and threading one
+through it is the same work for all of its widgets. The real question is what
+the tree is *for*. `roadmap-detailed.md` §3.5 asks for a layout engine (flexbox,
+grid, sizing to content) and the tree is the only one the toolkit has, so
+retiring it outright would drop that; keeping it means rendering every
+`WidgetKind` through the component modules and a `Palette`, so the tree and
+the components cannot draw one control two ways.
+
+**Proper fix.** Make the tree a layout-and-routing layer over the component
+modules: `render(&self, palette, sink)` draws each kind through its module
+(`guitk::button`, `guitk::slider`, `textinput`, ...), the five silent kinds
+either render through a module or are removed until one exists, and the
+hardcoded colours go. Do it when a program first wants the tree's layout --
+or sooner, if the §3.5 layout items are picked up, since they are the same
+work. Until then nothing is broken for a user, because no user reaches it.
+
 ### [E] Thirteen fields in nine applications are read and never filled, so the features behind them cannot be reached -- 2026-09-27
 
 **Status:** FIXED or ANSWERED, every row, the same day -- see the last
@@ -172585,6 +172694,24 @@ mark over its base is the text layer's (`GPOS` mark attachment, which
 `gui/toolkit`'s shaper has); the terminal's part is to keep the mark and hand
 it over.
 
+### [C] The canary's window check refused a boot test over its own controller's delay -- 2026-09-28
+
+**Status:** open -- lane A's code; reported in
+`requests/c-a-the-canary-window-check-counts-the-controllers-own-delay-as-poll-slack.md`.
+
+**In short:** a lane C boot test (`cabf43019`, 4854 s) refused to build because
+`scripts/test-canary-load.py` saw benchmarks finish 0.23 s before the load
+started, where it allows 0.1 s. The benchmarks were not early: the load
+controller stamps completions when it polls and the load's start only after
+it has read the batch and signalled the spinners, and under the machine's
+load it was descheduled between the two. The suite passed alone minutes later.
+
+**If a boot test fails on it again:** it is this, not your change -- re-run,
+and keep heavy builds off the machine while the boot test is in its
+"tooling's own test suites" stretch. The fix is lane A's: compare the window
+against the poll stamp of the trigger's own batch, and report the controller's
+reaction time separately (the request has the lines).
+
 ### [E] Text on a panel an application fills itself may read under 4.5:1 in the light bordered look -- 2026-09-28
 
 **Status:** Open -- fixed in the games as the legibility pass reaches each;
@@ -172657,6 +172784,25 @@ header and footer, everything placed from it, the hit test reading the same
 layout, and the symbol centred by measuring it (`guitk::text::measure`,
 `line_height`). Tests over a range of window sizes, as those games carry:
 nothing drawn outside the window, and every gem's hit box on its gem.
+
+### [C] A second save moments after the first fails on a busy Windows machine (`apps/safeio`, lane E's) -- 2026-09-28
+
+**Status:** OPEN -- lane E's code; reported in
+`requests/c-e-safeio-rename-fails-on-windows-while-something-holds-the-file.md`.
+
+**In short:** `safeio::write_atomically` renames a finished temporary over
+the file once. On Windows the rename is refused while another program holds
+the target open without `FILE_SHARE_DELETE` -- which the virus scanner and
+the indexer do right after a file is written -- so saving the same file
+twice in quick succession can fail ("Access is denied"). `apps/email`'s
+`a_draft_is_saved_edited_and_deleted` does exactly that, and failed on lane
+C's workspace gate twice under load (1e5be9dad), passing otherwise.
+
+**If a workspace run fails on it:** it is this, not your change -- re-run
+`cargo test -p email --bin email`. Reproduced on demand by holding the draft
+open with `OpenOptions::new().read(true).share_mode(1)` across the second
+save. The fix is lane E's: retry the rename a few times on
+`PermissionDenied`, as cargo and git for Windows do.
 
 ### [E] GRUB cannot load the kernel itself: it has no multiboot2 header -- 2026-09-28
 

@@ -281,6 +281,9 @@ pub struct RunDialog {
     /// looked up per frame, and set from `DesktopShell::set_appearance` --
     /// which is the only place that knows the settings changed.
     caret_width: f32,
+    /// How wide the field's focus mark is drawn: the user's focus width,
+    /// pushed in with the caret width and for the same reason.
+    focus_ring: f32,
     /// Whether the dialog is currently visible.
     visible: bool,
     /// Text input state.
@@ -336,11 +339,19 @@ impl RunDialog {
     pub fn set_caret_width(&mut self, width: f32) {
         self.caret_width = width;
     }
+
+    /// Adopt the user's focus width, in pixels
+    /// (`AppearanceSettings::focus_ring_width`), for the field's focus mark.
+    pub fn set_focus_ring_width(&mut self, width: f32) {
+        self.focus_ring = width;
+    }
+
     /// Create a new Run dialog (initially hidden).
     pub fn new() -> Self {
         Self {
             visible: false,
             caret_width: guitk::textedit::CARET_WIDTH,
+            focus_ring: guitk::style::FOCUS_RING_WIDTH,
             input: TextInput::new(),
             history: Vec::new(),
             history_index: None,
@@ -853,16 +864,19 @@ impl RunDialog {
         let input_x = x + PADDING + 40.0;
         let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
 
-        let mut paint = p.surface_paint(Surface::Panel);
-        paint.border = Some(p.accent);
-        p.push_paint_radii(
+        // The toolkit's field (`guitk::field`), in the theme's shape: it has
+        // the keyboard whenever the box is up, and a command that does not
+        // exist marks it wrong as well as saying so below it.
+        guitk::field::draw(
             &mut cmds,
-            input_x,
-            y + INPUT_Y_OFFSET,
-            input_w,
-            INPUT_HEIGHT,
-            CornerRadii::all(4.0),
-            paint,
+            p,
+            guitk::frame::Rect::new(input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT),
+            guitk::field::State {
+                focused: true,
+                invalid: self.error_message.is_some(),
+                ..guitk::field::State::default()
+            },
+            self.focus_ring,
         );
 
         // Selection highlight (if any).
@@ -1967,6 +1981,22 @@ mod tests {
         assert!(dialog.is_visible());
         let events = dialog.drain_events();
         assert!(events.is_empty());
+
+        // And the field says so: its edge and its focus mark are red, the
+        // toolkit field's "what is in it is wrong".
+        let p = Palette::for_mode(false);
+        let reds = dialog
+            .render(&p)
+            .iter()
+            .filter(|cmd| {
+                matches!(cmd, RenderCommand::StrokeRect { color, .. }
+                    if (color.r, color.g, color.b) == (p.red.r, p.red.g, p.red.b))
+            })
+            .count();
+        assert!(
+            reds >= 2,
+            "the field does not mark the error: {reds} red strokes"
+        );
     }
 
     #[test]

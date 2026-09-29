@@ -12,11 +12,25 @@
 //! channel is stored separately as it is orthogonal to hue/saturation/value.
 //!
 //! All rendering produces `Vec<RenderCommand>` that any backend can consume.
+//!
+//! # Taking hold of a part
+//!
+//! Every part you drag -- the saturation/value square, the hue bar, the alpha
+//! bar, the three slider rows -- is taken hold of over its [`crate::grab`]
+//! region rather than only its drawn pixels: a slider row's eight-pixel track
+//! is a 24-pixel target, and a press just outside the square takes the
+//! square's edge. Where two regions meet, the press goes to the part drawn
+//! nearer (`grab::nearest`). A press on a slider row's thumb keeps where it
+//! took hold, as the toolkit's slider does, so the value does not jump by the
+//! distance from the thumb's centre; a press elsewhere on the row brings the
+//! thumb to it.
 
 use core::num::NonZeroUsize;
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::frame::Rect;
+use crate::grab;
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -43,6 +57,8 @@ const FONT_SIZE_SMALL: f32 = 10.0;
 const CORNER_RADIUS: f32 = 4.0;
 const SLIDER_HEIGHT: f32 = 16.0;
 const SLIDER_TRACK_HEIGHT: f32 = 8.0;
+/// A slider row's round thumb: a pixel inside the row at top and bottom.
+const SLIDER_THUMB: f32 = SLIDER_HEIGHT - 2.0;
 const SWATCH_SIZE: f32 = 20.0;
 const SWATCH_GAP: f32 = 4.0;
 const PREVIEW_SIZE: f32 = 48.0;
@@ -315,6 +331,15 @@ pub enum DragTarget {
     HsvSlider(u8),
 }
 
+impl DragTarget {
+    /// Whether this is a part of the inline picker -- the square or the hue
+    /// bar -- rather than one of the bars only the full dialog draws.
+    #[must_use]
+    pub const fn is_inline(self) -> bool {
+        matches!(self, Self::SvSquare | Self::HueBar)
+    }
+}
+
 /// Active input mode for the color picker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerMode {
@@ -520,11 +545,18 @@ impl ColorPicker {
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
             }
-            MouseEventKind::Move if self.drag.is_some() => {
+            // Only the drags this picker started. The dialog around it sets
+            // `drag` to its own bars -- the alpha bar and the slider rows --
+            // and hands this picker every event first; continuing those here
+            // read the pointer against the square's width instead of the
+            // row's track, so the first move of a slider row jumped its value.
+            MouseEventKind::Move if self.drag.is_some_and(DragTarget::is_inline) => {
                 self.apply_drag(local_x, local_y);
                 return Some(ColorPickerEvent::Changed(self.current_color()));
             }
-            MouseEventKind::Release(MouseButton::Left) if self.drag.is_some() => {
+            MouseEventKind::Release(MouseButton::Left)
+                if self.drag.is_some_and(DragTarget::is_inline) =>
+            {
                 self.drag = None;
                 self.sync_hex_from_hsv();
                 return Some(ColorPickerEvent::Changed(self.current_color()));
@@ -552,12 +584,11 @@ impl ColorPicker {
             match event.key {
                 Key::Backspace => {
                     self.hex_input.pop();
-                    self.try_apply_hex();
+                    self.apply_typed_hex();
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
                 Key::Enter => {
-                    self.try_apply_hex();
-                    self.hex_focused = false;
+                    self.commit_hex();
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
                 Key::Escape => {
@@ -577,7 +608,7 @@ impl ColorPicker {
                         took_any = true;
                     }
                     if took_any {
-                        self.try_apply_hex();
+                        self.apply_typed_hex();
                         return Some(ColorPickerEvent::Changed(self.current_color()));
                     }
                 }
@@ -836,25 +867,30 @@ impl ColorPicker {
     // --- Private interaction helpers ---
 
     /// Determine which part of the picker a local coordinate hits.
+    ///
+    /// The square and the hue bar are each taken hold of over their
+    /// [`grab::handle`] region, and a press where the two meet goes to the
+    /// nearer (see the module docs). A press in the margin outside the square
+    /// lands on its edge, because the drag clamps what it reads.
     fn hit_test(&self, local_x: f32, local_y: f32) -> Option<DragTarget> {
         let sv_size = self.sv_size;
-
-        // SV square: starts at (0, 0) in content area
-        if local_x >= 0.0 && local_x <= sv_size && local_y >= 0.0 && local_y <= sv_size {
-            return Some(DragTarget::SvSquare);
-        }
-
-        // Hue bar: to the right of SV square
-        let hue_x = sv_size + PADDING;
-        let hue_x_end = hue_x + HUE_BAR_WIDTH;
-        if local_x >= hue_x && local_x <= hue_x_end && local_y >= 0.0 && local_y <= sv_size {
-            return Some(DragTarget::HueBar);
-        }
-
-        None
+        grab::nearest(
+            [
+                (DragTarget::SvSquare, Rect::new(0.0, 0.0, sv_size, sv_size)),
+                (
+                    DragTarget::HueBar,
+                    Rect::new(sv_size + PADDING, 0.0, HUE_BAR_WIDTH, sv_size),
+                ),
+            ],
+            local_x,
+            local_y,
+        )
     }
 
     /// Apply a drag interaction based on the current drag target and position.
+    ///
+    /// The square and the hue bar only: the dialog's own bars are continued by
+    /// the dialog, against its layout (see `handle_mouse`).
     fn apply_drag(&mut self, local_x: f32, local_y: f32) {
         let sv_size = self.sv_size;
 
@@ -869,33 +905,8 @@ impl ColorPicker {
                 let h = (local_y / sv_size).clamp(0.0, 1.0) * 360.0;
                 self.hsv.h = h;
             }
-            Some(DragTarget::AlphaBar) => {
-                // Alpha bar occupies below the SV square in the full dialog.
-                let alpha_width = sv_size;
-                let a = (local_x / alpha_width).clamp(0.0, 1.0);
-                self.alpha = (a * 255.0 + 0.5) as u8;
-            }
-            Some(DragTarget::RgbSlider(channel)) => {
-                let slider_width = sv_size;
-                let val = ((local_x / slider_width).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                let (mut r, mut g, mut b) = hsv_to_rgb(self.hsv);
-                match channel {
-                    0 => r = val,
-                    1 => g = val,
-                    _ => b = val,
-                }
-                self.hsv = rgb_to_hsv(r, g, b);
-            }
-            Some(DragTarget::HsvSlider(component)) => {
-                let slider_width = sv_size;
-                let t = (local_x / slider_width).clamp(0.0, 1.0);
-                match component {
-                    0 => self.hsv.h = t * 360.0,
-                    1 => self.hsv.s = t,
-                    _ => self.hsv.v = t,
-                }
-            }
-            None => {}
+            Some(DragTarget::AlphaBar | DragTarget::RgbSlider(_) | DragTarget::HsvSlider(_))
+            | None => {}
         }
     }
 
@@ -903,6 +914,31 @@ impl ColorPicker {
     fn sync_hex_from_hsv(&mut self) {
         let (r, g, b) = hsv_to_rgb(self.hsv);
         self.hex_input = format!("{:02X}{:02X}{:02X}", r, g, b);
+    }
+
+    /// Apply the hex being typed if it is a whole code -- six digits, or eight
+    /// with the alpha -- and change nothing otherwise.
+    ///
+    /// Not the three-digit shorthand, which is also the first three digits of
+    /// every longer code: typing `FF0000` would flash yellow (`FF0`) on the way
+    /// to red, and deleting `00FF00` a digit at a time would leave the colour
+    /// blue (`00F`) once the field was empty. The shorthand is applied when
+    /// the entry is finished ([`commit_hex`](Self::commit_hex)).
+    fn apply_typed_hex(&mut self) {
+        if matches!(self.hex_input.len(), 6 | 8) {
+            self.try_apply_hex();
+        }
+    }
+
+    /// Finish typing in the hex field -- Enter, or the pointer taking the
+    /// keyboard elsewhere: apply what was typed if it is a colour in any form
+    /// the field accepts, leave the field, and show the colour in force in its
+    /// full form, so a shorthand `F00` reads `FF0000` and a half-typed code is
+    /// replaced by the colour it did not change.
+    fn commit_hex(&mut self) {
+        self.try_apply_hex();
+        self.hex_focused = false;
+        self.sync_hex_from_hsv();
     }
 
     /// Try to apply the hex input buffer to the color. If invalid, no change.
@@ -941,6 +977,11 @@ pub struct ColorPickerDialog {
     confirmed: bool,
     /// Whether the dialog has been cancelled.
     cancelled: bool,
+    /// While a slider row is dragged, how far to the right of its thumb's
+    /// centre the press took hold -- zero for a press elsewhere on the row,
+    /// which brings the thumb to the pointer. Kept so a press on the thumb
+    /// does not move the value by the distance from its centre.
+    slider_grip: f32,
 }
 
 impl ColorPickerDialog {
@@ -951,6 +992,7 @@ impl ColorPickerDialog {
             slider_tab: SliderTab::Rgb,
             confirmed: false,
             cancelled: false,
+            slider_grip: 0.0,
         }
     }
 
@@ -1018,8 +1060,8 @@ impl ColorPickerDialog {
         }
     }
 
-    /// Handle a mouse event (coordinates relative to the dialog origin).
-    /// Handle a mouse event against a dialog of this size.
+    /// Handle a mouse event against a dialog of this size, at coordinates
+    /// relative to the dialog's origin.
     ///
     /// The size is required because the layout depends on it — the preset
     /// palette's column count is a function of the width — and a widget that
@@ -1042,6 +1084,18 @@ impl ColorPickerDialog {
         if matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
             let (x, y) = (event.x, event.y);
 
+            // The hex field takes the keyboard when it is clicked, and gives
+            // it up -- finishing the entry, as Enter does -- when anything
+            // else is. Nothing used to give the field the keyboard at all, so
+            // it was drawn and could never be typed in.
+            if hex_field_rect(layout.right_x, layout.hex_y, layout.right_width).contains(x, y) {
+                self.picker.hex_focused = true;
+                return None;
+            }
+            if self.picker.hex_focused {
+                self.picker.commit_hex();
+            }
+
             if let Some(color) = self
                 .hit_test_presets(&layout, x, y)
                 .or_else(|| self.hit_test_recent(&layout, x, y))
@@ -1062,15 +1116,25 @@ impl ColorPickerDialog {
                 }
             }
 
-            if y >= layout.alpha_y && y <= layout.alpha_y + ALPHA_BAR_HEIGHT {
-                self.picker.drag = Some(DragTarget::AlphaBar);
-                return Some(self.drag_alpha_to(&layout, x));
-            }
-
-            if let Some(target) = self.hit_test_sliders(&layout, x, y) {
-                self.picker.drag = Some(target);
-                self.apply_slider_drag(&layout, x);
-                return Some(ColorPickerEvent::Changed(self.picker.current_color()));
+            match self.hit_test_bars(&layout, x, y) {
+                Some(DragTarget::AlphaBar) => {
+                    self.picker.drag = Some(DragTarget::AlphaBar);
+                    return Some(self.drag_alpha_to(&layout, x));
+                }
+                Some(target @ (DragTarget::RgbSlider(row) | DragTarget::HsvSlider(row))) => {
+                    self.picker.drag = Some(target);
+                    // On the thumb, keep where it was taken hold of; anywhere
+                    // else on the row, bring the thumb to the press.
+                    let thumb = self.row_thumb(&layout, row);
+                    self.slider_grip = if grab::handle(thumb).contains(x, y) {
+                        x - (thumb.x + thumb.w / 2.0)
+                    } else {
+                        0.0
+                    };
+                    self.apply_slider_drag(&layout, x - self.slider_grip);
+                    return Some(ColorPickerEvent::Changed(self.picker.current_color()));
+                }
+                _ => {}
             }
         }
 
@@ -1079,7 +1143,7 @@ impl ColorPickerDialog {
             match self.picker.drag {
                 Some(DragTarget::AlphaBar) => return Some(self.drag_alpha_to(&layout, event.x)),
                 Some(DragTarget::RgbSlider(_) | DragTarget::HsvSlider(_)) => {
-                    self.apply_slider_drag(&layout, event.x);
+                    self.apply_slider_drag(&layout, event.x - self.slider_grip);
                     return Some(ColorPickerEvent::Changed(self.picker.current_color()));
                 }
                 _ => {}
@@ -1088,6 +1152,7 @@ impl ColorPickerDialog {
 
         if matches!(event.kind, MouseEventKind::Release(MouseButton::Left)) {
             self.picker.drag = None;
+            self.slider_grip = 0.0;
             self.picker.sync_hex_from_hsv();
         }
 
@@ -1281,32 +1346,21 @@ impl ColorPickerDialog {
             overflow: TextOverflow::Clip,
         });
 
-        // Input field
-        let input_x = x + 32.0;
-        let input_width = width - 32.0;
-        let border_color = if self.picker.hex_focused {
-            palette.blue
-        } else {
-            palette.surface2
-        };
-
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: y - 2.0,
-            width: input_width,
-            height: 22.0,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x: input_x,
-            y: y - 2.0,
-            width: input_width,
-            height: 22.0,
-            color: border_color,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        // Input field: the box every field is drawn in (`crate::field`), with
+        // the keyboard's mark while the hex digits are being typed. It was a
+        // box of its own whose focused edge was blue, not the accent.
+        let field = hex_field_rect(x, y, width);
+        let (input_x, input_width) = (field.x, field.w);
+        crate::field::draw(
+            cmds,
+            palette,
+            field,
+            crate::field::State {
+                focused: self.picker.hex_focused,
+                ..crate::field::State::default()
+            },
+            crate::style::FOCUS_RING_WIDTH,
+        );
 
         // "#" prefix
         cmds.push(RenderCommand::Text {
@@ -1330,6 +1384,13 @@ impl ColorPickerDialog {
             max_width: Some(input_width - 20.0),
             overflow: TextOverflow::Ellipsis,
         });
+    }
+
+    /// Whether the hex field has the keyboard: typing goes into it, and Enter
+    /// applies what was typed rather than closing the dialog.
+    #[must_use]
+    pub fn hex_is_focused(&self) -> bool {
+        self.picker.hex_focused
     }
 
     fn render_eyedropper_button(
@@ -1426,7 +1487,7 @@ impl ColorPickerDialog {
                     (1, "G", Color::GREEN, g),
                     (2, "B", Color::BLUE, b),
                 ] {
-                    let fraction = f32::from(value) / 255.0;
+                    let fraction = self.row_fraction(row);
                     self.render_channel_slider(
                         palette,
                         cmds,
@@ -1442,11 +1503,9 @@ impl ColorPickerDialog {
             SliderTab::Hsv => {
                 // Hue gets a rainbow track rather than a single-colour fill,
                 // and its readout runs to 360 rather than 255.
-                self.render_hue_slider(palette, cmds, layout, hsv.h / 360.0, hsv.h as u16);
-                for (row, label, color, fraction) in [
-                    (1u8, "S", palette.blue, hsv.s),
-                    (2, "V", Color::WHITE, hsv.v),
-                ] {
+                self.render_hue_slider(palette, cmds, layout, self.row_fraction(0), hsv.h as u16);
+                for (row, label, color) in [(1u8, "S", palette.blue), (2, "V", Color::WHITE)] {
+                    let fraction = self.row_fraction(row);
                     let display = (fraction * 100.0 + 0.5) as u16;
                     self.render_channel_slider(
                         palette, cmds, layout, row, label, fraction, color, display,
@@ -1513,7 +1572,7 @@ impl ColorPickerDialog {
 
         // Thumb
         let thumb_x = track_x + fill_width;
-        let thumb_size = SLIDER_HEIGHT - 2.0;
+        let thumb_size = SLIDER_THUMB;
         cmds.push(RenderCommand::FillRect {
             x: thumb_x - thumb_size / 2.0,
             y: y + 1.0,
@@ -1606,7 +1665,7 @@ impl ColorPickerDialog {
 
         // Thumb
         let thumb_x = track_x + fraction.clamp(0.0, 1.0) * track_width;
-        let thumb_size = SLIDER_HEIGHT - 2.0;
+        let thumb_size = SLIDER_THUMB;
         cmds.push(RenderCommand::FillRect {
             x: thumb_x - thumb_size / 2.0,
             y: y + 1.0,
@@ -1802,18 +1861,85 @@ impl ColorPickerDialog {
         x >= tab_x && x <= tab_x + w && y >= layout.slider_y && y <= layout.slider_y + h
     }
 
-    fn hit_test_sliders(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<DragTarget> {
+    /// Which of the dialog's own bars a press at `(x, y)` takes hold of: the
+    /// alpha bar or one of the three slider rows.
+    ///
+    /// Each by its [`grab::handle`] region -- for a row, the track with the
+    /// thumb's overhang at both ends, as tall as the thumb -- and a press where
+    /// two regions meet goes to the nearer. The alpha bar used to answer a
+    /// press anywhere in its band, however far to the right of the bar, and a
+    /// row only on the track's exact pixels, so a thumb at either end hung
+    /// half outside the part that answered.
+    fn hit_test_bars(&self, layout: &DialogLayout, x: f32, y: f32) -> Option<DragTarget> {
         let (track_x, track_width) = layout.slider_track();
-        (0..3u8).find_map(|row| {
-            let sy = layout.slider_row_y(row);
-            let inside =
-                y >= sy && y <= sy + SLIDER_HEIGHT && x >= track_x && x <= track_x + track_width;
-            match (inside, self.slider_tab) {
-                (false, _) => None,
-                (true, SliderTab::Rgb) => Some(DragTarget::RgbSlider(row)),
-                (true, SliderTab::Hsv) => Some(DragTarget::HsvSlider(row)),
+        let thumb = SLIDER_THUMB;
+        let row = |i: u8| {
+            let target = match self.slider_tab {
+                SliderTab::Rgb => DragTarget::RgbSlider(i),
+                SliderTab::Hsv => DragTarget::HsvSlider(i),
+            };
+            let covered = Rect::new(
+                track_x - thumb / 2.0,
+                layout.slider_row_y(i) + (SLIDER_HEIGHT - thumb) / 2.0,
+                track_width + thumb,
+                thumb,
+            );
+            (target, covered)
+        };
+        grab::nearest(
+            [
+                (
+                    DragTarget::AlphaBar,
+                    Rect::new(
+                        layout.sv_x,
+                        layout.alpha_y,
+                        layout.sv_size,
+                        ALPHA_BAR_HEIGHT,
+                    ),
+                ),
+                row(0),
+                row(1),
+                row(2),
+            ],
+            x,
+            y,
+        )
+    }
+
+    /// How full slider row `row` is under the tab showing: a channel over 255
+    /// on the RGB tab; hue over 360, then saturation and value, on the HSV
+    /// tab. The drawing and the grip both read it, so the thumb you press is
+    /// the thumb that was drawn.
+    fn row_fraction(&self, row: u8) -> f32 {
+        let hsv = self.picker.hsv;
+        match self.slider_tab {
+            SliderTab::Rgb => {
+                let (r, g, b) = hsv_to_rgb(hsv);
+                let value = match row {
+                    0 => r,
+                    1 => g,
+                    _ => b,
+                };
+                f32::from(value) / 255.0
             }
-        })
+            SliderTab::Hsv => match row {
+                0 => hsv.h / 360.0,
+                1 => hsv.s,
+                _ => hsv.v,
+            },
+        }
+    }
+
+    /// Where slider row `row`'s thumb is drawn, at its current value.
+    fn row_thumb(&self, layout: &DialogLayout, row: u8) -> Rect {
+        let (track_x, track_width) = layout.slider_track();
+        let centre = track_x + self.row_fraction(row).clamp(0.0, 1.0) * track_width;
+        Rect::new(
+            centre - SLIDER_THUMB / 2.0,
+            layout.slider_row_y(row) + (SLIDER_HEIGHT - SLIDER_THUMB) / 2.0,
+            SLIDER_THUMB,
+            SLIDER_THUMB,
+        )
     }
 
     fn apply_slider_drag(&mut self, layout: &DialogLayout, mouse_x: f32) {
@@ -1872,6 +1998,23 @@ impl ColorPickerDialog {
 /// so storing a copy earned nothing. Found by removing this file's
 /// `#![allow(dead_code)]`, which had been suppressing the "never read"
 /// warning.
+/// Where the hex field is, for a hex row whose label starts at `(x, y)` in a
+/// column `width` wide: after the "Hex:" label, to the column's end. One
+/// rectangle for the drawing and the click.
+fn hex_field_rect(x: f32, y: f32, width: f32) -> crate::frame::Rect {
+    crate::frame::Rect::new(
+        x + HEX_LABEL_WIDTH,
+        y - 2.0,
+        (width - HEX_LABEL_WIDTH).max(0.0),
+        HEX_FIELD_HEIGHT,
+    )
+}
+
+/// The room the hex row's "Hex:" label takes before its field.
+const HEX_LABEL_WIDTH: f32 = 32.0;
+/// The hex field's height.
+const HEX_FIELD_HEIGHT: f32 = 22.0;
+
 struct DialogLayout {
     width: f32,
     /// Top-left corner of the saturation/value square, and its side.
@@ -2161,6 +2304,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn press(x: f32, y: f32) -> MouseEvent {
+        MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }
+    }
+
+    /// A slider row's track is eight pixels tall; its region is 24. A press two
+    /// pixels above the row's own box -- which answered nothing before -- takes
+    /// hold of the row.
+    #[test]
+    fn a_slider_row_is_taken_hold_of_just_off_its_track() {
+        let mut dialog = ColorPickerDialog::new(Color::rgb(100, 150, 200));
+        let layout = dialog.layout(400.0, 600.0);
+        let (track_x, track_width) = layout.slider_track();
+        let above = layout.slider_row_y(1) - 2.0;
+        let got = dialog.handle_mouse(&press(track_x + track_width / 4.0, above), 400.0, 600.0);
+        assert!(matches!(got, Some(ColorPickerEvent::Changed(_))), "{got:?}");
+        assert_eq!(dialog.picker.drag, Some(DragTarget::RgbSlider(1)));
+        // A quarter of the way along the green row is a quarter of 255.
+        let (_, g, _) = hsv_to_rgb(dialog.picker.hsv);
+        assert!((i32::from(g) - 64).abs() <= 1, "green is {g}");
+    }
+
+    /// Pressing on a thumb off its centre keeps where it was taken hold of:
+    /// the value stays, and a drag then moves it by the pointer's movement.
+    #[test]
+    fn a_press_on_a_slider_thumb_does_not_move_its_value() {
+        let mut dialog = ColorPickerDialog::new(Color::rgb(100, 150, 200));
+        let layout = dialog.layout(400.0, 600.0);
+        let thumb = dialog.row_thumb(&layout, 1);
+        let (cx, cy) = (thumb.x + thumb.w / 2.0, thumb.y + thumb.h / 2.0);
+        let got = dialog.handle_mouse(&press(cx + 5.0, cy), 400.0, 600.0);
+        assert!(matches!(got, Some(ColorPickerEvent::Changed(_))), "{got:?}");
+        let (_, g, _) = hsv_to_rgb(dialog.picker.hsv);
+        assert_eq!(g, 150, "a press on the thumb moved the value");
+
+        let (_, track_width) = layout.slider_track();
+        let step = track_width / 5.0; // a fifth of the track is 51 of 255
+        let moved = MouseEvent {
+            x: cx + 5.0 + step,
+            y: cy,
+            kind: MouseEventKind::Move,
+        };
+        dialog.handle_mouse(&moved, 400.0, 600.0);
+        let (_, g, _) = hsv_to_rgb(dialog.picker.hsv);
+        assert!(
+            (i32::from(g) - 201).abs() <= 1,
+            "green is {g}, wanted 150 + 51"
+        );
+    }
+
+    /// The alpha bar answers a press on or near itself, and not one far to its
+    /// right in the same band -- which used to set the alpha.
+    #[test]
+    fn the_alpha_bar_answers_only_near_itself() {
+        let mut dialog = ColorPickerDialog::new(Color::rgba(10, 20, 30, 200));
+        let layout = dialog.layout(400.0, 600.0);
+        let y = layout.alpha_y + ALPHA_BAR_HEIGHT / 2.0;
+        let far = layout.sv_x + layout.sv_size + 30.0;
+        let got = dialog.handle_mouse(&press(far, y), 400.0, 600.0);
+        assert_eq!(got, None, "a press beside the alpha bar did something");
+        assert_eq!(dialog.picker.alpha, 200);
+
+        // Three pixels past its right end is the bar's own margin: full alpha.
+        let near = layout.sv_x + layout.sv_size + 3.0;
+        dialog.handle_mouse(&press(near, y), 400.0, 600.0);
+        assert_eq!(dialog.picker.drag, Some(DragTarget::AlphaBar));
+        assert_eq!(dialog.picker.alpha, 255);
+    }
+
+    /// The inline picker: a press just outside the square takes its edge, and
+    /// one in the gap to the hue bar goes to whichever is nearer.
+    #[test]
+    fn a_press_beside_the_square_or_the_hue_bar_takes_the_nearer() {
+        let mut picker = ColorPicker::new(Color::rgb(0, 128, 255));
+        let sv = picker.sv_size;
+        let mid = sv / 2.0;
+        assert!(
+            picker
+                .handle_mouse(&press(sv + 3.0, mid), 0.0, 0.0)
+                .is_some()
+        );
+        assert_eq!(picker.drag, Some(DragTarget::SvSquare));
+        assert!(
+            (picker.hsv.s - 1.0).abs() < f32::EPSILON,
+            "the square's right edge"
+        );
+
+        let mut picker = ColorPicker::new(Color::rgb(0, 128, 255));
+        // Three pixels left of the hue bar: nearer it than the square.
+        assert!(
+            picker
+                .handle_mouse(&press(sv + PADDING - 3.0, mid), 0.0, 0.0)
+                .is_some()
+        );
+        assert_eq!(picker.drag, Some(DragTarget::HueBar));
     }
 
     // --- HSV ↔ RGB conversion tests ---
@@ -2515,6 +2758,131 @@ mod tests {
         let result = dialog.handle_key(&event);
         assert!(matches!(result, Some(ColorPickerEvent::Confirmed(_))));
         assert!(dialog.is_confirmed());
+    }
+
+    /// **The hex field can be typed in.** A click on it gives it the keyboard
+    /// -- its focus mark shows, the digits typed go into it, and Enter applies
+    /// them instead of closing the dialog -- and a click anywhere else applies
+    /// what was typed and takes the keyboard back. Nothing gave the field the
+    /// keyboard before, so it was drawn and could never be typed in.
+    #[test]
+    fn the_hex_field_is_clicked_into_and_typed_in() {
+        let palette = Palette::for_mode(false);
+        let key = |key: Key, text: &str| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: text.to_string(),
+        };
+        let mut dialog = ColorPickerDialog::new(Color::rgb(100, 150, 200));
+        let layout = dialog.layout(400.0, 600.0);
+        let field = hex_field_rect(layout.right_x, layout.hex_y, layout.right_width);
+        let focus_edge = |dialog: &ColorPickerDialog| {
+            dialog.render(&palette, 400.0, 600.0).iter().any(|c| {
+                matches!(c, RenderCommand::StrokeRect { x, y, color, .. }
+                    if (*x, *y) == (field.x, field.y) && *color == palette.accent)
+            })
+        };
+        assert!(!dialog.hex_is_focused());
+        assert!(!focus_edge(&dialog));
+
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        assert!(
+            dialog.hex_is_focused(),
+            "a click did not give it the keyboard"
+        );
+        assert!(
+            focus_edge(&dialog),
+            "the field does not show it has the keyboard"
+        );
+
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "ff0000"));
+        let applied = dialog.handle_key(&key(Key::Enter, ""));
+        assert!(
+            !dialog.is_confirmed(),
+            "Enter in the field closed the dialog"
+        );
+        assert!(
+            matches!(applied, Some(ColorPickerEvent::Changed(c)) if (c.r, c.g, c.b) == (255, 0, 0))
+        );
+        assert!(
+            !dialog.hex_is_focused(),
+            "Enter applies and leaves the field"
+        );
+
+        // Typing, then clicking elsewhere, keeps what was typed.
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "00ff00"));
+        dialog.handle_mouse(&press(1.0, 1.0), 400.0, 600.0);
+        assert!(
+            !dialog.hex_is_focused(),
+            "a click elsewhere kept the keyboard"
+        );
+        let now = dialog.picker.current_color();
+        assert_eq!((now.r, now.g, now.b), (0, 255, 0));
+
+        // A half-typed code is not a colour: leaving the field shows the
+        // colour in force again rather than the fragment.
+        dialog.handle_mouse(&press(field.x + 4.0, field.y + 4.0), 400.0, 600.0);
+        for _ in 0..8 {
+            dialog.handle_key(&key(Key::Backspace, ""));
+        }
+        dialog.handle_key(&key(Key::A, "12"));
+        dialog.handle_mouse(&press(1.0, 1.0), 400.0, 600.0);
+        assert_eq!(dialog.picker.hex_input(), "00FF00");
+    }
+
+    /// **Only a whole code applies while typing.** The three-digit shorthand
+    /// is also the start of every longer code, so applying it as it was typed
+    /// flashed `FF0000` yellow at its third digit, and deleting a code a digit
+    /// at a time left the colour blue (`00F`). Typed, the shorthand waits for
+    /// Enter -- and then reads in full.
+    #[test]
+    fn only_a_whole_hex_code_applies_while_typing() {
+        let key = |key: Key, text: &str| KeyEvent {
+            key,
+            pressed: true,
+            modifiers: crate::event::Modifiers::NONE,
+            text: text.to_string(),
+        };
+        let rgb = |p: &ColorPicker| {
+            let c = p.current_color();
+            (c.r, c.g, c.b)
+        };
+        let mut picker = ColorPicker::new(Color::rgb(0, 255, 0));
+        picker.hex_focused = true;
+        for _ in 0..6 {
+            picker.handle_key(&key(Key::Backspace, ""));
+            assert_eq!(rgb(&picker), (0, 255, 0), "deleting changed the colour");
+        }
+        for (typed, expect) in [
+            ("F", (0, 255, 0)),
+            ("F", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (0, 255, 0)),
+            ("0", (255, 0, 0)),
+        ] {
+            picker.handle_key(&key(Key::A, typed));
+            assert_eq!(rgb(&picker), expect, "after {:?}", picker.hex_input());
+        }
+
+        // The shorthand, finished with Enter.
+        for _ in 0..6 {
+            picker.handle_key(&key(Key::Backspace, ""));
+        }
+        picker.handle_key(&key(Key::A, "00F"));
+        assert_eq!(rgb(&picker), (255, 0, 0), "a shorthand applied mid-entry");
+        picker.handle_key(&key(Key::Enter, ""));
+        assert_eq!(rgb(&picker), (0, 0, 255));
+        assert_eq!(picker.hex_input(), "0000FF", "the shorthand reads in full");
+        assert!(!picker.hex_focused);
     }
 
     #[test]

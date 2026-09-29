@@ -631,7 +631,22 @@ BASELINE_HEADER = """\
 # and textview.rs), so the count still fell.  Delete the line when an
 # application opens a DirectoryTree.
 #
-# A third line was ADDED on 2026-09-28, by lane F:
+# Two more lines were ADDED on 2026-09-27, by lane C, on the same reasoning:
+# gui/toolkit/src/dropdown.rs and gui/toolkit/src/radio.rs, the toolkit's
+# drop-down list and radio group, which landed with its slider, switch and
+# checkbox (design-decisions 1431, 1432).  Their callers were looked for in
+# lane C's own tree first, and none is live: the shell's one-of-several
+# choices are menus (the desktop's View submenu) and lists (the shortcut
+# editor), and the two hand-drawn pickers it has -- the touchpad page's
+# choice boxes and focus assist's mode list -- are drawn only by their own
+# tests, the touchpad page being on this list itself.  The callers are
+# applications (the Settings application's own drop-downs, the unit
+# converter's, the radio groups in undelete, netmanager and podcast), lane
+# E's since the split, asked for in
+# requests/c-e-the-toolkit-has-switches-checkboxes-radio-buttons-and-drop-downs.md.
+# Delete each line when an application draws one.
+
+# Another line was ADDED on 2026-09-28, by lane F:
 # gui/imagecodec/src/avif/animation.rs, the player for animated AVIF pictures
 # (`imagecodec::avif::Animation`).  The same benign case with the commit in
 # another lane: its caller is the image viewer's player, which plays GIF and
@@ -639,6 +654,16 @@ BASELINE_HEADER = """\
 # asked for in requests/f-bce-avif-pictures-open-and-animate.md.  Lane F's own
 # tree has no program that plays a picture.  Delete the line when the viewer
 # plays an AVIF sequence.
+#
+# Another line was ADDED on 2026-09-28, by lane C: gui/toolkit/src/codeview.rs,
+# the toolkit's code editor on screen (`guitk::codeview::CodeView`), over the
+# model and buffer that landed with it (codeedit.rs, textbuffer.rs, which it
+# reaches).  Its callers were looked for in lane C's own tree first, and none
+# edits code: the shell's text is a Run box, a search, a note.  The callers
+# are the two editors, apps/editor and apps/markdowneditor, which each carry
+# their own copy of an editor and are lane E's -- asked for in
+# requests/c-e-the-toolkit-has-a-code-editor.md.  Delete the line when an
+# application draws a CodeView.
 #
 # THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
 # rewrites this file from that constant, so anything added directly to the

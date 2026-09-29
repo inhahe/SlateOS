@@ -122,23 +122,10 @@ pub mod security_dialog;
 pub mod session;
 pub mod session_mgr;
 pub mod shortcut_editor;
-/// The horizontal value slider every settings panel draws, in one place.
-///
-/// Five panels drew it by hand and disagreed about the thumb's colour; one of
-/// them inked it the same accent as the fill underneath it. The thumb is now
-/// `text` — and deliberately *not* derived from the fill, because unlike a
-/// switch knob it overhangs its track.
-pub mod slider;
 pub mod snap;
 pub mod sound_settings;
 pub mod startup_settings;
 pub mod storage_settings;
-/// The on/off switch every settings panel draws, in one place.
-///
-/// Seventeen panels drew it by hand and all seventeen filled the knob with
-/// `p.text`, which on an accent track is 1.35:1 against it. The knob is now
-/// derived from the track it sits on.
-pub mod switch;
 pub mod taskbar;
 pub mod taskbar_autohide;
 pub mod touchpad;
@@ -207,6 +194,26 @@ const TASKBAR_CONFIG_NAME: &str = "taskbar";
 
 /// The file the programs pinned to the start menu live in.
 const START_MENU_CONFIG_NAME: &str = "startmenu";
+
+/// The programs on the taskbar of a desktop that has never saved its pins:
+/// the kernel's `fs::pinnedapps` defaults, carried when the program lists
+/// became one (`gui/programs/INVENTORY.md` section 7, design-decisions §1425),
+/// less the web browser this system does not have.
+pub const FIRST_START_TASKBAR_PINS: [&str; 3] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Settings.desktop",
+];
+
+/// The programs pinned to the start menu of a desktop that has never saved
+/// them: the kernel's `fs::startmenu` favourites (inventory section 7).
+pub const FIRST_START_MENU_PINS: [&str; 5] = [
+    "org.slateos.Explorer.desktop",
+    "org.slateos.Terminal.desktop",
+    "org.slateos.Editor.desktop",
+    "org.slateos.Settings.desktop",
+    "org.slateos.Calculator.desktop",
+];
 
 /// The toolkit's rectangle, re-exported so the shell and its widgets share
 /// one. This crate declared an identical copy -- same four floats, same
@@ -2465,13 +2472,6 @@ pub struct DesktopTheme {
     /// The start menu's places column: a shade apart from the programs
     /// column, as the reference's darker glass is, so the two read as two.
     pub start_menu_side_bg: Color,
-    /// The well of the start menu's search field: the palette's `crust`,
-    /// where the toolkit sinks every text input.
-    pub start_menu_field_bg: Color,
-    /// The line round that well: the palette's `border`, as quiet as the
-    /// reference's `#aac6e0` edge. The caret, not a coloured ring, is what
-    /// says the typing goes there.
-    pub start_menu_field_border: Color,
     /// Floating overlays such as the Alt+Tab switcher.
     pub overlay_bg: Color,
     pub overlay_fg: Color,
@@ -2525,8 +2525,6 @@ impl DesktopTheme {
             start_menu_bg: p.base,
             start_menu_fg: p.text,
             start_menu_side_bg: p.mantle,
-            start_menu_field_bg: p.crust,
-            start_menu_field_border: p.border,
             overlay_bg: p.base,
             overlay_fg: p.text,
             overlay_selected_bg: p.surface1,
@@ -2827,6 +2825,12 @@ impl DesktopShell {
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The focus width with it, to the fields that draw a focus mark
+        // (`guitk::field`), for the same reason.
+        self.run_dialog
+            .set_focus_ring_width(appearance.focus_ring_width());
+        self.icons
+            .set_focus_ring_width(appearance.focus_ring_width());
         // The icon size goes to the layer that draws icons, for the same
         // reason: it was a setting with a working control and no reader --
         // `known-issues.md` TD-C-FOUR-APPEARANCE-SETTINGS-HAVE-A-WORKING-CONTROL-
@@ -2993,6 +2997,24 @@ impl DesktopShell {
                 .saturating_sub(into_minute)
                 .max(1),
         ))
+    }
+
+    /// The picture the time-of-day wallpaper schedule has up at `utc_secs`,
+    /// in this shell's zone -- `None` when there is no schedule. See
+    /// `AppearanceSettings::scheduled_wallpaper_at`.
+    #[must_use]
+    pub fn scheduled_wallpaper(&self, utc_secs: u64) -> Option<&Path> {
+        self.appearance
+            .scheduled_wallpaper_at(utc_secs, self.local_zone())
+    }
+
+    /// How long until the scheduled wallpaper next changes, in this shell's
+    /// zone. The shell sleeps exactly this long, as it does for the
+    /// automatic light/dark mode.
+    #[must_use]
+    pub fn next_wallpaper_change(&self, utc_secs: u64) -> Option<Duration> {
+        self.appearance
+            .next_wallpaper_change(utc_secs, self.local_zone())
     }
 
     /// How long until the automatic light/dark mode next changes, if the mode
@@ -3541,9 +3563,18 @@ impl DesktopShell {
     /// on it comes from the launcher's entry for that path at the moment it is
     /// drawn. Storing the name too would be a second copy of it, stale the
     /// first time an application is renamed.
+    ///
+    /// A desktop that has never saved its pins -- no `pinned` in the file, or
+    /// no file -- starts with [`FIRST_START_TASKBAR_PINS`]. Not written back:
+    /// they are defaults until the user changes them, and a pin removed is
+    /// saved as a list without it, so it does not come back.
     pub fn load_pinned(&mut self) {
         let doc = config::load(TASKBAR_CONFIG_NAME);
         let Some(execs) = doc.get_seq(&["pinned"]) else {
+            for exec in self.first_start_programs(&FIRST_START_TASKBAR_PINS) {
+                let name = self.app_name_for(&exec);
+                self.pin_app_without_saving(&exec, &name);
+            }
             return;
         };
         for exec in execs {
@@ -4303,9 +4334,10 @@ impl DesktopShell {
                 }
             }
         }
-        let Some(execs) = doc.get_seq(&["pinned"]) else {
-            return;
-        };
+        // Never saved: the first start's pins, as for the taskbar.
+        let execs = doc
+            .get_seq(&["pinned"])
+            .unwrap_or_else(|| self.first_start_programs(&FIRST_START_MENU_PINS));
         for exec in execs {
             if exec.is_empty() || self.is_pinned_to_start(&exec) {
                 continue;
@@ -4313,6 +4345,24 @@ impl DesktopShell {
             let entry = self.start_entry_for(&exec);
             self.start_pins.push(entry);
         }
+    }
+
+    /// The programs `ids` name -- desktop file ids of SlateOS's own
+    /// programs -- by the path each is started by, in order; an id the menu
+    /// does not list is left out rather than pinned as a button that starts
+    /// nothing.
+    ///
+    /// By id rather than by path so the defaults follow a program that moves:
+    /// the one list (`gui/programs`) says where each is.
+    fn first_start_programs(&self, ids: &[&str]) -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| {
+                self.apps
+                    .iter()
+                    .find(|app| app.desktop_id.as_deref() == Some(id))
+                    .map(|app| app.executable_path.clone())
+            })
+            .collect()
     }
 
     /// Note that `launch` is being started: the program it starts goes to the
@@ -9548,14 +9598,19 @@ impl DesktopShell {
     fn render_start_search(&self, tree: &mut RenderTree) {
         let field = self.start_search_rect();
         let size = self.font_size(TextRole::Body);
-        let radii = CornerRadii::all(self.scale(4.0));
-        fill_round(tree, field, self.theme.start_menu_field_bg, radii);
-        stroke_round(
+        // The toolkit's field (`guitk::field`), in the theme's shape and at the
+        // display's scaling -- but with no focus mark. The search has the
+        // keyboard whenever the menu is open, so a mark would say nothing the
+        // open menu does not; the reference draws none (its input is
+        // `outline: none` inside a bordered box), and the caret is what says
+        // the typing goes here.
+        guitk::field::draw_at_scale(
             tree,
-            field,
-            self.theme.start_menu_field_border,
+            &Palette::from_settings(&self.appearance),
+            guitk::frame::Rect::new(field.x, field.y, field.w, field.h),
+            guitk::field::State::default(),
+            0.0,
             self.scale(1.0),
-            radii,
         );
         let hint = with_alpha(self.theme.start_menu_fg, START_MENU_HINT_ALPHA);
         let inset = self.scale(START_SEARCH_INSET);
@@ -12423,19 +12478,17 @@ impl DesktopShell {
                 self.open_path(Path::new("/"), &label)
             }
             icons::IconAction::LaunchSystem(what) if what == icons::RECYCLE_BIN => {
-                // The bin exists -- the file manager moves files into it and
-                // restores them -- but nothing can show what is in it: the
-                // file manager has no view of it, and pointing it at the bin's
-                // storage would list internal entry folders named by ids.
-                // Said rather than faked. `requests/c-e-the-recycle-bin-icon-
-                // has-nowhere-to-open.md` asks lane E for the view.
-                self.say_cannot_open(
-                    &label,
-                    "Nothing can show the recycle bin's contents yet. What is \
-                     in it is kept, in the .recycle folder in your home \
-                     folder, until something can.",
-                );
-                ShellAction::Consumed
+                // The file manager's view of the bin: each item under its own
+                // name and the folder it came from, with Restore, Delete
+                // permanently and Empty -- lane E's answer to
+                // `requests/c-e-the-recycle-bin-icon-has-nowhere-to-open.md`.
+                // Until it existed this said the bin could not be shown,
+                // because pointing the file manager at the bin's storage would
+                // have listed internal folders named by ids.
+                ShellAction::Launch(hotkeys::Launch {
+                    program: PathBuf::from(launcher::FILE_MANAGER),
+                    args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                })
             }
             // A destination this build does not know -- a layout written by a
             // newer desktop -- or an application-defined action with no
@@ -12834,6 +12887,7 @@ impl DesktopShell {
                 budget,
                 self.shortcut_context(),
                 self.appearance.caret_width(),
+                self.appearance.focus_ring_width(),
             );
             self.push_shortcut_message(&mut tree, &p, x, y, width, height);
             return Some(tree);
@@ -21125,6 +21179,122 @@ mod taskbar_pin_tests {
         });
     }
 
+    // ---- the first start's pins (gui/programs/INVENTORY.md section 7) ----
+
+    /// The execs the pins name, taskbar then start menu.
+    fn pinned_execs(shell: &DesktopShell) -> (Vec<String>, Vec<String>) {
+        (
+            shell
+                .pinned_apps()
+                .iter()
+                .map(|pin| pin.exec_path.clone())
+                .collect(),
+            shell
+                .start_pins()
+                .iter()
+                .map(|entry| entry.executable_path.clone())
+                .collect(),
+        )
+    }
+
+    /// **A desktop that has never saved its pins starts with the kernel's
+    /// defaults** -- File Explorer, Terminal and Settings on the taskbar, and
+    /// the five favourites in the start menu -- carried when the program lists
+    /// became one, less the web browser this system does not have.
+    #[test]
+    fn a_first_start_has_the_pins_the_kernel_listed() {
+        with_scratch_config("shell-first-start-pins", |_root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            let (taskbar, start) = pinned_execs(&shell);
+            assert_eq!(
+                taskbar,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    super::launcher::SETTINGS
+                ]
+            );
+            assert_eq!(
+                start,
+                [
+                    super::launcher::FILE_MANAGER,
+                    super::launcher::TERMINAL,
+                    "/usr/bin/editor",
+                    super::launcher::SETTINGS,
+                    "/usr/bin/calculator"
+                ]
+            );
+        });
+    }
+
+    /// **Loading them writes nothing**: they are defaults until the user
+    /// changes something, and reading a file must not create it.
+    #[test]
+    fn the_first_starts_pins_are_not_written_down_by_loading() {
+        with_scratch_config("shell-first-start-no-write", |root| {
+            let mut shell = shell();
+            shell.load_pinned();
+            shell.load_start_menu();
+            assert!(!shell.take_start_menu_dirty(), "loading asked for a save");
+            let written: Vec<std::path::PathBuf> = walk(root);
+            assert!(written.is_empty(), "loading wrote {written:?}");
+        });
+    }
+
+    /// **Unpinning everything sticks**: a list saved empty is the user's
+    /// choice, not a first start, so the defaults do not come back.
+    #[test]
+    fn a_pin_list_saved_empty_stays_empty() {
+        with_scratch_config("shell-first-start-emptied", |_root| {
+            let mut first = shell();
+            first.load_pinned();
+            first.load_start_menu();
+            let (taskbar, start) = pinned_execs(&first);
+            for exec in &taskbar {
+                first.unpin_app(exec);
+            }
+            for exec in &start {
+                first.unpin_from_start(exec);
+            }
+            first.save_start_menu().expect("saved");
+
+            let mut restarted = shell();
+            restarted.load_pinned();
+            restarted.load_start_menu();
+            let (taskbar, start) = pinned_execs(&restarted);
+            assert!(
+                taskbar.is_empty(),
+                "the taskbar's defaults came back: {taskbar:?}"
+            );
+            assert!(
+                start.is_empty(),
+                "the start menu's defaults came back: {start:?}"
+            );
+        });
+    }
+
+    /// Every file under `root`, for the test that loading writes nothing.
+    fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
     /// Pinning the same program twice leaves one button.
     #[test]
     fn pinning_the_same_program_twice_leaves_one_button() {
@@ -25646,19 +25816,26 @@ mod start_search_tests {
                 "Terminal",
                 "# All apps",
                 "[Accessories]",
+                "  Archive Manager",
                 "  Calculator",
                 "  File Explorer",
                 "  Screenshot",
                 "  Text Editor",
+                "[Development]",
+                "  Hex Editor",
                 "[Graphics]",
                 "  Image Viewer",
                 "[Multimedia]",
                 "  Music Player",
+                "  Video Player",
+                "[Office]",
+                "  Calendar",
+                "  PDF Viewer",
                 "[Settings]",
                 "  Settings",
                 "[System]",
                 "  Process Explorer",
-                "  System Info",
+                "  System Information",
                 "  Terminal",
             ]
         );

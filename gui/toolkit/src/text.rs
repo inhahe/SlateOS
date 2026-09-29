@@ -31,6 +31,8 @@
 
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+pub use osfont::colr::ColourPalette;
+pub use osfont::raster::{Rendering, Subpixel};
 use osfont::select::Query;
 pub use osfont::shape::Affinity;
 use osfont::shape::Hit;
@@ -371,6 +373,36 @@ pub fn set_mono_family(family: &str) -> bool {
     }
     fonts.mono_family = Some(family.to_string());
     true
+}
+
+/// Rasterize this process's text the way `rendering` says from now on:
+/// hinting, smoothing, the subpixel order, and which of a colour font's
+/// palettes its emoji are painted with.
+///
+/// The compositor draws most text, with its own cache set from the same
+/// settings; this is for the text the toolkit rasterizes itself, into an
+/// application's own buffers. Without it that text was drawn unhinted while
+/// the compositor's was hinted, so the same label looked different at small
+/// sizes depending on who drew it. Returns whether anything changed: a
+/// change drops every rasterized glyph, so an unchanged setting is left
+/// alone.
+pub fn set_rendering(rendering: Rendering) -> bool {
+    let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    if fonts.cache.rendering() == rendering {
+        return false;
+    }
+    fonts.cache.set_rendering(rendering);
+    true
+}
+
+/// How this process rasterizes text now.
+#[must_use]
+pub fn rendering() -> Rendering {
+    cache()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .cache
+        .rendering()
 }
 
 /// The family UI text is currently drawn in, or `None` if no installed font

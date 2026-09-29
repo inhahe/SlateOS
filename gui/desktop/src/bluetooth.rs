@@ -636,11 +636,9 @@ impl BluetoothSettingsUI {
 
         // Power toggle.
         let power_x = x + w - 80.0;
-        cmds.extend(crate::switch::switch(
-            power_x,
-            y + 11.0,
-            36.0,
-            18.0,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(power_x, y + 11.0, 36.0, 18.0),
             mgr.adapter.powered,
             if mgr.adapter.powered {
                 p.accent

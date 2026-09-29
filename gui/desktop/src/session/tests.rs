@@ -318,6 +318,44 @@ fn only_the_overlay_surface_refuses_the_mouse() {
     assert!(specs[3].input_transparent);
 }
 
+/// **What the settings watch reports is announced to every window, each file
+/// once** (design-decisions 1418). A save and the editor's second save of the
+/// same file, reported in two batches before the loop came round, are one
+/// change as far as any window needs to know.
+#[test]
+fn every_settings_file_the_watch_reports_is_announced_once() {
+    let (mut session, desktop, _turn) = session();
+    let (reports, names) = std::sync::mpsc::channel();
+    session.watch_settings_from(names);
+    let name = |s: &str| guitk::event::SettingsName::new(s.as_bytes()).unwrap();
+    let announced = |desktop: &Desktop| -> Vec<String> {
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match r.body {
+                RequestBody::AnnounceSettings { name } => Some(name.as_str().to_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        announced(&desktop),
+        Vec::<String>::new(),
+        "nothing before a report"
+    );
+
+    reports.send(vec![name("notes"), name("calendar")]).unwrap();
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar"]);
+
+    // A later change to the same file is a new change, and announced again.
+    reports.send(vec![name("notes")]).unwrap();
+    session.pump().unwrap();
+    assert_eq!(announced(&desktop), ["notes", "calendar", "notes"]);
+}
+
 #[test]
 fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
     let (_session, desktop, _turn) = session();
@@ -538,7 +576,14 @@ fn right_clicking_a_pinned_tile_draws_its_menu() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let before = desktop.borrow().seen.len();
         let frames = frames_on(&desktop, popups);
 
@@ -705,7 +750,14 @@ fn a_program_started_from_its_pin_is_recently_used() {
             .shell_mut()
             .pin_app(crate::launcher::TERMINAL, "Terminal");
         session.pump().expect("pump");
-        let tile = session.shell().taskbar_button_rect(0);
+        let slot = session
+            .shell()
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .position(|pin| pin.exec_path == crate::launcher::TERMINAL)
+            .expect("Terminal is pinned");
+        let tile = session.shell().taskbar_button_rect(slot);
         let (x, y) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
 
         press_at(&desktop, session.panel(), x, y);
@@ -1059,6 +1111,13 @@ fn the_compositors_window_list_is_what_the_taskbar_is_drawn_from() {
     assert_eq!(titles, ["Terminal", "notes.txt"]);
 }
 
+/// The taskbar slot of the `n`th window's button: after the pinned programs,
+/// which a desktop that has never saved its pins has from its first start
+/// (`FIRST_START_TASKBAR_PINS`).
+fn window_slot(session: &Session, n: usize) -> usize {
+    session.shell().taskbar.pinned_apps().len() + n
+}
+
 #[test]
 fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
     let (mut session, desktop, _turn) = session();
@@ -1067,7 +1126,11 @@ fn a_taskbar_button_asks_the_compositor_rather_than_changing_anything() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1095,7 +1158,11 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
         .send_window_list(&[app(1, "Terminal"), focused]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     press_at(&desktop, session.panel(), button.0, button.1);
     release_at(&desktop, session.panel(), button.0, button.1);
     session.pump().expect("pump");
@@ -1323,7 +1390,11 @@ fn a_window_list_arriving_with_a_click_is_folded_in_after_it() {
         .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
     session.pump().expect("pump");
 
-    let button = centre(session.shell().taskbar_button_rect(1));
+    let button = centre(
+        session
+            .shell()
+            .taskbar_button_rect(window_slot(&session, 1)),
+    );
     {
         let mut d = desktop.borrow_mut();
         // Both in flight at once, the list first — the worst ordering for a
@@ -3301,6 +3372,77 @@ fn a_wallpaper_named_in_the_settings_is_adopted() {
 /// `follow_desktop_base` and a solid colour draw the same pixels today and
 /// diverge the moment the user switches between light and dark. Only one of
 /// them is a decision the user made.
+/// **A time-of-day schedule is the wallpaper**, over a fixed picture and over
+/// a rotation folder, as the settings' own docs say.
+///
+/// One entry, so it is up whatever the time and zone the test runs in.
+#[test]
+fn a_scheduled_wallpaper_wins_over_a_picture_and_a_folder() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.shell_mut().appearance.wallpaper_folder = Some(std::env::temp_dir());
+    session.shell_mut().appearance.wallpaper_schedule = vec![appearance::ScheduledWallpaper {
+        from: appearance::TimeOfDay::MIDNIGHT,
+        image: fixture("gray8"),
+    }];
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the schedule's picture is not the one up"
+    );
+
+    // Take the schedule away: the folder is the wallpaper again.
+    session.shell_mut().appearance.wallpaper_schedule.clear();
+    session.sync_wallpaper();
+    assert_ne!(
+        session.wallpaper_mut().current_image_path(),
+        Some(fixture("gray8").as_path()),
+        "the scheduled picture stayed up after the schedule went"
+    );
+}
+
+/// **A schedule with two pictures wakes the desktop at its next edge**, and
+/// no later: nothing else would change the picture at 18:00 on a desktop
+/// nobody is touching.
+#[test]
+fn a_wallpaper_schedule_arms_a_wake_up_at_its_next_edge() {
+    let (mut session, desktop, _turn) = session();
+    assert_eq!(
+        armed_in(&mut session),
+        None,
+        "the fixture starts with a timer"
+    );
+    session.shell_mut().appearance.wallpaper_schedule = vec![
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::MIDNIGHT,
+            image: fixture("rgb8"),
+        },
+        appearance::ScheduledWallpaper {
+            from: appearance::TimeOfDay::new(12, 0).expect("noon"),
+            image: fixture("gray8"),
+        },
+    ];
+    session.sync_wallpaper();
+    // A frame, which ends by arming the next wake-up -- the path every
+    // change on a running desktop takes.
+    woken_after(&mut session, &desktop, 16);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after 1970")
+        .as_secs();
+    let edge = session
+        .shell()
+        .next_wallpaper_change(now)
+        .expect("two pictures change twice a day");
+    assert!(edge <= std::time::Duration::from_hours(12), "{edge:?}");
+    let until = armed_in(&mut session).expect("the schedule armed no wake-up");
+    assert!(
+        until <= edge + std::time::Duration::from_secs(2),
+        "armed for {until:?}, past the schedule's edge in {edge:?}"
+    );
+}
+
 #[test]
 fn clearing_the_wallpaper_goes_back_to_following_the_theme() {
     let (mut session, _desktop, _turn) = session();
@@ -5995,6 +6137,15 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .clone();
         first.shell_mut().pin_to_start(&exec);
         first.pump().expect("pump");
+        // Whatever the pins were -- the first start's, and the one added --
+        // is what the next login must find.
+        let saved: Vec<String> = first
+            .shell()
+            .start_pins()
+            .iter()
+            .map(|entry| entry.executable_path.clone())
+            .collect();
+        assert!(saved.contains(&exec), "the pin was not made");
         drop(first);
 
         let (restarted, _d2, _turn2) = session();
@@ -6004,7 +6155,7 @@ fn a_start_menu_pin_is_saved_and_comes_back_at_the_next_login() {
             .iter()
             .map(|entry| entry.executable_path.clone())
             .collect();
-        assert_eq!(pins, [exec]);
+        assert_eq!(pins, saved);
     });
 }
 

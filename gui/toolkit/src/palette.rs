@@ -21,7 +21,9 @@
 //! spelling at 458 call sites without this crate knowing what a setting is.
 
 use crate::color::Color;
+use crate::highlight::Highlight;
 use crate::theme::{contrast_ratio, perceptual_difference, relative_luminance, with_alpha};
+use crate::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
 
 pub const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -535,6 +537,14 @@ pub struct Palette {
     /// a `mantle` band with labels on it, and a separated one is not, so which
     /// grounds exist depends on this.
     strip_style: StripStyle,
+    /// How the toolkit's controls are shaped: the theme's widget style
+    /// (`crate::widget_style`, design-decisions 1435).
+    ///
+    /// Carried on the palette for the reason `surface_style` is -- a palette
+    /// already reaches every draw site, so a control needs no new argument to
+    /// honour the theme. Public where `surface_style` is not, because nothing
+    /// here depends on it: it changes shapes, never which grounds carry text.
+    pub widget_style: WidgetStyle,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -622,6 +632,11 @@ pub struct Palette {
     /// palette's own hues in the slots every terminal gives them, unless the
     /// theme's `terminal` section says otherwise.
     pub terminal: TerminalColors,
+    /// What code is drawn in: see [`SyntaxColors`]. The palette's own hues
+    /// where code editors customarily put them, unless the theme's `syntax`
+    /// section says otherwise -- and held to the text floor when drawn
+    /// ([`syntax_ink`](Self::syntax_ink)).
+    pub syntax: SyntaxColors,
 }
 
 /// The colours a terminal emulator draws in: its own background and
@@ -772,6 +787,93 @@ impl TerminalColors {
     }
 }
 
+/// The colours code is drawn in: one for each kind of thing a highlighter
+/// tells apart ([`Highlight`]). A theme's `syntax` section, so one theme
+/// dresses the code editors too.
+///
+/// **The built-in colours are the palette's hues where code editors
+/// customarily put them** -- keywords mauve, strings green, functions blue,
+/// numbers and constants peach, types yellow, comments the faintest mark --
+/// as Catppuccin, which this palette's hues come from, places them. So a theme
+/// that retints its hues retints its code to match, and a `syntax` section can
+/// set any kind outright.
+///
+/// **Held to the floor when drawn, not when set.** Code is text and every
+/// kind of it is read, comments included, so each is held to the text floor on
+/// every ground the theme can put text on -- by
+/// [`Palette::syntax_ink`], at the time it is asked for, because the style
+/// setters change which grounds those are after the palette is built. What is
+/// kept here is the colour as the theme states it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyntaxColors {
+    colors: [Color; Highlight::COUNT],
+}
+
+impl SyntaxColors {
+    /// Nothing yet: what a palette holds for the instant between being built
+    /// and having its code colours derived from it ([`of`](Self::of)).
+    const UNSET: Self = Self {
+        colors: [Color::rgb(0, 0, 0); Highlight::COUNT],
+    };
+
+    /// The built-in code colours for `palette`: its hues, where code editors
+    /// put them.
+    ///
+    /// Variables are the text's own ink, and punctuation a grey halfway from
+    /// it to the faintest mark -- Catppuccin's `overlay2`, which this palette
+    /// does not carry as a role.
+    #[must_use]
+    pub fn of(palette: &Palette) -> Self {
+        let p = palette;
+        let colors = Highlight::ALL.map(|kind| match kind {
+            Highlight::Keyword => p.mauve,
+            Highlight::String => p.green,
+            Highlight::Escape => p.pink,
+            Highlight::Comment => p.overlay0,
+            Highlight::Number | Highlight::Constant => p.peach,
+            Highlight::Type | Highlight::Attribute => p.yellow,
+            Highlight::Function | Highlight::Tag | Highlight::Heading => p.blue,
+            Highlight::Macro => p.teal,
+            Highlight::Builtin => p.red,
+            Highlight::Constructor | Highlight::Label => p.sapphire,
+            Highlight::Variable => p.text,
+            Highlight::Parameter => p.maroon,
+            Highlight::Property | Highlight::Module => p.lavender,
+            Highlight::Operator => p.sky,
+            Highlight::Punctuation => p.text.lerp(p.overlay0, 0.5),
+            Highlight::Link => p.link,
+        });
+        Self { colors }
+    }
+
+    /// The colour of `kind`, as the theme states it -- before the floor.
+    #[must_use]
+    pub fn get(&self, kind: Highlight) -> Color {
+        self.colors
+            .get(kind.index())
+            .copied()
+            .unwrap_or(Color::rgb(0, 0, 0))
+    }
+
+    /// Set the colour a theme's `syntax` section names `name` -- one of
+    /// [`Highlight::name`]'s. Any other name is not a kind and is ignored:
+    /// the theme's reader reports it, because the palette has nowhere to.
+    pub fn set(&mut self, name: &str, color: Color) {
+        if let Some(slot) =
+            Highlight::from_name(name).and_then(|kind| self.colors.get_mut(kind.index()))
+        {
+            *slot = color;
+        }
+    }
+}
+
+/// What a theme's `syntax` section may set: every [`Highlight`]'s name, in
+/// declaration order.
+#[must_use]
+pub fn syntax_roles() -> [&'static str; Highlight::COUNT] {
+    Highlight::ALL.map(Highlight::name)
+}
+
 /// The colours a theme sets, by role name, for each mode -- what
 /// [`Palette::for_theme`] lays over the built-in palette.
 ///
@@ -793,6 +895,11 @@ pub struct ThemeColors {
     pub terminal_dark: BTreeMap<String, Color>,
     /// The terminal colours set for light mode: `terminal-light`.
     pub terminal_light: BTreeMap<String, Color>,
+    /// The code colours set for dark mode, by [`Highlight`] name -- the
+    /// theme's `syntax` section.
+    pub syntax_dark: BTreeMap<String, Color>,
+    /// The code colours set for light mode: `syntax-light`.
+    pub syntax_light: BTreeMap<String, Color>,
 }
 
 impl ThemeColors {
@@ -811,6 +918,17 @@ impl ThemeColors {
             &self.terminal_light
         } else {
             &self.terminal_dark
+        }
+    }
+
+    /// The code colours set for one mode, on the terms of
+    /// [`terminal_roles`](Self::terminal_roles).
+    #[must_use]
+    pub fn syntax_roles(&self, light: bool) -> &BTreeMap<String, Color> {
+        if light {
+            &self.syntax_light
+        } else {
+            &self.syntax_dark
         }
     }
 
@@ -916,6 +1034,7 @@ impl Palette {
                 border: LIGHT_BORDER,
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
+                widget_style: WidgetStyle::AERO,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -936,6 +1055,7 @@ impl Palette {
                 ink_sources: [LIGHT_TEXT, LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK],
                 themed: false,
                 terminal: TerminalColors::UNSET,
+                syntax: SyntaxColors::UNSET,
             }
         } else {
             Self {
@@ -953,6 +1073,7 @@ impl Palette {
                 border: BORDER,
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
+                widget_style: WidgetStyle::AERO,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -973,11 +1094,11 @@ impl Palette {
                 ink_sources: [TEXT, SUBTEXT0, SUBTEXT1, LINK],
                 themed: false,
                 terminal: TerminalColors::UNSET,
+                syntax: SyntaxColors::UNSET,
             }
         };
         chosen.apply_text_floor();
-        chosen.terminal = TerminalColors::of(&chosen);
-        chosen
+        chosen.with_derived_colours()
     }
 
     /// `color`, made legible wherever this theme could put text in it.
@@ -1022,6 +1143,22 @@ impl Palette {
             out = legible_on(out, *ground);
         }
         out
+    }
+
+    /// The colour code of kind `kind` is drawn in: the theme's
+    /// ([`syntax`](Self::syntax)), held to the text floor on every ground
+    /// this theme can put text on, as [`ink`](Self::ink) holds any colour.
+    #[must_use]
+    pub fn syntax_ink(&self, kind: Highlight) -> Color {
+        self.ink(self.syntax.get(kind))
+    }
+
+    /// [`syntax_ink`](Self::syntax_ink) for every kind, indexed by
+    /// [`Highlight::index`]: what a view drawing a screenful of code works
+    /// out once per frame rather than once per word.
+    #[must_use]
+    pub fn syntax_inks(&self) -> [Color; Highlight::COUNT] {
+        Highlight::ALL.map(|kind| self.syntax_ink(kind))
     }
 
     /// Whether boxes are outlined or filled.
@@ -1119,6 +1256,13 @@ impl Palette {
         }
         terminal.hold_the_foreground();
         palette.terminal = terminal;
+        // The code colours the same way: the theme's hues, then its own
+        // section. They are held to the floor when drawn, not here.
+        let mut syntax = SyntaxColors::of(&palette);
+        for (name, color) in theme.syntax_roles(light) {
+            syntax.set(name, *color);
+        }
+        palette.syntax = syntax;
         palette
     }
 
@@ -1241,6 +1385,9 @@ impl Palette {
             // the fix.
             palette.surface_style = settings.surface_style();
             palette.strip_style = settings.strip_style();
+            // The theme's shapes survive too, less the choices that trade how
+            // plainly a control shows for how it looks.
+            palette.widget_style = settings.widget_style().for_high_contrast();
             return palette;
         }
         let mut palette = match settings.theme() {
@@ -1253,6 +1400,7 @@ impl Palette {
         // reason they are setters: which grounds exist depends on the styles.
         palette.set_surface_style(settings.surface_style());
         palette.set_strip_style(settings.strip_style());
+        palette.widget_style = settings.widget_style();
         palette
     }
 
@@ -1328,16 +1476,25 @@ impl Palette {
             // Rebuilt below from this palette's own page and ink: the
             // ordinary palette's terminal is drawn on the ordinary page.
             terminal: TerminalColors::UNSET,
+            // Rebuilt below from this palette's hues and ink, for the same
+            // reason: the ordinary palette's comment grey is not this one's.
+            syntax: SyntaxColors::UNSET,
+            // The built-in shapes, less what hides: see
+            // `WidgetStyle::for_high_contrast`. `from_settings` puts the
+            // user's theme's back, adjusted the same way.
+            widget_style: WidgetStyle::AERO.for_high_contrast(),
             // The categorical hues, from the mode that suits this background.
             ..ordinary
         }
-        .with_its_terminal()
+        .with_derived_colours()
     }
 
-    /// This palette with its [`terminal`](Self::terminal) derived from it.
+    /// This palette with its [`terminal`](Self::terminal) and its
+    /// [`syntax`](Self::syntax) colours derived from it.
     #[must_use]
-    fn with_its_terminal(mut self) -> Self {
+    fn with_derived_colours(mut self) -> Self {
         self.terminal = TerminalColors::of(&self);
+        self.syntax = SyntaxColors::of(&self);
         self
     }
 
@@ -1420,6 +1577,12 @@ impl Palette {
             // they are the roles above in a terminal's slots, and a theme's
             // `terminal` section sets them apart from its `colors`.
             terminal: _,
+            // Not a colour: the shapes of the controls.
+            widget_style: _,
+            // Colours, but code's rather than roles, on the terms of
+            // `terminal` above: the roles in the places code editors put
+            // them, which a theme's `syntax` section sets apart.
+            syntax: _,
         } = *self;
         [
             ("crust", crust),
@@ -1677,5 +1840,13 @@ pub trait PaletteSource {
     /// need not say so.
     fn theme(&self) -> Option<&ThemeColors> {
         None
+    }
+
+    /// The shapes of the toolkit's controls, from the widget-style theme the
+    /// user chose. Already read, for [`theme`](Self::theme)'s reason, and
+    /// defaulted for the same one: a source that knows nothing of themes has
+    /// the built-in theme's.
+    fn widget_style(&self) -> WidgetStyle {
+        WidgetStyle::AERO
     }
 }

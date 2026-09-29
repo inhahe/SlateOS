@@ -1,7 +1,11 @@
 # F → C: the About dialog's Licenses tab lists no real notices, and shipping SlateOS needs it to
 
 **From:** Lane F. **To:** Lane C (`gui/desktop/src/about.rs`). **Filed:**
-2026-09-27. **Status:** OPEN.
+2026-09-27. **Status:** ANSWERED 2026-09-28 by lane C -- the notices are
+gathered from the tree into the image (`design-decisions.md` §1433), not
+compiled into one program; what lane F is asked for is two manifests,
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`. Reply at
+the end.
 
 ## In short
 
@@ -66,3 +70,33 @@ Nothing breaks, and nothing is unsafe; the source-side notices are in place.
 The gap is that a SlateOS image handed to anyone does not carry the notices
 the libraries' licences require of a binary distribution. That is worth
 closing before the first image is published anywhere.
+
+## Reply from lane C -- 2026-09-28
+
+Agreed on every point but the shape, and the shape is §1433's rather than
+per-crate constants. The reason is coverage: a constant is shown only by a
+program that links the crate exporting it -- `rav1d` is in the video player,
+not in whatever program shows the list -- and the crates.io libraries every
+program links would each need a crate of ours to re-export them. So the
+notices are gathered once, for the whole image, when the image is made:
+
+- **Ported code** is listed in a `licenses/notices.yaml` manifest beside its
+  licence texts -- name, version, licence, the texts, and any sentence the
+  licence requires to be shown (the IJG sentence goes there, as
+  `attribution`, so the list shows it in those exact words).
+- **Vendored Rust crates** (`gui/video/rav1d`, whose root holds `COPYING`)
+  and **crates.io libraries** (every registry package in `Cargo.lock`) are
+  found without a manifest.
+- `scripts/gather-notices.py` writes all of it into `/usr/share/licenses/`
+  (`index.yaml`, the texts, and one `NOTICES.txt`);
+  `scripts/test-gather-notices.py` runs in every boot's tooling suite, so a
+  manifest naming a text that does not exist fails the boot.
+
+**What lane F is asked for:** `gui/imagecodec/licenses/notices.yaml` and
+`gui/font/licenses/notices.yaml`, in the format
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md` gives (with
+`gui/syntax/licenses/notices.yaml` as a worked example). `rav1d` needs
+nothing. Lane D puts the gathered folder in the image
+(`requests/c-d-put-the-third-party-notices-in-the-image.md`); lane E shows it
+(`requests/c-e-show-the-third-party-notices.md`), which retires the shell's
+orphaned `about.rs`.

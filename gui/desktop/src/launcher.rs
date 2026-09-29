@@ -1,8 +1,9 @@
 //! The programs the shell knows how to start: the built-in database, and the
 //! paths the menus and shortcuts name.
 //!
-//! [`builtin_app_database`] is the shell's own list of programs, the start
-//! menu's fallback for those no desktop entry names; [`FILE_MANAGER`],
+//! [`builtin_app_database`] is SlateOS's own programs, from the one list of
+//! programs (`gui/programs`), as the start menu's fallback for those no
+//! installed desktop entry names; [`FILE_MANAGER`],
 //! [`SETTINGS`] and [`TERMINAL`] are the three paths the menus, the desktop
 //! icons and the shortcuts start by name; `search_score` is how the start
 //! menu's search ranks a program against what was typed; and
@@ -23,6 +24,11 @@
 /// moving the program is one edit rather than three that can disagree about
 /// which program a folder opens in.
 pub const FILE_MANAGER: &str = "/usr/bin/explorer";
+
+/// What the file manager is started with to show the recycle bin: its view
+/// of what was deleted, with Restore and Empty (lane E, `explorer
+/// --recycle-bin`). What the desktop's Recycle Bin icon opens.
+pub const RECYCLE_BIN_VIEW_ARG: &str = "--recycle-bin";
 
 /// The settings application: what the start menu's Settings button and the
 /// Settings shortcut start, and this database's entry for it.
@@ -240,192 +246,26 @@ pub(crate) fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
 // Built-in app database
 // ============================================================================
 
-/// The applications this desktop knows how to start.
+/// The applications this desktop knows how to start: SlateOS's own programs,
+/// from the one list of programs (`programs::built_in`, design-decisions
+/// §1425), as the start menu's entries.
 ///
-/// Public because the launcher is not the only front end onto it: the shell's
-/// start menu offers the same programs, and a second hand-written list there
-/// would be free to drift away from this one — as it had, listing a "System
-/// Monitor" that no entry here has ever provided.
+/// The fallback behind the programs installed on the machine: an installed
+/// entry for the same program replaces its built-in one
+/// (`DesktopShell::set_installed_apps`). Until 2026-09-27 this was a table
+/// the shell kept for itself -- ten programs, one of them started by the
+/// wrong path (`/usr/bin/sysinfo`, the command-line tool) -- beside three
+/// other lists that disagreed with it; `gui/programs/INVENTORY.md` records
+/// what each held and where it went.
+///
+/// Untranslated: the built-in entries carry no translations yet, so a locale
+/// would change nothing.
 #[must_use]
 pub fn builtin_app_database() -> Vec<AppEntry> {
-    vec![
-        AppEntry {
-            name: "Terminal".to_string(),
-            description: "Command-line terminal emulator".to_string(),
-            executable_path: TERMINAL.to_string(),
-            keywords: vec![
-                "shell".into(),
-                "console".into(),
-                "bash".into(),
-                "cli".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("utilities-terminal".to_owned()),
-            folder: Folder::System,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Text Editor".to_string(),
-            description: "Plain text and code editor".to_string(),
-            executable_path: "/usr/bin/editor".to_string(),
-            keywords: vec![
-                "edit".into(),
-                "code".into(),
-                "write".into(),
-                "notepad".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("accessories-text-editor".to_owned()),
-            folder: Folder::Accessories,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "File Explorer".to_string(),
-            description: "Browse and manage files".to_string(),
-            executable_path: FILE_MANAGER.to_string(),
-            keywords: vec![
-                "files".into(),
-                "browse".into(),
-                "folder".into(),
-                "directory".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("system-file-manager".to_owned()),
-            folder: Folder::Accessories,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Calculator".to_string(),
-            description: "Scientific calculator".to_string(),
-            executable_path: "/usr/bin/calculator".to_string(),
-            keywords: vec!["math".into(), "calc".into(), "compute".into()],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("accessories-calculator".to_owned()),
-            folder: Folder::Accessories,
-            ..AppEntry::default()
-        },
-        // The words of three entries that are no longer here. "Display
-        // Settings", "Network Settings" and "Sound Settings" named
-        // `/usr/bin/settings --display` and its neighbours as their program --
-        // one path with a space and a flag in it, which no file is called -- so
-        // each row of the start menu started nothing. Pointed at
-        // `/usr/bin/settings` alone they would be three rows each claiming a
-        // page and all opening the same front one, and Settings cannot yet be
-        // asked for a page: it refuses an argument it does not know, and
-        // `--display` is every program's compositor address. So a search for
-        // "wifi" finds Settings itself, which is honest about where it lands:
-        // `known-issues.md`
-        // `TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST`.
-        AppEntry {
-            name: "Settings".to_string(),
-            description: "System preferences and configuration".to_string(),
-            executable_path: SETTINGS.to_string(),
-            keywords: vec![
-                "config".into(),
-                "preferences".into(),
-                "options".into(),
-                "display".into(),
-                "monitor".into(),
-                "resolution".into(),
-                "dpi".into(),
-                "network".into(),
-                "wifi".into(),
-                "ethernet".into(),
-                "vpn".into(),
-                "internet".into(),
-                "sound".into(),
-                "audio".into(),
-                "volume".into(),
-                "speaker".into(),
-                "microphone".into(),
-            ],
-            category: Category::Setting,
-            launch_count: 0,
-            icon: Some("preferences-system".to_owned()),
-            folder: Folder::Settings,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "System Info".to_string(),
-            description: "Hardware and OS information".to_string(),
-            executable_path: "/usr/bin/sysinfo".to_string(),
-            keywords: vec![
-                "hardware".into(),
-                "info".into(),
-                "about".into(),
-                "specs".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("computer".to_owned()),
-            folder: Folder::System,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Process Explorer".to_string(),
-            description: "View and manage running processes".to_string(),
-            executable_path: "/usr/bin/procexplorer".to_string(),
-            keywords: vec![
-                "task".into(),
-                "manager".into(),
-                "processes".into(),
-                "kill".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("utilities-system-monitor".to_owned()),
-            folder: Folder::System,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Image Viewer".to_string(),
-            description: "View images and photos".to_string(),
-            executable_path: "/usr/bin/imageviewer".to_string(),
-            keywords: vec![
-                "photo".into(),
-                "picture".into(),
-                "gallery".into(),
-                "png".into(),
-                "jpg".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("image-x-generic".to_owned()),
-            folder: Folder::Graphics,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Music Player".to_string(),
-            description: "Play music and audio files".to_string(),
-            executable_path: "/usr/bin/musicplayer".to_string(),
-            keywords: vec!["audio".into(), "song".into(), "mp3".into(), "media".into()],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("audio-x-generic".to_owned()),
-            folder: Folder::Multimedia,
-            ..AppEntry::default()
-        },
-        AppEntry {
-            name: "Screenshot".to_string(),
-            description: "Capture screen area or window".to_string(),
-            executable_path: "/usr/bin/screenshot".to_string(),
-            keywords: vec![
-                "capture".into(),
-                "snip".into(),
-                "screen".into(),
-                "grab".into(),
-            ],
-            category: Category::Application,
-            launch_count: 0,
-            icon: Some("applets-screenshooter".to_owned()),
-            folder: Folder::Accessories,
-            ..AppEntry::default()
-        },
-    ]
+    programs::built_in(None)
+        .into_iter()
+        .filter_map(AppEntry::from_desktop)
+        .collect()
 }
 
 // ============================================================================

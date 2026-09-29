@@ -69,6 +69,8 @@
 use crate::date::Date;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
+use crate::grab;
+use crate::layout::Axis;
 use crate::palette::Palette;
 use crate::pathbar::{CompletionItem, PathBar, PathBarEvent};
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -308,6 +310,9 @@ pub struct FileDialog {
     /// Kept so the thumb does not jump under the pointer on the first drag
     /// event: the thumb follows the grab point, not the pointer.
     thumb_grab: Option<f32>,
+    /// Whether the pointer is over the file list's scrollbar: an overlaid bar
+    /// widens into its full self while it is (`crate::scrollbar::draw`).
+    bar_hovered: bool,
     /// The zone the Modified column is rendered in.
     ///
     /// Defaults to UTC because a toolkit has no business reading `TZ` behind
@@ -853,6 +858,17 @@ impl FileDialog {
         }
 
         match event.kind {
+            MouseEventKind::Move | MouseEventKind::Enter => {
+                self.bar_hovered = matches!(
+                    target,
+                    Some(DialogTarget::ScrollTrack | DialogTarget::ScrollThumb)
+                );
+            }
+            MouseEventKind::Leave => self.bar_hovered = false,
+            _ => {}
+        }
+
+        match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.press(&frame, target, event.x, event.y, height)
             }
@@ -926,14 +942,23 @@ impl FileDialog {
                 DialogAction::None
             }
             Some(DialogTarget::ScrollTrack) => {
-                // A click on the track moves one windowful towards the click,
-                // which is what every scrollbar does and is more predictable
-                // than jumping to the exact spot: the thumb ends up under the
-                // pointer either way if you keep clicking.
+                let thumb = frame.rect_of(|t| *t == DialogTarget::ScrollThumb);
+                // A press on the track just past the thumb's end is aimed at
+                // the thumb, and takes hold of it (`grab::in_track`) rather
+                // than paging -- the grip then keeps it from jumping.
+                if let (Some(thumb), Some(track)) =
+                    (thumb, frame.rect_of(|t| *t == DialogTarget::ScrollTrack))
+                    && grab::in_track(thumb, track, Axis::Vertical).contains(x, y)
+                {
+                    self.thumb_grab = Some(y - thumb.y);
+                    return DialogAction::None;
+                }
+                // Anywhere else on the track moves one windowful towards the
+                // click, which is what every scrollbar does and is more
+                // predictable than jumping to the exact spot: the thumb ends
+                // up under the pointer either way if you keep clicking.
                 let page = usize::try_from(page_step(height)).unwrap_or(1);
-                let above = frame
-                    .rect_of(|t| *t == DialogTarget::ScrollThumb)
-                    .is_some_and(|thumb| y < thumb.y);
+                let above = thumb.is_some_and(|thumb| y < thumb.y);
                 self.scroll_top = self.visible_rows(height).start;
                 self.scroll_top = if above {
                     self.scroll_top.saturating_sub(page)
@@ -1181,6 +1206,7 @@ impl FileDialog {
             scroll_top: 0,
             wheel: wheel::Accumulator::default(),
             thumb_grab: None,
+            bar_hovered: false,
             timezone: Tz::UTC,
             address: PathBar::new("/"),
             address_proposed: false,
@@ -1822,31 +1848,25 @@ impl FileDialog {
             SCROLLBAR_WIDTH,
             (height - ROW_HEIGHT).max(0.0),
         );
-        frame.push(RenderCommand::FillRect {
-            x: track.x,
-            y: track.y,
-            width: track.w,
-            height: track.h,
-            color: palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
-        frame.hit(DialogTarget::ScrollTrack, track);
-
         let thumb = scrollbar::thumb(
             track,
             total,
             capacity,
             self.visible_rows(dialog_height).start,
         );
-        palette.push_surface(
+        // Drawn in the theme's form, inside the column; the whole column and
+        // the whole thumb take a press, however much of them is drawn.
+        scrollbar::draw(
             frame,
-            thumb.x,
-            thumb.y,
-            thumb.w,
-            thumb.h,
-            CORNER_RADIUS,
-            Surface::ControlTrack,
+            palette,
+            track,
+            thumb,
+            scrollbar::BarState {
+                hovered: self.bar_hovered,
+                dragging: self.thumb_grab.is_some(),
+            },
         );
+        frame.hit(DialogTarget::ScrollTrack, track);
         // Recorded after the track, so a press on the overlap reaches the thumb
         // — `hit_test` answers with the last box drawn, which is the one on top.
         frame.hit(DialogTarget::ScrollThumb, thumb);
@@ -1879,27 +1899,22 @@ impl FileDialog {
         // Filename input (save mode only)
         if self.mode == DialogMode::Save {
             let input_width = width - BUTTON_WIDTH * 2.0 - PADDING * 5.0;
-            frame.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: input_y,
-                width: input_width,
-                height: 28.0,
-                color: palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            frame.hit(
-                DialogTarget::FilenameInput,
-                Rect::new(PADDING, input_y, input_width, 28.0),
+            let field = Rect::new(PADDING, input_y, input_width, 28.0);
+            // The box every field is drawn in (`crate::field`), with the
+            // keyboard's mark while what is typed goes to it -- which is
+            // whenever the address bar is not being typed in. It was a box of
+            // its own, outlined in blue whether it had the keyboard or not.
+            crate::field::draw(
+                frame,
+                palette,
+                field,
+                crate::field::State {
+                    focused: !self.address.is_editing(),
+                    ..crate::field::State::default()
+                },
+                crate::style::FOCUS_RING_WIDTH,
             );
-            frame.push(RenderCommand::StrokeRect {
-                x: PADDING,
-                y: input_y,
-                width: input_width,
-                height: 28.0,
-                color: palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            frame.hit(DialogTarget::FilenameInput, field);
 
             let display_text = if self.filename_input.is_empty() {
                 String::from("Enter filename...")
@@ -3939,6 +3954,58 @@ mod tests {
         );
     }
 
+    /// **The file list's scrollbar is the toolkit's, in the theme's form**:
+    /// under an overlaid style it is a line until the pointer comes to its
+    /// column, then the full bar, and a line again when the pointer leaves --
+    /// while the column that takes a press is the same throughout.
+    #[test]
+    fn an_overlaid_scrollbar_widens_when_the_pointer_reaches_it() {
+        use crate::widget_style::ScrollbarVisibility;
+        let mut palette = Palette::for_mode(false);
+        palette.widget_style.scrollbar.visibility = ScrollbarVisibility::Overlay;
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let thumb_width = |dialog: &FileDialog| {
+            let frame = dialog.frame(&palette, W, H);
+            let thumb = frame
+                .rect_of(|t| *t == DialogTarget::ScrollThumb)
+                .expect("a long listing has a scrollbar");
+            let drawn = frame
+                .into_tree()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        y, width, color, ..
+                    } if *y == thumb.y
+                        && (color.r, color.g, color.b)
+                            != (palette.crust.r, palette.crust.g, palette.crust.b)
+                        && *width <= scrollbar::WIDTH =>
+                    {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .expect("no thumb was drawn");
+            (thumb.w, drawn)
+        };
+        assert_eq!(
+            thumb_width(&dialog),
+            (scrollbar::WIDTH, scrollbar::IDLE_WIDTH)
+        );
+
+        let (x, y) = centre_of(&dialog, DialogTarget::ScrollTrack);
+        let at = |kind| MouseEvent { x, y, kind };
+        dialog.handle_mouse(&at(MouseEventKind::Move), W, H);
+        assert_eq!(thumb_width(&dialog), (scrollbar::WIDTH, scrollbar::WIDTH));
+
+        dialog.handle_mouse(&at(MouseEventKind::Leave), W, H);
+        assert_eq!(
+            thumb_width(&dialog),
+            (scrollbar::WIDTH, scrollbar::IDLE_WIDTH)
+        );
+    }
+
     #[test]
     fn a_move_without_a_grab_does_not_scroll() {
         let mut dialog = FileDialog::open();
@@ -3959,6 +4026,37 @@ mod tests {
             0,
             "the pointer merely passing over the scrollbar must not move it"
         );
+    }
+
+    /// A press on the track just past the thumb's end is aimed at the thumb:
+    /// it takes hold of it (`grab::in_track`) instead of paging, and a drag
+    /// from there scrolls.
+    #[test]
+    fn a_press_just_past_the_thumb_takes_hold_of_it() {
+        let mut dialog = FileDialog::open();
+        dialog.set_entries(long_listing());
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
+        let thumb = frame
+            .rect_of(|t| *t == DialogTarget::ScrollThumb)
+            .expect("a long listing has a scrollbar");
+        let (x, below) = (thumb.centre().0, thumb.bottom() + 2.0);
+        click_at(&mut dialog, x, below);
+        assert!(
+            dialog.thumb_grab.is_some(),
+            "the press did not take the thumb"
+        );
+        assert_eq!(dialog.visible_rows(H).start, 0, "the press paged instead");
+
+        dialog.handle_mouse(
+            &MouseEvent {
+                x,
+                y: below + H,
+                kind: MouseEventKind::Move,
+            },
+            W,
+            H,
+        );
+        assert_eq!(dialog.visible_rows(H).end, 30, "the drag did not scroll");
     }
 
     #[test]
@@ -4147,6 +4245,43 @@ mod tests {
             );
         }
         assert!(frame.is_balanced(), "every clip has to be closed");
+    }
+
+    /// **The Save box is the toolkit's field, marked while typing goes to
+    /// it** -- which is whenever the address bar is not being typed in. It
+    /// was a box of its own, outlined in blue whether typing went to it or
+    /// not.
+    #[test]
+    fn the_save_name_box_is_marked_while_typing_goes_to_it() {
+        let palette = Palette::for_mode(false);
+        let edge = |dialog: &FileDialog| {
+            let frame = dialog.frame(&palette, W, H);
+            let field = frame
+                .rect_of(|t| *t == DialogTarget::FilenameInput)
+                .expect("no name box");
+            frame
+                .into_tree()
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::StrokeRect { x, y, color, .. }
+                        if (*x, *y) == (field.x, field.y) =>
+                    {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("the name box has no edge")
+        };
+        let mut dialog = FileDialog::save().with_initial_path("/docs");
+        assert_eq!(edge(&dialog), palette.accent, "typing goes to the name");
+        dialog.handle_event(&ctrl(Key::L), H);
+        assert!(dialog.address().is_editing());
+        assert_eq!(
+            edge(&dialog),
+            palette.surface1,
+            "the address bar has the typing now"
+        );
     }
 
     // ---- the address bar ----

@@ -2683,6 +2683,8 @@ mod tests {
         derived.extend((0..=u8::MAX).map(|v| Color::rgba(0, v, 0, 255)));
         let sp = screen_palette();
         assert!(!sp.light, "the saver must draw with the dark palette");
+        // And the bouncing logo's label, lettered for its plate.
+        derived.push(readable_on(sp.blue));
         for style in every_style() {
             let mut ss = ScreenSaver::new(style, 800, 600);
             // Several frames: the matrix rain only recycles a column after it

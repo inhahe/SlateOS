@@ -77,8 +77,19 @@ TARGET = "x86_64-pc-windows-gnu"
 
 APP = "gui/appearance/src/lib.rs"
 DESK = "gui/desktop/src/lib.rs"
+# The palette itself, since design-decisions 838 moved it from `appearance`
+# into the toolkit; its tests stayed in `appearance`, which is why the
+# defects below still name that package.
+TK_PALETTE = "gui/toolkit/src/palette.rs"
+# The colour type, and since 2026-09 the one hex parser: the calendar's
+# `parse_hex_color` reads through `Color::from_hex_text`.
+TK_COLOR = "gui/toolkit/src/color.rs"
 SEC = "gui/desktop/src/security_dialog.rs"
 RUN = "gui/desktop/src/run_dialog.rs"
+# The toolkit's field -- the well, edge and focus mark every text field is
+# drawn with since design-decisions 1435 -- where the run box's and the login
+# screen's field colours are now chosen.
+FIELD = "gui/toolkit/src/field.rs"
 ICON = "gui/desktop/src/icons.rs"
 NOTIF_PANE = "gui/desktop/src/notif_pane.rs"
 DEV = "gui/desktop/src/device_settings.rs"
@@ -116,8 +127,18 @@ SESS = "gui/desktop/src/session_mgr.rs"
 FD = "gui/desktop/src/file_drop.rs"
 IM = "gui/desktop/src/input_method.rs"
 WP = "gui/desktop/src/wallpaper.rs"
-SWITCH = "gui/desktop/src/switch.rs"
-SLIDER = "gui/desktop/src/slider.rs"
+# The switch moved into the toolkit on 2026-09-27 (`guitk::switch`), as the
+# slider did, with its shapes spelled as before; its defects build `guitk`
+# for the module's own tests and `desktop` for the panels that draw one.
+SWITCH = "gui/toolkit/src/switch.rs"
+# The slider moved into the toolkit on 2026-09-27 (`guitk::slider`), with its
+# drawing, its reasoning and its tests; the desktop draws through it. Its
+# defects therefore build `guitk` for the module's own tests and `desktop`
+# for the panels that draw sliders.
+SLIDER = "gui/toolkit/src/slider.rs"
+# The toolkit's one-line text field, where the Run box's caret movement
+# went when the box moved onto it.
+TK_TEXTINPUT = "gui/toolkit/src/textinput.rs"
 MM = "gui/desktop/src/multimon.rs"
 # The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
 # down here so there would be one copy of it; a defect patched into this file
@@ -134,66 +155,98 @@ PBAR = "gui/toolkit/src/pathbar.rs"
 DEFECTS = [
     (
         "A: the light palette keeps Catppuccin's own subtext0, which is 4.37:1",
-        APP,
-        [("pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x686B80);",
-          "pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x6C6F85);")],
-        ["appearance"],
-        ["every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette"],
+        TK_PALETTE,
+        [
+            ('pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x00688B);\n',
+             'pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x6C6F85);\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            # The resolved palette raises subtext0 to the text floor, so the role sweep no
+            # longer sees a weak constant; the constant's own floor test and the ladder's
+            # pinned subtext0/subtext1 tie do.
+            'light_inks_clear_the_contrast_floor_on_every_surface',
+            'the_surface_ladder_climbs_away_from_the_base_in_both_modes',
+        ],
     ),
     (
+        # Re-modelled 2026-09-27. It copied the dark value into `subtext1:`,
+        # which the legibility floor now recomputes from `ink_sources`, so the
+        # edit changed nothing and the sweep reported it escaped. `overlay0` is
+        # the same defect -- one line left as its dark counterpart -- on a
+        # role nothing recomputes.
         "B: one line of the light palette was left as its dark counterpart",
-        APP,
-        [("                subtext1: LIGHT_SUBTEXT1,", "                subtext1: SUBTEXT1,")],
+        TK_PALETTE,
+        [("                overlay0: LIGHT_OVERLAY0,", "                overlay0: OVERLAY0,")],
         ["appearance"],
-        ["every_role_has_a_different_value_in_the_two_modes"],
+        ["every_role_has_a_different_value_in_the_two_modes",
+         "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "C: two rungs of the light ladder are swapped",
-        APP,
+        TK_PALETTE,
         [("                surface1: LIGHT_SURFACE1,\n"
           "                surface2: LIGHT_SURFACE2,",
           "                surface1: LIGHT_SURFACE2,\n"
           "                surface2: LIGHT_SURFACE1,")],
         ["appearance", "desktop"],
-        ["the_surface_ladder_climbs_away_from_the_base_in_both_modes"],
+        ["the_surface_ladder_climbs_away_from_the_base_in_both_modes", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "D: crust and mantle are swapped in light mode",
-        APP,
+        TK_PALETTE,
         [("                crust: LIGHT_CRUST,\n"
           "                mantle: LIGHT_MANTLE,",
           "                crust: LIGHT_MANTLE,\n"
           "                mantle: LIGHT_CRUST,")],
         ["appearance"],
-        ["the_recessed_layers_are_darker_than_the_base_in_both_modes"],
+        ["the_recessed_layers_are_darker_than_the_base_in_both_modes", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         "E: the accent setting never reaches the palette",
-        APP,
-        [("        palette.accent = settings.effective_accent();\n", "")],
-        ["appearance", "desktop"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone",
-         "a_custom_accent_reaches_the_palette_exactly_as_chosen"],
+        TK_PALETTE,
+        [
+            ('        palette.accent = settings.accent();\n',
+             ''),
+        ],
+        ["guitk", "appearance", "desktop"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            # `from_settings` reads the accent through `PaletteSource`.
+            'a_custom_accent_reaches_the_palette_exactly_as_chosen',
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "F: the accent overwrites the categorical blue as well",
-        APP,
-        [("        palette.accent = settings.effective_accent();",
-          "        palette.accent = settings.effective_accent();\n"
-          "        palette.blue = palette.accent;")],
-        ["appearance"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone"],
+        TK_PALETTE,
+        [
+            ('        palette.accent = settings.accent();\n',
+             '        palette.accent = settings.accent();\n        palette.blue = palette.accent;\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "G: the transparency level never reaches the palette",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();\n", "")],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             ''),
+        ],
         ["appearance"],
-        ["transparency_reaches_panels_and_nothing_behind_them"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'transparency_reaches_panels_and_nothing_behind_them',
+        ],
     ),
     (
         "H: a panel is drawn opaque however transparent the user asked for",
-        APP,
+        TK_PALETTE,
         [("    pub fn panel_bg(&self) -> Color {\n"
           "        with_alpha(self.base, self.panel_alpha)",
           "    pub fn panel_bg(&self) -> Color {\n"
@@ -203,16 +256,20 @@ DEFECTS = [
     ),
     (
         "I: the alpha meant for panels is applied to the base itself",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();",
-          "        palette.panel_alpha = settings.transparency.panel_alpha();\n"
-          "        palette.base = with_alpha(palette.base, palette.panel_alpha);")],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             '        palette.panel_alpha = settings.panel_alpha();\n        palette.base = Color::rgba(palette.base.r, palette.base.g, palette.base.b, palette.panel_alpha);\n'),
+        ],
         ["appearance"],
-        ["transparency_reaches_panels_and_nothing_behind_them"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'transparency_reaches_panels_and_nothing_behind_them',
+        ],
     ),
     (
         "J: the scrim dims with the palette's own base, as the shell used to",
-        APP,
+        TK_PALETTE,
         [("    pub fn scrim(&self) -> Color {\n        Color::rgba(0, 0, 0, 140)",
           "    pub fn scrim(&self) -> Color {\n        with_alpha(self.base, 140)")],
         ["appearance"],
@@ -220,27 +277,29 @@ DEFECTS = [
     ),
     (
         "K: a label's shadow is no stronger than a panel's",
-        APP,
+        TK_PALETTE,
         [("    pub fn text_shadow(&self) -> Color {\n        Color::rgba(0, 0, 0, 180)",
           "    pub fn text_shadow(&self) -> Color {\n        Color::rgba(0, 0, 0, 120)")],
         ["appearance"],
         ["the_scrim_and_the_shadows_darken_whichever_palette_they_fall_on"],
     ),
     (
-        "L: hue() answers in dark-mode values whatever mode it is in",
+        "L: `AccentColor::in_mode` answers in dark-mode values whatever mode it is asked for",
         APP,
-        [("        if self.light {\n"
-          "            accent.color_light()\n"
-          "        } else {\n"
-          "            accent.color()\n"
-          "        }",
-          "        accent.color()")],
+        [
+            ('        if light {\n            self.color_light()\n        } else {\n            self.color()\n        }\n',
+             '        self.color()\n'),
+        ],
         ["appearance"],
-        ["every_named_hue_agrees_with_the_accent_of_the_same_name"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. `Palette::hue` became `AccentColor::in_mode`
+            # when the palette moved into the toolkit, which cannot name an accent.
+            'every_named_hue_agrees_with_the_accent_of_the_same_name',
+        ],
     ),
     (
         "M: text on the accent is the palette's text, not chosen for the accent",
-        APP,
+        TK_PALETTE,
         [("    pub fn on_accent(&self) -> Color {\n        readable_on(self.accent)",
           "    pub fn on_accent(&self) -> Color {\n        self.text")],
         ["appearance"],
@@ -248,7 +307,7 @@ DEFECTS = [
     ),
     (
         "N: two of the accent washes are the same strength",
-        APP,
+        TK_PALETTE,
         [("    pub fn selection_border(&self) -> Color {\n"
           "        with_alpha(self.accent, wash::EDGE)",
           "    pub fn selection_border(&self) -> Color {\n"
@@ -258,7 +317,7 @@ DEFECTS = [
     ),
     (
         "O: a drop target is the accent, like the selection shown beside it",
-        APP,
+        TK_PALETTE,
         [("    pub fn drop_target(&self) -> Color {\n        with_alpha(self.green, 60)",
           "    pub fn drop_target(&self) -> Color {\n        with_alpha(self.accent, 60)")],
         ["appearance"],
@@ -280,11 +339,11 @@ DEFECTS = [
     ),
     (
         "T: SKY carries the transposed byte pair it shipped with",
-        APP,
+        TK_PALETTE,
         [("pub const SKY: Color = Color::from_hex(0x89DCEB);",
           "pub const SKY: Color = Color::from_hex(0x89DCFE);")],
         ["appearance"],
-        ["every_dark_constant_is_the_published_catppuccin_mocha_value"],
+        ["every_dark_constant_is_the_published_catppuccin_mocha_value", "the_shipped_built_in_theme_is_the_built_in_palette"],
     ),
     (
         # Defect F is this collapse unconditionally. This one happens only in
@@ -294,14 +353,16 @@ DEFECTS = [
         # run of this defect reported NO TEST FAILED; that is what put the
         # sweep in.
         "U: in light mode only, the accent overwrites the categorical sapphire",
-        APP,
-        [("        palette.panel_alpha = settings.transparency.panel_alpha();",
-          "        palette.panel_alpha = settings.transparency.panel_alpha();\n"
-          "        if palette.light {\n"
-          "            palette.sapphire = palette.accent;\n"
-          "        }")],
-        ["appearance"],
-        ["the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone"],
+        TK_PALETTE,
+        [
+            ('        palette.panel_alpha = settings.panel_alpha();\n',
+             '        palette.panel_alpha = settings.panel_alpha();\n        if palette.light {\n            palette.sapphire = palette.accent;\n        }\n'),
+        ],
+        ["guitk", "appearance"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838).
+            'the_accent_setting_moves_the_accent_and_leaves_the_categorical_hues_alone',
+        ],
     ),
     (
         "R: a pressed taskbar button is raised one step too far",
@@ -339,12 +400,15 @@ DEFECTS = [
         # Behind the details disclosure, so only an expanded render sees it.
         "W: the details panel keeps its own Mocha mantle",
         SEC,
-        [("                height: panel_h,\n"
-          "                color: p.mantle,",
-          "                height: panel_h,\n"
-          "                color: guitk::Color::from_hex(0x181825),")],
+        [
+            ('            let mut paint = p.surface_paint(Surface::Card);\n            paint.border = Some(paint.border.unwrap_or(p.surface1));\n            p.push_paint_radii(\n                &mut cmds,\n                dx + PADDING,\n                panel_y,\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.border = Some(paint.border.unwrap_or(p.surface1));\n            paint.fill = Some(guitk::color::Color::from_hex(0x181825));\n            p.push_paint_radii(\n                &mut cmds,\n                dx + PADDING,\n                panel_y,\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The details panel is a card surface now.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn while the pointer is over Allow: a state the sweep has to
@@ -370,23 +434,38 @@ DEFECTS = [
     # would only encode the hole as if it were a result.
     (
         "Y: the run box's focus border is left as this module's own Mocha blue",
-        RUN,
-        [("            color: p.accent,\n"
-          "            line_width: 1.0,\n"
-          "            corner_radii: CornerRadii::all(4.0),",
-          "            color: guitk::color::Color::from_hex(0x89B4FA),\n"
-          "            line_width: 1.0,\n"
-          "            corner_radii: CornerRadii::all(4.0),")],
-        ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        FIELD,
+        [
+            ('    } else if live && state.focused && p.widget_style.field.focus == FocusMark::Glow {\n        p.accent\n',
+             '    } else if live && state.focused && p.widget_style.field.focus == FocusMark::Glow {\n        Color::from_hex(0x89B4FA)\n'),
+        ],
+        ["guitk", "desktop"],
+        [
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            # The login screen draws the same field, focused: swept 2026-09-28.
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
+        ],
     ),
     (
         # Only drawn when the query matched something.
         "Z: the autocomplete dropdown keeps its own Mocha mantle",
         RUN,
-        [("                color: p.mantle,", "                color: guitk::color::Color::from_hex(0x181825),")],
+        [
+            ('            paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '            paint.border = Some(guitk::color::Color::from_hex(0x45475A));\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The list's fill is the panel
+            # paint's now, so the colour put back is its edge's: Mocha surface1, which
+            # the light palette does not have.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The OK button's label. Mocha `base` on a blue fill was fine while
@@ -394,10 +473,18 @@ DEFECTS = [
         # has to go dark by computation, not by constant.
         "AA: the OK button's label is left as this module's own Mocha base",
         RUN,
-        [("        let fg = if primary { p.on_accent() } else { p.text };",
-          "        let fg = if primary { guitk::color::Color::from_hex(0x1E1E2E) } else { p.text };")],
+        [
+            ('                ..guitk::button::State::default()\n            },\n            p.base,\n',
+             '                ..guitk::button::State::default()\n            },\n            guitk::color::Color::from_hex(0x1E1E2E),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_dialog_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The OK button is the toolkit's,
+            # which derives its face and label from the ground it is told it sits on;
+            # told Mocha's base instead of the palette's, every colour it derives is
+            # one no palette has.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+        ],
     ),
     # `icons.rs`, 16 constants + 2 written inline. Its sweep is the first that
     # had to *drive a gesture* to reach a colour at all, so the defects below
@@ -462,7 +549,7 @@ DEFECTS = [
     ),
     (
         "FF: `on_wallpaper` is made to follow the mode after all",
-        APP,
+        TK_PALETTE,
         [("    pub fn on_wallpaper(&self) -> Color {\n        LIGHT_EXTREME",
           "    pub fn on_wallpaper(&self) -> Color {\n        self.text")],
         ["appearance"],
@@ -485,36 +572,45 @@ DEFECTS = [
         # constant would ship.
         "HH: the dismiss button, which only exists on hover, keeps Mocha surface2",
         NOTIF_PANE,
-        [("                height: DISMISS_BTN_SIZE,\n                color: p.surface2,",
-          "                height: DISMISS_BTN_SIZE,\n"
-          "                color: Color::from_hex(0x585B70),")],
+        [
+            ('            p.push_surface(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE / 2.0,\n                Surface::Selected,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::Selected);\n            paint.fill = Some(Color::from_hex(0x585B70));\n            p.push_paint_radii(\n                cmds,\n                btn_x,\n                btn_y,\n                DISMISS_BTN_SIZE,\n                DISMISS_BTN_SIZE,\n                CornerRadii::all(DISMISS_BTN_SIZE / 2.0),\n                paint,\n            );\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The button is `Surface::Selected` now; this gives it a frozen fill.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn on the per-app settings page, behind the "Settings" link.
         "II: the per-app enabled pill, behind the settings view, keeps Mocha green",
         NOTIF_PANE,
-        [("            let pill_bg = if app.enabled { p.green } else { p.surface2 };",
-          "            let pill_bg = if app.enabled {\n"
-          "                Color::from_hex(0xA6E3A1)\n"
-          "            } else {\n"
-          "                p.surface2\n"
-          "            };")],
+        [
+            ('            let pill_bg = if enabled { p.green } else { p.surface2 };\n',
+             '            let pill_bg = if enabled { Color::from_hex(0xA6E3A1) } else { p.surface2 };\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. An app is on unless it is silenced now.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # Only drawn when there is nothing to draw. A state matrix that only
         # ever renders a populated pane never reaches this line at all.
         "JJ: the empty-list caption, drawn only when there are no notifications",
         NOTIF_PANE,
-        [('                text: "No notifications".to_string(),\n'
-          "                color: p.overlay0,",
-          '                text: "No notifications".to_string(),\n'
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No notifications".to_string(),\n                color: p.subtext0,\n',
+             '                text: "No notifications".to_string(),\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_pane_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The caption is subtext0 now -- overlay0 is not a text role -- so this
+            # freezes that.
+            'every_colour_the_pane_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The part-2 lesson from defect EE, applied to this module. A priority
@@ -587,7 +683,7 @@ DEFECTS = [
         # badge unrendered and the reintroduced constant unseen.
         "PP: the one-shot badge goes back to Mocha peach",
         RULES,
-        [("                    color: p.peach,", "                    color: Color::from_hex(0xFAB387),")],
+        [("                    color: p.ink(p.peach),", "                    color: Color::from_hex(0xFAB387),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
@@ -644,18 +740,25 @@ DEFECTS = [
         # matrix too: a fixture that never sets one would leave it unrendered.
         "VV: the status message goes back to Mocha yellow",
         ACCT,
-        [("                color: p.yellow,", "                color: Color::from_hex(0xF9E2AF),")],
+        [("                color: p.ink(p.yellow),", "                color: Color::from_hex(0xF9E2AF),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         # Behind a tab *and* behind an empty activity log -- the branch a
         # populated fixture alone would never reach.
-        "WW: the empty activity-log caption goes back to Mocha overlay0",
+        "WW: the empty activity-log caption goes back to Mocha subtext0",
         ACCT,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No activity recorded.".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                text: "No activity recorded.".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The last slot of the avatar table, which only an account whose stored
@@ -686,10 +789,16 @@ DEFECTS = [
         # accent entirely.
         "ZZ: the active tab's label stops following the accent",
         ACCT,
-        [("                color: if is_active { p.accent } else { p.subtext0 },",
-          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        [
+            ('                text: tab.display_name().to_string(),\n                font_size: 12.0,\n                color: if is_active {\n                    p.ink(p.accent)\n',
+             '                text: tab.display_name().to_string(),\n                font_size: 12.0,\n                color: if is_active {\n                    p.ink(p.blue)\n'),
+        ],
         ["desktop"],
-        ["a_users_identity_colours_do_not_follow_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'a_users_identity_colours_do_not_follow_the_accent',
+        ],
     ),
     # --- bluetooth.rs (module 8) -------------------------------------------
     (
@@ -700,12 +809,18 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "BBB: the \"n more\" line goes back to Mocha overlay0",
+        "BBB: the \"n more\" line goes back to Mocha subtext0",
         BT,
-        [("                font_size: 10.0,\n                color: p.overlay0,",
-          "                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: format!("{hidden} more - scroll to see the rest"),\n                font_size: 10.0,\n                color: p.subtext0,\n',
+             '                text: format!("{hidden} more - scroll to see the rest"),\n                font_size: 10.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "CCC: the device icon circle goes back to Mocha lavender",
@@ -750,35 +865,49 @@ DEFECTS = [
     (
         "HHH: the status banner's background goes back to Mocha mantle",
         UPD,
-        [("            height: 36.0,\n            color: p.mantle,",
-          "            height: 36.0,\n            color: Color::from_hex(0x181825),")],
+        [
+            ('        p.push_surface(&mut cmds, x + pad, cy, inner, 36.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(&mut cmds, x + pad, cy, inner, 36.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "III: the restart warning goes back to Mocha peach",
         UPD,
-        [("                color: p.peach,", "                color: Color::from_hex(0xFAB387),")],
+        [("                color: p.ink(p.peach),", "                color: Color::from_hex(0xFAB387),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         "JJJ: the schedule heading goes back to Mocha lavender",
         UPD,
-        [("            text: \"Update schedule\".into(),\n"
-          "            font_size: 14.0,\n            color: p.lavender,",
-          "            text: \"Update schedule\".into(),\n"
-          "            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),")],
+        [
+            ('            text: "Update schedule".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),\n',
+             '            text: "Update schedule".into(),\n            font_size: 14.0,\n            color: Color::from_hex(0xB4BEFE),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The heading is inked now.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "KKK: a failed install's row goes back to Mocha red",
         UPD,
-        [("            let color = if entry.success { p.green } else { p.red };",
-          "            let color = if entry.success { p.green } else { Color::from_hex(0xF38BA8) };")],
+        [
+            ('            } else {\n                p.ink(p.red)\n            };\n            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);\n',
+             '            } else {\n                Color::from_hex(0xF38BA8)\n            };\n            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The row's text is inked now; the entry is named by the card after it.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "LLL: the error status is made to follow the accent",
@@ -790,8 +919,8 @@ DEFECTS = [
     (
         "MMM: the active tab's label stops following the accent",
         UPD,
-        [("                color: if active { p.accent } else { p.subtext0 },",
-          "                color: if active { p.blue } else { p.subtext0 },")],
+        [("                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+          "                color: if active { p.ink(p.blue) } else { p.subtext0 },")],
         ["desktop"],
         ["an_updates_status_colours_do_not_follow_the_accent"],
     ),
@@ -802,8 +931,8 @@ DEFECTS = [
     (
         "NNN: the chosen schedule's label stops following the accent",
         UPD,
-        [("                color: if active { p.accent } else { p.text },",
-          "                color: if active { p.blue } else { p.text },")],
+        [("                color: if active { p.ink(p.accent) } else { p.text },",
+          "                color: if active { p.ink(p.blue) } else { p.text },")],
         ["desktop"],
         ["an_updates_status_colours_do_not_follow_the_accent"],
     ),
@@ -825,30 +954,37 @@ DEFECTS = [
     (
         "QQQ: the breakdown heading goes back to Mocha lavender",
         STOR,
-        [("                color: p.lavender,", "                color: Color::from_hex(0xB4BEFE),")],
+        [("                color: p.ink(p.lavender),", "                color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         "RRR: the low-space warning caption goes back to Mocha red",
         STOR,
-        [("                color: p.red,", "                color: Color::from_hex(0xF38BA8),")],
+        [("                color: p.ink(p.red),", "                color: Color::from_hex(0xF38BA8),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
         "SSS: the reclaimable estimate goes back to Mocha green",
         STOR,
-        [("                    color: p.green,", "                    color: Color::from_hex(0xA6E3A1),")],
+        [("                    color: p.ink(p.green),", "                    color: Color::from_hex(0xA6E3A1),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "TTT: the filesystem caption goes back to Mocha overlay0",
+        "TTT: the filesystem caption goes back to Mocha subtext0",
         STOR,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    if drive.removable { " (removable)" } else { "" }\n                ),\n                font_size: 10.0,\n                color: p.subtext0,\n',
+             '                    if drive.removable { " (removable)" } else { "" }\n                ),\n                font_size: 10.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "UUU: the recycle bin's slice is made to follow the accent",
@@ -861,8 +997,8 @@ DEFECTS = [
     (
         "VVV: the active tab's label stops following the accent",
         STOR,
-        [("                color: if active { p.accent } else { p.subtext0 },",
-          "                color: if active { p.blue } else { p.subtext0 },")],
+        [("                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+          "                color: if active { p.ink(p.blue) } else { p.subtext0 },")],
         ["desktop"],
         ["the_storage_panels_own_colours_do_not_follow_the_accent"],
     ),
@@ -872,7 +1008,7 @@ DEFECTS = [
     (
         "WWW: the Change buttons stop following the accent",
         STOR,
-        [("                color: p.accent,", "                color: p.blue,")],
+        [("                color: p.ink(p.accent),", "                color: p.ink(p.blue),")],
         ["desktop"],
         ["the_storage_panels_own_colours_do_not_follow_the_accent"],
     ),
@@ -904,9 +1040,16 @@ DEFECTS = [
     (
         "ZZZ: the no-battery caption keeps its own grey",
         POW,
-        [("                color: p.overlay0,", "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No battery detected — running on AC power.".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No battery detected — running on AC power.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "AAAA: the charge bar's track keeps its own grey",
@@ -948,8 +1091,8 @@ DEFECTS = [
         "DDDD: the active tab's label stops following the accent",
         POW,
         [(
-            "                color: if active { p.accent } else { p.subtext0 },",
-            "                color: if active { p.blue } else { p.subtext0 },",
+            "                color: if active { p.ink(p.accent) } else { p.subtext0 },",
+            "                color: if active { p.ink(p.blue) } else { p.subtext0 },",
         )],
         ["desktop"],
         ["the_power_panels_own_colours_do_not_follow_the_accent"],
@@ -962,8 +1105,8 @@ DEFECTS = [
         "EEEE: the selected plan's label stops following the accent",
         POW,
         [(
-            "                color: if active { p.accent } else { p.text },",
-            "                color: if active { p.blue } else { p.text },",
+            "                color: if active { p.ink(p.accent) } else { p.text },",
+            "                color: if active { p.ink(p.blue) } else { p.text },",
         )],
         ["desktop"],
         ["the_power_panels_own_colours_do_not_follow_the_accent"],
@@ -1081,12 +1224,16 @@ DEFECTS = [
     (
         "OOOO: the network you are on stops following the accent",
         NET,
-        [(
-            "color: if net.connected { p.accent } else { p.text },",
-            "color: if net.connected { p.blue } else { p.text },",
-        )],
+        [
+            ('                    color: if net.connected {\n                        p.ink(p.accent)\n                    } else {\n                        p.text\n',
+             '                    color: if net.connected {\n                        p.ink(p.blue)\n                    } else {\n                        p.text\n'),
+        ],
         ["desktop"],
-        ["only_the_network_you_are_on_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'only_the_network_you_are_on_follows_the_accent',
+        ],
     ),
     (
         "PPPP: airplane mode is repainted the user's accent",
@@ -1151,7 +1298,7 @@ DEFECTS = [
         "VVVV: the pin marker keeps its old yellow (only drawn for a pinned entry)",
         CLIP,
         [(
-            '                        text: "P".to_string(),\n                        color: p.yellow,',
+            '                        text: "P".to_string(),\n                        color: p.ink(p.yellow),',
             '                        text: "P".to_string(),\n                        color: Color::from_hex(0xF9E2AF),',
         )],
         ["desktop"],
@@ -1194,8 +1341,8 @@ DEFECTS = [
         "ZZZZ: the sensitive marker is repainted the user's accent",
         CLIP,
         [(
-            '                        text: "S".to_string(),\n                        color: p.red,',
-            '                        text: "S".to_string(),\n                        color: p.accent,',
+            '                        text: "S".to_string(),\n                        color: p.ink(p.red),',
+            '                        text: "S".to_string(),\n                        color: p.ink(p.accent),',
         )],
         ["desktop"],
         ["only_the_active_filter_tab_follows_the_accent"],
@@ -1203,12 +1350,16 @@ DEFECTS = [
     (
         "AAAAA: the destructive \"Clear All\" is repainted the user's accent",
         CLIP,
-        [(
-            '            text: "Clear All".to_string(),\n            color: p.red,',
-            '            text: "Clear All".to_string(),\n            color: p.accent,',
-        )],
+        [
+            ('            text: "Clear All".to_string(),\n            color: p.ink(p.red),\n',
+             '            text: "Clear All".to_string(),\n            color: p.ink(p.accent),\n'),
+        ],
         ["desktop"],
-        ["only_the_active_filter_tab_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Hue text is inked now (`p.ink`).
+            'only_the_active_filter_tab_follows_the_accent',
+        ],
     ),
     (
         "BBBBB: a faint underlay is pushed beneath the search field, where the "
@@ -1280,61 +1431,75 @@ DEFECTS = [
         "KKKKKK: the tab content well keeps Mocha crust, which the membership "
         "sweep is structurally unable to see",
         NET_SET,
-        [("            height: content_h,\n            color: p.crust,",
-          "            height: content_h,\n"
-          "            color: Color::from_hex(0x11111B),")],
+        [
+            ('        p.push_surface(\n            &mut cmds,\n            x + 8.0,\n            content_y,\n            width - 16.0,\n            content_h,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x11111B));\n        p.push_paint_radii(\n            &mut cmds,\n            x + 8.0,\n            content_y,\n            width - 16.0,\n            content_h,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
+        ],
         ["desktop"],
-        ["the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The well is a card surface now.
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         # Reachable only with Wi-Fi switched off *and* no networks listed. A
         # state matrix that renders one populated Wi-Fi tab never touches it.
-        "LLLLLL: the \"Wi-Fi is disabled\" caption keeps Mocha overlay0",
+        "LLLLLL: the \"Wi-Fi is disabled\" caption keeps Mocha subtext0",
         NET_SET,
-        [("                    \"Wi-Fi is disabled\".to_string()\n"
-          "                },\n"
-          "                font_size: 12.0,\n                color: p.overlay0,",
-          "                    \"Wi-Fi is disabled\".to_string()\n"
-          "                },\n"
-          "                font_size: 12.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    "Wi-Fi is disabled".to_string()\n                },\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                    "Wi-Fi is disabled".to_string()\n                },\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "MMMMMM: the \"No Ethernet interfaces detected\" caption keeps Mocha "
-        "overlay0",
+        "subtext0",
         NET_SET,
-        [("                text: \"No Ethernet interfaces detected\".to_string(),\n"
-          "                font_size: 14.0,\n                color: p.overlay0,",
-          "                text: \"No Ethernet interfaces detected\".to_string(),\n"
-          "                font_size: 14.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No Ethernet interfaces detected".to_string(),\n                font_size: 14.0,\n                color: p.subtext0,\n',
+             '                text: "No Ethernet interfaces detected".to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "NNNNNN: the \"None configured\" search-domain caption keeps Mocha "
-        "overlay0",
+        "subtext0",
         NET_SET,
-        [("                text: \"None configured\".to_string(),\n"
-          "                font_size: 11.0,\n                color: p.overlay0,",
-          "                text: \"None configured\".to_string(),\n"
-          "                font_size: 11.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "None configured".to_string(),\n                font_size: 11.0,\n                color: p.subtext0,\n',
+             '                text: "None configured".to_string(),\n                font_size: 11.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
-        "OOOOOO: the empty-firewall caption keeps Mocha overlay0",
+        "OOOOOO: the empty-firewall caption keeps Mocha subtext0",
         NET_SET,
-        [("                text: \"No custom rules. Using default policies.\".to_string(),\n"
-          "                font_size: 12.0,\n                color: p.overlay0,",
-          "                text: \"No custom rules. Using default policies.\".to_string(),\n"
-          "                font_size: 12.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No custom rules. Using default policies.".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,\n',
+             '                text: "No custom rules. Using default policies.".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         # The colour that never was a constant: Mocha surface0's three channels
@@ -1352,12 +1517,15 @@ DEFECTS = [
     (
         "QQQQQQ: the active tab's label is frozen blue instead of the accent",
         NET_SET,
-        [("                font_size: 13.0,\n"
-          "                color: if is_active { p.accent } else { p.subtext0 },",
-          "                font_size: 13.0,\n"
-          "                color: if is_active { p.blue } else { p.subtext0 },")],
+        [
+            ('                font_size: 13.0,\n                color: if is_active {\n                    p.ink(p.accent)\n',
+             '                font_size: 13.0,\n                color: if is_active {\n                    p.ink(p.blue)\n'),
+        ],
         ["desktop"],
-        ["every_control_that_offers_something_follows_the_accent"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads. The label is inked now.
+            'every_control_that_offers_something_follows_the_accent',
+        ],
     ),
     (
         "RRRRRR: the status tab's four quick toggles are frozen blue",
@@ -1505,7 +1673,7 @@ DEFECTS = [
     (
         "FFFFFFF: two rungs of the Wi-Fi security ladder collapse onto peach",
         NET_SET,
-        [("            2 => p.yellow,", "            2 => p.peach,")],
+        [("            2 => p.ink(p.yellow),", "            2 => p.ink(p.peach),")],
         ["desktop"],
         ["every_category_stays_distinct_under_every_accent"],
     ),
@@ -1588,11 +1756,17 @@ DEFECTS = [
     (
         "MMMMMMM: the filter field keeps Mocha's surface0",
         STARTUP,
-        [("            height: 30.0,\n            color: p.surface0,",
-          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "NNNNNNN: a selected entry's row keeps Mocha's surface1",
@@ -1606,34 +1780,50 @@ DEFECTS = [
     (
         "OOOOOOO: the last-boot-time card keeps Mocha's surface0",
         STARTUP,
-        [("                height: 48.0,\n                color: p.surface0,",
-          "                height: 48.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 48.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 48.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
-        "PPPPPPP: the sort indicator keeps Mocha's overlay0",
+        "PPPPPPP: the sort indicator keeps Mocha's subtext0",
         STARTUP,
-        [("            font_size: 11.0,\n            color: p.overlay0,",
-          "            font_size: 11.0,\n            color: Color::from_hex(0x6C7086),")],
+        [
+            ('            text: format!("Sort: {}", self.sort.label()),\n            font_size: 11.0,\n            color: p.subtext0,\n',
+             '            text: format!("Sort: {}", self.sort.label()),\n            font_size: 11.0,\n            color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
-        "QQQQQQQ: the empty-list caption keeps Mocha's overlay0",
+        "QQQQQQQ: the empty-list caption keeps Mocha's subtext0",
         STARTUP,
-        [('                text: "No startup apps".into(),\n'
-          "                font_size: 13.0,\n                color: p.overlay0,",
-          '                text: "No startup apps".into(),\n'
-          "                font_size: 13.0,\n                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No startup apps".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No startup apps".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "RRRRRRR: the filter field's placeholder keeps Mocha's overlay0",
         STARTUP,
-        [("            color: if self.filter.is_empty() {\n                p.overlay0",
+        [("            color: if self.filter.is_empty() {\n                p.subtext0",
           "            color: if self.filter.is_empty() {\n"
           "                Color::from_hex(0x6C7086)")],
         ["desktop"],
@@ -1650,7 +1840,7 @@ DEFECTS = [
     (
         "TTTTTTT: a delayed entry's delay line keeps Mocha's overlay0",
         STARTUP,
-        [("                    font_size: 10.0,\n                    color: p.overlay0,",
+        [("                    font_size: 10.0,\n                    color: p.subtext0,",
           "                    font_size: 10.0,\n"
           "                    color: Color::from_hex(0x6C7086),")],
         ["desktop"],
@@ -1672,7 +1862,7 @@ DEFECTS = [
         "WWWWWWW: the boot tab's heading keeps Mocha's lavender",
         STARTUP,
         [('            text: "Boot Performance".into(),\n'
-          "            font_size: 15.0,\n            color: p.lavender,",
+          "            font_size: 15.0,\n            color: p.ink(p.lavender),",
           '            text: "Boot Performance".into(),\n'
           "            font_size: 15.0,\n            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -1809,7 +1999,7 @@ DEFECTS = [
         "LLLLLLLL: the boot-time ladder's first band moves from ten seconds "
         "to one",
         STARTUP,
-        [("    if ms < 10_000 {\n        p.green", "    if ms < 1_000 {\n        p.green")],
+        [("    if ms < 10_000 {\n        p.ink(p.green)", "    if ms < 1_000 {\n        p.ink(p.green)")],
         ["desktop"],
         ["the_boot_time_bands_are_where_they_say_they_are"],
     ),
@@ -1817,7 +2007,7 @@ DEFECTS = [
         "MMMMMMMM: a bad boot reading is painted in the accent, so a forty-"
         "second boot is green on a green desktop",
         STARTUP,
-        [("    } else {\n        p.red\n    }\n}", "    } else {\n        p.accent\n    }\n}")],
+        [("    } else {\n        p.ink(p.red)\n    }\n}", "    } else {\n        p.ink(p.accent)\n    }\n}")],
         ["desktop"],
         ["no_category_follows_the_accent",
          "every_control_that_offers_something_follows_the_accent"],
@@ -1825,8 +2015,8 @@ DEFECTS = [
     (
         "NNNNNNNN: a slow boot collapses onto a fast one",
         STARTUP,
-        [("    } else if ms < 30_000 {\n        p.yellow",
-          "    } else if ms < 30_000 {\n        p.green")],
+        [("    } else if ms < 30_000 {\n        p.ink(p.yellow)",
+          "    } else if ms < 30_000 {\n        p.ink(p.green)")],
         ["desktop"],
         ["every_category_stays_distinct_under_every_accent"],
     ),
@@ -1896,11 +2086,17 @@ DEFECTS = [
     (
         "GGGGGGGGG: the clock card keeps Mocha's surface0",
         DTS,
-        [("                height: 80.0,\n                color: p.surface0,",
-          "                height: 80.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 80.0, 12.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 80.0, CornerRadii::all(12.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "HHHHHHHHH: the main clock face keeps Mocha's text",
@@ -1938,7 +2134,7 @@ DEFECTS = [
         "KKKKKKKKK: the Taskbar Clock heading keeps Mocha's lavender",
         DTS,
         [('text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Taskbar Clock".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -1947,11 +2143,17 @@ DEFECTS = [
     (
         "LLLLLLLLL: the current-zone card keeps Mocha's surface1",
         DTS,
-        [("                height: 44.0,\n                color: p.surface1,",
-          "                height: 44.0,\n                color: Color::from_hex(0x45475A),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 44.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x45475A));\n            p.push_paint_radii(cmds, x, cy, width, 44.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "MMMMMMMMM: the current-zone card's heading keeps Mocha's text",
@@ -1981,16 +2183,22 @@ DEFECTS = [
     (
         "OOOOOOOOO: the search field keeps Mocha's surface0",
         DTS,
-        [("            height: 30.0,\n            color: p.surface0,",
-          "            height: 30.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "PPPPPPPPP: the search placeholder keeps Mocha's overlay0",
         DTS,
-        [("            color: if self.tz_search.is_empty() {\n                p.overlay0",
+        [("            color: if self.tz_search.is_empty() {\n                p.subtext0",
           "            color: if self.tz_search.is_empty() {\n"
           "                Color::from_hex(0x6C7086)")],
         ["desktop"],
@@ -2029,8 +2237,8 @@ DEFECTS = [
     (
         "TTTTTTTTT: the name of the zone in force is pinned to blue again",
         DTS,
-        [("color: if is_current { p.accent } else { p.text },",
-          "color: if is_current { p.blue } else { p.text },")],
+        [("color: if is_current { p.ink(p.accent) } else { p.text },",
+          "color: if is_current { p.ink(p.blue) } else { p.text },")],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent",
          "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
@@ -2039,7 +2247,7 @@ DEFECTS = [
         "UUUUUUUUU: the zone in force stops being named differently at all, "
         "so the panel cannot say which zone the machine is on",
         DTS,
-        [("color: if is_current { p.accent } else { p.text },", "color: p.text,")],
+        [("color: if is_current { p.ink(p.accent) } else { p.text },", "color: p.text,")],
         ["desktop"],
         ["every_control_that_offers_something_follows_the_accent",
          "the_zone_you_are_looking_at_is_not_the_zone_in_force"],
@@ -2057,7 +2265,7 @@ DEFECTS = [
     (
         "WWWWWWWWW: the DST badge keeps Mocha's yellow",
         DTS,
-        [("                    font_size: 10.0,\n                    color: p.yellow,",
+        [("                    font_size: 10.0,\n                    color: p.ink(p.yellow),",
           "                    font_size: 10.0,\n"
           "                    color: Color::from_hex(0xF9E2AF),")],
         ["desktop"],
@@ -2068,8 +2276,8 @@ DEFECTS = [
         "XXXXXXXXX: the DST badge follows the accent, so whether a zone's "
         "clock is shifted depends on the desktop's colour",
         DTS,
-        [("                    font_size: 10.0,\n                    color: p.yellow,",
-          "                    font_size: 10.0,\n                    color: p.accent,")],
+        [("                    font_size: 10.0,\n                    color: p.ink(p.yellow),",
+          "                    font_size: 10.0,\n                    color: p.ink(p.accent),")],
         ["desktop"],
         ["the_dst_badge_does_not_follow_the_accent",
          "every_control_that_offers_something_follows_the_accent"],
@@ -2087,20 +2295,26 @@ DEFECTS = [
         "ZZZZZZZZZ: the Time Synchronization heading keeps Mocha's lavender",
         DTS,
         [('text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Time Synchronization".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "AAAAAAAAAA: the sync-status card keeps Mocha's surface0",
+        "AAAAAAAAAA: the sync-status well keeps Mocha's surface2",
         DTS,
-        [("            height: 36.0,\n            color: p.surface0,",
-          "            height: 36.0,\n            color: Color::from_hex(0x313244),")],
+        [
+            ('        p.push_surface(cmds, x, cy, width, 36.0, 6.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(Color::from_hex(0x585B70));\n        p.push_paint_radii(cmds, x, cy, width, 36.0, CornerRadii::all(6.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "BBBBBBBBBB: a disabled clock is reported in the accent, so a fact "
@@ -2157,11 +2371,17 @@ DEFECTS = [
     (
         "HHHHHHHHHH: an NTP server row keeps Mocha's surface0",
         DTS,
-        [("                height: 28.0,\n                color: p.surface0,",
-          "                height: 28.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 28.0, 4.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 28.0, CornerRadii::all(4.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "IIIIIIIIII: an NTP server's name keeps Mocha's text",
@@ -2173,22 +2393,33 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "JJJJJJJJJJ: the empty-clocks caption keeps Mocha's overlay0",
+        "JJJJJJJJJJ: the empty-clocks caption keeps Mocha's subtext0",
         DTS,
-        [("                font_size: 13.0,\n                color: p.overlay0,",
-          "                font_size: 13.0,\n"
-          "                color: Color::from_hex(0x6C7086),")],
+        [
+            ('                text: "No additional clocks. Add one to track time in another city.".into(),\n                font_size: 13.0,\n                color: p.subtext0,\n',
+             '                text: "No additional clocks. Add one to track time in another city.".into(),\n                font_size: 13.0,\n                color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "KKKKKKKKKK: a world-clock card keeps Mocha's surface0",
         DTS,
-        [("                height: 60.0,\n                color: p.surface0,",
-          "                height: 60.0,\n                color: Color::from_hex(0x313244),")],
+        [
+            ('            p.push_surface(cmds, x, cy, width, 60.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(Color::from_hex(0x313244));\n            p.push_paint_radii(cmds, x, cy, width, 60.0, CornerRadii::all(8.0), paint);\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette",
-         "the_panels_own_surfaces_come_from_the_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The panel's boxes are surfaces now (`push_surface`); this freezes one's fill.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+            'the_panels_own_surfaces_come_from_the_palette',
+        ],
     ),
     (
         "LLLLLLLLLL: a world-clock face goes back to the blue it shipped in, "
@@ -2228,14 +2459,18 @@ DEFECTS = [
         ["every_colour_the_panel_draws_comes_from_its_palette"],
     ),
     (
-        "PPPPPPPPPP: the Hidden mark on a world clock keeps Mocha's overlay0",
+        "PPPPPPPPPP: the Hidden mark on a world clock keeps Mocha's subtext0",
         DTS,
-        [('text: "Hidden".into(),\n                    font_size: 10.0,\n'
-          "                    color: p.overlay0,",
-          'text: "Hidden".into(),\n                    font_size: 10.0,\n'
-          "                    color: Color::from_hex(0x6C7086),")],
+        [
+            ('                    text: "Hidden".into(),\n                    font_size: 10.0,\n                    color: p.subtext0,\n',
+             '                    text: "Hidden".into(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0xA6ADC8),\n'),
+        ],
         ["desktop"],
-        ["every_colour_the_panel_draws_comes_from_its_palette"],
+        [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Captions are subtext0 now -- overlay0 is not a text role -- so this freezes that.
+            'every_colour_the_panel_draws_comes_from_its_palette',
+        ],
     ),
     (
         "QQQQQQQQQQ: a toggle row's label keeps Mocha's text",
@@ -2299,7 +2534,7 @@ DEFECTS = [
         "WWWWWWWWWW: the NTP Servers heading keeps Mocha's lavender",
         DTS,
         [('text: "NTP Servers".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "NTP Servers".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -2309,7 +2544,7 @@ DEFECTS = [
         "XXXXXXXXXX: the Additional Clocks heading keeps Mocha's lavender",
         DTS,
         [('text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
-          "            color: p.lavender,",
+          "            color: p.ink(p.lavender),",
           'text: "Additional Clocks".into(),\n            font_size: 15.0,\n'
           "            color: Color::from_hex(0xB4BEFE),")],
         ["desktop"],
@@ -2341,11 +2576,12 @@ DEFECTS = [
         "BBBBBBBBBBB: the panel's title bar keeps Mocha's mantle",
         TPAD,
         [
-            ('            color: p.mantle,',
-             '            color: Color::from_hex(0x181825),'),
+            ('        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));\n',
+             '        let mut paint = p.surface_paint(Surface::Strip(Edge::Bottom));\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(&mut cmds, x, y, w, 40.0, CornerRadii::all(0.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The title bar is a strip surface now.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -2453,11 +2689,13 @@ DEFECTS = [
         "KKKKKKKKKKK: the cursor behind the selected gesture row keeps Mocha's surface0",
         TPAD,
         [
-            ('                    width: 420.0,\n                    height: 22.0,\n                    color: p.surface0,',
-             '                    width: 420.0,\n                    height: 22.0,\n                    color: Color::from_hex(0x313244),'),
+            ('                p.push_surface(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, 4.0, Surface::Selected);\n',
+             '                let mut paint = p.surface_paint(Surface::Selected);\n                paint.fill = Some(Color::from_hex(0x313244));\n                p.push_paint_radii(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The cursor is `Surface::Selected` now -- outlined in the accent under
+            # the default theme; this gives it a frozen fill.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -2566,11 +2804,12 @@ DEFECTS = [
         "TTTTTTTTTTT: a choice control's label keeps Mocha's text",
         TPAD,
         [
-            ('            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,',
-             '            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        cmds.push(RenderCommand::FillRect {\n            x: x + 250.0,\n            y,\n            width: 200.0,'),
+            ('            font_size: 12.0,\n            color: p.text,\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n',
+             '            font_size: 12.0,\n            color: Color::from_hex(0xCDD6F4),\n            font_weight: FontWeightHint::Regular,\n            max_width: None,\n            overflow: TextOverflow::Clip,\n        });\n        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The label is named by the well drawn after it.
             'every_colour_the_panel_draws_comes_from_its_palette',
         ],
     ),
@@ -2578,11 +2817,13 @@ DEFECTS = [
         "UUUUUUUUUUU: a choice control's well keeps Mocha's surface0",
         TPAD,
         [
-            ('            width: 200.0,\n            height: 22.0,\n            color: p.surface0,',
-             '            width: 200.0,\n            height: 22.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x + 250.0, y, 200.0, 22.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_the_panel_draws_comes_from_its_palette',
             'the_panels_own_surfaces_come_from_the_palette',
         ],
@@ -3291,11 +3532,13 @@ DEFECTS = [
         "DDDDDDDDDDDDDDD: a hovered built-in row keeps Mocha's surface0",
         CTX,
         [
-            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
-             '                        height: item_height,\n                        color: guitk::color::Color::from_hex(0x313244),\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+            ('                    p.push_surface(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        4.0,\n                        Surface::Selected,\n                    );\n                }\n\n                // Icon.\n',
+             '                    let mut paint = p.surface_paint(Surface::Selected);\n                    paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n                    p.push_paint_radii(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        CornerRadii::all(4.0),\n                        paint,\n                    );\n                }\n\n                // Icon.\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The hover is `Surface::Selected` now -- outlined in the accent under the default theme -- and the built-in row's call is told from the extension row's by the icon comment after it.
             'every_colour_the_context_menu_draws_comes_from_its_palette',
             'the_menus_own_surfaces_come_from_the_palette',
         ],
@@ -3328,7 +3571,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGG: a shortcut hint keeps Mocha's overlay0",
         CTX,
         [
-            ('                        font_size: 11.0,\n                        color: p.overlay0,\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {',
+            ('                        font_size: 11.0,\n                        color: p.subtext0,\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {',
              '                        font_size: 11.0,\n                        color: guitk::color::Color::from_hex(0x6C7086),\n                        font_weight: FontWeightHint::Light,\n                        max_width: None,\n                        overflow: TextOverflow::Clip,\n                    });\n                }\n\n                cy += item_height;\n            }\n            ContextMenuEntry::Extension {'),
         ],
         ["desktop"],
@@ -3340,8 +3583,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHH: an idle extension icon keeps Mocha's subtext0",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
-             '                    color: if hovered { p.accent } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
+             '                    color: if hovered { p.ink(p.accent) } else { guitk::color::Color::from_hex(0xA6ADC8) },'),
         ],
         ["desktop"],
         [
@@ -3353,7 +3596,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIII: a slow extension's label keeps Mocha's overlay0",
         CTX,
         [
-            ('                    color: if *slow {\n                        p.overlay0',
+            ('                    color: if *slow {\n                        p.subtext0',
              '                    color: if *slow {\n                        guitk::color::Color::from_hex(0x6C7086)'),
         ],
         ["desktop"],
@@ -3389,11 +3632,13 @@ DEFECTS = [
         "LLLLLLLLLLLLLLL: the settings search bar keeps Mocha's surface0",
         CTX,
         [
-            ('            height: 28.0,\n            color: p.surface0,',
-             '            height: 28.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            width - padding * 2.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n        p.push_paint_radii(\n            &mut commands,\n            x + padding,\n            cy,\n            width - padding * 2.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_the_context_menu_draws_comes_from_its_palette',
         ],
     ),
@@ -3453,7 +3698,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQ: the Slow badge keeps Mocha's yellow",
         CTX,
         [
-            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.yellow),',
              '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: guitk::color::Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -3468,7 +3713,7 @@ DEFECTS = [
         "RRRRRRRRRRRRRRR: a hovered extension's icon keeps its hardcoded blue",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3481,7 +3726,7 @@ DEFECTS = [
         "SSSSSSSSSSSSSSS: a hovered extension's icon is drawn like an idle one",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { p.subtext0 } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3493,8 +3738,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTT: an extension's icon takes the accent whether it is pointed at or not",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
-             '                    color: if hovered { p.accent } else { p.accent },'),
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
+             '                    color: if hovered { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -3505,7 +3750,7 @@ DEFECTS = [
         "UUUUUUUUUUUUUUU: a hovered extension's icon is drawn in the body text colour",
         CTX,
         [
-            ('                    color: if hovered { p.accent } else { p.subtext0 },',
+            ('                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },',
              '                    color: if hovered { p.text } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -3543,8 +3788,8 @@ DEFECTS = [
         "XXXXXXXXXXXXXXX: the Slow badge follows the desktop's accent",
         CTX,
         [
-            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.yellow,',
-             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.accent,'),
+            ('                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.yellow),',
+             '                        text: "Slow".to_string(),\n                        font_size: 10.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -3567,11 +3812,14 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZ: the hovered row is the same colour as the menu under it',
         CTX,
         [
-            ('                        height: item_height,\n                        color: p.surface0,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.',
-             '                        height: item_height,\n                        color: p.base,\n                        corner_radii: CornerRadii::all(4.0),\n                    });\n                }\n\n                // Icon.'),
+            ('                    p.push_surface(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        4.0,\n                        Surface::Selected,\n                    );\n                }\n\n                // Icon.\n',
+             '                    let mut paint = p.surface_paint(Surface::Selected);\n                    paint.fill = Some(p.base);\n                    paint.border = None;\n                    p.push_paint_radii(\n                        &mut commands,\n                        x + 4.0,\n                        cy,\n                        width - 8.0,\n                        item_height,\n                        CornerRadii::all(4.0),\n                        paint,\n                    );\n                }\n\n                // Icon.\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The hover is `Surface::Selected` now -- outlined in the accent under the default theme -- and the built-in row's call is told from the extension row's by the icon comment after it.
+            # The same colour as the menu is a base fill and no outline: no mark at all.
             'the_menus_own_surfaces_come_from_the_palette',
         ],
     ),
@@ -3798,11 +4046,13 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMM: a widget's title-bar icon is drawn in body text",
         WID,
         [
-            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
-             'color: Color::rgba(\n                p.text.r,\n                p.text.g,\n                p.text.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+            ('            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n',
+             '            w.kind.icon_name(),\n            Color::rgba(\n                p.text.r,\n                p.text.g,\n                p.text.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3810,11 +4060,13 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNN: a widget's title-bar icon loses its emphasis over the panel",
         WID,
         [
-            ('color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n            font_weight: FontWeightHint::Regular,',
-             'color: Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                w.bg_opacity,\n            ),\n            font_weight: FontWeightHint::Regular,'),
+            ('            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                (w.bg_opacity as f32 * 1.2) as u8,\n            ),\n        );\n',
+             '            w.kind.icon_name(),\n            Color::rgba(\n                p.subtext0.r,\n                p.subtext0.g,\n                p.subtext0.b,\n                w.bg_opacity,\n            ),\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -3835,11 +4087,12 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPP: the clock's time keeps Mocha's text",
         WID,
         [
-            ('text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
-             'text: "12:34".to_string(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+            ('                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: live.clock_time.clone(),\n                    font_size: 36.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3848,23 +4101,26 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQ: the clock's date is dimmed to a placeholder",
         WID,
         [
-            ('text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Sunday, May 18".to_string(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),'),
+            ('                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                    text: live.clock_date.clone(),\n                    font_size: 12.0,\n                    color: Color::rgba(p.overlay0.r, p.overlay0.g, p.overlay0.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The clock draws the live reading now.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
     (
-        "RRRRRRRRRRRRRRRRR: the CPU meter's label keeps Mocha's subtext0",
+        "RRRRRRRRRRRRRRRRR: the meters' labels keep Mocha's subtext0",
         WID,
         [
-            ('text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "CPU".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
+            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -3873,11 +4129,13 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSS: the CPU meter's track steps up a surface",
         WID,
         [
-            ('y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 14.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),'),
+            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
+            # trough now, so this steps all three up.
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
@@ -3885,50 +4143,46 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTT: the CPU meter follows the accent",
         WID,
         [
-            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
-             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                    ("CPU", live.cpu_fraction, p.blue),\n',
+             '                    ("CPU", live.cpu_fraction, p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             # This is module 19's slider rule applied to something that is not a
             # slider. The accent is a palette member, so only the frozen test sees it.
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
     (
-        "UUUUUUUUUUUUUUUUU: the CPU meter is drawn opaque over a translucent panel",
+        "UUUUUUUUUUUUUUUUU: the meters are drawn opaque over a translucent panel",
         WID,
         [
-            ('width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),',
-             'width: width * 0.45,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, 255),'),
+            ('                            color: Color::rgba(role.r, role.g, role.b, alpha),\n',
+             '                            color: Color::rgba(role.r, role.g, role.b, 255),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
-    (
-        "VVVVVVVVVVVVVVVVV: the Memory meter's label keeps Mocha's subtext0",
-        WID,
-        [
-            ('text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Memory".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(0xA6, 0xAD, 0xC8, alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
-        ],
-    ),
+    # RETIRED 2026-09-27: the Memory meter's label keeps Mocha's subtext0.
+    #   The meters share one label site now, so this is the same edit as
+    #   "the meters' labels keep Mocha's subtext0", which stays.
     (
         "WWWWWWWWWWWWWWWWW: the Memory meter's track keeps Mocha's surface1",
         WID,
         [
-            ('y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 46.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
+            ('                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),\n',
+             '                        y: row + 14.0,\n                        width,\n                        height: bar_h,\n                        color: Color::rgba(0x45, 0x47, 0x5A, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The three meters share one
+            # trough now, so this is every meter's track.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'nothing_that_reports_a_measurement_follows_the_accent',
         ],
@@ -3937,61 +4191,60 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXX: the Memory meter is the same colour as the CPU meter",
         WID,
         [
-            ('width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'width: width * 0.62,\n                    height: bar_h,\n                    color: Color::rgba(p.blue.r, p.blue.g, p.blue.b, alpha),'),
+            ('                    ("Memory", live.memory_fraction, p.green),\n',
+             '                    ("Memory", live.memory_fraction, p.blue),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
             'the_three_meters_never_look_alike',
         ],
     ),
     (
-        "YYYYYYYYYYYYYYYYY: the Disk meter's label is promoted to body text",
+        "YYYYYYYYYYYYYYYYY: the meters' labels are promoted to body text",
         WID,
         [
-            ('text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "Disk".to_string(),\n                    font_size: 10.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+            ('                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        text: heading,\n                        font_size: 10.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The three meters are drawn in one loop now: one label site, one fill site.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
-    (
-        "ZZZZZZZZZZZZZZZZZ: the Disk meter's track keeps Mocha's surface1",
-        WID,
-        [
-            ('y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(p.surface1.r, p.surface1.g, p.surface1.b, alpha),',
-             'y: y + 78.0,\n                    width,\n                    height: bar_h,\n                    color: Color::rgba(0x45, 0x47, 0x5A, alpha),'),
-        ],
-        ["desktop"],
-        [
-            'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'nothing_that_reports_a_measurement_follows_the_accent',
-        ],
-    ),
+    # RETIRED 2026-09-27: the Disk meter's track keeps Mocha's surface1.
+    #   The three meters share one trough now, so this would be the same edit as
+    #   "the Memory meter's track keeps Mocha's surface1" above, which stays.
     (
         "AAAAAAAAAAAAAAAAAA: the Disk meter follows the accent",
         WID,
         [
-            ('width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.peach.r, p.peach.g, p.peach.b, alpha),',
-             'width: width * 0.38,\n                    height: bar_h,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                    ("Disk", live.disk_fraction, p.peach),\n',
+             '                    ("Disk", live.disk_fraction, p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The system monitor draws its three meters in one loop now, each with its own role.
             'nothing_that_reports_a_measurement_follows_the_accent',
+            'the_three_meters_never_look_alike',
         ],
     ),
     (
         "BBBBBBBBBBBBBBBBBB: an empty note's placeholder is drawn like a written one",
         WID,
         [
-            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
-             '                        if w.state_text.is_empty() {\n                            p.text.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.text.b\n                        } else {\n                            p.text.b\n                        },'),
+            ('                        placeholder: Some((NOTE_PLACEHOLDER, ink(p.subtext0))),\n',
+             '                        placeholder: Some((NOTE_PLACEHOLDER, ink(p.text))),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's
+            # text area now, and its placeholder's ink is passed in.
             'an_empty_note_and_a_written_one_never_look_alike',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4000,11 +4253,13 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCC: a written note keeps Mocha's text",
         WID,
         [
-            ('                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            p.text.r\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            p.text.g\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            p.text.b\n                        },',
-             '                        if w.state_text.is_empty() {\n                            p.overlay0.r\n                        } else {\n                            0xCD\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.g\n                        } else {\n                            0xD6\n                        },\n                        if w.state_text.is_empty() {\n                            p.overlay0.b\n                        } else {\n                            0xF4\n                        },'),
+            ('                        color: ink(p.text),\n',
+             '                        color: ink(Color::from_hex(0xCDD6F4)),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's text area; its
+            # ink is washed by the `ink` closure.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4013,11 +4268,13 @@ DEFECTS = [
         "DDDDDDDDDDDDDDDDDD: a note is drawn opaque over a translucent panel",
         WID,
         [
-            ('                        },\n                        alpha,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {',
-             '                        },\n                        255,\n                    ),\n                    font_weight: FontWeightHint::Regular,\n                    max_width: Some(width),\n                    overflow: TextOverflow::Ellipsis,\n                });\n            }\n            WidgetKind::BatteryStatus => {'),
+            ('                let ink = |c: Color| Color::rgba(c.r, c.g, c.b, alpha);\n',
+             '                let ink = |c: Color| Color::rgba(c.r, c.g, c.b, 255);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A note draws through the toolkit's text area; its
+            # ink is washed by the `ink` closure.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -4025,40 +4282,45 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEE: the battery glyph follows the accent",
         WID,
         [
-            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.accent.r, p.accent.g, p.accent.b, alpha),'),
+            ('                        let g = p.ink(p.green);\n',
+             '                        let g = p.ink(p.accent);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The battery is the theme's icon
+            # now, not an emoji; its colour is chosen here.
             # Green on a battery is the reading itself, not decoration: it is how
             # the widget says the charge is healthy. A red accent would make it lie.
-            'nothing_that_reports_a_measurement_follows_the_accent',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+            'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
     (
         "FFFFFFFFFFFFFFFFFF: the battery glyph keeps Mocha's green",
         WID,
         [
-            ('text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),',
-             'text: "\\u{1F50B}".to_string(),\n                    font_size: 28.0,\n                    color: Color::rgba(0xA6, 0xE3, 0xA1, alpha),'),
+            ('                        let g = p.ink(p.green);\n',
+             '                        let g = Color::from_hex(0xA6E3A1);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The battery is the theme's icon
+            # now, not an emoji; its colour is chosen here.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
-            'nothing_that_reports_a_measurement_follows_the_accent',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
+            'nothing_that_reports_a_measurement_follows_the_accent',
         ],
     ),
     (
         "GGGGGGGGGGGGGGGGGG: the battery's reading keeps Mocha's text",
         WID,
         [
-            ('text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),',
-             'text: "85%".to_string(),\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),'),
+            ('                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n',
+             '                    text: headline,\n                    font_size: 20.0,\n                    color: Color::rgba(0xCD, 0xD6, 0xF4, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The reading is the live charge now.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4067,11 +4329,12 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHH: the battery's estimate is promoted to body text",
         WID,
         [
-            ('text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),',
-             'text: "3h 42m remaining".to_string(),\n                    font_size: 11.0,\n                    color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),'),
+            ('                        font_size: 11.0,\n                        color: Color::rgba(p.subtext0.r, p.subtext0.g, p.subtext0.b, alpha),\n',
+             '                        font_size: 11.0,\n                        color: Color::rgba(p.text.r, p.text.g, p.text.b, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The estimate is drawn only when one is known.
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
     ),
@@ -4079,11 +4342,13 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIII: the generic widget's placeholder icon keeps Mocha's surface2",
         WID,
         [
-            ('font_size: 32.0,\n                    color: Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),',
-             'font_size: 32.0,\n                    color: Color::rgba(0x58, 0x5B, 0x70, alpha),'),
+            ('                    w.kind.icon_name(),\n                    Color::rgba(p.surface2.r, p.surface2.g, p.surface2.b, alpha),\n',
+             '                    w.kind.icon_name(),\n                    Color::rgba(0x58, 0x5B, 0x70, alpha),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'every_wash_the_widget_layer_draws_is_a_role_under_its_own_veil',
         ],
@@ -4116,11 +4381,12 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLL: the picker's panel keeps Mocha's mantle",
         WID,
         [
-            ('            color: p.mantle,',
-             '            color: guitk::color::Color::from_hex(0x181825),'),
+            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n        paint.fill = Some(guitk::color::Color::from_hex(0x181825));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'the_pickers_own_surfaces_come_from_the_palette',
         ],
@@ -4129,11 +4395,12 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMM: the picker's border keeps Mocha's surface1",
         WID,
         [
-            ('            color: p.surface1,\n            line_width: 1.0,',
-             '            color: guitk::color::Color::from_hex(0x45475A),\n            line_width: 1.0,'),
+            ('        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(paint.border.unwrap_or(p.surface1));\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.border = Some(guitk::color::Color::from_hex(0x45475A));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The picker is a card surface now (`surface_paint`).
             'every_colour_the_widget_layer_draws_comes_from_its_palette',
             'the_pickers_own_surfaces_come_from_the_palette',
         ],
@@ -4154,11 +4421,13 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOO: every picker row's icon follows the accent",
         WID,
         [
-            ('font_size: 16.0,\n                color: p.blue,',
-             'font_size: 16.0,\n                color: p.accent,'),
+            ('                kind.icon_name(),\n                p.ink(p.blue),\n',
+             '                kind.icon_name(),\n                p.ink(p.accent),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now, drawn by `self.icon` with a colour.
             # Every row is drawn identically, so an accent here says nothing about
             # any row -- and it costs the accent its one job, which is the ring.
             'the_pickers_own_surfaces_come_from_the_palette',
@@ -4181,7 +4450,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQ: the picker's size hints keep Mocha's overlay0",
         WID,
         [
-            ('font_size: 10.0,\n                color: p.overlay0,',
+            ('font_size: 10.0,\n                color: p.subtext0,',
              'font_size: 10.0,\n                color: guitk::color::Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -4223,11 +4492,12 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTT: a hidden widget is drawn anyway",
         WID,
         [
-            ('            if !w.visible {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);',
-             '            if !w.visible && w.bg_opacity == 0 {\n                continue;\n            }\n            self.render_widget(w, p, &mut commands);'),
+            ('            if !w.visible {\n                continue;\n            }\n            self.render_widget(w, p, live, &mut commands);\n',
+             '            if !w.visible && w.bg_opacity == 0 {\n                continue;\n            }\n            self.render_widget(w, p, live, &mut commands);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `render` passes the live readings through now.
             'the_fixture_takes_every_branch_the_widget_layer_has',
         ],
     ),
@@ -4298,7 +4568,7 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEE: a muted master volume stops going red",
         SND,
         [
-            ('master_muted {\n                p.red\n',
+            ('master_muted {\n                p.ink(p.red)\n',
              'master_muted {\n                p.text\n'),
         ],
         ["desktop"],
@@ -4310,8 +4580,8 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFF: an unmuted master volume drops to secondary text",
         SND,
         [
-            ('p.red\n            } else {\n                p.text\n            },',
-             'p.red\n            } else {\n                p.subtext0\n            },'),
+            ('p.ink(p.red)\n            } else {\n                p.text\n            },',
+             'p.ink(p.red)\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [
@@ -4348,7 +4618,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIII: the active tab's label is frozen back to Mocha blue",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
              'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -4362,7 +4632,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJ: the active tab's label reads like an inactive one",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
              'color: if active { p.subtext0 } else { p.subtext0 },'),
         ],
         ["desktop"],
@@ -4376,8 +4646,8 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKK: every tab's label takes the accent",
         SND,
         [
-            ('color: if active { p.accent } else { p.subtext0 },',
-             'color: if active { p.accent } else { p.accent },'),
+            ('color: if active { p.ink(p.accent) } else { p.subtext0 },',
+             'color: if active { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -4385,18 +4655,11 @@ DEFECTS = [
             'every_pair_this_panel_uses_to_tell_things_apart_stays_apart',
         ],
     ),
-    (
-        "LLLLLLLLLLLLLLLLLLL: the empty-output line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No output devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-output line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "MMMMMMMMMMMMMMMMMMM: the default output device stops being raised",
         SND,
@@ -4447,18 +4710,11 @@ DEFECTS = [
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
-    (
-        "QQQQQQQQQQQQQQQQQQQ: the empty-input line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No input devices detected.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-input line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "RRRRRRRRRRRRRRRRRRR: the default input device stops being raised",
         SND,
@@ -4513,8 +4769,8 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVV: the microphone heading follows the accent",
         SND,
         [
-            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.lavender,',
-             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+            ('text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),',
+             'text: "Microphone Settings".into(),\n            font_size: 14.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -4522,27 +4778,22 @@ DEFECTS = [
             'nothing_that_reports_a_state_follows_the_accent',
         ],
     ),
-    (
-        "WWWWWWWWWWWWWWWWWWW: the empty-app line is promoted to secondary text",
-        SND,
-        [
-            ('text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.overlay0,',
-             'text: "No applications are currently producing audio.".into(),\n                font_size: 13.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: the empty-app line is promoted to secondary text.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         "XXXXXXXXXXXXXXXXXXX: an app row is raised like a default device",
         SND,
         [
-            ('height: 48.0,\n                color: p.mantle,',
-             'height: 48.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, y, width, 48.0, 6.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, y, width, 48.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Rows are card surfaces now -- outlined, not filled, since 829 -- so a row "raised" is one that gains a fill.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4562,11 +4813,12 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZ: a muted app's volume stops going red",
         SND,
         [
-            ('color: if entry.muted { p.red } else { p.subtext0 },',
-             'color: if entry.muted { p.subtext0 } else { p.subtext0 },'),
+            ('                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.subtext0\n                },\n',
+             '                color: if entry.muted {\n                    p.subtext0\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4574,11 +4826,12 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAA: an unmuted app's volume is promoted to body text",
         SND,
         [
-            ('color: if entry.muted { p.red } else { p.subtext0 },',
-             'color: if entry.muted { p.red } else { p.text },'),
+            ('                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.subtext0\n                },\n',
+             '                color: if entry.muted {\n                    p.ink(p.red)\n                } else {\n                    p.text\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4586,11 +4839,13 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBB: a system-sound row is raised off the panel",
         SND,
         [
-            ('height: 28.0,\n                color: p.mantle,',
-             'height: 28.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, y, width, 28.0, CornerRadii::all(4.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Rows are card surfaces now -- outlined, not filled, since 829 -- so a row "raised" is one that gains a fill.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -4610,11 +4865,12 @@ DEFECTS = [
         "DDDDDDDDDDDDDDDDDDDD: an enabled sound's status follows the accent",
         SND,
         [
-            ('color: if sc.enabled { p.green } else { p.overlay0 },',
-             'color: if sc.enabled { p.accent } else { p.overlay0 },'),
+            ('                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.overlay0\n                },\n',
+             '                color: if sc.enabled {\n                    p.ink(p.accent)\n                } else {\n                    p.overlay0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
             'nothing_that_reports_a_state_follows_the_accent',
         ],
@@ -4623,11 +4879,12 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEE: a disabled sound's status is promoted to secondary text",
         SND,
         [
-            ('color: if sc.enabled { p.green } else { p.overlay0 },',
-             'color: if sc.enabled { p.green } else { p.subtext0 },'),
+            ('                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.overlay0\n                },\n',
+             '                color: if sc.enabled {\n                    p.ink(p.green)\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             'every_text_the_sound_panel_draws_is_in_the_role_it_claims',
             'nothing_that_reports_a_state_follows_the_accent',
         ],
@@ -4648,8 +4905,8 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGG: the spatial heading follows the accent",
         SND,
         [
-            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.lavender,',
-             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.accent,'),
+            ('text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.ink(p.lavender),',
+             'text: "Spatial Audio".into(),\n            font_size: 14.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -4687,7 +4944,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJ: the selected spatial mode's label is frozen back to Mocha blue",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
+            ('color: if active { p.ink(p.accent) } else { p.text },',
              'color: if active { guitk::color::Color::from_hex(0x89B4FA) } else { p.text },'),
         ],
         ["desktop"],
@@ -4701,7 +4958,7 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKK: the selected spatial mode's label reads like an unselected one",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
+            ('color: if active { p.ink(p.accent) } else { p.text },',
              'color: if active { p.text } else { p.text },'),
         ],
         ["desktop"],
@@ -4714,8 +4971,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLL: every spatial mode's label takes the accent",
         SND,
         [
-            ('color: if active { p.accent } else { p.text },',
-             'color: if active { p.accent } else { p.accent },'),
+            ('color: if active { p.ink(p.accent) } else { p.text },',
+             'color: if active { p.ink(p.accent) } else { p.ink(p.accent) },'),
         ],
         ["desktop"],
         [
@@ -4723,27 +4980,31 @@ DEFECTS = [
         ],
     ),
     (
-        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface1",
+        "MMMMMMMMMMMMMMMMMMMM: a volume bar's track is frozen back to Mocha surface2",
         SND,
         [
-            ('height: bar_h,\n            color: p.surface1,',
-             'height: bar_h,\n            color: guitk::color::Color::from_hex(0x45475A),'),
+            ('        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(guitk::color::Color::from_hex(0x585B70));\n        p.push_paint_radii(cmds, x, y, width, bar_h, CornerRadii::all(3.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The groove is `Surface::ControlTrack` now, which is surface2 in both themes.
             'every_colour_the_sound_panel_draws_comes_from_its_palette',
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
     (
-        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface0",
+        "NNNNNNNNNNNNNNNNNNNN: a volume bar's track drops a step, to surface1",
         SND,
         [
-            ('height: bar_h,\n            color: p.surface1,',
-             'height: bar_h,\n            color: p.surface0,'),
+            ('        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);\n',
+             '        let mut paint = p.surface_paint(Surface::ControlTrack);\n        paint.fill = Some(p.surface1);\n        p.push_paint_radii(cmds, x, y, width, bar_h, CornerRadii::all(3.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The groove is `Surface::ControlTrack` now, which is surface2 in both themes.
             'every_rectangle_the_sound_panel_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -5008,27 +5269,31 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHH: the slider's icon is frozen back to Mocha blue",
         OSD,
         [
-            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: icon_size,\n            color: Color::rgba(0x89, 0xB4, 0xFA, text_alpha),'),
+            ('            icon,\n            p.ink(accent),\n            text_alpha,\n',
+             '            icon,\n            Color::from_hex(0x89B4FA),\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
         "IIIIIIIIIIIIIIIIIIIIII: the slider's icon stops saying which kind of slider it is",
         OSD,
         [
-            ('font_size: icon_size,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: icon_size,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            icon,\n            p.ink(accent),\n            text_alpha,\n',
+             '            icon,\n            p.text,\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5129,12 +5394,14 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTT: the music note is frozen back to Mocha lavender',
         OSD,
         [
-            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
-             'font_size: 28.0,\n            color: Color::rgba(0xB4, 0xBE, 0xFE, text_alpha),'),
+            ('            "audio-x-generic",\n            p.ink(p.lavender),\n',
+             '            "audio-x-generic",\n            Color::from_hex(0xB4BEFE),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -5142,11 +5409,13 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUU: the music note stops being a music note and becomes text',
         OSD,
         [
-            ('font_size: 28.0,\n            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),',
-             'font_size: 28.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            "audio-x-generic",\n            p.ink(p.lavender),\n',
+             '            "audio-x-generic",\n            p.text,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
@@ -5294,27 +5563,31 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGG: the notice icon is frozen back to Mocha red',
         OSD,
         [
-            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: 20.0,\n            color: Color::rgba(0xF3, 0x8B, 0xA8, text_alpha),'),
+            ('            icon,\n            accent,\n            text_alpha,\n',
+             '            icon,\n            Color::from_hex(0xF38BA8),\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
         'HHHHHHHHHHHHHHHHHHHHHHH: the notice icon stops saying what kind of notice it is',
         OSD,
         [
-            ('font_size: 20.0,\n            color: Color::rgba(accent.r, accent.g, accent.b, text_alpha),',
-             'font_size: 20.0,\n            color: Color::rgba(p.text.r, p.text.g, p.text.b, text_alpha),'),
+            ('            icon,\n            accent,\n            text_alpha,\n',
+             '            icon,\n            p.text,\n            text_alpha,\n'),
         ],
         ["desktop"],
         [
-            'every_text_the_osd_draws_is_in_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The icons are themed images now (design-decisions 881), drawn by `self.icon` with a colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
     ),
     (
@@ -5461,12 +5734,14 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTT: the screenshot notice is frozen back to Mocha green',
         OSD,
         [
-            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
-             '"\\u{1F4F7}",\n                    &label,\n                    Color::from_hex(0xA6E3A1),'),
+            ('                    "camera-photo",\n                    &label,\n                    p.green,\n',
+             '                    "camera-photo",\n                    &label,\n                    Color::from_hex(0xA6E3A1),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5474,13 +5749,15 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUUU: the screenshot notice follows the accent',
         OSD,
         [
-            ('"\\u{1F4F7}",\n                    &label,\n                    p.green,',
-             '"\\u{1F4F7}",\n                    &label,\n                    p.accent,'),
+            ('                    "camera-photo",\n                    &label,\n                    p.green,\n',
+             '                    "camera-photo",\n                    &label,\n                    p.accent,\n'),
         ],
         ["desktop"],
         [
-            'no_colour_the_overlay_draws_ever_follows_the_accent',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
+            'no_colour_the_overlay_draws_ever_follows_the_accent',
         ],
     ),
     (
@@ -5535,11 +5812,13 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZZZZZZZZZ: a low battery stops being a warning and becomes a caution',
         OSD,
         [
-            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
-             '"\\u{1F50B}",\n                    &label,\n                    p.peach,'),
+            ('                    "battery-caution",\n                    &label,\n                    p.red,\n',
+             '                    "battery-caution",\n                    &label,\n                    p.peach,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5548,12 +5827,14 @@ DEFECTS = [
         'AAAAAAAAAAAAAAAAAAAAAAAA: a low battery is frozen back to Mocha red',
         OSD,
         [
-            ('"\\u{1F50B}",\n                    &label,\n                    p.red,',
-             '"\\u{1F50B}",\n                    &label,\n                    Color::from_hex(0xF38BA8),'),
+            ('                    "battery-caution",\n                    &label,\n                    p.red,\n',
+             '                    "battery-caution",\n                    &label,\n                    Color::from_hex(0xF38BA8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The overlay names an icon now, not an emoji.
+            # The palette sweep cannot see an image's colour, so the role tests are what catch this.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_text_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5562,11 +5843,12 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBB: the Info icon stops being informational and turns into a success',
         OSD,
         [
-            ('OsdIcon::Info => ("\\u{2139}", p.blue),',
-             'OsdIcon::Info => ("\\u{2139}", p.green),'),
+            ('OsdIcon::Info => ("dialog-information", p.ink(p.blue)),',
+             'OsdIcon::Info => ("dialog-information", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5575,11 +5857,12 @@ DEFECTS = [
         'CCCCCCCCCCCCCCCCCCCCCCCC: the Success icon stops being green',
         OSD,
         [
-            ('OsdIcon::Success => ("\\u{2705}", p.green),',
-             'OsdIcon::Success => ("\\u{2705}", p.blue),'),
+            ('OsdIcon::Success => ("emblem-ok", p.ink(p.green)),',
+             'OsdIcon::Success => ("emblem-ok", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5588,12 +5871,12 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDD: the Warning icon is frozen back to Mocha yellow',
         OSD,
         [
-            ('OsdIcon::Warning => ("\\u{26A0}", p.yellow),',
-             'OsdIcon::Warning => ("\\u{26A0}", Color::from_hex(0xF9E2AF)),'),
+            ('OsdIcon::Warning => ("dialog-warning", p.ink(p.yellow)),',
+             'OsdIcon::Warning => ("dialog-warning", Color::from_hex(0xF9E2AF)),'),
         ],
         ["desktop"],
         [
-            'every_colour_the_osd_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5601,11 +5884,12 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEE: the Error icon collides with the battery warning',
         OSD,
         [
-            ('OsdIcon::Error => ("\\u{274C}", p.red),',
-             'OsdIcon::Error => ("\\u{274C}", p.peach),'),
+            ('OsdIcon::Error => ("dialog-error", p.ink(p.red)),',
+             'OsdIcon::Error => ("dialog-error", p.ink(p.peach)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5614,11 +5898,12 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFF: the Speaker icon stops sharing the volume overlay's blue",
         OSD,
         [
-            ('OsdIcon::Speaker => ("\\u{1F50A}", p.blue),',
-             'OsdIcon::Speaker => ("\\u{1F50A}", p.text),'),
+            ('OsdIcon::Speaker => ("audio-volume-high", p.ink(p.blue)),',
+             'OsdIcon::Speaker => ("audio-volume-high", p.text),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5626,11 +5911,12 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGG: the Brightness icon stops sharing the brightness overlay's yellow",
         OSD,
         [
-            ('OsdIcon::Brightness => ("\\u{2600}", p.yellow),',
-             'OsdIcon::Brightness => ("\\u{2600}", p.green),'),
+            ('OsdIcon::Brightness => ("display-brightness", p.ink(p.yellow)),',
+             'OsdIcon::Brightness => ("display-brightness", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5638,11 +5924,12 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHH: the Network icon turns into an error',
         OSD,
         [
-            ('OsdIcon::Network => ("\\u{1F310}", p.green),',
-             'OsdIcon::Network => ("\\u{1F310}", p.red),'),
+            ('OsdIcon::Network => ("network-idle", p.ink(p.green)),',
+             'OsdIcon::Network => ("network-idle", p.ink(p.red)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5650,11 +5937,12 @@ DEFECTS = [
         'IIIIIIIIIIIIIIIIIIIIIIII: the Battery icon loses its peach and collides with the error red',
         OSD,
         [
-            ('OsdIcon::Battery => ("\\u{1F50B}", p.peach),',
-             'OsdIcon::Battery => ("\\u{1F50B}", p.red),'),
+            ('OsdIcon::Battery => ("battery", p.ink(p.peach)),',
+             'OsdIcon::Battery => ("battery", p.ink(p.red)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5663,11 +5951,12 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJ: the Lock icon loses its lavender and collides with the info blue',
         OSD,
         [
-            ('OsdIcon::Lock => ("\\u{1F512}", p.lavender),',
-             'OsdIcon::Lock => ("\\u{1F512}", p.blue),'),
+            ('OsdIcon::Lock => ("system-lock-screen", p.ink(p.lavender)),',
+             'OsdIcon::Lock => ("system-lock-screen", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
             'every_pair_this_module_uses_to_tell_things_apart_stays_apart',
         ],
@@ -5676,11 +5965,12 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKK: the Camera icon stops confirming anything',
         OSD,
         [
-            ('OsdIcon::Camera => ("\\u{1F4F7}", p.green),',
-             'OsdIcon::Camera => ("\\u{1F4F7}", p.subtext0),'),
+            ('OsdIcon::Camera => ("camera-photo", p.ink(p.green)),',
+             'OsdIcon::Camera => ("camera-photo", p.subtext0),'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `icon_info` names a themed icon now and inks its colour.
             'every_kind_draws_its_icon_in_the_colour_that_kind_claims',
         ],
     ),
@@ -5688,11 +5978,13 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLL: the medium volume icon collapses into the low one',
         OSD,
         [
-            ('} else if level < 66 {\n        "\\u{1F509}" // medium',
-             '} else if level < 66 {\n        "\\u{1F508}" // medium'),
+            ('    } else if level < 66 {\n        "audio-volume-medium"\n',
+             '    } else if level < 66 {\n        "audio-volume-low"\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The icons are named from the theme now.
+            'an_overlays_icon_goes_up_before_the_frame_that_names_it',
             'the_fixtures_take_every_branch_the_osd_has',
             'volume_icon_levels',
         ],
@@ -5897,14 +6189,16 @@ DEFECTS = [
         ],
     ),
     (
-        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface0",
+        "DDDDDDDDDDDDDDDDDDDDDDDDD: the timeout slider's track is frozen back to Mocha surface2",
         OSD,
         [
-            ('height: 4.0,\n            color: p.surface0,',
-             'height: 4.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            track_w,\n            4.0,\n            2.0,\n            Surface::ControlTrack,\n        );\n',
+             '        commands.push(RenderCommand::FillRect {\n            x: x + padding,\n            y: cy,\n            width: track_w,\n            height: 4.0,\n            color: Color::from_hex(0x585B70),\n            corner_radii: CornerRadii::all(2.0),\n        });\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The track is `Surface::ControlTrack` now,
+            # surface2 in both themes, so the frozen value is Mocha's surface2.
             'every_colour_the_osd_draws_comes_from_its_palette',
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
         ],
@@ -5913,13 +6207,14 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEE: the timeout slider's track takes the accent too, so the fill vanishes into it",
         OSD,
         [
-            ('height: 4.0,\n            color: p.surface0,',
-             'height: 4.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut commands,\n            x + padding,\n            cy,\n            track_w,\n            4.0,\n            2.0,\n            Surface::ControlTrack,\n        );\n',
+             '        commands.push(RenderCommand::FillRect {\n            x: x + padding,\n            y: cy,\n            width: track_w,\n            height: 4.0,\n            color: p.accent,\n            corner_radii: CornerRadii::all(2.0),\n        });\n'),
         ],
         ["desktop"],
         [
-            'the_settings_panel_has_exactly_three_accent_sites',
+            # Re-derived 2026-09-27 against the code as it now reads. The track is `Surface::ControlTrack` now.
             'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_settings_panel_has_exactly_three_accent_sites',
         ],
     ),
     (
@@ -6219,8 +6514,8 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHH: the selected printer's name stops following the accent",
         PRINTMGR,
         [
-            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
-             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.blue,'),
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.accent),',
+             '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.blue),'),
         ],
         ["desktop"],
         [
@@ -6232,7 +6527,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIII: the selected printer's name is drawn as ordinary body text",
         PRINTMGR,
         [
-            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.accent,',
+            ('            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.ink(p.accent),',
              '            text: printer_name.to_string(),\n            font_size: 12.0,\n            color: p.text,'),
         ],
         ["desktop"],
@@ -6245,11 +6540,13 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the printer field's fill takes the accent as well as its label",
         PRINTMGR,
         [
-            ('            height: 24.0,\n            color: p.surface0,',
-             '            height: 24.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            4.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.accent);\n        p.push_paint_radii(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            CornerRadii::all(4.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
             'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
         ],
@@ -6258,11 +6555,13 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKK: the printer field is frozen back to Mocha surface0',
         PRINTMGR,
         [
-            ('            height: 24.0,\n            color: p.surface0,',
-             '            height: 24.0,\n            color: Color::from_hex(0x313244),'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            4.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x313244));\n        p.push_paint_radii(\n            &mut cmds,\n            dx + 100.0,\n            dy + 62.0,\n            280.0,\n            24.0,\n            CornerRadii::all(4.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_dialog_draws_comes_from_its_palette',
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
         ],
@@ -6295,8 +6594,8 @@ DEFECTS = [
         'NNNNNNNNNNNNNNNNNNNNNNNNNNNN: a validation error is reported in the accent instead of red',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
-             '                font_size: 11.0,\n                color: p.accent,'),
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
+             '                font_size: 11.0,\n                color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -6308,7 +6607,7 @@ DEFECTS = [
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOO: a validation error is frozen back to Mocha red',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
              '                font_size: 11.0,\n                color: Color::from_hex(0xF38BA8),'),
         ],
         ["desktop"],
@@ -6321,7 +6620,7 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPP: a validation error is drawn as ordinary body text',
         PRINTMGR,
         [
-            ('                font_size: 11.0,\n                color: p.red,',
+            ('                font_size: 11.0,\n                color: p.ink(p.red),',
              '                font_size: 11.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -6389,11 +6688,13 @@ DEFECTS = [
         'UUUUUUUUUUUUUUUUUUUUUUUUUUUU: the Cancel button is dressed up as a second default action',
         PRINTMGR,
         [
-            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
-             '            width: 80.0,\n            height: 28.0,\n            color: p.accent,'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.accent);\n        p.push_paint_radii(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
             'nothing_but_the_selection_and_the_default_action_moves_with_the_accent',
         ],
@@ -6402,11 +6703,13 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVV: the Cancel button is frozen back to Mocha surface1',
         PRINTMGR,
         [
-            ('            width: 80.0,\n            height: 28.0,\n            color: p.surface1,',
-             '            width: 80.0,\n            height: 28.0,\n            color: Color::from_hex(0x45475A),'),
+            ('        p.push_surface(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            6.0,\n            Surface::Card,\n        );\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(Color::from_hex(0x45475A));\n        p.push_paint_radii(\n            &mut cmds,\n            dx + dw - 100.0,\n            btn_y,\n            80.0,\n            28.0,\n            CornerRadii::all(6.0),\n            paint,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_dialog_draws_comes_from_its_palette',
             'every_rectangle_this_dialog_draws_is_in_the_role_it_claims',
         ],
@@ -6915,7 +7218,7 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: the charging bolt is frozen back to Mocha yellow',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
              '            text: "\\u{26A1}".to_string(), // ⚡\n            color: Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -6928,8 +7231,8 @@ DEFECTS = [
         'WWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: the charging bolt turns into an alarm',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
-             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.red,'),
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.red),'),
         ],
         ["desktop"],
         [
@@ -6940,8 +7243,8 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the charging bolt takes the accent',
         POWER,
         [
-            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.yellow,',
-             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.accent,'),
+            ('            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.yellow),',
+             '            text: "\\u{26A1}".to_string(), // ⚡\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -6991,7 +7294,7 @@ DEFECTS = [
         'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the Balanced badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
              '        PowerProfile::Balanced => ("Balanced", Color::from_hex(0x89B4FA)),'),
         ],
         ["desktop"],
@@ -7005,8 +7308,8 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the Balanced badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
-             '        PowerProfile::Balanced => ("Balanced", p.peach),'),
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
+             '        PowerProfile::Balanced => ("Balanced", p.ink(p.peach)),'),
         ],
         ["desktop"],
         [
@@ -7018,8 +7321,8 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the Balanced badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Balanced => ("Balanced", p.blue),',
-             '        PowerProfile::Balanced => ("Balanced", p.accent),'),
+            ('        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),',
+             '        PowerProfile::Balanced => ("Balanced", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7032,7 +7335,7 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the Performance badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
              '        PowerProfile::Performance => ("Performance", Color::from_hex(0xFAB387)),'),
         ],
         ["desktop"],
@@ -7045,8 +7348,8 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the Performance badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
-             '        PowerProfile::Performance => ("Performance", p.blue),'),
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
+             '        PowerProfile::Performance => ("Performance", p.ink(p.blue)),'),
         ],
         ["desktop"],
         [
@@ -7057,8 +7360,8 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the Performance badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Performance => ("Performance", p.peach),',
-             '        PowerProfile::Performance => ("Performance", p.accent),'),
+            ('        PowerProfile::Performance => ("Performance", p.ink(p.peach)),',
+             '        PowerProfile::Performance => ("Performance", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7070,7 +7373,7 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the Power Saver badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
              '        PowerProfile::PowerSaver => ("Power Saver", Color::from_hex(0xA6E3A1)),'),
         ],
         ["desktop"],
@@ -7083,8 +7386,8 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the Power Saver badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
-             '        PowerProfile::PowerSaver => ("Power Saver", p.lavender),'),
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.lavender)),'),
         ],
         ["desktop"],
         [
@@ -7095,8 +7398,8 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Power Saver badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::PowerSaver => ("Power Saver", p.green),',
-             '        PowerProfile::PowerSaver => ("Power Saver", p.accent),'),
+            ('        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),',
+             '        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7108,7 +7411,7 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Custom badge is frozen back to its Mocha value',
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
              '        PowerProfile::Custom => ("Custom", Color::from_hex(0xB4BEFE)),'),
         ],
         ["desktop"],
@@ -7121,8 +7424,8 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Custom badge is swapped with another profile's hue",
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
-             '        PowerProfile::Custom => ("Custom", p.green),'),
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
+             '        PowerProfile::Custom => ("Custom", p.ink(p.green)),'),
         ],
         ["desktop"],
         [
@@ -7133,8 +7436,8 @@ DEFECTS = [
         'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Custom badge takes the accent',
         POWER,
         [
-            ('        PowerProfile::Custom => ("Custom", p.lavender),',
-             '        PowerProfile::Custom => ("Custom", p.accent),'),
+            ('        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),',
+             '        PowerProfile::Custom => ("Custom", p.ink(p.accent)),'),
         ],
         ["desktop"],
         [
@@ -7596,26 +7899,30 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the selected avatar is frozen back to Mocha blue',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: if selected { Color::from_hex(0x89B4FA) } else { p.subtext0 },'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                Color::from_hex(0x89B4FA)\n            } else {\n                p.subtext0\n            };\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
+            'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
     (
         'UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: no avatar is accented, so nothing marks which row you are on',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: p.subtext0,'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                p.subtext0\n            } else {\n                p.subtext0\n            };\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7624,11 +7931,13 @@ DEFECTS = [
         'VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: every avatar is accented, so the accent marks nothing',
         LOGIN,
         [
-            ('                color: if selected { p.accent } else { p.subtext0 },',
-             '                color: if selected { p.accent } else { p.accent },'),
+            ('            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.subtext0\n            };\n',
+             '            let avatar_ink = if selected {\n                p.ink(p.accent)\n            } else {\n                p.ink(p.accent)\n            };\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_user_list_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -7664,7 +7973,7 @@ DEFECTS = [
         'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the account type is frozen back to Mocha overlay0',
         LOGIN,
         [
-            ('                font_size: 11.0,\n                color: p.overlay0,',
+            ('                font_size: 11.0,\n                color: p.subtext0,',
              '                font_size: 11.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -7678,7 +7987,7 @@ DEFECTS = [
         'ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the account type is promoted to primary text',
         LOGIN,
         [
-            ('                font_size: 11.0,\n                color: p.overlay0,',
+            ('                font_size: 11.0,\n                color: p.subtext0,',
              '                font_size: 11.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -7690,14 +7999,15 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the signing-in user's avatar is frozen back to Mocha blue",
         LOGIN,
         [
-            ('                    font_size: 48.0,\n                    color: p.accent,',
-             '                    font_size: 48.0,\n                    color: Color::from_hex(0x89B4FA),'),
+            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
+             '                    48.0,\n                    AVATAR_ICON,\n                    Color::from_hex(0x89B4FA),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
     ),
@@ -7705,14 +8015,16 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the signing-in user's avatar loses the accent it carried in the list",
         LOGIN,
         [
-            ('                    font_size: 48.0,\n                    color: p.accent,',
-             '                    font_size: 48.0,\n                    color: p.on_wallpaper(),'),
+            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
+             '                    48.0,\n                    AVATAR_ICON,\n                    p.on_wallpaper(),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'exactly_two_things_in_the_password_panel_carry_the_accent',
             'exactly_seven_things_in_the_full_render_sit_on_the_background',
+            'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
     ),
     (
@@ -7745,64 +8057,94 @@ DEFECTS = [
     ),
     (
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the rejected-password border is frozen back to Mocha red',
-        LOGIN,
+        FIELD,
         [
-            ('            let border_color = if self.error_message.is_some() {\n                p.red',
-             '            let border_color = if self.error_message.is_some() {\n                Color::from_hex(0xF38BA8)'),
+            ('    let edge = if state.invalid {\n        p.red\n',
+             '    let edge = if state.invalid {\n        Color::from_hex(0xF38BA8)\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # The run box draws the same field, wrong: swept 2026-09-28.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
         ],
     ),
     (
         'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the rejected-password border takes the accent, so a refusal is decoration',
-        LOGIN,
+        FIELD,
         [
-            ('            let border_color = if self.error_message.is_some() {\n                p.red',
-             '            let border_color = if self.error_message.is_some() {\n                p.accent'),
+            ('    let edge = if state.invalid {\n        p.red\n',
+             '    let edge = if state.invalid {\n        p.accent\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
+            'a_wrong_fields_edge_is_red_whatever_else_is_true',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
+            # Every other field that can be wrong -- the run box, a path bar,
+            # a dialog's input, the code view's find bar -- swept 2026-09-28.
+            'test_not_found_error',
+            'the_input_field_shows_an_error_even_while_it_is_being_fixed',
+            'a_refused_path_leaves_everything_where_it_was',
+            'a_typed_path_the_host_refuses_stays_to_be_corrected',
+            'the_field_is_an_inputs_well_in_both_modes',
+            'the_switches_search_again_and_a_bad_pattern_says_why',
         ],
     ),
     (
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the border at rest is frozen back to Mocha surface1',
-        LOGIN,
+        FIELD,
         [
-            ('            } else {\n                p.surface1\n            };',
-             '            } else {\n                Color::from_hex(0x45475A)\n            };'),
+            ('    } else {\n        p.surface1\n    };\n',
+             '    } else {\n        Color::from_hex(0x45475A)\n    };\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
-            'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            # The login screen's field always has the keyboard, so its edge is
+            # never at rest: the toolkit's test is the one that sees it.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
         ],
     ),
     (
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the password field is frozen back to Mocha surface0',
-        LOGIN,
+        FIELD,
         [
-            ('                height: field_h,\n                color: p.surface0,',
-             '                height: field_h,\n                color: Color::from_hex(0x313244),'),
+            ('        well: fade(p.crust),\n',
+             '        well: fade(Color::from_hex(0x313244)),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-28: the field is `guitk::field`'s now (design-decisions
+            # 1435), which is where this colour is chosen. The toolkit test asks both
+            # modes, which is what catches a colour frozen to its dark value.
+            'every_colour_a_field_draws_is_its_palettes_in_both_modes',
+            'the_built_in_field_is_the_references',
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
+            # The run box's well and the drop-down's, swept 2026-09-28.
+            'every_colour_the_dialog_draws_comes_from_its_palette',
+            'the_field_is_an_inputs_well_in_both_modes',
         ],
     ),
     (
         'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the placeholder is frozen back to Mocha overlay0',
         LOGIN,
         [
-            ('                color: if self.password_input.is_empty() {\n                    p.overlay0',
+            ('                color: if self.password_input.is_empty() {\n                    p.subtext0',
              '                color: if self.password_input.is_empty() {\n                    Color::from_hex(0x6C7086)'),
         ],
         ["desktop"],
@@ -7842,14 +8184,15 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the reveal toggle is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                }\n                .to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
-             '                }\n                .to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                    "view-conceal"\n                },\n                p.subtext0,\n',
+             '                    "view-conceal"\n                },\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_password_entry_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -7909,7 +8252,7 @@ DEFECTS = [
         'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the error message is frozen back to Mocha red',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.red,',
+            ('                        font_size: 12.0,\n                        color: p.ink(p.red),',
              '                        font_size: 12.0,\n                        color: Color::from_hex(0xF38BA8),'),
         ],
         ["desktop"],
@@ -7923,8 +8266,8 @@ DEFECTS = [
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the error message takes the accent',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.red,',
-             '                        font_size: 12.0,\n                        color: p.accent,'),
+            ('                        font_size: 12.0,\n                        color: p.ink(p.red),',
+             '                        font_size: 12.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -7936,7 +8279,7 @@ DEFECTS = [
         'SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the lockout notice is frozen back to Mocha yellow',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.yellow,',
+            ('                        font_size: 12.0,\n                        color: p.ink(p.yellow),',
              '                        font_size: 12.0,\n                        color: Color::from_hex(0xF9E2AF),'),
         ],
         ["desktop"],
@@ -7950,8 +8293,8 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the lockout notice takes the accent',
         LOGIN,
         [
-            ('                        font_size: 12.0,\n                        color: p.yellow,',
-             '                        font_size: 12.0,\n                        color: p.accent,'),
+            ('                        font_size: 12.0,\n                        color: p.ink(p.yellow),',
+             '                        font_size: 12.0,\n                        color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -8055,25 +8398,28 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the bar's power button is frozen back to Mocha subtext0",
         LOGIN,
         [
-            ('                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{23FB}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                "system-shutdown",\n                p.subtext0,\n',
+             '                "system-shutdown",\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
         'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the accessibility button takes the accent',
         LOGIN,
         [
-            ('                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{267F}".to_string(),\n                font_size: 16.0,\n                color: p.accent,'),
+            ('                "preferences-desktop-accessibility",\n                p.subtext0,\n',
+             '                "preferences-desktop-accessibility",\n                p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
             'exactly_two_things_in_the_password_panel_carry_the_accent',
         ],
@@ -8082,27 +8428,30 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the on-screen-keyboard button is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: p.subtext0,',
-             '                text: "\\u{2328}".to_string(),\n                font_size: 16.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('                "input-keyboard",\n                p.subtext0,\n',
+             '                "input-keyboard",\n                Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the power menu is frozen back to Mocha mantle',
         LOGIN,
         [
-            ('            width: menu_w,\n            height: menu_h,\n            color: p.mantle,',
-             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x181825),'),
+            ('        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);\n',
+             '        let mut paint = p.surface_paint(Surface::Panel);\n        paint.fill = Some(Color::from_hex(0x181825));\n        p.push_paint_radii(commands, mx, my, menu_w, menu_h, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -8110,13 +8459,15 @@ DEFECTS = [
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the power menu's border is frozen back to Mocha surface1",
         LOGIN,
         [
-            ('            width: menu_w,\n            height: menu_h,\n            color: p.surface1,',
-             '            width: menu_w,\n            height: menu_h,\n            color: Color::from_hex(0x45475A),'),
+            ('        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);\n',
+             '        let mut paint = p.surface_paint(Surface::Panel);\n        paint.border = Some(Color::from_hex(0x45475A));\n        p.push_paint_radii(commands, mx, my, menu_w, menu_h, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The password field and the power menu are surfaces now (`surface_paint`).
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
         ],
     ),
@@ -8124,14 +8475,15 @@ DEFECTS = [
         'GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a power-menu icon is frozen back to Mocha subtext0',
         LOGIN,
         [
-            ('                text: icon.to_string(),\n                font_size: 14.0,\n                color: p.subtext0,',
-             '                text: icon.to_string(),\n                font_size: 14.0,\n                color: Color::from_hex(0xA6ADC8),'),
+            ('            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, p.subtext0);\n',
+             '            self.icon(commands, mx + 12.0, iy + 8.0, 14.0, icon, Color::from_hex(0xA6ADC8));\n'),
         ],
         ["desktop"],
         [
-            'every_colour_the_login_screen_draws_comes_from_its_palette',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The glyphs are themed icons now; the sweep sees their colours through `rendered`, the deleted-constants test (plain `render`) does not.
             'every_colour_in_the_bar_and_the_power_menu_is_in_the_role_it_claims',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
+            'every_colour_the_login_screen_draws_comes_from_its_palette',
         ],
     ),
     (
@@ -8202,17 +8554,19 @@ DEFECTS = [
     ),
     (
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the default background names a colour again',
-        LOGIN,
+        APP,
         [
-            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {',
-             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {'),
-            ('    #[default]\n    Theme,',
-             '    Theme,'),
-            ('    Gradient { top: Color, bottom: Color },\n}',
-             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}'),
+            ('#[derive(Clone, Debug, Default, PartialEq)]\npub enum LoginBackground {\n',
+             '#[derive(Clone, Debug, PartialEq)]\npub enum LoginBackground {\n'),
+            ('    #[default]\n    Theme,\n',
+             '    Theme,\n'),
+            ('    Gradient { top: Color, bottom: Color },\n}\n',
+             '    Gradient { top: Color, bottom: Color },\n}\n\nimpl Default for LoginBackground {\n    fn default() -> Self {\n        Self::SolidColor(Color::from_hex(0x11111B))\n    }\n}\n'),
         ],
-        ["desktop"],
+        ["appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `LoginBackground` is a setting now and lives in
+            # `appearance`; the greeter re-exports it.
             'the_default_background_defers_its_colour_to_the_palette',
         ],
     ),
@@ -9245,11 +9599,13 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the current-language card drops to the list rows' rung",
         LANG,
         [
-            ('                height: 50.0,\n                color: p.surface1,',
-             '                height: 50.0,\n                color: p.surface0,'),
+            ('            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(p.surface0);\n            p.push_paint_radii(cmds, x, cy, width, 50.0, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             # Caught by nothing but the per-site table: both rungs are roles,
             # so the membership sweep accepts either, and the card is still
             # exactly one 552x50 fill so every count still balances. This is
@@ -9261,11 +9617,13 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the current-language card is frozen to Mocha surface1',
         LANG,
         [
-            ('                height: 50.0,\n                color: p.surface1,',
-             '                height: 50.0,\n                color: guitk::color::Color::from_hex(0x45475A),'),
+            ('            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);\n',
+             '            let mut paint = p.surface_paint(Surface::Card);\n            paint.fill = Some(guitk::color::Color::from_hex(0x45475A));\n            p.push_paint_radii(cmds, x, cy, width, 50.0, CornerRadii::all(8.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_panel_draws_comes_from_its_palette',
             'every_site_draws_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -9301,11 +9659,13 @@ DEFECTS = [
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the search box is raised to the card's rung",
         LANG,
         [
-            ('            height: 30.0,\n            color: p.surface0,',
-             '            height: 30.0,\n            color: p.surface1,'),
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(p.surface1);\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -9313,11 +9673,13 @@ DEFECTS = [
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the search box is frozen to Mocha surface0',
         LANG,
         [
-            ('            height: 30.0,\n            color: p.surface0,',
-             '            height: 30.0,\n            color: guitk::color::Color::from_hex(0x313244),'),
+            ('        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);\n',
+             '        let mut paint = p.surface_paint(Surface::Card);\n        paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n        p.push_paint_radii(cmds, x, cy, width, 30.0, CornerRadii::all(6.0), paint);\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The box is a surface now (`push_surface`) -- outlined, not filled, since 829 -- so this is the same call with its fill replaced.
             'every_colour_this_panel_draws_comes_from_its_palette',
             'every_site_draws_the_role_it_claims',
             'none_of_the_eleven_deleted_constants_is_still_drawn',
@@ -9327,7 +9689,7 @@ DEFECTS = [
         'PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the placeholder is as bright as a query the user typed',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
              '            color: p.text,'),
         ],
         ["desktop"],
@@ -9339,8 +9701,8 @@ DEFECTS = [
         'QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the placeholder and the typed-query rungs are exchanged',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
-             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.overlay0\n            },'),
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.text\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [
@@ -9351,8 +9713,8 @@ DEFECTS = [
         'RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the typed query is frozen to Mocha text',
         LANG,
         [
-            ('            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                p.text\n            },',
-             '            color: if self.language_search.is_empty() {\n                p.overlay0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
+            ('            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                p.text\n            },',
+             '            color: if self.language_search.is_empty() {\n                p.subtext0\n            } else {\n                guitk::color::Color::from_hex(0xCDD6F4)\n            },'),
         ],
         ["desktop"],
         [
@@ -9431,7 +9793,7 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the current language's name stops being accented",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
              '                color: p.text,\n                font_weight: if is_current {'),
         ],
         ["desktop"],
@@ -9443,8 +9805,8 @@ DEFECTS = [
         'YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: every list row is accented, not just the current one',
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
-             '                color: p.accent,\n                font_weight: if is_current {'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
+             '                color: p.ink(p.accent),\n                font_weight: if is_current {'),
         ],
         ["desktop"],
         [
@@ -9456,8 +9818,8 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: an ordinary row's name is frozen to Mocha text",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: if is_current {',
-             '                color: if is_current {\n                    p.accent\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: if is_current {',
+             '                color: if is_current {\n                    p.ink(p.accent)\n                } else {\n                    guitk::color::Color::from_hex(0xCDD6F4)\n                },\n                font_weight: if is_current {'),
         ],
         ["desktop"],
         [
@@ -9568,7 +9930,7 @@ DEFECTS = [
         'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the count line is frozen to Mocha overlay0',
         LANG,
         [
-            ('            font_size: 11.0,\n            color: p.overlay0,',
+            ('            font_size: 11.0,\n            color: p.subtext0,',
              '            font_size: 11.0,\n            color: guitk::color::Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -9582,7 +9944,7 @@ DEFECTS = [
         'IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the count line is promoted to the primary text rung',
         LANG,
         [
-            ('            font_size: 11.0,\n            color: p.overlay0,',
+            ('            font_size: 11.0,\n            color: p.subtext0,',
              '            font_size: 11.0,\n            color: p.text,'),
         ],
         ["desktop"],
@@ -9594,7 +9956,7 @@ DEFECTS = [
         'JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the Date Format heading is frozen to Mocha lavender',
         LANG,
         [
-            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Date Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Date Format".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -9608,8 +9970,8 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the Time Format heading follows the accent',
         LANG,
         [
-            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.lavender,',
-             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.accent,'),
+            ('            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
+             '            text: "Time Format".into(),\n            font_size: 15.0,\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -9621,7 +9983,7 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the Measurement heading drops to the sub-heading rung',
         LANG,
         [
-            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Measurement".into(),\n            font_size: 15.0,\n            color: p.subtext1,'),
         ],
         ["desktop"],
@@ -9647,7 +10009,7 @@ DEFECTS = [
         'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the Currency heading is frozen to Mocha lavender',
         LANG,
         [
-            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.lavender,',
+            ('            text: "Currency".into(),\n            font_size: 15.0,\n            color: p.ink(p.lavender),',
              '            text: "Currency".into(),\n            font_size: 15.0,\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -9715,7 +10077,7 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the default currency's row stops being accented",
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: FontWeightHint::Regular,',
              '                color: p.text,\n                font_weight: FontWeightHint::Regular,'),
         ],
         ["desktop"],
@@ -9731,8 +10093,8 @@ DEFECTS = [
         'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: every currency row is accented, not just the default one',
         LANG,
         [
-            ('                color: if is_current { p.accent } else { p.text },\n                font_weight: FontWeightHint::Regular,',
-             '                color: p.accent,\n                font_weight: FontWeightHint::Regular,'),
+            ('                color: if is_current { p.ink(p.accent) } else { p.text },\n                font_weight: FontWeightHint::Regular,',
+             '                color: p.ink(p.accent),\n                font_weight: FontWeightHint::Regular,'),
         ],
         ["desktop"],
         [
@@ -10516,17 +10878,19 @@ DEFECTS = [
         ],
     ),
     (
-        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own overlay0",
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the app name beside an action keeps Catppuccin Mocha's own subtext0",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: guitk::color::Color::from_hex(0x6C7086),'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: guitk::color::Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
             'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -10561,15 +10925,17 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a key badge's lettering keeps Catppuccin Mocha's own subtext0",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: guitk::color::Color::from_hex(0xA6ADC8),'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: guitk::color::Color::from_hex(0xA6ADC8),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_panel_draws_comes_from_its_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_colour_this_panel_draws_comes_from_its_palette',
+            'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -10652,13 +11018,15 @@ DEFECTS = [
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: the app name is lettered as loudly as the action it qualifies",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: p.subtext1,'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: p.subtext1,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
@@ -10703,13 +11071,15 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a key badge is lettered as loudly as the heading",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: p.text,'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.text,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
@@ -10810,14 +11180,16 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a key badge's lettering is repainted with the accent",
         HOTKEYS,
         [
-            ('                color: p.subtext0,',
-             '                color: p.accent,'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
+            'a_key_badge_stands_off_the_panel_it_sits_on',
             'every_site_draws_the_role_it_claims',
             'nothing_in_this_panel_is_accented',
-            'a_key_badge_stands_off_the_panel_it_sits_on',
         ],
     ),
     (
@@ -10852,14 +11224,16 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the app name beside an action is repainted with the accent",
         HOTKEYS,
         [
-            ('                color: p.overlay0,',
-             '                color: p.accent,'),
+            ('                // argument to the action beside it, not a second action.\n                color: p.subtext0,\n',
+             '                // argument to the action beside it, not a second action.\n                color: p.accent,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
+            'a_key_badge_stands_off_the_panel_it_sits_on',
             'every_site_draws_the_role_it_claims',
             'nothing_in_this_panel_is_accented',
-            'a_key_badge_stands_off_the_panel_it_sits_on',
         ],
     ),
     (
@@ -10956,35 +11330,34 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a key badge's border and lettering trade roles",
         HOTKEYS,
         [
-            ('                color: p.surface1,\n                line_width: 1.0,',
-             '                color: p.subtext0,\n                line_width: 1.0,'),
-            # Anchored on the line *below* as well, because the edit above has
-            # just manufactured a second `color: p.subtext0,` at a lower file
-            # offset. A one-line pattern would land on that copy, revert the
-            # first edit, and leave the file untouched — the defect would be a
-            # no-op reported as `NO TEST FAILED`. See `check()`'s NO-OP branch.
-            ('                color: p.subtext0,\n                font_size: KEY_FONT_SIZE,',
-             '                color: p.surface1,\n                font_size: KEY_FONT_SIZE,'),
+            ('                color: p.surface1,\n                line_width: 1.0,\n',
+             '                color: p.subtext0,\n                line_width: 1.0,\n'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.surface1,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the header and a key badge trade lettering",
         HOTKEYS,
         [
-            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,',
-             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,'),
-            ('                color: p.subtext0,',
-             '                color: p.text,'),
+            ('        color: p.text,\n        font_size: HEADER_FONT_SIZE,\n',
+             '        color: p.subtext0,\n        font_size: HEADER_FONT_SIZE,\n'),
+            ('                text: (*part).to_string(),\n                color: p.subtext0,\n',
+             '                text: (*part).to_string(),\n                color: p.text,\n'),
         ],
         ["desktop"],
         [
-            'every_site_draws_the_role_it_claims',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The app name is subtext0 now, not overlay0 -- overlay0 is not a text role -- which is also the badge's role, so each site is named by its own neighbouring line.
             'a_key_badge_stands_off_the_panel_it_sits_on',
+            'every_site_draws_the_role_it_claims',
         ],
     ),
     (
@@ -11154,7 +11527,7 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: MOCHA_PEACH survives the conversion at the fallback site",
         SCRCAP,
         [
-            ('                color: p.peach,',
+            ('                color: p.ink(p.peach),',
              '                color: guitk::color::Color::from_hex(0xFAB387),'),
         ],
         ["desktop"],
@@ -11284,7 +11657,7 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the transient-state word and the panel title trade ink",
         SCRCAP,
         [
-            ('                color: p.peach,',
+            ('                color: p.ink(p.peach),',
              '                color: p.text,'),
             ('        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.text,',
              '        text: "Screen Recorder".to_string(),\n        font_size: 13.0,\n        color: p.peach,'),
@@ -11390,8 +11763,8 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the transient-state word is painted with the accent",
         SCRCAP,
         [
-            ('                color: p.peach,',
-             '                color: p.accent,'),
+            ('                color: p.ink(p.peach),',
+             '                color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -11641,8 +12014,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the transient-state word borrows the pause colour",
         SCRCAP,
         [
-            ('                color: p.peach,',
-             '                color: p.yellow,'),
+            ('                color: p.ink(p.peach),',
+             '                color: p.ink(p.yellow),'),
         ],
         ["desktop"],
         [
@@ -11693,14 +12066,16 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: MOCHA_SURFACE0 survives at a thumbnail's background",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: guitk::color::Color::from_hex(0x313244),'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(guitk::color::Color::from_hex(0x313244));\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_colour_all_three_renderers_draw_comes_from_their_palette',
-            'none_of_the_ten_deleted_constants_is_still_drawn',
             'every_site_draws_the_role_it_claims',
+            'none_of_the_ten_deleted_constants_is_still_drawn',
         ],
     ),
     (
@@ -11764,7 +12139,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: MOCHA_LAVENDER survives at the picker's title",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: guitk::color::Color::from_hex(0xB4BEFE),'),
         ],
         ["desktop"],
@@ -11913,7 +12288,7 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the picker's title and a zone's label trade inks",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: readable_on(p.scrim()),'),
             ('                // be dark-on-dark under the light theme.\n                color: readable_on(p.scrim()),',
              '                // be dark-on-dark under the light theme.\n                color: p.lavender,'),
@@ -11958,13 +12333,15 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the thumbnail background and the picker's title trade colours",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: p.lavender,'),
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
-             '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(p.ink(p.lavender));\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),\n',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.surface2,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -11974,7 +12351,7 @@ DEFECTS = [
         [
             ('            height: picker_h,\n            color: p.surface0,',
              '            height: picker_h,\n            color: p.lavender,'),
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: p.surface0,'),
         ],
         ["desktop"],
@@ -12072,8 +12449,8 @@ DEFECTS = [
         "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the picker's title is accented and competes with the thumbnail that matters",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
-             '            // the accented thumbnail below it that actually means something.\n            color: p.accent,'),
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
+             '            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.accent),'),
         ],
         ["desktop"],
         [
@@ -12329,11 +12706,13 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: a thumbnail's background drops a rung",
         SNAP,
         [
-            ('                height: THUMB_SIZE,\n                color: p.surface0,',
-             '                height: THUMB_SIZE,\n                color: p.mantle,'),
+            ('            p.push_surface(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                4.0,\n                Surface::ControlTrack,\n            );\n',
+             '            let mut paint = p.surface_paint(Surface::ControlTrack);\n            paint.fill = Some(p.surface1);\n            p.push_paint_radii(\n                &mut cmds,\n                ix,\n                iy,\n                THUMB_SIZE,\n                THUMB_SIZE,\n                CornerRadii::all(4.0),\n                paint,\n            );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A thumbnail's ground is `Surface::ControlTrack` now: surface2 in both themes.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -12354,7 +12733,7 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the picker's title is as quiet as body text",
         SNAP,
         [
-            ('            // the accented thumbnail below it that actually means something.\n            color: p.lavender,',
+            ('            // the accented thumbnail below it that actually means something.\n            color: p.ink(p.lavender),',
              '            // the accented thumbnail below it that actually means something.\n            color: p.subtext0,'),
         ],
         ["desktop"],
@@ -12413,7 +12792,7 @@ DEFECTS = [
         'CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the engaged Current line keeps its own Mocha blue',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
              '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                Color::from_hex(0x89B4FA)\n            },'),
         ],
         ["desktop"],
@@ -12429,8 +12808,8 @@ DEFECTS = [
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the quiet Current line keeps its own Mocha subtext0',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.blue\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                Color::from_hex(0xA6ADC8)\n            } else {\n                p.ink(p.blue)\n            },'),
         ],
         ["desktop"],
         [
@@ -12444,7 +12823,7 @@ DEFECTS = [
         'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: the suppressed-count line keeps its own Mocha overlay0',
         FOCUS,
         [
-            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12491,11 +12870,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the unchosen rows' icon keeps its own Mocha subtext0",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { Color::from_hex(0xA6ADC8) },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    Color::from_hex(0xA6ADC8)\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_colour_the_module_draws_comes_from_its_palette',
             'every_site_changes_when_the_mode_does',
             'every_site_draws_the_role_it_claims',
@@ -12522,7 +12903,7 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a row's description keeps its own Mocha overlay0",
         FOCUS,
         [
-            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
+            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,',
              '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12552,7 +12933,7 @@ DEFECTS = [
         'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the empty-state line keeps its own Mocha overlay0',
         FOCUS,
         [
-            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12566,11 +12947,13 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a rule's row keeps its own Mocha surface0",
         FOCUS,
         [
-            ('                    height: 28.0,\n                    color: p.surface0,',
-             '                    height: 28.0,\n                    color: Color::from_hex(0x313244),'),
+            ('                p.push_surface(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    6.0,\n                    Surface::Card,\n                );\n',
+             '                let mut paint = p.surface_paint(Surface::Card);\n                paint.fill = Some(Color::from_hex(0x313244));\n                p.push_paint_radii(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    CornerRadii::all(6.0),\n                    paint,\n                );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A rule's row is a card surface now -- outlined, not filled, since 829.
             'every_colour_the_module_draws_comes_from_its_palette',
             'every_site_changes_when_the_mode_does',
             'every_site_draws_the_role_it_claims',
@@ -12596,7 +12979,7 @@ DEFECTS = [
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a rule's mode keeps its own Mocha overlay0",
         FOCUS,
         [
-            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,',
              '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: Color::from_hex(0x6C7086),'),
         ],
         ["desktop"],
@@ -12725,8 +13108,8 @@ DEFECTS = [
         'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the engaged Current line follows the accent',
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.accent\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.accent)\n            },'),
         ],
         ["desktop"],
         [
@@ -12738,11 +13121,13 @@ DEFECTS = [
         "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the chosen row's icon is blue again, as it was before the split",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.blue } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.blue)\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -12751,11 +13136,13 @@ DEFECTS = [
         "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: the chosen row's icon is body text and marks nothing",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.text\n                } else {\n                    p.subtext0\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -12785,23 +13172,16 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a row's description climbs above its rung",
-        FOCUS,
-        [
-            ('                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.overlay0,',
-             '                text: m.description().to_string(),\n                font_size: 10.0,\n                color: p.subtext0,'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
+    # RETIRED 2026-09-27: a row's description climbs above its rung.
+    #   What this defect did -- a line drawn in the disabled grey moved up
+    #   to `subtext0` -- is now the design: the gate that keeps the disabled
+    #   grey for disabled text moved every such line there, so the edit had
+    #   become a no-op.
     (
         'DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the suppressed-count line is as loud as the title',
         FOCUS,
         [
-            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: format!("{} notifications suppressed", self.suppressed_count),\n                font_size: 12.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -12838,7 +13218,7 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a rule's mode is as loud as its label",
         FOCUS,
         [
-            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.overlay0,',
+            ('                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.subtext0,',
              '                    text: rule.mode().label().to_string(),\n                    font_size: 10.0,\n                    color: p.text,'),
         ],
         ["desktop"],
@@ -12850,11 +13230,13 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a rule's row sinks to the page behind it",
         FOCUS,
         [
-            ('                    height: 28.0,\n                    color: p.surface0,',
-             '                    height: 28.0,\n                    color: p.mantle,'),
+            ('                p.push_surface(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    6.0,\n                    Surface::Card,\n                );\n',
+             '                let mut paint = p.surface_paint(Surface::Card);\n                paint.fill = Some(p.mantle);\n                p.push_paint_radii(\n                    &mut commands,\n                    x + padding,\n                    cy,\n                    width - padding * 2.0,\n                    28.0,\n                    CornerRadii::all(6.0),\n                    paint,\n                );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A rule's row is a card surface now -- outlined, not filled, since 829.
             'every_site_draws_the_role_it_claims',
         ],
     ),
@@ -12888,7 +13270,7 @@ DEFECTS = [
         'KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: the empty-state line is as loud as the heading above it',
         FOCUS,
         [
-            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.overlay0,',
+            ('                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.subtext0,',
              '                text: "No automatic rules configured".to_string(),\n                font_size: 12.0,\n                color: p.text,'),
         ],
         ["desktop"],
@@ -12980,13 +13362,15 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a row's icon and label colours are traded",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.text } else { p.subtext0 },'),
-            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },',
-             '                font_size: 13.0,\n                color: if selected { p.accent } else { p.subtext0 },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.text\n                } else {\n                    p.subtext0\n                },\n'),
+            ('                font_size: 13.0,\n                color: if selected { p.text } else { p.subtext0 },\n',
+             '                font_size: 13.0,\n                color: if selected { p.ink(p.accent) } else { p.subtext0 },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -12995,8 +13379,8 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the Current line's engaged and quiet branches are swapped",
         FOCUS,
         [
-            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.blue\n            },',
-             '            color: if mode == FocusMode::Off {\n                p.blue\n            } else {\n                p.subtext0\n            },'),
+            ('            color: if mode == FocusMode::Off {\n                p.subtext0\n            } else {\n                p.ink(p.blue)\n            },',
+             '            color: if mode == FocusMode::Off {\n                p.ink(p.blue)\n            } else {\n                p.subtext0\n            },'),
         ],
         ["desktop"],
         [
@@ -13021,11 +13405,13 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the row icon's chosen and unchosen branches are swapped",
         FOCUS,
         [
-            ('                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.accent } else { p.subtext0 },',
-             '                font_size: 16.0,\n                // Here `BLUE` meant "chosen", not "this much silence" — the\n                // picker\'s only accent site.\n                color: if selected { p.subtext0 } else { p.accent },'),
+            ('                // picker\'s only accent site.\n                color: if selected {\n                    p.ink(p.accent)\n                } else {\n                    p.subtext0\n                },\n',
+             '                // picker\'s only accent site.\n                color: if selected {\n                    p.subtext0\n                } else {\n                    p.ink(p.accent)\n                },\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The chosen row's icon is inked now (`p.ink(p.accent)`).
             'every_site_draws_the_role_it_claims',
             'the_picker_marks_the_chosen_row_with_the_accent',
         ],
@@ -16881,32 +17267,34 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a fresh configuration names the Mocha base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: String::new(),',
-             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: String::new(),'),
+            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
+             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: PathBuf::new(),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_module_draws_comes_from_its_palette',
-            'an_images_underlay_follows_the_theme_too',
+            # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
-            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_images_underlay_follows_the_theme_too',
             'an_unchosen_colour_survives_a_save_and_load',
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
     (
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a fresh configuration names the Latte base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: String::new(),',
-             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: String::new(),'),
+            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
+             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: PathBuf::new(),\n'),
         ],
         ["desktop"],
         [
-            'every_colour_this_module_draws_comes_from_its_palette',
-            'an_images_underlay_follows_the_theme_too',
+            # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
-            'saving_an_unchosen_colour_writes_no_colour_key',
+            'an_images_underlay_follows_the_theme_too',
             'an_unchosen_colour_survives_a_save_and_load',
+            'every_colour_this_module_draws_comes_from_its_palette',
+            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
     (
@@ -17083,7 +17471,7 @@ DEFECTS = [
             ('        x + width - knob - INSET\n',
              '        x + width - knob\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_switch_already_used',
             'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
@@ -17096,7 +17484,7 @@ DEFECTS = [
             ('    let knob_x = if on {\n',
              '    let knob_x = if !on {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_switch_already_used',
             'the_knob_is_at_the_right_end_when_on_and_the_left_end_when_off',
@@ -17107,14 +17495,14 @@ DEFECTS = [
         SWITCH,
         [
             ('            color: readable_on(track),\n',
-             '            color: appearance::LIGHT_EXTREME,\n'),
+             '            color: crate::palette::LIGHT_EXTREME,\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The ink is still one of the two extremes, so every 'comes from its
             # palette' sweep still passes -- only *which* extreme changes, and
             # only for a light background.
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
             'the_knob_follows_the_track_rather_than_the_theme',
             # The one call-site test that pins the ink by equality with
@@ -17135,47 +17523,52 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a slider thumb hangs off the bottom of its own track",
         SLIDER,
         [
-            ('            y: self.y + self.height / 2.0 - self.thumb / 2.0,\n',
-             '            y: self.y + self.height / 2.0,\n'),
+            ('        Rect::new(cx - d / 2.0, cy - d / 2.0, d, d)\n',
+             '        Rect::new(cx - d / 2.0, cy, d, d)\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
-            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
+            'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
+            'a_vertical_slider_fills_from_the_bottom',
         ],
     ),
     (
         "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a slider thumb shrinks to the height of its track",
         SLIDER,
         [
-            (('            width: self.thumb,\n'
-              '            height: self.thumb,\n'),
-             ('            width: self.height,\n'
-              '            height: self.height,\n')),
+            (('        width: k.w,\n'
+              '        height: k.h,\n'
+              '        color: fade(thumb, look.alpha),\n'),
+             ('        width: thickness,\n'
+              '        height: thickness,\n'
+              '        color: fade(thumb, look.alpha),\n')),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The overhang test is the premise of the ink rule: a contained
             # thumb would be read against the track, not the card, and 'text'
             # would stop being the right answer.
             'the_geometry_is_the_one_every_hand_written_slider_already_used',
-            'the_thumb_overhangs_the_track_on_every_shape_the_shell_draws',
-            'every_site_draws_the_role_it_claims',
+            'the_thumb_overhangs_the_track_on_every_shape_the_desktop_draws',
+            'a_vertical_slider_fills_from_the_bottom',
+            'every_control_that_offers_something_follows_the_accent',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_fixtures_take_every_branch_the_osd_has',
         ],
     ),
     (
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a slider thumb takes the colour of the fill it ends",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: fade(self.fill, self.alpha),\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: fade(look.fill, look.alpha),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # This is the touchpad bug (1.00:1) generalised to all five sliders.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
             'every_control_that_offers_something_follows_the_accent',
-            'the_thumb_does_not_follow_the_fill_it_ends',
             # `text_beats_readable_on_the_fill_against_the_card` was declared
             # here and the sweep of 2026-08-24 recorded it as MISSING. Correctly
             # so, and the declaration was the error: that test renders nothing.
@@ -17183,42 +17576,45 @@ DEFECTS = [
             # contrast(base, readable_on(fill)) -- to establish *why* the thumb
             # uses `text`, so no change to what the thumb is actually drawn with
             # can reach it. It is the rule's premise, not its witness.
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_alpha_reaches_every_part_of_the_control',
         ],
     ),
     (
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a slider thumb takes the switch knob's rule instead of its own",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: fade(appearance::readable_on(self.fill), self.alpha),\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: fade(crate::palette::readable_on(look.fill), look.alpha),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The plausible 'fix' a future reader would reach for, having seen
             # switch.rs. On Mocha it inks the thumb #11111B -- 1.1:1 against a
             # base card. Containment, not consistency, decides the rule.
             'the_thumb_is_legible_against_every_card_it_can_sit_on',
             'every_control_that_offers_something_follows_the_accent',
-            'the_thumb_does_not_follow_the_fill_it_ends',
             # Not `text_beats_readable_on_the_fill_against_the_card`, for the
             # reason given under GGG...x80 above: it renders no slider, so a
             # change to the thumb's colour is invisible to it.
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_alpha_reaches_every_part_of_the_control',
         ],
     ),
     (
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the light theme's ink drifts toward the page it is read on",
-        APP,
+        TK_PALETTE,
         [
-            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x4C4F69);\n',
+            ('pub const LIGHT_TEXT: Color = Color::from_hex(0x000000);\n',
              'pub const LIGHT_TEXT: Color = Color::from_hex(0x8A8DA0);\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The palette is the toolkit's now (design-decisions 838). Light text is the
+            # operator's black since 829, not Latte's.
             # 2.90:1 on a Latte base. 0x8C8FA1 would have been the rounder
             # number but it is light overlay1's own value, and a duplicate would
             # trip the palette's distinctness tests for the wrong reason.
-            'the_thumb_is_legible_against_every_card_it_can_sit_on',
-            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
             # `text_beats_readable_on_the_fill_against_the_card` was declared
             # here too, and was MISSING for a subtler reason than under
             # GGG...x80: it *does* read LIGHT_TEXT. But the value it compares
@@ -17228,28 +17624,34 @@ DEFECTS = [
             # right-hand side is 1.00:1, and even a 2.90:1 ink beats it. The
             # test constrains the ink from below only as far as the base itself,
             # which is not far enough to see this.
+            'every_role_a_user_reads_is_legible_on_the_base_of_its_own_palette',
+            'legible_on_is_a_no_op_for_a_pair_that_already_passes',
+            'light_inks_clear_the_contrast_floor_on_every_surface',
+            'the_thumb_is_legible_against_every_card_it_can_sit_on',
         ],
     ),
     (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a slider at its floor still emits a zero-width fill",
         SLIDER,
         [
-            ('        if fill_w > 0.0 {\n',
-             '        if fill_w >= 0.0 {\n'),
+            ('    if filled > 0.0 {\n',
+             '    if filled >= 0.0 {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'a_slider_on_its_floor_emits_no_fill_rectangle',
+            'the_fixtures_take_every_branch_the_osd_has',
+            'the_panel_draws_nothing_that_is_immediately_erased',
         ],
     ),
     (
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a slider's fraction stops being bounded",
         SLIDER,
         [
-            ('            self.frac.clamp(0.0, 1.0)\n',
-             '            self.frac\n'),
+            ('        frac.clamp(0.0, 1.0)\n',
+             '        frac\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             'an_out_of_range_fraction_cannot_push_the_thumb_off_the_track',
         ],
@@ -17258,23 +17660,24 @@ DEFECTS = [
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a fading slider's thumb stays opaque",
         SLIDER,
         [
-            ('            color: fade(self.p.text, self.alpha),\n',
-             '            color: self.p.text,\n'),
+            ('        color: fade(thumb, look.alpha),\n',
+             '        color: thumb,\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
             # The osd is the only caller that fades, so this is invisible
             # everywhere else -- which is exactly why the helper owns the fade
             # rather than the caller pre-multiplying.
             'the_alpha_reaches_every_part_of_the_control',
+            'hover_lights_focus_rings_and_disabled_dims',
         ],
     ),
     (
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: every slider reads as fully set, so its track is drawn and immediately covered",
         TPAD,
         [
-            ('            frac: (value - min) / (max - min),\n',
-             '            frac: 1.0,\n'),
+            ('            (value - min) / (max - min),\n',
+             '            1.0,\n'),
         ],
         ["desktop"],
         [
@@ -17297,7 +17700,7 @@ DEFECTS = [
     # below is caught by something.
     (
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ink chooser goes back to estimating brightness from a luma sum",
-        APP,
+        TK_PALETTE,
         [
             ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
              '    if 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b) > 140.0 {\n'),
@@ -17314,12 +17717,12 @@ DEFECTS = [
     ),
     (
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the ink chooser returns whichever of the two inks is harder to read",
-        APP,
+        TK_PALETTE,
         [
             ('    if contrast_ratio(bg, DARK_EXTREME) >= contrast_ratio(bg, LIGHT_EXTREME) {\n',
              '    if contrast_ratio(bg, DARK_EXTREME) < contrast_ratio(bg, LIGHT_EXTREME) {\n'),
         ],
-        ["appearance", "desktop"],
+        ["guitk", "appearance", "desktop"],
         [
             # One character. Unlike the luma rule this is wrong for *every*
             # colour, so the two fixtures 536 taught to assert their own
@@ -17368,7 +17771,7 @@ DEFECTS = [
             'the_content_well_is_deeper_than_the_panel_it_sits_in',
             'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
@@ -17383,8 +17786,8 @@ DEFECTS = [
         # others, since `appearance` now re-exports what this breaks.
         THEME,
         [
-            ('        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n',
-             '        v\n'),
+            ('    if v <= 0.039_28 {\n        v / 12.92\n    } else {\n        ((v + 0.055) / 1.055).powf(2.4)\n    }\n',
+             '    v\n'),
         ],
         ["guitk", "appearance", "desktop"],
         [
@@ -17413,7 +17816,7 @@ DEFECTS = [
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'a_selected_pattern_chip_is_lettered_for_its_own_fill',
             # Everything below was found by the sweep of 2026-08-24. The
             # eighteen constants that flip are concentrated in the light
@@ -17514,7 +17917,7 @@ DEFECTS = [
             'the_content_well_is_deeper_than_the_panel_it_sits_in',
             'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
-            'the_knob_is_the_more_legible_of_the_two_inks_the_shell_has',
+            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
@@ -17589,28 +17992,12 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the appearance crate goes back to its own copy of the luminance curve",
         APP,
         [
-            ('pub use guitk::theme::{contrast_ratio, relative_luminance};\n',
-             ('#[must_use]\n'
-              'pub fn relative_luminance(c: Color) -> f32 {\n'
-              '    fn channel(v: u8) -> f32 {\n'
-              '        let v = f32::from(v) / 255.0;\n'
-              '        if v <= 0.039_28 {\n'
-              '            v / 12.92\n'
-              '        } else {\n'
-              '            ((v + 0.055) / 1.055).powf(2.4)\n'
-              '        }\n'
-              '    }\n'
-              '    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n'
-              '}\n'
-              '#[must_use]\n'
-              'pub fn contrast_ratio(a: Color, b: Color) -> f32 {\n'
-              '    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n'
-              '    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n'
-              '    (hi + 0.05) / (lo + 0.05)\n'
-              '}\n')),
+            ('pub use guitk::theme::{contrast_ratio, perceptual_difference, relative_luminance};\n',
+             'pub use guitk::theme::perceptual_difference;\n#[must_use]\npub fn relative_luminance(c: Color) -> f32 {\n    fn channel(v: u8) -> f32 {\n        let v = f32::from(v) / 255.0;\n        if v <= 0.039_28 {\n            v / 12.92\n        } else {\n            ((v + 0.055) / 1.055).powf(2.4)\n        }\n    }\n    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)\n}\n#[must_use]\npub fn contrast_ratio(a: Color, b: Color) -> f32 {\n    let (la, lb) = (relative_luminance(a), relative_luminance(b));\n    let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };\n    (hi + 0.05) / (lo + 0.05)\n}\n'),
         ],
         ["guitk", "appearance", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The re-export names `perceptual_difference` too now.
             # A *correct* copy -- byte-for-byte what the toolkit computes, so
             # every ratio in the tree is unchanged and no legibility test can
             # see it. That is the point: the defect 537 fixed is the existence
@@ -17783,30 +18170,23 @@ DEFECTS = [
     ),
     (
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the Run dialog's arrows go back to stepping through the string",
-        RUN,
+        TK_TEXTINPUT,
         [
-            ('        if let Some(prev) = text::caret_left(\n'
-             '            &self.text,\n'
-             '            self.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        ) {\n',
+            ('        if let Some(prev) = text::caret_left(&self.text, self.cursor, font_size, weight) {\n',
              '        if let Some(prev) = self.cursor.prev_in(&self.text) {\n'),
-            ('        if let Some(next) = text::caret_right(\n'
-             '            &self.text,\n'
-             '            self.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        ) {\n',
+            ('        if let Some(next) = text::caret_right(&self.text, self.cursor, font_size, weight) {\n',
              '        if let Some(next) = self.cursor.next_in(&self.text) {\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
-            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
+            # Re-derived 2026-09-27 against the code as it now reads. The Run box moved onto the
+            # toolkit's `TextInput`, and the screen-order arrows with it, so the defect
+            # -- the arrows walking the string -- is put back there.
             # Undeclared until the sweep of 2026-08-24, for the same reason as
             # N above: a logical Right moves the offset from 2 to 6, and the
             # shaper draws 6 to the *left* of 2, so the drawn-caret test sees
             # a movement defect even though nothing about the drawing changed.
+            'the_run_dialogs_arrows_walk_the_line_by_the_screen_not_by_the_string',
             'the_run_dialogs_drawn_caret_only_ever_moves_rightwards_under_the_right_arrow',
         ],
     ),
@@ -17814,20 +18194,13 @@ DEFECTS = [
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: the Run dialog goes back to slicing its text at the caret's raw byte offset",
         RUN,
         [
-            ('        let cursor_px = text::caret_x(\n'
-             '            &self.input.text,\n'
-             '            self.input.cursor,\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        );\n',
-             '        let cursor_px = text::measure(\n'
-             '            &self.input.text[..self.input.cursor.byte()],\n'
-             '            INPUT_FONT_SIZE,\n'
-             '            FontWeightHint::Regular,\n'
-             '        );\n'),
+            ('        let cursor_px = text::caret_x(\n            self.input.text(),\n            self.input.cursor(),\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n',
+             '        let cursor_px = text::measure(\n            &self.input.text()[..self.input.cursor().byte()],\n            INPUT_FONT_SIZE,\n            FontWeightHint::Regular,\n        );\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The same regression against
+            # the field's accessors: the caret measured from a byte slice.
             # Two faults in one line, so two catchers. The prefix width puts
             # the caret in the wrong place on a bidirectional line, and the
             # *slice* panics outright on an offset inside a character -- inside
@@ -18075,19 +18448,23 @@ DEFECTS = [
     ),
     (
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a hex colour's blue channel reads the green digits",
-        CAL,
+        TK_COLOR,
         [
-            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;',
-             '    let b = u8::from_str_radix(s.get(2..4)?, 16).ok()?;'),
+            ('            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?)),\n',
+             '            6 => Some(Self::rgb(byte(0)?, byte(2)?, byte(2)?)),\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The calendar reads colours through the
+            # toolkit's `Color::from_hex_text` now, so the defect is there.
             # Every colour comes back on the blue-green diagonal. It still
             # parses and still round-trips through `export_text`, so nothing
             # short of a value assertion notices -- though in practice the
             # import path notices too, since a colour written out and read
             # back no longer matches what went in.
+            'a_colours_hex_text_reads_back_as_the_same_colour',
             'export_import_roundtrip',
+            'hex_text_reads_either_case_and_refuses_anything_else',
             'import_single_event',
             'parse_hex_color_valid',
         ],
@@ -18207,11 +18584,13 @@ DEFECTS = [
         "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: adjacent start-menu rows overlap by a pixel",
         DESK,
         [
-            ('            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
-             '            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
+            ('            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
+             '            left.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The rows are measured from the
+            # start menu's left column now.
             # The classic fencepost. Every row after the first is one pixel high
             # into its neighbour, so the boundary pixel belongs to two rows and
             # `hit_test` gives it to whichever it scans first -- which means one
@@ -18279,11 +18658,12 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the start menu reopens wherever it was last left",
         DESK,
         [
-            ('            self.start_menu_open = true;\n            self.start_menu_scroll = 0;\n',
-             '            self.start_menu_open = true;\n'),
+            ('            self.shortcut_card_open = false;\n            self.start_menu_scroll = 0;\n',
+             '            self.shortcut_card_open = false;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `toggle_start_menu` rewinds the list.
             # A menu that reopens scrolled hides the first application from a
             # user who has no idea it ever scrolled -- and who therefore has no
             # reason to scroll back up to look for it.
@@ -18310,71 +18690,51 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: closing the start menu strands the power menu open over the desktop",
         DESK,
         [
-            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n    }\n',
-             '        self.start_menu_open = false;\n    }\n'),
+            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n        self.start_lit = None;\n',
+             '        self.start_menu_open = false;\n        self.start_lit = None;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # `the_power_menu_offers_every_system_action_and_launches_them` is gone with
+            # the old power menu (design-decisions 1405), so it is no longer declared.
             # `close_start_menu` is deliberately the single place the menu
             # closes, so that the submenu cannot outlive its parent. Removing
             # one line from it leaves a power menu floating over an empty
             # desktop, anchored to a button that is no longer drawn.
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-            'the_power_menu_offers_every_system_action_and_launches_them',
+            'the_power_menu_offers_every_power_action_and_carries_each_out',
         ],
     ),
-    (
-        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the start menu lists the system actions as ordinary programs",
-        DESK,
-        [
-            ('            .filter(|app| matches!(app.category, Category::Application | Category::Setting))\n',
-             '            .filter(|app| {\n                matches!(\n                    app.category,\n                    Category::Application | Category::Setting | Category::System\n                )\n            })\n'),
-        ],
-        ["desktop"],
-        [
-            # The exclusion is not tidiness: it is what keeps `Shutdown` from
-            # being one mis-click away from `Screenshot` in an alphabetical
-            # list. It also puts every system action in *both* menus at once,
-            # which is the half the partition test sees.
-            'the_two_menus_between_them_offer_every_program_exactly_once',
-            'the_start_menu_offers_only_programs_the_launcher_knows',
-        ],
-    ),
-    (
-        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the power menu offers the applications instead of the system actions",
-        DESK,
-        [
-            ('            .filter(|app| matches!(app.category, Category::System))\n',
-             '            .filter(|app| matches!(app.category, Category::Application))\n'),
-        ],
-        ["desktop"],
-        [
-            # The complement of L, and the reason the two filters are written as
-            # complements of one another: an action must be in exactly one of
-            # the two lists, and only a test that checks the *partition* can see
-            # a change that puts it in the wrong one rather than in neither.
-            'the_power_menu_offers_every_system_action_and_launches_them',
-            'the_two_menus_between_them_offer_every_program_exactly_once',
-            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
-            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-        ],
-    ),
+    # RETIRED 2026-09-27: LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL (80): the start menu lists the system actions as ordinary programs
+    #   No-op now: it let System-category entries (power actions) into the start
+    #   menu, and there are none -- they left the program list when the power
+    #   menu became `PowerChoice` (design-decisions 1405). The System half of
+    #   `the_start_menu_offers_only_programs_the_launcher_knows` can no longer fire.
+    # RETIRED 2026-09-27: MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM (80): the power menu offers the applications instead of the system actions
+    #   The power menu is `PowerChoice` now (design-decisions 1405), not a filter over
+    #   the program list, and two of its four tests are gone; the other two are
+    #   declared by the re-derived close/dismiss entries above.
     (
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: dismissing the power menu takes the start menu down with it",
         DESK,
         [
-            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.start_menu_open = false;\n            }\n            return ShellAction::Consumed;\n',
-             '            self.power_menu_open = false;\n            self.start_menu_open = false;\n            return ShellAction::Consumed;\n'),
+            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.close_start_menu();\n            }\n            return ShellAction::Consumed;\n',
+             '            self.power_menu_open = false;\n            self.close_start_menu();\n            return ShellAction::Consumed;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # `the_power_button_toggles_its_menu_and_leaves_the_start_menu_open` is gone
+            # with the old power button, so it is no longer declared.
             # The submenu is dismissed first and *on its own*: a click on the
             # application list while the power menu is up should close the power
             # menu and leave the list where it was. Closing both makes one click
             # undo two things, the second of which the user did not ask for.
             'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'a_press_on_a_place_first_closes_the_power_menu',
             'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
-            'the_power_button_toggles_its_menu_and_leaves_the_start_menu_open',
+            'the_power_caret_toggles_its_menu_and_leaves_the_start_menu_open',
         ],
     ),
     (
@@ -18400,16 +18760,19 @@ DEFECTS = [
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a release over the shell's chrome is handed to the client underneath",
         DESK,
         [
-            ('            MouseEventKind::Release(_) => {\n                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n            }\n',
-             '            MouseEventKind::Release(_) => ShellAction::Pass,\n'),
+            ('                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n',
+             '                let _ = self.hit_test(event.x, event.y);\n                ShellAction::Pass\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
             # A release belongs to whoever took the press. A client that saw a
             # release with no press for it reads a click on the taskbar as a
             # click on itself -- so the visible symptom is a button in an
             # application firing when you let go over the shell.
+            'a_folders_row_closes_and_opens_it',
             'a_release_over_chrome_is_swallowed_with_the_press',
+            'every_visible_row_launches_the_program_named_on_it',
         ],
     ),
     (
@@ -18432,22 +18795,24 @@ DEFECTS = [
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the taskbar button minimizes the window you were trying to reach",
         DESK,
         [
-            ('                if self.focused_window == Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n',
-             '                if self.focused_window != Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n'),
+            ('            if press.was_focused {\n                ShellControlAction::Minimize\n',
+             '            if !press.was_focused {\n                ShellControlAction::Minimize\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A taskbar click is decided on release now
+            # (`finish_window_press`), from the focus at the press.
             # The toggle inverted. Clicking an unfocused window's button
             # minimizes it instead of raising it, and clicking the focused one
             # raises what is already raised -- so the taskbar becomes a way to
             # make windows disappear and nothing else.
-            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
-            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
-            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
             'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
             'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
             'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
             'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
         ],
     ),
     (
@@ -18562,11 +18927,13 @@ DEFECTS = [
         "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: an update rebuilds each window from nothing, losing the shell's own state",
         DESK,
         [
-            ('            let previous = self.windows.get(&id);\n',
-             '            let previous: Option<&ManagedWindow> = None;\n'),
+            ('            let carried = self\n                .windows\n                .get(&id)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n',
+             '            let carried = self\n                .windows\n                .get(&id)\n                .filter(|_| false)\n                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. What a window carries over is read out as
+            # `carried` now.
             # `icon_id` has no counterpart in the compositor's list -- it is
             # shell-local, and an update that does not look up the existing
             # window cannot preserve it. The symptom is every taskbar icon
@@ -18578,11 +18945,12 @@ DEFECTS = [
         "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: every taskbar button acts on the first window on the bar",
         DESK,
         [
-            ('                if self.taskbar_button_rect(index).contains(x, y) {\n                    return Hit::TaskbarButton(window.id);\n',
-             '                if self.taskbar_button_rect(index).contains(x, y) {\n                    let _ = window;\n                    return Hit::TaskbarButton(self.taskbar_windows()[0].id);\n'),
+            ('                        TaskbarSlot::Window(id) => Hit::TaskbarButton(id),\n',
+             '                        TaskbarSlot::Window(_) => Hit::TaskbarButton(self.taskbar_windows()[0].id),\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The bar hit-tests slots, pinned and window.
             # The pairing of slot to window, which is what the hit test is for
             # once the hit carries an id. The old form of
             # `a_taskbar_button_is_clickable_where_it_is_drawn` compared the
@@ -19454,19 +19822,21 @@ DEFECTS = [
     ),
     (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a hex colour made of non-hex characters parses as black",
-        CAL,
+        TK_COLOR,
         [
-            ('    let r = u8::from_str_radix(s.get(0..2)?, 16).ok()?;\n',
-             '    let r = u8::from_str_radix(s.get(0..2)?, 16).unwrap_or(0);\n'),
-            ('    let g = u8::from_str_radix(s.get(2..4)?, 16).ok()?;\n',
-             '    let g = u8::from_str_radix(s.get(2..4)?, 16).unwrap_or(0);\n'),
-            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;\n',
-             '    let b = u8::from_str_radix(s.get(4..6)?, 16).unwrap_or(0);\n'),
+            ('        if !digits.bytes().all(|b| b.is_ascii_hexdigit()) {\n            return None;\n        }\n',
+             ''),
+            ('            u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).ok()\n',
+             '            Some(u8::from_str_radix(digits.get(i..i.checked_add(2)?)?, 16).unwrap_or(0))\n'),
         ],
-        ["desktop"],
+        ["guitk", "desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The calendar reads colours through the
+            # toolkit's `Color::from_hex_text` now: this drops its digit check and reads
+            # a pair that is not hex as 0, which is what the old parser's defect did.
             # All three at once on purpose: `?` on the first channel hides a
             # broken second and third, so patching one is untestable.
+            'hex_text_reads_either_case_and_refuses_anything_else',
             'parse_hex_color_invalid_chars',
         ],
     ),
@@ -19745,29 +20115,32 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a single window opens the Alt-Tab switcher, which then has nothing to switch to",
         DESK,
         [
-            ('        let count = self.taskbar_windows().len();\n        if count > 1 {\n            self.alt_tab_active = true;\n',
-             '        let count = self.taskbar_windows().len();\n        if count > 0 {\n            self.alt_tab_active = true;\n'),
+            ('        if count < 2 {\n            return;\n        }\n        self.alt_tab_active = true;\n',
+             '        if count < 1 {\n            return;\n        }\n        self.alt_tab_active = true;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A switch starts in `begin_switch`.
             'alt_tab_with_one_window_is_consumed_without_opening_the_switcher',
         ],
     ),
     (
-        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: Alt-Tab opens on index 1, which with exactly two windows is the window you are already in",
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: Alt-Tab opens on index 0, which is the window you are already in",
         DESK,
         [
-            ('            self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));\n',
-             '            self.alt_tab_index = 1;\n'),
+            ('        } else {\n            step::wrapping_after(count, 0)\n        };\n',
+             '        } else {\n            0\n        };\n'),
         ],
         ["desktop"],
         [
-            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
-            'alt_tab_between_two_windows_swaps_them',
+            # Re-derived 2026-09-27 against the code as it now reads. The switcher lists the most recent window
+            # first now, so index 0 is the one you are in.
             # The documented historical bug, restored. `taskbar_windows` is
             # ordered bottom-to-top, so the window below the top one is the
             # second from the *end*, not index 1.
             'a_key_release_only_ends_the_window_switcher',
+            'alt_tab_between_two_windows_swaps_them',
+            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
         ],
     ),
     (
@@ -19824,11 +20197,13 @@ DEFECTS = [
         "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a switcher whose window closed under it stays open forever, because the early return skips the close",
         DESK,
         [
-            ('        self.alt_tab_active = false;\n        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n',
-             '        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;\n        self.alt_tab_active = false;\n'),
+            ('        self.alt_tab_active = false;\n        let chosen = self\n            .switcher_windows()\n            .get(self.alt_tab_index)\n            .map(|w| w.id);\n',
+             '        let chosen = Some(self\n            .switcher_windows()\n            .get(self.alt_tab_index)\n            .map(|w| w.id)?);\n        self.alt_tab_active = false;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `finish_alt_tab` reads the choice after closing;
+            # this returns before closing, as the old code did.
             # Escaped, as predicted, and now closed. The `?` only fires on a
             # stale index, and every fixture reached `finish_alt_tab` through
             # `next_alt_tab`, which wraps and therefore always lands in range.
@@ -19844,15 +20219,19 @@ DEFECTS = [
         "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: any key release ends the Alt-Tab switcher, not just letting go of Alt",
         DESK,
         [
-            ('            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {\n',
+            ('            if self.alt_tab_active && self.alt_tab_anchor.released_by(key.key) {\n',
              '            if self.alt_tab_active {\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. A switch ends now on the release
+            # of a key that started it (`SwitchAnchor`, design-decisions 1419).
             # Escaped, as predicted, and now closed. Only one test released a key
             # at all, and the key it released was LeftAlt -- for which the guard
             # and its removal agree. Releasing the Tab of an Alt+Tab is the
             # ordinary case this breaks, and no fixture ever released Tab.
+            'a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up',
+            'letting_go_of_shift_mid_switch_keeps_switching',
             'releasing_tab_does_not_end_the_window_switcher',
         ],
     ),
@@ -19860,52 +20239,61 @@ DEFECTS = [
         "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every key release is swallowed by the shell, so no window ever sees one",
         DESK,
         [
-            ('            return HotkeyOutcome::ignored();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n',
-             '            return HotkeyOutcome::consumed();\n        }\n\n        // The overview gets every press before the shortcut table does, and\n'),
+            ('                return HotkeyOutcome::ask(self.finish_alt_tab());\n            }\n            return HotkeyOutcome::ignored();\n',
+             '                return HotkeyOutcome::ask(self.finish_alt_tab());\n            }\n            return HotkeyOutcome::consumed();\n'),
         ],
         ["desktop"],
         [
-            'releasing_tab_does_not_end_the_window_switcher',
+            # Re-derived 2026-09-27 against the code as it now reads.
             'a_key_release_only_ends_the_window_switcher',
+            'a_switch_on_a_rebound_chord_ends_when_its_own_modifier_comes_up',
+            'letting_go_of_shift_mid_switch_keeps_switching',
+            'releasing_tab_does_not_end_the_window_switcher',
         ],
     ),
     (
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: Shift+Alt+Tab is bound to the forwards cycle, so the two chords do the same thing",
-        DESK,
+        HOTKEYS,
         [
-            ('            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),\n',
-             '            (true, false, true, false, Key::Tab) => Some(Self::CycleWindows),\n'),
+            ('            Hotkey::new(Key::Tab, mods(false, true, true, false)),\n            HotkeyAction::CycleWindowsBackwards,\n',
+             '            Hotkey::new(Key::Tab, mods(false, true, true, false)),\n            HotkeyAction::CycleWindows,\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The shortcut table is the registry's defaults now (hotkeys.rs), cut back to a handful by 1416; this one is still in it.
             'shift_alt_tab_goes_round_the_other_way',
         ],
     ),
     (
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: Alt+F4 is bound to Alt+Super+F4, so plain Alt+F4 falls through to the application",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),\n',
-             '            (false, false, true, true, Key::F4) => Some(Self::CloseFocused),\n'),
+            ('            Hotkey::new(Key::F4, Modifiers::alt()),\n            HotkeyAction::CloseWindow,\n',
+             '            Hotkey::new(Key::F4, mods(false, true, false, true)),\n            HotkeyAction::CloseWindow,\n'),
         ],
         ["desktop"],
         [
-            'alt_f4_asks_the_compositor_to_close_the_focused_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # The shortcut table is the registry's defaults now (hotkeys.rs), cut back to a handful by 1416; this one is still in it.
             'a_window_shortcut_with_nothing_focused_asks_for_nothing',
             'alt_f4_asks_the_compositor_and_changes_nothing_itself',
+            'alt_f4_asks_the_compositor_to_close_the_focused_window',
         ],
     ),
     (
         "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: Super+D maximises the focused window instead of clearing the desktop",
         DESK,
         [
-            ('            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),\n',
-             '            (false, false, false, true, Key::D) => Some(Self::Maximize),\n'),
+            ('            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(self.show_desktop_requests()),\n',
+             '            HotkeyAction::ShowDesktop => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))\n            }\n'),
         ],
         ["desktop"],
         [
-            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'a_refused_shortcut_does_not_swallow_the_rest_of_the_batch',
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
             'super_d_asks_for_every_window_to_be_minimised',
             'super_d_minimizes_everything_on_the_current_desktop',
         ],
@@ -19914,53 +20302,60 @@ DEFECTS = [
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: Super+Right tiles the window to the left, so both arrows snap the same way",
         DESK,
         [
-            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
-             '            (false, false, false, true, Key::Right) => Some(Self::SnapLeft),\n'),
+            ('            HotkeyAction::SnapRight => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapRight))\n',
+             '            HotkeyAction::SnapRight => {\n                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))\n'),
         ],
         ["desktop"],
         [
-            'super_right_asks_for_a_tile_and_computes_no_geometry',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'snapping_and_switching_desktops_are_different_shortcuts',
+            'super_right_asks_for_a_tile_and_computes_no_geometry',
         ],
     ),
     (
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: Super+Down maximises rather than walking the window down a step",
         DESK,
         [
-            ('            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),\n',
-             '            (false, false, false, true, Key::Down) => Some(Self::Maximize),\n'),
+            ('                let want = if restore {\n                    ShellControlAction::Restore\n                } else {\n                    ShellControlAction::Minimize\n                };\n',
+             '                let _ = restore;\n                let want = ShellControlAction::Maximize;\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'super_down_restores_a_maximized_window_and_minimizes_any_other',
         ],
     ),
     (
         "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: the Super+Right binding stops naming Ctrl, and swallows Ctrl+Super+Right the way it used to",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, true, Key::Right) => Some(Self::SnapRight),\n',
-             '            (false, _, false, true, Key::Right) => Some(Self::SnapRight),\n'),
+            ('            Key::LeftSuper | Key::RightSuper => super_key = false,\n            _ => {}\n',
+             '            Key::LeftSuper | Key::RightSuper => super_key = false,\n            Key::Right => ctrl = false,\n            _ => {}\n'),
         ],
         ["desktop"],
         [
-            'desktop_navigation_stops_at_both_ends',
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A binding is an exact chord in a registry now, so a pattern cannot wildcard a modifier; the loosening lives in `Hotkey::normalized`, which every press goes through.
             # The exact bug the whole match-the-full-chord table exists to
             # prevent, reintroduced on the right-hand side.
+            'desktop_navigation_stops_at_both_ends',
             'snapping_and_switching_desktops_are_different_shortcuts',
+            'switching_desktop_names_no_window',
         ],
     ),
     (
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: the same loosening on the left-hand side: Ctrl+Super+Left snaps instead of switching desktop",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),\n',
-             '            (false, _, false, true, Key::Left) => Some(Self::SnapLeft),\n'),
+            ('            Key::LeftSuper | Key::RightSuper => super_key = false,\n            _ => {}\n',
+             '            Key::LeftSuper | Key::RightSuper => super_key = false,\n            Key::Left => ctrl = false,\n            _ => {}\n'),
         ],
         ["desktop"],
         [
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # A binding is an exact chord in a registry now, so a pattern cannot wildcard a modifier; the loosening lives in `Hotkey::normalized`, which every press goes through.
             # Predicted escape, and the interesting one: the table's own
             # regression test presses Ctrl+Super+*Right* and never
             # Ctrl+Super+Left. `desktop_navigation_stops_at_both_ends` does press
@@ -19968,44 +20363,53 @@ DEFECTS = [
             # nothing', and a snap request on a shell with no focused window is
             # also nothing. The two answers coincide at exactly the one point
             # the suite looks at.
+            'switching_desktop_names_no_window',
         ],
     ),
     (
         "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: Ctrl+Super+Left goes to the next desktop, so both chords go the same way",
         DESK,
         [
-            ('            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),\n',
-             '            (false, true, false, true, Key::Left) => Some(Self::NextDesktop),\n'),
+            ('            HotkeyAction::PreviousDesktop => {\n                HotkeyOutcome::ask(self.previous_desktop().and_then(|d| self.switch_desktop(d)))\n',
+             '            HotkeyAction::PreviousDesktop => {\n                HotkeyOutcome::ask(self.next_desktop().and_then(|d| self.switch_desktop(d)))\n'),
         ],
         ["desktop"],
         [
-            'switching_desktop_names_no_window',
+            # Re-derived 2026-09-27 against the code as it now reads.
+            # Super+D, Super+arrows and Ctrl+Super+arrows are no longer bound by default (1416), so the defect moves to what the action does once bound, which is what the tests press.
             'desktop_navigation_stops_at_both_ends',
+            'switching_desktop_names_no_window',
         ],
     ),
     (
         "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: Escape is bound to nothing, so a popup can be opened by a click but never closed by a key",
-        DESK,
+        HOTKEYS,
         [
-            ('            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),\n',
-             '            (false, false, false, false, Key::Escape) => None,\n'),
+            ('        // dialog on the desktop.\n        (Hotkey::bare(Key::Escape), HotkeyAction::DismissPopup),\n',
+             '        // dialog on the desktop.\n'),
         ],
         ["desktop"],
         [
-            'closing_the_last_menu_takes_the_surface_away_again',
-            'the_chooser_closes_the_ways_a_popup_closes',
+            # Re-derived 2026-09-27 against the code as it now reads. The binding lives in the
+            # shortcut table's defaults now (`hotkeys.rs`).
+            'a_deleted_shortcut_is_still_deleted_in_a_fresh_shell',
             'escape_closes_a_popup_and_is_otherwise_left_alone',
+            'escape_is_claimed_while_a_menu_is_open_and_given_back_after',
+            'escape_is_not_held_permanently',
+            'the_chooser_closes_the_ways_a_popup_closes',
+            'the_defaults_are_the_operators_set_and_nothing_else',
         ],
     ),
     (
         "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: Escape is claimed unconditionally, so no window can ever close a dialog with it",
         DESK,
         [
-            ('            DesktopAction::DismissPopup => {\n                if self.dismiss_popups() {\n                    HotkeyOutcome::consumed()\n                } else {\n                    HotkeyOutcome::ignored()\n                }\n            }\n',
-             '            DesktopAction::DismissPopup => {\n                self.dismiss_popups();\n                HotkeyOutcome::consumed()\n            }\n'),
+            ('            HotkeyAction::DismissPopup => {\n                if self.dismiss_popups() {\n                    HotkeyOutcome::consumed()\n                } else {\n                    HotkeyOutcome::ignored()\n                }\n            }\n',
+             '            HotkeyAction::DismissPopup => {\n                self.dismiss_popups();\n                HotkeyOutcome::consumed()\n            }\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. `DesktopAction` is `HotkeyAction` now.
             'escape_closes_a_popup_and_is_otherwise_left_alone',
         ],
     ),
@@ -20013,8 +20417,8 @@ DEFECTS = [
         "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: Super+D asks an already-minimised window to minimise again, which the user must then undo twice",
         DESK,
         [
-            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
-             '                    .filter(|w| w.mapped && w.desktop == self.current_desktop)\n'),
+            ('            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '            .filter(|w| w.mapped && w.desktop == self.current_desktop)\n'),
         ],
         ["desktop"],
         [
@@ -20032,8 +20436,8 @@ DEFECTS = [
         "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: Super+D minimises every window on every desktop, not just the one on screen",
         DESK,
         [
-            ('                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
-             '                    .filter(|w| w.on_glass())\n'),
+            ('            .filter(|w| w.on_glass() && w.desktop == self.current_desktop)\n',
+             '            .filter(|w| w.on_glass())\n'),
         ],
         ["desktop"],
         [
@@ -20068,14 +20472,16 @@ DEFECTS = [
         "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: the taskbar lists every desktop's windows at once",
         DESK,
         [
-            ('            .filter(|w| w.mapped && w.desktop == self.current_desktop)\n',
-             '            .filter(|w| w.mapped)\n'),
+            ('            .filter(|w| w.mapped && w.desktop == self.current_desktop && also(w))\n',
+             '            .filter(|w| w.mapped && also(w))\n'),
         ],
         ["desktop"],
         [
+            # Re-derived 2026-09-27 against the code as it now reads. The bar, the switcher and the overview share
+            # `listed_windows`.
+            'a_window_is_only_visible_on_its_own_desktop',
             'a_window_list_is_what_says_which_desktop_a_window_is_on',
             'switching_desktop_names_no_window',
-            'a_window_is_only_visible_on_its_own_desktop',
         ],
     ),
     (
@@ -20138,6 +20544,20 @@ def run_tests(pkg):
                 continue
             failed.add(s.rsplit("::", 1)[-1])
     return failed, out
+
+
+def snapshot(files, missing_ok=False):
+    """`{path: bytes}` for `files`, as they are on disk now.
+
+    `missing_ok` reads a file that is not there as empty. Only `--check` asks
+    for that: it writes nothing, so there is nothing to restore, and a defect
+    whose file has gone is exactly what it reports. A run that patches files
+    must not, because it would "restore" the missing file as an empty one.
+    """
+    return {
+        f: (ROOT / f).read_bytes() if (ROOT / f).exists() or not missing_ok else b""
+        for f in files
+    }
 
 
 def source(snap, path):
@@ -20513,15 +20933,21 @@ def main():
         sys.exit(coverage())
 
     files = sorted({d[1] for d in DEFECTS})
-    snap = {f: (ROOT / f).read_bytes() for f in files}
+    # Before the banner, and tolerant of a missing file, for the same reason:
+    # `--check` writes nothing, and a file a defect names having been deleted
+    # or moved is precisely the rot it exists to report. Reading such a file
+    # as empty reports every defect aimed at it as PATTERN NOT FOUND, by name;
+    # the strict read below would die on the first one instead, with a
+    # traceback that names a file and no defect.
+    if sys.argv[1:2] == ["--check"]:
+        sys.exit(check(snapshot(files, missing_ok=True)))
+
+    snap = snapshot(files)
     digest = {f: hashlib.sha256(b).hexdigest() for f, b in snap.items()}
     print("snapshot:")
     for f in files:
         print(f"  {digest[f][:16]}  {f}")
     print()
-
-    if sys.argv[1:2] == ["--check"]:
-        sys.exit(check(snap))
 
     if sys.argv[1:2] == ["--compile"]:
         # Its own `finally`: `compile_check` writes to the tree, so a Ctrl-C

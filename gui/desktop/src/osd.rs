@@ -821,21 +821,24 @@ impl OsdManager {
         let track_w = osd_w - padding * 2.0;
         let track_h = 6.0;
 
-        crate::slider::Slider {
-            x: track_x,
-            y: track_y,
-            width: track_w,
-            height: track_h,
-            frac: level.min(100) as f32 / 100.0,
-            thumb: 10.0,
-            track: p.surface0,
-            fill: accent,
+        // A slider's shapes and not a slider: the overlay shows a level and
+        // takes no input, so it draws the toolkit's bar rather than a control.
+        guitk::slider::draw_bar(
+            commands,
             p,
-            // The overlay fades in and out as one thing, so the slider takes
-            // the same opacity as the label above it.
-            alpha: text_alpha,
-        }
-        .draw(commands);
+            &guitk::slider::Placement::horizontal(
+                guitk::frame::Rect::new(track_x, track_y, track_w, track_h),
+                10.0,
+            ),
+            f32::from(level.min(100)) / 100.0,
+            guitk::slider::Look {
+                track: p.surface0,
+                fill: accent,
+                // The overlay fades in and out as one thing, so the slider
+                // takes the same opacity as the label above it.
+                alpha: text_alpha,
+            },
+        );
     }
 
     /// Render a media track OSD with title/artist/album.
@@ -1102,11 +1105,9 @@ impl OsdSettingsUI {
         } else {
             p.subtext0
         };
-        commands.extend(crate::switch::switch(
-            x + padding,
-            cy,
-            40.0,
-            20.0,
+        commands.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(x + padding, cy, 40.0, 20.0),
             self.config.enabled,
             enable_color,
         ));

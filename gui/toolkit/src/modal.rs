@@ -62,7 +62,6 @@ const CONTENT_PADDING: f32 = 24.0;
 const ICON_SIZE: f32 = 40.0;
 const ICON_PADDING: f32 = 16.0;
 const INPUT_HEIGHT: f32 = 36.0;
-const INPUT_CORNER_RADIUS: f32 = 6.0;
 const PROGRESS_BAR_HEIGHT: f32 = 8.0;
 const PROGRESS_BAR_RADIUS: f32 = 4.0;
 const FONT_SIZE: f32 = 14.0;
@@ -228,10 +227,11 @@ impl DialogButton {
     /// function, via [`DialogLayout::button_rects`]. They used to be two copies
     /// of the constant, which was harmless only while every button was exactly
     /// as wide as every other.
-    fn width(&self) -> f32 {
-        // The toolkit button's own measure, so the rectangle laid out is the
-        // one the label was measured for when it is drawn.
-        crate::button::width(&self.label).max(BUTTON_MIN_WIDTH)
+    fn width(&self, style: &crate::widget_style::ButtonStyle) -> f32 {
+        // The toolkit button's own measure, in the style it is drawn in, so
+        // the rectangle laid out is the one the label was measured for when
+        // it is drawn.
+        crate::button::width(style, &self.label).max(BUTTON_MIN_WIDTH)
     }
 }
 
@@ -617,6 +617,15 @@ pub struct AlertDialog {
     /// [`with_focus_ring_width`](Self::with_focus_ring_width), exactly as
     /// `InputDialog` takes a caret width.
     focus_ring_width: f32,
+    /// The shape of the buttons, as the dialog was last drawn: the palette's
+    /// (`widget_style.button`), adopted at the start of each `render`.
+    ///
+    /// Kept because a button's padding decides its width, and so where every
+    /// button after the first begins and how wide the dialog must be. The
+    /// layout is measured with the style the buttons are drawn in, and the
+    /// placement `render` records from it is what a click is tested against
+    /// -- so a click lands on the button drawn under it, in any theme.
+    button_style: crate::widget_style::ButtonStyle,
 }
 
 impl AlertDialog {
@@ -918,6 +927,9 @@ impl AlertDialog {
         // Render overlay scrim.
         self.overlay.render(parent_width, parent_height, tree);
 
+        // The buttons' shape, before anything is measured: their padding is
+        // part of the layout the click is tested against.
+        self.button_style = palette.widget_style.button;
         let layout = self.compute_layout(parent_width, parent_height);
         self.overlay
             .set_content_rect(layout.x, layout.y, layout.width, layout.height);
@@ -1098,7 +1110,7 @@ impl AlertDialog {
         self.buttons
             .buttons
             .iter()
-            .map(DialogButton::width)
+            .map(|button| button.width(&self.button_style))
             .sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING
     }
@@ -1208,7 +1220,7 @@ impl AlertDialog {
             .buttons
             .buttons
             .iter()
-            .map(DialogButton::width)
+            .map(|button| button.width(&self.button_style))
             .collect();
         let total_btn_width: f32 = widths.iter().sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
@@ -1269,6 +1281,7 @@ impl AlertDialog {
         let focused_button = buttons.default_index();
         Self {
             focus_ring_width: crate::style::FOCUS_RING_WIDTH,
+            button_style: crate::widget_style::WidgetStyle::AERO.button,
             title: title.to_string(),
             message: message.to_string(),
             detail: None,
@@ -1322,6 +1335,13 @@ pub struct InputDialog {
     /// `caret_width_scale` sets it with
     /// [`with_caret_width`](Self::with_caret_width). 839.
     caret_width: f32,
+    /// How wide to draw the mark that says what has the keyboard -- the
+    /// field's, and each button's ring -- in pixels.
+    ///
+    /// As [`AlertDialog`]'s: the toolkit's own width until a caller that has
+    /// read the user's `focus_ring_scale` sets it with
+    /// [`with_focus_ring_width`](Self::with_focus_ring_width).
+    focus_ring_width: f32,
     // No `buttons: ButtonSet` here, deliberately. There was one, initialised to
     // `ok_cancel()` and never read: `render` draws the strings "OK" and
     // "Cancel" outright, and `InputPlacement` names its two hit rectangles
@@ -1348,7 +1368,6 @@ enum InputFocus {
 }
 
 impl InputDialog {
-    /// Create a new input dialog.
     /// Draw this dialog's caret at `width` pixels.
     ///
     /// For a caller that has read `caret_width_scale` out of the appearance
@@ -1360,6 +1379,17 @@ impl InputDialog {
         self
     }
 
+    /// Draw this dialog's focus marks at `width` pixels: the field's and the
+    /// buttons'. For a caller that has read `focus_ring_scale` --
+    /// `AppearanceSettings::focus_ring_width` does the multiplication.
+    #[must_use]
+    pub fn with_focus_ring_width(mut self, width: f32) -> Self {
+        self.focus_ring_width = width;
+        self
+    }
+
+    /// Create a new input dialog: `title` over `message`, and a field showing
+    /// `placeholder` until something is typed.
     pub fn prompt(title: &str, message: &str, placeholder: &str) -> Self {
         let mut overlay = ModalOverlay::new();
         overlay.dismiss_on_escape = true;
@@ -1376,6 +1406,7 @@ impl InputDialog {
             validation_error: None,
             has_validator: false,
             caret_width: crate::textedit::CARET_WIDTH,
+            focus_ring_width: crate::style::FOCUS_RING_WIDTH,
             focused_element: InputFocus::TextField,
             result: None,
             overlay,
@@ -1975,32 +2006,22 @@ impl InputDialog {
         // Input field.
         let input_width = width - CONTENT_PADDING * 2.0;
         let field_rect = (x + CONTENT_PADDING, content_y, input_width, INPUT_HEIGHT);
-        let input_border_color = if self.focused_element == InputFocus::TextField {
-            palette.blue
-        } else if self.validation_error.is_some() {
-            palette.red
-        } else {
-            palette.surface2
-        };
-
-        tree.push(RenderCommand::FillRect {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            width: input_width,
-            height: INPUT_HEIGHT,
-            color: palette.surface0,
-            corner_radii: CornerRadii::all(INPUT_CORNER_RADIUS),
-        });
-
-        tree.push(RenderCommand::StrokeRect {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            width: input_width,
-            height: INPUT_HEIGHT,
-            color: input_border_color,
-            line_width: 1.5,
-            corner_radii: CornerRadii::all(INPUT_CORNER_RADIUS),
-        });
+        // The box every field is drawn in (`crate::field`). It used to be a
+        // box of its own whose edge turned *blue* -- not the accent -- when
+        // focused, and whose red "this is wrong" edge was hidden whenever the
+        // field had the keyboard: exactly while someone was fixing it.
+        crate::field::draw(
+            tree,
+            palette,
+            crate::frame::Rect::new(field_rect.0, field_rect.1, field_rect.2, field_rect.3),
+            crate::field::State {
+                hovered: false,
+                focused: self.focused_element == InputFocus::TextField,
+                disabled: false,
+                invalid: self.validation_error.is_some(),
+            },
+            self.focus_ring_width,
+        );
 
         // Input text or placeholder.
         //
@@ -2117,7 +2138,7 @@ impl InputDialog {
                     ..crate::button::State::default()
                 },
                 palette.base,
-                crate::style::FOCUS_RING_WIDTH,
+                self.focus_ring_width,
             );
         }
 
@@ -3174,24 +3195,83 @@ mod tests {
 
     #[test]
     fn a_button_is_at_least_as_wide_as_its_own_label() {
+        let aero = crate::widget_style::WidgetStyle::AERO.button;
         // The four built-in labels fit the minimum; a verb need not.
-        assert!((DialogButton::ok().width() - BUTTON_MIN_WIDTH).abs() < 0.01);
+        assert!((DialogButton::ok().width(&aero) - BUTTON_MIN_WIDTH).abs() < 0.01);
         let long = DialogButton::destructive("Overwrite Every Existing File");
         assert!(
-            long.width() > BUTTON_MIN_WIDTH,
+            long.width(&aero) > BUTTON_MIN_WIDTH,
             "a long label must widen its button, got {}",
-            long.width()
+            long.width(&aero)
         );
         // Measured as the toolkit's button draws it (`crate::button`), which
         // is what the rectangle is laid out for.
         assert!(
-            long.width()
+            long.width(&aero)
                 >= crate::text::measure(
                     long.label(),
                     crate::button::FONT_SIZE,
                     FontWeightHint::Bold
                 ) + crate::button::PADDING_H * 2.0
         );
+    }
+
+    /// **A theme's padding widens the buttons it is drawn with, and the click
+    /// follows**: the row is laid out with the style the dialog is drawn in,
+    /// so a widened button pushes the ones after it along -- and a press on
+    /// the centre of each button as *drawn* is answered by that button, in the
+    /// padded theme as in the built-in one.
+    #[test]
+    fn a_themes_padding_moves_the_buttons_and_the_clicks_with_them() {
+        let mut padded = Palette::for_mode(false);
+        padded.widget_style.button.padding = 24;
+        let row = || {
+            AlertDialog::confirm("T", "M").with_buttons(ButtonSet::custom(vec![
+                DialogButton::destructive("Overwrite Every Existing File"),
+                DialogButton::cancel(),
+            ]))
+        };
+        let faces = |palette: &Palette| -> Vec<(f32, f32, f32, f32)> {
+            let mut dialog = row();
+            dialog.show();
+            let mut tree = RenderTree::new();
+            dialog.render(palette, 1600.0, 900.0, &mut tree);
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } if (*height - BUTTON_HEIGHT).abs() < 0.01 => Some((*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let before = faces(&Palette::for_mode(false));
+        let after = faces(&padded);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(
+            after[0].2 > before[0].2,
+            "the long button did not widen: {} then {}",
+            before[0].2,
+            after[0].2
+        );
+        for (i, expect) in [DialogResult::Ok, DialogResult::Cancel].iter().enumerate() {
+            let (x, y, w, h) = after[i];
+            let mut d = row();
+            d.show();
+            let mut t = RenderTree::new();
+            d.render(&padded, 1600.0, 900.0, &mut t);
+            d.handle_event(&mouse_at(
+                x + w / 2.0,
+                y + h / 2.0,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            assert_eq!(d.result(), Some(expect), "button {i} drawn at {x},{y}");
+        }
     }
 
     #[test]
@@ -4400,6 +4480,49 @@ mod tests {
     ///   than a character count does. Masking exists to stop exactly that.
     ///
     /// **A failure here counting more marks than characters is that bug back.**
+    /// **The input dialog's field is the toolkit's field** (`crate::field`):
+    /// its well, the keyboard's mark while it has the keyboard, and a red edge
+    /// while what is in it is wrong -- *even while it has the keyboard*, which
+    /// is when someone is fixing it. The field's own box used to turn blue
+    /// when focused and hide the red. And the focus width is the caller's.
+    #[test]
+    fn the_input_field_shows_an_error_even_while_it_is_being_fixed() {
+        let palette = Palette::for_mode(false);
+        let edges = |dialog: &mut InputDialog| -> Vec<(Color, f32)> {
+            let mut tree = RenderTree::new();
+            dialog.render(&palette, 800.0, 600.0, &mut tree);
+            let field = dialog.placement.as_ref().expect("drawn").field;
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        color,
+                        line_width,
+                        ..
+                    } if *x <= field.0 && *y <= field.1 && *x >= field.0 - 8.0 => {
+                        Some((*color, *line_width))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut dialog = InputDialog::prompt("Rename", "New name:", "")
+            .with_validation()
+            .with_focus_ring_width(3.0);
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+        // Focused and fine: the accent's edge and its halo, three wide.
+        let fine = edges(&mut dialog);
+        assert_eq!(fine[0].0, palette.accent, "{fine:?}");
+        assert!(fine.iter().any(|(_, w)| *w == 3.0), "{fine:?}");
+
+        dialog.set_validation_error(Some("That name is taken"));
+        let wrong = edges(&mut dialog);
+        assert_eq!(wrong[0].0, palette.red, "the error is hidden: {wrong:?}");
+    }
+
     #[test]
     fn the_mask_has_one_mark_per_character_not_per_byte() {
         let palette = Palette::for_mode(false);

@@ -1,9 +1,9 @@
 # C -> A -- from the operator's answers: the kernel's program list goes (later), a hint on the first screens, and a start for repair the desktop can see
 
 **From:** Lane C. **To:** Lane A (`kernel/**`, the boot path).
-**Filed:** 2026-09-27. **Status:** OPEN -- all decided by the operator. The
-first waits on lane C; lane C's halves of the second and third are in
-(2026-09-27, `gui/desktop/src/autologin.rs`), and the rest is yours.
+**Filed:** 2026-09-27. **Status:** OPEN -- all decided by the operator, and
+lane C's halves of all three are in (2026-09-27: `gui/programs`,
+`gui/desktop/src/autologin.rs`); the rest is yours.
 
 ## 1. `fs::appregistry` goes -- after its contents have a new home (C-Q20, §1425)
 
@@ -13,12 +13,25 @@ registry goes. **But not first:** "before deleting anything else you should
 collect all of the built-in apps, categories, MIME types, apps, file types,
 per-role defaults, etc. and make sure they survive in the new place."
 
-So the order is lane C's inventory of all four lists, then the library, then the
-readers moving to it -- and only then removing `fs::appregistry`, and deciding
-what `fs::startmenu` (eleven call sites into it) and `/proc/startmenu` become.
-**Nothing to do yet:** lane C will say when the library holds everything the
-kernel's registry holds. This entry is so it is on your list, and so the
-registry is not changed in the meantime without the inventory knowing.
+**Update 2026-09-27: the inventory and the library are done.** There were
+fourteen lists, not four -- nine of them yours: `fs::appregistry`,
+`fs::defaultapps`, `fs::associations`, `fs::mime`, `fs::filetype`,
+`fs::pinnedapps`, `fs::startmenu` (its favourites and quick links),
+`fs::applaunch`, and the empty `fs::openwith` and `fs::appstore`.
+`gui/programs/INVENTORY.md` lists every item each held and where it now lives
+-- the programs and defaults in `gui/programs`, the file types and content
+signatures in `guitk::filetypes`, the default pins in the shell's first start --
+or why it was not carried (nine invented program paths, priorities between a
+program and one that does not exist, and so on). `gui/programs/tests/inventory.rs`
+holds that to the code.
+
+**So they can go, as far as their contents are concerned, whenever suits you.**
+Nothing outside the kernel reads any of them -- the shell, File Associations and
+Settings each kept their own list, which is what the decision was about -- so
+there is no reader to move first. What is yours to decide is the kernel shell's
+commands over them (`appreg` and its neighbours) and what `/proc/startmenu`
+becomes; lane E's programs moving onto the library
+(`requests/c-e-read-the-one-list-of-programs.md`) does not wait on you either.
 
 ## 2. "Hold Shift to choose an account", shown from the first screen (C-Q22, §1427)
 

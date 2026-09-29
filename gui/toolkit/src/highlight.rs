@@ -325,6 +325,31 @@ pub trait Highlighter: fmt::Debug {
     /// text changed since may be uncoloured or coloured as it was before, but
     /// never coloured at the wrong offsets.
     fn highlights(&self, text: &TextBuffer, range: Range<usize>) -> Vec<HighlightSpan>;
+
+    /// The bracket by `offset` in `text` -- the character at it, else the one
+    /// before it -- and its partner, as the language reads them. A
+    /// highlighter that knows the text's structure pairs brackets by it, so
+    /// a bracket in a string or a comment is none, and one in code skips
+    /// over those. The default knows nothing: the view counts brackets
+    /// itself.
+    fn brackets(&self, _text: &TextBuffer, _offset: usize) -> Brackets {
+        Brackets::Unknown
+    }
+}
+
+/// What a highlighter says of the bracket by a caret
+/// ([`Highlighter::brackets`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Brackets {
+    /// The bracket at the first offset pairs with the one at the second.
+    Pair(usize, usize),
+    /// No pair: what is by the caret is no bracket in the language -- it is
+    /// in a string, a comment -- or not a bracket at all.
+    Unpaired,
+    /// The highlighter cannot say -- its parse is behind the text, or the
+    /// language's structure does not show the pair -- and brackets are
+    /// counted instead.
+    Unknown,
 }
 
 #[cfg(test)]

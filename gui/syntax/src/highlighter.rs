@@ -97,7 +97,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use guitk::highlight::{Highlight, HighlightSpan, Highlighter};
+use guitk::highlight::{Brackets, Highlight, HighlightSpan, Highlighter};
 use guitk::textbuffer::{Splice, TextBuffer};
 use tree_sitter::{
     InputEdit, Node, ParseOptions, ParseState, Parser, Point, QueryCursor, StreamingIterator,
@@ -1058,6 +1058,41 @@ impl Highlighter for SyntaxHighlighter {
         self.stale || self.pass.is_some() || self.injected.try_borrow().is_ok_and(|c| c.pending())
     }
 
+    /// Paired by the tree: a bracket is a token of its own, and its partner
+    /// the matching token among its node's children -- so a bracket in a
+    /// string or a comment, part of a token that is not one, is none, and
+    /// one in code pairs over those. A language injected there pairs its
+    /// own. Where the parse is behind the text, or the partner is not where
+    /// the tree would have it (broken code), it cannot say.
+    fn brackets(&self, text: &TextBuffer, offset: usize) -> Brackets {
+        let Some(tree) = self.tree.as_ref() else {
+            return Brackets::Unknown;
+        };
+        if self.is_stale() {
+            return Brackets::Unknown;
+        }
+        let candidates = [
+            text.char_at(offset).map(|c| (offset, c)),
+            text.chars_rev(offset).next(),
+        ];
+        let mut unknown = false;
+        for (at, c) in candidates.into_iter().flatten() {
+            if partner_of(c).is_none() {
+                continue;
+            }
+            match self.bracket_in(self.compiled, tree, text, (at, c), 0) {
+                pair @ Brackets::Pair(..) => return pair,
+                Brackets::Unknown => unknown = true,
+                Brackets::Unpaired => {}
+            }
+        }
+        if unknown {
+            Brackets::Unknown
+        } else {
+            Brackets::Unpaired
+        }
+    }
+
     fn highlights(&self, text: &TextBuffer, range: Range<usize>) -> Vec<HighlightSpan> {
         let Some(tree) = self.tree.as_ref() else {
             return Vec::new();
@@ -1262,6 +1297,95 @@ impl SyntaxHighlighter {
         }
     }
 
+    /// The bracket `c` at `at` as `tree`, in `compiled`'s language, reads
+    /// it -- or as the stretch injected over it does, `depth` injections
+    /// down, when that stretch has been parsed.
+    fn bracket_in(
+        &self,
+        compiled: &'static Compiled,
+        tree: &Tree,
+        text: &TextBuffer,
+        (at, c): (usize, char),
+        depth: usize,
+    ) -> Brackets {
+        let end = at.saturating_add(c.len_utf8());
+        if let Some(injections) = compiled
+            .injections
+            .as_ref()
+            .filter(|_| depth < MAX_INJECTION_DEPTH)
+        {
+            for (language, ranges) in injections_in(injections, tree, text, at..end) {
+                if !ranges
+                    .iter()
+                    .any(|r| r.start_byte <= at && end <= r.end_byte)
+                {
+                    continue;
+                }
+                let key: StretchKey = (
+                    language.index,
+                    ranges.iter().map(|r| (r.start_byte, r.end_byte)).collect(),
+                );
+                let found = self.injected.try_borrow().ok().and_then(|cache| {
+                    if cache.revision != text.revision() {
+                        return None;
+                    }
+                    match cache.stretches.get(&key) {
+                        Some(Stretch::Done { tree, compiled, .. }) => {
+                            Some((tree.clone(), *compiled))
+                        }
+                        _ => None,
+                    }
+                });
+                return match found {
+                    Some((sub, inner)) => {
+                        self.bracket_in(inner, &sub, text, (at, c), depth.saturating_add(1))
+                    }
+                    None => Brackets::Unknown,
+                };
+            }
+        }
+        let Some(node) = tree.root_node().descendant_for_byte_range(at, end) else {
+            return Brackets::Unknown;
+        };
+        // Part of a token that is not a bracket -- a string's text, a
+        // comment, a character -- it is none.
+        if node.is_named() || node.child_count() > 0 {
+            return Brackets::Unpaired;
+        }
+        let Some(partner) = partner_of(c) else {
+            return Brackets::Unpaired;
+        };
+        let token = |n: Node<'_>| -> Option<String> {
+            (!n.is_named() && n.child_count() == 0)
+                .then(|| text.slice(n.byte_range()).ok())
+                .flatten()
+        };
+        // The partner is the matching token among the same node's children:
+        // what is between them sits in children of its own.
+        let opens = matches!(c, '(' | '[' | '{');
+        let mut sibling = if opens {
+            node.next_sibling()
+        } else {
+            node.prev_sibling()
+        };
+        while let Some(n) = sibling {
+            if let Some(t) = token(n) {
+                if opens && t.starts_with(partner) {
+                    return Brackets::Pair(at, n.start_byte());
+                }
+                if !opens && t.ends_with(partner) {
+                    return Brackets::Pair(at, n.end_byte().saturating_sub(partner.len_utf8()));
+                }
+            }
+            sibling = if opens {
+                n.next_sibling()
+            } else {
+                n.prev_sibling()
+            };
+        }
+        Brackets::Unknown
+    }
+
     /// Carry on the injected stretches drawing began and did not finish --
     /// their parses and their locals passes -- each until it is done or
     /// `deadline` passes: whether any is left.
@@ -1405,6 +1529,19 @@ fn injections_in(
         out.push((language, ranges));
     }
     out
+}
+
+/// The bracket that pairs with `c`, if `c` is one.
+fn partner_of(c: char) -> Option<char> {
+    match c {
+        '(' => Some(')'),
+        ')' => Some('('),
+        '[' => Some(']'),
+        ']' => Some('['),
+        '{' => Some('}'),
+        '}' => Some('{'),
+        _ => None,
+    }
 }
 
 /// A pattern's `(#offset! @injection.content start-row start-column
@@ -3368,5 +3505,91 @@ mod tests {
         assert_eq!(at("EOF\nRUN cat", 0), Some(Highlight::Keyword));
         assert_eq!(at("if data", 0), Some(Highlight::String));
         assert_eq!(at("if file", 0), Some(Highlight::String));
+    }
+
+    /// A highlighter of `text` in `language`, settled, with the text.
+    fn settled_on(text: &str, language: &str) -> (SyntaxHighlighter, TextBuffer) {
+        let buffer = TextBuffer::from_text(text);
+        let mut h = Language::named(language).unwrap().highlighter().unwrap();
+        h.reset(&buffer);
+        settled(&mut h, &buffer);
+        (h, buffer)
+    }
+
+    /// **A bracket is paired as the language reads it**: the partner of one
+    /// in code skips over a bracket in a string and one in a comment, which
+    /// are none themselves -- from either side of the caret.
+    #[test]
+    fn a_bracket_is_paired_as_the_language_reads_it() {
+        let text = "fn f() { g(\"(\", x) // )\n}\n";
+        let (h, buffer) = settled_on(text, "rust");
+        let open = text.find("g(").unwrap() + 1;
+        let close = text.find("x)").unwrap() + 1;
+        assert_eq!(h.brackets(&buffer, open), Brackets::Pair(open, close));
+        assert_eq!(h.brackets(&buffer, close), Brackets::Pair(close, open));
+        assert_eq!(
+            h.brackets(&buffer, close + 1),
+            Brackets::Pair(close, open),
+            "just after the closer"
+        );
+        let in_string = text.find("\"(\"").unwrap() + 1;
+        assert_eq!(h.brackets(&buffer, in_string), Brackets::Unpaired);
+        let in_comment = text.find("// )").unwrap() + 3;
+        assert_eq!(h.brackets(&buffer, in_comment), Brackets::Unpaired);
+        let body = text.find('{').unwrap();
+        let body_end = text.rfind('}').unwrap();
+        assert_eq!(h.brackets(&buffer, body), Brackets::Pair(body, body_end));
+        // Not by a bracket at all.
+        assert_eq!(h.brackets(&buffer, 0), Brackets::Unpaired);
+    }
+
+    /// **A language injected pairs its own brackets**: a script's in an
+    /// HTML page, whose own tree holds the script as one run of text; a
+    /// Markdown code fence's in its language; a template's `${` with its
+    /// `}`.
+    #[test]
+    fn an_injected_language_pairs_its_own_brackets() {
+        let text = "<p>(</p><script>f(\"(\", x);</script>\n";
+        let (h, buffer) = settled_on(text, "html");
+        let open = text.find("f(").unwrap() + 1;
+        let close = text.find("x)").unwrap() + 1;
+        assert_eq!(h.brackets(&buffer, open), Brackets::Pair(open, close));
+        let in_string = text.find("\"(\"").unwrap() + 1;
+        assert_eq!(h.brackets(&buffer, in_string), Brackets::Unpaired);
+        let text = "Some prose.\n\n```rust\nlet v = vec![1, (2)];\n```\n";
+        let (h, buffer) = settled_on(text, "markdown");
+        let open = text.find("![").unwrap() + 1;
+        let close = text.find("];").unwrap();
+        assert_eq!(h.brackets(&buffer, open), Brackets::Pair(open, close));
+        let text = "let s = `a${x}b`;\n";
+        let (h, buffer) = settled_on(text, "javascript");
+        let open = text.find("${").unwrap() + 1;
+        let close = text.find("}b").unwrap();
+        assert_eq!(h.brackets(&buffer, open), Brackets::Pair(open, close));
+        assert_eq!(h.brackets(&buffer, close), Brackets::Pair(close, open));
+    }
+
+    /// **A bracket whose partner is not where the tree would have it cannot
+    /// be paired by the tree**: broken code leaves it to counting.
+    #[test]
+    fn a_bracket_with_no_partner_in_the_tree_is_unknown() {
+        let (h, buffer) = settled_on("fn f() { g(x; }\n", "rust");
+        assert_eq!(h.brackets(&buffer, 10), Brackets::Unknown);
+    }
+
+    /// **Behind the text, it cannot say where a bracket's partner is**:
+    /// after an edit, until the parse catches up, the view counts brackets
+    /// itself.
+    #[test]
+    fn behind_the_text_a_brackets_partner_is_unknown() {
+        let (mut h, mut buffer) = settled_on("f(x)\n", "rust");
+        assert_eq!(h.brackets(&buffer, 1), Brackets::Pair(1, 3));
+        let _ = buffer.take_changes();
+        buffer.insert(0, "g").unwrap();
+        let changes = buffer.take_changes();
+        h.edited(&buffer, &changes.splices.unwrap());
+        assert_eq!(h.brackets(&buffer, 2), Brackets::Unknown);
+        while h.work(&buffer, Duration::from_secs(5)) {}
+        assert_eq!(h.brackets(&buffer, 2), Brackets::Pair(2, 4));
     }
 }

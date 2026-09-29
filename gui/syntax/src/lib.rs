@@ -147,7 +147,7 @@ const VISIBLE: usize = 15;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 16] = [
+static LANGUAGES: [Language; 18] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -359,6 +359,33 @@ static LANGUAGES: [Language; 16] = [
         locals: "",
         index: 15,
     },
+    // Hidden: injected by JavaScript and TypeScript into their comments.
+    Language {
+        name: "jsdoc",
+        extensions: &[],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::jsdoc::generated::language_fn,
+        highlights: grammars::jsdoc::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 16,
+    },
+    // Hidden: injected by JavaScript and TypeScript into their regular
+    // expressions.
+    Language {
+        name: "regex",
+        extensions: &[],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &[],
+        grammar: grammars::regex::generated::language_fn,
+        highlights: grammars::regex::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 17,
+    },
 ];
 
 /// A language's queries, compiled: the highlight query with what each of
@@ -490,7 +517,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 16] = [const { OnceLock::new() }; 16];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 18] = [const { OnceLock::new() }; 18];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -701,6 +728,8 @@ mod tests {
             ("JSON", None, 14, 25, 2),
             ("Markdown", Some("markdown"), 15, 207, 1),
             ("markdown_inline", Some("markdown_inline"), 15, 153, 0),
+            ("jsdoc", Some("jsdoc"), 15, 43, 1),
+            ("regex", Some("regex"), 15, 78, 0),
             ("Python", Some("python"), 15, 274, 32),
             ("Rust", Some("rust"), 15, 355, 31),
         ] {
@@ -731,7 +760,11 @@ mod tests {
     fn every_highlight_query_compiles() {
         for l in &LANGUAGES {
             let c = l.compiled().unwrap_or_else(|e| panic!("{e}"));
-            assert!(c.highlights.capture_names().len() > 3, "{}", l.name);
+            assert!(
+                c.paints.iter().any(|p| matches!(p, Paint::Kind(_))),
+                "{}: a highlight query that paints nothing",
+                l.name
+            );
             assert_eq!(c.paints.len(), c.highlights.capture_names().len());
             if let Some(i) = &c.injections {
                 assert!(

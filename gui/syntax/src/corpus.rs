@@ -417,6 +417,20 @@ fn markdown_inline_passes_its_corpus() {
     );
 }
 
+/// **The JSDoc grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**, its CRLF examples among them.
+#[test]
+fn jsdoc_passes_its_corpus() {
+    check("jsdoc", "jsdoc", 17, &[]);
+}
+
+/// **The regular-expression grammar parses its whole corpus as upstream's
+/// does.**
+#[test]
+fn regex_passes_its_corpus() {
+    check("regex", "regex", 37, &[]);
+}
+
 /// **The JSON grammar parses its whole corpus as upstream's does.**
 #[test]
 fn json_passes_its_corpus() {

@@ -2042,7 +2042,8 @@ live.
   in Markdown's inline grammar, a Rust macro's body, a JavaScript tagged
   template (`` html`...` ``, `` css`...` ``) in the language its tag names,
   an HTML page's scripts and styles, a C++ raw string in the language its
-  delimiter names (`R"sql(...)sql"`).
+  delimiter names (`R"sql(...)sql"`), JavaScript's and TypeScript's regular
+  expressions and JSDoc comments in grammars of their own.
   **Next:** the formats the tree holds most of that no grammar reads yet --
   Makefiles, Dockerfiles, INI, XML, diffs -- as the editor meets them.
 

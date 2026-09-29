@@ -2515,4 +2515,21 @@ mod tests {
         assert_eq!(at("10", 0), Some(Highlight::Number));
         assert_eq!(at("loop", 0), Some(Highlight::Keyword));
     }
+
+    /// **JavaScript's regular expressions and doc comments are coloured
+    /// inside**, by the grammars its injection query names: a regex's
+    /// escapes and operators; a JSDoc tag and its type over the comment,
+    /// the rest of which stays a comment.
+    #[test]
+    fn regexes_and_doc_comments_are_coloured_inside() {
+        let text = "/**\n * @param {string} name\n */\nfunction f(name) {\n  return /\\d+x?/g.test(name);\n}\n";
+        let spans = highlighted(text, "javascript");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("/**", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("@param", 0), Some(Highlight::Keyword));
+        assert_eq!(at("string", 0), Some(Highlight::Type));
+        assert_eq!(at("\\d", 0), Some(Highlight::Escape));
+        assert_eq!(at("+x", 0), Some(Highlight::Operator));
+        assert_eq!(at("?/", 0), Some(Highlight::Operator));
+    }
 }

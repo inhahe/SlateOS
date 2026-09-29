@@ -70,6 +70,12 @@ tree-sitter-javascript:
   texts:
     - tree-sitter-javascript-LICENSE
 
+tree-sitter-jsdoc:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-jsdoc-LICENSE
+
 tree-sitter-json:
   version: 0.24.8
   licence: MIT
@@ -87,6 +93,12 @@ tree-sitter-python:
   licence: MIT
   texts:
     - tree-sitter-python-LICENSE
+
+tree-sitter-regex:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-regex-LICENSE
 
 tree-sitter-rust:
   version: 0.24.2

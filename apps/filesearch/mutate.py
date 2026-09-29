@@ -217,6 +217,72 @@ MUTATIONS = [
         "        \"jpg\" | \"jpeg\" | \"png\" | \"gif\" | \"bmp\" | \"svg\" | \"ico\" | \"webp\" | \"tif\"",
         ["test_categorize_image"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search forgotten elsewhere stays saved here',
+        '            if search.is_bookmarked && !kept {',
+        '            if false && search.is_bookmarked && !kept {',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search saved elsewhere that this window ran is not saved here',
+        '                search.is_bookmarked = true;\n                search.name = Some(query);\n                continue;',
+        '                continue;',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a search saved elsewhere that this window ran is listed twice',
+        '                .find(|s| s.mode == mode && s.query == query)',
+        '                .find(|_| false)',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'an unreadable entry is kept once more at every reading',
+        '        self.unreadable_saved.clear();\n',
+        '',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.saved_search_items()\n    }',
+        '        false\n    }',
+        ['a_search_saved_in_another_window_reaches_this_one'],
+    ),
+    (
+        'the filters scroll is left past its end by a re-read',
+        '        self.keep_filters_in_reach();\n    }\n\n    /// Read the saved searches again',
+        '    }\n\n    /// Read the saved searches again',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        "the filters scroll is left past its end by forgetting a saved search",
+        '            search.name = None;\n        }\n        self.keep_filters_in_reach();\n',
+        '            search.name = None;\n        }\n',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        'the filters scroll is left past its end by a taller window',
+        '                self.keep_selection_visible();\n                self.keep_filters_in_reach();\n',
+        '                self.keep_selection_visible();\n',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
+    (
+        'keeping the filters scroll in reach keeps nothing',
+        '            .min(self.filters_scroll_limit(l.filters));',
+        '            .min(f32::MAX);',
+        ['the_filters_panel_is_not_left_scrolled_past_its_end'],
+    ),
 ]
 
 if __name__ == "__main__":

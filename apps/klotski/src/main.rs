@@ -73,7 +73,7 @@
 //!    could no longer be unwound to the start. It is a `VecDeque` now, and the
 //!    header shows the count so the loss is at least visible.
 
-use gamechrome::{Chrome, HistoryKey};
+use gamechrome::{Chrome, HistoryKey, help};
 use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -791,9 +791,36 @@ impl Layout {
 /// missing from it until 2026-09-21 -- the key had always worked and there is
 /// a `Prev` button for it, so it was reachable by mouse and invisible to the
 /// keyboard.
+///
+/// The first line ends with the key to the rest: a window short enough to
+/// show one line shows where the others are.
 const FOOTER_LINES: [&str; 2] = [
-    "Enter: select   Arrows: move   Z: undo   Ctrl+Y: redo",
+    "Enter: select   Arrows: move   Z: undo   F1: all keys",
     "N/Tab: next   P: prev   R: restart   1-7: puzzle",
+];
+
+/// Every key this game answers, on the list F1 raises.
+///
+/// The game had no list, and its footer had room for eleven keys and not the
+/// history's -- Ctrl+Shift+Z and Alt+Z, which the operator's answer to C-Q24
+/// added (`design-decisions.md` §1416), could be found only by pressing
+/// them. **Each row is a key this game answers**, checked by
+/// `every_advertised_key_does_something`.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Enter / Space", "Choose the next block"),
+    ("Arrows", "Slide the chosen block"),
+    ("Esc", "Put the block down"),
+    ("Z / Ctrl+Z", "Take back a slide"),
+    ("Ctrl+Y / Ctrl+Shift+Z", "Slide it again"),
+    (
+        "Alt+Z / Alt+Shift+Z",
+        "The board before / after this one, on any branch",
+    ),
+    ("N / Tab", "The next puzzle"),
+    ("P", "The puzzle before"),
+    ("R", "Start this puzzle again"),
+    ("1-7", "Puzzle 1 to 7"),
+    ("F1 / ?", "This list"),
 ];
 
 /// The buttons, in the order `Layout::button_rects` lays them out.
@@ -829,6 +856,9 @@ pub struct Klotski {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Whether the list of keys is up. While it is, it is the window's: a
+    /// block slid under it would be one the player cannot see.
+    show_help: bool,
 }
 
 impl Default for Klotski {
@@ -851,6 +881,7 @@ impl Klotski {
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            show_help: false,
         };
         app.load_puzzle(0);
         app
@@ -1228,6 +1259,17 @@ impl Klotski {
         self.draw_footer(&mut f, &l);
         if self.is_won() {
             self.draw_win(&mut f, &l);
+        }
+        // Last, over everything, because it is what the player asked to see.
+        if self.show_help {
+            guitk::shortcut::render_card(
+                &mut f,
+                &self.palette,
+                (l.window.w, l.window.h),
+                0.0,
+                SHORTCUTS,
+                help::CLOSES,
+            );
         }
         f
     }
@@ -1677,6 +1719,15 @@ impl Klotski {
     }
 
     pub fn handle_mouse(&mut self, ev: &MouseEvent) -> EventResult {
+        // A click anywhere puts the list of keys away, and does nothing
+        // else: the block under the card is one the player cannot see.
+        if self.show_help {
+            if let MouseEventKind::Press(_) = ev.kind {
+                self.show_help = false;
+                return EventResult::Consumed;
+            }
+            return EventResult::Ignored;
+        }
         if !matches!(ev.kind, MouseEventKind::Press(MouseButton::Left)) {
             return EventResult::Ignored;
         }
@@ -1708,6 +1759,14 @@ impl Klotski {
         if !ev.pressed {
             return EventResult::Ignored;
         }
+        // The list of keys is modal: what raised it, Escape or Enter put it
+        // away, and nothing reaches the board under it.
+        if self.show_help {
+            if help::closes(ev) {
+                self.show_help = false;
+            }
+            return EventResult::Consumed;
+        }
         // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,
         // Ctrl+Y or Ctrl+Shift+Z, Alt+Z and Alt+Shift+Z.
         if let Some(key) = HistoryKey::of(ev) {
@@ -1730,6 +1789,10 @@ impl Klotski {
         let m = ev.modifiers;
         if m.ctrl || m.alt || m.super_key {
             return EventResult::Ignored;
+        }
+        if help::raises(ev) {
+            self.show_help = true;
+            return EventResult::Consumed;
         }
         let plain = ev.modifiers == guitk::event::Modifiers::NONE;
         match ev.key {
@@ -2357,6 +2420,116 @@ mod tests {
         assert!(undone.move_block(id, Direction::Down));
         assert!(undone.undo());
         vec![Klotski::new(), moved, undone]
+    }
+
+    /// **Every key the list of keys advertises is one this game answers.**
+    ///
+    /// Read with `guitk::shortcut` and pressed, as the footer's test does.
+    /// The property is "some board answers this key": Ctrl+Z has nothing to
+    /// take back on a fresh board, and Ctrl+Y nothing to slide again until
+    /// something is taken back.
+    #[test]
+    fn every_advertised_key_does_something() {
+        let mut checked = 0usize;
+        for (label, what) in SHORTCUTS {
+            for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
+                let answered = list_states()
+                    .iter_mut()
+                    .any(|g| probe::key(g, &stroke) == EventResult::Consumed);
+                assert!(
+                    answered,
+                    "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
+                    stroke.key
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(checked >= 20, "only {checked} keystrokes were checked");
+    }
+
+    /// The footer's boards, and one with a slide still made, so Ctrl+Z has
+    /// one to take back.
+    fn list_states() -> Vec<Klotski> {
+        let mut states = help_states();
+        let mut slid = Klotski::new();
+        let id = slid.block_at(3, 1).expect("no block at (3,1)");
+        assert!(slid.move_block(id, Direction::Down));
+        states.push(slid);
+        states
+    }
+
+    /// Every string the window paints at `w` x `h`.
+    fn texts(g: &Klotski, w: f32, h: f32) -> Vec<String> {
+        g.frame(w, h)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The list of keys reaches the window**, every row of it, and goes
+    /// when it is put away; and the footer's first line says how to raise
+    /// it, so a window with room for one line still shows where the rest
+    /// are.
+    #[test]
+    fn the_list_of_keys_reaches_the_window() {
+        let mut g = game();
+        let (w, h) = g.size_drawn;
+        let drawn = |g: &Klotski| texts(g, w, h).join(" | ");
+        assert!(!drawn(&g).contains(help::CLOSES), "up before anybody asked");
+        assert!(
+            FOOTER_LINES[0].contains("F1"),
+            "the footer's first line does not say F1"
+        );
+        assert_eq!(
+            probe::key(&mut g, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        let shown = drawn(&g);
+        for (keys, what) in SHORTCUTS {
+            assert!(shown.contains(keys), "{keys:?} never reached the window");
+            assert!(shown.contains(what), "{what:?} never reached the window");
+        }
+        probe::key(&mut g, &probe::press(Key::Escape));
+        assert!(!drawn(&g).contains(help::CLOSES), "Escape did not close it");
+    }
+
+    /// **While the list of keys is up, the board takes nothing**: a block
+    /// slid under the card would be one the player cannot see. A click puts
+    /// the card away and does nothing else.
+    #[test]
+    fn the_list_of_keys_is_the_windows_while_it_is_up() {
+        let mut g = game();
+        let id = g.block_at(3, 1).expect("no block at (3,1)");
+        g.selected = Some(id);
+        probe::key(&mut g, &probe::press(Key::F1));
+        let before = (g.moves, g.current_puzzle, g.selected);
+        for key in [Key::Down, Key::Space, Key::N, Key::Z, Key::Num2] {
+            assert_eq!(
+                probe::key(&mut g, &probe::press(key)),
+                EventResult::Consumed
+            );
+            assert!(g.show_help, "{key:?} put the list away");
+        }
+        assert_eq!(
+            (g.moves, g.current_puzzle, g.selected),
+            before,
+            "a key reached the board"
+        );
+        probe::click_background(&mut g);
+        assert!(!g.show_help, "a click did not put the list away");
+        assert_eq!(
+            (g.moves, g.current_puzzle, g.selected),
+            before,
+            "the click did something"
+        );
+        probe::key(&mut g, &probe::press(Key::F1));
+        probe::key(&mut g, &probe::press(Key::Enter));
+        assert!(!g.show_help, "Enter did not put the list away");
+        assert_eq!(g.selected, before.2, "Enter chose a block as it closed");
     }
 
     fn game() -> Klotski {

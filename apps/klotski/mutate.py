@@ -917,6 +917,48 @@ MUTATIONS = [
         "                    Color::from_hex(0xF9E2AF),",
         ["the_window_is_drawn_in_the_users_colours"],
     ),
+    (
+        'F1 does not raise the list',
+        '        if help::raises(ev) {\n            self.show_help = true;',
+        '        if false {\n            self.show_help = true;',
+        ["the_list_of_keys_reaches_the_window", "every_advertised_key_does_something", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the list is not drawn',
+        '        if self.show_help {\n            guitk::shortcut::render_card(',
+        '        if false {\n            guitk::shortcut::render_card(',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
+    (
+        'nothing puts the list away',
+        '            if help::closes(ev) {\n                self.show_help = false;',
+        '            if false {\n                self.show_help = false;',
+        ["the_list_of_keys_reaches_the_window", "the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a key under the list reaches the board',
+        "                self.show_help = false;\n            }\n            return EventResult::Consumed;\n        }\n        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,",
+        "                self.show_help = false;\n            }\n        }\n        // The history's keys, read as every game reads them (C-Q24): Ctrl+Z,",
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click under the list plays',
+        '        if self.show_help {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        '        if false {\n            if let MouseEventKind::Press(_) = ev.kind {',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'a click leaves the list up',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n                self.show_help = false;',
+        '            if let MouseEventKind::Press(_) = ev.kind {\n',
+        ["the_list_of_keys_is_the_windows_while_it_is_up"],
+    ),
+    (
+        'the footer does not say how to raise the list',
+        '    "Enter: select   Arrows: move   Z: undo   F1: all keys",',
+        '    "Enter: select   Arrows: move   Z: undo   Ctrl+Y: redo",',
+        ["the_list_of_keys_reaches_the_window"],
+    ),
 ]
 
 if __name__ == "__main__":

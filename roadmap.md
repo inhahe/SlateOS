@@ -2034,8 +2034,9 @@ live.
   highlight tests), a name coloured as its declaration is where the
   grammar says where names are declared (§1440: a parameter wherever it is
   used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
-  shell script), C, C++, CSS, Go (§1442: its query read general-first),
-  HTML, Java, JavaScript (JSX included), JSON, Markdown (block and inline), Python,
+  shell script), C, C++, CSS, diffs (a change's lines in kinds of their
+  own), Go (§1442: its query read general-first), HTML, INI (desktop entries,
+  systemd units), Java, JavaScript (JSX included), JSON, Makefiles, Markdown (block and inline), Python,
   Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
   and YAML (every settings file), each passing its authors' test corpus. **Injections** (a language inside another): a Markdown code fence
   in the language it names, front matter as YAML or TOML, every paragraph
@@ -2044,8 +2045,9 @@ live.
   an HTML page's scripts and styles, a C++ raw string in the language its
   delimiter names (`R"sql(...)sql"`), JavaScript's and TypeScript's regular
   expressions and JSDoc comments in grammars of their own.
-  **Next:** the formats the tree holds most of that no grammar reads yet --
-  Makefiles, Dockerfiles, INI, XML, diffs -- as the editor meets them.
+  **Next:** a diff's hunks in their files' languages (its injection query
+  needs the language a file's name says, and `#offset!`); XML and
+  Dockerfiles.
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

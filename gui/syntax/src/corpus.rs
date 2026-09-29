@@ -272,8 +272,9 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
     (ran, failures)
 }
 
-/// Every `.txt` file under `dir`, its subdirectories' too -- as
-/// `tree-sitter test` reads a corpus: C++'s holds C's in `c/`.
+/// Every file under `dir`, its subdirectories' too, whatever its name ends
+/// in -- as `tree-sitter test` reads a corpus: C++'s holds C's in `c/`, and
+/// Make's files end in `.mk`.
 fn corpus_files(dir: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)
@@ -283,7 +284,7 @@ fn corpus_files(dir: &std::path::Path) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() {
             out.extend(corpus_files(&path));
-        } else if path.extension().is_some_and(|e| e == "txt") {
+        } else {
             out.push(path);
         }
     }
@@ -316,6 +317,27 @@ fn ada_passes_its_corpus() {
 #[test]
 fn bash_passes_its_corpus() {
     check("Bash", "bash", 100, &[]);
+}
+
+/// **The diff grammar parses its whole corpus as upstream's does.**
+#[test]
+fn diff_passes_its_corpus() {
+    check("Diff", "diff", 30, &[]);
+}
+
+/// **The INI grammar parses its whole corpus as upstream's does.**
+#[test]
+fn ini_passes_its_corpus() {
+    check("INI", "ini", 11, &[]);
+}
+
+/// **The Make grammar parses its whole corpus as upstream's does**, its
+/// files `.mk` as its authors name them. (Four of `shell.mk`'s headers
+/// have no example under them, and `functions.mk` none at all: 99 run, as
+/// under `tree-sitter test`.)
+#[test]
+fn make_passes_its_corpus() {
+    check("Make", "make", 99, &[]);
 }
 
 /// **The Go grammar parses its whole corpus as upstream's does.**

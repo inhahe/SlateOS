@@ -58,6 +58,12 @@ tree-sitter-css:
   texts:
     - tree-sitter-css-LICENSE
 
+tree-sitter-diff:
+  version: 0.2.0
+  licence: MIT
+  texts:
+    - tree-sitter-diff-LICENSE
+
 tree-sitter-go:
   version: 0.25.0
   licence: MIT
@@ -69,6 +75,12 @@ tree-sitter-html:
   licence: MIT
   texts:
     - tree-sitter-html-LICENSE
+
+tree-sitter-ini:
+  version: 1.4.0
+  licence: Apache-2.0
+  texts:
+    - tree-sitter-ini-LICENSE
 
 tree-sitter-java:
   version: 0.23.5
@@ -93,6 +105,12 @@ tree-sitter-json:
   licence: MIT
   texts:
     - tree-sitter-json-LICENSE
+
+tree-sitter-make:
+  version: 1.1.1
+  licence: MIT
+  texts:
+    - tree-sitter-make-LICENSE
 
 tree-sitter-markdown:
   version: 0.5.3

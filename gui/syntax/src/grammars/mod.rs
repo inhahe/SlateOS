@@ -12,12 +12,15 @@ pub(crate) mod bash;
 pub(crate) mod c;
 pub(crate) mod cpp;
 pub(crate) mod css;
+pub(crate) mod diff;
 pub(crate) mod go;
 pub(crate) mod html;
+pub(crate) mod ini;
 pub(crate) mod java;
 pub(crate) mod javascript;
 pub(crate) mod jsdoc;
 pub(crate) mod json;
+pub(crate) mod make;
 pub(crate) mod markdown;
 pub(crate) mod markdown_inline;
 pub(crate) mod python;
@@ -86,18 +89,21 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 20] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 23] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
             ("cpp", &super::cpp::generated::TABLES),
             ("css", &super::css::generated::TABLES),
+            ("diff", &super::diff::generated::TABLES),
             ("go", &super::go::generated::TABLES),
             ("html", &super::html::generated::TABLES),
+            ("ini", &super::ini::generated::TABLES),
             ("java", &super::java::generated::TABLES),
             ("javascript", &super::javascript::generated::TABLES),
             ("jsdoc", &super::jsdoc::generated::TABLES),
             ("json", &super::json::generated::TABLES),
+            ("make", &super::make::generated::TABLES),
             ("markdown", &super::markdown::generated::TABLES),
             (
                 "markdown_inline",

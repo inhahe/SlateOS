@@ -2705,4 +2705,58 @@ mod tests {
         assert_eq!(at("add(", 0), Some(Highlight::Variable));
         assert_eq!(at("Println", 0), Some(Highlight::Property));
     }
+
+    /// **An INI file -- a desktop entry -- is coloured as its query says**:
+    /// a section's name, a setting's name, a comment.
+    #[test]
+    fn ini_is_coloured_as_its_query_says() {
+        let text = "# Files, the manager.\n[Desktop Entry]\nName=Files\nExec=files %U\n";
+        let spans = highlighted(text, "ini");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("# Files", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("Desktop Entry", 0), Some(Highlight::Type));
+        assert_eq!(at("Name", 0), Some(Highlight::Property));
+        assert_eq!(at("=Files", 0), Some(Highlight::Operator));
+    }
+
+    /// **A diff's lines are coloured as a change's**: a `+` line inserted, a
+    /// `-` line deleted, the files' header lines likewise, the hunk's
+    /// location an attribute -- and a line both have, uncoloured.
+    #[test]
+    fn a_diff_is_coloured_as_its_query_says() {
+        let text = "diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -1,2 +1,2 @@\n same\n-old\n+new\n";
+        let spans = highlighted(text, "diff");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        // A line's marker is punctuation -- its `(#set! priority 95)`, which
+        // would put it under the line's colour, is Neovim's, and not read,
+        // as tree-sitter's own highlighter does not -- the rest of the line
+        // the change's colour.
+        assert_eq!(at("-old", 0), Some(Highlight::Punctuation), "{spans:?}");
+        assert_eq!(at("old\n", 0), Some(Highlight::Deleted));
+        assert_eq!(at("+new", 0), Some(Highlight::Punctuation));
+        assert_eq!(at("new\n", 0), Some(Highlight::Inserted));
+        // The files' header lines: their markers punctuation, their names
+        // paths, the blank between a change's colour.
+        assert_eq!(at("--- a", 0), Some(Highlight::Punctuation));
+        assert_eq!(at(" a/x.txt\n+++", 0), Some(Highlight::Deleted));
+        assert_eq!(at("a/x.txt\n+++", 0), Some(Highlight::String));
+        assert_eq!(at(" b/x.txt\n@@", 0), Some(Highlight::Inserted));
+        assert_eq!(at("@@", 0), Some(Highlight::Attribute));
+        assert_eq!(at(" same", 0), None);
+    }
+
+    /// **A Makefile is coloured as its query says**: a variable's name, a
+    /// variable make itself uses, a reference to one, a standard target, a
+    /// comment.
+    #[test]
+    fn a_makefile_is_coloured_as_its_query_says() {
+        let text = "# Build it.\nCC := gcc\nOBJS = main.o\nall: $(OBJS)\n\t$(CC) -o app $(OBJS)\n";
+        let spans = highlighted(text, "make");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("# Build", 0), Some(Highlight::Comment), "{spans:?}");
+        assert_eq!(at("CC :=", 0), Some(Highlight::Constant));
+        assert_eq!(at("OBJS =", 0), Some(Highlight::Constant));
+        assert_eq!(at("OBJS)", 0), Some(Highlight::Constant));
+        assert_eq!(at("all:", 0), Some(Highlight::Macro));
+    }
 }

@@ -397,6 +397,42 @@ MUTATIONS = [
         '        self.status_msg = String::from("Habit created!");',
         ["a_failed_write_is_reported"],
     ),
+    (
+        'an announced change is not read',
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if false && group.file_name() == CONFIG_NAME => {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        "every program's announcement is read as this one's",
+        '            Event::SettingsChanged { group } if group.file_name() == CONFIG_NAME => {',
+        '            Event::SettingsChanged { group } if !group.file_name().is_empty() => {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a tracker that keeps nothing reads the file',
+        '        if !self.persist {\n            return false;\n        }\n        let shown = |app: &Self| {',
+        '        let shown = |app: &Self| {',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'the selection stays in its place',
+        '        self.selected_habit = place(self, &now_shown, selected)',
+        '        self.selected_habit = None::<usize>',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a waiting delete stays in its place',
+        '        self.pending_delete = deleting.and_then(|id| self.habits.iter().position(|h| h.id == id));',
+        '        self.pending_delete = self.pending_delete.filter(|&i| i < self.habits.len());',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
+    (
+        'a re-read says it changed nothing',
+        '        before != self.habits\n    }',
+        '        false\n    }',
+        ['a_change_in_another_window_reaches_this_one_and_the_selection_follows_its_habit'],
+    ),
 ]
 
 if __name__ == "__main__":

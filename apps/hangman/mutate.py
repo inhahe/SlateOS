@@ -472,6 +472,12 @@ MUTATIONS = [
         "                    (self.colours.surface0, self.colours.text)",
         ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
+    (
+        "a key held with a modifier is the game's",
+        '                if !textline::is_plain(ke.modifiers) {\n                    return EventResult::Ignored;\n                }\n',
+        '',
+        ['a_key_held_with_a_modifier_guesses_nothing'],
+    ),
 ]
 
 if __name__ == "__main__":

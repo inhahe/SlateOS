@@ -2033,6 +2033,14 @@ impl HangmanApp {
             // to act on Escape, so a reader who opened the list and wants out
             // does not also get thrown back to the categories.
             Event::Key(ke) if ke.pressed => {
+                // Every binding here is on the key itself -- a letter key
+                // guesses its letter -- so a key is the game's only with
+                // nothing but Shift held. A chord arrives carrying its key:
+                // Alt+A guessed A, and so did Ctrl+A. AltGr+A types a
+                // character on some layouts, or none, and is not A.
+                if !textline::is_plain(ke.modifiers) {
+                    return EventResult::Ignored;
+                }
                 if ke.key == Key::F1 || (ke.key == Key::Slash && ke.modifiers.shift) {
                     self.show_help = !self.show_help;
                     return EventResult::Consumed;
@@ -3323,6 +3331,44 @@ mod tests {
     }
 
     // -- Playing keys ---------------------------------------------------
+
+    /// **A key held with Ctrl, Alt or the Windows key guesses nothing**:
+    /// Alt+A and Ctrl+A guessed A, a chord arriving carrying its key. AltGr
+    /// (Ctrl+Alt) is not A either. Shift+A is.
+    #[test]
+    fn a_key_held_with_a_modifier_guesses_nothing() {
+        use guitk::event::Modifiers;
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let mut app = playing_app("cat");
+        for held in [
+            Modifiers::ctrl(),
+            Modifiers::alt(),
+            Modifiers::super_key(),
+            altgr,
+        ] {
+            for k in [Key::C, Key::H, Key::Num3, Key::Enter, Key::F1] {
+                assert_eq!(
+                    guitk::probe::key(&mut app, &guitk::probe::press_with(k, held)),
+                    EventResult::Ignored,
+                    "{held:?} {k:?} was taken"
+                );
+            }
+        }
+        assert_eq!(total_guessed(&app), 0, "a chord guessed a letter");
+        assert!(!app.hint_used, "a chord took the hint");
+        assert_eq!(app.difficulty, playing_app("cat").difficulty);
+        assert!(!app.show_help, "a chord raised the keys");
+        assert_eq!(app.word, b"cat", "a chord started a new round");
+
+        guitk::probe::key(
+            &mut app,
+            &guitk::probe::press_with(Key::C, Modifiers::shift()),
+        );
+        assert!(app.is_guessed(b'c'), "Shift+C guessed nothing");
+    }
 
     #[test]
     fn test_playing_letter_key() {

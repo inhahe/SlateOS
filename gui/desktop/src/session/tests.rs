@@ -7692,6 +7692,17 @@ fn the_toasts_surface_is_exactly_the_stack() {
     let screen_w = session.shell().screen_width as f32;
     assert!((extent.x + extent.w - screen_w).abs() < 0.01);
     assert!((extent.y + extent.h - session.shell().taskbar_rect().y).abs() < 0.01);
+
+    // A third arrives after the first two have settled: the stack grows,
+    // and the surface goes with it.
+    session.post_desktop_notice("Three", "Third.");
+    for _ in 0..40 {
+        frame(&mut session, 16);
+    }
+    let grown = session.shell_mut().toast_extent().expect("toasts are showing");
+    assert!(grown.h > extent.h, "the stack did not grow");
+    assert_eq!(session.toasts_at, Some(grown), "the surface stayed where it was");
+    assert_eq!(session.toasts.origin(), (grown.x.round(), grown.y.round()));
 }
 
 /// **A press on a toast opens its notification**: the program it names is

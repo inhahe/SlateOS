@@ -28,11 +28,29 @@ tree-sitter-c2rust:
   texts:
     - tree-sitter-LICENSE
 
+tree-sitter-ada:
+  version: 0.1.0
+  licence: MIT
+  texts:
+    - tree-sitter-ada-LICENSE
+
+tree-sitter-bash:
+  version: 0.25.1
+  licence: MIT
+  texts:
+    - tree-sitter-bash-LICENSE
+
 tree-sitter-c:
   version: 0.24.2
   licence: MIT
   texts:
     - tree-sitter-c-LICENSE
+
+tree-sitter-cpp:
+  version: 0.23.4
+  licence: MIT
+  texts:
+    - tree-sitter-cpp-LICENSE
 
 tree-sitter-css:
   version: 0.25.0
@@ -40,11 +58,71 @@ tree-sitter-css:
   texts:
     - tree-sitter-css-LICENSE
 
+tree-sitter-diff:
+  version: 0.2.0
+  licence: MIT
+  texts:
+    - tree-sitter-diff-LICENSE
+
+tree-sitter-dockerfile:
+  version: 0.2.0
+  licence: MIT
+  texts:
+    - tree-sitter-dockerfile-LICENSE
+
+tree-sitter-go:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-go-LICENSE
+
+tree-sitter-html:
+  version: 0.23.2
+  licence: MIT
+  texts:
+    - tree-sitter-html-LICENSE
+
+tree-sitter-ini:
+  version: 1.4.0
+  licence: Apache-2.0
+  texts:
+    - tree-sitter-ini-LICENSE
+
+tree-sitter-java:
+  version: 0.23.5
+  licence: MIT
+  texts:
+    - tree-sitter-java-LICENSE
+
+tree-sitter-javascript:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-javascript-LICENSE
+
+tree-sitter-jsdoc:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-jsdoc-LICENSE
+
 tree-sitter-json:
   version: 0.24.8
   licence: MIT
   texts:
     - tree-sitter-json-LICENSE
+
+tree-sitter-lua:
+  version: 0.5.0
+  licence: MIT
+  texts:
+    - tree-sitter-lua-LICENSE
+
+tree-sitter-make:
+  version: 1.1.1
+  licence: MIT
+  texts:
+    - tree-sitter-make-LICENSE
 
 tree-sitter-markdown:
   version: 0.5.3
@@ -58,6 +136,12 @@ tree-sitter-python:
   texts:
     - tree-sitter-python-LICENSE
 
+tree-sitter-regex:
+  version: 0.25.0
+  licence: MIT
+  texts:
+    - tree-sitter-regex-LICENSE
+
 tree-sitter-rust:
   version: 0.24.2
   licence: MIT
@@ -69,6 +153,18 @@ tree-sitter-toml:
   licence: MIT
   texts:
     - tree-sitter-toml-LICENSE
+
+tree-sitter-typescript:
+  version: 0.23.2
+  licence: MIT
+  texts:
+    - tree-sitter-typescript-LICENSE
+
+tree-sitter-xml:
+  version: 0.7.0
+  licence: MIT
+  texts:
+    - tree-sitter-xml-LICENSE
 
 tree-sitter-yaml:
   version: 0.7.2

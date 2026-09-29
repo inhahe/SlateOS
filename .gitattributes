@@ -133,5 +133,6 @@ bench/history.jsonl merge=union
 # 1437). Its carriage returns ARE the test -- tree-sitter's grammars ship a
 # `crlf.txt` corpus to check that Windows line endings parse -- so the file is
 # stored and checked out byte for byte, as its authors wrote it. Normalised to
-# LF, the example would pass while testing nothing.
-gui/syntax/grammars/*/corpus/crlf.txt -text
+# LF, the example would pass while testing nothing. At any depth: C++'s corpus
+# holds C's in `corpus/c/`, its `crlf.txt` among them.
+gui/syntax/grammars/**/crlf.txt -text

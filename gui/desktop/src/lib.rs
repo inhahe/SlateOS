@@ -3583,42 +3583,29 @@ impl DesktopShell {
         }
     }
 
-    /// Adopt the programs installed on this machine -- their desktop entries,
-    /// which the session reads -- beside the shell's own list.
+    /// Adopt the programs this machine has, as the start menu lists them: the
+    /// installed ones whose entries a menu shows, then SlateOS's own that no
+    /// installed entry replaces -- the session's list, made by the one rule
+    /// every list of programs uses (`programs::with_built_in`,
+    /// design-decisions §1445: an installed entry replaces SlateOS's own
+    /// when their desktop file IDs match).
     ///
-    /// An installed program replaces the shell's own entry for the same
-    /// program, matched by file name (the entry says `calculator`, the
-    /// shell's list `/usr/bin/calculator`): the entry is the one the program
-    /// ships, with its own name, picture and command line. The shell's own
-    /// stay for programs no entry names, so a machine with none installed --
-    /// every one today -- still has a menu.
+    /// The whole list, not the installed part of it: the shell starts with
+    /// SlateOS's own alone ([`launcher::builtin_app_database`]), and this
+    /// replaces it.
     ///
     /// The list is kept in name order, which is the order the menu lists
     /// programs in. Each program's launch count carries over, and the
     /// programs pinned to the start menu are looked up again, so a pin shows
     /// the installed entry's name and picture.
-    pub fn set_installed_apps(&mut self, installed: Vec<AppEntry>) {
+    pub fn set_programs(&mut self, programs: Vec<AppEntry>) {
         use std::collections::BTreeMap;
-        use std::ffi::OsString;
-        let file_name = |exec: &str| {
-            Path::new(exec)
-                .file_name()
-                .map(std::ffi::OsStr::to_os_string)
-        };
-        let named: std::collections::BTreeSet<OsString> = installed
-            .iter()
-            .filter_map(|app| file_name(&app.executable_path))
-            .collect();
         let counts: BTreeMap<String, u32> = self
             .apps
             .iter()
             .map(|app| (app.executable_path.clone(), app.launch_count))
             .collect();
-        let mut apps: Vec<AppEntry> = launcher::builtin_app_database()
-            .into_iter()
-            .filter(|own| file_name(&own.executable_path).is_none_or(|name| !named.contains(&name)))
-            .chain(installed)
-            .collect();
+        let mut apps = programs;
         for app in &mut apps {
             if let Some(count) = counts.get(&app.executable_path) {
                 app.launch_count = *count;
@@ -21491,21 +21478,16 @@ mod taskbar_pin_tests {
     #[test]
     fn a_window_is_known_by_its_entrys_name_or_class() {
         let mut shell = shell();
-        let entry = |text: &str, id: &str| {
-            let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
-            let app = desktopentry::App::from_entry(&parsed, id, None).expect("valid");
-            super::launcher::AppEntry::from_desktop(app).expect("startable")
-        };
-        shell.set_installed_apps(vec![
-            entry(
+        shell.set_programs(crate::start_search_tests::known_with(vec![
+            crate::start_search_tests::installed_as(
                 "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=/opt/sketch/run\n",
                 "org.example.Sketch.desktop",
             ),
-            entry(
+            crate::start_search_tests::installed_as(
                 "[Desktop Entry]\nType=Application\nName=Paint\nExec=/opt/paint/run\nStartupWMClass=PaintStudio\n",
                 "paint.desktop",
             ),
-        ]);
+        ]));
         let named = |app_id: &str| shell.program_for_app_id(app_id).map(|a| a.name.clone());
         assert_eq!(named("org.example.Sketch").as_deref(), Some("Sketchpad"));
         assert_eq!(named("ORG.EXAMPLE.SKETCH").as_deref(), Some("Sketchpad"));
@@ -23112,9 +23094,7 @@ mod taskbar_pin_tests {
             )
             .expect("parses");
             let app = desktopentry::App::from_entry(&entry, "sketch.desktop", None).expect("valid");
-            shell.set_installed_apps(vec![
-                super::launcher::AppEntry::from_desktop(app).expect("startable"),
-            ]);
+            shell.set_programs(crate::start_search_tests::known_with(vec![app]));
             shell.apply_window_list(&WindowList::new(
                 0,
                 vec![window_of(1, "sketch", "a drawing")],
@@ -25906,14 +25886,14 @@ mod start_search_tests {
         )
         .expect("parses");
         let app = desktopentry::App::from_entry(&entry, "htop.desktop", None).expect("valid");
-        let top = super::launcher::AppEntry::from_desktop(app).expect("startable");
+        let top = super::launcher::AppEntry::from_desktop(app.clone()).expect("startable");
         let launch = top.launch();
         assert_eq!(
             launch.program,
             std::path::PathBuf::from(super::launcher::TERMINAL),
             "the premise: it starts in a terminal"
         );
-        shell.set_installed_apps(vec![top]);
+        shell.set_programs(known_with(vec![app]));
         shell.note_started(&launch);
         assert_eq!(shell.start_recent(), ["htop"], "credited to the terminal");
     }
@@ -26170,7 +26150,7 @@ mod start_search_tests {
     #[test]
     fn a_programs_menu_starts_with_its_jump_list() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
         let labels = pin_menu_labels(&shell);
@@ -26189,7 +26169,7 @@ mod start_search_tests {
     #[test]
     fn a_jump_list_row_starts_its_action() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         let blank = super::DesktopShell::MENU_JUMP_LIST_BASE + 2;
         assert_eq!(
@@ -26204,7 +26184,7 @@ mod start_search_tests {
         // By key: the first row, chosen with Down and Enter.
         let mut shell = super::DesktopShell::new(1920, 1080);
         shell.toggle_start_menu();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
         drop(shell.handle_hotkey(&press(Key::Down)));
@@ -26235,7 +26215,7 @@ mod start_search_tests {
     fn a_click_on_the_jump_list_starts_its_action() {
         use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
         let row = row_named(&shell, "Sketchpad");
         shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
 
@@ -26266,7 +26246,7 @@ mod start_search_tests {
         // Pinning saves the taskbar's pins: a directory of the test's own.
         settingsfile::testing::with_scratch_config("shell-jump-list", |_root| {
             let mut shell = shell();
-            shell.set_installed_apps(vec![installed(SKETCHPAD_WITH_ACTIONS)]);
+            shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
             shell.pin_app("sketch", "Sketchpad");
             let index = shell
                 .pinned_apps()
@@ -26413,12 +26393,26 @@ mod start_search_tests {
         assert_eq!(shell.start_query.text(), name);
     }
 
-    /// An installed program's entry, as the session makes it from the
-    /// program's desktop entry.
-    fn installed(text: &str) -> super::launcher::AppEntry {
+    /// An installed program's entry, under the desktop file ID
+    /// `fixture.desktop`.
+    fn installed(text: &str) -> desktopentry::App {
+        installed_as(text, "fixture.desktop")
+    }
+
+    /// An installed program's entry, under the desktop file ID `id`.
+    pub(super) fn installed_as(text: &str, id: &str) -> desktopentry::App {
         let entry = desktopentry::DesktopEntry::parse(text.as_bytes()).expect("parses");
-        let app = desktopentry::App::from_entry(&entry, "fixture.desktop", None).expect("valid");
-        super::launcher::AppEntry::from_desktop(app).expect("startable")
+        desktopentry::App::from_entry(&entry, id, None).expect("valid")
+    }
+
+    /// The programs a machine with `installed` has, as the session lists
+    /// them: `installed`, then SlateOS's own whose IDs none of them has.
+    pub(super) fn known_with(installed: Vec<desktopentry::App>) -> Vec<super::launcher::AppEntry> {
+        let ids: Vec<String> = installed.iter().map(|app| app.id.clone()).collect();
+        programs::with_built_in(installed, |id| ids.iter().any(|i| i == id), None)
+            .into_iter()
+            .filter_map(super::launcher::AppEntry::from_desktop)
+            .collect()
     }
 
     fn launch(program: &str, args: &[&str]) -> crate::hotkeys::Launch {
@@ -26434,9 +26428,9 @@ mod start_search_tests {
     #[test]
     fn an_installed_program_starts_as_its_entry_says() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch --new \"blank page\" %U\nIcon=applications-graphics\nCategories=Graphics;\n",
-        )]);
+        )]));
         assert!(names(&shell).contains(&"Sketchpad".to_owned()));
         type_text(&mut shell, "Sketchpad");
         let outcome = shell.handle_hotkey(&press(Key::Enter));
@@ -26447,21 +26441,34 @@ mod start_search_tests {
         );
     }
 
-    /// **An installed program replaces the shell's own entry for it**, and
-    /// the shell's own stay for the programs nothing installed names.
+    /// **An installed entry with SlateOS's entry's ID replaces it**; one
+    /// under another ID -- even one starting a program of the same name --
+    /// sits beside it; and SlateOS's own stay for the IDs nothing installed
+    /// has (design-decisions §1445).
     #[test]
     fn an_installed_program_replaces_the_shells_own_entry_for_it() {
         let mut shell = shell();
         let before = names(&shell);
         assert!(before.contains(&"Calculator".to_owned()), "the premise");
-        shell.set_installed_apps(vec![installed(
-            "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
-        )]);
+        shell.set_programs(known_with(vec![
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Abacus\nExec=/opt/bin/calculator\n",
+                "org.slateos.Calculator.desktop",
+            ),
+            installed_as(
+                "[Desktop Entry]\nType=Application\nName=Other Calculator\nExec=calculator --scientific\n",
+                "org.example.Calc.desktop",
+            ),
+        ]));
         let after = names(&shell);
         assert!(after.contains(&"Abacus".to_owned()));
         assert!(
             !after.contains(&"Calculator".to_owned()),
             "the shell's own entry stayed beside the installed one: {after:?}"
+        );
+        assert!(
+            after.contains(&"Other Calculator".to_owned()),
+            "an entry under another ID replaced nothing and is listed: {after:?}"
         );
         assert!(
             after.contains(&"Terminal".to_owned()),
@@ -26478,9 +26485,9 @@ mod start_search_tests {
     #[test]
     fn a_terminal_program_is_started_in_the_terminal() {
         let mut shell = shell();
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Top\nExec=htop --tree\nTerminal=true\n",
-        )]);
+        )]));
         assert_eq!(
             shell.launch_for("htop"),
             launch(super::launcher::TERMINAL, &["-e", "htop", "--tree"])
@@ -26498,9 +26505,9 @@ mod start_search_tests {
             "paint",
             "named for its file, unknown"
         );
-        shell.set_installed_apps(vec![installed(
+        shell.set_programs(known_with(vec![installed(
             "[Desktop Entry]\nType=Application\nName=Paint Studio\nExec=/opt/bin/paint --studio\n",
-        )]);
+        )]));
         assert_eq!(shell.start_pins()[0].name, "Paint Studio");
         assert_eq!(
             shell.launch_for("/opt/bin/paint"),
@@ -26524,7 +26531,7 @@ mod start_search_tests {
         {
             app.launch_count = 7;
         }
-        shell.set_installed_apps(Vec::new());
+        shell.set_programs(known_with(Vec::new()));
         let count = shell
             .apps
             .iter()

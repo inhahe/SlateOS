@@ -184,9 +184,10 @@ fn point(source: &str, line_starts: &[usize], byte: usize) -> Position {
     (row, source[start..byte].chars().count())
 }
 
-/// Check every file in `grammars/<dir>/highlight/`: how many assertions
-/// were checked, and the failures.
-fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
+/// Check every file in `grammars/<dir>/highlight/` but those `not_yet`
+/// names: how many assertions were checked, and the failures -- among them
+/// any name in `not_yet` that is no file's.
+fn run(language: &str, dir: &str, not_yet: &[(&str, &str)]) -> (usize, Vec<String>) {
     let lang = Language::named(language).expect("a language");
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("grammars")
@@ -200,7 +201,13 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
     files.sort();
     let mut checked = 0;
     let mut failures = Vec::new();
+    let mut left_out = vec![false; not_yet.len()];
     for file in files {
+        let name = file.file_name().unwrap_or_default();
+        if let Some(i) = not_yet.iter().position(|&(f, _)| name == f) {
+            left_out[i] = true;
+            continue;
+        }
         let source = std::fs::read_to_string(&file).expect("a test file");
         // Kept as it is, and only rendered: a file's name need not be text.
         let short = file.file_name().unwrap_or_default().display();
@@ -245,13 +252,19 @@ fn run(language: &str, dir: &str) -> (usize, Vec<String>) {
             }
         }
     }
+    for (&(file, _), found) in not_yet.iter().zip(left_out) {
+        if !found {
+            failures.push(format!("{file}: left out, but there is no such file"));
+        }
+    }
     (checked, failures)
 }
 
-/// `language`'s highlight tests all pass, and at least `at_least` of their
-/// assertions were checked.
-fn check(language: &str, dir: &str, at_least: usize) {
-    let (checked, failures) = run(language, dir);
+/// `language`'s highlight tests all pass -- but for the files `not_yet`
+/// names, each with why -- and at least `at_least` of their assertions
+/// were checked.
+fn check(language: &str, dir: &str, at_least: usize, not_yet: &[(&str, &str)]) {
+    let (checked, failures) = run(language, dir, not_yet);
     assert!(
         checked >= at_least,
         "{language}: only {checked} assertions checked"
@@ -267,31 +280,78 @@ fn check(language: &str, dir: &str, at_least: usize) {
 /// **C is coloured as its grammar's highlight tests say.**
 #[test]
 fn c_is_coloured_as_its_tests_say() {
-    check("C", "c", 23);
+    check("C", "c", 23, &[]);
+}
+
+/// **C++ is coloured as its grammar's highlight tests say**, C's query
+/// under its own.
+#[test]
+fn cpp_is_coloured_as_its_tests_say() {
+    check("C++", "cpp", 23, &[]);
 }
 
 /// **CSS is coloured as its grammar's highlight tests say.**
 #[test]
 fn css_is_coloured_as_its_tests_say() {
-    check("CSS", "css", 37);
+    check("CSS", "css", 37, &[]);
+}
+
+/// **Java is coloured as its grammar's highlight tests say.**
+#[test]
+fn java_is_coloured_as_its_tests_say() {
+    check("Java", "java", 17, &[]);
+}
+
+/// **HTML is coloured as its grammar's highlight tests say**, the end tag
+/// that closes nothing among them.
+#[test]
+fn html_is_coloured_as_its_tests_say() {
+    check("HTML", "html", 38, &[]);
+}
+
+/// **Lua is coloured as its grammar's highlight tests say.**
+#[test]
+fn lua_is_coloured_as_its_tests_say() {
+    check("Lua", "lua", 29, &[]);
+}
+
+/// **XML is coloured as its grammar's highlight tests say.**
+#[test]
+fn xml_is_coloured_as_its_tests_say() {
+    check("XML", "xml", 10, &[]);
+}
+
+/// **A document type definition is coloured as its grammar's highlight
+/// tests say.**
+#[test]
+fn dtd_is_coloured_as_its_tests_say() {
+    check("DTD", "dtd", 10, &[]);
+}
+
+/// **JavaScript is coloured as its grammar's highlight tests say** --
+/// tagged templates in the language their tag names, and names by where
+/// each was declared (`variables.js`), among them.
+#[test]
+fn javascript_is_coloured_as_its_tests_say() {
+    check("JavaScript", "javascript", 55, &[]);
 }
 
 /// **Python is coloured as its grammar's highlight tests say.**
 #[test]
 fn python_is_coloured_as_its_tests_say() {
-    check("Python", "python", 34);
+    check("Python", "python", 34, &[]);
 }
 
 /// **TOML is coloured as its grammar's highlight tests say.**
 #[test]
 fn toml_is_coloured_as_its_tests_say() {
-    check("TOML", "toml", 16);
+    check("TOML", "toml", 16, &[]);
 }
 
 /// **YAML is coloured as its grammar's highlight tests say.**
 #[test]
 fn yaml_is_coloured_as_its_tests_say() {
-    check("YAML", "yaml", 25);
+    check("YAML", "yaml", 25, &[]);
 }
 
 /// **Assertions are read as `tree-sitter test` reads them**: `<-` at the

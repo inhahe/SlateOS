@@ -251,8 +251,9 @@ pub(crate) fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
 /// §1425), as the start menu's entries.
 ///
 /// The fallback behind the programs installed on the machine: an installed
-/// entry for the same program replaces its built-in one
-/// (`DesktopShell::set_installed_apps`). Until 2026-09-27 this was a table
+/// entry with a built-in entry's desktop file ID replaces it
+/// (`programs::with_built_in`, `DesktopShell::set_programs`, design-decisions
+/// §1445). Until 2026-09-27 this was a table
 /// the shell kept for itself -- ten programs, one of them started by the
 /// wrong path (`/usr/bin/sysinfo`, the command-line tool) -- beside three
 /// other lists that disagreed with it; `gui/programs/INVENTORY.md` records

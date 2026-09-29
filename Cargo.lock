@@ -2914,6 +2914,7 @@ version = "0.1.0"
 dependencies = [
  "desktopentry",
  "guitk",
+ "scratchdir",
 ]
 
 [[package]]
@@ -3761,6 +3762,7 @@ dependencies = [
 name = "syntax"
 version = "0.1.0"
 dependencies = [
+ "deflate",
  "guitk",
  "tree-sitter-c2rust",
  "tree-sitter-language",

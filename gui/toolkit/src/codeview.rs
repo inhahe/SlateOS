@@ -58,7 +58,7 @@ use crate::codeedit::{CodeEditor, Selection};
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
-use crate::highlight::{HighlightSpan, Highlighter};
+use crate::highlight::{Brackets, HighlightSpan, Highlighter};
 use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow, TextSpan};
 use crate::scrollbar;
@@ -985,7 +985,9 @@ impl CodeView {
         }
     }
 
-    /// The bracket at the primary caret and its partner, outlined.
+    /// The bracket at the primary caret and its partner, outlined -- paired
+    /// as the highlighter reads the language, where it can say (a bracket
+    /// in a string or a comment is none), else by counting.
     fn draw_bracket_pair(
         &self,
         sink: &mut impl CommandSink,
@@ -994,7 +996,15 @@ impl CodeView {
         text: Rect,
     ) {
         let head = self.editor.primary().head;
-        let Some((a, b)) = self.editor.matching_bracket(head) else {
+        let said = self.highlighter.as_ref().map_or(Brackets::Unknown, |h| {
+            h.brackets(self.editor.buffer(), head)
+        });
+        let pair = match said {
+            Brackets::Pair(a, b) => Some((a, b)),
+            Brackets::Unpaired => None,
+            Brackets::Unknown => self.editor.matching_bracket(head),
+        };
+        let Some((a, b)) = pair else {
             return;
         };
         for at in [a, b] {
@@ -2054,6 +2064,64 @@ mod tests {
             .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
             .count();
         assert_eq!(boxes, 2);
+    }
+
+    /// A highlighter that colours nothing and says the same of every
+    /// bracket.
+    #[derive(Debug)]
+    struct Says(Brackets);
+
+    impl Highlighter for Says {
+        fn reset(&mut self, _text: &crate::textbuffer::TextBuffer) {}
+
+        fn edited(
+            &mut self,
+            _text: &crate::textbuffer::TextBuffer,
+            _splices: &[crate::textbuffer::Splice],
+        ) {
+        }
+
+        fn work(&mut self, _text: &crate::textbuffer::TextBuffer, _budget: Duration) -> bool {
+            false
+        }
+
+        fn highlights(
+            &self,
+            _text: &crate::textbuffer::TextBuffer,
+            _range: Range<usize>,
+        ) -> Vec<HighlightSpan> {
+            Vec::new()
+        }
+
+        fn brackets(&self, _text: &crate::textbuffer::TextBuffer, _offset: usize) -> Brackets {
+            self.0
+        }
+    }
+
+    /// **The highlighter's word on brackets is taken over counting**: a pair
+    /// it names is outlined where it says, none where it says the bracket is
+    /// no bracket (in a string, a comment), and counting only where it
+    /// cannot say.
+    #[test]
+    fn the_highlighters_word_on_brackets_is_taken() {
+        let outlined = |said: Brackets| -> Vec<f32> {
+            let mut v = view("f(x) (y)");
+            v.set_highlighter(Some(Box::new(Says(said))));
+            v.editor_mut().set_selections(vec![Selection::caret(1)]);
+            drawn(&v)
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect { x, .. } => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let counted = outlined(Brackets::Unknown);
+        assert_eq!(counted.len(), 2, "counting pairs `(` with `)`");
+        assert!(outlined(Brackets::Unpaired).is_empty());
+        let named = outlined(Brackets::Pair(5, 7));
+        assert_eq!(named.len(), 2);
+        assert_ne!(named, counted, "outlined where the highlighter said");
     }
 
     /// **A tab is drawn as spaces to the next stop**, so what is drawn is

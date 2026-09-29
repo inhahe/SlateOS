@@ -14,8 +14,11 @@
 //!
 //! - the **tables** -- parse tables, lexer modes, symbol metadata, field maps,
 //!   alias sequences -- as little-endian bytes laid out exactly as the C
-//!   compiler would lay out the generator's structs, which the Rust side
-//!   includes (`include_bytes!`) and hands the runtime pointers into; and
+//!   compiler would lay out the generator's structs, which the build writes
+//!   deflated and the Rust side includes (`include_bytes!`), inflates the
+//!   first time the grammar is asked for, and hands the runtime pointers
+//!   into -- a table of zeros and small numbers is a tenth of its size
+//!   deflated, and a program carries every grammar while using a few; and
 //! - the **lexers** -- `ts_lex` and `ts_lex_keywords`, state machines of
 //!   `if`s and jumps -- as Rust functions ([`clex`]).
 //!
@@ -26,7 +29,7 @@
 //! # What the output assumes
 //!
 //! The Rust written here names the pieces `gui/syntax`'s `ffi` module
-//! provides -- `Lexer`, `set_contains`, the `TSLanguage` mirror, `Aligned`,
+//! provides -- `Lexer`, `set_contains`, the `TSLanguage` mirror, `Deflated`,
 //! `SyncLanguage`, `SyncPtrs`, `lexer_entry!`, `scanner_table` -- and, when the
 //! grammar has an external scanner, a type called `Scanner` in scope where it
 //! is included: the hand-ported scanner (`gui/syntax/src/grammars/*`).
@@ -150,7 +153,8 @@ pub struct Output {
     /// The Rust source, to be `include!`d into the grammar's module.
     pub rust: String,
     /// Each table, as `(file name, bytes)`, to be written into the directory
-    /// the Rust names.
+    /// the Rust names -- deflated (RFC 1951, raw): the Rust inflates what it
+    /// includes.
     pub blobs: Vec<(String, Vec<u8>)>,
 }
 
@@ -788,16 +792,16 @@ fn structs(
     Ok(out)
 }
 
-/// An array of strings (or `NULL`s), `len` long.
+/// An array of strings (or `NULL`s), `len` long -- each read as C reads a
+/// string, up to its first NUL: Go's grammar names a token `"\0"`, which C,
+/// and the runtime reading the names as C strings, sees as the empty name.
 fn strings(d: &Declared, len: usize, constants: &Constants) -> Result<Vec<Option<Vec<u8>>>, Error> {
     let mut out = vec![None; len];
     for (index, value) in cinit::elements(&d.init, constants, d.line)? {
         let text = match value {
             Init::Expr(Expr::Str(bytes)) => {
-                if bytes.contains(&0) {
-                    return Err(Error::at(d.line, "a name with a NUL in it"));
-                }
-                Some(bytes.clone())
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                Some(bytes.get(..end).unwrap_or_default().to_vec())
             }
             Init::Expr(Expr::Ident(n)) if n == "NULL" => None,
             _ => return Err(Error::at(d.line, "a name that is not a string")),
@@ -1003,17 +1007,29 @@ impl Grammar {
         }
         rust.push_str("];\n\n");
 
-        // The tables.
+        // The tables, deflated, and how long each is inflated.
+        let mut idents = Vec::new();
         for blob in &self.blobs {
             let ident = blob.field.replace('.', "_").to_ascii_uppercase();
-            let file = format!("{}.bin", blob.field.replace('.', "_"));
+            let file = format!("{}.bin.z", blob.field.replace('.', "_"));
             let _ = writeln!(
                 rust,
-                "static {ident}: crate::ffi::Aligned<[u8; {}]> = crate::ffi::Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{module}/{file}\")));",
+                "static {ident}: crate::ffi::Deflated = crate::ffi::Deflated {{ bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/{module}/{file}\")), len: {} }};",
                 blob.bytes.len()
             );
             blobs.push((file, blob.bytes.clone()));
+            idents.push(ident);
         }
+        let _ = writeln!(
+            rust,
+            "/// Every table, for the test that inflates them all.\n#[cfg(test)]\npub(crate) static TABLES: [&crate::ffi::Deflated; {}] = [{}];",
+            idents.len(),
+            idents
+                .iter()
+                .map(|i| format!("&{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         let names = |list: &[Option<Vec<u8>>]| -> String {
             list.iter()
                 .map(|n| {
@@ -1061,14 +1077,21 @@ impl Grammar {
                 || "core::ptr::null()".to_owned(),
                 |b| {
                     format!(
-                        "{}.0.as_ptr().cast::<{ty}>()",
+                        "{}.inflate().cast::<{ty}>()",
                         b.field.replace('.', "_").to_ascii_uppercase()
                     )
                 },
             )
         };
-        let _ = writeln!(rust, "/// The grammar, as the runtime reads it.");
-        rust.push_str("pub(crate) static LANGUAGE: crate::ffi::SyncLanguage = crate::ffi::SyncLanguage(crate::ffi::TSLanguage {\n");
+        let _ = writeln!(
+            rust,
+            "/// The grammar, as the runtime reads it: built, its tables inflated, the\n/// first time it is asked for."
+        );
+        rust.push_str("pub(crate) fn language() -> &'static crate::ffi::TSLanguage {\n");
+        rust.push_str("    static LANGUAGE: std::sync::OnceLock<crate::ffi::SyncLanguage> = std::sync::OnceLock::new();\n");
+        rust.push_str(
+            "    &LANGUAGE.get_or_init(|| crate::ffi::SyncLanguage(crate::ffi::TSLanguage {\n",
+        );
         let _ = writeln!(rust, "    abi_version: {},", self.abi);
         let _ = writeln!(rust, "    symbol_count: {},", c.symbol);
         let _ = writeln!(rust, "    alias_count: {},", c.alias);
@@ -1210,7 +1233,7 @@ impl Grammar {
             rust,
             "    metadata: crate::ffi::LanguageMetadata {{ major_version: {major}, minor_version: {minor}, patch_version: {patch} }},"
         );
-        rust.push_str("});\n");
+        rust.push_str("    })).0\n}\n");
         Output { rust, blobs }
     }
 }

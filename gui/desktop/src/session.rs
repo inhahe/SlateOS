@@ -1422,8 +1422,13 @@ impl<T: Transport> ShellSession<T> {
     /// What the menu shows is decided here, where the filesystem is: the
     /// entries a menu lists (`desktopentry::menu::shows_in_menu`: not
     /// `NoDisplay`, not for another desktop), whose `TryExec` program is
-    /// installed, and that can be started without D-Bus. Files that could not
-    /// be used are kept for [`Self::take_app_problems`].
+    /// installed, and that can be started without D-Bus -- then SlateOS's own
+    /// programs that no installed file claims the ID of (`Scan::claims`,
+    /// `programs::with_built_in`: design-decisions §1445), so a `Hidden=true`
+    /// copy of one of them takes it off the menu. SlateOS's own are not held
+    /// to their `TryExec`: the image does not install their entries yet, and
+    /// a menu without them would be empty. Files that could not be used are
+    /// kept for [`Self::take_app_problems`].
     fn refresh_installed_apps(&mut self) {
         let stamps = app_dir_stamps(&self.app_dirs);
         if self.app_dirs_seen.as_ref() == Some(&stamps) {
@@ -1434,7 +1439,7 @@ impl<T: Transport> ShellSession<T> {
         let scan = desktopentry::scan::scan(&self.app_dirs);
         let (apps, invalid) = desktopentry::scan::apps(&scan, locale.as_ref());
         let search_path = std::env::var_os("PATH");
-        let installed: Vec<crate::launcher::AppEntry> = apps
+        let shown: Vec<desktopentry::App> = apps
             .into_iter()
             .filter(|app| {
                 desktopentry::menu::shows_in_menu(app, &[desktopentry::menu::DESKTOP_NAME])
@@ -1444,14 +1449,18 @@ impl<T: Transport> ShellSession<T> {
                     desktopentry::scan::program_exists(program, search_path.as_deref())
                 })
             })
-            .filter_map(crate::launcher::AppEntry::from_desktop)
             .collect();
+        let listed: Vec<crate::launcher::AppEntry> =
+            programs::with_built_in(shown, |id| scan.claims(id), locale.as_ref())
+                .into_iter()
+                .filter_map(crate::launcher::AppEntry::from_desktop)
+                .collect();
         self.app_problems = scan.skipped;
         self.app_problems.extend(invalid);
         // Not marked dirty: both callers paint next anyway -- `start_with`
         // repaints, and the start menu opening is a repaint of its own -- and
         // a flag set here would paint the whole desktop a second time.
-        self.shell.set_installed_apps(installed);
+        self.shell.set_programs(listed);
     }
 
     /// The entry files the last read of installed programs could not use,

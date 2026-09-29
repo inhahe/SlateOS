@@ -1917,8 +1917,8 @@ live.
   kernel's default pins as the shell's first start, and the shell reading the
   library. **Waiting on others:** lane E's Settings, file manager, File
   Associations and launcher read it (`requests/c-e-read-the-one-list-of-programs.md`);
-  then lane A removes the kernel's lists. **Lane C, when lane E's 3275adc99 is
-  on `main`:** add `.oga` to the toolkit's table and to the inventory test.
+  then lane A removes the kernel's lists. `.oga` is in the toolkit's table and
+  the inventory test, lane E's 3275adc99 having made room for it.
 
 - `[C]` **Automatic sign-in, with a key held at start-up to choose** --
   **lane C's half done 2026-09-27** (C-Q22, §1427). `gui/desktop/src/autologin.rs`:
@@ -2032,12 +2032,30 @@ live.
   few milliseconds at a time, re-parsing only what an edit touched; colours
   from the grammars' own highlight queries through the theme, read as
   tree-sitter's own highlighter reads them (§1438, held to upstream's
-  highlight tests). **Grammars:** C, CSS, JSON, Markdown (block and inline),
-  Python, Rust, TOML and YAML (every settings file), each passing its
-  authors' test corpus. **Injections** (a language inside another): a
-  Markdown code fence in the language it names, front matter as YAML or
-  TOML, every paragraph in Markdown's inline grammar, a Rust macro's body.
-  **Next:** shell, then JavaScript and HTML.
+  highlight tests), a name coloured as its declaration is where the
+  grammar says where names are declared (§1440: a parameter wherever it is
+  used). **Grammars:** Ada (the OS's safety-critical drivers), Bash (every
+  shell script), C, C++, CSS, diffs (a change's lines in kinds of their
+  own), Dockerfiles, DTD, Go (§1442: its query read general-first), HTML, INI (desktop entries,
+  systemd units), Java, JavaScript (JSX included), JSON, Lua, Makefiles, Markdown (block and inline), Python,
+  Rust, TOML, TypeScript and TSX (§1441: their query after JavaScript's)
+  XML (SVG, XSLT, plists, project files) and YAML (every settings file),
+  each passing its authors' test corpus (XML's save one example, which has
+  valid XML be an error: `grammars/xml.rs`). **Injections** (a language inside another): a Markdown code fence
+  in the language it names, front matter as YAML or TOML, every paragraph
+  in Markdown's inline grammar, a Rust macro's body, a JavaScript tagged
+  template (`` html`...` ``, `` css`...` ``) in the language its tag names,
+  an HTML page's scripts and styles, a C++ raw string in the language its
+  delimiter names (`R"sql(...)sql"`), JavaScript's and TypeScript's regular
+  expressions and JSDoc comments in grammars of their own.
+  A diff's hunks are coloured in their files' languages, git's diffs and
+  plain `diff -u`'s alike (§1444), an injected language's colours over its
+  host's in the text it was given and a query's `priority` read (§1443).
+  A Dockerfile's RUN commands, and a `RUN <<EOF` script, are Bash.
+  A bracket's partner is found in the tree, a language inside another's
+  in its own (`Highlighter::brackets`): a bracket in a string or a comment
+  is none. **Next:** more languages as the editor meets them (SQL for the
+  database viewer, PowerShell, linker scripts).
 
 - `[C]` **Wallpapers by the time of day** -- done 2026-09-27. A day picture
   and a night picture, or any number at any times: `wallpaper.schedule` in

@@ -7,7 +7,9 @@
 //! and hand-ported scanner -- and parses as the C one does. The format and the
 //! comparison are `tree-sitter test`'s: whitespace is not significant in the
 //! expected tree, field names are compared only when the expected tree has
-//! them, and an example marked `:error` needs only to fail to parse cleanly.
+//! them, an example marked `:error` needs only to fail to parse cleanly, and
+//! one marked `:language(name)` is parsed with that language -- TSX's
+//! examples in the corpus it shares with TypeScript.
 //!
 //! A few examples test what the grammar as published does not have -- an
 //! opt-in extension its `parser.c` was generated without -- and are named,
@@ -35,6 +37,9 @@ struct Example {
     error: bool,
     /// `:skip`.
     skip: bool,
+    /// `:language(name)`: the language to parse it with, if not the
+    /// corpus's own.
+    language: Option<String>,
 }
 
 /// Whether `line` is a header's `===` line -- in a file with CRLF endings,
@@ -67,11 +72,18 @@ fn examples(text: &str) -> Vec<Example> {
         let mut name = String::new();
         let mut error = false;
         let mut skip = false;
+        let mut language = None;
         i += 1;
         while i < lines.len() && !is_equals(lines[i]) {
             match lines[i].trim() {
+                // A blank line between the name and the attributes, as
+                // XML's corpus has, is no part of either.
+                "" => {}
                 ":error" => error = true,
                 ":skip" => skip = true,
+                attribute if attribute.starts_with(":language(") && attribute.ends_with(')') => {
+                    language = Some(attribute[":language(".len()..attribute.len() - 1].to_owned());
+                }
                 attribute if attribute.starts_with(':') => {}
                 title => {
                     if !name.is_empty() {
@@ -113,6 +125,7 @@ fn examples(text: &str) -> Vec<Example> {
             expected,
             error,
             skip,
+            language,
         });
     }
     out
@@ -157,10 +170,11 @@ fn has_fields(sexp: &str) -> bool {
         .any(|pair| is_field(pair[0]) && pair[1].starts_with('('))
 }
 
-/// Run every example in `grammars/<dir>/corpus/` but those `not_built`
+/// Run every example in `grammars/<dir>/corpus/` but those `left_out`
 /// names (`(file, example)`), answering how many ran and the failures -- a
-/// `not_built` name no example has among them.
-fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<String>) {
+/// `left_out` name no example has among them. An example is left out only
+/// for a reason given where it is listed.
+fn run(language: &str, dir: &str, left_out: &[(&str, &str)]) -> (usize, Vec<String>) {
     let lang = Language::for_injection(language).expect("a language");
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -170,34 +184,48 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
         .join("grammars")
         .join(dir)
         .join("corpus");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
-        .expect("the corpus")
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "txt"))
-        .collect();
+    let mut files = corpus_files(&root);
     files.sort();
+    // A parser for the examples that name another language.
+    let mut other = tree_sitter::Parser::new();
     let mut ran = 0;
     let mut failures = Vec::new();
-    let mut left_out = vec![false; not_built.len()];
+    let mut found_out = vec![false; left_out.len()];
     for file in files {
         let text = std::fs::read_to_string(&file).expect("a corpus file");
-        // Kept as it is: compared as a name, rendered only in messages. A
-        // file's name need not be text.
-        let name = file.file_name().unwrap_or_default();
+        // Its path under the corpus, `c/types.txt` -- kept as it is:
+        // compared as a path, rendered only in messages. A file's name need
+        // not be text.
+        let name = file.strip_prefix(&root).unwrap_or(&file);
         let short = name.display();
         for example in examples(&text) {
             if example.skip {
                 continue;
             }
-            if let Some(at) = not_built
+            if let Some(at) = left_out
                 .iter()
-                .position(|&(f, title)| name == f && title == example.name)
+                .position(|&(f, title)| name == std::path::Path::new(f) && title == example.name)
             {
-                left_out[at] = true;
+                found_out[at] = true;
                 continue;
             }
             ran += 1;
+            let parser = match example.language.as_deref() {
+                Some(name) => {
+                    let Some(named) = Language::for_injection(name) else {
+                        failures.push(format!(
+                            "{short}: {}: no language {name} to parse it with",
+                            example.name
+                        ));
+                        continue;
+                    };
+                    other
+                        .set_language(&named.ts_language())
+                        .expect("the grammar loads");
+                    &mut other
+                }
+                None => &mut parser,
+            };
             let deadline = Instant::now() + EXAMPLE_LIMIT;
             let mut too_long = |_: &tree_sitter::ParseState| Instant::now() >= deadline;
             let input = example.input.as_bytes();
@@ -238,20 +266,39 @@ fn run(language: &str, dir: &str, not_built: &[(&str, &str)]) -> (usize, Vec<Str
             }
         }
     }
-    for (&(file, name), found) in not_built.iter().zip(left_out) {
+    for (&(file, name), found) in left_out.iter().zip(found_out) {
         if !found {
             failures.push(format!(
-                "{file}: {name}: left out as not built, but there is no such example"
+                "{file}: {name}: left out, but there is no such example"
             ));
         }
     }
     (ran, failures)
 }
 
-/// Every example of `language`'s corpus but those `not_built` parses as
+/// Every file under `dir`, its subdirectories' too, whatever its name ends
+/// in -- as `tree-sitter test` reads a corpus: C++'s holds C's in `c/`, and
+/// Make's files end in `.mk`.
+fn corpus_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .expect("the corpus")
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(corpus_files(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Every example of `language`'s corpus but those `left_out` parses as
 /// upstream's grammar parses it, and at least `at_least` of them ran.
-fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)]) {
-    let (ran, failures) = run(language, dir, not_built);
+fn check(language: &str, dir: &str, at_least: usize, left_out: &[(&str, &str)]) {
+    let (ran, failures) = run(language, dir, left_out);
     assert!(ran >= at_least, "{language}: only {ran} examples ran");
     assert!(
         failures.is_empty(),
@@ -259,6 +306,85 @@ fn check(language: &str, dir: &str, at_least: usize, not_built: &[(&str, &str)])
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+/// **The Ada grammar parses its whole corpus as upstream's does.**
+#[test]
+fn ada_passes_its_corpus() {
+    check("Ada", "ada", 129, &[]);
+}
+
+/// **The Bash grammar -- tables, lexers and its large ported scanner --
+/// parses its whole corpus as upstream's does.** (Its `crlf.txt` has no
+/// carriage returns: upstream's repository normalises every text file to
+/// LF, that one included.)
+#[test]
+fn bash_passes_its_corpus() {
+    check("Bash", "bash", 100, &[]);
+}
+
+/// **The diff grammar parses its whole corpus as upstream's does.**
+#[test]
+fn diff_passes_its_corpus() {
+    check("Diff", "diff", 30, &[]);
+}
+
+/// **The INI grammar parses its whole corpus as upstream's does.**
+#[test]
+fn ini_passes_its_corpus() {
+    check("INI", "ini", 11, &[]);
+}
+
+/// **The Make grammar parses its whole corpus as upstream's does**, its
+/// files `.mk` as its authors name them. (Four of `shell.mk`'s headers
+/// have no example under them, and `functions.mk` none at all: 99 run, as
+/// under `tree-sitter test`.)
+#[test]
+fn make_passes_its_corpus() {
+    check("Make", "make", 99, &[]);
+}
+
+/// **The Go grammar parses its whole corpus as upstream's does.**
+#[test]
+fn go_passes_its_corpus() {
+    check("Go", "go", 67, &[]);
+}
+
+/// **The Java grammar parses its whole corpus as upstream's does.**
+#[test]
+fn java_passes_its_corpus() {
+    check("Java", "java", 108, &[]);
+}
+
+/// **The HTML grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**: end tags left out, raw text, custom
+/// elements.
+#[test]
+fn html_passes_its_corpus() {
+    check("HTML", "html", 20, &[]);
+}
+
+/// **The JavaScript grammar -- tables, lexers and ported scanner -- parses
+/// its whole corpus as upstream's does**: the semicolons a line leaves out,
+/// template strings, regular expressions, JSX.
+#[test]
+fn javascript_passes_its_corpus() {
+    check("JavaScript", "javascript", 115, &[]);
+}
+
+/// **The TypeScript grammar -- tables, lexers and ported scanner -- parses
+/// its whole corpus as upstream's does**, and TSX the examples marked for
+/// it: types, declarations, the semicolons a line leaves out.
+#[test]
+fn typescript_passes_its_corpus() {
+    check("TypeScript", "typescript", 110, &[]);
+}
+
+/// **The C++ grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**, C's own examples among it.
+#[test]
+fn cpp_passes_its_corpus() {
+    check("C++", "cpp", 179, &[]);
 }
 
 /// **The C grammar parses its whole corpus as upstream's does.**
@@ -279,6 +405,35 @@ fn css_passes_its_corpus() {
 #[test]
 fn toml_passes_its_corpus() {
     check("TOML", "toml", 17, &[]);
+}
+
+/// **The Lua grammar -- tables, lexers and its ported long-bracket
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn lua_passes_its_corpus() {
+    check("Lua", "lua", 42, &[]);
+}
+
+/// **The Dockerfile grammar -- tables, lexers and its ported heredoc
+/// scanner -- parses its whole corpus as upstream's does.**
+#[test]
+fn dockerfile_passes_its_corpus() {
+    check("Dockerfile", "dockerfile", 113, &[]);
+}
+
+/// **XML's grammar and DTD's -- their tables, lexers and ported scanners --
+/// parse the package's corpus as upstream's do**, save one example: the
+/// corpus has `<?bar is ?> invalid?>` inside an element be an error, where
+/// XML reads an instruction (`<?bar is ?>`) and then text -- which the port
+/// follows, as `grammars/xml.rs` says.
+#[test]
+fn xml_passes_its_corpus() {
+    check(
+        "XML",
+        "xml",
+        21,
+        &[("errors.txt", "Invalid processing instruction")],
+    );
 }
 
 /// **The YAML grammar -- tables, lexers and its large ported scanner --
@@ -329,6 +484,20 @@ fn markdown_inline_passes_its_corpus() {
     );
 }
 
+/// **The JSDoc grammar -- tables, lexers and ported scanner -- parses its
+/// whole corpus as upstream's does**, its CRLF examples among them.
+#[test]
+fn jsdoc_passes_its_corpus() {
+    check("jsdoc", "jsdoc", 17, &[]);
+}
+
+/// **The regular-expression grammar parses its whole corpus as upstream's
+/// does.**
+#[test]
+fn regex_passes_its_corpus() {
+    check("regex", "regex", 37, &[]);
+}
+
 /// **The JSON grammar parses its whole corpus as upstream's does.**
 #[test]
 fn json_passes_its_corpus() {
@@ -368,6 +537,11 @@ fn the_corpus_format_is_read() {
     );
     assert_eq!(normalize("(a\n  x: (b)\n  (c)\n)"), "(a x: (b) (c))");
     assert!(has_fields("(a x: (b))") && !has_fields("(a (b))"));
+    let e = examples("=====\nT\n:language(tsx)\n=====\nx\n---\n(e)\n");
+    assert_eq!(
+        (e[0].name.as_str(), e[0].language.as_deref()),
+        ("T", Some("tsx"))
+    );
     let e = examples("=====\nD\n=====\na\n---\nb\n------\n(d)\n; a note\n");
     assert_eq!(
         (e[0].input.as_str(), normalize(&e[0].expected).as_str()),
@@ -376,7 +550,7 @@ fn the_corpus_format_is_read() {
     assert_eq!(without_fields("(a x: (b) (c))"), "(a (b) (c))");
 }
 
-/// **An example left out must exist**: a name in a `not_built` list that no
+/// **An example left out must exist**: a name in a `left_out` list that no
 /// example of the corpus has is a failure, so the list cannot outlive the
 /// examples it names -- and one that does exist is not run.
 #[test]

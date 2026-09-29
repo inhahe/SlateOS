@@ -3663,6 +3663,47 @@ fn an_entry_that_cannot_be_used_is_reported_once() {
     assert!(menu_names(&session).contains(&"Sketchpad".to_owned()));
 }
 
+/// **An installed entry with the ID of one of SlateOS's own replaces it in
+/// the menu, and a hidden copy takes it off**; an entry under another ID
+/// starting the same program is listed beside it (design-decisions §1445).
+#[test]
+fn an_installed_entry_replaces_slateoss_own_by_its_id() {
+    let (mut session, _desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-installed-replaces");
+    let dir = data_dir(
+        &scratch,
+        &[
+            (
+                "org.slateos.Calculator.desktop",
+                "[Desktop Entry]\nType=Application\nName=Abacus\nExec=calculator\n",
+            ),
+            (
+                "org.slateos.Editor.desktop",
+                "[Desktop Entry]\nHidden=true\n",
+            ),
+            (
+                "org.example.Calc.desktop",
+                "[Desktop Entry]\nType=Application\nName=Scientific\nExec=calculator --scientific\n",
+            ),
+        ],
+    );
+    let before = menu_names(&session);
+    for own in ["Calculator", "Text Editor", "Terminal"] {
+        assert!(before.contains(&own.to_owned()), "the premise: {own}");
+    }
+    session.set_app_dirs(desktopentry::scan::DataDirs::new(vec![dir]));
+    let names = menu_names(&session);
+    assert!(names.contains(&"Abacus".to_owned()), "{names:?}");
+    assert!(names.contains(&"Scientific".to_owned()), "{names:?}");
+    for gone in ["Calculator", "Text Editor"] {
+        assert!(
+            !names.contains(&gone.to_owned()),
+            "{gone} stayed: {names:?}"
+        );
+    }
+    assert!(names.contains(&"Terminal".to_owned()), "{names:?}");
+}
+
 /// Opening the menu with nothing changed does not read every entry again:
 /// the directories' times are compared first.
 #[test]

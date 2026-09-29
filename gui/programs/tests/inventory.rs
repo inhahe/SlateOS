@@ -481,7 +481,7 @@ fn section_5_the_kernels_extensions_reached_the_toolkit() {
     use guitk::filetypes::{FileCategory, category_from_extension};
     for ext in [
         "a", "bat", "cc", "cmd", "cpio", "cxx", "diff", "epub", "gzip", "htm", "hxx", "jar", "lib",
-        "markdown", "mjs", "o", "patch", "psm1", "pyw", "text", "xsd", "xsl", "zstd",
+        "markdown", "mjs", "o", "oga", "patch", "psm1", "pyw", "text", "xsd", "xsl", "zstd",
     ] {
         assert_ne!(
             category_from_extension(ext),

@@ -183,6 +183,9 @@ syntax:
   tag: "#89b4fa"          # <div>
   heading: "#89b4fa"      # # A heading, in markup
   link: "#89b4fa"         # a URL, in markup
+  inserted: "#a6e3a1"     # a diff's + line
+  deleted: "#f38ba8"      # a diff's - line
+  changed: "#f9e2af"      # a context diff's ! line
 
 syntax-light:
   keyword: "#8839ef"
@@ -207,6 +210,9 @@ syntax-light:
   tag: "#0036a3"
   heading: "#0036a3"
   link: "#0036a3"
+  inserted: "#317b21"
+  deleted: "#d20f39"
+  changed: "#976014"
 
 widget-style:
   # The shapes of the controls. Sizes are whole pixels.

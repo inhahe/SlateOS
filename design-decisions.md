@@ -85935,6 +85935,255 @@ finished.
 hundred units a byte (raise the rate, with the file as a test), or the
 runtime starts reporting more of its work (then count that too).
 
+## 1440. A name's declaration colours its uses: each version of the file is indexed once, in the background
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** JavaScript's colouring rules -- and TypeScript's, which build
+on them -- colour a function's parameters wherever they are used, not only
+where they are declared, and stop colouring `module` or `console` as
+Node's own where the code declares a variable of that name. They do it
+through a third query besides colours and injections, `locals.scm`, which
+says where the scopes are, which names each declares, and which names may
+use one; tree-sitter's own highlighter reads it, and the code editor's now
+does too, the same way. A use can be thousands of lines below its
+declaration, where the editor -- which colours a screen at a time --
+never looks, so each version of the file is indexed once, in the
+background, a few milliseconds per frame. Until the index for the edited
+file is ready, the previous one is used, moved along with the edits.
+
+**What it costs** (1.1 MB of real JavaScript -- npm's own modules, end to
+end -- in a release build, with a workspace test running alongside): the
+pass takes 0.3 s, all of it tree-sitter's query cursor, which takes as long
+with this crate's bookkeeping taken out; parsing the file from scratch takes
+0.7 s. After a keystroke the reparse and the pass together take 0.33 s of
+background work, spread a few milliseconds over each frame; a file of
+typical size, 20 KB, a few milliseconds in all. Drawing a screen takes 4.5
+ms with the index and 4.4 ms without; moving the index with a keystroke,
+0.17 ms. A declaration's colour is found once, the first time a use of it is
+drawn, by a query started just above the declaration -- as many levels up
+as the query's patterns nest (`pattern_depth`) -- rather than at the root,
+from which it steps past everything before the declaration: the first
+screen at the end of the large file draws in 6.9 ms that way, against 17.8
+ms from the root and 3.7 ms for each draw after, once the colours are
+known.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Index each tree once, in `work()`'s slices; move it with the edits until the next is done** (chosen) | exact -- as tree-sitter's highlighter reads the query -- once the pass is done; never on the drawing path; nothing flickers while it runs | a pass for every edit: background work in proportion to the file (0.3 s for 1.1 MB); until the pass after an edit is done, a use the edit touched is shown as a plain name |
+| Ignore `locals.scm` (Neovim's choice) | costs nothing | parameters coloured only where declared; a declared `module` still coloured as Node's; JavaScript's own highlight test `variables.js` fails |
+| Run the locals query from the top of the file on every draw | exact, and no index to keep | every frame pays for a pass over everything above the screen: 0.3 s on the large file |
+| Run it over the screen alone (Helix, until its rewrite) | cheap | a parameter's uses change colour as its declaration scrolls off the top |
+| An incremental index, redoing only what follows an edit | less background work | what follows an edit must be redone anyway -- a declaration changes how everything after it resolves -- so it saves half a pass on average, for the machinery of saving the pass's state as it goes |
+
+**Where it follows tree-sitter's highlighter to the letter**, since the
+queries are written and tested against it: a scope is closed only by a node
+starting *past* its end, so two blocks back to back (`{ ... }{ ... }`) nest;
+a use is of the last declaration of its name, before it, in the innermost
+scope that has one, looking outward only through scopes that inherit
+(`local.scope-inherits`), and not of a declaration whose value it is inside
+(`local.definition-value`); of a local's captures, the first paints even if
+its pattern is marked `(#is-not? local)`, and the later ones so marked do
+not; a use of a declaration that paints nothing is no local. Captures whose
+names have no colour here take no part, as §1438 has it for every node.
+
+**How it is known to be right.** JavaScript's highlight tests run here:
+55 assertions, 26 of them `variables.js`'s, seven of which -- a
+parameter's uses, `module` declared in a block -- fail without this. Tests
+of this crate's own pin the rest: the pass in slices finds what one pass
+does, with scopes that inherit and scopes that do not; a colour found near
+its declaration is the one found from the root, for every declaration of a
+file of them; the rules above, one by one, with queries that use what
+JavaScript's does not; an edit moving the index, and forgetting what it
+touched -- a name an edit runs into the next is not its declaration's
+meanwhile; an injected stretch indexed as it is parsed, and carried on by
+`work` when it does not fit a draw. Twenty-two mutations of it each fail
+one of these; one more is no change at all (a use looked up on a node that
+also declares a name, where the declaration always wins).
+
+**Revisit if** the pass after each keystroke shows up as a problem on large
+files (keeping the pass's state at points along the file would let it
+resume from before the edit), or tree-sitter's query cursor gains a way to
+skip to a position rather than step through every sibling before it, which
+would cut both the pass and the drawing of a screen on large files.
+
+## 1441. TypeScript's highlight query goes after JavaScript's, not before it as its package lists them
+
+**Date:** 2026-09-28 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** TypeScript's colouring rules are JavaScript's plus TypeScript's
+own -- types, parameters, TypeScript's keywords. Its package says to read
+TypeScript's rules first and JavaScript's after them; but where two rules
+colour the same piece of code the later one wins -- in tree-sitter's own
+highlighter as in the editor's (§1438) -- so JavaScript's general rules
+("every name is a variable", "`<` is an operator") would override
+TypeScript's specific ones ("this name is a parameter", "this `<` opens a
+type's arguments"). Every parameter would look like any other variable.
+The editor reads JavaScript's rules first and TypeScript's after them, so
+the specific wins -- the order JavaScript's own package gives its own
+parameter rules.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **JavaScript's query first, TypeScript's after** (chosen; TSX: JavaScript's, its JSX query, then TypeScript's) | each specific rule wins over the general one, as its author meant: parameters are parameters, a type's `<...>` brackets, and in TSX a tag a tag | departs from the list in the package's `tree-sitter.json`; a capitalised name such as `Foo` in `new Foo()` takes TypeScript's colour, a type, where JavaScript's rule makes it a constructor |
+| The package's order, TypeScript's first | exactly as published | parameters coloured as plain variables, the `<` of `Map<K, V>` as an operator; in TSX, JSX's rules before JavaScript's, so every tag a variable |
+| Edit the queries so no two rules overlap | either order would do | our own copies of upstream's queries, to be redone by hand at every update |
+
+**Why the package lists them the other way.** When tree-sitter's
+highlighter let the *first* rule win (§1438), TypeScript's first was the
+specific-over-general order. The highlighter changed; the list did not; and
+the package ships no highlight tests of its own that would have shown it.
+JavaScript's package, which does, lists its general query before its
+specific ones (`highlights.scm`, then `highlights-jsx.scm` and
+`highlights-params.scm`).
+
+**How it is known to be right.** `typescripts_query_goes_after_javascripts`
+(`gui/syntax/src/highlighter.rs`) colours a TypeScript function in both
+orders: this one paints its parameter -- at its declaration and at its use
+-- as a parameter and a type argument's `<` as a bracket; the package's
+order paints them a variable and an operator. `tsx_is_coloured_with_jsx_and_types`
+checks TSX's tags, attributes, parameters and types.
+
+**Revisit if** tree-sitter-typescript reorders its list, or ships highlight
+tests: then its own tests say what it means, and the order follows them.
+
+## 1442. Go's highlight query is read with its general patterns first
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** Go's colouring rules say "a function's name is a function"
+and, further down, "every name is a variable". Tree-sitter's highlighter --
+and the editor's (§1438) -- lets the later rule win where two colour the
+same piece of code, so read as published every Go function's name came out
+a plain variable and every method a property. The rules were written when
+the first rule won, and the grammar ships no tests of its colours that would
+have shown the change. The editor reads the same rules with the general ones
+moved to the top, so the specific ones win, as their author meant.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The published patterns, the general block (`type_identifier`, `field_identifier`, `identifier`) moved to the top** (chosen) | functions and methods coloured as functions; every pattern upstream's, no more and no fewer | a file of our own beside the published one (`highlights.general-first.scm`), which a test holds to the published one reordered, so an update shows at once |
+| The published order | exactly as published | function and method names coloured as variables and properties |
+| Neovim's Go query instead | written for the last-wins rule | another project's query, with predicates this runtime does not evaluate (`#lua-match?`), and captures named for another editor |
+
+**How it was found, and that it is the only one.** A test of the editor's
+own colouring of Go failed on a function's name. A scan of every vendored
+query for a bare `(node) @capture` coming after a more specific pattern on
+the same node found two: Go's, and CSS's `--custom` properties -- whose
+`@variable` pattern CSS's own highlight tests show is meant to lose (they
+expect `--color1` to be a property). TypeScript's order was already the
+subject of §1441.
+
+**Revisit if** tree-sitter-go reorders its query or ships highlight tests;
+then the published query is read as it is, and this file goes.
+
+## 1443. Injected colours win over their host's in the text they were given, and a pattern's priority is read
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** when one language sits inside another -- a Rust file's lines
+inside a diff, a code block inside Markdown, HTML inside a JavaScript
+template -- both colour the same text, and something has to decide which
+colour shows. Until now whichever started later won. That showed a diff's
+added line inside a Rust comment in the "added" colour instead of the
+comment's. Now a query's own word on importance (Neovim's `priority`)
+decides first; then the inner language wins over the outer, but only on
+the text the inner language was given to read; only then does the start
+order decide, as before.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **Priority, then the inner language over the outer within the inner's own text, then start order** (chosen) | a diff's code coloured as code wherever it is, its `+` and `-` in their line's colour as the query asks; the holes in an injected language -- a template's `${...}`, a diff's markers, Markdown's `>` inside a quoted paragraph -- keep the outer language's colours | departs from tree-sitter's own highlighter, whose single stack the old rule copied event for event |
+| Start order only -- tree-sitter's highlighter, the old rule | exactly tree-sitter's behaviour | an outer colour starting inside an inner one hides it: a diff line's colour over the second line of a comment; and `priority` unread, so a diff's markers are drawn as punctuation, and once the code is coloured the change shows only on plain names |
+| Neovim's rule exactly: priority, then the inner language, nothing cut | the rule the diff's queries were written for | an inner node spanning a hole paints the hole: a comment the new file opens before a deleted line and closes after it paints the deleted line as a comment; an HTML attribute's string paints the JavaScript `${...}` inside it |
+
+**What `priority` is.** Neovim's directive `(#set! priority 95)` -- or
+`(#set! @capture priority 95)` for one capture: 100 where none is set;
+higher shows over lower wherever both are, however their nodes nest; among
+one node's captures, the higher beats a later pattern. Of the queries
+vendored, only the diff's sets one: on the `+` and `-` markers, to put them
+under their line's colour.
+
+**Revisit if** a query turns up that needs an outer language's colour over
+an inner one's inside the text the inner language was given.
+
+## 1444. A diff's hunks are read in their files' languages, flat diffs included
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C
+
+**In short:** a diff of a Rust file now shows its code in Rust's colours:
+the lines the new file has (kept and added) read together as one piece of
+code, the old file's as another. The grammar's own rule for this finds
+hunks only under a `diff --git`-style line; a plain `diff -u` of two files
+has none, nor has `svn diff`, so a second rule of our own reads those. And
+a file named with a timestamp after it, as `diff -u` and `diff -r` name
+one, is known by its name alone.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **The published query, plus `injections.flat.scm` of our own for diffs with no `diff` line; a header's name cut at a tab** (chosen) | git's diffs, `diff -u`'s, `diff -r`'s and `svn diff`'s all coloured | a query of our own to keep in step with the grammar's -- its patterns mirror the published ones, and tests hold both shapes |
+| The published query alone | nothing of our own | `diff -u` of two files -- the commonest diff outside git -- uncoloured; and a timestamped header names no language, so `diff -r`'s blocks lost their colours too |
+| No injection: the diff's own colours only | a change's colour on every character | the code unreadable as code |
+
+**Two readings of Neovim's directive `#offset!`.** It moves a range's ends
+by rows and columns. A column past a line's end goes on into the next line,
+the end of the line counting one column whether it is `\n` or `\r\n` -- so
+the query's `0 1 0 1`, meant to take in each line's newline, takes in all of
+a Windows file's `\r\n`; counted in bytes it would stop between the two, and
+a `//` comment would run on into the next line. And where Neovim keeps a
+capture whole when its offset would turn it inside out, it is dropped here:
+a text too short to trim has nothing in it to colour.
+
+**Revisit if** tree-sitter-diff gives a flat diff's hunks a block of their
+own -- the flat query then goes -- or publishes a reading of either.
+
+## 1445. An installed program replaces SlateOS's own by desktop file ID, not by the program it starts
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** C &middot; asked by lane E (`e-c-the-installed-and-built-in-programs-belong-in-gui-programs`)
+
+**In short:** the start menu, Settings' Default Apps page and the file
+manager each list "the programs this machine has": the installed ones, with
+SlateOS's own behind them. They disagreed about when an installed program
+*replaces* one of SlateOS's. The start menu matched by the program an entry
+starts (an entry running `calculator` replaced SlateOS's Calculator); the
+others by the entry's name on disk, its desktop file ID
+(`org.slateos.Calculator.desktop`). Now there is one rule, in
+`gui/programs` (`known`, `known_in`, `with_built_in`), and it is the ID: an
+entry replaces SlateOS's only when it is the same entry.
+
+**The alternatives:**
+
+| Option | For | Against |
+|---|---|---|
+| **By desktop file ID** (chosen) | the freedesktop rule for "the same entry" -- a user's copy of a system entry replaces it by its ID, and so do SlateOS's own entries once the image installs them as files; a launcher someone makes for a program, `Exec=calculator --scientific` under an ID of its own, is a second entry beside the first, as it is on every other desktop | an entry that starts one of SlateOS's programs under another ID is listed beside SlateOS's, not instead of it |
+| By the program's file name -- the start menu's rule until now | a third-party entry for SlateOS's calculator hides SlateOS's | another program that happens to share a name -- `/opt/foo/bin/editor` -- takes SlateOS's editor off the menu; a launcher a person made for SlateOS's calculator hides the stock one; and `defaults.list`, which names defaults by ID, cannot say which of the two it meant |
+| Either | catches both | the false matches of the second, and two rules to explain |
+
+**What counts as the same ID.** Any file the scan finds for it, used or not
+(`Scan::claims`): a `Hidden=true` copy -- the freedesktop way to remove an
+entry -- takes SlateOS's off the list too, and a copy that does not parse is
+reported rather than quietly passed over for the compiled-in one. The start
+menu holds installed entries to their `TryExec` and `NoDisplay` as before;
+SlateOS's own are not held to `TryExec`, because the image does not install
+their entries yet and a menu without them would be empty.
+
+**Order:** the installed first, SlateOS's behind -- `Role::filled_by` breaks
+ties by order, and a program the machine has installed is asked first.
+
+**Revisit if** SlateOS's own entries ship installed as files (their
+`TryExec` then applies like anyone's), or a real case turns up of a package
+shipping one of SlateOS's programs under an ID of its own.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

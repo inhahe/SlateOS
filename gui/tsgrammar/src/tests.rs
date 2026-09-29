@@ -297,6 +297,22 @@ fn blob<'g>(g: &'g Grammar, field: &str) -> &'g [u8] {
         .bytes
 }
 
+/// **A name is read as C reads a string, up to its first NUL**: Go's
+/// grammar names a token `"\0"`, which C -- and the runtime, which reads the
+/// names as C strings -- sees as the empty name.
+#[test]
+fn a_name_is_read_up_to_its_first_nul() {
+    for (name, read) in [(r#""\0""#, &b""[..]), (r#""a\0b""#, &b"a"[..])] {
+        let source = MINI.replace(
+            r#"[anon_sym_SEMI] = ";","#,
+            &format!("[anon_sym_SEMI] = {name},"),
+        );
+        assert_ne!(source, MINI);
+        let g = parse(&source).unwrap();
+        assert_eq!(g.symbol_names[1].as_deref(), Some(read), "{name}");
+    }
+}
+
 /// **Every table is read, and laid out as C lays out the generator's
 /// structs**, byte for byte.
 #[test]
@@ -383,8 +399,11 @@ fn the_rust_names_every_table_the_lexers_and_the_language() {
     let out = parse(MINI).unwrap().render("mini");
     let rust = &out.rust;
     for needle in [
-        "static PARSE_TABLE: crate::ffi::Aligned<[u8; 20]> = crate::ffi::Aligned(*include_bytes!(concat!(env!(\"OUT_DIR\"), \"/mini/parse_table.bin\")));",
-        "static EXTERNAL_SCANNER_STATES: crate::ffi::Aligned<[u8; 2]>",
+        "static PARSE_TABLE: crate::ffi::Deflated = crate::ffi::Deflated { bytes: include_bytes!(concat!(env!(\"OUT_DIR\"), \"/mini/parse_table.bin.z\")), len: 20 };",
+        "static EXTERNAL_SCANNER_STATES: crate::ffi::Deflated = crate::ffi::Deflated {",
+        "pub(crate) static TABLES: [&crate::ffi::Deflated; ",
+        "pub(crate) fn language() -> &'static crate::ffi::TSLanguage {",
+        "parse_table: PARSE_TABLE.inflate().cast::<u16>(),",
         "c\"na\\\"me\".as_ptr()",
         "field_names: FIELD_NAMES.0.as_ptr(),",
         "const SYM_WORD_CHARACTER_SET_1: &[(i32, i32)] = &[(65, 90), (97, 122), (192, 591), ];",
@@ -392,8 +411,8 @@ fn the_rust_names_every_table_the_lexers_and_the_language() {
         "crate::ffi::lexer_entry!(ts_lex_keywords, lex_keywords);",
         "keyword_lex_fn: Some(ts_lex_keywords),",
         "keyword_capture_token: 2,",
-        "external_scanner: crate::ffi::scanner_table::<Scanner>(EXTERNAL_SCANNER_STATES.0.as_ptr().cast::<bool>(), EXTERNAL_SCANNER_SYMBOL_MAP.0.as_ptr().cast::<u16>()),",
-        "lex_modes: LEX_MODES.0.as_ptr().cast::<crate::ffi::LexerMode>(),",
+        "external_scanner: crate::ffi::scanner_table::<Scanner>(EXTERNAL_SCANNER_STATES.inflate().cast::<bool>(), EXTERNAL_SCANNER_SYMBOL_MAP.inflate().cast::<u16>()),",
+        "lex_modes: LEX_MODES.inflate().cast::<crate::ffi::LexerMode>(),",
         "name: c\"mini\".as_ptr(),",
         "max_reserved_word_set_size: 1,",
         "supertype_count: 1,",
@@ -404,7 +423,7 @@ fn the_rust_names_every_table_the_lexers_and_the_language() {
     }
     let files: Vec<&str> = out.blobs.iter().map(|(f, _)| f.as_str()).collect();
     assert!(
-        files.contains(&"parse_table.bin") && files.contains(&"external_scanner_states.bin"),
+        files.contains(&"parse_table.bin.z") && files.contains(&"external_scanner_states.bin.z"),
         "{files:?}"
     );
 }

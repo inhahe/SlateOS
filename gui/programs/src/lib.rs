@@ -32,11 +32,16 @@
 //! # What is here
 //!
 //! - [`built_in`]: SlateOS's own programs.
+//! - [`known`], [`known_in`]: the programs this machine has -- those
+//!   installed, then SlateOS's own that no installed entry replaces, an
+//!   installed entry replacing SlateOS's when their desktop file IDs match
+//!   (design-decisions §1445).
 //! - [`default_for`]: the built-in default for a type.
 //! - [`Role`]: the jobs a program can be the default for -- web browser, text
 //!   editor, terminal and the rest -- and [`Role::filled_by`], which of a list
 //!   of programs does each.
 
+use desktopentry::scan::{DataDirs, Scan, Skipped};
 use desktopentry::{App, DesktopEntry, Locale};
 
 /// SlateOS's own programs' desktop entries: the file name each installs
@@ -132,6 +137,58 @@ pub fn built_in(locale: Option<&Locale>) -> Vec<App> {
             App::from_entry(&entry, id, locale).ok()
         })
         .collect()
+}
+
+/// The programs this machine has: those installed under `dirs`, read as the
+/// start menu reads them, then SlateOS's own that no installed entry
+/// replaces. See [`known_in`], which this scans for.
+#[must_use]
+pub fn known(dirs: &DataDirs, locale: Option<&Locale>) -> Vec<App> {
+    known_in(&desktopentry::scan::scan(dirs), locale).0
+}
+
+/// The programs `scan` found installed, in `locale`, then SlateOS's own
+/// that none of its files replaces -- with the files that could not be used
+/// and why, for a caller that says so.
+///
+/// Installed first: [`Role::filled_by`] breaks a tie by order, and a
+/// program the machine has installed is asked before SlateOS's own.
+///
+/// An installed entry replaces SlateOS's own **when their desktop file IDs
+/// match** -- the freedesktop rule for "the same entry", by which a user's
+/// copy of a system entry replaces it, and by which SlateOS's own entries
+/// installed as files (`/usr/share/applications/org.slateos.Editor.desktop`)
+/// replace the copies compiled in here. Not by the program an entry starts:
+/// a launcher a person made for SlateOS's calculator, `Exec=calculator
+/// --scientific` under an ID of its own, is a second entry beside the first,
+/// and another program that happens to share a name must not take SlateOS's
+/// off the list (design-decisions §1445).
+///
+/// A file that claims an ID replaces SlateOS's entry for it whether or not
+/// it could be used ([`Scan::claims`]): a `Hidden=true` copy -- the
+/// freedesktop way to remove an entry -- removes SlateOS's too, and a copy
+/// that does not parse is reported rather than quietly passed over for the
+/// compiled-in one.
+#[must_use]
+pub fn known_in(scan: &Scan, locale: Option<&Locale>) -> (Vec<App>, Vec<Skipped>) {
+    let (installed, unusable) = desktopentry::scan::apps(scan, locale);
+    (
+        with_built_in(installed, |id| scan.claims(id), locale),
+        unusable,
+    )
+}
+
+/// `installed`, then SlateOS's own programs, in `locale`, whose desktop
+/// file ID `claimed` does not answer yes for: [`known_in`]'s rule, for a
+/// caller whose installed entries did not come from a scan.
+#[must_use]
+pub fn with_built_in(
+    mut installed: Vec<App>,
+    claimed: impl Fn(&str) -> bool,
+    locale: Option<&Locale>,
+) -> Vec<App> {
+    installed.extend(built_in(locale).into_iter().filter(|own| !claimed(&own.id)));
+    installed
 }
 
 /// The built-in default for the type `mime`: a desktop file id, such as
@@ -433,5 +490,134 @@ mod tests {
                 .map(|app| app.id.as_str()),
             Some("org.slateos.Editor.desktop")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The programs this machine has
+    // ------------------------------------------------------------------
+
+    /// A scratch data directory with these `applications/` files.
+    fn machine(files: &[(&str, &str)]) -> (scratchdir::ScratchDir, DataDirs) {
+        let scratch = scratchdir::ScratchDir::new("programs-known");
+        let data = scratch.path("data");
+        for (name, text) in files {
+            let path = data.join("applications").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        (scratch, DataDirs::new(vec![data]))
+    }
+
+    fn ids(apps: &[App]) -> Vec<&str> {
+        apps.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    /// **With nothing installed, the programs are SlateOS's own**, in their
+    /// order.
+    #[test]
+    fn with_nothing_installed_the_programs_are_slateoss_own() {
+        let (_scratch, dirs) = machine(&[]);
+        assert_eq!(ids(&known(&dirs, None)), ids(&built_in(None)));
+    }
+
+    /// **An installed entry with SlateOS's entry's ID replaces it**, and
+    /// the installed ones come first.
+    #[test]
+    fn an_installed_entry_with_the_same_id_replaces_slateoss() {
+        let (_scratch, dirs) = machine(&[(
+            "org.slateos.Calculator.desktop",
+            "[Desktop Entry]\nType=Application\nName=Abacus\nExec=calculator\nCategories=Utility;Calculator;\n",
+        )]);
+        let programs = known(&dirs, None);
+        let calculators: Vec<&App> = programs
+            .iter()
+            .filter(|a| a.id == "org.slateos.Calculator.desktop")
+            .collect();
+        assert_eq!(calculators.len(), 1, "{:?}", ids(&programs));
+        assert_eq!(calculators[0].name, "Abacus");
+        assert_eq!(
+            programs[0].id, "org.slateos.Calculator.desktop",
+            "installed first"
+        );
+        assert_eq!(programs.len(), built_in(None).len());
+        assert_eq!(
+            Role::Calculator
+                .filled_by(&programs)
+                .map(|a| a.name.as_str()),
+            Some("Abacus")
+        );
+    }
+
+    /// **An entry under another ID is a program beside SlateOS's**, even one
+    /// that starts the same program: a launcher someone made for the
+    /// calculator, or another program that shares its name.
+    #[test]
+    fn an_entry_under_another_id_is_beside_slateoss() {
+        let (_scratch, dirs) = machine(&[(
+            "org.example.Calc.desktop",
+            "[Desktop Entry]\nType=Application\nName=Scientific\nExec=calculator --scientific\n",
+        )]);
+        let programs = known(&dirs, None);
+        let listed = ids(&programs);
+        assert!(listed.contains(&"org.example.Calc.desktop"));
+        assert!(
+            listed.contains(&"org.slateos.Calculator.desktop"),
+            "{listed:?}"
+        );
+        assert_eq!(programs.len(), built_in(None).len() + 1);
+    }
+
+    /// **A hidden copy removes SlateOS's entry, and one that cannot be read
+    /// is reported in its place** -- neither brings the compiled-in entry
+    /// back.
+    #[test]
+    fn a_hidden_or_broken_copy_replaces_slateoss_entry() {
+        let (_scratch, dirs) = machine(&[
+            (
+                "org.slateos.Editor.desktop",
+                "[Desktop Entry]\nHidden=true\n",
+            ),
+            ("org.slateos.Terminal.desktop", "no entry here\n[\n"),
+            (
+                "org.slateos.Calendar.desktop",
+                "[Desktop Entry]\nType=Application\nName=No command\n",
+            ),
+        ]);
+        let scan = desktopentry::scan::scan(&dirs);
+        let (programs, unusable) = known_in(&scan, None);
+        let listed = ids(&programs);
+        for gone in [
+            "org.slateos.Editor.desktop",
+            "org.slateos.Terminal.desktop",
+            "org.slateos.Calendar.desktop",
+        ] {
+            assert!(!listed.contains(&gone), "{gone} came back: {listed:?}");
+        }
+        assert_eq!(programs.len(), built_in(None).len() - 3);
+        // The invalid one is reported; the unreadable one is the scan's to
+        // report, as it is for every caller of the scan.
+        assert!(
+            unusable
+                .iter()
+                .any(|s| s.id.as_deref() == Some("org.slateos.Calendar.desktop")),
+            "{unusable:?}"
+        );
+        assert!(
+            scan.skipped
+                .iter()
+                .any(|s| s.id.as_deref() == Some("org.slateos.Terminal.desktop"))
+        );
+    }
+
+    /// **`with_built_in` is the same rule for a caller with its own list.**
+    #[test]
+    fn with_built_in_leaves_out_what_is_claimed() {
+        let all = with_built_in(Vec::new(), |_| false, None);
+        assert_eq!(ids(&all), ids(&built_in(None)));
+        let none = with_built_in(Vec::new(), |_| true, None);
+        assert!(none.is_empty());
+        let some = with_built_in(Vec::new(), |id| id == "org.slateos.Editor.desktop", None);
+        assert_eq!(some.len(), built_in(None).len() - 1);
+        assert!(!ids(&some).contains(&"org.slateos.Editor.desktop"));
     }
 }

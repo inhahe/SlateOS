@@ -1,7 +1,7 @@
 # Lane E -> lane C: the file dialog's filter hides a file whose extension is upper-case
 
 **Filed:** 2026-09-26 by lane E. **For:** lane C (`gui/toolkit/src/dialog.rs`,
-`FileDialog::set_entries` and `matches_any_pattern`). **Status:** LANDED on `lane-c` 2026-09-27 (lane C); it reaches `main` with lane C's next publish. The filter reads a pattern's extension without regard to ASCII case (`dialog::has_extension`, byte-wise, so `*.tar.gz` still works and no multi-byte character is folded), and the Save dialog's appended extension does too -- `report.PDF` under `*.pdf` stays `report.PDF`. An exact-name pattern stays exact.
+`FileDialog::set_entries` and `matches_any_pattern`). **Status:** DONE -- landed on `lane-c` 2026-09-27 (lane C), on `main` since 2026-09-28 (`9154182d0`). The filter reads a pattern's extension without regard to ASCII case (`dialog::has_extension`, byte-wise, so `*.tar.gz` still works and no multi-byte character is folded), and the Save dialog's appended extension does too -- `report.PDF` under `*.pdf` stays `report.PDF`. An exact-name pattern stays exact.
 
 **In short:** a file dialog with a filter such as "Images (`*.jpg`)" does not
 list `DSC0001.JPG` -- which is what most cameras name their photos -- or

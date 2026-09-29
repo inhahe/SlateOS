@@ -842,6 +842,10 @@ impl SyntaxColors {
             Highlight::Operator => p.sky,
             Highlight::Punctuation => p.text.lerp(p.overlay0, 0.5),
             Highlight::Link => p.link,
+            // A change's lines in the hues that say gained, lost, altered.
+            Highlight::Inserted => p.green,
+            Highlight::Deleted => p.red,
+            Highlight::Changed => p.yellow,
         });
         Self { colors }
     }
@@ -1793,6 +1797,119 @@ pub enum StripStyle {
 }
 
 // ---------------------------------------------------------------------------
+// Tones: a caller's colour for text a widget draws
+// ---------------------------------------------------------------------------
+
+/// A colour for text, named by its role in the palette rather than given as
+/// a colour: the theme decides what green is, and [`Palette::tone`] holds it
+/// to the text floor as [`Palette::ink`] holds any colour. A widget that
+/// draws a caller's text in a caller's colour -- a tree row's label, its
+/// badge -- takes one of these, so the caller cannot hand it an unreadable
+/// one, nor one that ignores the theme.
+///
+/// [`Faint`](Self::Faint) is the exception [`overlay0`](Palette::overlay0)
+/// always is: a thing present but not active, deliberately below the floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tone {
+    /// Primary text: [`Palette::text`].
+    Text,
+    /// Secondary text: [`Palette::subtext0`].
+    Subtext0,
+    /// Secondary but load-bearing text: [`Palette::subtext1`].
+    Subtext1,
+    /// The faintest mark, [`Palette::overlay0`]: not held to the floor, as a
+    /// disabled label's is not.
+    Faint,
+    /// The user's accent: [`Palette::accent`].
+    Accent,
+    /// [`Palette::blue`].
+    Blue,
+    /// [`Palette::green`] -- also "this succeeded".
+    Green,
+    /// [`Palette::red`] -- also "this failed".
+    Red,
+    /// [`Palette::yellow`] -- also "this needs attention".
+    Yellow,
+    /// [`Palette::peach`].
+    Peach,
+    /// [`Palette::lavender`].
+    Lavender,
+    /// [`Palette::mauve`].
+    Mauve,
+    /// [`Palette::sapphire`].
+    Sapphire,
+    /// [`Palette::teal`].
+    Teal,
+    /// [`Palette::sky`].
+    Sky,
+    /// [`Palette::pink`].
+    Pink,
+    /// [`Palette::rosewater`].
+    Rosewater,
+    /// [`Palette::flamingo`].
+    Flamingo,
+    /// [`Palette::maroon`].
+    Maroon,
+}
+
+impl Tone {
+    /// Every tone, in the order declared.
+    pub const ALL: [Self; 19] = [
+        Self::Text,
+        Self::Subtext0,
+        Self::Subtext1,
+        Self::Faint,
+        Self::Accent,
+        Self::Blue,
+        Self::Green,
+        Self::Red,
+        Self::Yellow,
+        Self::Peach,
+        Self::Lavender,
+        Self::Mauve,
+        Self::Sapphire,
+        Self::Teal,
+        Self::Sky,
+        Self::Pink,
+        Self::Rosewater,
+        Self::Flamingo,
+        Self::Maroon,
+    ];
+}
+
+impl Palette {
+    /// The colour text in `tone` is drawn in under this palette: a text ink
+    /// as it is, the faint one as it is, and an accent or a named hue --
+    /// which are also fills, and so not moved in the palette -- held to the
+    /// text floor on every ground this theme puts text on ([`ink`](Self::ink)).
+    #[must_use]
+    pub fn tone(&self, tone: Tone) -> Color {
+        let hue = match tone {
+            Tone::Text => return self.text,
+            Tone::Subtext0 => return self.subtext0,
+            Tone::Subtext1 => return self.subtext1,
+            Tone::Faint => return self.overlay0,
+            Tone::Accent => self.accent,
+            Tone::Blue => self.blue,
+            Tone::Green => self.green,
+            Tone::Red => self.red,
+            Tone::Yellow => self.yellow,
+            Tone::Peach => self.peach,
+            Tone::Lavender => self.lavender,
+            Tone::Mauve => self.mauve,
+            Tone::Sapphire => self.sapphire,
+            Tone::Teal => self.teal,
+            Tone::Sky => self.sky,
+            Tone::Pink => self.pink,
+            Tone::Rosewater => self.rosewater,
+            Tone::Flamingo => self.flamingo,
+            Tone::Maroon => self.maroon,
+        };
+        self.ink(hue)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The seam
 // ---------------------------------------------------------------------------
 
@@ -1848,5 +1965,74 @@ pub trait PaletteSource {
     /// the built-in theme's.
     fn widget_style(&self) -> WidgetStyle {
         WidgetStyle::AERO
+    }
+}
+
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+
+    /// Every palette a tone can be drawn under: both modes, both surface
+    /// styles, both strip styles.
+    fn palettes() -> Vec<Palette> {
+        let mut out = Vec::new();
+        for light in [false, true] {
+            for surface in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                for strip in [StripStyle::Filled, StripStyle::Separator] {
+                    let mut palette = Palette::for_mode(light);
+                    palette.set_surface_style(surface);
+                    palette.set_strip_style(strip);
+                    out.push(palette);
+                }
+            }
+        }
+        out
+    }
+
+    /// **Every tone but the faint one can be read on every ground text goes
+    /// on**, under every palette -- a hue the theme left too pale for text
+    /// is deepened, as `ink` deepens it.
+    #[test]
+    fn every_tone_but_faint_clears_the_text_floor() {
+        for palette in palettes() {
+            for tone in Tone::ALL {
+                if tone == Tone::Faint {
+                    continue;
+                }
+                let colour = palette.tone(tone);
+                for ground in palette.text_grounds().iter().flatten() {
+                    let ratio = contrast_ratio(colour, *ground);
+                    assert!(
+                        ratio >= TEXT_CONTRAST_FLOOR - 0.01,
+                        "{tone:?} on {ground:?}: {ratio:.2} (light: {})",
+                        palette.light
+                    );
+                }
+            }
+        }
+    }
+
+    /// **A tone is its role's colour**: the text inks as they are, the faint
+    /// one as it is, a hue as `ink` makes it.
+    #[test]
+    fn a_tone_is_its_roles_colour() {
+        for palette in palettes() {
+            assert_eq!(palette.tone(Tone::Text), palette.text);
+            assert_eq!(palette.tone(Tone::Subtext0), palette.subtext0);
+            assert_eq!(palette.tone(Tone::Subtext1), palette.subtext1);
+            assert_eq!(palette.tone(Tone::Faint), palette.overlay0);
+            assert_eq!(palette.tone(Tone::Accent), palette.ink(palette.accent));
+            assert_eq!(palette.tone(Tone::Green), palette.ink(palette.green));
+            assert_eq!(palette.tone(Tone::Maroon), palette.ink(palette.maroon));
+        }
+        // Distinct hues stay distinct: a tree telling kinds apart by tone
+        // still can.
+        let palette = Palette::for_mode(false);
+        let hues: Vec<Color> = Tone::ALL.iter().skip(5).map(|&t| palette.tone(t)).collect();
+        for (i, a) in hues.iter().enumerate() {
+            for b in hues.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
     }
 }

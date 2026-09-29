@@ -42705,8 +42705,17 @@ with invalid, as `mathl.rs` answers everywhere, where glibc's `jnl` and
 `ynl` return 0 or set `ERANGE`; `errno` in the directed modes, §1139's one
 rule; and `jnl`'s underflow at a huge order, +0 where glibc answers -0.
 
-**Not yet:** a huge order near `x = n` takes time in proportion to the
-order (D-POSIX-BESSEL-HUGE-ORDERS-ARE-SLOW), as glibc's does.
+**Huge orders.** From order 512 `jnl` and `ynl` use Debye's
+expansions, whose terms fall as powers of `1/n`: the sech(alpha) form
+before the turning point `x = n`, the sec(beta) form -- in phase and
+amplitude, reduced as Hankel's is -- past it; and from order 2048, within
+`32 n^(1/3)` of the turning point, where neither holds, a recurrence from
+where they do (upward for Y, Miller's downward for J, scaled to Debye's
+values by least squares over two orders). A recurrence all the way from
+order 0, as glibc's does and this did at first, costs time in proportion
+to the order: minutes at 2^31, where this takes at most 6 ms. The phase at such an order is of the order of `n`, held to 2^-128
+of itself, so the answer there is good to about 2^-97 of the amplitude --
+correctly rounded but next to a zero or in the rare hard case.
 
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 

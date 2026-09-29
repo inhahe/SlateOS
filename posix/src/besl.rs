@@ -36,13 +36,19 @@
 //!   zero's cancellation happens once, in an exact sum, and the answer keeps
 //!   its relative precision near every zero there too.
 //!
-//! `jnl` and `ynl`: `Y_n` by the forward recurrence from Y0 and Y1, which is
-//! stable for it everywhere; `J_n` by its power series where `x^2 < 4(n +
-//! 1)`, the forward recurrence from J0 and J1 where `n <= x` past 48, and
-//! Miller's recurrence to `n` elsewhere. An answer the Debye estimate puts
-//! far past the range is answered as an overflow or underflow without the
-//! recurrence. Near a zero of `J_n` or `Y_n` for `n >= 2` the answer is good
-//! to about 2^-124 of the function's amplitude rather than of its value.
+//! `jnl` and `ynl`, up to order 511: `Y_n` by the forward recurrence from
+//! Y0 and Y1, which is stable for it everywhere; `J_n` by its power series
+//! where `x^2 < 4(n + 1)`, the forward recurrence from J0 and J1 where `n <=
+//! x` past 48, and Miller's recurrence to `n` elsewhere. From order 512,
+//! Debye's expansions -- the sech(alpha) form before the turning point `x =
+//! n`, the sec(beta) form past it -- except within `32 n^(1/3)` of it,
+//! where from order 2048 a recurrence crosses from where they hold, so no
+//! order costs more than about `70 n^(1/3)` steps. An answer the Debye estimate puts far past the range
+//! is answered as an overflow or underflow at once. Near a zero of `J_n` or
+//! `Y_n` for `n >= 2` the answer is good to about 2^-124 of the function's
+//! amplitude rather than of its value; at a huge order the phase, which is
+//! of the order of `n`, is good to 2^-128 of itself, so at order 2^31 the
+//! answer is good to about 2^-97 of the amplitude.
 //!
 //! # What C leaves open: glibc's answers
 //!
@@ -600,33 +606,36 @@ fn start_index(n: u32, x: L) -> u32 {
     let ln_x = ln_f64(x);
     let target = 140.0 * LN2_F64;
     let gn = debye_g(f64::from(n), ln_x);
-    let enough = |big: u32| {
-        debye_g(f64::from(big), ln_x) >= target
-            && 2.0 * debye_g(f64::from(big) + 1.0, ln_x) - 2.0 * gn >= target
+    // In 64 bits: at order 2^31 the start is past 2^31 itself.
+    #[allow(clippy::cast_precision_loss)]
+    let enough = |big: u64| {
+        let b = big as f64;
+        debye_g(b, ln_x) >= target && 2.0 * debye_g(b + 1.0, ln_x) - 2.0 * gn >= target
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let floor_x = x.to_f64().min(4.0e9) as u32;
-    let mut lo = n.max(floor_x).saturating_add(2);
-    if enough(lo) {
-        return lo;
-    }
-    // Double the step until enough, then halve back.
-    let mut step = 8u32;
-    let mut hi = lo.saturating_add(step);
-    while !enough(hi) && hi < u32::MAX / 2 {
-        lo = hi;
-        step = step.saturating_mul(2);
-        hi = hi.saturating_add(step);
-    }
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if enough(mid) {
-            hi = mid;
-        } else {
-            lo = mid;
+    let floor_x = x.to_f64().min(4.0e9) as u64;
+    let mut lo = u64::from(n).max(floor_x) + 2;
+    let mut hi = lo;
+    if !enough(hi) {
+        // Double the step until enough, then halve back. The start is never
+        // far past n: 70 n^(1/3) at most, by Debye's estimate.
+        let mut step = 8u64;
+        hi = lo + step;
+        while !enough(hi) && hi < 1 << 40 {
+            lo = hi;
+            step *= 2;
+            hi += step;
+        }
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if enough(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
         }
     }
-    hi
+    u32::try_from(hi).unwrap_or(u32::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +780,7 @@ fn exact_sum(terms: &mut [L]) -> DD {
 
 /// `x + psi` reduced by pi/4: the odd `K` nearest `(x + psi) 4/pi`, as `K`
 /// mod 8, and `t = x + psi - K pi/4`, `|t| <= pi/4` or a hair past, for `x >
-/// XH` and `psi` Hankel's small phase correction.
+/// XH` and `psi` Hankel's or Debye's phase correction, with `x + psi > 0`.
 fn reduce(x: L, psi: DD) -> (u32, DD) {
     if x < X_REDUCE {
         // K below 2^40: K times each 24-bit piece of pi/4 is exact, and so
@@ -797,17 +806,21 @@ fn reduce(x: L, psi: DD) -> (u32, DD) {
         let k8 = (k.to_i64_rint() & 7) as u32;
         return (k8, t);
     }
-    // x = n pi/2 + y, |y| <= pi/4; then x + psi - (2n + j) pi/4 = y + psi -
-    // j pi/4, j = +-1.
+    // x = n pi/2 + y, |y| <= pi/4; y + psi = k pi/2 + b, |b| <= pi/4 (psi
+    // is Debye's phase at a huge order, up to about 2^21 there, or Hankel's,
+    // small); then x + psi - (2(n + k) + j) pi/4 = b - j pi/4, j = +-1.
     let (n, y) = rem_pio2_113(x);
     let base = y.add(psi);
-    let (j, t) = if base.hi.is_sign_negative() {
-        (-1i64, base.add(PI_OVER_4))
+    #[allow(clippy::cast_possible_truncation)]
+    let k = (base.hi * TWO_OVER_PI.hi).to_i64_rint();
+    let b = base.sub(PI_OVER_4.twice().mul_l(int(k)));
+    let (j, t) = if b.hi.is_sign_negative() {
+        (-1i64, b.add(PI_OVER_4))
     } else {
-        (1i64, base.sub(PI_OVER_4))
+        (1i64, b.sub(PI_OVER_4))
     };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let k8 = ((2 * n + j).rem_euclid(8)) as u32;
+    let k8 = ((2 * (n + k) + j).rem_euclid(8)) as u32;
     (k8, t)
 }
 
@@ -888,9 +901,16 @@ fn hankel(nu: u32, x: L) -> (DD, DD) {
         .scale(-(e & 1))
         .sqrt()
         .scale(-(e >> 1));
+    phase_amplitude(nu, x, psi, amp)
+}
+
+/// `amp cos(theta)` and `amp sin(theta)`, `theta = x + psi - (2 nu + 1)
+/// pi/4` (`nu_mod4` is `nu` mod 4): the phase reduced by pi/4 exactly
+/// ([`reduce`]), then the quadrant's sine or cosine of what is left.
+fn phase_amplitude(nu_mod4: u32, x: L, psi: DD, amp: DD) -> (DD, DD) {
     let (k8, t) = reduce(x, psi);
     // theta = t + m pi/2, K = 2m + 2 nu + 1.
-    let m = ((k8 + 8 - (2 * nu + 1)) % 8) / 2;
+    let m = ((k8 + 8 - (2 * nu_mod4 + 1)) % 8) / 2;
     let (c, s) = cos_sin(t);
     let (cos_theta, sin_theta) = match m {
         0 => (c, s),
@@ -971,6 +991,11 @@ fn jn_scaled(m: u32, x: L) -> (DD, i32) {
         // Far below the least subnormal: positive (J_m has no zero below
         // m), and that is all the rounding needs.
         return (DD::l(ONE), -16_445 - 64);
+    }
+    if m >= DEBYE_ORDER {
+        if let Some(v) = jn_large(m, x) {
+            return v;
+        }
     }
     // The series where (x/2)^2 < m + 1 -- x below 2^17, as m is below 2^31.
     if x < pow2(17) {
@@ -1072,6 +1097,11 @@ fn yn_scaled(m: u32, x: L) -> (DD, i32) {
         // below m).
         return (DD::l(-ONE), 16_384 + 64);
     }
+    if m >= DEBYE_ORDER {
+        if let Some(v) = yn_large(m, x) {
+            return v;
+        }
+    }
     let (mut a, mut b, mut e) = y01_scaled(x);
     let two_over_x = over_x(TWO, x);
     for k in 1..m {
@@ -1088,6 +1118,275 @@ fn yn_scaled(m: u32, x: L) -> (DD, i32) {
         }
     }
     (b, e)
+}
+
+// ---------------------------------------------------------------------------
+// Huge orders: Debye's expansions
+//
+// Past order DEBYE_ORDER a recurrence to the order would be long, so J_n and
+// Y_n come from Debye's asymptotic expansions (DLMF 10.19.3 and 10.19.6),
+// whose terms fall as powers of 1/n -- in the sech(alpha) form before the
+// turning point x = n, the sec(beta) form past it. Both fail near the turning
+// point; from DEBYE_GAP n^(1/3) away their sums hold to 2^-135 with at most
+// 27 of Debye's polynomials, at every order (the distance in units of n^(1/3)
+// is what the terms depend on). Within that window a recurrence crosses from
+// where they hold: upward for Y, which grows that way; downward, Miller's,
+// for J, scaled to Debye's values on the far side -- about 70 n^(1/3) steps,
+// some 80,000 at the largest order.
+// ---------------------------------------------------------------------------
+
+/// From this order up `jnl` and `ynl` use Debye's expansions away from the
+/// turning point: 12 to 20 microseconds, where the recurrences take a tenth
+/// of a microsecond an order. (They agree with the recurrences to 2^-112
+/// from order 256 up.)
+const DEBYE_ORDER: u32 = 512;
+/// From this order up they also cross the turning-point window from
+/// Debye's values, rather than recurring all the way from order 0 or 1:
+/// the window's two evaluations and its `70 n^(1/3)` steps cost about what
+/// a whole recurrence does here.
+const DEBYE_WINDOW_ORDER: u32 = 2048;
+/// How far past the turning point, in units of `n^(1/3)`, Debye's
+/// expansions answer.
+const DEBYE_GAP: f64 = 32.0;
+
+/// `atan(u)` in [`DD`] for a finite `u`: odd; past 1 `pi/2 - atan(1/u)`;
+/// otherwise the argument halved four times, `atan(u) = 2 atan(u / (1 +
+/// sqrt(1 + u^2)))`, to below `tan(pi/64)`, and the series there.
+fn atan_dd(u: DD) -> DD {
+    if u.hi.is_sign_negative() {
+        return atan_dd(u.neg()).neg();
+    }
+    let one = DD::l(ONE);
+    if u.hi > ONE {
+        return PI_OVER_4.twice().sub(atan_dd(one.div(u)));
+    }
+    let mut v = u;
+    for _ in 0..4 {
+        v = v.div(one.add(one.add(v.mul(v)).sqrt()));
+    }
+    let v2 = v.mul(v);
+    let mut acc = recip(35);
+    for j in (0..17u32).rev() {
+        acc = recip(2 * j + 1).sub(v2.mul(acc));
+    }
+    acc.mul(v).scale(4)
+}
+
+/// `ln q` for a pair `q > 0`: [`ln_dd`] of its high part, and its low part's
+/// share to first order, which is all of it at 2^-128.
+fn ln_of(q: DD) -> DD {
+    ln_dd(q.hi).add(DD::l(q.lo / q.hi))
+}
+
+/// `e^y` as `(v, e)`, `e^y = v 2^e`, `v` within a factor `2^(1/2)` of 1, for
+/// `|y|` below about 2^30: `y = e ln 2 + r`, `|r| <= ln 2 / 2`, and `e^r` by
+/// its series to `r^30`.
+fn exp_scaled(y: DD) -> (DD, i32) {
+    #[allow(clippy::cast_possible_truncation)]
+    let e = (y.hi * L::LOG2_E).to_i64_rint() as i32;
+    let r = y.sub(LN_2.mul_l(int(i64::from(e))));
+    let mut acc = inv_factorial(30);
+    for k in (0..30usize).rev() {
+        acc = acc.mul(r).add(inv_factorial(k));
+    }
+    (acc, e)
+}
+
+/// `atanh(tau) - tau` for `0 < tau < 1`: below 1/4 by its series, `tau^3/3 +
+/// tau^5/5 + ...` -- the difference is what Debye's exponent needs, and near
+/// the turning point it is all cancellation -- and above by the logarithm.
+fn atanh_minus_id(tau: DD) -> DD {
+    if tau.hi < pow2(-2) {
+        let t2 = tau.mul(tau);
+        // sum over j >= 1 of tau^(2j+1)/(2j+1), to j = 34: tau^68 < 2^-136.
+        let mut acc = recip(69);
+        for j in (1..34u32).rev() {
+            acc = acc.mul(t2).add(recip(2 * j + 1));
+        }
+        return acc.mul(t2).mul(tau);
+    }
+    let one = DD::l(ONE);
+    ln_of(one.add(tau).div(one.sub(tau))).scale(-1).sub(tau)
+}
+
+/// Debye's sums at `t` for order `n`: over the even `k` and over the odd, of
+/// `u_k(t)/n^k` -- or, `oscillatory`, of `u_k(i t)/n^k` with the powers of
+/// `i` taken out: the even sum is real, the odd one `i` times the second
+/// value. Each term `(t/n)^k v_k(t^2)`, `v_k` row `k` of [`DEBYE`]; summed
+/// until one is below 2^-135.
+fn debye_sums(t: DD, n: L, oscillatory: bool) -> (DD, DD) {
+    let t2 = t.mul(t);
+    let w = if oscillatory { t2.neg() } else { t2 };
+    let ratio = t.div_l(n);
+    let mut base = DD::l(ONE);
+    let (mut even, mut odd) = (DD::ZERO, DD::ZERO);
+    for (k, row) in DEBYE.iter().enumerate() {
+        let mut v = DD::ZERO;
+        for &c in row.iter().rev() {
+            v = v.mul(w).add(c);
+        }
+        let term = base.mul(v);
+        // i^k: (-1)^(k/2), and a factor i more for odd k.
+        let term = if oscillatory && (k / 2) % 2 == 1 {
+            term.neg()
+        } else {
+            term
+        };
+        if k % 2 == 0 {
+            even = even.add(term);
+        } else {
+            odd = odd.add(term);
+        }
+        if k >= 2 && term.mag() < pow2(-135) {
+            break;
+        }
+        base = base.mul(ratio);
+    }
+    (even, odd)
+}
+
+/// `J_nu(x)` and `Y_nu(x)` past the turning point, `x >= nu + DEBYE_GAP
+/// nu^(1/3)`: Debye's sec(beta) form, `J = sqrt(2/(pi s)) (E cos xi + R sin
+/// xi)`, `Y = sqrt(2/(pi s)) (E sin xi - R cos xi)`, `s = sqrt(x^2 - nu^2) =
+/// nu tan(beta)`, `xi = s - nu beta - pi/4`, `E` and `R` Debye's sums at `i
+/// cot(beta)` -- written in phase and amplitude as Hankel's expansion is, and
+/// the phase `x - (2 nu + 1) pi/4 + phi + atan(-R/E)`, `phi = s - x + nu
+/// atan(nu/s)`, reduced by pi/4 as Hankel's is. Nothing is formed from `x`
+/// but `nu/x`, so no size of `x` overflows.
+fn debye_oscillatory(nu: u32, x: L) -> (DD, DD) {
+    let n = int(i64::from(nu));
+    let one = DD::l(ONE);
+    let r = over_x(n, x);
+    // s/x and cot(beta) = nu/s.
+    let sq = one.sub(r).mul(one.add(r)).sqrt();
+    let c = r.div(sq);
+    let (e, o) = debye_sums(c, n, true);
+    let phase = atan_dd(o.div(e)).neg();
+    let size = e.mul(e).add(o.mul(o)).sqrt();
+    // sqrt(2/(pi s)) = sqrt(2/(pi x)) / sqrt(s/x), x's power of 2 halved
+    // outside the root.
+    let (xs, ex) = split(x);
+    let amp = TWO_OVER_PI
+        .div_l(xs)
+        .scale(-(ex & 1))
+        .sqrt()
+        .scale(-(ex >> 1))
+        .mul(size)
+        .div(sq.sqrt());
+    // s - x = -x r^2 / (1 + s/x) = -nu r / (1 + s/x).
+    let phi = atan_dd(c).sub(r.div(one.add(sq))).mul_l(n);
+    phase_amplitude(nu % 4, x, phi.add(phase), amp)
+}
+
+/// `J_nu(x)` and `Y_nu(x)` before the turning point, `x <= nu - DEBYE_GAP
+/// nu^(1/3)`, each as `(v, e)` for `v 2^e`: Debye's sech(alpha) form, `J =
+/// e^-g (E + O) / sqrt(2 pi nu tanh(alpha))`, `Y = -e^g (E - O) /
+/// sqrt(pi nu tanh(alpha) / 2)`, `g = nu (alpha - tanh(alpha))`, `E` and
+/// `O` Debye's sums at `coth(alpha)`.
+fn debye_evanescent(nu: u32, x: L) -> ((DD, i32), (DD, i32)) {
+    let n = int(i64::from(nu));
+    let one = DD::l(ONE);
+    let r = DD::l(x).div_l(n);
+    let tau = one.sub(r).mul(one.add(r)).sqrt();
+    let (e, o) = debye_sums(one.div(tau), n, false);
+    let g = atanh_minus_id(tau).mul_l(n);
+    // sqrt(2 pi nu tanh(alpha)); pi/4 times 8 is 2 pi.
+    let root = PI_OVER_4.scale(3).mul(tau).mul_l(n).sqrt();
+    let (vj, ej) = exp_scaled(g.neg());
+    let (vy, ey) = exp_scaled(g);
+    let j = vj.mul(e.add(o)).div(root);
+    let y = vy.mul(e.sub(o)).div(root).scale(1).neg();
+    ((j, ej), (y, ey))
+}
+
+/// The order below the turning-point window from which the recurrences start
+/// for `x`: at least `DEBYE_GAP x^(1/3)` below `x`, so Debye's oscillatory
+/// form holds for it and the next, and at least 2 below `nu`.
+fn window_start(nu: u32, x: L) -> u32 {
+    let xf = x.to_f64();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let p = libm::floor(xf - DEBYE_GAP * libm::cbrt(xf)).max(2.0) as u32;
+    p.saturating_sub(1).min(nu - 2)
+}
+
+/// `J_m(x)` for `m >= DEBYE_ORDER`, as `(v, e)` for `v 2^e` -- or `None`
+/// within the turning-point window below [`DEBYE_WINDOW_ORDER`], where the
+/// recurrences are the cheaper way.
+fn jn_large(m: u32, x: L) -> Option<(DD, i32)> {
+    let (mf, xf) = (f64::from(m), x.to_f64());
+    let gap = DEBYE_GAP * libm::cbrt(mf);
+    if xf >= mf + gap {
+        return Some((debye_oscillatory(m, x).0, 0));
+    }
+    if xf <= mf - gap {
+        return Some(debye_evanescent(m, x).0);
+    }
+    if m < DEBYE_WINDOW_ORDER {
+        return None;
+    }
+    // Within the window: Miller's recurrence from start_index down to p,
+    // scaled to Debye's J_p and J_(p+1) -- by least squares over the two, so
+    // a zero of either costs nothing.
+    let p = window_start(m, x);
+    let (jp, _) = debye_oscillatory(p, x);
+    let (jq, _) = debye_oscillatory(p + 1, x);
+    let big_n = start_index(m, x);
+    let two_over_x = over_x(TWO, x);
+    let (mut next, mut cur) = (DD::ZERO, DD::l(ONE));
+    let (mut ans, mut ans_e, mut e) = (DD::ZERO, 0i32, 0i32);
+    for k in (p + 1..=big_n).rev() {
+        if k == m {
+            ans = cur;
+            ans_e = e;
+        }
+        let prev = two_over_x.mul_l(int(i64::from(k))).mul(cur).sub(next);
+        next = cur;
+        cur = prev;
+        if cur.mag() > pow2(RESCALE) {
+            cur = cur.scale(-RESCALE);
+            next = next.scale(-RESCALE);
+            e += RESCALE;
+        }
+    }
+    // cur is f(p), next f(p+1), both at 2^-e; J_k = S f(k).
+    let s = jp
+        .mul(cur)
+        .add(jq.mul(next))
+        .div(cur.mul(cur).add(next.mul(next)));
+    Some((ans.mul(s), ans_e - e))
+}
+
+/// `Y_m(x)` for `m >= DEBYE_ORDER`, as `(v, e)` for `v 2^e` -- or `None`
+/// as [`jn_large`] answers it.
+fn yn_large(m: u32, x: L) -> Option<(DD, i32)> {
+    let (mf, xf) = (f64::from(m), x.to_f64());
+    let gap = DEBYE_GAP * libm::cbrt(mf);
+    if xf >= mf + gap {
+        return Some((debye_oscillatory(m, x).1, 0));
+    }
+    if xf <= mf - gap {
+        return Some(debye_evanescent(m, x).1);
+    }
+    if m < DEBYE_WINDOW_ORDER {
+        return None;
+    }
+    // Within the window: upward from Debye's Y_p and Y_(p+1).
+    let p = window_start(m, x);
+    let (_, mut a) = debye_oscillatory(p, x);
+    let (_, mut b) = debye_oscillatory(p + 1, x);
+    let two_over_x = over_x(TWO, x);
+    let mut e = 0i32;
+    for k in p + 1..m {
+        let c = two_over_x.mul_l(int(i64::from(k))).mul(b).sub(a);
+        a = b;
+        b = c;
+        if b.mag() > pow2(RESCALE) {
+            a = a.scale(-RESCALE);
+            b = b.scale(-RESCALE);
+            e += RESCALE;
+        }
+    }
+    Some((b, e))
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,6 +2448,1806 @@ const INV_FACTORIALS: [DD; 38] = [
         hi: L::from_bits(0x3F6F, 0xCF6468E4A742D7A6),
         lo: L::from_bits(0x3F2D, 0xF162B87B13A5E7F9),
     },
+];
+/// Debye's polynomials u_0 .. u_28: u_k(t) = t^k times the
+/// polynomial in t^2 whose coefficients, lowest first, are row k.
+const DEBYE: [&[DD]; 29] = [
+    &[DD {
+        hi: L::from_bits(0x3FFF, 0x8000000000000000),
+        lo: L::from_bits(0x0000, 0x0000000000000000),
+    }],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFC, 0x8000000000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xBFFC, 0xD555555555555555),
+            lo: L::from_bits(0xBFBB, 0xAAAAAAAAAAAAAAAB),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFB, 0x9000000000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xBFFD, 0xCD55555555555555),
+            lo: L::from_bits(0xBFBC, 0xAAAAAAAAAAAAAAAB),
+        },
+        DD {
+            hi: L::from_bits(0x3FFD, 0xAB1C71C71C71C71C),
+            lo: L::from_bits(0x3FBC, 0xE38E38E38E38E38E),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFB, 0x9600000000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xBFFE, 0xE426666666666666),
+            lo: L::from_bits(0xBFBD, 0xCCCCCCCCCCCCCCCD),
+        },
+        DD {
+            hi: L::from_bits(0x3FFF, 0xEC58E38E38E38E39),
+            lo: L::from_bits(0xBFBC, 0xE38E38E38E38E38E),
+        },
+        DD {
+            hi: L::from_bits(0xBFFF, 0x834DD3C0CA4587E7),
+            lo: L::from_bits(0x3FBE, 0x9161F9ADD3C0CA46),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFB, 0xE5B0000000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC000, 0x974D333333333333),
+            lo: L::from_bits(0xBFBE, 0xCCCCCCCCCCCCCCCD),
+        },
+        DD {
+            hi: L::from_bits(0x4002, 0x8CA0400000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC002, 0xB34FE1F9ADD3C0CA),
+            lo: L::from_bits(0xBFC1, 0x8B0FCD6E9E06522C),
+        },
+        DD {
+            hi: L::from_bits(0x4001, 0x956D3C5010DB20A9),
+            lo: L::from_bits(0xBFC0, 0xE172D4CE7C5010DB),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFC, 0xE88F000000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC001, 0xEBCD29D41D41D41D),
+            lo: L::from_bits(0xBFC0, 0x83A83A83A83A83A8),
+        },
+        DD {
+            hi: L::from_bits(0x4004, 0xAA23D6B60B60B60B),
+            lo: L::from_bits(0x3FC3, 0xC16C16C16C16C16C),
+        },
+        DD {
+            hi: L::from_bits(0xC005, 0xB7A2F08E38E38E39),
+            lo: L::from_bits(0x3FC2, 0xE38E38E38E38E38E),
+        },
+        DD {
+            hi: L::from_bits(0x4005, 0xA945BE52B3183AFF),
+            lo: L::from_bits(0xBFC1, 0xDB20A88F469598C2),
+        },
+        DD {
+            hi: L::from_bits(0xC003, 0xE1B25318EECAF954),
+            lo: L::from_bits(0x3FC0, 0x9215C5B4D9B91081),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFE, 0x928F740000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC003, 0xD3EE731B6DB6DB6E),
+            lo: L::from_bits(0x3FC2, 0x9249249249249249),
+        },
+        DD {
+            hi: L::from_bits(0x4006, 0xDA30C560AEE487E2),
+            lo: L::from_bits(0x3FC3, 0xBDD8AA577243F10C),
+        },
+        DD {
+            hi: L::from_bits(0xC008, 0xAEE5189D6C16C16C),
+            lo: L::from_bits(0xBFC5, 0xB60B60B60B60B60B),
+        },
+        DD {
+            hi: L::from_bits(0x4009, 0x847FB1C980000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC008, 0xBF502870226A0D58),
+            lo: L::from_bits(0xBFC6, 0x9215C5B4D9B91081),
+        },
+        DD {
+            hi: L::from_bits(0x4006, 0xD491F40AD0E79D0D),
+            lo: L::from_bits(0xBFC5, 0xCB493CD46A992FB8),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x3FFF, 0xDD262CC000000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC005, 0xD82E8D09DB6DB6DB),
+            lo: L::from_bits(0xBFC4, 0xDB6DB6DB6DB6DB6E),
+        },
+        DD {
+            hi: L::from_bits(0x4009, 0x961CE4AA41EB851F),
+            lo: L::from_bits(0xBFC8, 0x8F5C28F5C28F5C29),
+        },
+        DD {
+            hi: L::from_bits(0xC00B, 0xA5CD2D031F8E38E4),
+            lo: L::from_bits(0x3FCA, 0xE38E38E38E38E38E),
+        },
+        DD {
+            hi: L::from_bits(0x400C, 0xB61D92C6E625ED09),
+            lo: L::from_bits(0x3FCB, 0xF684BDA12F684BDA),
+        },
+        DD {
+            hi: L::from_bits(0xC00C, 0xD44A3334E2FCD6EA),
+            lo: L::from_bits(0x3FC9, 0xFCD6E9E06522C3F3),
+        },
+        DD {
+            hi: L::from_bits(0x400B, 0xFBEDC70737FC1921),
+            lo: L::from_bits(0xBFCA, 0x86ECFF7E2589265B),
+        },
+        DD {
+            hi: L::from_bits(0xC009, 0xEFEEA52B72456D44),
+            lo: L::from_bits(0x3FC8, 0x8080304760B3617B),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4001, 0xC25E8D54C0000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC007, 0xF6F528B4F1249249),
+            lo: L::from_bits(0xBFC5, 0x9249249249249249),
+        },
+        DD {
+            hi: L::from_bits(0x400B, 0xDE2C1D4A9FA08C6F),
+            lo: L::from_bits(0x3FC9, 0xB564EFE898231BCB),
+        },
+        DD {
+            hi: L::from_bits(0xC00E, 0xA0E8A7AC0AAAE148),
+            lo: L::from_bits(0x3FCD, 0xA3D70A3D70A3D70A),
+        },
+        DD {
+            hi: L::from_bits(0x400F, 0xEEAC3B84904297B4),
+            lo: L::from_bits(0x3FCD, 0x97B425ED097B425F),
+        },
+        DD {
+            hi: L::from_bits(0xC010, 0xC6A20B588FF4BC3A),
+            lo: L::from_bits(0x3FCF, 0xD14B802CF301C17E),
+        },
+        DD {
+            hi: L::from_bits(0x4010, 0xBC08C014319CA7DB),
+            lo: L::from_bits(0x3FCF, 0xF51D25932377BF63),
+        },
+        DD {
+            hi: L::from_bits(0xC00F, 0xBD6A4C97FFB6358F),
+            lo: L::from_bits(0xBFCD, 0xBD1C009280519316),
+        },
+        DD {
+            hi: L::from_bits(0x400D, 0x9DD895295517D74D),
+            lo: L::from_bits(0xBFCC, 0xB13455184A88AD61),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4003, 0xC30B5327B6000000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC00A, 0x9C3D49A74BB11746),
+            lo: L::from_bits(0x3FC8, 0xBA2E8BA2E8BA2E8C),
+        },
+        DD {
+            hi: L::from_bits(0x400E, 0xB0A2C4DBF66C2492),
+            lo: L::from_bits(0x3FCD, 0x9249249249249249),
+        },
+        DD {
+            hi: L::from_bits(0xC011, 0xA1EFA584FE58F436),
+            lo: L::from_bits(0xBFCF, 0xE49886F9136840C1),
+        },
+        DD {
+            hi: L::from_bits(0x4013, 0x9AD46A2FC33F7DD0),
+            lo: L::from_bits(0x3FD1, 0xDA740DA740DA740E),
+        },
+        DD {
+            hi: L::from_bits(0xC014, 0xABB9ECE8064CE6E1),
+            lo: L::from_bits(0x3FD3, 0x81EE7113506AC124),
+        },
+        DD {
+            hi: L::from_bits(0x4014, 0xE5B11D30CCD72270),
+            lo: L::from_bits(0x3FD2, 0x8E56DAE4B9E24498),
+        },
+        DD {
+            hi: L::from_bits(0xC014, 0xB6FBFFAC9540E27C),
+            lo: L::from_bits(0xBFD3, 0xA021B641511E8D2B),
+        },
+        DD {
+            hi: L::from_bits(0x4013, 0xA0209CEAD46C491C),
+            lo: L::from_bits(0x3FD2, 0xEC6F361341FD25B7),
+        },
+        DD {
+            hi: L::from_bits(0xC010, 0xED39CC069008B82A),
+            lo: L::from_bits(0xBFCE, 0xA9955DDA3EC823E4),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4005, 0xDC08C69BFFB80000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC00C, 0xD8F85BE865FD88BA),
+            lo: L::from_bits(0xBFCA, 0xBA2E8BA2E8BA2E8C),
+        },
+        DD {
+            hi: L::from_bits(0x4011, 0x967B4CF296411191),
+            lo: L::from_bits(0x3FCE, 0xC9615D90DC60E3FA),
+        },
+        DD {
+            hi: L::from_bits(0xC014, 0xAA054883291877CC),
+            lo: L::from_bits(0xBFD3, 0xEAD65B7A32846FF5),
+        },
+        DD {
+            hi: L::from_bits(0x4016, 0xCAC53F2A9A9ECB11),
+            lo: L::from_bits(0xBFD4, 0xA252ADB363BEC475),
+        },
+        DD {
+            hi: L::from_bits(0xC018, 0x8F4EB22A49F25E11),
+            lo: L::from_bits(0x3FD5, 0xDF8297736BD60755),
+        },
+        DD {
+            hi: L::from_bits(0x4018, 0xFD15901195290E32),
+            lo: L::from_bits(0x3FD7, 0xC3B76CFA7F971E51),
+        },
+        DD {
+            hi: L::from_bits(0xC019, 0x8D582786C4E022E2),
+            lo: L::from_bits(0xBFD6, 0xA7EF74C83E1E0B51),
+        },
+        DD {
+            hi: L::from_bits(0x4018, 0xC25E669F87D1478B),
+            lo: L::from_bits(0x3FD1, 0x9FD1CD5AA3CCA6D8),
+        },
+        DD {
+            hi: L::from_bits(0xC017, 0x9659E18F28C986B9),
+            lo: L::from_bits(0x3FD6, 0x8D428AA236DAD3A0),
+        },
+        DD {
+            hi: L::from_bits(0x4014, 0xC877D7698BB75E4C),
+            lo: L::from_bits(0xBFD3, 0xBC58B8D84923C4D6),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4008, 0x89D57F5272BBA000),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC00F, 0xA412B7804DCBF24E),
+            lo: L::from_bits(0xBFCE, 0xA4B3055EE19101CA),
+        },
+        DD {
+            hi: L::from_bits(0x4014, 0x88F2E0B6314D7617),
+            lo: L::from_bits(0x3FD3, 0x9CBC14E5E0A72F05),
+        },
+        DD {
+            hi: L::from_bits(0xC017, 0xBAB8E75CE501B41B),
+            lo: L::from_bits(0x3FD5, 0x8A7849E52AC1D977),
+        },
+        DD {
+            hi: L::from_bits(0x401A, 0x877B53BCC2B21015),
+            lo: L::from_bits(0xBFD8, 0xCC364F574E3408CC),
+        },
+        DD {
+            hi: L::from_bits(0xC01B, 0xEC756BC23343173D),
+            lo: L::from_bits(0xBFDA, 0x84D41278259CE622),
+        },
+        DD {
+            hi: L::from_bits(0x401D, 0x83F22981A5622703),
+            lo: L::from_bits(0xBFDC, 0xC2759203CAE75920),
+        },
+        DD {
+            hi: L::from_bits(0xC01D, 0xC13F73D03777F506),
+            lo: L::from_bits(0xBFDC, 0x8A739297A02BB35E),
+        },
+        DD {
+            hi: L::from_bits(0x401D, 0xB93403C7242311B2),
+            lo: L::from_bits(0xBFDA, 0xD101620B6FCE2032),
+        },
+        DD {
+            hi: L::from_bits(0xC01C, 0xDFFC3B5EB9EFB052),
+            lo: L::from_bits(0xBFDB, 0xC4B1E0BAF6FE15D0),
+        },
+        DD {
+            hi: L::from_bits(0x401B, 0x9B3ECE917C72C0C6),
+            lo: L::from_bits(0x3FD8, 0x90912B6A05703346),
+        },
+        DD {
+            hi: L::from_bits(0xC018, 0xBC2D196A8754CAA3),
+            lo: L::from_bits(0x3FD7, 0xFAFACC0E6AF545CC),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x400A, 0xBDE172BB94B923C0),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC012, 0x863D253DBC70AFCB),
+            lo: L::from_bits(0xBFD0, 0xE525982AF70C880E),
+        },
+        DD {
+            hi: L::from_bits(0x4017, 0x84B6D1C6E8C1A9B2),
+            lo: L::from_bits(0xBFD5, 0xB23705844AF837D3),
+        },
+        DD {
+            hi: L::from_bits(0xC01A, 0xD6AD6FDE3B0B83AC),
+            lo: L::from_bits(0x3FD9, 0x99AB7AB7AB7AB7AB),
+        },
+        DD {
+            hi: L::from_bits(0x401D, 0xB9E171F1C22E0A71),
+            lo: L::from_bits(0x3FDB, 0xCAC7C7AB95591408),
+        },
+        DD {
+            hi: L::from_bits(0xC01F, 0xC399F5304F44B581),
+            lo: L::from_bits(0x3FDE, 0xFC01797544A69706),
+        },
+        DD {
+            hi: L::from_bits(0x4021, 0x85C4F1EC64FAAD05),
+            lo: L::from_bits(0xBFDD, 0xFB8B4CFF6666E9E9),
+        },
+        DD {
+            hi: L::from_bits(0xC021, 0xF6113D68B99F8622),
+            lo: L::from_bits(0xBFE0, 0xF5D6E05327F672C3),
+        },
+        DD {
+            hi: L::from_bits(0x4022, 0x99C7DA4EBC1046FE),
+            lo: L::from_bits(0x3FE1, 0xEA69FFF9E551EF34),
+        },
+        DD {
+            hi: L::from_bits(0xC022, 0x8103B0B7C28A5AB8),
+            lo: L::from_bits(0xBFE0, 0x8C54C829E4AE2B2F),
+        },
+        DD {
+            hi: L::from_bits(0x4021, 0x8B3CED52A97765D4),
+            lo: L::from_bits(0xBFDF, 0x8C5E9F5C283FEBBF),
+        },
+        DD {
+            hi: L::from_bits(0xC01F, 0xAED5B3AA06A2EE11),
+            lo: L::from_bits(0xBFDE, 0xF9EA1582CDECD11A),
+        },
+        DD {
+            hi: L::from_bits(0x401C, 0xC242C7A07926CFA2),
+            lo: L::from_bits(0xBFDB, 0xB16DAF35C5DC6CFF),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x400D, 0x8EA382CD86CC4EDB),
+            lo: L::from_bits(0x0000, 0x0000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC014, 0xEC5165C531C1453E),
+            lo: L::from_bits(0xBFD3, 0xA879BBF8D6D33EA8),
+        },
+        DD {
+            hi: L::from_bits(0x401A, 0x8886A74B8091BB82),
+            lo: L::from_bits(0xBFD9, 0xCE0E0404D2964DF7),
+        },
+        DD {
+            hi: L::from_bits(0xC01E, 0x812C5037394AA2A0),
+            lo: L::from_bits(0x3FDD, 0xAA917A5312E809EE),
+        },
+        DD {
+            hi: L::from_bits(0x4021, 0x8363944DDAB811B6),
+            lo: L::from_bits(0x3FDF, 0xE6465687B9098F3B),
+        },
+        DD {
+            hi: L::from_bits(0xC023, 0xA3AA48F5902FA5EA),
+            lo: L::from_bits(0xBFE2, 0x84540C90B9AF7201),
+        },
+        DD {
+            hi: L::from_bits(0x4025, 0x86106E93644D19F7),
+            lo: L::from_bits(0x3FE2, 0x80F1A4FB4CCC70BE),
+        },
+        DD {
+            hi: L::from_bits(0xC026, 0x9642BE687D606285),
+            lo: L::from_bits(0x3FE4, 0x87124730CF175674),
+        },
+        DD {
+            hi: L::from_bits(0x4026, 0xEABAE7E4F161D0F6),
+            lo: L::from_bits(0x3FE5, 0xF2BB0280E8BCB972),
+        },
+        DD {
+            hi: L::from_bits(0xC026, 0xFFBC42D171392AA3),
+            lo: L::from_bits(0x3FE4, 0x83231DA0D4E46FA6),
+        },
+        DD {
+            hi: L::from_bits(0x4026, 0xBEBD3CDFEC93CBCF),
+            lo: L::from_bits(0x3FE5, 0xA2E2406DD843B336),
+        },
+        DD {
+            hi: L::from_bits(0xC025, 0xB9D7F8B4F0EED8D2),
+            lo: L::from_bits(0x3FE2, 0xA9DCDC71AEC6C557),
+        },
+        DD {
+            hi: L::from_bits(0x4023, 0xD54503A92034DBD9),
+            lo: L::from_bits(0x3FE1, 0xE2D1DD973B0E4F79),
+        },
+        DD {
+            hi: L::from_bits(0xC020, 0xDABCF00FEC84FBBE),
+            lo: L::from_bits(0x3FDB, 0xEF6D691A012EAEFA),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x400F, 0xE81B368F950FE29A),
+            lo: L::from_bits(0x3FCC, 0xA000000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC017, 0xDEB0920FA4EE7E3B),
+            lo: L::from_bits(0x3FD6, 0xB0DCC157B8644073),
+        },
+        DD {
+            hi: L::from_bits(0x401D, 0x94A7B41B0681F7BB),
+            lo: L::from_bits(0xBFDA, 0xD25D3A2E8BA2E8BA),
+        },
+        DD {
+            hi: L::from_bits(0xC021, 0xA297EE71B0EF669A),
+            lo: L::from_bits(0xBFE0, 0x823BB8E6B6A5EE07),
+        },
+        DD {
+            hi: L::from_bits(0x4024, 0xBFC5D7E101A3DB27),
+            lo: L::from_bits(0x3FE1, 0xEE7E4882155CEC18),
+        },
+        DD {
+            hi: L::from_bits(0xC027, 0x8B4C0E0022173EA3),
+            lo: L::from_bits(0x3FE6, 0xC8FE21DE9FE5AB86),
+        },
+        DD {
+            hi: L::from_bits(0x4029, 0x863F7C362E243912),
+            lo: L::from_bits(0x3FE8, 0xE4A30A70B2F5B59D),
+        },
+        DD {
+            hi: L::from_bits(0xC02A, 0xB349681FA7E49835),
+            lo: L::from_bits(0x3FE8, 0x8DC65C6E747F200E),
+        },
+        DD {
+            hi: L::from_bits(0x402B, 0xA9E1B78F492EBA3E),
+            lo: L::from_bits(0xBFEA, 0xF4733709DDBA5F98),
+        },
+        DD {
+            hi: L::from_bits(0xC02B, 0xE6688C8782894469),
+            lo: L::from_bits(0x3FEA, 0xE291E35E9C78C517),
+        },
+        DD {
+            hi: L::from_bits(0x402B, 0xDE63FB97D1FA909D),
+            lo: L::from_bits(0xBFE8, 0xFAEE8BC3538403DF),
+        },
+        DD {
+            hi: L::from_bits(0xC02B, 0x9547B4029FB37FC7),
+            lo: L::from_bits(0x3FEA, 0x8BC2CAF80F84EAB4),
+        },
+        DD {
+            hi: L::from_bits(0x402A, 0x848EF0BA4D7E6220),
+            lo: L::from_bits(0xBFE9, 0xD1E3F9FD5F8709E3),
+        },
+        DD {
+            hi: L::from_bits(0xC028, 0x8C10A204FF2040E6),
+            lo: L::from_bits(0xBFE3, 0x9EAFDDACD2CAFB68),
+        },
+        DD {
+            hi: L::from_bits(0x4025, 0x85652C970B5BAB86),
+            lo: L::from_bits(0xBFE4, 0x88D70E3BCEE1A1CC),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4012, 0xCB55B4DD402F3FD9),
+            lo: L::from_bits(0xBFD1, 0xD7A0000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC01A, 0xDFB120B85B246A33),
+            lo: L::from_bits(0xBFD8, 0xCFD21931CF5931CF),
+        },
+        DD {
+            hi: L::from_bits(0x4020, 0xAADA6244DCAFEAE6),
+            lo: L::from_bits(0x3FDF, 0xEAB1D2D08F377F1B),
+        },
+        DD {
+            hi: L::from_bits(0xC024, 0xD5D9864EA0FC6227),
+            lo: L::from_bits(0x3FE3, 0xBDCC36FAB121310B),
+        },
+        DD {
+            hi: L::from_bits(0x4028, 0x90A5663EC88575F1),
+            lo: L::from_bits(0x3FE7, 0xA1B1116BA8F5C28F),
+        },
+        DD {
+            hi: L::from_bits(0xC02A, 0xF2118D1919C7B034),
+            lo: L::from_bits(0xBFE9, 0xA9938D2086B45179),
+        },
+        DD {
+            hi: L::from_bits(0x402D, 0x8748AF24C40E4A36),
+            lo: L::from_bits(0xBFEC, 0x8C422FD70E2CAD4B),
+        },
+        DD {
+            hi: L::from_bits(0xC02E, 0xD38D885607CBECDC),
+            lo: L::from_bits(0xBFE9, 0x818776AF81DA92FA),
+        },
+        DD {
+            hi: L::from_bits(0x402F, 0xEDDB9A3CB00653EA),
+            lo: L::from_bits(0x3FE9, 0xEC59E6832FA801F8),
+        },
+        DD {
+            hi: L::from_bits(0xC030, 0xC2F6CD11E65BC34A),
+            lo: L::from_bits(0xBFED, 0x9A412FE2E0891E24),
+        },
+        DD {
+            hi: L::from_bits(0x4030, 0xE980A8EA6A929F49),
+            lo: L::from_bits(0xBFEF, 0x8D252F7A53B97F15),
+        },
+        DD {
+            hi: L::from_bits(0xC030, 0xCA3F894858909C47),
+            lo: L::from_bits(0x3FEF, 0xAD654A98B5D3CF66),
+        },
+        DD {
+            hi: L::from_bits(0x402F, 0xF6CF3677F305DC82),
+            lo: L::from_bits(0xBFEE, 0xFF734F89CED83DEB),
+        },
+        DD {
+            hi: L::from_bits(0xC02E, 0xC950FA9605BD322B),
+            lo: L::from_bits(0x3FEC, 0xCB9DFC8B02450433),
+        },
+        DD {
+            hi: L::from_bits(0x402C, 0xC518BD222C88322E),
+            lo: L::from_bits(0x3FEB, 0xB0D03F3821931EB0),
+        },
+        DD {
+            hi: L::from_bits(0xC029, 0xAF326F3AD2402C9B),
+            lo: L::from_bits(0x3FE4, 0xD7FC7CE1B0B72F1A),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4015, 0xBED32EFCA37C57AB),
+            lo: L::from_bits(0x3FCE, 0x8906000000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC01D, 0xEE9D6AA0623081E0),
+            lo: L::from_bits(0xBFDB, 0x8B24939FDAEE9FDB),
+        },
+        DD {
+            hi: L::from_bits(0x4023, 0xCEBFAFEE996E9E42),
+            lo: L::from_bits(0x3FE2, 0xEAE88C01F66AC7DF),
+        },
+        DD {
+            hi: L::from_bits(0xC028, 0x92C626382836B21E),
+            lo: L::from_bits(0x3FE7, 0xD2175E169AB3703A),
+        },
+        DD {
+            hi: L::from_bits(0x402B, 0xE19BD9E41203B0FB),
+            lo: L::from_bits(0x3FEA, 0xFDFDD8BD91E7288E),
+        },
+        DD {
+            hi: L::from_bits(0xC02E, 0xD73BF60344C1406E),
+            lo: L::from_bits(0xBFEC, 0xDE23FB373098839C),
+        },
+        DD {
+            hi: L::from_bits(0x4031, 0x89DD82D1481D6D54),
+            lo: L::from_bits(0x3FEF, 0xB88ECDB212001D33),
+        },
+        DD {
+            hi: L::from_bits(0xC032, 0xF8EF940F38D6F701),
+            lo: L::from_bits(0xBFF0, 0x96D17E58ABCB5AD4),
+        },
+        DD {
+            hi: L::from_bits(0x4034, 0xA33C65845BA56070),
+            lo: L::from_bits(0x3FF3, 0xA66A446B468B9198),
+        },
+        DD {
+            hi: L::from_bits(0xC035, 0x9E39AA61C538CD20),
+            lo: L::from_bits(0x3FF3, 0xA085DC63915B0C69),
+        },
+        DD {
+            hi: L::from_bits(0x4035, 0xE45B2EA227D60266),
+            lo: L::from_bits(0x3FF4, 0xCE6C6437784DB3E2),
+        },
+        DD {
+            hi: L::from_bits(0xC035, 0xF4C3239B3A713165),
+            lo: L::from_bits(0xBFF4, 0x8B518C9D3CFAD432),
+        },
+        DD {
+            hi: L::from_bits(0x4035, 0xC03C3BB1D030B27B),
+            lo: L::from_bits(0x3FF4, 0xCC6D0A2301D8BF41),
+        },
+        DD {
+            hi: L::from_bits(0xC034, 0xD701FCCDDA9144B9),
+            lo: L::from_bits(0xBFF2, 0xBF276C8C6EE7BD44),
+        },
+        DD {
+            hi: L::from_bits(0x4033, 0xA22B077608F1B67A),
+            lo: L::from_bits(0x3FF0, 0xCAEDC8757783C1CF),
+        },
+        DD {
+            hi: L::from_bits(0xC031, 0x93E8742788C06DA8),
+            lo: L::from_bits(0xBFF0, 0xAB5A7F711F6AF596),
+        },
+        DD {
+            hi: L::from_bits(0x402D, 0xF6836C41E3EB616E),
+            lo: L::from_bits(0xBFEA, 0xDEFA03B883E19AC4),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4018, 0xBF0015620C1B47C0),
+            lo: L::from_bits(0xBFD7, 0xBC71FDA000000000),
+        },
+        DD {
+            hi: L::from_bits(0xC021, 0x86B1780C150EDBA4),
+            lo: L::from_bits(0x3FDC, 0xE2EC9CD899742456),
+        },
+        DD {
+            hi: L::from_bits(0x4027, 0x83662761A16FE1CF),
+            lo: L::from_bits(0xBFE6, 0xE2ABFE963DC06518),
+        },
+        DD {
+            hi: L::from_bits(0xC02B, 0xD203164F9DB61500),
+            lo: L::from_bits(0xBFE8, 0xFE62275323C9CF34),
+        },
+        DD {
+            hi: L::from_bits(0x402F, 0xB5EB4DE0D22E1EEA),
+            lo: L::from_bits(0xBFEC, 0xB9C55048AE5E37CA),
+        },
+        DD {
+            hi: L::from_bits(0xC032, 0xC421B7AC591807DF),
+            lo: L::from_bits(0xBFF1, 0x8F98EB9BD3F1D06F),
+        },
+        DD {
+            hi: L::from_bits(0x4035, 0x8E90B27C0B7C359A),
+            lo: L::from_bits(0xBFF4, 0xB272F56106A33A14),
+        },
+        DD {
+            hi: L::from_bits(0xC037, 0x92EBE7FF98B0C965),
+            lo: L::from_bits(0x3FF5, 0xEC56AF0DA83F9836),
+        },
+        DD {
+            hi: L::from_bits(0x4038, 0xDDB14CB205A86846),
+            lo: L::from_bits(0x3FF7, 0xB9FFD3F6F67A1F20),
+        },
+        DD {
+            hi: L::from_bits(0xC039, 0xF9DBD42B71025F8D),
+            lo: L::from_bits(0x3FF8, 0xB9C447497E9C3401),
+        },
+        DD {
+            hi: L::from_bits(0x403A, 0xD49D7A7692B8FCA6),
+            lo: L::from_bits(0xBFF9, 0xB10864EEC7A08F76),
+        },
+        DD {
+            hi: L::from_bits(0xC03B, 0x88F55A645DC253F2),
+            lo: L::from_bits(0x3FF8, 0xB92CD6A9401CC03F),
+        },
+        DD {
+            hi: L::from_bits(0x403B, 0x84CE060DB8497609),
+            lo: L::from_bits(0xBFFA, 0xE79781F4B4F6A572),
+        },
+        DD {
+            hi: L::from_bits(0xC03A, 0xBECB26A2E2AC62F1),
+            lo: L::from_bits(0x3FF7, 0x8F1A0070FD90A96A),
+        },
+        DD {
+            hi: L::from_bits(0x4039, 0xC4F1C9859DB74013),
+            lo: L::from_bits(0x3FF7, 0xD535E85E3C117D3E),
+        },
+        DD {
+            hi: L::from_bits(0xC038, 0x8A2363E66E2B7468),
+            lo: L::from_bits(0x3FF6, 0xF4C8B267CCC52730),
+        },
+        DD {
+            hi: L::from_bits(0x4035, 0xEBD9498C8A2F2C30),
+            lo: L::from_bits(0x3FF4, 0xEC91434C2C4E585A),
+        },
+        DD {
+            hi: L::from_bits(0xC032, 0xB8FABC31FDF2CD53),
+            lo: L::from_bits(0xBFF0, 0xBE615A8186C12B38),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x401B, 0xCB1A888409C33B2F),
+            lo: L::from_bits(0x3FD8, 0xDE74085300000000),
+        },
+        DD {
+            hi: L::from_bits(0xC024, 0xA0738664F566E924),
+            lo: L::from_bits(0xBFDB, 0xE785D23AE40FD9F5),
+        },
+        DD {
+            hi: L::from_bits(0x402A, 0xAF0FAC7CAF331151),
+            lo: L::from_bits(0x3FE9, 0xF7A2EDDB16F51B57),
+        },
+        DD {
+            hi: L::from_bits(0xC02F, 0x9C6AD4E6F251F947),
+            lo: L::from_bits(0x3FEE, 0x9DCF054F5DF2FDB8),
+        },
+        DD {
+            hi: L::from_bits(0x4033, 0x97A203226FEB3567),
+            lo: L::from_bits(0x3FF2, 0xE01A9DEC046159F0),
+        },
+        DD {
+            hi: L::from_bits(0xC036, 0xB7568F10660BAB70),
+            lo: L::from_bits(0x3FF5, 0x804EB6D65C89B834),
+        },
+        DD {
+            hi: L::from_bits(0x4039, 0x95F45D4EE0DB1C4A),
+            lo: L::from_bits(0xBFF8, 0xDF58F759D61AA1CA),
+        },
+        DD {
+            hi: L::from_bits(0xC03B, 0xAEB5A33C282FD7FF),
+            lo: L::from_bits(0xBFF9, 0xD36547D985FCE0C0),
+        },
+        DD {
+            hi: L::from_bits(0x403D, 0x95F5E0877ADE387E),
+            lo: L::from_bits(0x3FFC, 0xE32F9B9C3FE3A039),
+        },
+        DD {
+            hi: L::from_bits(0xC03E, 0xC1E243C71862B11F),
+            lo: L::from_bits(0x3FFD, 0x8CF0F6063A2456F1),
+        },
+        DD {
+            hi: L::from_bits(0x403F, 0xBF532F50C48BA095),
+            lo: L::from_bits(0xBFFE, 0x8621314B46BA2BDF),
+        },
+        DD {
+            hi: L::from_bits(0xC040, 0x90FBBEDBBFDDCE34),
+            lo: L::from_bits(0xBFFF, 0xC637EBB78B2587D4),
+        },
+        DD {
+            hi: L::from_bits(0x4040, 0xA89CF668795F815E),
+            lo: L::from_bits(0xBFFD, 0xEE1623969B31A805),
+        },
+        DD {
+            hi: L::from_bits(0xC040, 0x953D7D4E17124ECC),
+            lo: L::from_bits(0x3FFE, 0x8FBEC09DAF123F21),
+        },
+        DD {
+            hi: L::from_bits(0x403F, 0xC5845FDD26A3BAB0),
+            lo: L::from_bits(0x3FFE, 0x815DAED6241AF36B),
+        },
+        DD {
+            hi: L::from_bits(0xC03E, 0xBD48F49942550C01),
+            lo: L::from_bits(0x3FFC, 0xB24ECBEED78D4DE5),
+        },
+        DD {
+            hi: L::from_bits(0x403C, 0xF825605EDA3FFA65),
+            lo: L::from_bits(0x3FFA, 0xB517AF0AE5539789),
+        },
+        DD {
+            hi: L::from_bits(0xC03A, 0xC71675661AD78BA3),
+            lo: L::from_bits(0x3FF9, 0xE399892212857961),
+        },
+        DD {
+            hi: L::from_bits(0x4037, 0x9378EEAA72B2A052),
+            lo: L::from_bits(0x3FF6, 0xF897C05889FBF1F1),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x401E, 0xE4A89BCC3AFDB0BC),
+            lo: L::from_bits(0x3FDD, 0xCF0821B619000000),
+        },
+        DD {
+            hi: L::from_bits(0xC027, 0xC921978B207FF05A),
+            lo: L::from_bits(0x3FE3, 0xBCCF2A05E8DDD534),
+        },
+        DD {
+            hi: L::from_bits(0x402D, 0xF3F86EEA8A7CC557),
+            lo: L::from_bits(0x3FEC, 0xCD510530AB53EBCE),
+        },
+        DD {
+            hi: L::from_bits(0xC032, 0xF243530279512569),
+            lo: L::from_bits(0xBFF0, 0xB4494D735215183F),
+        },
+        DD {
+            hi: L::from_bits(0x4037, 0x82977EDA30438407),
+            lo: L::from_bits(0xBFF6, 0xDF03216CAD7EE21F),
+        },
+        DD {
+            hi: L::from_bits(0xC03A, 0xAFE55F8E42FEFEDB),
+            lo: L::from_bits(0xBFF9, 0x9D94B54ACF006E4F),
+        },
+        DD {
+            hi: L::from_bits(0x403D, 0xA0B3A050B1221696),
+            lo: L::from_bits(0x3FFB, 0xBCDFC55C95B0FA94),
+        },
+        DD {
+            hi: L::from_bits(0xC03F, 0xD1F0DBF54D8A0FD3),
+            lo: L::from_bits(0x3FFE, 0xD189F00595190DB8),
+        },
+        DD {
+            hi: L::from_bits(0x4041, 0xCB17B3C446CDD8FF),
+            lo: L::from_bits(0x3FFF, 0xD18D094F452B916D),
+        },
+        DD {
+            hi: L::from_bits(0xC043, 0x94F3F5248C591FC7),
+            lo: L::from_bits(0xC001, 0x98B5D55A6F416D4C),
+        },
+        DD {
+            hi: L::from_bits(0x4044, 0xA8325CB75B01923F),
+            lo: L::from_bits(0xBFFE, 0xA4C01D3E2C9BA972),
+        },
+        DD {
+            hi: L::from_bits(0xC045, 0x93793D218B613B73),
+            lo: L::from_bits(0xC003, 0x8953B32E06A39C09),
+        },
+        DD {
+            hi: L::from_bits(0x4045, 0xC959209CCDF7D4F3),
+            lo: L::from_bits(0x4003, 0xCC3D20D51D0F507B),
+        },
+        DD {
+            hi: L::from_bits(0xC045, 0xD55754F8694CFE72),
+            lo: L::from_bits(0x4004, 0xEE76094615FA51D4),
+        },
+        DD {
+            hi: L::from_bits(0x4045, 0xADA7D2EE525D86BE),
+            lo: L::from_bits(0xC004, 0xF47A5804DDD34D60),
+        },
+        DD {
+            hi: L::from_bits(0xC044, 0xD50896B726BC7A76),
+            lo: L::from_bits(0xC003, 0xD12B23086144EE23),
+        },
+        DD {
+            hi: L::from_bits(0x4043, 0xBE81CA5A287E7130),
+            lo: L::from_bits(0xC001, 0xC85E01A02D91C717),
+        },
+        DD {
+            hi: L::from_bits(0xC041, 0xEA661C810468ABA4),
+            lo: L::from_bits(0xBFFD, 0xADE200109E0DA3F3),
+        },
+        DD {
+            hi: L::from_bits(0x403F, 0xB1626FACC5364EB1),
+            lo: L::from_bits(0xBFFD, 0xBC2B56549ADB4139),
+        },
+        DD {
+            hi: L::from_bits(0xC03B, 0xF8F5F211EC5E2F91),
+            lo: L::from_bits(0x3FF9, 0x8A57C58437A87F79),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4022, 0x87DAFA2A710C871B),
+            lo: L::from_bits(0x3FE0, 0x8E03100EFBB50000),
+        },
+        DD {
+            hi: L::from_bits(0xC02B, 0x84546A588F784C44),
+            lo: L::from_bits(0x3FEA, 0x87A921271B2CC354),
+        },
+        DD {
+            hi: L::from_bits(0x4031, 0xB1802BD2463268E9),
+            lo: L::from_bits(0xBFEF, 0xFE32DC5311A8C1A7),
+        },
+        DD {
+            hi: L::from_bits(0xC036, 0xC2D4FEBCF52B008E),
+            lo: L::from_bits(0xBFF4, 0x86B6710EF0A21B0F),
+        },
+        DD {
+            hi: L::from_bits(0x403A, 0xE84BFFE780BC91B8),
+            lo: L::from_bits(0x3FF7, 0xFC457F49E6F78CEA),
+        },
+        DD {
+            hi: L::from_bits(0xC03E, 0xAD3F03E9DBFB1680),
+            lo: L::from_bits(0xBFFD, 0xA9BDD98DE4B07232),
+        },
+        DD {
+            hi: L::from_bits(0x4041, 0xAFABE95109C998D8),
+            lo: L::from_bits(0xC000, 0x98C1B5106E3A7695),
+        },
+        DD {
+            hi: L::from_bits(0xC043, 0xFF840E17D375BF3D),
+            lo: L::from_bits(0xC000, 0x9E1CED7CF45E4037),
+        },
+        DD {
+            hi: L::from_bits(0x4046, 0x8A2DF104D0215CC7),
+            lo: L::from_bits(0xC002, 0xB7466E3F5330B4CF),
+        },
+        DD {
+            hi: L::from_bits(0xC047, 0xE3D7C20D9ACA541A),
+            lo: L::from_bits(0x4004, 0xDD0942918527A3F1),
+        },
+        DD {
+            hi: L::from_bits(0x4049, 0x919AB91122E4F784),
+            lo: L::from_bits(0xC008, 0xD03908C9D80AC422),
+        },
+        DD {
+            hi: L::from_bits(0xC04A, 0x91C6894BC228EEAC),
+            lo: L::from_bits(0xC005, 0xBC7FCE5A31AB7BC8),
+        },
+        DD {
+            hi: L::from_bits(0x404A, 0xE5D6E2B1CD989806),
+            lo: L::from_bits(0x4008, 0xD45E35EDC74E55B3),
+        },
+        DD {
+            hi: L::from_bits(0xC04B, 0x8EB1E7D6B4640DD2),
+            lo: L::from_bits(0x400A, 0xF689D63187AF8835),
+        },
+        DD {
+            hi: L::from_bits(0x404B, 0x8AD13EF42159C094),
+            lo: L::from_bits(0x4009, 0xA457E4A9AE3DE880),
+        },
+        DD {
+            hi: L::from_bits(0xC04A, 0xD128078BE3F07FCA),
+            lo: L::from_bits(0x4009, 0xC8F416CA7F5998FB),
+        },
+        DD {
+            hi: L::from_bits(0x4049, 0xEF189ADBF844F36D),
+            lo: L::from_bits(0x4008, 0xFAFEADBB7B467B6F),
+        },
+        DD {
+            hi: L::from_bits(0xC048, 0xC8694AAD9262CA84),
+            lo: L::from_bits(0x4004, 0xA1C5DA91A7A17841),
+        },
+        DD {
+            hi: L::from_bits(0x4046, 0xE84E6E02DC98E859),
+            lo: L::from_bits(0x4004, 0xE79A17512A4D698B),
+        },
+        DD {
+            hi: L::from_bits(0xC044, 0xA65BD8111A01AFA9),
+            lo: L::from_bits(0x4003, 0x8618A335D4B883D7),
+        },
+        DD {
+            hi: L::from_bits(0x4040, 0xDDCFCAC178023F8C),
+            lo: L::from_bits(0xBFFF, 0xB2CB8447C64B5A74),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4025, 0xA9EB994639F77A82),
+            lo: L::from_bits(0xBFE3, 0xFCDB06C5A4093C00),
+        },
+        DD {
+            hi: L::from_bits(0xC02E, 0xB66039B4592F1F1D),
+            lo: L::from_bits(0xBFED, 0xA94D920C3C01BA3A),
+        },
+        DD {
+            hi: L::from_bits(0x4035, 0x869B0FF3209AB3BA),
+            lo: L::from_bits(0xBFF3, 0xCBF31C5BCD61F104),
+        },
+        DD {
+            hi: L::from_bits(0xC03A, 0xA2868C859C62CC29),
+            lo: L::from_bits(0xBFF3, 0xEB2152B4AC9B7011),
+        },
+        DD {
+            hi: L::from_bits(0x403E, 0xD53B89075E3C69B5),
+            lo: L::from_bits(0xBFFD, 0xCFF104E9F4960DC0),
+        },
+        DD {
+            hi: L::from_bits(0xC042, 0xAF2F17F89B0702DF),
+            lo: L::from_bits(0xBFFF, 0xBCD73560B8C65E24),
+        },
+        DD {
+            hi: L::from_bits(0x4045, 0xC40A814EEA00BC2E),
+            lo: L::from_bits(0xC004, 0xD55C68A9DE621B65),
+        },
+        DD {
+            hi: L::from_bits(0xC048, 0x9DC137B5022A421F),
+            lo: L::from_bits(0xC006, 0xFCCDEB403A893CB2),
+        },
+        DD {
+            hi: L::from_bits(0x404A, 0xBD7352FD53910650),
+            lo: L::from_bits(0xC009, 0xA29039A22F3A45AA),
+        },
+        DD {
+            hi: L::from_bits(0xC04C, 0xAE33BA26446F2254),
+            lo: L::from_bits(0xC00B, 0xB6740F0E17FF8641),
+        },
+        DD {
+            hi: L::from_bits(0x404D, 0xF9BA73CB009A4B22),
+            lo: L::from_bits(0x400C, 0xE830C2EE54514CD5),
+        },
+        DD {
+            hi: L::from_bits(0xC04F, 0x8D367EF11E02A1EA),
+            lo: L::from_bits(0xC00D, 0xEE8891A99D6BEB66),
+        },
+        DD {
+            hi: L::from_bits(0x404F, 0xFDC353FCDF000BA9),
+            lo: L::from_bits(0x400E, 0xE9038FF277CB7708),
+        },
+        DD {
+            hi: L::from_bits(0xC050, 0xB5A0FF8532199C2E),
+            lo: L::from_bits(0xC00E, 0xD912E12F5ACFDA72),
+        },
+        DD {
+            hi: L::from_bits(0x4050, 0xCEBE32A3FDB91763),
+            lo: L::from_bits(0x400C, 0xD4FC6BE367DEBB82),
+        },
+        DD {
+            hi: L::from_bits(0xC050, 0xB9E03B25F2F727DC),
+            lo: L::from_bits(0xC00F, 0xE022ADD1F251B491),
+        },
+        DD {
+            hi: L::from_bits(0x4050, 0x824FA0C904294EBB),
+            lo: L::from_bits(0x400D, 0xE6614350F1260F0A),
+        },
+        DD {
+            hi: L::from_bits(0xC04F, 0x8B73FC14435C950C),
+            lo: L::from_bits(0xC00E, 0xBF78FEBF6ED73743),
+        },
+        DD {
+            hi: L::from_bits(0x404D, 0xDBFC985FB9768AAF),
+            lo: L::from_bits(0x400B, 0xBFD8486BBE51A9FE),
+        },
+        DD {
+            hi: L::from_bits(0xC04B, 0xF109D3894B88E9CC),
+            lo: L::from_bits(0xC006, 0xD1FF5AEC340AF019),
+        },
+        DD {
+            hi: L::from_bits(0x4049, 0xA3D045AD81B1290E),
+            lo: L::from_bits(0x4006, 0x95D24A7AF877E60C),
+        },
+        DD {
+            hi: L::from_bits(0xC045, 0xD00468BBD162FF4F),
+            lo: L::from_bits(0x4003, 0xB53156CE5E2DC756),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4028, 0xDF241E30C47C7226),
+            lo: L::from_bits(0x3FE7, 0xC93F185F231C7B6C),
+        },
+        DD {
+            hi: L::from_bits(0xC032, 0x835C40DDCF7048E7),
+            lo: L::from_bits(0xBFF1, 0xDC1A7129B45A1364),
+        },
+        DD {
+            hi: L::from_bits(0x4038, 0xD4746B8ABDC7AD9C),
+            lo: L::from_bits(0x3FF6, 0xE1FBACA2A63AF9AF),
+        },
+        DD {
+            hi: L::from_bits(0xC03E, 0x8C77EC305977D081),
+            lo: L::from_bits(0x3FFC, 0xF55705B8D2D597AD),
+        },
+        DD {
+            hi: L::from_bits(0x4042, 0xC9E1A6909605E650),
+            lo: L::from_bits(0x4001, 0xEB33856F79154E93),
+        },
+        DD {
+            hi: L::from_bits(0xC046, 0xB5D89B96EDB3BE63),
+            lo: L::from_bits(0xC003, 0xBF976F37A55A9CC2),
+        },
+        DD {
+            hi: L::from_bits(0x4049, 0xDF73823080755D97),
+            lo: L::from_bits(0xC005, 0x9A01F2CC24DAFE4E),
+        },
+        DD {
+            hi: L::from_bits(0xC04C, 0xC5E041CEF51B3A10),
+            lo: L::from_bits(0xC008, 0x994FD80BB1D995E1),
+        },
+        DD {
+            hi: L::from_bits(0x404F, 0x8322435A88A64FAF),
+            lo: L::from_bits(0x400E, 0x9F56AE7C37977726),
+        },
+        DD {
+            hi: L::from_bits(0xC051, 0x859376ED2E0D9AF1),
+            lo: L::from_bits(0xC00F, 0xB4F851AD722A0638),
+        },
+        DD {
+            hi: L::from_bits(0x4052, 0xD51F858EF94CFBD6),
+            lo: L::from_bits(0xC011, 0xFA43ADB44028A041),
+        },
+        DD {
+            hi: L::from_bits(0xC054, 0x86E9C7A46A24A22C),
+            lo: L::from_bits(0xC011, 0x91E057FF30B51C0C),
+        },
+        DD {
+            hi: L::from_bits(0x4055, 0x88B168FED7B963DB),
+            lo: L::from_bits(0xC014, 0xAAC8B4EA86EFEFB0),
+        },
+        DD {
+            hi: L::from_bits(0xC055, 0xDEA9E75E69CD7B55),
+            lo: L::from_bits(0x4014, 0x96CC15A8DC15A12E),
+        },
+        DD {
+            hi: L::from_bits(0x4056, 0x91E1135253FBF0F4),
+            lo: L::from_bits(0xC015, 0xB35A482FF3239759),
+        },
+        DD {
+            hi: L::from_bits(0xC056, 0x993FE105ABB8F157),
+            lo: L::from_bits(0xC015, 0x8369B744FC93EAB2),
+        },
+        DD {
+            hi: L::from_bits(0x4056, 0x800E200048D07F1F),
+            lo: L::from_bits(0x4013, 0x884271094CC94E3A),
+        },
+        DD {
+            hi: L::from_bits(0xC055, 0xA7E2A8C0EC3BD1C2),
+            lo: L::from_bits(0xC011, 0xEF1C6657788B887A),
+        },
+        DD {
+            hi: L::from_bits(0x4054, 0xA8DFE2E2E87B14A2),
+            lo: L::from_bits(0xC012, 0xE47D6367FDF504B5),
+        },
+        DD {
+            hi: L::from_bits(0xC052, 0xFB8D919E248919B7),
+            lo: L::from_bits(0x4010, 0x9E179CA1EFEDF741),
+        },
+        DD {
+            hi: L::from_bits(0x4051, 0x82A8E47E5A2360A6),
+            lo: L::from_bits(0xC00F, 0x908911134E5A74E0),
+        },
+        DD {
+            hi: L::from_bits(0xC04E, 0xA8FBC821797BC886),
+            lo: L::from_bits(0xC00D, 0xF07A8DA8FD9BF7E1),
+        },
+        DD {
+            hi: L::from_bits(0x404A, 0xCCD4195EE0D419D9),
+            lo: L::from_bits(0x4009, 0x97DA5E222BA5C79C),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x402C, 0x997C3C1210E3DC15),
+            lo: L::from_bits(0x3FE7, 0x8AFA9064F053E492),
+        },
+        DD {
+            hi: L::from_bits(0xC035, 0xC56C46DD2CF83166),
+            lo: L::from_bits(0x3FF4, 0xAF4095AFC7C82217),
+        },
+        DD {
+            hi: L::from_bits(0x403C, 0xAE392B848E9867B9),
+            lo: L::from_bits(0x3FFB, 0x965B02C90EE8F497),
+        },
+        DD {
+            hi: L::from_bits(0xC041, 0xFB4C7C21EC34F0EA),
+            lo: L::from_bits(0xBFFE, 0xA878BCBE6A6B883C),
+        },
+        DD {
+            hi: L::from_bits(0x4046, 0xC501F65E9ACF5F58),
+            lo: L::from_bits(0x4003, 0xECB112516EA3AC1D),
+        },
+        DD {
+            hi: L::from_bits(0xC04A, 0xC1BBAC89DD0B7548),
+            lo: L::from_bits(0xC004, 0xBE6974D21047DBEE),
+        },
+        DD {
+            hi: L::from_bits(0x404E, 0x821C8891ED1FABB9),
+            lo: L::from_bits(0x400D, 0xFD291D0E15D3B55B),
+        },
+        DD {
+            hi: L::from_bits(0xC050, 0xFC5BE00D62EDA4F9),
+            lo: L::from_bits(0x400F, 0xE432CF87C18C04C7),
+        },
+        DD {
+            hi: L::from_bits(0x4053, 0xB7994A62FEFD6AF6),
+            lo: L::from_bits(0x4011, 0x835FF6F02EA125D0),
+        },
+        DD {
+            hi: L::from_bits(0xC055, 0xCDF503B142A397D9),
+            lo: L::from_bits(0x4014, 0xDD69B7C2AC56CA17),
+        },
+        DD {
+            hi: L::from_bits(0x4057, 0xB5A77DBF2CC8BC5C),
+            lo: L::from_bits(0x4014, 0xEF215A3642562F36),
+        },
+        DD {
+            hi: L::from_bits(0xC058, 0xFF81A06DCF43FA03),
+            lo: L::from_bits(0xC017, 0xFF943A79539FAE3C),
+        },
+        DD {
+            hi: L::from_bits(0x405A, 0x90A9F5BFC5E0553D),
+            lo: L::from_bits(0x4019, 0xBAAC17FC83C5FE34),
+        },
+        DD {
+            hi: L::from_bits(0xC05B, 0x84A8B786B4F69F91),
+            lo: L::from_bits(0xC019, 0xC34131CFAE92B214),
+        },
+        DD {
+            hi: L::from_bits(0x405B, 0xC58554535DA60D1D),
+            lo: L::from_bits(0xC017, 0x91738D02DDED597D),
+        },
+        DD {
+            hi: L::from_bits(0xC05B, 0xEE8C65451BA7034A),
+            lo: L::from_bits(0x4018, 0xDFB94C46AAFD3804),
+        },
+        DD {
+            hi: L::from_bits(0x405B, 0xE8A014678F027727),
+            lo: L::from_bits(0xC018, 0xE74514C48E9B15DD),
+        },
+        DD {
+            hi: L::from_bits(0xC05B, 0xB58BC9761FC51363),
+            lo: L::from_bits(0x401A, 0x996591482C238766),
+        },
+        DD {
+            hi: L::from_bits(0x405A, 0xDF7B6F19347D38B2),
+            lo: L::from_bits(0xC018, 0xC9CAFFFF9C468A3F),
+        },
+        DD {
+            hi: L::from_bits(0xC059, 0xD40EF344413FFEB8),
+            lo: L::from_bits(0xC016, 0xE8E241B8A63CD306),
+        },
+        DD {
+            hi: L::from_bits(0x4058, 0x9599C3CA1508ED54),
+            lo: L::from_bits(0xC017, 0x8C30081B32095352),
+        },
+        DD {
+            hi: L::from_bits(0xC056, 0x93BD768D9869E597),
+            lo: L::from_bits(0xC015, 0xABAF372B731DA5C7),
+        },
+        DD {
+            hi: L::from_bits(0x4053, 0xB63C4105ACE78173),
+            lo: L::from_bits(0xC012, 0xD192619FEC711E65),
+        },
+        DD {
+            hi: L::from_bits(0xC04F, 0xD34991E17A8E4476),
+            lo: L::from_bits(0xC00A, 0x94EDCB99887FA70C),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x402F, 0xDCBC2B0EA5F507AE),
+            lo: L::from_bits(0xBFEE, 0xE1D75FC01805F597),
+        },
+        DD {
+            hi: L::from_bits(0xC039, 0x9A830D3D431D0ED2),
+            lo: L::from_bits(0x3FF8, 0xF7FC1E0916857ECB),
+        },
+        DD {
+            hi: L::from_bits(0x4040, 0x9441B4B704D82AE6),
+            lo: L::from_bits(0xBFFF, 0xB6FDA5D076101866),
+        },
+        DD {
+            hi: L::from_bits(0xC045, 0xE867E3D20432A984),
+            lo: L::from_bits(0x4004, 0xE7B1E7AFF313FFCD),
+        },
+        DD {
+            hi: L::from_bits(0x404A, 0xC606958E3827DFAA),
+            lo: L::from_bits(0x4009, 0x9B1A5955912943A8),
+        },
+        DD {
+            hi: L::from_bits(0xC04E, 0xD3C62CD5B20E83B5),
+            lo: L::from_bits(0x400D, 0xF9285DA62013B667),
+        },
+        DD {
+            hi: L::from_bits(0x4052, 0x9AD665811344AAD7),
+            lo: L::from_bits(0x4011, 0xC29C6D8D3C4E56C4),
+        },
+        DD {
+            hi: L::from_bits(0xC055, 0xA3B9EFFAB5C3C0D5),
+            lo: L::from_bits(0x4012, 0xE4C0767D4ED076BF),
+        },
+        DD {
+            hi: L::from_bits(0x4058, 0x8226957D0DB7B873),
+            lo: L::from_bits(0x4016, 0xCAD27CE507341468),
+        },
+        DD {
+            hi: L::from_bits(0xC05A, 0x9FF3AEE739F10F70),
+            lo: L::from_bits(0x4017, 0xE00F98AB84FD07F6),
+        },
+        DD {
+            hi: L::from_bits(0x405C, 0x9B12C0D84098E3CF),
+            lo: L::from_bits(0x401B, 0xE2D58EBA0BC60EAE),
+        },
+        DD {
+            hi: L::from_bits(0xC05D, 0xF0BCD65B51D0F3FA),
+            lo: L::from_bits(0xC01A, 0xF880F82945C22608),
+        },
+        DD {
+            hi: L::from_bits(0x405F, 0x97304496C44536A8),
+            lo: L::from_bits(0xC01B, 0x89FACFF458DF85EE),
+        },
+        DD {
+            hi: L::from_bits(0xC060, 0x9AB977A91C0CF242),
+            lo: L::from_bits(0x401F, 0x95E2E2C9995CF7D8),
+        },
+        DD {
+            hi: L::from_bits(0x4061, 0x8183FCC957402C12),
+            lo: L::from_bits(0xC01A, 0x87DB8EF38E8190F9),
+        },
+        DD {
+            hi: L::from_bits(0xC061, 0xB1849BF756E459D2),
+            lo: L::from_bits(0xC01D, 0x8610F77F9488BCDF),
+        },
+        DD {
+            hi: L::from_bits(0x4061, 0xC6C7A4AEAC567053),
+            lo: L::from_bits(0xC01F, 0xCBB4F1D739EBE936),
+        },
+        DD {
+            hi: L::from_bits(0xC061, 0xB4D8A008C02EB4BD),
+            lo: L::from_bits(0xC020, 0x8CDDDCEB3375274B),
+        },
+        DD {
+            hi: L::from_bits(0x4061, 0x84623130AB124BB3),
+            lo: L::from_bits(0xC01E, 0xBCC2229A30F297AD),
+        },
+        DD {
+            hi: L::from_bits(0xC060, 0x999452FCAA426986),
+            lo: L::from_bits(0x401F, 0xD1117ED61C464F86),
+        },
+        DD {
+            hi: L::from_bits(0x405F, 0x89E8D54C86BA5354),
+            lo: L::from_bits(0x401D, 0xE491B9B6D560C263),
+        },
+        DD {
+            hi: L::from_bits(0xC05D, 0xB8D25C70C3A4FF72),
+            lo: L::from_bits(0xC018, 0xCF125727E2B53A14),
+        },
+        DD {
+            hi: L::from_bits(0x405B, 0xADF081A979B231C5),
+            lo: L::from_bits(0x401A, 0xDD714D1B39AB3865),
+        },
+        DD {
+            hi: L::from_bits(0xC058, 0xCD10FDBF809C1A85),
+            lo: L::from_bits(0xC016, 0xC5F7CE33C3348C9C),
+        },
+        DD {
+            hi: L::from_bits(0x4054, 0xE3D9FD7F72748F3F),
+            lo: L::from_bits(0xC013, 0xAE76548DE8E2CE54),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4033, 0xA59EC8F24551D95C),
+            lo: L::from_bits(0x3FF2, 0xC44EF6513AC6689C),
+        },
+        DD {
+            hi: L::from_bits(0xC03C, 0xFB7EC8F6226AB373),
+            lo: L::from_bits(0x3FFA, 0xF05C3215B84F535E),
+        },
+        DD {
+            hi: L::from_bits(0x4044, 0x82BF37243920ED89),
+            lo: L::from_bits(0xC003, 0xDD8F4F04EF3B92C8),
+        },
+        DD {
+            hi: L::from_bits(0xC049, 0xDDFFAE90BCB86F9B),
+            lo: L::from_bits(0x4008, 0x918462A57F67DE52),
+        },
+        DD {
+            hi: L::from_bits(0x404E, 0xCCE3D4897CCBC551),
+            lo: L::from_bits(0xC00C, 0xBACC6F6A765DAE9A),
+        },
+        DD {
+            hi: L::from_bits(0xC052, 0xED729C328B54DCD4),
+            lo: L::from_bits(0xC010, 0x85FB26E3FEF74D38),
+        },
+        DD {
+            hi: L::from_bits(0x4056, 0xBC4D4D90C792F771),
+            lo: L::from_bits(0xC015, 0xB7BD2C107A44BAE5),
+        },
+        DD {
+            hi: L::from_bits(0xC059, 0xD8404F24C33DCBB7),
+            lo: L::from_bits(0x4018, 0xE16A4BE42AF8B7D4),
+        },
+        DD {
+            hi: L::from_bits(0x405C, 0xBB092BA4AD49428E),
+            lo: L::from_bits(0x4019, 0xAD19F9FFB68A6EF0),
+        },
+        DD {
+            hi: L::from_bits(0xC05E, 0xFAAAE5F22E4475A8),
+            lo: L::from_bits(0x401B, 0xF7BAD291FF349F51),
+        },
+        DD {
+            hi: L::from_bits(0x4061, 0x84E2C2E7EE419DEA),
+            lo: L::from_bits(0xC020, 0xC212830B53F61EC2),
+        },
+        DD {
+            hi: L::from_bits(0xC062, 0xE2638B3F377A4CF8),
+            lo: L::from_bits(0xC021, 0x9D0A915BDB149A99),
+        },
+        DD {
+            hi: L::from_bits(0x4064, 0x9CAF5C019398A6AD),
+            lo: L::from_bits(0x4022, 0xF3094FAB6D06B950),
+        },
+        DD {
+            hi: L::from_bits(0xC065, 0xB19D712143CA79CC),
+            lo: L::from_bits(0xC024, 0x85481120C6E1F77E),
+        },
+        DD {
+            hi: L::from_bits(0x4066, 0xA5B56E16536F7CB7),
+            lo: L::from_bits(0xC025, 0xFB21CD998D937DCD),
+        },
+        DD {
+            hi: L::from_bits(0xC066, 0xFF12216E88E5E2E3),
+            lo: L::from_bits(0xC025, 0x96BE25488CE7B3E7),
+        },
+        DD {
+            hi: L::from_bits(0x4067, 0xA1E4D16A089379AB),
+            lo: L::from_bits(0xC023, 0xC98BF4B181917B90),
+        },
+        DD {
+            hi: L::from_bits(0xC067, 0xA8F3752A132D21CF),
+            lo: L::from_bits(0xC025, 0xC9E773D9FA543981),
+        },
+        DD {
+            hi: L::from_bits(0x4067, 0x9008AEC3B5250D16),
+            lo: L::from_bits(0xC026, 0x8E77315AC5E1FDA2),
+        },
+        DD {
+            hi: L::from_bits(0xC066, 0xC68BA00B6E4DD617),
+            lo: L::from_bits(0xC024, 0xDD93C7F93C053D91),
+        },
+        DD {
+            hi: L::from_bits(0x4065, 0xD9C8FAF38C92C572),
+            lo: L::from_bits(0x4023, 0xC6F12CADF06F4A57),
+        },
+        DD {
+            hi: L::from_bits(0xC064, 0xB99A0C5DCD265D61),
+            lo: L::from_bits(0x4022, 0xB65513F95D9323B9),
+        },
+        DD {
+            hi: L::from_bits(0x4062, 0xECDAD7AECACFB2FD),
+            lo: L::from_bits(0x4021, 0xB86250A2C9C47F89),
+        },
+        DD {
+            hi: L::from_bits(0xC060, 0xD4E578B14E693787),
+            lo: L::from_bits(0xC01F, 0xAC54DF736A34F377),
+        },
+        DD {
+            hi: L::from_bits(0x405D, 0xF05E26FC42AE165D),
+            lo: L::from_bits(0x4019, 0x9EA25B685C11E1B3),
+        },
+        DD {
+            hi: L::from_bits(0xC05A, 0x803236ECF05CD8BA),
+            lo: L::from_bits(0xC018, 0x9DAF3F633F79D9D4),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x4037, 0x8170CA6F31685A92),
+            lo: L::from_bits(0x3FF5, 0x80636D04D0F2BF84),
+        },
+        DD {
+            hi: L::from_bits(0xC040, 0xD485BFEE97FF663D),
+            lo: L::from_bits(0xBFFE, 0xB197D2F4725E42D9),
+        },
+        DD {
+            hi: L::from_bits(0x4047, 0xEEB51062C92B111F),
+            lo: L::from_bits(0x4006, 0x923CEDA0544FC62E),
+        },
+        DD {
+            hi: L::from_bits(0xC04D, 0xDAD2C244F0573531),
+            lo: L::from_bits(0xC00C, 0x96432F4658E8A426),
+        },
+        DD {
+            hi: L::from_bits(0x4052, 0xDA118877200FEA4F),
+            lo: L::from_bits(0xC011, 0xE30C3C8C0F1D8730),
+        },
+        DD {
+            hi: L::from_bits(0xC057, 0x887D64D9089F26E4),
+            lo: L::from_bits(0x4016, 0x943DEE484D66F1A1),
+        },
+        DD {
+            hi: L::from_bits(0x405A, 0xEA028843820C9B11),
+            lo: L::from_bits(0xC018, 0x83C074A0ACE80689),
+        },
+        DD {
+            hi: L::from_bits(0xC05E, 0x916B1F8C8E2DC6DC),
+            lo: L::from_bits(0xC01C, 0xFC6A4C1CC46EF8C3),
+        },
+        DD {
+            hi: L::from_bits(0x4061, 0x885271D458BB74CB),
+            lo: L::from_bits(0x4020, 0x90E524ED19783251),
+        },
+        DD {
+            hi: L::from_bits(0xC063, 0xC66A4D2CBCA85713),
+            lo: L::from_bits(0x4021, 0xA250E684BA8D2C16),
+        },
+        DD {
+            hi: L::from_bits(0x4065, 0xE5062D8FAF393710),
+            lo: L::from_bits(0xC022, 0xFA4B9A17F8F4D85A),
+        },
+        DD {
+            hi: L::from_bits(0xC067, 0xD50475FFAE911D57),
+            lo: L::from_bits(0x4022, 0xB8D956652A3DF011),
+        },
+        DD {
+            hi: L::from_bits(0x4069, 0xA18F541F745C5893),
+            lo: L::from_bits(0xC027, 0xA3A6EAFE8FFB5A1C),
+        },
+        DD {
+            hi: L::from_bits(0xC06A, 0xC98F8A36F0EE2F2C),
+            lo: L::from_bits(0xC029, 0xBB6513D0CA7D1B81),
+        },
+        DD {
+            hi: L::from_bits(0x406B, 0xD00A44E3D5646C6E),
+            lo: L::from_bits(0x4029, 0xB5E9AAB178C11AB2),
+        },
+        DD {
+            hi: L::from_bits(0xC06C, 0xB24096C7F3ED0829),
+            lo: L::from_bits(0x402A, 0xAEDBBEFCCA4800E4),
+        },
+        DD {
+            hi: L::from_bits(0x406C, 0xFDD75E03E131237A),
+            lo: L::from_bits(0xC02B, 0xAF12A8D3A54A3D25),
+        },
+        DD {
+            hi: L::from_bits(0xC06D, 0x9600448E727E537C),
+            lo: L::from_bits(0xC02B, 0xBB17A765877EDCC5),
+        },
+        DD {
+            hi: L::from_bits(0x406D, 0x928C54A9919A1D1A),
+            lo: L::from_bits(0xC02C, 0xF63CA2A1A1F2A495),
+        },
+        DD {
+            hi: L::from_bits(0xC06C, 0xEB0DCD1D1052A359),
+            lo: L::from_bits(0x402A, 0xB301012083E8AA75),
+        },
+        DD {
+            hi: L::from_bits(0x406C, 0x990D18F6E6E239EB),
+            lo: L::from_bits(0x402A, 0xFE83D87E086A8177),
+        },
+        DD {
+            hi: L::from_bits(0xC06B, 0x9F3411194360156B),
+            lo: L::from_bits(0x4025, 0x9A762FC21722566D),
+        },
+        DD {
+            hi: L::from_bits(0x406A, 0x81192DBF18A26B19),
+            lo: L::from_bits(0xC026, 0x90675234C300FEB6),
+        },
+        DD {
+            hi: L::from_bits(0xC068, 0x9D3C628010BEBB4E),
+            lo: L::from_bits(0x4027, 0x93DDA46DE343E021),
+        },
+        DD {
+            hi: L::from_bits(0x4066, 0x87416476978EF38B),
+            lo: L::from_bits(0xC020, 0xB5CC6C67FE427C46),
+        },
+        DD {
+            hi: L::from_bits(0xC063, 0x928162E527711B6E),
+            lo: L::from_bits(0xC021, 0xF6B496E0DC3AB100),
+        },
+        DD {
+            hi: L::from_bits(0x405F, 0x96431018FA8122B3),
+            lo: L::from_bits(0xC01E, 0x952D3C78FEA6D32E),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x403A, 0xD26A761C290E8631),
+            lo: L::from_bits(0x3FF9, 0xC7C2970DC433867A),
+        },
+        DD {
+            hi: L::from_bits(0xC044, 0xBA385C3323DF44E2),
+            lo: L::from_bits(0x4003, 0x9502B5D42B05335B),
+        },
+        DD {
+            hi: L::from_bits(0x404B, 0xE14D990E299FFDA6),
+            lo: L::from_bits(0x4009, 0x81F0796BD2022DA8),
+        },
+        DD {
+            hi: L::from_bits(0xC051, 0xDE604DAD8295B69B),
+            lo: L::from_bits(0xC010, 0xB4444915EBC5BFB8),
+        },
+        DD {
+            hi: L::from_bits(0x4056, 0xEE97A143667C2F46),
+            lo: L::from_bits(0xC014, 0xA1B636229E57A944),
+        },
+        DD {
+            hi: L::from_bits(0xC05B, 0xA0D3DEB5510E41D2),
+            lo: L::from_bits(0xC01A, 0xB3483878905B49BE),
+        },
+        DD {
+            hi: L::from_bits(0x405F, 0x94928205460EC35F),
+            lo: L::from_bits(0xC01C, 0x84AC5F3FC6F1CC93),
+        },
+        DD {
+            hi: L::from_bits(0xC062, 0xC72EC0B7585BCE69),
+            lo: L::from_bits(0xC021, 0xDBE581D4D6902BE1),
+        },
+        DD {
+            hi: L::from_bits(0x4065, 0xC9AF83B2B13278ED),
+            lo: L::from_bits(0xC022, 0xCB6BD113686AF7B4),
+        },
+        DD {
+            hi: L::from_bits(0xC068, 0x9ECECDE5731041B5),
+            lo: L::from_bits(0x4027, 0x8B17E7C2C0370499),
+        },
+        DD {
+            hi: L::from_bits(0x406A, 0xC6C0DC5FDB4B9183),
+            lo: L::from_bits(0x4028, 0xFA1A7FD565D4E69C),
+        },
+        DD {
+            hi: L::from_bits(0xC06C, 0xC8F4A542D2D85542),
+            lo: L::from_bits(0xC02A, 0xD9110BB35C1BD9E1),
+        },
+        DD {
+            hi: L::from_bits(0x406E, 0xA631336495D0D102),
+            lo: L::from_bits(0x402A, 0x8332E7BFACE41FAB),
+        },
+        DD {
+            hi: L::from_bits(0xC06F, 0xE2EC09A5D7942906),
+            lo: L::from_bits(0x402D, 0xD142F53D0E58AD43),
+        },
+        DD {
+            hi: L::from_bits(0x4071, 0x80BBF6054C9C6AE4),
+            lo: L::from_bits(0xC030, 0xF88FBF8E334CEC02),
+        },
+        DD {
+            hi: L::from_bits(0xC071, 0xF3C9197506036865),
+            lo: L::from_bits(0x402F, 0x8F533EACA4098B4B),
+        },
+        DD {
+            hi: L::from_bits(0x4072, 0xC10B8CDBAD661376),
+            lo: L::from_bits(0xC02F, 0xBF25C43B62AC4E75),
+        },
+        DD {
+            hi: L::from_bits(0xC072, 0xFFB2B3A33AE368CA),
+            lo: L::from_bits(0x4031, 0xD563DC8144570CA6),
+        },
+        DD {
+            hi: L::from_bits(0x4073, 0x8D5336B6858ADD5F),
+            lo: L::from_bits(0xC032, 0xC0E80964E89F27D4),
+        },
+        DD {
+            hi: L::from_bits(0xC073, 0x81C5F6A903E2F0BF),
+            lo: L::from_bits(0xC030, 0xABA147CD4DDCD8F6),
+        },
+        DD {
+            hi: L::from_bits(0x4072, 0xC47B911DCCC3C2FF),
+            lo: L::from_bits(0x402E, 0xBBDE9FCEF0176097),
+        },
+        DD {
+            hi: L::from_bits(0xC071, 0xF275695F3F367C9A),
+            lo: L::from_bits(0xC02F, 0xE73CE4A2E1B1E8C3),
+        },
+        DD {
+            hi: L::from_bits(0x4070, 0xEFCD361239EDF872),
+            lo: L::from_bits(0x402F, 0xE0152DFC65EBC09D),
+        },
+        DD {
+            hi: L::from_bits(0xC06F, 0xB975E73B3D827528),
+            lo: L::from_bits(0xC02B, 0xADF6AF30F6B75242),
+        },
+        DD {
+            hi: L::from_bits(0x406D, 0xD807C4C36394BE41),
+            lo: L::from_bits(0x402A, 0xB2181477DE2EDAC6),
+        },
+        DD {
+            hi: L::from_bits(0xC06B, 0xB22BD620BAF583C9),
+            lo: L::from_bits(0x402A, 0xB6BBC0A99EEB4FE4),
+        },
+        DD {
+            hi: L::from_bits(0x4068, 0xB975255B077ACECA),
+            lo: L::from_bits(0xC027, 0x9D8B0B597C32C66B),
+        },
+        DD {
+            hi: L::from_bits(0xC064, 0xB72B0221043A14ED),
+            lo: L::from_bits(0xC022, 0x8345D69E4065F9A4),
+        },
+    ],
+    &[
+        DD {
+            hi: L::from_bits(0x403E, 0xB198DB427B829DB1),
+            lo: L::from_bits(0xBFF9, 0xE1C673873C1F0918),
+        },
+        DD {
+            hi: L::from_bits(0xC048, 0xA8FBF1B4694D11CB),
+            lo: L::from_bits(0xC006, 0xC371D2CB17A73CEE),
+        },
+        DD {
+            hi: L::from_bits(0x404F, 0xDBA33BA99F8692D1),
+            lo: L::from_bits(0x400D, 0xB801309185CA13BD),
+        },
+        DD {
+            hi: L::from_bits(0xC055, 0xE8CA7A954B58BCE1),
+            lo: L::from_bits(0x4012, 0xE95E81827C08F5F8),
+        },
+        DD {
+            hi: L::from_bits(0x405B, 0x8617D12EFC66A7F7),
+            lo: L::from_bits(0xC01A, 0xAB8E935BFA5E9598),
+        },
+        DD {
+            hi: L::from_bits(0xC05F, 0xC22715822B772E2E),
+            lo: L::from_bits(0x401E, 0xE68BD8327AC2FC8C),
+        },
+        DD {
+            hi: L::from_bits(0x4063, 0xC0BBCF17B6097E07),
+            lo: L::from_bits(0xC022, 0xCC99DB910718E84C),
+        },
+        DD {
+            hi: L::from_bits(0xC067, 0x8AF2106AFFE28F79),
+            lo: L::from_bits(0x4024, 0xC585F4513409D69B),
+        },
+        DD {
+            hi: L::from_bits(0x406A, 0x977C94A932D745BA),
+            lo: L::from_bits(0x4027, 0xDEA237E2AB507E1E),
+        },
+        DD {
+            hi: L::from_bits(0xC06D, 0x809FD7A58A071F2D),
+            lo: L::from_bits(0xC02C, 0xB14FA74051467E2C),
+        },
+        DD {
+            hi: L::from_bits(0x406F, 0xADE842C458E8EB13),
+            lo: L::from_bits(0x402D, 0xE8885B0A2C2D1DFA),
+        },
+        DD {
+            hi: L::from_bits(0xC071, 0xBE61B3E6DAE700CF),
+            lo: L::from_bits(0x4030, 0xB21843E26A2694A5),
+        },
+        DD {
+            hi: L::from_bits(0x4073, 0xAAEE0F69ACAAAE3E),
+            lo: L::from_bits(0xC02E, 0xBD1AE6E1F0A02FEE),
+        },
+        DD {
+            hi: L::from_bits(0xC074, 0xFE2EF7EE1EFBB666),
+            lo: L::from_bits(0xC033, 0xFAA8FE48A8E8A8E4),
+        },
+        DD {
+            hi: L::from_bits(0x4076, 0x9DA3C29E361F6B06),
+            lo: L::from_bits(0xC035, 0xA0072AE3C0B880D5),
+        },
+        DD {
+            hi: L::from_bits(0xC077, 0xA3E7F792CC8ED742),
+            lo: L::from_bits(0x4035, 0xA72429D822E1921D),
+        },
+        DD {
+            hi: L::from_bits(0x4078, 0x8F49C99D37BBC79A),
+            lo: L::from_bits(0x4036, 0xD56FA531E24A77EC),
+        },
+        DD {
+            hi: L::from_bits(0xC078, 0xD2E05526E28D2678),
+            lo: L::from_bits(0xC037, 0xFDF154539A5F2576),
+        },
+        DD {
+            hi: L::from_bits(0x4079, 0x8282A2DFAA5FBA73),
+            lo: L::from_bits(0x4038, 0xC38F531226E8C570),
+        },
+        DD {
+            hi: L::from_bits(0xC079, 0x877BD24AE070EBC4),
+            lo: L::from_bits(0x4038, 0x9C2F3666AF7B3FBB),
+        },
+        DD {
+            hi: L::from_bits(0x4078, 0xEAB0B91D663EFB69),
+            lo: L::from_bits(0xC037, 0xD2DDE7F006F07325),
+        },
+        DD {
+            hi: L::from_bits(0xC078, 0xA83A3573336C7E62),
+            lo: L::from_bits(0x4037, 0xA4A77BA4A6DFE415),
+        },
+        DD {
+            hi: L::from_bits(0x4077, 0xC53E7524B09FA804),
+            lo: L::from_bits(0xC036, 0xC23E5D7DA287B97E),
+        },
+        DD {
+            hi: L::from_bits(0xC076, 0xB9EF2D49B10E5D6E),
+            lo: L::from_bits(0x4035, 0xAF3AEB7D19F63CB0),
+        },
+        DD {
+            hi: L::from_bits(0x4075, 0x8970D5EE2054E097),
+            lo: L::from_bits(0xC032, 0xC0479B4382DC9890),
+        },
+        DD {
+            hi: L::from_bits(0xC073, 0x99675AA577CE42CE),
+            lo: L::from_bits(0x4032, 0xC8B4CE331EF8FFE8),
+        },
+        DD {
+            hi: L::from_bits(0x4070, 0xF305BDCF2A6087CC),
+            lo: L::from_bits(0xC02F, 0xA472E9333DCDDEEB),
+        },
+        DD {
+            hi: L::from_bits(0xC06D, 0xF37533B79BE1730A),
+            lo: L::from_bits(0xC028, 0xEDD9B4941EF5EC2F),
+        },
+        DD {
+            hi: L::from_bits(0x4069, 0xE7DD55D36FE2E777),
+            lo: L::from_bits(0x4028, 0x8810019B1A394E0F),
+        },
+    ],
 ];
 
 /// The zeros of J0 below 48, and its Taylor coefficients about each.
@@ -4239,6 +6338,143 @@ mod tests {
             assert!(same(a.add(b), a.add_ref(b)));
             assert!(same(a.mul(b), a.mul_ref(b)));
             assert!(same(a.mul_l(b.hi), a.mul_l_ref(b.hi)));
+        }
+    }
+
+    /// Values at orders from 600 to 2^31 - 1, across the turning
+    /// point (`posix/tools/oracle/besl_tables.py oracle-large`).
+    const LARGE_ORACLE: &str = include_str!("besl_large_oracle.txt");
+
+    /// At huge orders every value is the correctly rounded one too, but next
+    /// to a zero, where the phase's error -- 2^-128 of a phase of the order of
+    /// `n` -- is what is left.
+    #[test]
+    fn the_huge_orders_are_the_correctly_rounded_ones() {
+        extended();
+        let mut failures = Vec::new();
+        let mut rows = 0;
+        for line in LARGE_ORACLE
+            .lines()
+            .filter(|s| !s.starts_with('#') && !s.is_empty())
+        {
+            let w: Vec<&str> = line.split(' ').collect();
+            let row = Row {
+                func: w[0],
+                n: w[1].parse().unwrap(),
+                x: l(w[2]),
+                y: l(w[4]),
+                rel: w[5].chars().next().unwrap(),
+            };
+            rows += 1;
+            for (name, mode) in MODES {
+                assert_eq!(fesetround(mode), 0);
+                let r = call(row.func, row.n, row.x);
+                assert_eq!(fesetround(FE_TONEAREST), 0);
+                let want = directed(row.y, row.rel, name);
+                let d = ulps(r, want);
+                if d == 0 || (near_a_zero(&row) && d <= 1) {
+                    continue;
+                }
+                failures.push(format!(
+                    "{name} {} {} {}: want {} ours {} ({d} ulps)",
+                    row.func,
+                    row.n,
+                    hex(row.x),
+                    hex(want),
+                    hex(r)
+                ));
+            }
+        }
+        assert!(rows > 190, "{rows} rows");
+        let shown = failures.len().min(60);
+        assert!(
+            failures.is_empty(),
+            "{} differ; the first {shown}:\n{}",
+            failures.len(),
+            failures[..shown].join("\n")
+        );
+    }
+
+    /// Where both hold -- orders from a little below DEBYE_ORDER to a few
+    /// thousand, on either side of the turning point and across it --
+    /// Debye's expansions and the recurrences they replace agree.
+    #[test]
+    fn debye_and_the_recurrences_agree() {
+        extended();
+        for m in [256u32, 512, 1000, 2048, 3100] {
+            let mf = f64::from(m);
+            for x in [
+                mf * 0.8,
+                mf - 40.0 * mf.cbrt(),
+                mf - 7.3,
+                mf + 0.5,
+                mf + 9.25,
+                mf + 40.0 * mf.cbrt(),
+                mf * 1.5,
+                mf * 7.0,
+            ] {
+                let lx = L::from_f64(x);
+                let Some((a, ae)) = jn_large(m, lx) else {
+                    assert!(m < DEBYE_WINDOW_ORDER, "J{m}({x}): no Debye value");
+                    continue;
+                };
+                let (b, be) = jn_miller(m, lx);
+                let (a, b) = (a.scale(ae), b.scale(be));
+                let size = b
+                    .mag()
+                    .to_f64()
+                    .max((2.0 / (core::f64::consts::PI * x)).sqrt() * 1e-3);
+                assert!(
+                    a.sub(b).mag().to_f64() <= size * 2f64.powi(-100),
+                    "J{m}({x}): Debye {} recurrence {}",
+                    hex(a.hi),
+                    hex(b.hi)
+                );
+                let (c, ce) = yn_large(m, lx).unwrap();
+                // The forward recurrence from Y0 and Y1, the old way.
+                let (mut y0, mut y1, mut e) = y01_scaled(lx);
+                let two_over_x = over_x(TWO, lx);
+                for k in 1..m {
+                    let y2 = two_over_x.mul_l(int(i64::from(k))).mul(y1).sub(y0);
+                    y0 = y1;
+                    y1 = y2;
+                    if y1.mag() > pow2(RESCALE) {
+                        y0 = y0.scale(-RESCALE);
+                        y1 = y1.scale(-RESCALE);
+                        e += RESCALE;
+                    }
+                }
+                let (c, d) = (c.scale(ce), y1.scale(e));
+                let size = d
+                    .mag()
+                    .to_f64()
+                    .max((2.0 / (core::f64::consts::PI * x)).sqrt() * 1e-3);
+                assert!(
+                    c.sub(d).mag().to_f64() <= size * 2f64.powi(-100),
+                    "Y{m}({x}): Debye {} recurrence {}",
+                    hex(c.hi),
+                    hex(d.hi)
+                );
+            }
+        }
+    }
+
+    /// At the largest orders, where nothing else can check them, J and Y
+    /// satisfy the Wronskian `J_(n+1) Y_n - J_n Y_(n+1) = 2/(pi x)` across
+    /// the turning point: the window's recurrences and Debye's forms together.
+    #[test]
+    fn the_wronskian_holds_at_huge_orders() {
+        extended();
+        for n in [100_000i32, 16_777_216, 2_147_483_646] {
+            let nf = f64::from(n);
+            for d in [-50.0, -31.5, -3.0, 0.0, 0.5, 2.0, 31.5, 50.0, 1e4] {
+                let x = L::from_f64(nf + d * nf.cbrt());
+                let (jn, jn1, yn, yn1) = (jnl(n, x), jnl(n + 1, x), ynl(n, x), ynl(n + 1, x));
+                let w = jn1 * yn - jn * yn1;
+                let want = TWO_OVER_PI.hi / x;
+                let rel = ((w - want) / want).abs().to_f64();
+                assert!(rel < 1e-14, "n = {n}, x = {}: {rel:e}", x.to_f64());
+            }
         }
     }
 

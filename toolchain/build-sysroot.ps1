@@ -198,6 +198,21 @@ if ($pyShape) {
     }
 }
 
+# What libc.a has beyond musl, C reaches through posix/include: a header in
+# front of each musl header, declaring the rest as glibc 2.39 does
+# (design-decisions §1141). Every one must compile under every feature-macro
+# setting, and each declaration appear where glibc's does, with glibc's type.
+# About a minute. Exit 3 is "no zig": loud, not fatal; 1 and 2 are fatal.
+Write-Host "=== Checking the C header overlay against glibc's headers ===" -ForegroundColor Cyan
+if ($pyShape) {
+    & $pyShape.Source (Join-Path $root "scripts\check-libc-overlay.py")
+    if ($LASTEXITCODE -eq 3) {
+        Write-Host "  WARNING: no zig (FASTPY_ZIG or PATH) - the overlay NOT checked." -ForegroundColor Yellow
+    } elseif ($LASTEXITCODE -ne 0) {
+        throw "posix/include disagrees with glibc's headers (see above) - a C program written for glibc would not compile, or would see what glibc hides"
+    }
+}
+
 Write-Host ""
 # Record what this sysroot was built from, by content.
 #

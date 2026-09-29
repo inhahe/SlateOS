@@ -157,6 +157,13 @@ PINNED: dict[str, str] = {
         "boot-test.sh is asked for in "
         "requests/d-a-run-check-libc-declared-in-the-boot-test.md; delete this "
         "pin with that change.",
+    "check-libc-overlay.py":
+        "lane D, 2026-09-29: runs in toolchain/build-sysroot.ps1 after "
+        "check-libc-prototypes.py -- posix/include, the header overlay C is "
+        "built with, against glibc 2.39's headers. Wiring it into "
+        "boot-test.sh with the other two is asked for in "
+        "requests/d-a-run-check-libc-declared-in-the-boot-test.md; delete this "
+        "pin with that change.",
     # The other five lane-C gates filed here on 2026-09-02 were wired into
     # boot-test.sh on 2026-09-03 (check_lane_c_gui_gates) and their entries
     # deleted with the same commit, which is what this dict is for. Lane A's

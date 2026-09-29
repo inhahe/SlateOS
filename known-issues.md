@@ -175238,8 +175238,9 @@ reached from Rust's standard library.
   **Done 2026-09-27** (`posix/src/fenv.rs`): glibc 2.39's `sysdeps/x86_64/fpu`,
   both units, with `feenableexcept`/`fedisableexcept`/`fegetexcept`,
   `fesetexcept`/`fetestexceptflag` and `__flt_rounds`; `nearbyint` holds the
-  flags as glibc's does. Only C23's `fegetmode`/`fesetmode` wait -- musl's
-  headers, which the ABI gate checks against, have no `femode_t`.
+  flags as glibc's does. C23's `fegetmode`/`fesetmode` followed on
+  2026-09-29, with the `femode_t` musl's headers lack declared by
+  `posix/include/fenv.h`, the header overlay (design-decisions §1141).
 - **`long double`** -- on x86-64 an 80-bit x87 value: musl's
   `src/math/x86_64/*.s` for the functions the x87 unit computes (`sqrtl`,
   `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic
@@ -175591,7 +175592,7 @@ numbers there, no argument can land near it: about 16 integers deep for
 double, 20 for long double. For float, CORE-MATH's correctly rounded
 `lgammaf` (MIT) is a ready alternative.
 
-## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the six `long double` Bessel functions 2026-09-29, `posix/src/besl.rs`, written from the mathematics (design-decisions §1140): 13,338 of 13,339 values mpmath's correctly rounded ones in all four directions, glibc's special values, flags and `errno` at 8,136 calls. Left: `fegetmode` and `fesetmode`, which wait on musl's headers)**
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: FIXED 2026-09-29, the last two `fegetmode` and `fesetmode` (`posix/src/fenv.rs`, glibc's `fegetmode.c` and `fesetmode.c`, with `posix/include/fenv.h`'s `femode_t`). Before them: the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the six `long double` Bessel functions 2026-09-29, `posix/src/besl.rs`, written from the mathematics (design-decisions §1140): 13,338 of 13,339 values mpmath's correctly rounded ones in all four directions, glibc's special values, flags and `errno` at 8,136 calls)**
 
 **In short:** a C program that calls one of the functions below does not
 link. None is in C99; they are C23 additions, GNU extensions, or the `long
@@ -175608,7 +175609,7 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 | C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | **done 2026-09-28**, all twelve (`c23math.rs`, with oracle rows): the `double` and `float` ones are ours now, where they were compiler_builtins' weak exports |
 | C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | **done 2026-09-28** (`narrow.rs`): round-to-odd in the wider one, then round, as glibc's `math-narrow.h` |
 | XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28; `scalbl` the same day, `c23math.rs`: glibc's x87 `e_scalbl.S`, operation for operation) |
-| fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
+| fenv | `fegetmode` `fesetmode` | **done 2026-09-29** (`fenv.rs`): glibc's -- the x87 control word and `MXCSR`, the flags left alone -- with `femode_t` and `FE_DFL_MODE` from `posix/include/fenv.h`, which musl's headers lack; a caller's `MXCSR` held to the bits the processor implements, where glibc's faults on one no `fegetmode` made |
 
 `matherr` (an SVID hook glibc keeps only for old binaries) is deliberately
 absent.
@@ -176114,7 +176115,7 @@ harmless and named in the gate's `EXCEPTIONS` with why.
 `scripts/check-libc-declared.py`.
 
 
-## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: OPEN**
+## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: OPEN (2026-09-29: `posix/include` declares the 195 of them glibc 2.39's headers declare, where and as glibc's do -- held to glibc's by `scripts/check-libc-overlay.py`, design-decisions §1141 -- and the C fixtures are built with it; left: the gate for the other direction, a public name `libc.a` defines and no header declares, and the names glibc declares nowhere either, each to be decided)**
 
 **In short:** C on SlateOS is compiled against musl's headers (`zig cc
 --target=x86_64-linux-musl`), and musl's headers declare only what musl

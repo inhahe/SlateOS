@@ -4,8 +4,9 @@
 **Status:** OPEN.
 
 **Updated 2026-09-29:** a second gate, `scripts/check-libc-prototypes.py`,
-now runs beside it -- the other half of the same question -- and this asks
-for both; see the last section.
+now runs beside it -- the other half of the same question -- and a third,
+`scripts/check-libc-overlay.py`, after them; this asks for all three. See
+the last two sections.
 
 **In short:** a new gate checks that every function musl's headers declare
 exists in the C library. On 2026-09-28 126 did not -- among them all of C11's
@@ -46,3 +47,14 @@ it takes about half a minute the first time and a few seconds after, the
 parsed headers cached in `target/`. Same exit codes as above, same
 `--self-test`, and its own `PINNED` entry in `check-gates-are-wired.py` to
 delete with the wiring.
+
+## The third gate (2026-09-29)
+
+`python scripts/check-libc-overlay.py` checks `posix/include`, the header
+overlay C is now compiled with (`-I posix/include`, in front of musl's
+headers; design-decisions §1141), against glibc 2.39's headers: every
+header compiles in sixteen feature-macro settings, and each of the 195
+declarations it adds is visible exactly where glibc's is, with glibc's type.
+It needs zig, as the other two do, and no archive; about a minute. Same exit
+codes, `--self-test`, and a `PINNED` entry of its own in
+`check-gates-are-wired.py`.

@@ -24,6 +24,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `narrow_harness.py` | `posix/src/narrow_oracle.txt` (C23's narrowing functions, `fadd` ... `dfmal`, each call in all four rounding directions: value, flags raised and `errno`) | `narrow.rs`, `include_str!` |
 | `complex_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complex_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complex.rs`, `include_str!` |
 | `complexl_modes_harness.py` (the same calls, in the three directed rounding modes) | `posix/src/complexl_modes_oracle.txt` (the answers that change in kind or in `errno`) | `complexl.rs`, `include_str!` |
+| `glibc_declarations.py` (libclang's Python bindings, not gcc: its docstring says how to get them) | `posix/tools/oracle/glibc_declarations.txt` (for each name `posix/include` declares, the header, the feature-macro settings and the type glibc 2.39's headers give it) | `scripts/check-libc-overlay.py` |
 | `besl_harness.py` | `posix/src/besl_glibc.txt` (the `long double` Bessel functions at their special and extreme arguments, in all four rounding directions: value, flags raised and `errno`) | `besl.rs`, `include_str!` |
 | `besl_tables.py table` (mpmath, not glibc; `check` compares) | the constants, the reciprocals and the zeros' Taylor tables, pasted | `besl.rs` |
 | `besl_tables.py oracle` (mpmath, not glibc) | `posix/src/besl_oracle.txt` (the six functions correctly rounded, with the exact value's side of each) | `besl.rs`, `include_str!` |

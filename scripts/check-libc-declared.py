@@ -19,9 +19,12 @@ exists at all.
 How
 ---
 
-Every header under zig's `generic-musl` include directory is preprocessed on
-its own (some pairs conflict) with `_GNU_SOURCE`, `_BSD_SOURCE` and
-`_LARGEFILE64_SOURCE`, so every declaration a program can reach is visible.
+Every header under zig's `generic-musl` include directory, and every one in
+`posix/include` -- the overlay in front of them that declares what this
+library has beyond musl (design-decisions §1141) -- is preprocessed on its
+own (some pairs conflict) with the overlay first (`-I`) and `_GNU_SOURCE`,
+`_BSD_SOURCE` and `_LARGEFILE64_SOURCE`, so every declaration a program can
+reach is visible.
 Each declaration ending in `);` names a function. The names `libc.a` defines
 come from its archive index, read by `check-libc-shape.py`'s parser. The
 difference, less `NOT_FUNCTIONS` (text the declaration pattern mistakes for a
@@ -183,17 +186,20 @@ def declarations_by_file(text: str) -> dict[str, str]:
     return out
 
 
-def declared(zig: str, inc: Path) -> dict[str, str]:
-    """Function name -> the header that declares it (relative to `inc`)."""
+def declared(zig: str, inc: Path, overlay: Path | None = None) -> dict[str, str]:
+    """Function name -> the header that declares it (relative to `inc`, or to
+    `overlay`), musl's and the overlay's."""
     out: dict[str, str] = {}
-    headers = sorted(p.relative_to(inc).as_posix() for p in inc.rglob("*.h")
-                     if not p.relative_to(inc).as_posix().startswith("bits/"))
+    bases = [b for b in (overlay, inc) if b is not None and b.is_dir()]
+    headers = sorted({p.relative_to(b).as_posix() for b in bases for p in b.rglob("*.h")
+                      if not p.relative_to(b).as_posix().startswith("bits/")})
+    first = ["-I", str(overlay)] if overlay is not None and overlay.is_dir() else []
     root = inc.resolve().as_posix().lower()
     with tempfile.TemporaryDirectory() as t:
         src = Path(t) / "h.c"
         for h in headers:
             src.write_text(f"#include <{h}>\n", encoding="utf-8", newline="")
-            r = subprocess.run([zig, "cc", "--target=x86_64-linux-musl", "-E",
+            r = subprocess.run([zig, "cc", "--target=x86_64-linux-musl", "-E", *first,
                                 "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE", str(src)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=120)
@@ -280,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     defined = set().union(*members.values()) if members else set()
-    decl = declared(zig, inc)
+    decl = declared(zig, inc, ROOT / "posix" / "include")
     # A floor on discovery: a broken preprocessor run must not read as "no
     # function is declared, so none is missing".
     if len(decl) < 1000 or len(defined) < 1000:

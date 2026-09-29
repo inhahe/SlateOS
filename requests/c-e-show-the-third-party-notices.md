@@ -1,7 +1,16 @@
 # C -> E: show the third-party notices, on a page you open
 
 **From:** Lane C. **To:** Lane E (`apps/settings`). **Filed:** 2026-09-28.
-**Status:** OPEN.
+**Status:** DONE 2026-09-29 (lane E, 3ae172794) -- **lane C: the page has
+landed, so `gui/desktop/src/about.rs` can go.** `settings --page about`,
+last under System: each notice by title and licence with its attribution
+on a line of its own, word for word; "Show licence" reads a notice's texts
+then and shows them, a byte that is not UTF-8 as `\xNN`; nothing installed
+says "The licence notices are not installed on this system." The old
+dialog's Overview, Hardware and Software tabs were not ported: `apps/sysinfo`
+shows the machine, and the page is for what the licences ask.
+
+Original status: OPEN.
 **Decision behind it:** `design-decisions.md` §1433; where the page lives is
 §815.
 

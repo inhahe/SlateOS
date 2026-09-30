@@ -219,7 +219,7 @@ fn row_id(items: &[MenuItem], path: &[&str]) -> MenuItemId {
 fn choose(r: &mut Ribbon, path: &[&str]) -> RibbonEvent {
     let open = r.menu.as_ref().expect("no menu is open");
     let id = row_id(open.menu.items(), path);
-    let act = open.acts[usize::try_from(id).unwrap()];
+    let act = open.acts[usize::try_from(id).unwrap()].clone();
     r.menu = None;
     r.do_act(act)
 }
@@ -1579,4 +1579,472 @@ fn a_tab_or_nothing_has_no_tooltip() {
     assert!(!r.tick(10_000));
     r.handle_mouse(&l, &mouse(10.0, 600.0, MouseEventKind::Move));
     assert_eq!(r.tooltip_due_in(0), None);
+}
+
+// ---- one command, one state ----
+
+/// **A toggle's state is its command's: pressed on one tab, it is on on
+/// every tab that shows it.**
+#[test]
+fn a_toggles_state_is_its_commands_wherever_it_appears() {
+    let mut defined = tabs();
+    defined[1].groups[0].controls.push(Control::toggle(
+        Command::new(BOLD, "Bold"),
+        ButtonSize::Small,
+    ));
+    let mut r = Ribbon::new(defined);
+    let l = wide(&r);
+    let bold = centre(slot(&r, &l, BOLD).rect);
+    assert_eq!(
+        click(&mut r, &l, bold),
+        RibbonEvent::Toggled { id: BOLD, on: true }
+    );
+    let everywhere: Vec<bool> = r
+        .tabs()
+        .iter()
+        .flat_map(|t| &t.groups)
+        .flat_map(|g| &g.controls)
+        .filter_map(|c| match c {
+            Control::Toggle { command, on, .. } if command.id == BOLD => Some(*on),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        everywhere,
+        [true, true],
+        "the other tab's Bold was left off"
+    );
+    r.select_tab("view");
+    let l = wide(&r);
+    let bold = centre(slot(&r, &l, BOLD).rect);
+    assert_eq!(
+        click(&mut r, &l, bold),
+        RibbonEvent::Toggled {
+            id: BOLD,
+            on: false
+        }
+    );
+}
+
+// ---- the Quick Access Toolbar ----
+
+/// **The Quick Access Toolbar holds the commands put on it, over the strip,
+/// and each does what it does on its tab -- from whichever tab is in
+/// front.**
+#[test]
+fn the_quick_access_toolbar_does_what_its_commands_do() {
+    let mut r = ribbon();
+    assert!(wide(&r).qat.is_none(), "an empty toolbar took a row");
+    assert!(r.pin(CUT));
+    assert!(r.pin(BOLD));
+    assert!(r.pin(FONT));
+    assert!(!r.pin(CUT), "a command went on twice");
+    assert!(!r.pin(999), "a command the ribbon has not went on");
+    assert_eq!(r.qat(), [CUT, BOLD, FONT]);
+
+    r.select_tab("view");
+    let l = wide(&r);
+    let qat = l.qat.clone().expect("no toolbar");
+    assert_eq!(qat.rect.y, 0.0);
+    assert_eq!(l.strip.y, QAT_HEIGHT);
+    assert_eq!(l.rect.h, QAT_HEIGHT + STRIP_HEIGHT + BODY_HEIGHT);
+    assert_eq!(qat.buttons.len(), 3);
+    assert_eq!(
+        click(&mut r, &l, centre(qat.buttons[0].1)),
+        RibbonEvent::Command(CUT)
+    );
+    assert_eq!(
+        click(&mut r, &l, centre(qat.buttons[1].1)),
+        RibbonEvent::Toggled { id: BOLD, on: true }
+    );
+    assert!(matches!(
+        r.control(BOLD),
+        Some(Control::Toggle { on: true, .. })
+    ));
+    assert_eq!(
+        press(&mut r, &l, centre(qat.buttons[2].1)),
+        RibbonEvent::Handled
+    );
+    assert_eq!(
+        choose(&mut r, &["Mono"]),
+        RibbonEvent::Chose { id: FONT, index: 2 }
+    );
+    assert!(matches!(
+        r.control(FONT),
+        Some(Control::Dropdown {
+            selected: Some(2),
+            ..
+        })
+    ));
+
+    assert!(r.unpin(BOLD));
+    assert!(!r.unpin(BOLD));
+    assert_eq!(r.qat(), [CUT, FONT]);
+}
+
+/// **The toolbar can go under the ribbon -- under the tabs, when it is
+/// minimized.**
+#[test]
+fn the_toolbar_can_go_under_the_ribbon() {
+    let mut r = ribbon();
+    r.pin(CUT);
+    r.set_qat_below(true);
+    assert!(r.qat_below());
+    let l = wide(&r);
+    assert_eq!(l.strip.y, 0.0);
+    assert_eq!(
+        l.qat.as_ref().unwrap().rect.y,
+        l.body.as_ref().unwrap().rect.bottom()
+    );
+    assert_eq!(l.rect.h, STRIP_HEIGHT + BODY_HEIGHT + QAT_HEIGHT);
+    r.set_minimized(true);
+    let l = wide(&r);
+    assert_eq!(l.qat.as_ref().unwrap().rect.y, l.strip.bottom());
+    assert_eq!(l.rect.h, STRIP_HEIGHT + QAT_HEIGHT);
+}
+
+/// **The toolbar is drawn in the strip's colour over the ribbon, each
+/// button its picture at the small size -- or its name's first letter.**
+#[test]
+fn the_toolbar_is_drawn_with_pictures_or_initials() {
+    let mut r = ribbon();
+    r.pin(CUT);
+    r.pin(FONT);
+    let l = wide(&r);
+    let p = Palette::for_mode(false);
+    let asked = std::cell::RefCell::new(Vec::new());
+    let mut out = Vec::new();
+    draw(&mut out, &p, &r, &l, &|name, size| {
+        asked.borrow_mut().push((name.to_owned(), size));
+        Some(1)
+    });
+    let qat = l.qat.as_ref().unwrap();
+    assert!(fills(&out).contains(&(qat.rect, p.surface0)));
+    assert!(
+        asked
+            .borrow()
+            .contains(&("edit-cut".to_owned(), SMALL_ICON))
+    );
+    assert!(
+        texts(&out).iter().any(|(t, _)| t == "F"),
+        "the picture-less Font has no initial"
+    );
+}
+
+// ---- the right-click menu ----
+
+fn right_press(r: &mut Ribbon, l: &RibbonLayout, (x, y): (f32, f32)) -> RibbonEvent {
+    r.handle_mouse(l, &mouse(x, y, MouseEventKind::Press(MouseButton::Right)))
+}
+
+/// **A right-click on a command offers it for the toolbar and takes it out
+/// of its group; the group's menu offers every command it has not.**
+#[test]
+fn a_right_click_on_a_command_pins_it_or_takes_it_out() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    let cut = centre(slot(&r, &l, CUT).rect);
+    assert_eq!(right_press(&mut r, &l, cut), RibbonEvent::Handled);
+    assert_eq!(
+        menu_labels(&r),
+        [
+            "Add to Quick Access Toolbar",
+            "Remove from this group",
+            "Add a command to this group",
+            "Show the Quick Access Toolbar under the ribbon",
+            "Collapse the ribbon",
+        ]
+    );
+    assert_eq!(
+        choose(&mut r, &["Add to Quick Access Toolbar"]),
+        RibbonEvent::Customized
+    );
+    assert_eq!(r.qat(), [CUT]);
+
+    let l = wide(&r);
+    let cut = centre(slot(&r, &l, CUT).rect);
+    right_press(&mut r, &l, cut);
+    assert!(menu_labels(&r).contains(&"Remove from Quick Access Toolbar".to_owned()));
+    assert!(
+        menu_labels(&r).contains(&"Undo all changes to the ribbon".to_owned()),
+        "a changed ribbon offers no way back"
+    );
+    assert_eq!(
+        choose(&mut r, &["Remove from this group"]),
+        RibbonEvent::Customized
+    );
+    let l = wide(&r);
+    let clipboard = &r.tabs()[0].groups[0];
+    assert!(!clipboard.controls.iter().any(|c| c.command().id == CUT));
+    assert_eq!(
+        r.qat(),
+        [CUT],
+        "taking it out of its group took it off the toolbar"
+    );
+
+    // Back from the group's own menu, where it was.
+    let paste = centre(slot(&r, &l, PASTE).face);
+    right_press(&mut r, &l, paste);
+    assert_eq!(
+        choose(&mut r, &["Add a command to this group", "Cut"]),
+        RibbonEvent::Customized
+    );
+    let ids: Vec<CommandId> = r.tabs()[0].groups[0]
+        .controls
+        .iter()
+        .map(|c| c.command().id)
+        .collect();
+    assert_eq!(ids, [PASTE, CUT, COPY], "Cut did not go back where it was");
+}
+
+/// **A right-click on a toolbar button takes it off; on a tab, hides or
+/// moves it; past the ribbon, is not the ribbon's.**
+#[test]
+fn a_right_click_on_the_toolbar_or_a_tab() {
+    let mut r = ribbon();
+    r.pin(COPY);
+    let l = wide(&r);
+    let button = centre(l.qat.as_ref().unwrap().buttons[0].1);
+    right_press(&mut r, &l, button);
+    assert_eq!(menu_labels(&r)[0], "Remove from Quick Access Toolbar");
+    assert_eq!(
+        choose(&mut r, &["Remove from Quick Access Toolbar"]),
+        RibbonEvent::Customized
+    );
+    assert!(r.qat().is_empty());
+
+    let l = wide(&r);
+    let home = centre(tab_slot(&l, &r, "home"));
+    right_press(&mut r, &l, home);
+    let items = r.menu.as_ref().unwrap().menu.items().to_vec();
+    let enabled = |label: &str| {
+        items.iter().find_map(|i| match i {
+            MenuItem::Action {
+                label: l, enabled, ..
+            } if l == label => Some(*enabled),
+            _ => None,
+        })
+    };
+    assert_eq!(enabled("Hide this tab"), Some(true));
+    assert_eq!(
+        enabled("Move left"),
+        Some(false),
+        "the first tab can move left"
+    );
+    assert_eq!(enabled("Move right"), Some(true));
+    assert_eq!(choose(&mut r, &["Move right"]), RibbonEvent::Customized);
+    let order: Vec<&str> = r
+        .visible_tabs()
+        .iter()
+        .map(|&i| r.tabs()[i].id.as_str())
+        .collect();
+    assert_eq!(order, ["view", "home"]);
+    assert_eq!(
+        r.front_id(),
+        Some("home"),
+        "moving a tab changed the tab in front"
+    );
+
+    assert_eq!(right_press(&mut r, &l, (10.0, 600.0)), RibbonEvent::Ignored);
+    assert!(!r.menu_open());
+}
+
+/// **Tabs hide and show again -- the last ordinary one does not hide --
+/// and the menu anywhere offers the hidden ones back.**
+#[test]
+fn tabs_hide_and_show_again() {
+    let mut r = ribbon();
+    assert!(r.hide_tab("home", true));
+    assert_eq!(r.front_id(), Some("view"), "a hidden tab stayed in front");
+    assert!(!r.hide_tab("view", true), "the last tab was hidden");
+    assert!(!r.hide_tab("nope", true));
+    assert_eq!(r.hidden_tabs(), ["home"]);
+    let l = wide(&r);
+    right_press(&mut r, &l, centre(l.strip));
+    assert_eq!(
+        choose(&mut r, &["Show a hidden tab", "Home"]),
+        RibbonEvent::Customized
+    );
+    assert!(r.hidden_tabs().is_empty());
+    assert_eq!(r.visible_tabs(), [0, 1]);
+
+    // A hidden tab keeps its place in a moved order.
+    assert!(r.move_tab("view", true));
+    assert!(r.hide_tab("home", true));
+    assert!(!r.move_tab("view", false), "moved past a hidden tab");
+    assert!(r.hide_tab("home", false));
+    let order: Vec<&str> = r
+        .visible_tabs()
+        .iter()
+        .map(|&i| r.tabs()[i].id.as_str())
+        .collect();
+    assert_eq!(order, ["view", "home"]);
+}
+
+/// **A command put in a group comes at its end, a row high -- an offered
+/// one as a button -- and taking it out again leaves no trace.**
+#[test]
+fn a_command_put_in_a_group_comes_at_its_end() {
+    let mut r = ribbon();
+    assert!(r.add_to_group("home", "font", ZOOM));
+    assert!(!r.add_to_group("home", "font", ZOOM), "put in twice");
+    assert!(!r.add_to_group("home", "nope", ZOOM));
+    assert!(!r.add_to_group("home", "font", 999));
+    let font = &r.tabs()[0].groups[1];
+    assert!(matches!(
+        font.controls.last(),
+        Some(Control::Button { command, size: ButtonSize::Medium }) if command.id == ZOOM
+    ));
+    assert!(r.remove_from_group("home", "font", ZOOM));
+    assert!(!r.customized(), "taking an added command out left a trace");
+
+    r.offer(Command::new(77, "Word count"));
+    assert!(r.catalog().iter().any(|c| c.id == 77));
+    assert!(r.add_to_group("home", "clipboard", 77));
+    assert!(r.set_enabled(77, false, Some("No document")));
+    let added = r.tabs()[0].groups[0].controls.last().unwrap();
+    assert_eq!(added.command().id, 77);
+    assert!(!added.command().enabled);
+    let l = wide(&r);
+    let at = centre(slot(&r, &l, 77).rect);
+    assert_eq!(
+        click(&mut r, &l, at),
+        RibbonEvent::Handled,
+        "a disabled offered command ran"
+    );
+}
+
+/// **Undoing every change keeps how the ribbon is looked at: minimized
+/// stays minimized.**
+#[test]
+fn undoing_every_change_keeps_it_minimized() {
+    let mut r = ribbon();
+    r.pin(CUT);
+    r.hide_tab("view", true);
+    r.remove_from_group("home", "clipboard", COPY);
+    r.set_minimized(true);
+    assert!(r.customized());
+    r.reset_customization();
+    assert!(!r.customized());
+    assert!(r.qat().is_empty());
+    assert_eq!(r.visible_tabs(), [0, 1]);
+    assert!(
+        r.tabs()[0].groups[0]
+            .controls
+            .iter()
+            .any(|c| c.command().id == COPY)
+    );
+    assert!(r.minimized());
+}
+
+/// **New tabs from the application keep the user's changes.**
+#[test]
+fn new_tabs_keep_the_users_changes() {
+    let mut r = ribbon();
+    r.remove_from_group("home", "clipboard", CUT);
+    r.set_tabs(tabs());
+    assert!(
+        !r.tabs()[0].groups[0]
+            .controls
+            .iter()
+            .any(|c| c.command().id == CUT)
+    );
+}
+
+// ---- saved as a line of text ----
+
+/// **The user's changes go into one line of text and come back from it
+/// whole.**
+#[test]
+fn the_changes_survive_as_a_line_of_text() {
+    let mut r = ribbon();
+    assert_eq!(
+        r.customization_text(),
+        "ribbon1",
+        "an unchanged ribbon wrote something"
+    );
+    r.set_minimized(true);
+    r.pin(CUT);
+    r.pin(FONT);
+    r.set_qat_below(true);
+    r.move_tab("view", true);
+    r.hide_tab("home", true);
+    r.remove_from_group("home", "clipboard", COPY);
+    r.add_to_group("home", "font", ZOOM);
+    let text = r.customization_text();
+    assert_eq!(
+        text,
+        "ribbon1;min=1;qat=2,10;below=1;order=view,home;hidden=home;\
+         removed=home/clipboard/3;added=home/font/30"
+    );
+
+    let mut back = ribbon();
+    back.apply_customization(&text);
+    assert_eq!(back.customization_text(), text);
+    assert!(back.minimized());
+    assert_eq!(back.qat(), [CUT, FONT]);
+    assert!(
+        back.tabs()[0].groups[1]
+            .controls
+            .iter()
+            .any(|c| c.command().id == ZOOM)
+    );
+}
+
+/// **What names a tab, group or command the ribbon no longer has is
+/// dropped; text of another shape is ignored whole.**
+#[test]
+fn text_naming_what_is_gone_is_dropped() {
+    let mut r = ribbon();
+    r.apply_customization(
+        "ribbon1;qat=1,999,1;hidden=nope,view;order=home,picture,nope;\
+         removed=home/nope/2,home/clipboard/2,home/clipboard/999,bad;\
+         added=home/font/404,home/font/30;mystery=1",
+    );
+    assert_eq!(
+        r.customization_text(),
+        "ribbon1;qat=1;order=home;hidden=view;removed=home/clipboard/2;added=home/font/30"
+    );
+
+    let mut r = ribbon();
+    r.apply_customization("ribbon2;min=1");
+    assert!(!r.minimized(), "text of another shape was read");
+    r.apply_customization("");
+    assert!(!r.customized());
+}
+
+/// **A tab whose id is not plain is left out of the text, rather than
+/// written in a way that reads back as something else.**
+#[test]
+fn an_id_that_is_not_plain_is_left_out() {
+    let mut defined = tabs();
+    defined[1].id = "my view;x=1".to_owned();
+    let mut r = Ribbon::new(defined);
+    assert!(r.hide_tab("my view;x=1", true));
+    assert_eq!(r.customization_text(), "ribbon1");
+    assert!(plain("a-b_c.1"));
+    assert!(!plain(""));
+    assert!(!plain("a/b"));
+    assert!(!plain("a,b"));
+}
+
+// ---- the panel and the strip ----
+
+/// **A press on the strip where there is no tab closes an open panel, and
+/// does nothing else.**
+#[test]
+fn a_press_on_the_empty_strip_closes_a_panel() {
+    let mut r = ribbon();
+    let (whole, small) = widths(&r);
+    let width = whole[0] + whole[1] + small[2];
+    let l = layout_at(&r, width);
+    press(&mut r, &l, centre(group_slot(&l, 2).button.unwrap()));
+    assert!(r.panel_open());
+    let l = layout_at(&r, width);
+    let empty = (l.strip.right() - 5.0, l.strip.y + l.strip.h / 2.0);
+    assert_eq!(press(&mut r, &l, empty), RibbonEvent::Handled);
+    assert!(
+        !r.panel_open(),
+        "a press on the empty strip left the panel open"
+    );
 }

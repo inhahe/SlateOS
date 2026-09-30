@@ -2088,8 +2088,11 @@ live.
   on the commands, one layer), and tooltips that say why a disabled command
   cannot be used. Deliberately not Office's where Microsoft licenses the
   arrangement: no staged shrinking, no gallery preview, no set header above
-  contextual tabs, no layered key tips. **Next:** the Quick Access Toolbar,
-  customization and its saving.
+  contextual tabs, no layered key tips. A Quick Access Toolbar over or under
+  the ribbon, and the user's changes -- commands onto the toolbar, into and
+  out of groups, tabs hidden and moved -- from a right-click, kept as one
+  line of text the application saves. **Next:** a dialog for the same
+  changes; accent-coloured title bars followed.
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

@@ -86897,9 +86897,25 @@ why, as `design.txt` asks of every disabled control. A pointer event carries
 no time, so the ribbon is told the time (`tick`) rather than keeping a
 second clock, and says when it next needs telling (`tooltip_due_in`).
 
-**Not yet:** the Quick Access Toolbar, customization (reordering and hiding
-tabs, commands added to and removed from groups) and its saving, the dialog
-for it, and following accent-coloured title bars, which needs the toolkit's
+**The user's changes.** A right-click offers them where they apply: a
+command onto the Quick Access Toolbar or off it, out of its group, or a
+command into a group ("Add a command to this group": every command the
+ribbon has that the group has not, and any the application offers for the
+purpose); a tab hidden or moved; and anywhere, the hidden tabs back, the
+toolbar over or under the ribbon, collapsing, and undoing every change.
+
+| Question | Chosen | Instead |
+|---|---|---|
+| What the ribbon keeps | the application's tabs and the user's changes, the shown tabs built from the two | the changed tabs alone (a new version of the application's tabs could not be told from the user's changes) |
+| A command put in a group | at its end, a row high | where the user drops it (needs dragging, which nothing else in the ribbon needs) |
+| A command taken out and put back | back where it was | at the end, like any other |
+| A toggle's state, a list's choice | the command's: Bold on two tabs is on in both | each button's own (the first version did this; a click on one left the other stale) |
+| Where the changes live | one line of text the application keeps in its settings file, `ribbon1;min=1;qat=2,10;...`; a change naming what the ribbon no longer has is dropped on reading | a file of the ribbon's own (a second settings file per application) |
+| The last tab | cannot be hidden | can (and the ribbon has nowhere to show a command) |
+| Undo every change | undoes all but minimizing, which is how the ribbon is looked at | minimizing too |
+
+**Not yet:** a dialog for the same changes, showing every tab and group at
+once, and following accent-coloured title bars, which needs the toolkit's
 palette to carry the title bar's colours. `roadmap-detailed.md` → *Ribbon
 Widget* marks each.
 

@@ -37,9 +37,16 @@
 //!   and **`res_search`** is glibc's search: `ndots`, the search list, the
 //!   trailing dot, `RES_DEFNAMES`/`RES_DNSRCH`/`RES_NOTLDQUERY`.
 //!
+//! - **The reentrant forms** -- `res_ninit`, `res_nquery`, `res_nsearch`,
+//!   `res_nquerydomain`, `res_nmkquery`, `res_nsend`, `res_nclose` -- do the
+//!   same on a state of the caller's own, used as glibc uses it: as it is.
+//!   A failure sets `h_errno` and the state's `res_h_errno` together, as
+//!   glibc's `RES_SET_H_ERRNO` does, for these and `_res`'s alike.
+//!
 //! Not done: IPv6 nameservers (read, and skipped), `sortlist`, EDNS0,
 //! `HOSTALIASES`, DNSSEC.  `_res` is one per process, as in musl; glibc's is
-//! one per thread.
+//! one per thread -- a threaded program wanting its own has the reentrant
+//! forms.
 
 use crate::errno;
 
@@ -153,9 +160,17 @@ pub const RES_NOIP6DOTINT: u64 = 0x0008_0000;
 pub const RES_NOTLDQUERY: u64 = 0x0100_0000;
 /// Set the AD bit in queries.
 pub const RES_TRUSTAD: u64 = 0x0400_0000;
-/// The options a fresh state starts with: musl's header's, which a program
-/// here is compiled against, and glibc's with `RES_NOIP6DOTINT` besides.
+/// musl's header's `RES_DEFAULT`, which a program here is compiled against:
+/// glibc 2.39's with `RES_NOIP6DOTINT` besides. A fresh state starts with
+/// glibc's ([`FRESH_OPTIONS`]).
 pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH | RES_NOIP6DOTINT;
+
+/// The options a fresh state starts with: glibc 2.39's `RES_DEFAULT`, as
+/// its `res_ninit` leaves them (`resolvn_oracle.txt`: `2c1` with
+/// `RES_INIT`). Until 2026-09-30 a state started with musl's header's
+/// [`RES_DEFAULT`] instead, whose `RES_NOIP6DOTINT` does nothing here or in
+/// glibc but showed in `_res.options` as a number glibc's never is.
+const FRESH_OPTIONS: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
 
 /// `h_errno` for an error that is not the resolver's (see `errno`).
 pub const NETDB_INTERNAL: i32 = -1;
@@ -302,7 +317,7 @@ impl Conf {
         ndots: 1,
         timeout: RES_TIMEOUT,
         attempts: RES_DFLRETRY,
-        options: RES_DEFAULT,
+        options: FRESH_OPTIONS,
     };
 
     /// Replace the search list with the blank-separated domains in `list`
@@ -587,6 +602,43 @@ pub extern "C" fn res_init() -> i32 {
 pub extern "C" fn __res_init() -> i32 {
     res_init()
 }
+
+/// `res_ninit` -- read `resolv.conf` and the environment into the caller's
+/// own resolver state `statp`, as [`res_init`] reads them into `_res`: 0.
+/// Exported as `__res_ninit`, the name glibc's `<resolv.h>` (and
+/// `posix/include/resolv.h`) turns `res_ninit` into. glibc asks for a
+/// zeroed state and follows the pointers in one of garbage; this one is
+/// overwritten whole.
+///
+/// # Safety
+///
+/// `statp` points to a writable `ResState`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_ninit(statp: *mut ResState) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        statp.write(ResState::ZERO);
+        load_state(&mut *statp);
+    }
+    0
+}
+
+/// `res_nclose` (exported as `__res_nclose`, as glibc's is) -- release what
+/// `res_ninit` took for `statp`. This resolver keeps neither socket nor
+/// memory in a state -- a query opens and closes its own -- so there is
+/// nothing to release, and the state, `RES_INIT` still set as glibc leaves
+/// it (`resolvn_oracle.txt`), stays usable. glibc's does not: a query on it
+/// before `res_ninit` again crashes.
+///
+/// # Safety
+///
+/// `statp` is NULL or a `ResState`; it is not touched.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_nclose(_statp: *mut ResState) {}
 
 // ---------------------------------------------------------------------------
 // Names: glibc's ns_name_* functions
@@ -1974,6 +2026,45 @@ pub extern "C" fn res_mkquery(
     class: i32,
     type_: i32,
     data: *const u8,
+    datalen: i32,
+    newrr: *const u8,
+    buf: *mut u8,
+    buflen: i32,
+) -> i32 {
+    // SAFETY: `_res`, initialised.
+    unsafe {
+        res_nmkquery(
+            global(),
+            op,
+            dname,
+            class,
+            type_,
+            data,
+            datalen,
+            newrr,
+            buf,
+            buflen,
+        )
+    }
+}
+
+/// `res_nmkquery` -- [`res_mkquery`] with the caller's own resolver state
+/// `statp`: its options decide the RD and AD bits. Used as it is, one
+/// `res_ninit` has not seen builds a query too, as glibc's does
+/// (`resolvn_oracle.txt`).
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns; the rest is as for
+/// [`res_mkquery`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nmkquery(
+    statp: *mut ResState,
+    op: i32,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    data: *const u8,
     _datalen: i32,
     _newrr: *const u8,
     buf: *mut u8,
@@ -1982,7 +2073,7 @@ pub extern "C" fn res_mkquery(
     let Ok(len) = usize::try_from(buflen) else {
         return -1;
     };
-    if buf.is_null() || len < HFIXEDSZ || dname.is_null() {
+    if statp.is_null() || buf.is_null() || len < HFIXEDSZ || dname.is_null() {
         return -1;
     }
     // SAFETY: the caller's contract: NUL-terminated strings, and `buf`
@@ -1995,7 +2086,8 @@ pub extern "C" fn res_mkquery(
             core::slice::from_raw_parts_mut(buf, len),
         )
     };
-    match mkquery(state(), op, name, class, type_, data, out) {
+    // SAFETY: the caller's state, only read.
+    match mkquery(unsafe { &*statp }, op, name, class, type_, data, out) {
         Ok(n) => i32::try_from(n).unwrap_or(-1),
         Err(()) => -1,
     }
@@ -2269,6 +2361,11 @@ impl Transport for Net {
 /// Send a query and receive its answer into `answer`: the answer's full
 /// length (which may exceed `answer`), or the errno.
 fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> {
+    // glibc's `__res_context_send`: no nameserver is ESRCH, before any
+    // socket -- a state `res_ninit` has not seen has none.
+    if st.nscount <= 0 {
+        return Err(errno::ESRCH);
+    }
     let sv = servers(st);
     if answer.len() < PACKETSZ {
         // Receive into a whole datagram's room, keep what fits (musl).
@@ -2279,6 +2376,10 @@ fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> 
             dst.copy_from_slice(src);
         }
         return Ok(n);
+    }
+    #[cfg(test)]
+    if let Some(r) = tests::scripted_exchange(&sv, q, answer) {
+        return r;
     }
     let mut net = Net::open(&sv)?;
     exchange(&mut net, &sv, q, answer)
@@ -2292,7 +2393,33 @@ fn send_query(st: &ResState, q: &[u8], answer: &mut [u8]) -> Result<usize, i32> 
 /// none answered usably in time.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_send(msg: *const u8, msglen: i32, answer: *mut u8, anslen: i32) -> i32 {
-    let st = state();
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nsend(global(), msg, msglen, answer, anslen) }
+}
+
+/// `res_nsend` -- [`res_send`] with the caller's own resolver state
+/// `statp`, used as it is: one `res_ninit` has not seen has no nameserver,
+/// and the send is `ESRCH` (`resolvn_oracle.txt`). `h_errno` is left alone,
+/// as glibc leaves it.
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns, zeroed or from `res_ninit`; the
+/// buffers are as for [`res_send`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nsend(
+    statp: *mut ResState,
+    msg: *const u8,
+    msglen: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's state, only read while the send runs.
+    let st = unsafe { &*statp };
     if st.nscount <= 0 {
         errno::set_errno(errno::ESRCH);
         return -1;
@@ -2348,19 +2475,56 @@ fn judge(answer: &[u8]) -> Result<(), i32> {
     })
 }
 
-/// A query for `name`: the answer's length, or `Err` with `h_errno` (and
-/// `errno` for a send failure) set.
+/// Set `h_errno` and the state's own `res_h_errno` together, as glibc's
+/// `RES_SET_H_ERRNO` does: a caller of the reentrant functions reads the
+/// second, and everyone the first.
+///
+/// # Safety
+///
+/// `statp` points to a live `ResState` that nothing is borrowing.
+unsafe fn set_herr(statp: *mut ResState, h: i32) {
+    // SAFETY: the caller's contract; the one field is written.
+    unsafe { core::ptr::addr_of_mut!((*statp).res_h_errno).write(h) };
+    crate::socket::set_h_errno(h);
+}
+
+/// `_res`, initialised if nothing has initialised it yet, as the pointer the
+/// functions that take a state are given.
+fn global() -> *mut ResState {
+    let st: *mut ResState = state();
+    st
+}
+
+/// A query's answer as the C functions give it: its length, or -1 with the
+/// `h_errno` in both places.
+///
+/// # Safety
+///
+/// As [`set_herr`].
+unsafe fn finish(statp: *mut ResState, r: Result<usize, i32>) -> i32 {
+    match r {
+        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        Err(h) => {
+            // SAFETY: the caller's contract.
+            unsafe { set_herr(statp, h) };
+            -1
+        }
+    }
+}
+
+/// A query for `name`: `Ok` with the answer's length, else `Err` with the
+/// `h_errno` it comes to (see [`judge`]) -- the send's own failure left in
+/// `errno`.
 fn query(
     st: &ResState,
     name: &[u8],
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut q = [0u8; HFIXEDSZ + QFIXEDSZ + MAXCDNAME + 1];
     let Ok(ql) = mkquery(st, QUERY, name, class, type_, None, &mut q) else {
-        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
-        return Err(());
+        return Err(crate::socket::NO_RECOVERY);
     };
     let q = q.get(..ql).unwrap_or(&[]);
     // A buffer too short for the header is answered through a whole one,
@@ -2382,26 +2546,18 @@ fn query(
     match sent {
         Err(e) => {
             errno::set_errno(e);
-            crate::socket::set_h_errno(crate::socket::TRY_AGAIN);
-            Err(())
+            Err(crate::socket::TRY_AGAIN)
         }
-        Ok(n) => match verdict {
-            Ok(()) => Ok(n),
-            Err(h) => {
-                crate::socket::set_h_errno(h);
-                Err(())
-            }
-        },
+        Ok(n) => verdict.map(|()| n),
     }
 }
 
-/// The caller's name and answer buffer, or -1 (the `EFAULT` glibc would
-/// fault into).
+/// The caller's name and answer buffer, or `None` for a NULL where glibc
+/// would fault -- `EFAULT`, and the caller sets `h_errno` `NETDB_INTERNAL`.
 fn args<'a>(name: *const u8, answer: *mut u8, anslen: i32) -> Option<(&'a [u8], &'a mut [u8])> {
     let len = usize::try_from(anslen).unwrap_or(0);
     if name.is_null() || (answer.is_null() && len > 0) {
         errno::set_errno(errno::EFAULT);
-        crate::socket::set_h_errno(NETDB_INTERNAL);
         return None;
     }
     // SAFETY: the caller's contract.
@@ -2429,10 +2585,8 @@ pub extern "C" fn res_query(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    let Some((name, buf)) = args(dname, answer, anslen) else {
-        return -1;
-    };
-    query(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nquery(global(), dname, class, type_, answer, anslen) }
 }
 
 /// `__res_query` — glibc alias for `res_query`.
@@ -2445,6 +2599,41 @@ pub extern "C" fn __res_query(
     anslen: i32,
 ) -> i32 {
     res_query(dname, class, type_, answer, anslen)
+}
+
+/// `res_nquery` -- [`res_query`] with the caller's own resolver state
+/// `statp`, glibc's reentrant form. The state is used as it is: one
+/// `res_ninit` has not seen has no nameserver, and the query fails
+/// `TRY_AGAIN` at once (`resolvn_oracle.txt`). A failure sets `h_errno` and
+/// `statp->res_h_errno`; an answer leaves both alone.
+///
+/// # Safety
+///
+/// `statp` is a `ResState` the caller owns, zeroed or from `res_ninit`; the
+/// rest is as for [`res_query`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nquery(
+    statp: *mut ResState,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
+    let Some((name, buf)) = args(dname, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
+        return -1;
+    };
+    // SAFETY: the caller's state, only read while the query runs.
+    let r = query(unsafe { &*statp }, name, class, type_, buf);
+    // SAFETY: as above; the query's borrow has ended.
+    unsafe { finish(statp, r) }
 }
 
 /// `name.domain` (or `name` without a trailing dot, for no domain), glibc's
@@ -2479,11 +2668,10 @@ fn querydomain(
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut full = [0u8; MAXDNAME];
     let Some(n) = join(name, domain, &mut full) else {
-        crate::socket::set_h_errno(crate::socket::NO_RECOVERY);
-        return Err(());
+        return Err(crate::socket::NO_RECOVERY);
     };
     query(st, full.get(..n).unwrap_or(&[]), class, type_, answer)
 }
@@ -2498,14 +2686,43 @@ pub extern "C" fn res_querydomain(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nquerydomain(global(), name, domain, class, type_, answer, anslen) }
+}
+
+/// `res_nquerydomain` -- [`res_querydomain`] with the caller's own resolver
+/// state `statp`, used as it is (see [`res_nquery`]).
+///
+/// # Safety
+///
+/// As [`res_nquery`], with `domain` NULL or a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nquerydomain(
+    statp: *mut ResState,
+    name: *const u8,
+    domain: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
     let Some((name, buf)) = args(name, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
         return -1;
     };
     // SAFETY: the caller's contract: NULL or a NUL-terminated string.
     let domain = (!domain.is_null())
         .then(|| unsafe { core::slice::from_raw_parts(domain, crate::string::strlen(domain)) });
-    querydomain(state(), name, domain, class, type_, buf)
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: the caller's state, only read while the query runs.
+    let r = querydomain(unsafe { &*statp }, name, domain, class, type_, buf);
+    // SAFETY: as above; the query's borrow has ended.
+    unsafe { finish(statp, r) }
 }
 
 /// What one query of a search came to: the answer's length, or its
@@ -2607,7 +2824,7 @@ fn search(
     class: i32,
     type_: i32,
     answer: &mut [u8],
-) -> Result<usize, ()> {
+) -> Result<usize, i32> {
     let mut domains: [&[u8]; MAXDNSRCH] = [&[]; MAXDNSRCH];
     let mut nd = 0usize;
     for p in st.dnsrch.iter().take(MAXDNSRCH) {
@@ -2623,24 +2840,19 @@ fn search(
             nd += 1;
         }
     }
-    let result = search_with(
+    search_with(
         name,
         st.ndots(),
         st.options,
         domains.get(..nd).unwrap_or(&[]),
         |domain| {
             errno::set_errno(0);
-            querydomain(st, name, domain, class, type_, answer).map_err(|()| {
+            querydomain(st, name, domain, class, type_, answer).map_err(|h| {
                 let servfail = answer.get(3).is_some_and(|b| b & 0xf == SERVFAIL);
-                (
-                    crate::socket::get_h_errno(),
-                    errno::get_errno() == errno::ECONNREFUSED,
-                    servfail,
-                )
+                (h, errno::get_errno() == errno::ECONNREFUSED, servfail)
             })
         },
-    );
-    result.map_err(crate::socket::set_h_errno)
+    )
 }
 
 /// `res_search` -- query for `name` through the search list, glibc's way:
@@ -2649,7 +2861,9 @@ fn search(
 /// `RES_DEFNAMES`), then as it stands if not yet tried (unless
 /// `RES_NOTLDQUERY` and it has no dots).  The first answer wins; otherwise
 /// `h_errno` is the as-is query's, else `NO_DATA` if any domain had the
-/// name, else `TRY_AGAIN` for a server failure.
+/// name, else `TRY_AGAIN` for a server failure.  `h_errno` is
+/// `HOST_NOT_FOUND` from the start, as glibc's is, so an answer leaves it
+/// so.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_search(
     dname: *const u8,
@@ -2658,10 +2872,8 @@ pub extern "C" fn res_search(
     answer: *mut u8,
     anslen: i32,
 ) -> i32 {
-    let Some((name, buf)) = args(dname, answer, anslen) else {
-        return -1;
-    };
-    search(state(), name, class, type_, buf).map_or(-1, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // SAFETY: `_res`, initialised.
+    unsafe { res_nsearch(global(), dname, class, type_, answer, anslen) }
 }
 
 /// `__res_search` — glibc alias for `res_search`.
@@ -2676,12 +2888,391 @@ pub extern "C" fn __res_search(
     res_search(dname, class, type_, answer, anslen)
 }
 
+/// `res_nsearch` -- [`res_search`] with the caller's own resolver state
+/// `statp`, used as it is (see [`res_nquery`]).
+///
+/// # Safety
+///
+/// As [`res_nquery`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn res_nsearch(
+    statp: *mut ResState,
+    dname: *const u8,
+    class: i32,
+    type_: i32,
+    answer: *mut u8,
+    anslen: i32,
+) -> i32 {
+    if statp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return -1;
+    }
+    let Some((name, buf)) = args(dname, answer, anslen) else {
+        // SAFETY: the caller's state.
+        unsafe { set_herr(statp, NETDB_INTERNAL) };
+        return -1;
+    };
+    // glibc's "true if we never query": HOST_NOT_FOUND before the first,
+    // which a search that is answered leaves in place (`resolvn_oracle.txt`).
+    // SAFETY: the caller's state.
+    unsafe { set_herr(statp, crate::socket::HOST_NOT_FOUND) };
+    // SAFETY: the caller's state, only read while the search runs.
+    let r = search(unsafe { &*statp }, name, class, type_, buf);
+    // SAFETY: as above; the search's borrow has ended.
+    unsafe { finish(statp, r) }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    std::thread_local! {
+        /// Whether `send_query` asks [`Responder`] instead of the network.
+        static RESPONDER_ON: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    /// `send_query`'s hook: the exchange with [`Responder`] when a test has
+    /// turned it on, else `None`, for the network.
+    pub(super) fn scripted_exchange(
+        sv: &Servers,
+        q: &[u8],
+        answer: &mut [u8],
+    ) -> Option<Result<usize, i32>> {
+        if !RESPONDER_ON.with(core::cell::Cell::get) {
+            return None;
+        }
+        Some(exchange(&mut Responder::default(), sv, q, answer))
+    }
+
+    /// `resolvn_harness.py`'s responder, in-process: `a.example.test` has
+    /// the A record 10.0.0.1, `srv.example.test` answers SERVFAIL, every
+    /// other name NXDOMAIN.
+    #[derive(Default)]
+    struct Responder {
+        pending: std::collections::VecDeque<Vec<u8>>,
+        now: u64,
+    }
+
+    impl Transport for Responder {
+        fn send_udp(&mut self, _i: usize, q: &[u8]) {
+            self.pending.push_back(respond(q));
+        }
+        fn recv_udp(&mut self, buf: &mut [u8], ms: u64) -> Option<(usize, Option<usize>, bool)> {
+            let Some(r) = self.pending.pop_front() else {
+                self.now += ms;
+                return None;
+            };
+            let keep = r.len().min(buf.len());
+            buf[..keep].copy_from_slice(&r[..keep]);
+            Some((r.len(), Some(0), false))
+        }
+        fn tcp(&mut self, _i: usize, _q: &[u8], _buf: &mut [u8], _ms: u64) -> Option<usize> {
+            None
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now
+        }
+    }
+
+    fn respond(q: &[u8]) -> Vec<u8> {
+        let mut at = 12;
+        let mut name = Vec::new();
+        while at < q.len() && q[at] != 0 {
+            let l = usize::from(q[at]);
+            at += 1;
+            if !name.is_empty() {
+                name.push(b'.');
+            }
+            name.extend_from_slice(&q[at..at + l]);
+            at += l;
+        }
+        let qend = at + 1 + 4;
+        let mut r = q[..qend].to_vec();
+        r[2] = 0x80 | (q[2] & 1);
+        r[3] = 0x80;
+        r[4..12].copy_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
+        let qtype = u16::from_be_bytes([q[at + 1], q[at + 2]]);
+        if name.eq_ignore_ascii_case(b"a.example.test") && qtype == 1 {
+            r.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 1, 0x2c, 0, 4, 10, 0, 0, 1]);
+            r[7] = 1;
+        } else if name.eq_ignore_ascii_case(b"srv.example.test") {
+            r[3] |= 2;
+        } else {
+            r[3] |= 3;
+        }
+        r
+    }
+
+    /// An answer as the harness sums it up: `rcode ancount A`.
+    fn summary(a: &[u8], rc: i32) -> String {
+        if rc < 12 {
+            return "- - -".into();
+        }
+        let rcode = a[3] & 0xf;
+        let an = u16::from_be_bytes([a[6], a[7]]);
+        let mut addr = "-".to_string();
+        let mut h = core::mem::MaybeUninit::<NsMsg>::zeroed();
+        // SAFETY: `a` holds `rc` bytes; the handle is written by the call.
+        if an > 0 && unsafe { ns_initparse(a.as_ptr(), rc, h.as_mut_ptr()) } == 0 {
+            // SAFETY: filled by ns_initparse.
+            let mut h = unsafe { h.assume_init() };
+            for k in 0..i32::from(an) {
+                let mut rr = core::mem::MaybeUninit::<NsRr>::zeroed();
+                // SAFETY: a live handle and a record to fill.
+                if unsafe { ns_parserr(&raw mut h, 1, k, rr.as_mut_ptr()) } == 0 {
+                    // SAFETY: filled by ns_parserr.
+                    let rr = unsafe { rr.assume_init() };
+                    if rr.type_ == 1 && rr.rdlength == 4 {
+                        // SAFETY: four bytes of rdata inside the answer.
+                        let d = unsafe { core::slice::from_raw_parts(rr.rdata, 4) };
+                        addr = format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3]);
+                        break;
+                    }
+                }
+            }
+        }
+        format!("{rcode} {an} {addr}")
+    }
+
+    /// glibc 2.39's reentrant resolver (`resolvn_harness.py`), replayed: the
+    /// state from the harness's `resolv.conf`, the responder in place of the
+    /// network, `h_errno` and `res_h_errno` set to 12345 before each call.
+    #[test]
+    fn the_reentrant_resolver_answers_as_glibcs() {
+        const ORACLE: &str = include_str!("resolvn_oracle.txt");
+        let conf: Vec<u8> = ORACLE
+            .lines()
+            .filter_map(|l| l.strip_prefix("#   "))
+            .flat_map(|l| l.bytes().chain(Some(b'\n')))
+            .collect();
+        // What res_ninit makes of that file, built where it stays: the state
+        // points into itself (`dnsrch` into `defdname`), as glibc's does, so
+        // a moved copy's search list would point at the old one.
+        let mut st = ResState::ZERO;
+        store_conf(&mut st, &parse_conf(&conf, b""));
+        RESPONDER_ON.with(|r| r.set(true));
+        let mut qb = [0u8; 512];
+        let mut qlen = 0;
+        let mut zero = ResState::ZERO;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (case, glibc) = line.split_once(" = ").expect("<case> = <answer>");
+            let ask = |f: &mut dyn FnMut(*mut ResState, &mut [u8]) -> i32, sp: *mut ResState| {
+                let mut buf = [0u8; 1024];
+                crate::socket::set_h_errno(12345);
+                // SAFETY: a live state.
+                unsafe { (*sp).res_h_errno = 12345 };
+                let rc = f(sp, &mut buf);
+                // SAFETY: as above.
+                let res_h = unsafe { (*sp).res_h_errno };
+                let sum = if rc < 0 {
+                    "- - -".to_string()
+                } else {
+                    summary(&buf, rc)
+                };
+                format!(
+                    "{} {} {res_h} {sum}",
+                    if rc < 0 { -1 } else { 1 },
+                    crate::socket::get_h_errno()
+                )
+            };
+            let q = |name: &str| {
+                let mut n = name.as_bytes().to_vec();
+                n.push(0);
+                n
+            };
+            let ours = match case {
+                "I zeroed" => {
+                    let s0 = &st.nsaddr_list[0];
+                    let a = s0.sin_addr.s_addr.to_ne_bytes();
+                    let mut line = format!(
+                        "0 {} {} {:x} {} {}.{}.{}.{}:{} {}",
+                        st.retrans,
+                        st.retry,
+                        st.options,
+                        st.nscount,
+                        a[0],
+                        a[1],
+                        a[2],
+                        a[3],
+                        u16::from_be(s0.sin_port),
+                        st.ndots()
+                    );
+                    for p in st.dnsrch.iter().take_while(|p| !p.is_null()) {
+                        // SAFETY: into `defdname`, NUL-terminated.
+                        let d =
+                            unsafe { core::slice::from_raw_parts(*p, crate::string::strlen(*p)) };
+                        line.push(' ');
+                        line.push_str(core::str::from_utf8(d).unwrap());
+                    }
+                    line.push_str(" ;");
+                    line
+                }
+                "R again" => {
+                    // A state of its own: `st` must keep the harness's file.
+                    let mut again = ResState::ZERO;
+                    // SAFETY: a live state, initialised and then again.
+                    unsafe { __res_ninit(&raw mut again) };
+                    // SAFETY: as above.
+                    unsafe { __res_ninit(&raw mut again) }.to_string()
+                }
+                c if c.starts_with("Q ") => {
+                    let (name, t) = match &c[2..] {
+                        "a.example.test/AAAA" => ("a.example.test", T_AAAA),
+                        n => (n, T_A),
+                    };
+                    let n = q(name);
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nquery(sp, n.as_ptr(), C_IN, t, b.as_mut_ptr(), 1024)
+                        },
+                        &raw mut st,
+                    )
+                }
+                c if c.starts_with("S ") => {
+                    let n = q(&c[2..]);
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nsearch(sp, n.as_ptr(), C_IN, T_A, b.as_mut_ptr(), 1024)
+                        },
+                        &raw mut st,
+                    )
+                }
+                c if c.starts_with("D ") => {
+                    let (name, dom) = c[2..].split_once(' ').unwrap();
+                    let (n, d) = (q(name), q(dom));
+                    ask(
+                        &mut |sp, b: &mut [u8]| unsafe {
+                            res_nquerydomain(
+                                sp,
+                                n.as_ptr(),
+                                d.as_ptr(),
+                                C_IN,
+                                T_A,
+                                b.as_mut_ptr(),
+                                1024,
+                            )
+                        },
+                        &raw mut st,
+                    )
+                }
+                "M a.example.test" => {
+                    let n = q("a.example.test");
+                    // SAFETY: a live state and buffer.
+                    let rc = unsafe {
+                        res_nmkquery(
+                            &raw mut st,
+                            QUERY,
+                            n.as_ptr(),
+                            C_IN,
+                            T_A,
+                            core::ptr::null(),
+                            0,
+                            core::ptr::null(),
+                            qb.as_mut_ptr(),
+                            512,
+                        )
+                    };
+                    qlen = rc;
+                    let bytes: String = qb[..usize::try_from(rc).unwrap()]
+                        .iter()
+                        .enumerate()
+                        .map(|(k, b)| {
+                            if k < 2 {
+                                "00".to_string()
+                            } else {
+                                format!("{b:02x}")
+                            }
+                        })
+                        .collect();
+                    format!("{rc} {bytes}")
+                }
+                "N" => {
+                    let mut ab = [0u8; 1024];
+                    // SAFETY: a live state and buffers.
+                    let n =
+                        unsafe { res_nsend(&raw mut st, qb.as_ptr(), qlen, ab.as_mut_ptr(), 1024) };
+                    format!(
+                        "{} {}",
+                        if n < 0 { -1 } else { 1 },
+                        if n < 0 {
+                            "- - -".into()
+                        } else {
+                            summary(&ab, n)
+                        }
+                    )
+                }
+                c if c.starts_with("U ") => {
+                    let n = q("a.example.test");
+                    let one = q("a");
+                    let dom = q("example.test");
+                    let mut buf = [0u8; 1024];
+                    crate::socket::set_h_errno(12345);
+                    zero.res_h_errno = 12345;
+                    // SAFETY: a live (zeroed) state and buffers.
+                    let rc = unsafe {
+                        match &c[2..] {
+                            "query" => res_nquery(
+                                &raw mut zero,
+                                n.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "search" => res_nsearch(
+                                &raw mut zero,
+                                one.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "querydomain" => res_nquerydomain(
+                                &raw mut zero,
+                                one.as_ptr(),
+                                dom.as_ptr(),
+                                C_IN,
+                                T_A,
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "mkquery" => res_nmkquery(
+                                &raw mut zero,
+                                QUERY,
+                                n.as_ptr(),
+                                C_IN,
+                                T_A,
+                                core::ptr::null(),
+                                0,
+                                core::ptr::null(),
+                                buf.as_mut_ptr(),
+                                1024,
+                            ),
+                            "send" => {
+                                res_nsend(&raw mut zero, qb.as_ptr(), 32, buf.as_mut_ptr(), 1024)
+                            }
+                            other => {
+                                panic!("an uninitialised call this test does not know: {other}")
+                            }
+                        }
+                    };
+                    format!("{rc} {} {}", crate::socket::get_h_errno(), zero.res_h_errno)
+                }
+                "C init-bit" => {
+                    // SAFETY: a live state.
+                    unsafe { __res_nclose(&raw mut st) };
+                    i32::from(st.options & RES_INIT != 0).to_string()
+                }
+                other => panic!("a case this test does not know: {other}"),
+            };
+            assert_eq!(ours, glibc, "{case}");
+        }
+        RESPONDER_ON.with(|r| r.set(false));
+    }
+
     /// A line's text token back into bytes: `\xHH` for a byte, `\x` alone
     /// for the empty string (`nsname_harness.py`'s `token`).
     fn untoken(t: &str) -> Vec<u8> {
@@ -3247,7 +3838,7 @@ search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc 
         c.timeout = 3;
         store_conf(&mut st, &c);
         assert_eq!((st.nscount, st.retrans, st.retry, st.ndots()), (1, 3, 2, 2));
-        assert_eq!(st.options, RES_DEFAULT | RES_INIT);
+        assert_eq!(st.options, FRESH_OPTIONS | RES_INIT);
         assert_eq!(st.nsaddr_list[0].sin_port, 53u16.to_be());
         assert_eq!(
             st.nsaddr_list[0].sin_addr.s_addr.to_ne_bytes(),
@@ -3539,7 +4130,7 @@ search a.example b.example\noptions ndots:3 timeout:99 attempts:0 rotate use-vc 
             (st.retrans, st.retry, st.ndots()),
             (RES_TIMEOUT, RES_DFLRETRY, 1)
         );
-        assert_eq!(st.options & RES_DEFAULT, RES_DEFAULT);
+        assert_eq!(st.options & FRESH_OPTIONS, FRESH_OPTIONS);
         assert!(st.options & RES_INIT != 0);
     }
 

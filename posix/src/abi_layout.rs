@@ -240,6 +240,33 @@ pub(crate) fn abi_asserts() -> String {
          rdlength as "rdlength", rdata as "rdata");
     abi!(out, hdrs, crate::resolv::NsFlagData, "struct _ns_flagdata", "arpa/nameser.h",
          mask as "mask", shift as "shift");
+    // The resolver's state, which res_ninit and the other reentrant calls
+    // take of the caller's own. `ndots`, `nsort` and `ipv6_unavail` are
+    // bit-fields, which `offsetof` cannot name -- ours hold them as `bits`;
+    // the size and every field around them pin it.
+    abi!(
+        out,
+        hdrs,
+        crate::resolv::ResState,
+        "struct __res_state",
+        "resolv.h",
+        retrans,
+        retry,
+        options,
+        nscount,
+        nsaddr_list,
+        id,
+        dnsrch,
+        defdname,
+        pfcode,
+        sort_list,
+        qhook,
+        rhook,
+        res_h_errno,
+        _vcsock,
+        _flags,
+        _u
+    );
 
     // --- time: ftime's result -------------------------------------------------
     abi!(

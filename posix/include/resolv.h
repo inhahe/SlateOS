@@ -27,6 +27,23 @@ int res_ownok(const char *);
 int res_mailok(const char *);
 int res_dnok(const char *);
 
+/* The resolver on a state of the caller's own (glibc's "things involving a
+ * resolver context"). res_ninit and res_nclose are called __res_ninit and
+ * __res_nclose in the library, as glibc's header renames them. A state
+ * res_ninit has not filled is used as it is: it has no nameserver. */
+#define res_ninit __res_ninit
+#define res_nclose __res_nclose
+int res_ninit(res_state);
+int res_nquery(res_state, const char *, int, int, unsigned char *, int);
+int res_nsearch(res_state, const char *, int, int, unsigned char *, int);
+int res_nquerydomain(res_state, const char *, const char *, int, int,
+                     unsigned char *, int);
+int res_nmkquery(res_state, int, const char *, int, int,
+                 const unsigned char *, int, const unsigned char *,
+                 unsigned char *, int);
+int res_nsend(res_state, const unsigned char *, int, unsigned char *, int);
+void res_nclose(res_state);
+
 #ifdef __cplusplus
 }
 #endif

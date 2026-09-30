@@ -54,7 +54,16 @@ OUT_IMG="${1:-$ROOT_DIR/rootfs.ext4}"
 # Not larger: block groups are 32768 blocks at 4 KiB, so 384M is 3 of them —
 # enough that the driver's multi-group descriptor walk is exercised, without
 # adding image to hold nothing.
-IMG_SIZE="${IMG_SIZE:-384M}"
+#
+# SIZED FROM WHAT IS STAGED since 2026-09-30, when the 384M image had filled
+# again -- 362.6 MiB of files staged, the fonts, eSpeak NG and 73 native
+# utilities having come after CPython -- and `mke2fs -d` gave up partway, as
+# the paragraph above says it does. Each size here was right when it was chosen
+# and wrong a few ports later, so the rule it kept to is now what decides: the
+# image is the staged tree at most 60% full (~40% free), in whole block groups,
+# never under the 3 groups above (see "the image's size", just before mke2fs).
+# IMG_SIZE, given, still wins -- with a warning when it holds less headroom.
+IMG_SIZE="${IMG_SIZE:-}"
 
 # --- standard Ubuntu/Debian glibc locations ----------------------------------
 LD_SO="/lib64/ld-linux-x86-64.so.2"          # PT_INTERP of every x86-64 glibc exe
@@ -62,7 +71,7 @@ LIBC="/lib/x86_64-linux-gnu/libc.so.6"        # the C library itself
 LIBC_DIR="/lib/x86_64-linux-gnu"
 
 echo "[rootfs] repo root : $ROOT_DIR"
-echo "[rootfs] output    : $OUT_IMG ($IMG_SIZE)"
+echo "[rootfs] output    : $OUT_IMG (${IMG_SIZE:-sized from what is staged})"
 
 # --- sanity: required tools + glibc artifacts present ------------------------
 for tool in mke2fs gcc cp; do
@@ -2323,14 +2332,20 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     # `$(( 1G / 4 ))` is "value too great for base". A size this cannot parse
     # skips the check rather than failing, because the budget is advice and
     # advice must never be what breaks a build.
+    #
+    # Only for a given IMG_SIZE, since 2026-09-30: otherwise the image is sized
+    # from the whole staged tree just before mke2fs, which is the free-space
+    # accounting this comment says nothing did.
     SLATE_BUDGET=""
-    case "$IMG_SIZE" in
-        *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
-        *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
-        *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
-           echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
-           echo "[rootfs]       still accurate; only the comparison was skipped." ;;
-    esac
+    if [ -n "$IMG_SIZE" ]; then
+        case "$IMG_SIZE" in
+            *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
+            *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
+            *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
+               echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
+               echo "[rootfs]       still accurate; only the comparison was skipped." ;;
+        esac
+    fi
     if [ -n "$SLATE_BUDGET" ] && [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
         echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
         echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
@@ -2850,6 +2865,40 @@ fi
 
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
+
+# --- the image's size ----------------------------------------------------------
+# What the staged tree takes on disk -- `du`'s blocks, each file rounded up to
+# the 4 KiB block the image allocates it in -- at most 60% of the image, which
+# is whole 128 MiB block groups (32768 blocks of 4 KiB) and never fewer than
+# three. ext4's own tables come out of the other 40%: the inode tables, the
+# largest, are 1/64 of the image at mke2fs's default of one 256-byte inode per
+# 16 KiB. A given IMG_SIZE is used as it is; a warning says when it leaves less
+# than that headroom, since mke2fs -d fails partway through on a full image and
+# leaves none (see the header).
+STAGED_KIB=$(du -s -k "$STAGE" | cut -f1)
+STAGED_MIB=$(( (STAGED_KIB + 1023) / 1024 ))
+GROUP_MIB=128
+NEED_MIB=$(( (STAGED_KIB * 10 / 6 + 1023) / 1024 ))
+if [ -z "$IMG_SIZE" ]; then
+    # Not GROUPS: bash's own, the user's group list, ignores being assigned.
+    IMG_GROUPS=$(( (NEED_MIB + GROUP_MIB - 1) / GROUP_MIB ))
+    if [ "$IMG_GROUPS" -lt 3 ]; then
+        IMG_GROUPS=3
+    fi
+    IMG_SIZE="$(( IMG_GROUPS * GROUP_MIB ))M"
+    echo "[rootfs] image size: $IMG_SIZE -- $STAGED_MIB MiB staged, at most 60% of the image, in whole $GROUP_MIB MiB block groups"
+else
+    echo "[rootfs] image size: $IMG_SIZE, as IMG_SIZE gives it -- $STAGED_MIB MiB staged"
+    GIVEN_MIB=""
+    case "$IMG_SIZE" in
+        *[0-9][Mm]) GIVEN_MIB=${IMG_SIZE%?} ;;
+        *[0-9][Gg]) GIVEN_MIB=$(( ${IMG_SIZE%?} * 1024 )) ;;
+    esac
+    if [ -n "$GIVEN_MIB" ] && [ "$GIVEN_MIB" -lt "$NEED_MIB" ]; then
+        echo "[rootfs] WARNING: that leaves less than 40% free: $NEED_MIB MiB would. If mke2fs"
+        echo "[rootfs]          stops with \"Could not allocate block\", it is this; unset IMG_SIZE."
+    fi
+fi
 
 # --- pack into a driver-compatible ext4 image --------------------------------
 # -b 4096 : the driver reads/writes at 4 KiB ext4-block granularity.

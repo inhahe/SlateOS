@@ -115,7 +115,7 @@ impl Finder {
     ///
     /// [`FindError::Empty`] for an empty pattern, [`FindError::Pattern`] for a
     /// regular expression the engine refuses -- or one so large it would
-    /// cost more than [`REGEX_SIZE_LIMIT`] bytes.
+    /// cost more than four megabytes to compile (`REGEX_SIZE_LIMIT`).
     pub fn new(query: &FindQuery) -> Result<Self, FindError> {
         if query.pattern.is_empty() {
             return Err(FindError::Empty);

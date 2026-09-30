@@ -1,5 +1,5 @@
 //! A code editor, drawn and driven: [`CodeView`] puts a
-//! [`CodeEditor`](crate::codeedit::CodeEditor) on screen -- a gutter of line
+//! [`CodeEditor`] on screen -- a gutter of line
 //! numbers, the text in the fixed-pitch face, every selection and caret, the
 //! bracket pair at the caret, a scrollbar -- and turns keys and the pointer
 //! into its commands.
@@ -27,7 +27,7 @@
 //!
 //! # Finding
 //!
-//! Ctrl+F and Ctrl+H open the find bar across the top ([`findbar`]); the
+//! Ctrl+F and Ctrl+H open the find bar across the top (`findbar`); the
 //! rows start below it. F3 and Shift+F3 step through the matches from the
 //! text as well.
 //!

@@ -10,7 +10,9 @@ One call a line; `errno` is 1234 before each call. Text is written with
 the empty string; bytes are hex, `-` for none.
 
     T <text> <dstsiz> = <rc> <errno> <wire>             ns_name_pton
-    N <wire> <dstsiz> = <rc> <errno> <text>             ns_name_ntop
+    N <wire> <dstsiz> = <rc> <errno> <text>             ns_name_ntop; <text>
+                                                        what it wrote, a
+                                                        failed call's too
     U <message> <offset> <dstsiz> = <rc> <errno> <wire> ns_name_unpack
     S <message> <offset> <eom> = <rc> <errno> <offset>  ns_name_skip
     P <seq> <i> <how> <name> <dstsiz> = <rc> <errno> <bytes> ; <dnptrs>
@@ -64,6 +66,11 @@ NTOP = [
     nh.name(b"A", b"B"),
 ]
 NTOP_SIZES = [1025, 16, 4, 2, 1]
+# Names converted at every size from 1 past their text's end: where a
+# label, an escape and the NUL each stop fitting, and what a failed
+# call has written by then.
+NTOP_SWEEP = [nh.name(b"ab", b"c;d", b"\x07e"), nh.name(b"x", b"(y)"), b"\0",
+              nh.name(b"\xff\xfe", b"z")]
 
 UNPACK = [("full", 12, 1025), ("full", 33, 1025), ("full", 45, 1025), ("full", 12, 17),
           ("full", 12, 16), ("full", 12, 1), ("special", 12, 1025), ("root", 12, 1025),
@@ -177,13 +184,14 @@ static int wirelen(const unsigned char *p, int max) {
             L.append(f"  memset(w, 0xee, sizeof w); errno = 1234; rc = ns_name_pton({c_str(s)}, w, {n}); en = errno;")
             L.append(f'  printf("T %s {n} = %d %d", "{c_escape(token(s))}", rc, en);')
             L.append(f"  hex(w, rc < 0 ? 0 : wirelen(w, {n})); putchar('\\n');")
-    # ntop
-    for b in NTOP:
-        for n in NTOP_SIZES:
-            L.append(f"  {{ static const unsigned char s[] = {c_bytes(b)};")
-            L.append(f"    memset(t, 0, sizeof t); errno = 1234; rc = ns_name_ntop(s, t, {n}); en = errno;")
-            L.append(f'    printf("N {b.hex()} {n} = %d %d", rc, en);')
-            L.append("    if (rc < 0) printf(\" -\"); else text(t); putchar('\\n'); }")
+    # ntop: the text is what the call wrote, a failed call's too.
+    ntop = [(b, n) for b in NTOP for n in NTOP_SIZES]
+    ntop += [(b, n) for b in NTOP_SWEEP for n in range(1, 26)]
+    for b, n in ntop:
+        L.append(f"  {{ static const unsigned char s[] = {c_bytes(b)};")
+        L.append(f"    memset(t, 0, sizeof t); errno = 1234; rc = ns_name_ntop(s, t, {n}); en = errno;")
+        L.append(f'    printf("N {b.hex()} {n} = %d %d", rc, en);')
+        L.append("    text(t); putchar('\\n'); }")
     # unpack
     for m, o, n in UNPACK:
         b = nh.MESSAGES[m]

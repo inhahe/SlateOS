@@ -867,12 +867,23 @@ fn special(c: u8) -> bool {
 
 /// `ns_name_ntop`: an uncompressed wire name to NUL-terminated text in
 /// `dst`; the bytes written with the NUL.  The root is `"."`.
+///
+/// Where the text stops fitting is glibc's to the byte, as is what a
+/// failed call leaves written: an escape goes in whole or not at all, and
+/// a plain byte only with a byte to spare after it (glibc's
+/// `eom - dn < 2`), a dot or the NUL with room for itself.
 fn name_ntop(src: &[u8], dst: &mut [u8]) -> Result<usize, ()> {
     let mut dn = 0usize;
     let mut cp = 0usize;
-    let mut put = |dn: &mut usize, b: u8| -> Result<(), ()> {
-        *dst.get_mut(*dn).ok_or(())? = b;
-        *dn += 1;
+    // `bytes` at `dst[dn..]` if `room` bytes remain there, else nothing.
+    let mut put = |dn: &mut usize, room: usize, bytes: &[u8]| -> Result<(), ()> {
+        if dst.len().saturating_sub(*dn) < room {
+            return Err(());
+        }
+        dst.get_mut(*dn..*dn + bytes.len())
+            .ok_or(())?
+            .copy_from_slice(bytes);
+        *dn += bytes.len();
         Ok(())
     };
     loop {
@@ -885,28 +896,28 @@ fn name_ntop(src: &[u8], dst: &mut [u8]) -> Result<usize, ()> {
             return Err(());
         }
         if dn != 0 {
-            put(&mut dn, b'.')?;
+            put(&mut dn, 1, b".")?;
         }
         for _ in 0..l {
             let c = *src.get(cp).ok_or(())?;
             cp += 1;
             if special(c) {
-                put(&mut dn, b'\\')?;
-                put(&mut dn, c)?;
+                put(&mut dn, 2, &[b'\\', c])?;
             } else if !(0x21..0x7f).contains(&c) {
-                put(&mut dn, b'\\')?;
-                put(&mut dn, b'0' + c / 100)?;
-                put(&mut dn, b'0' + (c % 100) / 10)?;
-                put(&mut dn, b'0' + c % 10)?;
+                put(
+                    &mut dn,
+                    4,
+                    &[b'\\', b'0' + c / 100, b'0' + (c % 100) / 10, b'0' + c % 10],
+                )?;
             } else {
-                put(&mut dn, c)?;
+                put(&mut dn, 2, &[c])?;
             }
         }
     }
     if dn == 0 {
-        put(&mut dn, b'.')?;
+        put(&mut dn, 1, b".")?;
     }
-    put(&mut dn, 0)?;
+    put(&mut dn, 1, &[0])?;
     Ok(dn)
 }
 
@@ -4205,13 +4216,9 @@ mod tests {
                     let mut dst = vec![0u8; 2048];
                     // SAFETY: the wire name ends in the vector; `dst` holds `n`.
                     let rc = unsafe { ns_name_ntop(src.as_ptr(), dst.as_mut_ptr(), n) };
-                    let text = if rc < 0 {
-                        "-".to_string()
-                    } else {
-                        let end = dst.iter().position(|&c| c == 0).unwrap();
-                        token(&dst[..end])
-                    };
-                    format!("{rc} {} {text}", err(rc))
+                    // What the call wrote, a failed call's too.
+                    let end = dst.iter().position(|&c| c == 0).unwrap();
+                    format!("{rc} {} {}", err(rc), token(&dst[..end]))
                 }
                 'U' => {
                     let m = &msgs[f.next().unwrap()];

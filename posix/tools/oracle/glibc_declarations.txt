@@ -330,6 +330,8 @@ ns_name_unpack	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,
 ns_parse_ttl	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const char *, unsigned long *)
 ns_samedomain	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const char *, const char *)
 ns_samename	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const char *, const char *)
+ns_sprintrr	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const struct __ns_msg *, const struct __ns_rr *, const char *, const char *, char *, unsigned long)
+ns_sprintrrf	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const unsigned char *, unsigned long, const char *, enum __ns_class, enum __ns_type, unsigned long, const unsigned char *, unsigned long, const char *, const char *, char *, unsigned long)
 ns_subdomain	arpa/nameser.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (const char *, const char *)
 ntp_adjtime	sys/timex.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (struct timex *)
 ntp_gettime	sys/timex.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (struct ntptimeval *)

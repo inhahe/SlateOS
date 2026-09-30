@@ -512,6 +512,843 @@ pub unsafe extern "C" fn ns_datetosecs(cp: *const u8, errp: *mut i32) -> u32 {
     answer.unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Records as text: glibc 2.39's ns_print.c, with June 2026's fixes
+// ---------------------------------------------------------------------------
+//
+// glibc's ns_print.c as its June 2026 fixes left it, which the oracle's
+// glibc (Ubuntu's 2.39-0ubuntu8.9) carries: a class or type with no name
+// prints as RFC 3597's CLASSn/TYPEn, A6 by name (bug 34289); CERT, TKEY,
+// TSIG and OPT print as unknown records do, as hex, their printers gone
+// (CVE-2026-5435); an unknown record has no comment and a format error's
+// is " ; RR format error"; a LOC record must be 16 bytes and an A6's
+// address must be all there (CVE-2026-6238); and an address that does not
+// fit fails the call rather than printing nothing.
+
+/// The comment after a record's data that does not read, printed as hex.
+const FORMAT_ERROR: &[u8] = b" ; RR format error";
+
+/// What is left of `ns_sprintrrf`'s buffer, as `ns_print.c`'s `char **buf,
+/// size_t *buflen`: where the next byte goes, and how many remain -- a
+/// copy of it saved and put back is ns_print.c's `save_buf`.
+#[derive(Clone, Copy)]
+struct Pr {
+    buf: *mut u8,
+    len: usize,
+}
+
+/// `ns_print.c`'s failures: `ENOSPC` (set where it happened, as glibc's)
+/// or a record whose data does not read (`formerr`).
+enum PrErr {
+    /// -1 to the caller, `errno` as it was left.
+    Fail,
+    /// The data is printed as hex instead, this comment after its length:
+    /// [`FORMAT_ERROR`], or none for a type printed no other way.
+    Hexify(&'static [u8]),
+}
+
+impl Pr {
+    /// `addlen`: `n` bytes, already written, are the buffer's.
+    fn addlen(&mut self, n: usize) {
+        let n = n.min(self.len);
+        // SAFETY: `n` of the `len` bytes that remain.
+        self.buf = unsafe { self.buf.add(n) };
+        self.len -= n;
+    }
+
+    /// `addstr`: `s` and a NUL, or `ENOSPC` when they do not both fit.
+    fn addstr(&mut self, s: &[u8]) -> Result<(), PrErr> {
+        if s.len() >= self.len {
+            crate::errno::set_errno(errno::ENOSPC);
+            return Err(PrErr::Fail);
+        }
+        // SAFETY: `s` and a NUL fit in what remains.
+        unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), self.buf, s.len()) };
+        self.addlen(s.len());
+        // SAFETY: a byte remains, checked above.
+        unsafe { self.buf.write(0) };
+        Ok(())
+    }
+
+    /// `addtab`: to the column `target`, with tabs if the text so far,
+    /// `len` bytes, leaves room, else two spaces; whether it spaced.
+    fn addtab(&mut self, len: usize, target: usize, spaced: bool) -> Result<bool, PrErr> {
+        let save = *self;
+        if spaced || len >= target - 1 {
+            self.addstr(b"  ")?;
+            return Ok(true);
+        }
+        for _ in 0..=((target - len - 1) / 8) {
+            if self.addstr(b"\t").is_err() {
+                *self = save;
+                return Err(PrErr::Fail);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The NUL-terminated text now at the buffer's position.
+    fn text(&self) -> &[u8] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: the position holds a NUL within what remains -- every
+        // write here ends in one, as `inet_ntop`'s and `dn_expand`'s do.
+        let n = unsafe { crate::string::strnlen(self.buf, self.len) };
+        // SAFETY: as above.
+        unsafe { core::slice::from_raw_parts(self.buf, n) }
+    }
+}
+
+/// `prune_origin`: the bytes of `name` before `origin` begins in it --
+/// label by label, an escaped dot no end -- or all of them when it does
+/// not; the dot before `origin` is not counted.
+fn prune_origin(name: &[u8], origin: Option<&[u8]>) -> usize {
+    let mut i = 0;
+    while i < name.len() {
+        if let Some(o) = origin {
+            if samename(&name[i..], o) == Some(true) {
+                return i - usize::from(i > 0);
+            }
+        }
+        while i < name.len() {
+            if name[i] == b'\\' {
+                i += 1;
+                if i >= name.len() {
+                    break;
+                }
+                i += 1;
+            } else if name[i] == b'.' {
+                i += 1;
+                break;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    i
+}
+
+/// Whether a name printed without its origin's part wants a dot after it:
+/// no origin, or one not the root whose tail the name is not -- and the
+/// name not ending in a dot already. glibc's test, `name[len]` being the
+/// NUL when the origin was not found in it.
+fn wants_dot(name: &[u8], len: usize, origin: Option<&[u8]>) -> bool {
+    let origin_says = match origin {
+        None | Some([]) => true,
+        Some(o) => o[0] != b'.' && o.len() > 1 && len == name.len(),
+    };
+    origin_says && len > 0 && name[len - 1] != b'.'
+}
+
+/// The record's data being printed: the message it is in (for its names'
+/// pointers), and where it is at in the data -- past its end when a name
+/// in it ran on into the message after it, as `dn_expand` lets one.
+struct Rd {
+    msg: *const u8,
+    msglen: usize,
+    rdata: *const u8,
+    at: usize,
+    end: usize,
+}
+
+impl Rd {
+    /// The bytes left: none once past the end.
+    fn left(&self) -> usize {
+        self.end.saturating_sub(self.at)
+    }
+
+    /// `(unsigned)(edata - rdata)`, the count glibc's hex form starts with:
+    /// the bytes left, or -- a name having read past the end, which only an
+    /// SOA's then prints -- the negative difference as C's cast shows it,
+    /// modulo 2^32.
+    #[allow(clippy::cast_possible_truncation)] // C's (unsigned) keeps the low 32 bits
+    fn left_shown(&self) -> u32 {
+        if self.at <= self.end {
+            (self.end - self.at) as u32
+        } else {
+            0u32.wrapping_sub((self.at - self.end) as u32)
+        }
+    }
+
+    /// The data from here to its end.
+    fn rest(&self) -> &[u8] {
+        // SAFETY: `rdata` holds `end` bytes, the caller's contract; the
+        // slice is of those that are left.
+        unsafe { core::slice::from_raw_parts(self.rdata.add(self.at.min(self.end)), self.left()) }
+    }
+
+    /// `n` bytes, or a format error where glibc would read past the data.
+    fn take(&mut self, n: usize) -> Result<&[u8], PrErr> {
+        if n > self.left() {
+            return Err(PrErr::Hexify(FORMAT_ERROR));
+        }
+        // SAFETY: as `rest`; `n` of the bytes that remain.
+        let s = unsafe { core::slice::from_raw_parts(self.rdata.add(self.at), n) };
+        self.at += n;
+        Ok(s)
+    }
+
+    fn u8(&mut self) -> Result<u8, PrErr> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u32, PrErr> {
+        let b = self.take(2)?;
+        Ok(u32::from(u16::from_be_bytes([b[0], b[1]])))
+    }
+
+    fn u32(&mut self) -> Result<u32, PrErr> {
+        let b = self.take(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+}
+
+/// `charstr`: a `<character-string>` at the data's position, quoted, with
+/// `"`, `\`, a newline -- and, strchr's way, a NUL -- escaped: the bytes it
+/// took (0 for none that reads: a format error to the callers).
+fn charstr(rd: &mut Rd, out: &mut Pr) -> Result<usize, PrErr> {
+    let save = *out;
+    let r = (|| {
+        out.addstr(b"\"")?;
+        let s = rd.rest();
+        let mut took = 0;
+        if let Some(&n) = s.first() {
+            let n = usize::from(n);
+            // The length byte and its `n` bytes are all in the data.
+            if n < s.len() {
+                for &c in &s[1..=n] {
+                    if matches!(c, b'\n' | b'"' | b'\\' | 0) {
+                        out.addstr(b"\\")?;
+                    }
+                    out.addstr(&[c])?;
+                }
+                took = 1 + n;
+            }
+        }
+        out.addstr(b"\"")?;
+        Ok(took)
+    })();
+    match r {
+        Ok(took) => {
+            rd.at += took;
+            Ok(took)
+        }
+        Err(e) => {
+            *out = save;
+            crate::errno::set_errno(errno::ENOSPC);
+            Err(e)
+        }
+    }
+}
+
+/// `addname`: the compressed name at the data's position, expanded into the
+/// buffer by `dn_expand`, less its origin (`@` for the origin itself), a dot
+/// after an absolute one: its length.
+fn addname(rd: &mut Rd, origin: Option<&[u8]>, out: &mut Pr) -> Result<usize, PrErr> {
+    let save = *out;
+    let fail = |out: &mut Pr| {
+        crate::errno::set_errno(errno::ENOSPC);
+        *out = save;
+        Err(PrErr::Fail)
+    };
+    // SAFETY: the position is within the data, or past it only as far as
+    // a name before it ran on through the message -- `dn_expand`'s reach,
+    // which ends at the message's end.
+    let at = unsafe { rd.rdata.add(rd.at) };
+    // SAFETY: as above: the message's end.
+    let eom = unsafe { rd.msg.add(rd.msglen) };
+    let size = i32::try_from(out.len).unwrap_or(i32::MAX);
+    let n = crate::resolv::dn_expand(rd.msg, eom, at, out.buf, size);
+    let Ok(n) = usize::try_from(n) else {
+        return fail(out);
+    };
+    let name = NameCopy::of(out.text());
+    let mut newlen = prune_origin(name.as_slice(), origin);
+    let put = |out: &mut Pr, at: usize, c: u8| {
+        // SAFETY: `at + 2 <= len`, checked by the callers.
+        unsafe {
+            out.buf.add(at).write(c);
+            out.buf.add(at + 1).write(0);
+        }
+    };
+    if name.is_empty() || (newlen > 0 && wants_dot(name.as_slice(), newlen, origin)) {
+        if newlen + 2 > out.len {
+            return fail(out);
+        }
+        put(out, newlen, b'.');
+        newlen += 1;
+    } else if newlen == 0 {
+        if newlen + 2 > out.len {
+            return fail(out);
+        }
+        put(out, newlen, b'@');
+        newlen += 1;
+    }
+    rd.at += n;
+    out.addlen(newlen);
+    // SAFETY: a byte remains: the name and its NUL fit.
+    unsafe { out.buf.write(0) };
+    Ok(newlen)
+}
+
+/// A NUL-terminated text copied out of the buffer, for reading while the
+/// buffer is written: at most `NS_MAXDNAME` bytes, as a name is.
+struct NameCopy {
+    b: [u8; NS_MAXDNAME],
+    n: usize,
+}
+
+impl NameCopy {
+    fn of(s: &[u8]) -> Self {
+        let mut c = Self {
+            b: [0; NS_MAXDNAME],
+            n: s.len().min(NS_MAXDNAME),
+        };
+        c.b[..c.n].copy_from_slice(&s[..c.n]);
+        c
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.b[..self.n]
+    }
+
+    fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+}
+
+/// `sprintf`'s decimal, as text.
+fn dec(v: i64) -> ([u8; 24], usize) {
+    let mut b = [0u8; 24];
+    let mut k = b.len();
+    let mut m = v.unsigned_abs();
+    loop {
+        k -= 1;
+        b[k] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 {
+            break;
+        }
+    }
+    if v < 0 {
+        k -= 1;
+        b[k] = b'-';
+    }
+    let n = b.len() - k;
+    b.copy_within(k.., 0);
+    (b, n)
+}
+
+/// Text built for one `addstr`, as ns_print.c's `tmp`.
+struct Tmp {
+    b: [u8; 128],
+    n: usize,
+}
+
+impl Tmp {
+    const fn new() -> Self {
+        Self { b: [0; 128], n: 0 }
+    }
+
+    fn s(&mut self, s: &[u8]) -> &mut Self {
+        let k = s.len().min(self.b.len() - self.n);
+        self.b[self.n..self.n + k].copy_from_slice(&s[..k]);
+        self.n += k;
+        self
+    }
+
+    fn d(&mut self, v: i64) -> &mut Self {
+        let (b, n) = dec(v);
+        self.s(&b[..n])
+    }
+
+    fn get(&self) -> &[u8] {
+        &self.b[..self.n]
+    }
+}
+
+/// `addsym`: a space and the name `table` gives `number`, or -- it having
+/// none -- a space, `prefix` and the number, RFC 3597's form (`TYPE249`).
+fn addsym<const N: usize>(
+    table: &'static crate::res_debug::SymTable<N>,
+    number: i32,
+    prefix: &[u8],
+    out: &mut Pr,
+) -> Result<(), PrErr> {
+    if let Some(name) = crate::res_debug::sym_name(table, number) {
+        // Two writes, as glibc's: the space may fit where the name does not.
+        out.addstr(b" ")?;
+        return out.addstr(name);
+    }
+    out.addstr(Tmp::new().s(b" ").s(prefix).d(i64::from(number)).get())
+}
+
+/// `inet_ntop` into the buffer, the text's length added; when it does not
+/// fit, the call fails, `inet_ntop`'s `ENOSPC` its `errno`.
+fn ntop_into(af: i32, src: *const u8, out: &mut Pr) -> Result<(), PrErr> {
+    let size = u32::try_from(out.len).unwrap_or(u32::MAX);
+    if crate::inet::inet_ntop(af, src, out.buf, size).is_null() {
+        return Err(PrErr::Fail);
+    }
+    let n = out.text().len();
+    out.addlen(n);
+    Ok(())
+}
+
+/// The type numbers ns_sprintrrf prints by their own rules.
+mod t {
+    pub(super) const A: i32 = 1;
+    pub(super) const NS: i32 = 2;
+    pub(super) const CNAME: i32 = 5;
+    pub(super) const SOA: i32 = 6;
+    pub(super) const MB: i32 = 7;
+    pub(super) const MG: i32 = 8;
+    pub(super) const MR: i32 = 9;
+    pub(super) const WKS: i32 = 11;
+    pub(super) const PTR: i32 = 12;
+    pub(super) const HINFO: i32 = 13;
+    pub(super) const MINFO: i32 = 14;
+    pub(super) const MX: i32 = 15;
+    pub(super) const TXT: i32 = 16;
+    pub(super) const RP: i32 = 17;
+    pub(super) const AFSDB: i32 = 18;
+    pub(super) const X25: i32 = 19;
+    pub(super) const ISDN: i32 = 20;
+    pub(super) const RT: i32 = 21;
+    pub(super) const NSAP: i32 = 22;
+    pub(super) const PX: i32 = 26;
+    pub(super) const AAAA: i32 = 28;
+    pub(super) const LOC: i32 = 29;
+    pub(super) const SRV: i32 = 33;
+    pub(super) const NAPTR: i32 = 35;
+    pub(super) const A6: i32 = 38;
+    pub(super) const DNAME: i32 = 39;
+}
+
+/// The record's data, printed by its type (the switch of glibc's
+/// `ns_sprintrrf`); `spaced` as the owner and TTL left it.
+#[allow(clippy::too_many_lines)] // one arm a type, as glibc's switch
+fn rdata_text(
+    type_: i32,
+    rd: &mut Rd,
+    origin: Option<&[u8]>,
+    out: &mut Pr,
+    spaced: &mut bool,
+) -> Result<(), PrErr> {
+    let formerr = || Err(PrErr::Hexify(FORMAT_ERROR));
+    match type_ {
+        t::A => {
+            if rd.left() != 4 {
+                return formerr();
+            }
+            // SAFETY: four bytes of data remain.
+            ntop_into(crate::socket::AF_INET, unsafe { rd.rdata.add(rd.at) }, out)?;
+        }
+        t::CNAME | t::MB | t::MG | t::MR | t::NS | t::PTR | t::DNAME => {
+            addname(rd, origin, out)?;
+        }
+        t::HINFO | t::ISDN => {
+            if charstr(rd, out)? == 0 {
+                return formerr();
+            }
+            out.addstr(b" ")?;
+            if type_ == t::ISDN && rd.left() == 0 {
+                return Ok(());
+            }
+            if charstr(rd, out)? == 0 {
+                return formerr();
+            }
+        }
+        t::SOA => {
+            addname(rd, origin, out)?;
+            out.addstr(b" ")?;
+            addname(rd, origin, out)?;
+            out.addstr(b" (\n")?;
+            *spaced = false;
+            if rd.left() != 20 {
+                return formerr();
+            }
+            let serial = rd.u32()?;
+            out.addstr(b"\t\t\t\t\t")?;
+            let mut tmp = Tmp::new();
+            tmp.d(i64::from(serial));
+            out.addstr(tmp.get())?;
+            *spaced = out.addtab(tmp.get().len(), 16, *spaced)?;
+            out.addstr(b"; serial\n")?;
+            *spaced = false;
+            for (i, what) in [
+                &b"; refresh\n"[..],
+                b"; retry\n",
+                b"; expiry\n",
+                b"; minimum\n",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let v = rd.u32()?;
+                out.addstr(b"\t\t\t\t\t")?;
+                // SAFETY: the buffer holds `out.len` bytes from its position.
+                let len = unsafe { ns_format_ttl(u64::from(v), out.buf, out.len) };
+                let Ok(len) = usize::try_from(len) else {
+                    return Err(PrErr::Fail);
+                };
+                out.addlen(len);
+                if i == 3 {
+                    out.addstr(b" )")?;
+                }
+                *spaced = out.addtab(len, 16, *spaced)?;
+                out.addstr(what)?;
+                if i < 3 {
+                    *spaced = false;
+                }
+            }
+        }
+        t::MX | t::AFSDB | t::RT | t::PX => {
+            if rd.left() < 2 {
+                return formerr();
+            }
+            let pref = rd.u16()?;
+            out.addstr(Tmp::new().d(i64::from(pref)).s(b" ").get())?;
+            addname(rd, origin, out)?;
+            if type_ == t::PX {
+                out.addstr(b" ")?;
+                addname(rd, origin, out)?;
+            }
+        }
+        t::X25 => {
+            if charstr(rd, out)? == 0 {
+                return formerr();
+            }
+        }
+        t::TXT => {
+            while rd.left() > 0 {
+                if charstr(rd, out)? == 0 {
+                    return formerr();
+                }
+                if rd.left() > 0 {
+                    out.addstr(b" ")?;
+                }
+            }
+        }
+        t::NSAP => {
+            let mut t = [0u8; crate::inet::NSAP_NTOA_MAX];
+            let n = i32::try_from(rd.left()).unwrap_or(i32::MAX);
+            // SAFETY: the data holds `n` bytes; `t` the longest text.
+            unsafe { crate::inet::inet_nsap_ntoa(n, rd.rdata.add(rd.at), t.as_mut_ptr()) };
+            let len = t.iter().position(|&c| c == 0).unwrap_or(t.len());
+            out.addstr(&t[..len])?;
+        }
+        t::AAAA => {
+            if rd.left() != 16 {
+                return formerr();
+            }
+            // SAFETY: sixteen bytes of data remain.
+            ntop_into(crate::socket::AF_INET6, unsafe { rd.rdata.add(rd.at) }, out)?;
+        }
+        t::LOC => {
+            if rd.left() != 16 {
+                return formerr();
+            }
+            let b = rd.take(16)?;
+            let mut t = [0u8; crate::res_debug::LOC_NTOA_MAX];
+            // SAFETY: `b` holds 16 bytes; `t` the longest text.
+            unsafe { crate::res_debug::__loc_ntoa(b.as_ptr(), t.as_mut_ptr()) };
+            let len = t.iter().position(|&c| c == 0).unwrap_or(t.len());
+            out.addstr(&t[..len])?;
+        }
+        t::NAPTR => {
+            if rd.left() < 4 {
+                return formerr();
+            }
+            let order = rd.u16()?;
+            let pref = rd.u16()?;
+            out.addstr(
+                Tmp::new()
+                    .d(i64::from(order))
+                    .s(b" ")
+                    .d(i64::from(pref))
+                    .s(b" ")
+                    .get(),
+            )?;
+            for _ in 0..3 {
+                if charstr(rd, out)? == 0 {
+                    return formerr();
+                }
+                out.addstr(b" ")?;
+            }
+            addname(rd, origin, out)?;
+        }
+        t::SRV => {
+            if rd.left() < 6 {
+                return formerr();
+            }
+            let (p, w, port) = (rd.u16()?, rd.u16()?, rd.u16()?);
+            out.addstr(
+                Tmp::new()
+                    .d(i64::from(p))
+                    .s(b" ")
+                    .d(i64::from(w))
+                    .s(b" ")
+                    .d(i64::from(port))
+                    .s(b" ")
+                    .get(),
+            )?;
+            addname(rd, origin, out)?;
+        }
+        t::MINFO | t::RP => {
+            addname(rd, origin, out)?;
+            out.addstr(b" ")?;
+            addname(rd, origin, out)?;
+        }
+        t::WKS => {
+            if rd.left() < 5 {
+                return formerr();
+            }
+            // SAFETY: four bytes of data remain.
+            ntop_into(crate::socket::AF_INET, unsafe { rd.rdata.add(rd.at) }, out)?;
+            rd.at += 4;
+            let proto = rd.u8()?;
+            out.addstr(Tmp::new().s(b" ").d(i64::from(proto)).s(b" ( ").get())?;
+            let mut n: i64 = 0;
+            let mut lcnt = 0;
+            while rd.left() > 0 {
+                let mut c = u32::from(rd.u8()?);
+                loop {
+                    if c & 0o200 != 0 {
+                        if lcnt == 0 {
+                            out.addstr(b"\n\t\t\t\t")?;
+                            lcnt = 10;
+                            *spaced = false;
+                        }
+                        out.addstr(Tmp::new().d(n).s(b" ").get())?;
+                        lcnt -= 1;
+                    }
+                    c <<= 1;
+                    n += 1;
+                    // glibc's `while (++n & 07)`: a byte's eight bits done.
+                    if n % 8 == 0 {
+                        break;
+                    }
+                }
+            }
+            out.addstr(b")")?;
+        }
+        t::A6 => {
+            // The prefix length, printed -- and refused past 128 -- before
+            // it is stepped over, so the hex of a refused one starts with it.
+            let Some(&pbit) = rd.rest().first() else {
+                return formerr();
+            };
+            out.addstr(Tmp::new().d(i64::from(pbit)).s(b" ").get())?;
+            if pbit > 128 {
+                return formerr();
+            }
+            rd.at += 1;
+            let pbyte = usize::from(pbit & !7) / 8;
+            if pbit < 128 {
+                // The address's last 16 - pbyte bytes, all of them there.
+                let bytelen = 16 - pbyte;
+                if rd.left() < bytelen {
+                    return formerr();
+                }
+                let suffix = rd.take(bytelen)?;
+                let mut a = [0u8; 16];
+                a[pbyte..].copy_from_slice(suffix);
+                ntop_into(crate::socket::AF_INET6, a.as_ptr(), out)?;
+            }
+            if pbit == 0 {
+                return Ok(());
+            }
+            if rd.left() == 0 {
+                return formerr();
+            }
+            out.addstr(b" ")?;
+            addname(rd, origin, out)?;
+        }
+        _ => return Err(PrErr::Hexify(b"")),
+    }
+    Ok(())
+}
+
+/// The data that did not print, as hex and its printable bytes, `comment`
+/// after its length (`hexify:` in glibc's `ns_sprintrrf`): RFC 3597's `\#`
+/// form, with glibc's rows -- each starting a line, so none is spaced.
+fn hexify(comment: &[u8], rd: &Rd, rdlen: usize, out: &mut Pr) -> Result<(), PrErr> {
+    let mut tmp = Tmp::new();
+    tmp.s(b"\\# ").d(i64::from(rd.left_shown()));
+    tmp.s(if rdlen != 0 { b" (" } else { b"" }).s(comment);
+    out.addstr(tmp.get())?;
+    let data = rd.rest();
+    for row in data.chunks(16) {
+        let mut tmp = Tmp::new();
+        tmp.s(b"\n\t");
+        for &b in row {
+            let hex = b"0123456789abcdef";
+            tmp.s(&[hex[usize::from(b >> 4)], hex[usize::from(b & 0xf)], b' ']);
+        }
+        out.addstr(tmp.get())?;
+        if row.len() < 16 {
+            out.addstr(b")")?;
+            out.addtab(tmp.get().len() + 1, 48, false)?;
+        }
+        let mut tmp = Tmp::new();
+        tmp.s(b"; ");
+        for &b in row {
+            tmp.s(&[if (0x20..=0x7e).contains(&b) { b } else { b'.' }]);
+        }
+        out.addstr(tmp.get())?;
+    }
+    Ok(())
+}
+
+/// Print one record in zone-file form into `buf` (`buflen` bytes): the
+/// owner (a tab stop, or blank when it is `name_ctx`'s, `@` for `origin`
+/// itself, relative under it), the TTL as `ns_format_ttl` writes it, the
+/// class and type (`CLASSn` and `TYPEn` for ones with no name, RFC 3597's
+/// form), and the data by its type -- names relative to `origin`, strings
+/// quoted, and as hex in RFC 3597's `\#` form a type it has no printer for
+/// (CERT, TKEY, TSIG and OPT among them) or data that does not read, the
+/// latter marked `; RR format error`. The names in the data are expanded
+/// against the message `[msg, msg + msglen)`. glibc's as its June 2026
+/// fixes left it (CVE-2026-5435, CVE-2026-6238, bug 34289).
+///
+/// The characters written, or -1: `ENOSPC` for a buffer too small at any
+/// step, with what came before it written, as glibc's; a TTL that does
+/// not fit returns -1 with `errno` as it was, as glibc's does.
+/// Deprecated by glibc.
+///
+/// # Safety
+///
+/// `msg` holds `msglen` bytes and `rdata` `rdlen` of them; `name`,
+/// `name_ctx` and `origin` are NULL or NUL-terminated strings; `buf` holds
+/// `buflen` bytes.
+#[allow(clippy::too_many_arguments)] // glibc's signature
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_sprintrrf(
+    msg: *const u8,
+    msglen: usize,
+    name: *const u8,
+    class: i32,
+    type_: i32,
+    ttl: u64,
+    rdata: *const u8,
+    rdlen: usize,
+    name_ctx: *const u8,
+    origin: *const u8,
+    buf: *mut u8,
+    buflen: usize,
+) -> i32 {
+    if buf.is_null() || (rdata.is_null() && rdlen > 0) {
+        crate::errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    let (name, ctx, origin) = unsafe {
+        (
+            c_text(name).unwrap_or(b""),
+            c_text(name_ctx),
+            c_text(origin),
+        )
+    };
+    let mut out = Pr { buf, len: buflen };
+    let mut rd = Rd {
+        msg,
+        msglen,
+        rdata,
+        at: 0,
+        end: rdlen,
+    };
+    let r = (|| -> Result<(), PrErr> {
+        let mut spaced = false;
+        // The owner.
+        if ctx.is_some_and(|c| samename(c, name) == Some(true)) {
+            out.addstr(b"\t\t\t")?;
+        } else {
+            let mut len = prune_origin(name, origin);
+            if !name.is_empty() && len == 0 {
+                out.addstr(b"@\t\t\t")?;
+            } else {
+                if !name.is_empty() {
+                    out.addstr(&name[..len])?;
+                }
+                if name.is_empty() || wants_dot(name, len, origin) {
+                    out.addstr(b".")?;
+                    len += 1;
+                }
+                spaced = out.addtab(len, 24, spaced)?;
+            }
+        }
+        // The TTL, class and type: A6 by name, though the type table has
+        // none for it -- glibc's cannot grow, its size being ABI.
+        let start = out.buf as usize;
+        // SAFETY: the buffer holds `out.len` bytes from its position.
+        let x = unsafe { ns_format_ttl(ttl, out.buf, out.len) };
+        let Ok(x) = usize::try_from(x) else {
+            return Err(PrErr::Fail);
+        };
+        out.addlen(x);
+        addsym(&crate::res_debug::__p_class_syms, class, b"CLASS", &mut out)?;
+        if type_ == t::A6 {
+            out.addstr(b" A6")?;
+        } else {
+            addsym(&crate::res_debug::__p_type_syms, type_, b"TYPE", &mut out)?;
+        }
+        spaced = out.addtab(out.buf as usize - start, 16, spaced)?;
+        match rdata_text(type_, &mut rd, origin, &mut out, &mut spaced) {
+            Err(PrErr::Hexify(comment)) => hexify(comment, &rd, rdlen, &mut out),
+            other => other,
+        }
+    })();
+    match r {
+        Ok(()) => i32::try_from(out.buf as usize - buf as usize).unwrap_or(i32::MAX),
+        Err(_) => -1,
+    }
+}
+
+/// Print a record parsed from a message ([`crate::resolv::ns_parserr`]'s)
+/// with [`ns_sprintrrf`], its names expanded against the message.
+/// Deprecated by glibc.
+///
+/// # Safety
+///
+/// `handle` and `rr` are NULL or `ns_initparse`'s and `ns_parserr`'s; as
+/// [`ns_sprintrrf`] for the rest.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_sprintrr(
+    handle: *const NsMsg,
+    rr: *const crate::resolv::NsRr,
+    name_ctx: *const u8,
+    origin: *const u8,
+    buf: *mut u8,
+    buflen: usize,
+) -> i32 {
+    if handle.is_null() || rr.is_null() {
+        crate::errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    let (h, r) = unsafe { (&*handle, &*rr) };
+    let msglen = (h.eom as usize).saturating_sub(h.msg as usize);
+    // SAFETY: as above; the record's fields are ns_parserr's.
+    unsafe {
+        ns_sprintrrf(
+            h.msg,
+            msglen,
+            r.name.as_ptr(),
+            i32::from(r.rr_class),
+            i32::from(r.type_),
+            u64::from(r.ttl),
+            r.rdata,
+            usize::from(r.rdlength),
+            name_ctx,
+            origin,
+            buf,
+            buflen,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +1430,7 @@ mod tests {
             0 => "0",
             errno::EMSGSIZE => "EMSGSIZE",
             errno::EINVAL => "EINVAL",
+            errno::ENOSPC => "ENOSPC",
             _ => "other",
         }
     }
@@ -810,5 +1648,254 @@ mod tests {
         );
         assert_eq!(ns_msg_getflag(a_message(0xffff), 16), 0);
         assert_eq!(ns_msg_getflag(a_message(0xffff), -1), 0);
+    }
+
+    /// glibc 2.39's `ns_sprintrrf` and `ns_sprintrr`, one line a call
+    /// (`posix/tools/oracle/nsprint_harness.py`, which says the forms).
+    const PRINT_ORACLE: &str = include_str!("nsprint_oracle.txt");
+
+    /// An optional text: `-` for NULL.
+    fn opt(t: &str) -> Option<Vec<u8>> {
+        (t != "-").then(|| cstring(&untoken(t)))
+    }
+
+    /// The text's pointer, NULL for none.
+    fn ptr(v: Option<&[u8]>) -> *const u8 {
+        v.map_or(core::ptr::null(), <[u8]>::as_ptr)
+    }
+
+    /// What the harness prints after ` = ` for `call`.
+    fn print_ours(call: &str) -> String {
+        let f: Vec<&str> = call.split(' ').collect();
+        let mut buf = std::vec![0u8; 4096];
+        errno::set_errno(0);
+        let r = match f[0] {
+            "F" => {
+                // `<data>+<more>`: the message is both, the data the first.
+                let (data, more) = f[5].split_once('+').unwrap_or((f[5], ""));
+                let mut rdata = if data == "-" {
+                    std::vec![b'x']
+                } else {
+                    unhex(data)
+                };
+                let rdlen = if data == "-" { 0 } else { rdata.len() };
+                rdata.extend(unhex(more));
+                let owner = cstring(&untoken(f[4]));
+                let (ctx, origin) = (opt(f[6]), opt(f[7]));
+                // SAFETY: each buffer holds what the call is told it does.
+                unsafe {
+                    ns_sprintrrf(
+                        rdata.as_ptr(),
+                        if more.is_empty() { rdlen } else { rdata.len() },
+                        owner.as_ptr(),
+                        f[2].parse().unwrap(),
+                        f[1].parse().unwrap(),
+                        f[3].parse().unwrap(),
+                        rdata.as_ptr(),
+                        rdlen,
+                        ptr(ctx.as_deref()),
+                        ptr(origin.as_deref()),
+                        buf.as_mut_ptr(),
+                        f[8].parse().unwrap(),
+                    )
+                }
+            }
+            "R" => {
+                let m = unhex(f[1]);
+                let (ctx, origin) = (opt(f[4]), opt(f[5]));
+                let mut h = a_message(0);
+                // SAFETY: an all-zero record is a valid one to fill.
+                let mut rr: crate::resolv::NsRr = unsafe { core::mem::zeroed() };
+                // SAFETY: `m` is the message; `h` and `rr` are writable.
+                unsafe {
+                    assert_eq!(
+                        crate::resolv::ns_initparse(
+                            m.as_ptr(),
+                            i32::try_from(m.len()).unwrap(),
+                            &mut h
+                        ),
+                        0
+                    );
+                    assert_eq!(
+                        crate::resolv::ns_parserr(
+                            &mut h,
+                            f[2].parse().unwrap(),
+                            f[3].parse().unwrap(),
+                            &mut rr
+                        ),
+                        0
+                    );
+                }
+                errno::set_errno(0);
+                // SAFETY: as above; `buf` holds the size asked.
+                unsafe {
+                    ns_sprintrr(
+                        &h,
+                        &rr,
+                        ptr(ctx.as_deref()),
+                        ptr(origin.as_deref()),
+                        buf.as_mut_ptr(),
+                        f[6].parse().unwrap(),
+                    )
+                }
+            }
+            other => panic!("unknown line kind {other}"),
+        };
+        let e = errno::get_errno();
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        format!("{r} {} {}", errno_name(e), token(&buf[..n]))
+    }
+
+    #[test]
+    fn records_print_as_glibcs() {
+        let mut wrong = Vec::new();
+        let mut n = 0;
+        let lines = PRINT_ORACLE
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'));
+        for line in lines.filter(|l| !l.starts_with("S ")) {
+            let (call, want) = line.split_once(" = ").unwrap();
+            n += 1;
+            let got = print_ours(call);
+            if got != want {
+                wrong.push(format!("{call}\n  glibc: {want}\n  ours:  {got}"));
+            }
+        }
+        assert!(n > 150, "the oracle has {n} lines");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// The packet glibc's own test of its June 2026 fixes
+    /// (`resolv/tst-ns_sprintrr.c`) prints a record from: a response to
+    /// www.example.org/IN/ANY, the record its one answer, the answer's
+    /// owner a pointer to the question's name.
+    fn sweep_packet(type_: u16, rdata: &[u8]) -> Vec<u8> {
+        let mut p = b"AA\x81\x80\x00\x01\x00\x01\x00\x00\x00\x00\x03www\x07example\x03org\x00\x00\xff\x00\x01\xc0\x0c".to_vec();
+        p.extend_from_slice(&type_.to_be_bytes());
+        p.extend_from_slice(&1u16.to_be_bytes());
+        p.extend_from_slice(&86400u32.to_be_bytes());
+        p.extend_from_slice(&u16::try_from(rdata.len()).unwrap().to_be_bytes());
+        p.extend_from_slice(rdata);
+        p
+    }
+
+    /// `ns_sprintrr` on the packet's answer into `size` of 4096 zeroed
+    /// bytes: its answer, `errno` and the text, or `None` when the packet
+    /// does not parse.
+    fn sweep_answer(p: &[u8], size: usize) -> Option<(i32, i32, Vec<u8>)> {
+        let mut h = a_message(0);
+        // SAFETY: an all-zero record is a valid one to fill.
+        let mut rr: crate::resolv::NsRr = unsafe { core::mem::zeroed() };
+        // SAFETY: `p` is the packet; `h` and `rr` are writable.
+        unsafe {
+            if crate::resolv::ns_initparse(p.as_ptr(), i32::try_from(p.len()).unwrap(), &mut h) != 0
+                || crate::resolv::ns_parserr(&mut h, 1, 0, &mut rr) != 0
+            {
+                return None;
+            }
+        }
+        let mut buf = std::vec![0u8; 4096];
+        errno::set_errno(0);
+        // SAFETY: as above; `buf` holds more than `size` bytes.
+        let r = unsafe {
+            ns_sprintrr(
+                &h,
+                &rr,
+                core::ptr::null(),
+                core::ptr::null(),
+                buf.as_mut_ptr(),
+                size,
+            )
+        };
+        let e = errno::get_errno();
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        buf.truncate(n);
+        Some((r, e, buf))
+    }
+
+    /// One of a sweep's answers as the harness writes it: `rc/errno/k`, `k`
+    /// the bytes the text shares with the whole text, `/` and the rest of
+    /// the text after them when there is any.
+    fn sweep_entry(answer: Option<(i32, i32, Vec<u8>)>, full: &[u8]) -> String {
+        let Some((r, e, got)) = answer else {
+            return "parse-failed".into();
+        };
+        let k = full.iter().zip(&got).take_while(|(a, b)| a == b).count();
+        let mut s = format!("{r}/{}/{k}", errno_name(e));
+        if k < got.len() {
+            s.push('/');
+            s.push_str(&token(&got[k..]));
+        }
+        s
+    }
+
+    /// What the harness prints after ` = ` for an `S` line: the whole
+    /// text, each size's answer, each truncation's.
+    fn sweep_ours(type_: u16, rdata: &[u8]) -> String {
+        let p = sweep_packet(type_, rdata);
+        let Some((r, e, full)) = sweep_answer(&p, 4096) else {
+            return "parse-failed".into();
+        };
+        let mut s = format!("{r} {} {} |", errno_name(e), token(&full));
+        for size in 1..=full.len() + 16 {
+            s.push(' ');
+            s.push_str(&sweep_entry(sweep_answer(&p, size), &full));
+        }
+        s.push_str(" |");
+        for k in 0..=rdata.len() {
+            // The message ends where the data, cut to `k` bytes, does.
+            let mut t = p[..p.len() - rdata.len() + k].to_vec();
+            let at = t.len() - k - 2;
+            t[at..at + 2].copy_from_slice(&u16::try_from(k).unwrap().to_be_bytes());
+            s.push(' ');
+            s.push_str(&sweep_entry(sweep_answer(&t, 4096), &full));
+        }
+        s
+    }
+
+    /// glibc's answers for its own test's records, and a few more, at every
+    /// buffer size from 1 past the text's length and with the data cut to
+    /// every length: where each piece stops fitting, what a failing call
+    /// leaves in the buffer, and how each cut record reads.
+    #[test]
+    fn records_print_as_glibcs_at_every_size_and_cut() {
+        let mut wrong = Vec::new();
+        let mut n = 0;
+        for line in PRINT_ORACLE.lines().filter(|l| l.starts_with("S ")) {
+            let (call, want) = line.split_once(" = ").unwrap();
+            let f: Vec<&str> = call.split(' ').collect();
+            let rdata = if f[2] == "-" { Vec::new() } else { unhex(f[2]) };
+            n += 1;
+            let got = sweep_ours(f[1].parse().unwrap(), &rdata);
+            if got != want {
+                // The answers that differ, by their place in the line.
+                let (w, g): (Vec<&str>, Vec<&str>) =
+                    (want.split(' ').collect(), got.split(' ').collect());
+                let diffs: Vec<String> = (0..w.len().max(g.len()))
+                    .filter(|&i| w.get(i) != g.get(i))
+                    .take(6)
+                    .map(|i| {
+                        format!(
+                            "  [{i}] glibc: {:?}\n  [{i}] ours:  {:?}",
+                            w.get(i),
+                            g.get(i)
+                        )
+                    })
+                    .collect();
+                wrong.push(format!("{call}\n{}", diffs.join("\n")));
+            }
+        }
+        assert!(n >= 30, "the oracle has {n} sweeps");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
     }
 }

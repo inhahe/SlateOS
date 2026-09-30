@@ -197,6 +197,22 @@ unsafe fn entries<'a>(syms: *const ResSym) -> (&'a [ResSym], &'a ResSym) {
     unsafe { (core::slice::from_raw_parts(syms, n), &*syms.add(n)) }
 }
 
+/// The name `table` gives `number` -- its first entry's -- or `None` when
+/// none does: how `ns_sprintrrf` prints a class or type (`CLASSn` or
+/// `TYPEn` when `None`).
+pub(crate) fn sym_name<const N: usize>(
+    table: &'static SymTable<N>,
+    number: i32,
+) -> Option<&'static [u8]> {
+    let s = table
+        .0
+        .iter()
+        .take_while(|s| !s.name.is_null())
+        .find(|s| s.number == number)?;
+    // SAFETY: a table's names are NUL-terminated string literals.
+    unsafe { c_text(s.name) }
+}
+
 /// `number` in decimal into the thread's buffer `which` holds, as a string:
 /// glibc's `sprintf (unname, "%d", number)`.
 fn decimal_into(which: crate::netdb::ResDebugBuf, number: i64) -> *const u8 {

@@ -52,6 +52,15 @@ int ns_subdomain(const char *, const char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
 int ns_makecanon(const char *, char *, size_t) _SLATEOS_ATTRIBUTE_DEPRECATED;
 int ns_samename(const char *, const char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
 
+/* A record as zone-file text, from a parsed message or from its fields:
+ * deprecated by glibc, as here. */
+int ns_sprintrr(const ns_msg *, const ns_rr *, const char *, const char *,
+                char *, size_t) _SLATEOS_ATTRIBUTE_DEPRECATED;
+int ns_sprintrrf(const unsigned char *, size_t, const char *, ns_class,
+                 ns_type, unsigned long, const unsigned char *, size_t,
+                 const char *, const char *, char *, size_t)
+    _SLATEOS_ATTRIBUTE_DEPRECATED;
+
 #ifdef __cplusplus
 }
 #endif

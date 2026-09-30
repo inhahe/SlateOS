@@ -12,6 +12,13 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 `unshare -r`, which needs no root. Build products go in a temporary directory
 (`_wsl.workdir`); a run changes nothing in the tree but its own output.
 
+That glibc is Ubuntu's build, `2.39-0ubuntu8.9`: 2.39 with the fixes Ubuntu
+carries in `debian/patches`, glibc's own 2026 security fixes among them. So
+where the oracle and the 2.39 release's source disagree, the patches may be
+why -- `ns_print.c`'s were (`nsprint_harness.py`) -- and a port read from
+the release's source is checked against the patches for its file too: they
+are in `glibc_2.39-0ubuntu8.9.debian.tar.xz`, Launchpad's source package.
+
 ## Which program feeds which test
 
 | Program | Writes | Read by |
@@ -68,12 +75,13 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `conv_harness.py` | `posix/src/conv_oracle.txt` | `printf.rs` and `stdlib.rs`, through `decfloat::CONV_ORACLE` (`printf` and `strto*` of `double`, `float` and `long double`, and `wcstold`, every rounding mode) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
-| `nsname_harness.py` (`ns_harness.py`'s messages) | `posix/src/nsname_oracle.txt` (`ns_name_pton` and `ns_name_ntop` over escapes, label and name limits and buffer sizes; `ns_name_unpack` and `ns_name_skip` over the messages; sequences of `ns_name_pack` and `ns_name_compress` writing one message against one pointer table; `res_hnok`, `res_ownok`, `res_mailok` and `res_dnok` over 33 names -- 377 lines) | `resolv.rs`, `include_str!` |
+| `nsname_harness.py` (`ns_harness.py`'s messages) | `posix/src/nsname_oracle.txt` (`ns_name_pton` and `ns_name_ntop` over escapes, label and name limits and buffer sizes, `ns_name_ntop` at every size for four names too, with what a failed call wrote; `ns_name_unpack` and `ns_name_skip` over the messages; sequences of `ns_name_pack` and `ns_name_compress` writing one message against one pointer table; `res_hnok`, `res_ownok`, `res_mailok` and `res_dnok` over 33 names -- 477 lines) | `resolv.rs`, `include_str!` |
 | `resolvn_harness.py` (sandboxed as `gai_harness.py`, a responder on 127.0.0.1:53) | `posix/src/resolvn_oracle.txt` (`res_ninit`'s fields from a `resolv.conf`; `res_nquery`, `res_nsearch` and `res_nquerydomain` answered, refused and failed, with `h_errno` and `res_h_errno`; `res_nmkquery`'s bytes and `res_nsend`; all five on a state `res_ninit` has not seen; what `res_nclose` leaves -- 19 lines) | `resolv.rs`, `include_str!` |
 | `inetnet_harness.py` | `posix/src/inetnet_oracle.txt` (`inet_net_pton` over dotted, hex and CIDR text and every destination size's edge; `inet_net_ntop` at each width and size; `inet_neta`; `inet_nsap_addr` and `inet_nsap_ntoa` -- each output buffer whole, so that what a failing call wrote is compared too; 284 calls) | `inet.rs`, `include_str!` |
 | `nsutil_harness.py` | `posix/src/nsutil_oracle.txt` (`ns_makecanon` over escapes and sizes; `ns_samename`, `ns_samedomain` and `ns_subdomain` over pairs of names; `ns_msg_getflag` for each flag; `ns_name_ntol` and `ns_name_rollback`; `ns_format_ttl` at each size, `ns_parse_ttl` and `ns_datetosecs`, wraps included -- 646 calls) | `nameser.rs`, `include_str!` |
 | `resutil_harness.py` | `posix/src/resutil_oracle.txt` (`dn_count_labels`, `putlong`, `putshort`; `res_isourserver` against set nameservers; `res_nameinquery` and `res_queriesmatch` over messages whole and cut short; `hostalias` and `res_hostalias` over a `HOSTALIASES` file, one line of it longer than glibc's `BUFSIZ`; `res_close` and `res_randomid` -- 101 lines) | `resolv.rs`, `include_str!` |
 | `resdebug_harness.py` | `posix/src/resdebug_oracle.txt` (`b64_ntop` and `b64_pton` at each size, padding and bad input; `sym_ntos`, `sym_ntop` and `sym_ston` over the class and type tables; `p_class`, `p_type`, `p_rcode`, `p_option`, `p_time`; `loc_aton` and `loc_ntoa`, glibc's wraps included -- 485 calls) | `res_debug.rs`, `include_str!` |
+| `nsprint_harness.py` | `posix/src/nsprint_oracle.txt` (`ns_sprintrrf` over each type's records, whole, short and running on past their data, owners under `name_ctx` and `origin`, classes and types by name and by number, and buffer sizes; `ns_sprintrr` over a message's records; and glibc's own test of its June 2026 fixes, `resolv/tst-ns_sprintrr.c`, its records printed at every size and cut at every length -- 225 lines) | `nameser.rs`, `include_str!` |
 | `getdate_harness.py` | `posix/src/getdate_oracle.txt` | `time.rs`, `include_str!` (`getdate`, `getdate_r`) |
 | `strptime_harness.py` | `posix/src/strptime_oracle.txt` | `time.rs`, `include_str!` (`strptime`) |
 | `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |

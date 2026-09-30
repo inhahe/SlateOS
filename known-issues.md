@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`; and `<dlfcn.h>`'s `dladdr1`, `dlmopen`, `dlvsym` and `_dl_find_object`, the rest of it made glibc's static one on the way -- `dl_iterate_phdr` never called back, so no C++ exception could be caught, D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176280,7 +176280,7 @@ probes for one (`configure`) takes its fallback. Measured by
 | IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` -- **done 2026-09-29** (`posix/src/inet6.rs`; the source filters refused) |
 | GNU libraries in libc | argz (12) and envz (6) -- **done 2026-09-29** (`posix/src/argz.rs`) -- argp (10), obstack's four, the old GNU regex API (`re_compile_pattern` ... 9), printf's registration (7), `mcheck` and `mtrace` (6) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
 | system databases | `/etc/gshadow` (`getsgnam` ... 11), `/etc/fstab` (`getfsent` ... 5), `/etc/ttys` (`getttyent` ... 4), `getutmp`, `login` `logout` `logwtmp` | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
-| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s, `rpmatch`, `getpt`, `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym`, `glob_pattern_p`, `getdirentries`, `addseverity`, `monstartup` `sprofil` `vlimit`, and some twenty LFS64 names musl's headers have only as macros (`mkstemp64`, `pread64` ...) | |
+| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s, `rpmatch`, `getpt`, `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym` (**done 2026-09-29**, `posix/src/dlfcn.rs`), `glob_pattern_p`, `getdirentries`, `addseverity`, `monstartup` `sprofil` `vlimit`, and some twenty LFS64 names musl's headers have only as macros (`mkstemp64`, `pread64` ...) | |
 
 **The proper fix, family by family:** each written from its specification
 -- the C standard, POSIX, the Linux man pages -- with glibc 2.39 as the
@@ -176465,3 +176465,52 @@ failed where it should succeed.
   that, on the premise that 0 is out of range -- and is 0 now, as glibc's.
 
 **Where:** `posix/src/signal.rs`: `sigprocmask`, `raise`, and their tests.
+
+## D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT — `dl_iterate_phdr` returned 0 without calling its callback, so the unwinder C++ programs link found no unwind tables and every `throw` ended in `std::terminate`; `dlopen(NULL)` gave no handle, and `dlerror` was one slot for the whole process (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/dlfcn.rs`, `posix/src/tls.rs`), on the host; on the target once lane A runs `ctest-cxx-throw` (`requests/d-a-run-ctest-cxx-throw.md`)**
+
+**In short:** a C++ program on SlateOS could throw an exception but never
+catch one. The unwinder a C++ program is linked with (zig's libunwind) finds
+the tables that say how to unwind each function's stack frame by asking the C
+library for the list of loaded objects -- here, the program itself -- and the
+C library answered with an empty list. So the unwinder concluded there was
+nothing it could unwind, and every `throw` called `std::terminate`, ending the
+program. Linking always succeeded, which is why nothing noticed: no C++
+program had been run here (B-THE-C-PLUS-PLUS-LINK-LINE-NEEDS-TWO-DECISIONS-AND-ONE-MISSING-FAMILY
+says so), and cmake, the first large one ported, uses exceptions.
+
+| Call | Was | Is |
+|---|---|---|
+| `dl_iterate_phdr` | 0, the callback never called | one call, for the program: its program headers (found through `__ehdr_start`, as the TLS set-up finds them), load bias, name "", TLS module 1 and the calling thread's block of it; the callback's answer |
+| `_dl_find_object` (glibc 2.35) | absent | the program's segment holding an address, and its `.eh_frame_hdr` -- what GCC's unwinder asks, where glibc has it |
+| `__tls_get_addr` | NULL for everything | module 1's variable in the calling thread's block |
+| `dlopen(NULL)`, `dlopen("")` | NULL, "dynamic linking not supported" | the program's handle, which POSIX requires for NULL |
+| `dlsym`, `dlvsym` | NULL, the same message | NULL, `<program>: undefined symbol: <name>`, glibc's static answer |
+| `dlclose` of the program's handle | -1 | 0 |
+| `dlerror` | one slot for the process: a thread could read, or clear, another's message | the calling thread's own, as in glibc |
+| `dlinfo` | -1 for every request | the program's link map, namespace, directory, TLS module and block, program headers; glibc's refusals for the rest |
+| `dladdr` | 0 for every address | for one inside the program, its name and ELF header (design-decisions §1147) |
+| `dlmopen`, `dladdr1` | absent | glibc's static answers |
+
+**Found** reading `dlfcn.rs` for the `dladdr1`, `dlmopen`, `dlvsym` row of
+D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE: zig's `libunwind.a` has
+`dl_iterate_phdr` as an undefined symbol (`llvm-nm`), and LLVM's libunwind,
+built for Linux, has no other way to find an object's `PT_GNU_EH_FRAME`.
+
+**A second condition, for whoever links C++ by hand:** the unwinder also needs
+the program to have been linked with `--eh-frame-hdr`, which builds the
+`PT_GNU_EH_FRAME` segment it searches. `zig c++` and rustc pass it; a raw
+`rust-lld` invocation -- fastpy's `_link_slateos`, which the C fixtures use --
+does not. `services/ctest-cxx-throw/build.py` passes it itself.
+
+**Tests:** `posix/src/dlfcn.rs`'s replay glibc 2.39's static answers
+(`posix/tools/oracle/dlfcn_harness.py`) and hold `dl_iterate_phdr`, `dladdr`
+and `_dl_find_object` to them over a synthetic ELF image; `tls.rs`'s check
+the header reading those share. `services/ctest-cxx-throw` throws and catches
+on the target -- an `int`, a `std::runtime_error` through fifty-one frames
+with every destructor run, a rethrow, an `exception_ptr`, a derived class
+caught as its base -- and exits 42; it is built and staged, and runs once
+lane A adds its rung.
+
+**Where:** `posix/src/dlfcn.rs`; `posix/src/tls.rs` (`ProgramHeaders`, the
+program's own headers, which the TLS set-up and `<dlfcn.h>` both read);
+`posix/include/dlfcn.h`; `services/ctest-cxx-throw/`.

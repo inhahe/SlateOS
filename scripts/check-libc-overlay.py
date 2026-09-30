@@ -136,6 +136,9 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct random_data": "stdlib.h",
     "struct drand48_data": "stdlib.h",
     "struct sigstack": "signal.h",
+    "Dl_serpath": "dlfcn.h",
+    "Dl_serinfo": "dlfcn.h",
+    "struct dl_find_object": "dlfcn.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -144,6 +147,14 @@ FIELD_NAMES: dict[tuple[str, str], str] = {("femode_t", "__glibc_reserved"): "__
 # Where the layouts are read, both sides: C23, for femode_t; not _GNU_SOURCE,
 # so that <stdio.h>'s cookie types are the overlay's own and not musl's.
 LAYOUT_FLAGS = ["-std=gnu2x"]
+# ... and what a header's types need besides: <dlfcn.h>'s are _GNU_SOURCE's
+# alone, in glibc's header and the overlay's alike.
+LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"]}
+
+
+def layout_flags(header: str) -> list[str]:
+    """The flags `header`'s types' layouts are read with, both sides."""
+    return LAYOUT_FLAGS + LAYOUT_EXTRA_FLAGS.get(header, [])
 
 # glibc's names for types whose musl names differ, in the reference's types.
 # `__sigset_t` is glibc's unnamed struct behind sigset_t; musl's has the tag
@@ -336,7 +347,7 @@ def mislaid(zig: str, overlay: Path,
                 ours = FIELD_NAMES.get((cty, f), f)
                 src += f"_Static_assert(offsetof({cty}, {ours}) == {off}, \"@{len(what)}@\");\n"
                 what.append(f"{cty}'s {ours} is not at glibc's offset {off}")
-        _, diag = compile_c(zig, src, LAYOUT_FLAGS + ["-w", "-ferror-limit=0"], overlay)
+        _, diag = compile_c(zig, src, layout_flags(hdr) + ["-w", "-ferror-limit=0"], overlay)
         for line in errors_of(diag):
             m = FAILED_ASSERT.search(line)
             if m and "static assertion failed" in line:

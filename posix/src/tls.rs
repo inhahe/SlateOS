@@ -61,8 +61,7 @@
 //!   anyone, and could not safely run the start routine either.
 
 /// `p_type` of the program header describing the TLS init image.
-#[cfg(target_os = "none")]
-const PT_TLS: u32 = 7;
+pub(crate) const PT_TLS: u32 = 7;
 
 /// Bytes reserved for the thread control block at and above the thread
 /// pointer.  Only offsets 0 (TP self-reference) and 0x28 (stack-protector
@@ -246,14 +245,190 @@ impl TlsImage {
     }
 }
 
-/// Read this program's `PT_TLS` segment, or [`TlsImage::EMPTY`] if it has
-/// none -- or if its program headers cannot be found.
+/// `p_type` of a loadable segment.
+pub(crate) const PT_LOAD: u32 = 1;
+/// `p_type` of the program header table's own entry.
+pub(crate) const PT_PHDR: u32 = 6;
+/// `p_type` of `.eh_frame_hdr`'s segment: the index an unwinder searches.
+pub(crate) const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+
+/// Bytes in an `Elf64_Phdr`, the least an `e_phentsize` may say.
+// Read only where there is an image to read: the target, and the tests'
+// synthetic ones.
+#[cfg_attr(not(any(test, target_os = "none")), allow(dead_code))]
+const PHDR_SIZE: usize = 56;
+
+/// One program header's fields (`Elf64_Phdr`), read out of the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// The names are the ELF specification's own, prefix and all.
+#[allow(clippy::struct_field_names)]
+pub(crate) struct Phdr {
+    /// `p_type`.
+    pub p_type: u32,
+    /// `p_offset`: where the segment starts in the file.
+    pub p_offset: u64,
+    /// `p_vaddr`: where it starts in memory, before the load bias.
+    pub p_vaddr: u64,
+    /// `p_filesz`: bytes of it the file holds.
+    pub p_filesz: u64,
+    /// `p_memsz`: bytes of it in memory.
+    pub p_memsz: u64,
+    /// `p_align`.
+    pub p_align: u64,
+}
+
+/// The program's own ELF header and program header table, where they are
+/// mapped: what a Linux program is told through `AT_PHDR`, `AT_PHNUM` and
+/// `AT_PHENT`, and a native one finds through `__ehdr_start`
+/// ([`program_headers`]). Read in place, never copied.
 ///
-/// Locates the program headers through the linker-defined `__ehdr_start`
-/// symbol, which in a static non-PIE link resolves to the load address of
-/// our own `Elf64_Ehdr` — the same information a Linux crt would take from
-/// `AT_PHDR`/`AT_PHNUM`. Native processes get no auxiliary vector, so this is
-/// the only source.
+/// The TLS set-up here and `crate::dlfcn` -- `dl_iterate_phdr`, `dladdr`,
+/// `_dl_find_object`, `dlinfo` -- all read the program's headers, and all
+/// through this.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProgramHeaders {
+    /// The ELF header.
+    ehdr: *const u8,
+    /// The first program header.
+    phdr: *const u8,
+    /// `e_phnum`.
+    phnum: usize,
+    /// `e_phentsize`: at least [`PHDR_SIZE`].
+    phentsize: usize,
+}
+
+/// Read a `u64` at `p`, of no promised alignment.
+///
+/// # Safety
+///
+/// `p` must be valid for an 8-byte read.
+unsafe fn read_u64(p: *const u8) -> u64 {
+    // SAFETY: the caller's contract.
+    unsafe { core::ptr::read_unaligned(p.cast::<u64>()) }
+}
+
+impl ProgramHeaders {
+    /// The table the ELF header at `ehdr` describes; `None` when it has no
+    /// entries, or entries too short to be `Elf64_Phdr`s.
+    ///
+    /// # Safety
+    ///
+    /// `ehdr` must point at an `Elf64_Ehdr`, and the program header table it
+    /// describes must be mapped, both for as long as the result is used.
+    // Called only where there is an image: the target, and the tests.
+    #[cfg_attr(not(any(test, target_os = "none")), allow(dead_code))]
+    pub(crate) unsafe fn of_ehdr(ehdr: *const u8) -> Option<Self> {
+        // Elf64_Ehdr: e_phoff @0x20 (u64), e_phentsize @0x36 (u16), e_phnum
+        // @0x38 (u16); read unaligned, the header being bytes at an address
+        // of no promised alignment.
+        //
+        // SAFETY: the caller's contract; the offsets are inside the header's
+        // 64 bytes.
+        let (phoff, phentsize, phnum) = unsafe {
+            (
+                read_u64(ehdr.wrapping_add(0x20)),
+                usize::from(core::ptr::read_unaligned(
+                    ehdr.wrapping_add(0x36).cast::<u16>(),
+                )),
+                usize::from(core::ptr::read_unaligned(
+                    ehdr.wrapping_add(0x38).cast::<u16>(),
+                )),
+            )
+        };
+        if phnum == 0 || phentsize < PHDR_SIZE {
+            return None;
+        }
+        Some(Self {
+            ehdr,
+            phdr: ehdr.wrapping_add(usize::try_from(phoff).ok()?),
+            phnum,
+            phentsize,
+        })
+    }
+
+    /// The ELF header.
+    pub(crate) const fn ehdr(&self) -> *const u8 {
+        self.ehdr
+    }
+
+    /// The first program header: `dl_phdr_info`'s `dlpi_phdr`.
+    pub(crate) const fn phdr(&self) -> *const u8 {
+        self.phdr
+    }
+
+    /// How many program headers there are.
+    pub(crate) const fn phnum(&self) -> usize {
+        self.phnum
+    }
+
+    /// Header `i`; `None` past the last.
+    pub(crate) fn get(&self, i: usize) -> Option<Phdr> {
+        if i >= self.phnum {
+            return None;
+        }
+        let at = self.phdr.wrapping_add(i.checked_mul(self.phentsize)?);
+        // Elf64_Phdr: p_type @0 (u32), p_offset @8, p_vaddr @16, p_filesz
+        // @32, p_memsz @40, p_align @48 (u64s).
+        //
+        // SAFETY: `of_ehdr`'s contract maps the whole table, `phnum` entries
+        // of `phentsize` >= 56 bytes, and `i < phnum`.
+        unsafe {
+            Some(Phdr {
+                p_type: core::ptr::read_unaligned(at.cast::<u32>()),
+                p_offset: read_u64(at.wrapping_add(8)),
+                p_vaddr: read_u64(at.wrapping_add(16)),
+                p_filesz: read_u64(at.wrapping_add(32)),
+                p_memsz: read_u64(at.wrapping_add(40)),
+                p_align: read_u64(at.wrapping_add(48)),
+            })
+        }
+    }
+
+    /// Every header, in order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = Phdr> + '_ {
+        (0..self.phnum).filter_map(|i| self.get(i))
+    }
+
+    /// The first header of type `p_type`.
+    pub(crate) fn find(&self, p_type: u32) -> Option<Phdr> {
+        self.iter().find(|p| p.p_type == p_type)
+    }
+
+    /// The load bias: how far the program sits from the addresses its
+    /// headers give. 0 for an `ET_EXEC`, which runs where it was linked --
+    /// every program here -- and found as the C libraries find it for the
+    /// rest: from `PT_PHDR`, the table's own entry, or else from the
+    /// `PT_LOAD` mapping the file's first byte, where the ELF header is.
+    pub(crate) fn load_bias(&self) -> u64 {
+        if let Some(p) = self.find(PT_PHDR) {
+            return (self.phdr.addr() as u64).wrapping_sub(p.p_vaddr);
+        }
+        if let Some(p) = self.iter().find(|p| p.p_type == PT_LOAD && p.p_offset == 0) {
+            return (self.ehdr.addr() as u64).wrapping_sub(p.p_vaddr);
+        }
+        0
+    }
+
+    /// The program's `PT_TLS` segment, or [`TlsImage::EMPTY`] if it has
+    /// none.
+    pub(crate) fn tls_image(&self) -> TlsImage {
+        let bias = self.load_bias();
+        self.find(PT_TLS).map_or(TlsImage::EMPTY, |p| TlsImage {
+            init_vaddr: bias.wrapping_add(p.p_vaddr),
+            init_size: p.p_filesz,
+            mem_size: p.p_memsz,
+            align: normalise_align(p.p_align),
+        })
+    }
+}
+
+/// This program's headers; `None` if they are not in memory.
+///
+/// Found through the linker-defined `__ehdr_start` symbol, which in a static
+/// link resolves to the load address of our own `Elf64_Ehdr` -- the same
+/// information a Linux crt takes from `AT_PHDR`/`AT_PHNUM`. Native processes
+/// get no auxiliary vector (`requests/d-a-native-processes-could-be-told-where-their-program-headers-are.md`),
+/// so this is the only source.
 ///
 /// ## When `__ehdr_start` is 0
 ///
@@ -262,22 +437,23 @@ impl TlsImage {
 /// section instead (`PHDRS { load PT_LOAD FLAGS(7); }` without `FILEHDR
 /// PHDRS`, as `coreutils`, `oils` and `shell` were linked until 2026-09-25)
 /// leaves the headers out of memory, and lld resolves `__ehdr_start` to 0.
-/// This used to read through it anyway: every such program died on its first
+/// This used to be read through anyway: every such program died on its first
 /// instructions with a page fault at address 0x36, `e_phentsize`'s offset,
 /// which said nothing about why
 /// (`requests/a-bd-coreutils-cannot-start-two-link-faults.md`).
 ///
-/// It now answers "no TLS image", which is what glibc (weak `__ehdr_start`,
-/// null-checked in `_dl_aux_init`) and musl (no `AT_PHDR`, so its `PT_TLS`
-/// walk runs zero times) both do. The cost of that answer is known and
-/// narrow: a program whose headers are unmapped *and* which has a `PT_TLS`
-/// segment -- C `__thread`, since the slateos target sets `has-thread-local`
-/// false -- runs with an empty TLS block, so its thread-locals start at
-/// zero instead of their initialisers. Every program linked with lld's
-/// default layout maps its headers and is unaffected.
+/// It now answers `None` -- for [`image`], "no TLS image", which is what
+/// glibc (weak `__ehdr_start`, null-checked in `_dl_aux_init`) and musl (no
+/// `AT_PHDR`, so its `PT_TLS` walk runs zero times) both do. The cost of that
+/// answer is known and narrow: a program whose headers are unmapped *and*
+/// which has a `PT_TLS` segment -- C `__thread`, since the slateos target
+/// sets `has-thread-local` false -- runs with an empty TLS block, so its
+/// thread-locals start at zero instead of their initialisers; and
+/// `dl_iterate_phdr` has no program to report, so such a program cannot
+/// unwind. Every program linked with lld's default layout maps its headers
+/// and is unaffected.
 #[cfg(target_os = "none")]
-#[must_use]
-pub fn image() -> TlsImage {
+pub(crate) fn program_headers() -> Option<ProgramHeaders> {
     // Linker-defined: address of the ELF header of this executable.
     unsafe extern "C" {
         static __ehdr_start: u8;
@@ -301,57 +477,28 @@ pub fn image() -> TlsImage {
         );
     }
     if ehdr.is_null() {
-        return TlsImage::EMPTY;
+        return None;
     }
-    // Elf64_Ehdr field offsets: e_phoff @0x20 (u64), e_phentsize @0x36
-    // (u16), e_phnum @0x38 (u16).  Use unaligned reads — the header is a
-    // packed byte layout at a symbol address of unknown alignment.
-    //
-    // SAFETY: `__ehdr_start` is non-null (checked above), so the linker gave
-    // it the load address of our own ELF header, which it does only when a
-    // loaded segment maps the header; the offsets read here are within the
-    // 64-byte Elf64_Ehdr.
-    let (e_phoff, e_phentsize, e_phnum) = unsafe {
-        (
-            core::ptr::read_unaligned(ehdr.add(0x20).cast::<u64>()),
-            core::ptr::read_unaligned(ehdr.add(0x36).cast::<u16>()) as usize,
-            core::ptr::read_unaligned(ehdr.add(0x38).cast::<u16>()) as usize,
-        )
-    };
-
-    // SAFETY: e_phoff is our own header's program-header offset, so
-    // `ehdr + e_phoff` is inside our mapped image.
-    let phbase = unsafe { ehdr.add(e_phoff as usize) };
-    for i in 0..e_phnum {
-        // SAFETY: i < e_phnum, so this stays inside the program-header
-        // table described by our own ELF header.
-        let ph = unsafe { phbase.add(i.wrapping_mul(e_phentsize)) };
-        // Elf64_Phdr: p_type@0 (u32), p_vaddr@16, p_filesz@32, p_memsz@40,
-        // p_align@48 (all u64).
-        //
-        // SAFETY: `ph` points at a full Elf64_Phdr (56 bytes) inside the
-        // mapped image; all reads are unaligned-safe.
-        let p_type = unsafe { core::ptr::read_unaligned(ph.cast::<u32>()) };
-        if p_type == PT_TLS {
-            // SAFETY: as above — reads within this program header.
-            return unsafe {
-                TlsImage {
-                    init_vaddr: core::ptr::read_unaligned(ph.add(16).cast::<u64>()),
-                    init_size: core::ptr::read_unaligned(ph.add(32).cast::<u64>()),
-                    mem_size: core::ptr::read_unaligned(ph.add(40).cast::<u64>()),
-                    align: normalise_align(core::ptr::read_unaligned(ph.add(48).cast::<u64>())),
-                }
-            };
-        }
-    }
-    TlsImage::EMPTY
+    // SAFETY: `__ehdr_start` is non-null, so the linker gave it the load
+    // address of our own ELF header, which it does only when a loaded
+    // segment maps the header -- and the program header table follows it
+    // in that segment, as every layout that maps the header puts it
+    // (`FILEHDR PHDRS`). Both are the executable's, mapped for its life.
+    unsafe { ProgramHeaders::of_ehdr(ehdr) }
 }
 
-/// Host build: no ELF image to inspect, and no thread pointer to install.
+/// Host build: no ELF image to inspect.
 #[cfg(not(target_os = "none"))]
+#[allow(clippy::missing_const_for_fn, clippy::unnecessary_wraps)]
+pub(crate) fn program_headers() -> Option<ProgramHeaders> {
+    None
+}
+
+/// Read this program's `PT_TLS` segment, or [`TlsImage::EMPTY`] if it has
+/// none -- or if its program headers cannot be found ([`program_headers`]).
 #[must_use]
 pub fn image() -> TlsImage {
-    TlsImage::EMPTY
+    program_headers().map_or(TlsImage::EMPTY, |ph| ph.tls_image())
 }
 
 /// Initialise the TLS block and TCB for thread pointer `tp`.
@@ -668,5 +815,172 @@ mod tests {
         // block_size = 16, so TP is one alignment step above a 16-aligned
         // base.
         assert_eq!(img.thread_pointer(0x4000, 0), 0x4010);
+    }
+
+    use super::{
+        PT_GNU_EH_FRAME, PT_LOAD, PT_PHDR, PT_TLS, Phdr, ProgramHeaders, SyntheticImage,
+        program_headers,
+    };
+
+    fn ph(
+        p_type: u32,
+        p_offset: u64,
+        p_vaddr: u64,
+        p_filesz: u64,
+        p_memsz: u64,
+        p_align: u64,
+    ) -> Phdr {
+        Phdr {
+            p_type,
+            p_offset,
+            p_vaddr,
+            p_filesz,
+            p_memsz,
+            p_align,
+        }
+    }
+
+    /// A program linked at 0x400000, as lld lays one out: the headers in the
+    /// first segment, a TLS segment, and `.eh_frame_hdr`.
+    fn linked_at_4m(with_phdr: bool) -> std::vec::Vec<Phdr> {
+        let mut v = std::vec::Vec::new();
+        if with_phdr {
+            v.push(ph(PT_PHDR, 64, 0x40_0040, 56 * 5, 56 * 5, 8));
+        }
+        v.push(ph(PT_LOAD, 0, 0x40_0000, 0x1000, 0x1000, 0x1000));
+        v.push(ph(PT_LOAD, 0x1000, 0x40_1000, 0x800, 0x2000, 0x1000));
+        v.push(ph(PT_TLS, 0x1400, 0x40_1400, 8, 24, 8));
+        v.push(ph(PT_GNU_EH_FRAME, 0x900, 0x40_0900, 0x40, 0x40, 4));
+        v
+    }
+
+    #[test]
+    fn the_table_is_read_where_it_lies() {
+        let img = SyntheticImage::new(&linked_at_4m(true));
+        let h = img.headers();
+        assert_eq!(h.ehdr().addr() as u64, img.addr());
+        assert_eq!(h.phdr().addr() as u64, img.addr() + 64);
+        assert_eq!(h.phnum(), 5);
+        let all: std::vec::Vec<Phdr> = h.iter().collect();
+        assert_eq!(all, linked_at_4m(true));
+        assert_eq!(h.get(5), None);
+        assert_eq!(h.find(PT_TLS), Some(linked_at_4m(true)[3]));
+        assert_eq!(h.find(0x1234_5678), None);
+    }
+
+    /// `PT_PHDR` first, as musl and glibc read the bias; the `PT_LOAD` that
+    /// maps the file's first byte without one; 0 with neither.
+    #[test]
+    fn the_load_bias_comes_from_pt_phdr_or_the_first_load() {
+        let with = SyntheticImage::new(&linked_at_4m(true));
+        assert_eq!(
+            with.headers().load_bias(),
+            with.addr().wrapping_sub(0x40_0000)
+        );
+        let without = SyntheticImage::new(&linked_at_4m(false));
+        assert_eq!(
+            without.headers().load_bias(),
+            without.addr().wrapping_sub(0x40_0000)
+        );
+        let neither = SyntheticImage::new(&[ph(PT_LOAD, 0x1000, 0x40_1000, 8, 8, 8)]);
+        assert_eq!(neither.headers().load_bias(), 0);
+    }
+
+    #[test]
+    fn the_tls_image_is_pt_tls_moved_by_the_bias() {
+        let img = SyntheticImage::new(&linked_at_4m(true));
+        let bias = img.headers().load_bias();
+        assert_eq!(
+            img.headers().tls_image(),
+            TlsImage {
+                init_vaddr: bias.wrapping_add(0x40_1400),
+                init_size: 8,
+                mem_size: 24,
+                align: 8,
+            }
+        );
+        let none = SyntheticImage::new(&[ph(PT_LOAD, 0, 0x40_0000, 8, 8, 8)]);
+        assert_eq!(none.headers().tls_image(), TlsImage::EMPTY);
+    }
+
+    #[test]
+    fn a_table_that_is_not_one_is_refused() {
+        let mut img = SyntheticImage::new(&linked_at_4m(true));
+        img.set_u16(0x38, 0);
+        // SAFETY: the block is an ELF header followed by its table.
+        assert!(unsafe { ProgramHeaders::of_ehdr(img.ptr()) }.is_none());
+        let mut img = SyntheticImage::new(&linked_at_4m(true));
+        img.set_u16(0x36, 32);
+        // SAFETY: as above.
+        assert!(unsafe { ProgramHeaders::of_ehdr(img.ptr()) }.is_none());
+    }
+
+    /// On the host there is no image of our own to read: no headers, and no
+    /// TLS image, which is what `image()` answered before it had headers to
+    /// read at all.
+    #[test]
+    fn the_host_has_no_program_headers() {
+        assert!(program_headers().is_none());
+        assert_eq!(super::image(), TlsImage::EMPTY);
+    }
+}
+
+/// Test builds: an ELF header and its program header table in one block, as
+/// a program's are mapped -- the table at offset 64, 56 bytes an entry.
+#[cfg(test)]
+pub(crate) struct SyntheticImage {
+    /// `u64`s so the block is 8-aligned, as the real one is.
+    words: std::vec::Vec<u64>,
+}
+
+#[cfg(test)]
+impl SyntheticImage {
+    /// The image with these program headers.
+    pub(crate) fn new(phdrs: &[Phdr]) -> Self {
+        let mut b = std::vec![0u8; 64 + PHDR_SIZE * phdrs.len()];
+        b[0x20..0x28].copy_from_slice(&64u64.to_le_bytes());
+        b[0x36..0x38].copy_from_slice(&u16::try_from(PHDR_SIZE).unwrap().to_le_bytes());
+        b[0x38..0x3a].copy_from_slice(&u16::try_from(phdrs.len()).unwrap().to_le_bytes());
+        for (i, p) in phdrs.iter().enumerate() {
+            let e = &mut b[64 + PHDR_SIZE * i..64 + PHDR_SIZE * (i + 1)];
+            e[0..4].copy_from_slice(&p.p_type.to_le_bytes());
+            e[8..16].copy_from_slice(&p.p_offset.to_le_bytes());
+            e[16..24].copy_from_slice(&p.p_vaddr.to_le_bytes());
+            e[24..32].copy_from_slice(&p.p_vaddr.to_le_bytes());
+            e[32..40].copy_from_slice(&p.p_filesz.to_le_bytes());
+            e[40..48].copy_from_slice(&p.p_memsz.to_le_bytes());
+            e[48..56].copy_from_slice(&p.p_align.to_le_bytes());
+        }
+        let mut words = std::vec![0u64; b.len().div_ceil(8)];
+        for (i, byte) in b.iter().enumerate() {
+            words[i / 8] |= u64::from(*byte) << (8 * (i % 8));
+        }
+        Self { words }
+    }
+
+    /// Overwrite the `u16` at byte `offset` of the ELF header.
+    pub(crate) fn set_u16(&mut self, offset: usize, v: u16) {
+        for (k, byte) in v.to_le_bytes().iter().enumerate() {
+            let i = offset + k;
+            self.words[i / 8] &= !(0xff << (8 * (i % 8)));
+            self.words[i / 8] |= u64::from(*byte) << (8 * (i % 8));
+        }
+    }
+
+    /// The ELF header's address.
+    pub(crate) fn ptr(&self) -> *const u8 {
+        self.words.as_ptr().cast()
+    }
+
+    /// The same, as a number.
+    pub(crate) fn addr(&self) -> u64 {
+        self.ptr().addr() as u64
+    }
+
+    /// The headers, read from the block.
+    pub(crate) fn headers(&self) -> ProgramHeaders {
+        // SAFETY: the block is an ELF header followed by the table it
+        // describes, and lives as long as `self`.
+        unsafe { ProgramHeaders::of_ehdr(self.ptr()) }.expect("a synthetic image has a table")
     }
 }

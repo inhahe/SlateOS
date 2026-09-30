@@ -364,6 +364,29 @@ def test_stamp_and_mtime_modes_are_distinguishable(cf, tmpdir):
     check("stamp mode speaks of content", "have since changed" in stamp_text, True)
 
 
+def test_a_cpp_fixtures_source_is_an_input(cf, tmpdir):
+    """A C++ fixture's source is `main.cpp`: an edit to it makes the ELF
+    stale, as an edit to a C fixture's `main.c` does. Before `main.cpp` was
+    an input, `ctest-cxx-throw` would have read as current after any change
+    to the program it runs."""
+    _fake_tree(cf, tmpdir)
+    fx = Path(tmpdir) / "services" / "ctest-cxx"
+    fx.mkdir(parents=True)
+    (fx / "build.py").write_bytes(b"# recipe\n")
+    (fx / "main.cpp").write_bytes(b"int main() { return 42; }\n")
+    elf = cf.elf_of(fx)
+    elf.write_bytes(b"ELF")
+    for p in (fx / "build.py", fx / "main.cpp", cf.LIBC):
+        _age(p, 100)
+    _age(elf, 50)
+    labels = [label for label, _p, _t in cf._inputs(fx)]
+    check("main.cpp is an input", "main.cpp" in labels, True)
+    check("an ELF newer than its inputs is current", cf.is_stale(fx), None)
+    now = time.time()
+    os.utime(fx / "main.cpp", (now, now))
+    check("an ELF older than main.cpp is stale", cf.is_stale(fx), "older than main.cpp")
+
+
 def main() -> int:
     cf = load_module()
     tests = [(name, fn) for name, fn in sorted(globals().items())

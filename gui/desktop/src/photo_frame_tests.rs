@@ -149,6 +149,50 @@ fn escape_leaves_the_frames_folder_as_it_was() {
     assert!(!shell.take_widgets_dirty());
 }
 
+/// **After a frame's chooser has come and gone, the Run box's Browse answers
+/// into the Run box** -- what the chooser was put up for is recorded each
+/// time it goes up, not only the first -- and the frame's folder is left
+/// alone.
+#[test]
+fn the_run_box_browses_for_itself_after_a_frame_asked() {
+    let (mut shell, frame) = shell_with_a_frame();
+    menu_on(&mut shell, frame);
+    shell.activate_desktop_menu_item(DesktopShell::MENU_FRAME_FOLDER);
+    shell.desktop_menu.hide();
+    drop(shell.handle_hotkey(&key(Key::Escape)));
+    assert!(!shell.chooser_open());
+
+    shell.toggle_run_dialog();
+    shell.open_run_box_chooser();
+    assert_eq!(shell.chooser_wants(), Some(Path::new("/")));
+    shell.set_chooser_entries(vec![dir("bin")]);
+    drop(shell.handle_hotkey(&key(Key::Home)));
+    drop(shell.handle_hotkey(&key(Key::Enter)));
+    assert_eq!(shell.chooser_wants(), Some(Path::new("/bin")));
+    shell.set_chooser_entries(vec![DirEntry {
+        is_dir: false,
+        size: 1,
+        ..dir("tool")
+    }]);
+    drop(shell.handle_hotkey(&key(Key::Home)));
+    drop(shell.handle_hotkey(&key(Key::Enter)));
+
+    assert!(
+        !shell.chooser_open(),
+        "choosing a program left the chooser up"
+    );
+    assert_eq!(
+        shell.run_dialog.browse_start(),
+        PathBuf::from("/bin"),
+        "the program chosen did not reach the Run box"
+    );
+    assert_eq!(
+        shell.widgets.frame_folder(frame),
+        Some(PathBuf::from("/pictures")),
+        "the program chosen went to the frame"
+    );
+}
+
 /// **Only a photo frame's menu offers a folder**: a clock's does not.
 #[test]
 fn only_a_photo_frame_offers_a_folder() {

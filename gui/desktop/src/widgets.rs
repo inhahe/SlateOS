@@ -4145,6 +4145,143 @@ mod tests {
         assert_eq!(mgr.frame_folder(clock), None);
     }
 
+    /// A lister that answers `x.png` and `y.png` in whatever folder it is
+    /// asked about, and records each folder asked.
+    fn two_pictures_in(reads: &std::cell::RefCell<Vec<PathBuf>>) -> impl Fn(&Path) -> Vec<PathBuf> {
+        move |f: &Path| {
+            reads.borrow_mut().push(f.to_path_buf());
+            ["x.png", "y.png"].iter().map(|n| f.join(n)).collect()
+        }
+    }
+
+    /// **Two frames showing two folders, due at once, each get their own
+    /// folder's pictures** -- each folder read once -- and not the first
+    /// folder's listing handed to both.
+    #[test]
+    fn two_frames_due_together_read_their_own_folders() {
+        let (mut mgr, id) = one_frame();
+        let other = mgr
+            .find_free_position(WidgetKind::PhotoFrame.default_size())
+            .and_then(|at| mgr.add_widget(WidgetKind::PhotoFrame, at))
+            .expect("room for a second frame");
+        let trips = PathBuf::from("/home/someone/Trips");
+        assert!(mgr.set_frame_folder(id, &trips));
+        let reads = std::cell::RefCell::new(Vec::new());
+        mgr.step_frames(Some(&folder()), &two_pictures_in(&reads));
+        assert_eq!(
+            mgr.frame_state(id).unwrap().wanted,
+            Some(trips.join("x.png"))
+        );
+        assert_eq!(
+            mgr.frame_state(other).unwrap().wanted,
+            Some(folder().join("x.png"))
+        );
+        let mut read = reads.borrow().clone();
+        read.sort();
+        assert_eq!(read, [folder(), trips], "each folder read once");
+    }
+
+    /// **A frame moved from a folder to the one above it starts at the
+    /// first picture there** -- not at the picture that sorts after the
+    /// sub-folder it was showing, which in the folder above is somewhere in
+    /// the middle.
+    #[test]
+    fn a_frame_moved_up_a_folder_starts_at_the_top() {
+        let (mut mgr, id) = one_frame();
+        let below = folder().join("m");
+        assert!(mgr.set_frame_folder(id, &below));
+        let names = |f: &Path| -> Vec<PathBuf> {
+            if f == folder() {
+                // "a.png" sorts before the sub-folder "m", "z.png" after it.
+                vec![folder().join("a.png"), folder().join("z.png")]
+            } else {
+                vec![f.join("x.png")]
+            }
+        };
+        mgr.step_frames(Some(&folder()), &names);
+        mgr.frame_picture_ready(id, up(below.join("x.png"), 1));
+
+        assert!(mgr.set_frame_folder(id, &folder()));
+        mgr.step_frames(Some(&folder()), &names);
+        assert_eq!(
+            mgr.frame_state(id).unwrap().wanted,
+            Some(folder().join("a.png")),
+            "carried on from the old folder's place"
+        );
+    }
+
+    /// **A new folder drops what the old one had in hand**: a picture of the
+    /// old folder still being decoded is no longer wanted, and what the old
+    /// folder said -- that it was empty -- is no longer said, from the
+    /// moment the folder changes rather than from the next step.
+    #[test]
+    fn a_new_folder_drops_the_old_ones_picture_and_its_word() {
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&["a.png"]));
+        assert!(mgr.frame_wants(id, &picture("a.png")));
+        assert!(mgr.set_frame_folder(id, Path::new("/home/someone/Trips")));
+        assert!(
+            !mgr.frame_wants(id, &picture("a.png")),
+            "the old folder's picture would still be shown when it arrived"
+        );
+        assert!(mgr.frames_to_fetch().is_empty());
+
+        let (mut mgr, id) = one_frame();
+        mgr.step_frames(Some(&folder()), &listing(&[]));
+        assert!(mgr.frame_state(id).unwrap().problem.is_some());
+        assert!(mgr.set_frame_folder(id, Path::new("/home/someone/Trips")));
+        assert_eq!(mgr.frame_state(id).unwrap().problem, None);
+    }
+
+    /// **A layout's `folder` belongs to photo frames**: one found under a
+    /// note -- a hand-edited file, or a widget whose kind was changed -- is
+    /// not taken for the note's words.
+    #[test]
+    fn a_folder_under_a_note_in_the_layout_is_not_its_words() {
+        let (mut mgr, _, (x, y)) = one_note();
+        assert!(mgr.note_press(x, y, 1));
+        mgr.note_key(&typed("shopping"));
+        let mut doc = Document::parse("");
+        mgr.write_into(&mut doc);
+        let key = doc
+            .keys(&["widgets"])
+            .into_iter()
+            .next()
+            .expect("the note was saved");
+        doc.set_str(&["widgets", &key, "folder"], "/home/someone/Trips");
+
+        let mut back = make_mgr();
+        back.read_from(&doc);
+        let read = back.all_widgets()[0].id;
+        assert_eq!(
+            back.get(read).map(|w| w.state_text.as_str()),
+            Some("shopping")
+        );
+        assert_eq!(back.frame_folder(read), None);
+    }
+
+    /// **Only a photo frame has a folder.** A note keeps its words where a
+    /// frame keeps its folder (`state_text`), so a note whose words read as
+    /// a path must still answer no folder -- and cannot be given one.
+    #[test]
+    fn a_notes_words_are_not_a_folder() {
+        let (mut mgr, note, (x, y)) = one_note();
+        assert!(mgr.note_press(x, y, 1));
+        mgr.note_key(&typed("/home/someone/Trips"));
+        assert_eq!(
+            mgr.get(note).map(|w| w.state_text.as_str()),
+            Some("/home/someone/Trips"),
+            "the note did not take the words, so this proves nothing"
+        );
+        assert_eq!(mgr.frame_folder(note), None);
+        assert!(!mgr.set_frame_folder(note, Path::new("/tmp")));
+        assert_eq!(
+            mgr.get(note).map(|w| w.state_text.as_str()),
+            Some("/home/someone/Trips"),
+            "setting a folder on a note overwrote its words"
+        );
+    }
+
     /// **With no Pictures folder and none chosen, a frame says so**, and
     /// reads nothing.
     #[test]

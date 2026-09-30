@@ -30,8 +30,28 @@ extern "C" {
 #define PTHREAD_MUTEX_STALLED_NP PTHREAD_MUTEX_STALLED
 #define PTHREAD_MUTEX_ROBUST_NP PTHREAD_MUTEX_ROBUST
 
+/* The stack by its top, the address it grows down from, as the obsolete
+ * interface took it (pthread_attr_setstack takes its lowest address). */
+int pthread_attr_getstackaddr(const pthread_attr_t *__restrict, void **__restrict)
+	_SLATEOS_DEPRECATED("pthread_attr_getstackaddr is deprecated: use pthread_attr_getstack");
+int pthread_attr_setstackaddr(pthread_attr_t *, void *)
+	_SLATEOS_DEPRECATED("pthread_attr_setstackaddr is deprecated: use pthread_attr_setstack");
+
 #ifdef _GNU_SOURCE
 #define PTHREAD_MUTEX_FAST_NP PTHREAD_MUTEX_TIMED_NP
+
+/* The CPUs threads created with the attributes may run on: every one, here,
+ * and pthread_create refuses a set of fewer. */
+int pthread_attr_setaffinity_np(pthread_attr_t *, size_t, const cpu_set_t *);
+int pthread_attr_getaffinity_np(const pthread_attr_t *, size_t, cpu_set_t *);
+
+/* pthread_timedjoin_np against CLOCK_REALTIME or CLOCK_MONOTONIC. */
+int pthread_clockjoin_np(pthread_t, void **, clockid_t, const struct timespec *);
+
+/* sched_yield, by the name glibc gave it before it deprecated it -- the
+ * same function, as glibc's header makes it. */
+int pthread_yield(void) __asm__("sched_yield")
+	_SLATEOS_DEPRECATED("pthread_yield is deprecated: use sched_yield");
 
 /* The timed waits, against the clock named: CLOCK_REALTIME or
  * CLOCK_MONOTONIC. */

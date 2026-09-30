@@ -290,7 +290,10 @@ def declarations_in(ast: dict) -> dict[str, tuple]:
         ret = c_class(return_type(ftype), typedefs)
         params = ftype[len(return_type(ftype)):]
         variadic = "..." in params
-        out.setdefault(node["name"], (tuple(args), ret, variadic))
+        # Keyed by the symbol a call links to: clang's `mangledName`, which
+        # in C is the name but for an asm label -- glibc's __REDIRECT, and the
+        # overlay's pthread_yield, which is sched_yield.
+        out.setdefault(node.get("mangledName") or node["name"], (tuple(args), ret, variadic))
     return out
 
 
@@ -310,6 +313,9 @@ def c_declarations(zig: str, inc: Path, overlay: Path | None) -> dict[str, tuple
         # behind the musl ones they extend.
         flags += ["-I", str(overlay)]
     key = hashlib.sha256()
+    # This script's text too: a change to how a declaration is read is a
+    # change to what the cache holds.
+    key.update(Path(__file__).read_bytes())
     key.update(subprocess.run([zig, "version"], capture_output=True, text=True).stdout.encode())
     key.update(" ".join(flags).encode())
     for base in [b for b in (overlay, inc) if b and b.is_dir()]:
@@ -727,6 +733,13 @@ def self_test() -> int:
     check("a function returning a function pointer returns a pointer",
           c_class(return_type("void (*(int, void (*)(int)))(int)"), {}) == "i64")
     check("an attribute after the parameters", return_type("void (int) __attribute__((noreturn))") == "void")
+    ast = {"inner": [
+        {"kind": "FunctionDecl", "name": "old", "mangledName": "new_one",
+         "type": {"qualType": "int (void)"}},
+        {"kind": "FunctionDecl", "name": "plain", "type": {"qualType": "int (void)"}},
+    ]}
+    check("a declaration is its link name: an asm label's, or its own",
+          set(declarations_in(ast)) == {"new_one", "plain"})
     fns = rust_functions('pub extern "C" fn f(a: i32, // x\n cb: Option<extern "C" fn(i32, i32) -> i32>, '
                          'b: usize) -> i64 { 0 }')
     check("a callback's `->` and a comment do not split parameters",

@@ -192,6 +192,26 @@ def layout_flags(header: str) -> list[str]:
 # not included <utmp.h> there is no `struct utmp` to name.
 TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utmpx"}
 
+# ... and the tagged names glibc's typedefs are of, where musl's are of
+# untagged types: glibc's pthread_attr_t is `union pthread_attr_t`, which
+# clang writes out; musl's is an untagged struct, named only pthread_attr_t.
+TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t"}
+
+# name -> (glibc's type as the reference has it, the overlay's in musl's
+# names, why they differ): where the two libraries' typedefs are of different
+# types, for the same 8 bytes passed the same way, so that glibc's cannot be
+# spelt in musl's names. The overlay's declaration is held to the second; the
+# first is held to the reference, so an entry glibc has moved on from is
+# refused.
+TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
+    "pthread_clockjoin_np": (
+        "int (unsigned long, void **, int, const struct timespec *)",
+        "int (pthread_t, void **, clockid_t, const struct timespec *)",
+        "glibc's pthread_t is `unsigned long`, musl's `struct __pthread *`: a thread's "
+        "8-byte handle either way",
+    ),
+}
+
 # How clang says a name is not declared -- for a library function it knows
 # the type of, "undeclared library function".
 # ... and that a word is a type's name, not an object's or a function's.
@@ -265,7 +285,24 @@ def visible(zig: str, header: str | list[str], names: list[str], flags: list[str
 
 def c_type(glibc_type: str) -> str:
     """A reference type in musl's names."""
+    for glibc, musl in TYPE_PHRASES.items():
+        glibc_type = glibc_type.replace(glibc, musl)
     return re.sub(r"\b\w+\b", lambda m: TYPE_NAMES.get(m.group(0), m.group(0)), glibc_type)
+
+
+def expected_type(name: str, glibc_type: str) -> str:
+    """The type the overlay's `name` is held to: glibc's, but where
+    TYPE_OVERRIDES says musl's typedefs make it another."""
+    over = TYPE_OVERRIDES.get(name)
+    return over[1] if over is not None else glibc_type
+
+
+def stale_overrides(ref: dict[str, tuple[str, frozenset[str], str]]) -> list[str]:
+    """Each TYPE_OVERRIDES entry whose glibc type is not the reference's."""
+    return [f"TYPE_OVERRIDES[{n!r}] records glibc's type as `{glibc}`, but the reference "
+            f"has `{ref[n][2] if n in ref else 'no such name'}`: look again"
+            for n, (glibc, _, _) in TYPE_OVERRIDES.items()
+            if n not in ref or ref[n][2] != glibc]
 
 
 def mistyped(zig: str, header: str, entries: list[tuple[str, str]], flags: list[str],
@@ -535,7 +572,8 @@ def check_declarations(zig: str, overlay: Path,
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
         seen = list(pool.map(probe, jobs))
         typed = dict(zip(sorted(by_header), pool.map(
-            lambda h: mistyped(zig, h, [(n, ref[n][2]) for n in by_header[h]], WIDEST, overlay),
+            lambda h: mistyped(zig, h, [(n, expected_type(n, ref[n][2])) for n in by_header[h]],
+                               WIDEST, overlay),
             sorted(by_header))))
     for h, cfg, vis in seen:
         for n in by_header[h]:
@@ -552,7 +590,8 @@ def check_declarations(zig: str, overlay: Path,
     for h, bad in typed.items():
         for n in sorted(bad):
             problems.append(f"<{h}> declares {n} with a type incompatible with glibc's "
-                            f"`{ref[n][2]}`")
+                            f"`{expected_type(n, ref[n][2])}`")
+    problems += stale_overrides(ref)
     return problems, len(names & set(ref))
 
 
@@ -568,6 +607,18 @@ def self_test() -> int:
     check("a glibc type name maps to musl's",
           c_type("int (int, const __sigset_t *)") == "int (int, const sigset_t *)")
     check("an unrelated name is left alone", c_type("__sigset_tx *") == "__sigset_tx *")
+    check("glibc's tagged pthread_attr_t is musl's",
+          c_type("int (const union pthread_attr_t *, void **)")
+          == "int (const pthread_attr_t *, void **)")
+    over = {"pthread_clockjoin_np": ("pthread.h", frozenset({"gnu"}),
+                                     TYPE_OVERRIDES["pthread_clockjoin_np"][0])}
+    check("an override matching the reference stands", stale_overrides(over) == [])
+    check("and is what the overlay is held to",
+          expected_type("pthread_clockjoin_np", "anything").startswith("int (pthread_t,"))
+    check("an override the reference has moved on from is refused",
+          len(stale_overrides({"pthread_clockjoin_np": ("pthread.h", frozenset(), "int (long)")}))
+          == 1)
+    check("a name without one is held to glibc's type", expected_type("f", "int (int)") == "int (int)")
     with tempfile.TemporaryDirectory() as t:
         d = Path(t)
         (d / "a.h").write_text(

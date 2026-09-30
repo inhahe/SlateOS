@@ -265,6 +265,11 @@ REPLACEABLE = frozenset(
         # where the libc lacks it, as musl does -- posix::legacy's
         # gnu_group_member member
         "group_member",
+        # added 2026-09-29 (lane D): gnulib's argz module defines these where
+        # the libc lacks them, as musl does -- posix::argz's gnu_argz member
+        "argz_create", "argz_create_sep", "argz_count", "argz_extract",
+        "argz_stringify", "argz_append", "argz_add", "argz_add_sep",
+        "argz_delete", "argz_insert", "argz_replace", "argz_next",
         # stdio-ish
         "getline", "getdelim", "fseeko", "ftello", "vasprintf", "asprintf",
         # stdio_ext.h: gnulib's freadahead/freadptr/fpending/fpurge/fseterr

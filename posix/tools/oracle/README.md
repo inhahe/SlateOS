@@ -68,6 +68,7 @@ and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs
 | `conv_harness.py` | `posix/src/conv_oracle.txt` | `printf.rs` and `stdlib.rs`, through `decfloat::CONV_ORACLE` (`printf` and `strto*` of `double`, `float` and `long double`, and `wcstold`, every rounding mode) |
 | `cvt_harness.py` | `posix/src/cvt_oracle.txt` | `stdlib.rs`, `include_str!` (`ecvt`, `fcvt`, `gcvt`) |
 | `ns_harness.py` | `posix/src/ns_oracle.txt` | `resolv.rs`, `include_str!` (`ns_initparse` & co.) |
+| `nsname_harness.py` (`ns_harness.py`'s messages) | `posix/src/nsname_oracle.txt` (`ns_name_pton` and `ns_name_ntop` over escapes, label and name limits and buffer sizes; `ns_name_unpack` and `ns_name_skip` over the messages; sequences of `ns_name_pack` and `ns_name_compress` writing one message against one pointer table; `res_hnok`, `res_ownok`, `res_mailok` and `res_dnok` over 33 names -- 377 lines) | `resolv.rs`, `include_str!` |
 | `getdate_harness.py` | `posix/src/getdate_oracle.txt` | `time.rs`, `include_str!` (`getdate`, `getdate_r`) |
 | `strptime_harness.py` | `posix/src/strptime_oracle.txt` | `time.rs`, `include_str!` (`strptime`) |
 | `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |

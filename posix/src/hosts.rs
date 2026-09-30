@@ -945,7 +945,7 @@ fn kernel_reverse(addr: [u8; 4], out: &mut [u8; 256]) -> Result<usize, i32> {
 /// The forward lookup the three `byname` forms share: `name`'s IPv4
 /// address, after glibc's `check_name`.
 fn kernel_forward(name: &[u8], herr: &mut i32) -> Result<[u8; 4], Status> {
-    if !crate::resolv::res_hnok(name) {
+    if !crate::resolv::hnok(name) {
         *herr = HOST_NOT_FOUND;
         return Err(Status::NotFound);
     }
@@ -2081,7 +2081,7 @@ mod tests {
 
     #[test]
     fn res_hnok_is_glibcs() {
-        use crate::resolv::res_hnok;
+        use crate::resolv::hnok as res_hnok;
         for ok in [
             &b"example.com"[..],
             b"a-b.c_d",

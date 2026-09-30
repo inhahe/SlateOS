@@ -592,22 +592,19 @@ pub extern "C" fn __res_init() -> i32 {
 // Names: glibc's ns_name_* functions
 // ---------------------------------------------------------------------------
 
-/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
-/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
-/// and `_`, the first not starting with `-`.  The DNS module asks about
-/// nothing else.
-pub(crate) fn res_hnok(dn: &[u8]) -> bool {
+/// `dn` as a wire name, if it is printable ASCII and a name `ns_name_pton`
+/// accepts: what all four of glibc's name checks ask first.  The wire
+/// name's length.
+fn printable_wire(dn: &[u8], wire: &mut [u8; MAXCDNAME]) -> Option<usize> {
     if !dn.iter().all(|&c| c > b' ' && c <= b'~') {
-        return false;
+        return None;
     }
-    let mut wire = [0u8; 255];
-    let Ok((n, _)) = name_pton(dn, &mut wire) else {
-        return false;
-    };
-    let wire = wire.get(..n).unwrap_or(&[]);
-    if wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-') {
-        return false;
-    }
+    name_pton(dn, wire).ok().map(|(n, _)| n)
+}
+
+/// Whether every label of the wire name `wire` is only letters, digits, `-`
+/// and `_`: a host name's labels.
+fn host_labels(wire: &[u8]) -> bool {
     let mut i = 0usize;
     while let Some(&len) = wire.get(i) {
         if len == 0 {
@@ -623,6 +620,98 @@ pub(crate) fn res_hnok(dn: &[u8]) -> bool {
         i += 1 + usize::from(len);
     }
     true
+}
+
+/// Whether the wire name's first label starts with `-`.
+fn starts_with_hyphen(wire: &[u8]) -> bool {
+    wire.first().is_some_and(|&l| l > 0) && wire.get(1) == Some(&b'-')
+}
+
+/// glibc's `res_hnok`: whether `dn` is a host name -- printable ASCII, a
+/// name `ns_name_pton` accepts, and every label only letters, digits, `-`
+/// and `_`, the first not starting with `-`.  What the DNS module asks of a
+/// name an answer gives.
+pub(crate) fn hnok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    !starts_with_hyphen(wire) && host_labels(wire)
+}
+
+/// glibc's `res_ownok`: [`hnok`], but a first label of `*` alone is let
+/// through -- a wildcard record's owner.
+fn ownok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    if starts_with_hyphen(wire) {
+        return false;
+    }
+    if wire.starts_with(&[1, b'*']) {
+        host_labels(wire.get(2..).unwrap_or(&[]))
+    } else {
+        host_labels(wire)
+    }
+}
+
+/// glibc's `res_mailok`: a mailbox as DNS writes one -- the first label
+/// anything printable, and at least one more after it, which are a host
+/// name's; `.` alone passes.
+fn mailok(dn: &[u8]) -> bool {
+    let mut wire = [0u8; MAXCDNAME];
+    let Some(n) = printable_wire(dn, &mut wire) else {
+        return false;
+    };
+    let wire = wire.get(..n).unwrap_or(&[]);
+    let Some(&first) = wire.first() else {
+        return false;
+    };
+    if first == 0 {
+        return true;
+    }
+    let tail = wire.get(1 + usize::from(first)..).unwrap_or(&[]);
+    tail.first().is_some_and(|&l| l != 0) && host_labels(tail)
+}
+
+/// The C string at `dn`, or `None` for NULL.
+fn c_name<'a>(dn: *const u8) -> Option<&'a [u8]> {
+    if dn.is_null() {
+        return None;
+    }
+    // SAFETY: a non-NULL `dn` is a NUL-terminated string, per the contract.
+    Some(unsafe { core::slice::from_raw_parts(dn, crate::string::strlen(dn)) })
+}
+
+/// Whether `dn` is a host name: 1 or 0.  See [`hnok`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_hnok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(hnok))
+}
+
+/// Whether `dn` may own a host's records: a host name, or one whose first
+/// label is `*`.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_ownok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(ownok))
+}
+
+/// Whether `dn` is a mailbox as DNS writes one (`SOA` and `RP` records):
+/// a first label of anything printable, then a host name.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_mailok(dn: *const u8) -> i32 {
+    i32::from(c_name(dn).is_some_and(mailok))
+}
+
+/// Whether `dn` is a domain name at all: printable ASCII that
+/// `ns_name_pton` accepts.  1 or 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn res_dnok(dn: *const u8) -> i32 {
+    let mut wire = [0u8; MAXCDNAME];
+    i32::from(c_name(dn).is_some_and(|d| printable_wire(d, &mut wire).is_some()))
 }
 
 /// `ns_name_pton`: text to an uncompressed wire name in `dst`; the bytes
@@ -1059,30 +1148,10 @@ pub extern "C" fn dn_skipname(comp_dn: *const u8, eom: *const u8) -> i32 {
     }
     // SAFETY: the caller's contract: `[comp_dn, eom)` is readable.
     let s = unsafe { core::slice::from_raw_parts(comp_dn, avail) };
-    let mut cp = 0usize;
-    while let Some(&n) = s.get(cp) {
-        cp += 1;
-        if n == 0 {
-            return i32::try_from(cp).unwrap_or(-1);
-        }
-        match n & 0xc0 {
-            0 => {
-                if s.len() - cp < usize::from(n) {
-                    break;
-                }
-                cp += usize::from(n);
-            }
-            0xc0 => {
-                if cp == s.len() {
-                    break;
-                }
-                return i32::try_from(cp + 1).unwrap_or(-1);
-            }
-            _ => break,
-        }
+    match skip_len(s).map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
     }
-    errno::set_errno(errno::EMSGSIZE);
-    -1
 }
 
 /// `dn_comp` -- the text name `exp_dn` into `comp_dn` (`length` bytes),
@@ -1114,6 +1183,264 @@ pub extern "C" fn dn_comp(
         errno::set_errno(errno::EMSGSIZE);
         -1
     })
+}
+
+// ---------------------------------------------------------------------------
+// ns_name_ntop / ns_name_pton / ns_name_unpack / ns_name_pack /
+// ns_name_compress / ns_name_skip
+// ---------------------------------------------------------------------------
+
+/// The length of the uncompressed wire name at `src`, found by walking its
+/// labels -- as glibc's functions read it, never past the name -- or `Err`
+/// at a label no uncompressed name can hold (a compression pointer, an
+/// extended label type).
+///
+/// # Safety
+///
+/// `src` points to a wire name, readable up to its terminating zero label.
+unsafe fn wire_len(src: *const u8) -> Result<usize, ()> {
+    let mut at = 0usize;
+    loop {
+        // SAFETY: the caller's contract: every byte up to the root label.
+        let n = usize::from(unsafe { *src.add(at) });
+        at += 1;
+        if n == 0 {
+            return Ok(at);
+        }
+        if n >= 64 {
+            // The label byte is part of the name: ntop refuses it itself.
+            return Ok(at);
+        }
+        at += n;
+    }
+}
+
+/// The value glibc's `ns_name_*` functions answer for `Err`: -1, with
+/// `EMSGSIZE`.
+fn name_fail() -> i32 {
+    errno::set_errno(errno::EMSGSIZE);
+    -1
+}
+
+/// `ns_name_ntop` -- the uncompressed wire name at `src` as NUL-terminated
+/// text in `dst` (`dstsiz` bytes): labels joined by `.`, `"`, `.`, `;`,
+/// `\`, `(`, `)`, `@` and `$` escaped with a backslash, bytes outside
+/// `!`..`~` as `\DDD`, the root as `.`.  The bytes written with the NUL, or
+/// -1 with `EMSGSIZE` for too small a `dst` or a label no uncompressed name
+/// holds (`nsname_oracle.txt`).
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its end; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_ntop(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    if src.is_null() || dst.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract.
+    let result = unsafe { wire_len(src) }.and_then(|len| {
+        // SAFETY: as above: `len` bytes of `src`, `dstsiz` of `dst`.
+        let (from, to) = unsafe {
+            (
+                core::slice::from_raw_parts(src, len),
+                core::slice::from_raw_parts_mut(dst, dstsiz),
+            )
+        };
+        name_ntop(from, to)
+    });
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_pton` -- the text name `src` as an uncompressed wire name in
+/// `dst` (`dstsiz` bytes), `\.` and `\DDD` unescaped.  1 when the text
+/// was fully qualified (ended in `.`), 0 when not -- the empty text is the
+/// root, unqualified -- or -1 with `EMSGSIZE`: an empty label, one over 63
+/// bytes, a name over 255, a bad escape, too small a `dst`.
+///
+/// # Safety
+///
+/// `src` is a NUL-terminated string; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_pton(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    let Some(text) = c_name(src) else {
+        return name_fail();
+    };
+    if dst.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+    let to = unsafe { core::slice::from_raw_parts_mut(dst, dstsiz) };
+    match name_pton(text, to) {
+        Ok((_, qualified)) => i32::from(qualified),
+        Err(()) => name_fail(),
+    }
+}
+
+/// `ns_name_unpack` -- the compressed name at `src` in the message `[msg,
+/// eom)`, compression pointers followed (a forward one too; a loop is
+/// refused), into `dst` (`dstsiz` bytes) uncompressed.  The bytes the name
+/// occupies at `src`, or -1 with `EMSGSIZE`.
+///
+/// # Safety
+///
+/// `[msg, eom)` is a readable message and `src` inside it; `dst` holds
+/// `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_unpack(
+    msg: *const u8,
+    eom: *const u8,
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+) -> i32 {
+    let result = (|| {
+        if msg.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let len = (eom as usize).checked_sub(msg as usize).ok_or(())?;
+        let at = (src as usize).checked_sub(msg as usize).ok_or(())?;
+        // SAFETY: the caller's contract.
+        let (whole, to) = unsafe {
+            (
+                core::slice::from_raw_parts(msg, len),
+                core::slice::from_raw_parts_mut(dst, dstsiz),
+            )
+        };
+        name_unpack(whole, at, to)
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_pack` -- the uncompressed wire name at `src` into `dst`
+/// (`dstsiz` bytes), compressed against the names `dnptrs` lists, and added
+/// to the list when `lastdnptr` leaves it room -- glibc's pointer table: the
+/// message first, then the names in it, NULL-terminated.  The bytes
+/// written, or -1 with `EMSGSIZE`.
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its end; `dst` holds `dstsiz` bytes;
+/// `dnptrs` is NULL or a table as above, whose array ends at `lastdnptr`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_pack(
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: i32,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) -> i32 {
+    let result = (|| {
+        if src.is_null() || dst.is_null() {
+            return Err(());
+        }
+        let cap = usize::try_from(dstsiz).map_err(|_| ())?;
+        // SAFETY: the caller's contract.
+        let len = unsafe { wire_len(src) }?;
+        // SAFETY: as above: `len` bytes of `src`.
+        let from = unsafe { core::slice::from_raw_parts(src, len) };
+        // SAFETY: the caller's contract for `dst`, `dnptrs` and `lastdnptr`.
+        unsafe { name_pack(from, dst, cap, dnptrs.cast(), lastdnptr.cast()) }
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// `ns_name_compress` -- the text name `src` into `dst` (`dstsiz` bytes),
+/// through `ns_name_pton` and `ns_name_pack`: [`dn_comp`], with a `size_t`
+/// size.
+///
+/// # Safety
+///
+/// As [`ns_name_pack`], with `src` a NUL-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_compress(
+    src: *const u8,
+    dst: *mut u8,
+    dstsiz: usize,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) -> i32 {
+    let result = (|| {
+        let text = c_name(src).ok_or(())?;
+        if dst.is_null() {
+            return Err(());
+        }
+        let mut tmp = [0u8; MAXCDNAME];
+        name_pton(text, &mut tmp)?;
+        // SAFETY: the caller's contract for `dst`, `dnptrs` and `lastdnptr`.
+        unsafe { name_pack(&tmp, dst, dstsiz, dnptrs.cast(), lastdnptr.cast()) }
+    })();
+    match result.map(i32::try_from) {
+        Ok(Ok(n)) => n,
+        _ => name_fail(),
+    }
+}
+
+/// How many bytes the compressed name at the start of `s` occupies -- a
+/// pointer ends it, as two bytes, without being followed -- or `Err` if it
+/// runs past `s` or holds a label that is neither length nor pointer.
+fn skip_len(s: &[u8]) -> Result<usize, ()> {
+    let mut cp = 0usize;
+    while let Some(&n) = s.get(cp) {
+        cp += 1;
+        if n == 0 {
+            return Ok(cp);
+        }
+        match n & 0xc0 {
+            0 => {
+                if s.len() - cp < usize::from(n) {
+                    break;
+                }
+                cp += usize::from(n);
+            }
+            0xc0 => {
+                if cp == s.len() {
+                    break;
+                }
+                return Ok(cp + 1);
+            }
+            _ => break,
+        }
+    }
+    Err(())
+}
+
+/// `ns_name_skip` -- move `*ptrptr` past the compressed name it points at,
+/// which must end before `eom`: 0, or -1 with `EMSGSIZE` and `*ptrptr` where
+/// it was.
+///
+/// # Safety
+///
+/// `*ptrptr` and `eom` bound a readable range.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_skip(ptrptr: *mut *const u8, eom: *const u8) -> i32 {
+    if ptrptr.is_null() {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract.
+    let start = unsafe { *ptrptr };
+    if start.is_null() {
+        return name_fail();
+    }
+    let avail = (eom as usize).saturating_sub(start as usize);
+    // SAFETY: the caller's contract: `[start, eom)` is readable.
+    let s = unsafe { core::slice::from_raw_parts(start, avail) };
+    match skip_len(s) {
+        Ok(n) => {
+            // SAFETY: `n <= avail`: the pointer stays in the range.
+            unsafe { *ptrptr = start.add(n) };
+            0
+        }
+        Err(()) => name_fail(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2355,6 +2682,250 @@ pub extern "C" fn __res_search(
 
 #[cfg(test)]
 mod tests {
+    /// A line's text token back into bytes: `\xHH` for a byte, `\x` alone
+    /// for the empty string (`nsname_harness.py`'s `token`).
+    fn untoken(t: &str) -> Vec<u8> {
+        if t == "\\x" {
+            return Vec::new();
+        }
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).expect("hex"));
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn unhex(h: &str) -> Vec<u8> {
+        if h == "-" {
+            return Vec::new();
+        }
+        (0..h.len())
+            .step_by(2)
+            .map(|k| u8::from_str_radix(&h[k..k + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    fn hex(b: &[u8]) -> String {
+        use core::fmt::Write;
+        if b.is_empty() {
+            return "-".into();
+        }
+        b.iter().fold(String::new(), |mut s, x| {
+            // Writing into a String cannot fail.
+            let _ = write!(s, "{x:02x}");
+            s
+        })
+    }
+
+    /// Text as the harness writes it.
+    fn token(b: &[u8]) -> String {
+        use core::fmt::Write;
+        if b.is_empty() {
+            return "\\x".into();
+        }
+        b.iter().fold(String::new(), |mut s, &c| {
+            if (0x21..=0x7e).contains(&c) && c != b'\\' {
+                s.push(c as char);
+            } else {
+                // Writing into a String cannot fail.
+                let _ = write!(s, "\\x{c:02x}");
+            }
+            s
+        })
+    }
+
+    /// The uncompressed wire name at the start of `b`: its bytes, up to the
+    /// root label or the end.
+    fn wire_prefix(b: &[u8]) -> &[u8] {
+        let mut i = 0;
+        while let Some(&n) = b.get(i) {
+            if n == 0 {
+                return &b[..=i];
+            }
+            i += 1 + usize::from(n);
+        }
+        &b[..b.len().min(i)]
+    }
+
+    /// glibc 2.39's `ns_name_*` and `res_*ok` (`nsname_harness.py`),
+    /// replayed line by line; `errno` compared where the call failed.
+    #[test]
+    fn ns_name_and_the_name_checks_answer_as_glibcs() {
+        use std::collections::HashMap;
+        const ORACLE: &str = include_str!("nsname_oracle.txt");
+        let mut msgs: HashMap<String, Vec<u8>> = HashMap::new();
+        for line in include_str!("ns_oracle.txt").lines() {
+            if let Some(rest) = line.strip_prefix("M ") {
+                let (n, h) = rest.split_once(' ').expect("M <name> <hex>");
+                msgs.insert(n.to_string(), unhex(h));
+            }
+        }
+        let err = |rc: i32| -> i32 {
+            if rc < 0 {
+                crate::errno::get_errno()
+            } else {
+                1234
+            }
+        };
+        // One pack sequence at a time: its message and table.
+        let mut seq_name = String::new();
+        let mut msg = vec![0u8; 1024];
+        let mut table: Vec<*const u8> = Vec::new();
+        let mut at = 12usize;
+        let mut counted = HashMap::<char, usize>::new();
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (call, glibc) = line.split_once(" = ").expect("<call> = <answer>");
+            let mut f = call.split(' ');
+            let kind = f.next().expect("a kind").chars().next().expect("a letter");
+            *counted.entry(kind).or_default() += 1;
+            crate::errno::set_errno(1234);
+            let ours = match kind {
+                'T' => {
+                    let text = untoken(f.next().unwrap());
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut src = text.clone();
+                    src.push(0);
+                    let mut dst = vec![0xeeu8; 2048];
+                    // SAFETY: a NUL-terminated text; `dst` holds `n` bytes.
+                    let rc = unsafe { ns_name_pton(src.as_ptr(), dst.as_mut_ptr(), n) };
+                    let wire = if rc < 0 {
+                        &[][..]
+                    } else {
+                        wire_prefix(&dst[..n])
+                    };
+                    format!("{rc} {} {}", err(rc), hex(wire))
+                }
+                'N' => {
+                    let src = unhex(f.next().unwrap());
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut dst = vec![0u8; 2048];
+                    // SAFETY: the wire name ends in the vector; `dst` holds `n`.
+                    let rc = unsafe { ns_name_ntop(src.as_ptr(), dst.as_mut_ptr(), n) };
+                    let text = if rc < 0 {
+                        "-".to_string()
+                    } else {
+                        let end = dst.iter().position(|&c| c == 0).unwrap();
+                        token(&dst[..end])
+                    };
+                    format!("{rc} {} {text}", err(rc))
+                }
+                'U' => {
+                    let m = &msgs[f.next().unwrap()];
+                    let o: usize = f.next().unwrap().parse().unwrap();
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    let mut dst = vec![0xeeu8; 2048];
+                    // SAFETY: the message and `dst`, as the contract asks.
+                    let rc = unsafe {
+                        ns_name_unpack(
+                            m.as_ptr(),
+                            m.as_ptr().add(m.len()),
+                            m.as_ptr().add(o),
+                            dst.as_mut_ptr(),
+                            n,
+                        )
+                    };
+                    let wire = if rc < 0 {
+                        &[][..]
+                    } else {
+                        wire_prefix(&dst[..n])
+                    };
+                    format!("{rc} {} {}", err(rc), hex(wire))
+                }
+                'S' => {
+                    let m = &msgs[f.next().unwrap()];
+                    let o: usize = f.next().unwrap().parse().unwrap();
+                    let e: usize = f.next().unwrap().parse().unwrap();
+                    let mut p = m.as_ptr().wrapping_add(o);
+                    // SAFETY: `[p, m + e)` is inside the message.
+                    let rc = unsafe { ns_name_skip(&raw mut p, m.as_ptr().add(e)) };
+                    format!("{rc} {} {}", err(rc), p as usize - m.as_ptr() as usize)
+                }
+                'P' => {
+                    let seq = f.next().unwrap();
+                    let _i = f.next().unwrap();
+                    let how = f.next().unwrap();
+                    let name = f.next().unwrap();
+                    let n: usize = f.next().unwrap().parse().unwrap();
+                    if seq != seq_name {
+                        seq_name = seq.to_string();
+                        msg = vec![0u8; 1024];
+                        at = 12;
+                        let room = if seq == "full" { 2 } else { 8 };
+                        table = vec![core::ptr::null(); room + 2];
+                        table[0] = msg.as_ptr();
+                    }
+                    let nocomp = seq == "nocomp";
+                    let (dnptrs, last) = if nocomp {
+                        (core::ptr::null_mut(), core::ptr::null_mut())
+                    } else {
+                        let len = table.len();
+                        (table.as_mut_ptr(), table.as_mut_ptr().wrapping_add(len - 1))
+                    };
+                    let dst = msg.as_mut_ptr().wrapping_add(at);
+                    // SAFETY: `dst` is inside `msg`, which the table's names are in.
+                    let rc = unsafe {
+                        if how == "wire" {
+                            let src = unhex(name);
+                            ns_name_pack(src.as_ptr(), dst, i32::try_from(n).unwrap(), dnptrs, last)
+                        } else {
+                            let mut src = untoken(name);
+                            src.push(0);
+                            ns_name_compress(src.as_ptr(), dst, n, dnptrs, last)
+                        }
+                    };
+                    let written = if rc > 0 {
+                        hex(&msg[at..at + rc as usize])
+                    } else {
+                        "-".into()
+                    };
+                    let mut tab = String::new();
+                    if nocomp {
+                        tab.push_str(" -");
+                    } else {
+                        for &q in table.iter().take_while(|q| !q.is_null()) {
+                            tab.push_str(&format!(" {}", q as usize - msg.as_ptr() as usize));
+                        }
+                        tab.push_str(" -");
+                    }
+                    if rc > 0 {
+                        at += rc as usize;
+                    }
+                    // glibc leaves `errno` at dn_find's ENOENT after a
+                    // successful pack; only a failure's is compared.
+                    let e = if rc < 0 {
+                        err(rc).to_string()
+                    } else {
+                        glibc.split(' ').nth(1).unwrap().to_string()
+                    };
+                    format!("{rc} {e} {written} ;{tab}")
+                }
+                'O' => {
+                    let mut dn = untoken(f.next().unwrap());
+                    dn.push(0);
+                    let p = dn.as_ptr();
+                    format!(
+                        "{} {} {} {}",
+                        res_hnok(p),
+                        res_ownok(p),
+                        res_mailok(p),
+                        res_dnok(p)
+                    )
+                }
+                other => panic!("a kind this test does not know: {other}"),
+            };
+            assert_eq!(ours, glibc, "{call}");
+        }
+        assert!(counted.values().sum::<usize>() > 300, "{counted:?}");
+    }
+
     use super::*;
 
     fn pton(s: &[u8]) -> Result<(Vec<u8>, bool), ()> {

@@ -161295,7 +161295,21 @@ answers it, and an unchanged control (`devpower` at 362 both sides) made it
 specific. Same instrument, different question, opposite verdict on its
 fitness. The error was not using a proxy; it was not asking what the proxy
 was a proxy *for*.
-## `TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO` (lane C, 2026-09-17)
+## `TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO` (lane C, 2026-09-17) -- FIXED 2026-09-30: the desktop asks it to, and the first ask found a defect
+
+**Status, 2026-09-30.** The first caller is the desktop's photo frame:
+"Choose folder…" on its menu puts the shell's chooser up in folder mode
+(design-decisions §1452). And the warning below -- budget for discovering,
+not for plumbing -- was borne out: opening a folder -- a double click, or
+Enter on it -- *chose* it
+(`FileDialog::activate_entry`), so only a folder beside the one the chooser
+opened on could ever be chosen. Fixed in the toolkit: opening a folder opens
+it in every mode, and the Select button -- or Enter with nothing
+highlighted -- chooses the folder highlighted or the one shown, an empty one
+included. `gui/desktop/src/photo_frame_tests.rs` drives it end to end
+through the shell's keys; `test_select_folder_mode` holds the rule.
+What stays open is the applications below, which are lane E's: the mode now
+works for them.
 
 **In short:** guitk's file dialog knows how to choose a *folder*. It has a
 named constructor for it, `FileDialog::select_folder()`, and the mode is

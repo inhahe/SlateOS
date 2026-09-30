@@ -2060,21 +2060,14 @@ impl<T: Transport> ShellSession<T> {
     /// Called from `refresh_background`, as the wallpaper's is, so a frame's
     /// interval ending is noticed at the paint its tick asked for.
     fn fetch_frame_pictures(&mut self) {
-        // With no home, a frame has no folder: it is stepped over nothing,
-        // and says so, rather than reading a folder named relative to
-        // wherever the desktop was started.
-        let readable = self.frame_folder.is_some();
-        let named = self
-            .frame_folder
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("Pictures"));
-        self.shell.widgets.step_frames(&named, &|listed| {
-            if readable {
-                Self::pictures_in(listed, &[])
-            } else {
-                Vec::new()
-            }
-        });
+        // A frame's own folder, or the user's Pictures; with no home to find
+        // Pictures in, a frame with no folder of its own says so rather than
+        // reading one named relative to wherever the desktop was started.
+        self.shell
+            .widgets
+            .step_frames(self.frame_folder.as_deref(), &|folder| {
+                Self::pictures_in(folder, &[])
+            });
         for (frame, path, fit) in self.shell.widgets.frames_to_fetch() {
             if self
                 .frame_requests

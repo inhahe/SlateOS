@@ -524,9 +524,13 @@ impl FileDialog {
 
     /// Activate (double-click/Enter) the entry at `index`.
     ///
-    /// - If it is a directory, navigates into it.
+    /// - If it is a directory, navigates into it -- in every mode, the
+    ///   folder picker's included: choosing a folder is the Select button's
+    ///   ([`confirm`](Self::confirm)), which takes the one highlighted or the
+    ///   one being shown. A picker in which opening a folder chose it could
+    ///   choose only folders it started beside, and it did until its first
+    ///   caller, the desktop's photo frame, found so.
     /// - If it is a file (and mode is Open), returns `DialogAction::Selected`.
-    /// - In `SelectFolder` mode, double-clicking a dir selects it.
     pub fn activate_entry(&mut self, index: usize) -> DialogAction {
         let entry = match self.entries.get(index) {
             Some(e) => e.clone(),
@@ -535,9 +539,6 @@ impl FileDialog {
 
         if entry.is_dir {
             let full = self.child_path(&entry.name);
-            if self.mode == DialogMode::SelectFolder {
-                return DialogAction::Selected(full);
-            }
             let before = self.snapshot();
             self.navigate_to(full);
             self.before_navigating = Some(before);
@@ -3513,23 +3514,45 @@ mod tests {
         ));
     }
 
+    /// **A folder picker opens a folder as the other modes do, and chooses
+    /// with its Select button**: the folder highlighted, or with none
+    /// highlighted the one being shown -- so a folder below the one it
+    /// opened on can be reached and chosen, an empty one included.
     #[test]
     fn test_select_folder_mode() {
-        let mut dialog = FileDialog::select_folder().with_initial_path("/home");
-        dialog.set_entries(vec![DirEntry {
-            name: OsString::from("projects"),
+        let dir = |name: &str| DirEntry {
+            name: OsString::from(name),
             is_dir: true,
             size: 0,
             modified_timestamp: 1000,
             extension: OsString::new(),
-        }]);
+        };
+        let mut dialog = FileDialog::select_folder().with_initial_path("/home");
+        dialog.set_entries(vec![dir("projects"), dir("trips")]);
 
-        // Activating a dir in select-folder mode selects it.
+        // Highlighted, the Select button takes it.
+        dialog.selected_index = Some(1);
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/trips")));
+
+        // Activated, it opens -- and chooses nothing yet.
         let action = dialog.activate_entry(0);
         assert_eq!(
             action,
-            DialogAction::Selected(PathBuf::from("/home/projects"))
+            DialogAction::NavigatedTo(PathBuf::from("/home/projects"))
         );
+        assert_eq!(dialog.current_path(), Path::new("/home/projects"));
+        // An empty folder, nothing highlighted: Select takes the folder shown.
+        dialog.set_entries(Vec::new());
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/projects")));
+        // A file is never the answer in this mode.
+        dialog.set_entries(vec![DirEntry {
+            is_dir: false,
+            extension: OsString::from("png"),
+            ..dir("photo.png")
+        }]);
+        dialog.selected_index = Some(0);
+        assert_eq!(dialog.activate_entry(0), DialogAction::None);
+        assert_eq!(dialog.confirm(), Some(PathBuf::from("/home/projects")));
     }
 
     #[test]

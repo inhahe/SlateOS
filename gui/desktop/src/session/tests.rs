@@ -4498,6 +4498,9 @@ fn photo_frame_in_turn() {
         .map(|w| w.id)
         .expect("the menu placed no photo frame");
     session.paint_background().expect("paint");
+    // A second paint before the answer: the picture is asked for once, so
+    // it goes up under the first id there is.
+    session.paint_background().expect("paint");
     session
         .settle_pictures()
         .expect("the first picture went up");
@@ -4512,6 +4515,11 @@ fn photo_frame_in_turn() {
     assert_eq!(sent.len(), 1, "one picture for one frame: {sent:?}");
     let (window, first, width, height, _, _) = sent[0];
     assert_eq!(window, background);
+    assert_eq!(
+        first,
+        crate::widgets::FRAME_PICTURE_TAG | 1,
+        "the picture was asked for again at the second paint"
+    );
     let (_, _, content_w, content_h) = session.shell().widgets.content_rect(frame).unwrap();
     assert!(
         f64::from(width) <= f64::from(content_w).ceil()

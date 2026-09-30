@@ -144,6 +144,8 @@ mod notification_menu_tests;
 #[cfg(test)]
 mod open_with_tests;
 #[cfg(test)]
+mod photo_frame_tests;
+#[cfg(test)]
 mod pointer_tests;
 #[cfg(test)]
 mod service_menu_tests;
@@ -1137,6 +1139,17 @@ struct WindowPress {
     /// bar can itself move the focus before the release arrives, and a click
     /// on the front window's button must not turn into "summon" on the way.
     was_focused: bool,
+}
+
+/// What the shell's file chooser was put up for, and so where its answer
+/// goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChooserFor {
+    /// The Run box's Browse: the program chosen goes into its command line.
+    RunBox,
+    /// "Choose folder…" on a photo frame's menu: the folder chosen is the one
+    /// that frame shows from then on.
+    FrameFolder(widgets::WidgetInstanceId),
 }
 
 /// A start-menu row pressed and perhaps being dragged.
@@ -2442,7 +2455,10 @@ pub struct DesktopShell {
     /// report one until this surface existed, which is what
     /// [`HotkeyOutcome::launches`] is for.
     pub run_dialog: run_dialog::RunDialog,
-    /// The file chooser the Run box's Browse button puts up, while it is up.
+    /// The shell's file chooser, while it is up: put up by the Run box's
+    /// Browse button, or by "Choose folder…" on a photo frame's menu --
+    /// [`chooser_for`](Self::chooser_for) says which, and so where its answer
+    /// goes.
     ///
     /// Modal over the Run box in exactly the way the Run box is modal over the
     /// desktop, and by the same two mechanisms: it is offered every press
@@ -2458,6 +2474,8 @@ pub struct DesktopShell {
     /// one for the lifetime of the session would keep a listing of a directory
     /// nobody is looking at, going staler by the hour.
     chooser: Option<guitk::dialog::FileDialog>,
+    /// What the chooser was put up for: where its answer goes.
+    chooser_for: ChooserFor,
     /// The directory the chooser has actually been given a listing for.
     ///
     /// The shell reads no files — that is what keeps every test in this module
@@ -2836,6 +2854,7 @@ impl DesktopShell {
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
             chooser: None,
+            chooser_for: ChooserFor::RunBox,
             chooser_listed: None,
             rules: window_rules::WindowRulesManager::new(),
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
@@ -7931,6 +7950,23 @@ impl DesktopShell {
         let start = self.run_dialog.browse_start();
         self.chooser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
         self.chooser_listed = None;
+        self.chooser_for = ChooserFor::RunBox;
+    }
+
+    /// Put the chooser up to pick the folder the photo frame `frame` shows:
+    /// in its folder mode (`FileDialog::select_folder`), opened on the folder
+    /// the frame shows now -- the one chosen for it, or the user's Pictures.
+    fn open_frame_folder_chooser(&mut self, frame: widgets::WidgetInstanceId) {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let start = self
+            .widgets
+            .frame_folder(frame)
+            .or_else(|| Self::photo_frame_folder(home.as_deref()))
+            .or(home)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        self.chooser = Some(guitk::dialog::FileDialog::select_folder().with_initial_path(&start));
+        self.chooser_listed = None;
+        self.chooser_for = ChooserFor::FrameFolder(frame);
     }
 
     /// Take the chooser down, whether it was cancelled or answered.
@@ -8071,7 +8107,14 @@ impl DesktopShell {
             // spelling is the program that starts — see
             // `RunDialog::set_command_path`.
             guitk::dialog::DialogAction::Selected(path) => {
-                self.run_dialog.set_command_path(&path);
+                match self.chooser_for {
+                    ChooserFor::RunBox => self.run_dialog.set_command_path(&path),
+                    // Kept with the layout, which is written because it
+                    // changed -- as a widget moved is.
+                    ChooserFor::FrameFolder(frame) => {
+                        self.widgets_dirty |= self.widgets.set_frame_folder(frame, &path);
+                    }
+                }
                 self.close_chooser();
             }
             // The box is left exactly as it was, text and all. A Browse that
@@ -12037,6 +12080,7 @@ impl DesktopShell {
     const MENU_SORT_BY_NAME: u64 = 8;
     const MENU_ADD_NOTE: u64 = 9;
     const MENU_ADD_PHOTO_FRAME: u64 = 10;
+    const MENU_FRAME_FOLDER: u64 = 11;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // An icon's own menu, opened by a right-click on the icon.
@@ -12539,8 +12583,9 @@ impl DesktopShell {
         }
     }
 
-    /// The items for a right-click *on a widget*.
-    fn widget_menu_items() -> Vec<MenuItem> {
+    /// The items for a right-click *on a widget*: removing it, or every
+    /// widget -- and, on a photo frame, choosing the folder it shows.
+    fn widget_menu_items(photo_frame: bool) -> Vec<MenuItem> {
         let add = |id: u64, label: &str| MenuItem::Action {
             id,
             label: label.to_string(),
@@ -12549,11 +12594,17 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        vec![
+        let mut items = Vec::new();
+        if photo_frame {
+            items.push(add(Self::MENU_FRAME_FOLDER, "Choose folder…"));
+            items.push(MenuItem::Separator);
+        }
+        items.extend([
             add(Self::MENU_REMOVE_ONE_WIDGET, "Remove this widget"),
             MenuItem::Separator,
             add(Self::MENU_REMOVE_WIDGETS, "Remove all widgets"),
-        ]
+        ]);
+        items
     }
 
     /// Whether the widget layout needs writing, clearing the flag.
@@ -12868,8 +12919,12 @@ impl DesktopShell {
         } else {
             self.icons.icon_at(x, y)
         };
-        let items = if self.menu_widget.is_some() {
-            Self::widget_menu_items()
+        let items = if let Some(widget) = self.menu_widget {
+            let photo_frame = self
+                .widgets
+                .get(widget)
+                .is_some_and(|w| matches!(w.kind, WidgetKind::PhotoFrame));
+            Self::widget_menu_items(photo_frame)
         } else if let Some(id) = self.menu_icon {
             // A right-click on an icon that is not selected selects it alone,
             // as a left click would: the menu is about what is selected, and
@@ -12940,6 +12995,18 @@ impl DesktopShell {
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
         if let Some(action) = self.activate_open_with_item(id) {
             return action;
+        }
+        // "Choose folder" puts the chooser up and changes nothing yet: the
+        // layout is written when a folder is chosen, not when one is asked for.
+        if id == Self::MENU_FRAME_FOLDER {
+            return match self.menu_widget.take() {
+                Some(frame) => {
+                    self.open_frame_folder_chooser(frame);
+                    ShellAction::Consumed
+                }
+                // The frame went while the menu was open.
+                None => ShellAction::Pass,
+            };
         }
         if let Some(action) = self.activate_service_item(id) {
             return action;
@@ -13458,6 +13525,9 @@ impl DesktopShell {
             || self.snap.is_overlay_visible()
             || self.overview.visible
             || self.run_dialog.is_visible()
+            // The chooser on its own, when a photo frame put it up rather
+            // than the Run box: Escape must still reach it.
+            || self.chooser.is_some()
             || self.shortcut_card_open
     }
 
@@ -24205,7 +24275,7 @@ mod view_menu_tests {
             for mode in Mode::ALL {
                 let mut all = Vec::new();
                 ids(&DesktopShell::desktop_menu_items(*size, mode), &mut all);
-                ids(&DesktopShell::widget_menu_items(), &mut all);
+                ids(&DesktopShell::widget_menu_items(true), &mut all);
                 // The widget menu repeats "Remove all widgets" on purpose --
                 // the same item, so the same id -- and nothing else.
                 let remove_all = all

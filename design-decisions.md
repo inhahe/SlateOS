@@ -86741,7 +86741,7 @@ picture in `widgets.rs`, and offered by nothing (`roadmap-detailed.md` →
 
 | | |
 |---|---|
-| The folder | the user's Pictures -- the folder the start menu's Pictures place opens, from the same definition (`DesktopShell::photo_frame_folder`); found once when the session starts |
+| The folder | the user's Pictures -- the folder the start menu's Pictures place opens, from the same definition (`DesktopShell::photo_frame_folder`); found once when the session starts -- or the one chosen for the frame with "Choose folder…" on its menu: the shell's chooser (the Run box's, generalised) in its folder mode, the folder kept with the layout (`widgets.yaml`, `folder`, in `pathcodec`'s form since a name need not be text); a new folder starts at its first picture |
 | Which pictures | the files the wallpaper's slideshow would take (`wallpaper::is_picture`), listed as it lists them (`ShellSession::pictures_in`), sorted by name |
 | The order | the next *name* after the last one chosen, round to the first: a picture added or deleted between two steps moves no other's turn |
 | The pace | 30 s (`FRAME_INTERVAL_MS`), a gadget's -- slower than a whole-screen slideshow, since a frame is read in passing; a deadline, so an idle desktop still sleeps between pictures |
@@ -86758,11 +86758,17 @@ picture in `widgets.rs`, and offered by nothing (`roadmap-detailed.md` →
 | Decode at full size, scale when drawing | simpler | memory and decode time for pixels never shown |
 | A timer per frame | independent | the widget layer already dates its widgets (`update_interval_ms`); a second clock is a second thing to arm |
 
-**Revisit if** the frame should be pointed at another folder -- a
-"Choose folder" on its menu is the toolkit's folder chooser's first caller
-(`known-issues.md` `TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO`),
-and the folder would be saved with the layout -- or if users ask for
-shuffling or a slower pace.
+**The folder chooser's first caller.** "Choose folder…" is the first
+use of the toolkit's folder mode (`FileDialog::select_folder`), and the
+first use found what the known-issue entry said it might
+(`TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO`):
+opening a folder -- a double click, or Enter on it -- *chose* it, so a
+folder below the one the chooser opened on could not be reached. Opening a
+folder now opens it, in every mode; the Select button, or Enter with
+nothing highlighted, chooses the folder highlighted or the one shown -- as
+Windows' and GTK's folder pickers do.
+
+**Revisit if** users ask for shuffling or a slower pace.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

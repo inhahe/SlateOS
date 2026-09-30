@@ -2072,9 +2072,10 @@ live.
   order, one every thirty seconds and round again, each decoded to the
   frame's size on the decoding thread and fitted in it; an empty folder says
   so. The old picture is released only after the frame that stops naming it
-  is sent. **Next:** a "Choose folder" row on the frame's menu -- the
-  toolkit's folder chooser's first caller -- with the folder saved in
-  `widgets.yaml`.
+  is sent. "Choose folder…" on the frame's menu picks another folder in
+  the shell's chooser -- the toolkit's folder picker's first caller, which
+  found and fixed that opening a folder in it chose it -- saved with the
+  layout.
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

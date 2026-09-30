@@ -43,8 +43,19 @@
 //!   A failure sets `h_errno` and the state's `res_h_errno` together, as
 //!   glibc's `RES_SET_H_ERRNO` does, for these and `_res`'s alike.
 //!
+//! - **`HOSTALIASES`** names a file of `name alias` lines: `res_search` asks
+//!   for a name with no dot as its alias, when the file has one, and
+//!   `hostalias` and `res_hostalias` look one up (unless `RES_NOALIASES`).
+//!   The environment is read as `secure_getenv` reads it -- this variable,
+//!   `LOCALDOMAIN` and `RES_OPTIONS` are among those glibc's loader strikes
+//!   from a program run with privileges it was not started with.
+//! - **libresolv's helpers** -- `res_nameinquery`, `res_queriesmatch`,
+//!   `res_isourserver`, `dn_count_labels`, `putlong`, `putshort`,
+//!   `res_randomid`, `res_close` -- are glibc's, each under the `__` name
+//!   its header renames it to.
+//!
 //! Not done: IPv6 nameservers (read, and skipped), `sortlist`, EDNS0,
-//! `HOSTALIASES`, DNSSEC.  `_res` is one per process, as in musl; glibc's is
+//! DNSSEC.  `_res` is one per process, as in musl; glibc's is
 //! one per thread -- a threaded program wanting its own has the reentrant
 //! forms.
 
@@ -151,6 +162,8 @@ pub const RES_DEFNAMES: u64 = 0x0000_0080;
 pub const RES_DNSRCH: u64 = 0x0000_0200;
 /// Rotate among the nameservers.
 pub const RES_ROTATE: u64 = 0x0000_4000;
+/// `RES_NOALIASES`: the `HOSTALIASES` file is not read ([`__res_hostalias`]).
+pub const RES_NOALIASES: u64 = 0x0000_1000;
 /// Do not look names up under `ip6.int` (accepted; this resolver never
 /// does). musl's header puts it in [`RES_DEFAULT`]; glibc 2.39's retired it.
 pub const RES_NOIP6DOTINT: u64 = 0x0008_0000;
@@ -482,12 +495,15 @@ fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
     Some(n)
 }
 
-/// An environment variable's bytes.
+/// An environment variable's bytes, as `secure_getenv` reads them:
+/// `LOCALDOMAIN`, `RES_OPTIONS` and `HOSTALIASES` are among the variables
+/// glibc's loader strikes from a program run with privileges it was not
+/// started with (`unsecvars.h`).
 fn env(name: &[u8]) -> Option<&'static [u8]> {
     // SAFETY: `name` is NUL-terminated; the value is a NUL-terminated
     // string that lives as long as the environment.
     unsafe {
-        let v = crate::environ::getenv(name.as_ptr());
+        let v = crate::environ::secure_getenv(name.as_ptr());
         if v.is_null() {
             return None;
         }
@@ -2928,6 +2944,16 @@ fn search(
             nd += 1;
         }
     }
+    // glibc's "if there aren't any dots, it could be a user-level alias":
+    // a dot-free name the HOSTALIASES file names is queried as its alias,
+    // as it stands, and nothing else is tried.
+    if !name.contains(&b'.') {
+        let mut alias = [0u8; NS_MAXDNAME];
+        if alias_for(st.options, name, &mut alias) {
+            let n = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
+            return query(st, &alias[..n], class, type_, answer);
+        }
+    }
     search_with(
         name,
         st.ndots(),
@@ -3012,6 +3038,401 @@ pub unsafe extern "C" fn res_nsearch(
 }
 
 // ---------------------------------------------------------------------------
+// libresolv's smaller helpers: glibc 2.39's res_isourserver.c,
+// res_nameinquery.c, res_queriesmatch.c, res_context_hostalias.c,
+// res_data.c, res_randomid.c, res-putget.c, and res_debug.c's
+// dn_count_labels -- each under the `__` name glibc's <resolv.h> #defines
+// its public one to, as posix/include's does (`resutil_oracle.txt`)
+// ---------------------------------------------------------------------------
+
+/// `dn_count_labels` -- the labels in the text name `name`, BIND's count:
+/// its dots, one fewer after a leading `*` (a wildcard's), one more for a
+/// last label no dot ends. An escaped dot counts, as BIND's code (and its
+/// "XXX") has it, and the root, `.`, is 1. NULL is 0. Deprecated by glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __dn_count_labels(name: *const u8) -> i32 {
+    let Some(s) = c_name(name) else {
+        return 0;
+    };
+    // A name of a few dozen bytes, counted once.
+    #[allow(clippy::naive_bytecount)]
+    let mut count = s.iter().filter(|&&c| c == b'.').count();
+    if s.first() == Some(&b'*') && count > 0 {
+        count -= 1;
+    }
+    if s.last().is_some_and(|&c| c != b'.') {
+        count += 1;
+    }
+    i32::try_from(count).unwrap_or(i32::MAX)
+}
+
+/// `putlong` -- [`ns_put32`], as glibc's is. Deprecated by glibc, whose
+/// text says "use NS_PUT16 instead" (sic: `putshort`'s says NS_PUT32).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __putlong(src: u32, dst: *mut u8) {
+    ns_put32(u64::from(src), dst);
+}
+
+/// `putshort` -- [`ns_put16`], as glibc's is. Deprecated by glibc.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __putshort(src: u16, dst: *mut u8) {
+    ns_put16(u32::from(src), dst);
+}
+
+/// Whether `inp` is one of `st`'s nameservers: glibc's `res_ourserver_p`.
+/// A server's `0.0.0.0` is any address at its port. The state here has no
+/// IPv6 servers ("read, and skipped"), so an IPv6 address is none of them.
+fn is_our_server(st: &ResState, inp: &crate::socket::SockaddrIn) -> bool {
+    if i32::from(inp.sin_family) != crate::socket::AF_INET {
+        return false;
+    }
+    let n = usize::try_from(st.nscount).unwrap_or(0).min(MAXNS);
+    st.nsaddr_list.get(..n).unwrap_or(&[]).iter().any(|srv| {
+        i32::from(srv.sin_family) == crate::socket::AF_INET
+            && srv.sin_port == inp.sin_port
+            && (srv.sin_addr.s_addr == 0 || srv.sin_addr.s_addr == inp.sin_addr.s_addr)
+    })
+}
+
+/// `res_isourserver` -- whether the address and port `inp` is one of
+/// `_res`'s nameservers: 1 or 0 (see [`is_our_server`]). NULL is 0.
+/// Deprecated by glibc.
+///
+/// # Safety
+///
+/// `inp` is NULL or a readable `struct sockaddr_in` (or `sockaddr_in6`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_isourserver(inp: *const crate::socket::SockaddrIn) -> i32 {
+    if inp.is_null() {
+        return 0;
+    }
+    // SAFETY: `_res`, only read; `inp` readable, the caller's contract.
+    i32::from(is_our_server(unsafe { &*global() }, unsafe { &*inp }))
+}
+
+/// The message `[buf, eom)` as a slice, if it is one and holds a header.
+///
+/// # Safety
+///
+/// A non-NULL `buf` and `eom` bound a readable message.
+unsafe fn message<'a>(buf: *const u8, eom: *const u8) -> Option<&'a [u8]> {
+    if buf.is_null() {
+        return None;
+    }
+    let len = (eom as usize).checked_sub(buf as usize)?;
+    if len < HFIXEDSZ {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    Some(unsafe { core::slice::from_raw_parts(buf, len) })
+}
+
+/// The question at byte `cp` of `msg`: its name as text into `tname`, its
+/// type, class, and where the next begins -- or `None` (-1 for the
+/// callers) for a name that will not expand or a question cut short.
+fn question(msg: &[u8], cp: usize, tname: &mut [u8]) -> Option<(usize, i32, i32, usize)> {
+    let base = msg.as_ptr();
+    // SAFETY: `cp <= msg.len()`: the callers only move it past what was read.
+    let at = unsafe { base.add(cp) };
+    let size = i32::try_from(tname.len()).unwrap_or(i32::MAX);
+    // SAFETY: as above, and `msg.len()` bytes from `base` are its end.
+    let n = dn_expand(
+        base,
+        unsafe { base.add(msg.len()) },
+        at,
+        tname.as_mut_ptr(),
+        size,
+    );
+    let cp = cp + usize::try_from(n).ok()?;
+    let f = msg.get(cp..cp + 4)?;
+    let tlen = tname.iter().position(|&c| c == 0).unwrap_or(tname.len());
+    let ttype = i32::from(u16::from_be_bytes([f[0], f[1]]));
+    let tclass = i32::from(u16::from_be_bytes([f[2], f[3]]));
+    Some((tlen, ttype, tclass, cp + 4))
+}
+
+/// glibc's `__libc_res_nameinquery` on a message: 1, 0, or -1.
+fn name_in_query(name: &[u8], type_: i32, class: i32, msg: &[u8]) -> i32 {
+    let qdcount = u16::from_be_bytes([msg[4], msg[5]]);
+    let mut cp = HFIXEDSZ;
+    for _ in 0..qdcount {
+        let mut tname = [0u8; NS_MAXDNAME + 1];
+        let Some((tlen, ttype, tclass, next)) = question(msg, cp, &mut tname) else {
+            return -1;
+        };
+        cp = next;
+        if ttype == type_
+            && tclass == class
+            && crate::nameser::samename(&tname[..tlen], name) == Some(true)
+        {
+            return 1;
+        }
+    }
+    0
+}
+
+/// `res_nameinquery` -- whether the message `[buf, eom)` asks about `name`,
+/// of type `type_` and class `class`: 1 or 0, the name compared as
+/// `ns_samename` compares; -1 for a question that will not read. A NULL
+/// name, or a message too short for a header -- whose count glibc reads
+/// regardless -- is -1. Deprecated by glibc.
+///
+/// # Safety
+///
+/// `name` is NULL or a NUL-terminated string; a non-NULL `buf` and `eom`
+/// bound a readable message.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_nameinquery(
+    name: *const u8,
+    type_: i32,
+    class: i32,
+    buf: *const u8,
+    eom: *const u8,
+) -> i32 {
+    let Some(name) = c_name(name) else {
+        return -1;
+    };
+    // SAFETY: the caller's contract.
+    match unsafe { message(buf, eom) } {
+        Some(msg) => name_in_query(name, type_, class, msg),
+        None => -1,
+    }
+}
+
+/// `res_queriesmatch` -- whether two messages ask the same questions, in
+/// any order: 1 or 0, or -1 when either is shorter than a header or the
+/// first's questions will not read. Two dynamic updates match whatever
+/// they hold. As glibc's, a question of the first that the second will not
+/// read counts as found in it -- `__libc_res_nameinquery`'s -1 is not the
+/// 0 that refuses. Deprecated by glibc.
+///
+/// # Safety
+///
+/// Each non-NULL message and its end bound a readable message.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_queriesmatch(
+    buf1: *const u8,
+    eom1: *const u8,
+    buf2: *const u8,
+    eom2: *const u8,
+) -> i32 {
+    // SAFETY: the caller's contract.
+    let (Some(m1), Some(m2)) = (unsafe { message(buf1, eom1) }, unsafe {
+        message(buf2, eom2)
+    }) else {
+        return -1;
+    };
+    // The opcode, bits 3-6 of the third byte.
+    let opcode = |m: &[u8]| (m[2] >> 3) & 0x0f;
+    if opcode(m1) == NS_O_UPDATE && opcode(m2) == NS_O_UPDATE {
+        return 1;
+    }
+    if m1[4..6] != m2[4..6] {
+        return 0;
+    }
+    let qdcount = u16::from_be_bytes([m1[4], m1[5]]);
+    let mut cp = HFIXEDSZ;
+    for _ in 0..qdcount {
+        let mut tname = [0u8; NS_MAXDNAME + 1];
+        let Some((tlen, ttype, tclass, next)) = question(m1, cp, &mut tname) else {
+            return -1;
+        };
+        cp = next;
+        if name_in_query(&tname[..tlen], ttype, tclass, m2) == 0 {
+            return 0;
+        }
+    }
+    1
+}
+
+/// A dynamic update's opcode (`ns_o_update`).
+const NS_O_UPDATE: u8 = 5;
+
+/// glibc's `BUFSIZ`, the most one of its `fgets` reads of the aliases file
+/// takes -- which decides how a longer line is judged, so it is glibc's
+/// and not this library's own `BUFSIZ`.
+const GLIBC_BUFSIZ: usize = 8192;
+
+/// What one `fgets` of the aliases file says of a name.
+enum AliasLine {
+    /// Not this line's: read the next.
+    Next,
+    /// The search ends here, with no alias.
+    Stop,
+    /// The alias, now in `dst`.
+    Found,
+}
+
+/// One `fgets` of glibc's `__res_context_hostalias` loop: a line is
+/// `name alias ...`; the first whose name is `name` as `ns_samename` has it
+/// answers, strncpy'd into `dst` (`dst.len() - 1` bytes at most, and
+/// NUL-terminated) -- and a chunk with no white space in it (a line with
+/// none, or the first `BUFSIZ - 1` bytes of a longer one), or a matching
+/// line with no alias, ends the search. `dst` is not empty.
+fn alias_line(line: &[u8], name: &[u8], dst: &mut [u8]) -> AliasLine {
+    let Some(end) = line.iter().position(|&c| is_space(c)) else {
+        return AliasLine::Stop;
+    };
+    if crate::nameser::samename(&line[..end], name) != Some(true) {
+        return AliasLine::Next;
+    }
+    let rest = &line[end + 1..];
+    let Some(start) = rest.iter().position(|&c| !is_space(c)) else {
+        return AliasLine::Stop;
+    };
+    let alias = &rest[start..];
+    let alias = &alias[..alias
+        .iter()
+        .position(|&c| is_space(c))
+        .unwrap_or(alias.len())];
+    let k = alias.len().min(dst.len() - 1);
+    dst[..k].copy_from_slice(&alias[..k]);
+    // strncpy pads with NULs to `dst.len() - 1` bytes; the last is a NUL.
+    dst[k..].fill(0);
+    AliasLine::Found
+}
+
+/// glibc's `__res_context_hostalias`: the alias the file `file` gives
+/// `name`, into `dst`, or `false` -- read with `fgets` into glibc's
+/// `BUFSIZ` as glibc's is, each chunk judged by [`alias_line`].
+fn alias_in(file: *const u8, name: &[u8], dst: &mut [u8]) -> bool {
+    if dst.is_empty() || file.is_null() {
+        return false;
+    }
+    // SAFETY: `file` is a NUL-terminated path; the mode is a literal.
+    let fp = unsafe { crate::stdio::fopen(file, b"rce\0".as_ptr()) };
+    if fp.is_null() {
+        return false;
+    }
+    let mut buf = [0u8; GLIBC_BUFSIZ];
+    let mut found = false;
+    while !crate::stdio::fgets(buf.as_mut_ptr(), GLIBC_BUFSIZ as i32, fp).is_null() {
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        match alias_line(&buf[..n], name, dst) {
+            AliasLine::Next => {}
+            AliasLine::Stop => break,
+            AliasLine::Found => {
+                found = true;
+                break;
+            }
+        }
+    }
+    // A read-only stream's close cannot lose anything.
+    let _ = crate::stdio::fclose(fp);
+    found
+}
+
+/// C's `isspace` in the C locale.
+fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// The file `HOSTALIASES` names, NUL-terminated, or NULL -- read as
+/// `secure_getenv` reads, glibc's loader striking the variable from a
+/// program run with privileges it was not started with.
+fn aliases_file() -> *const u8 {
+    // SAFETY: a NUL-terminated name.
+    unsafe { crate::environ::secure_getenv(b"HOSTALIASES\0".as_ptr()) }
+}
+
+/// The alias for `name` in the `HOSTALIASES` file, unless `options` has
+/// `RES_NOALIASES`: [`alias_in`].
+fn alias_for(options: u64, name: &[u8], dst: &mut [u8]) -> bool {
+    if options & RES_NOALIASES != 0 {
+        return false;
+    }
+    // A host test has no file layer to read through, nor an environment of
+    // its own: its file's bytes, read as `fgets` reads them.
+    #[cfg(test)]
+    match tests::aliases_for_test() {
+        tests::AliasesFile::Environment => {}
+        tests::AliasesFile::Missing => return false,
+        tests::AliasesFile::Bytes(b) => return tests::alias_in_bytes(&b, name, dst),
+    }
+    alias_in(aliases_file(), name, dst)
+}
+
+/// `res_hostalias` -- the alias `HOSTALIASES`'s file gives `name`, into
+/// `dst` (`siz` bytes, the alias cut to `siz - 1`): `dst`, or NULL for
+/// none, for `RES_NOALIASES` in the caller's state, or for no file. See
+/// [`alias_in`] for the file. A NULL state is NULL with `h_errno`
+/// `NETDB_INTERNAL`, as glibc answers one it cannot use; a NULL `name`,
+/// a NULL `dst` or a `siz` of 0 -- which glibc overruns -- is NULL.
+/// Deprecated by glibc ("use getaddrinfo instead").
+///
+/// # Safety
+///
+/// `statp` is NULL or a resolver state; `name` is NULL or a NUL-terminated
+/// string; `dst` is NULL or holds `siz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __res_hostalias(
+    statp: *const ResState,
+    name: *const u8,
+    dst: *mut u8,
+    siz: usize,
+) -> *const u8 {
+    if statp.is_null() {
+        crate::socket::set_h_errno(NETDB_INTERNAL);
+        return core::ptr::null();
+    }
+    let Some(name) = c_name(name) else {
+        return core::ptr::null();
+    };
+    if dst.is_null() || siz == 0 {
+        return core::ptr::null();
+    }
+    // SAFETY: `statp` is the caller's state; `dst` holds `siz` bytes.
+    let (options, out) = unsafe { ((*statp).options, core::slice::from_raw_parts_mut(dst, siz)) };
+    if alias_for(options, name, out) {
+        dst.cast_const()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// `hostalias` -- [`__res_hostalias`] on `_res`, into the calling thread's
+/// buffer, which its next call overwrites (glibc shares one static between
+/// threads): the alias, or NULL. Deprecated by glibc ("use getaddrinfo
+/// instead").
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __hostalias(name: *const u8) -> *const u8 {
+    let Some(name) = c_name(name) else {
+        return core::ptr::null();
+    };
+    let buf = crate::netdb::hostalias_buffer();
+    if buf.is_null() {
+        return core::ptr::null();
+    }
+    // SAFETY: the thread's buffer holds `NS_MAXDNAME` bytes; `_res`,
+    // initialised, only read.
+    let (options, out) = unsafe {
+        (
+            (*global()).options,
+            core::slice::from_raw_parts_mut(buf, NS_MAXDNAME),
+        )
+    };
+    if alias_for(options, name, out) {
+        buf.cast_const()
+    } else {
+        core::ptr::null()
+    }
+}
+
+/// `res_close` -- close `_res`'s connections: a no-op, as `res_nclose` is,
+/// this resolver keeping no socket between queries; `_res` stays usable
+/// and `RES_INIT` set, as glibc's `__res_iclose` leaves it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __res_close() {}
+
+/// `res_randomid` -- a random query id, 16 bits of `arc4random`'s: glibc's
+/// `0xffff & random_bits ()`. Deprecated by glibc ("use getentropy
+/// instead").
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __res_randomid() -> u32 {
+    crate::random::arc4random() & 0xffff
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3020,6 +3441,302 @@ mod tests {
     std::thread_local! {
         /// Whether `send_query` asks [`Responder`] instead of the network.
         static RESPONDER_ON: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        /// The `HOSTALIASES` file this thread's calls read, in place of the
+        /// environment's and the file layer, neither of which a host test
+        /// has.
+        static ALIASES_FILE: core::cell::RefCell<AliasesFile> =
+            const { core::cell::RefCell::new(AliasesFile::Environment) };
+    }
+
+    /// Where a test's `HOSTALIASES` file is.
+    #[derive(Clone)]
+    pub(super) enum AliasesFile {
+        /// The environment's, read through the file layer: no test's.
+        Environment,
+        /// No file: no variable, or one naming nothing.
+        Missing,
+        /// A file of these bytes.
+        Bytes(Vec<u8>),
+    }
+
+    /// `alias_for`'s hook: this thread's file.
+    pub(super) fn aliases_for_test() -> AliasesFile {
+        ALIASES_FILE.with(|f| f.borrow().clone())
+    }
+
+    /// Set this thread's `HOSTALIASES` file (see [`ALIASES_FILE`]).
+    fn set_aliases_file(file: AliasesFile) {
+        ALIASES_FILE.with(|f| *f.borrow_mut() = file);
+    }
+
+    /// [`alias_in`] on a file of `bytes`: each chunk `fgets (buf, BUFSIZ,
+    /// fp)` would read -- to a newline, inclusive, or `BUFSIZ - 1` bytes --
+    /// judged by [`alias_line`].
+    pub(super) fn alias_in_bytes(bytes: &[u8], name: &[u8], dst: &mut [u8]) -> bool {
+        if dst.is_empty() {
+            return false;
+        }
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let upto = rest
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(rest.len(), |i| i + 1);
+            let n = upto.min(GLIBC_BUFSIZ - 1);
+            let (chunk, after) = rest.split_at(n);
+            rest = after;
+            match alias_line(chunk, name, dst) {
+                AliasLine::Next => {}
+                AliasLine::Stop => return false,
+                AliasLine::Found => return true,
+            }
+        }
+        false
+    }
+
+    /// glibc 2.39's `dn_count_labels`, `putlong`, `putshort`,
+    /// `res_isourserver`, `res_nameinquery`, `res_queriesmatch`, `hostalias`,
+    /// `res_hostalias`, `res_close` and `res_randomid`
+    /// (`resutil_harness.py`), replayed: `_res`'s nameservers and the
+    /// aliases file from the oracle's own lines, and each on a state of this
+    /// test's own where glibc's used `_res`.
+    #[test]
+    fn the_small_helpers_answer_as_glibcs() {
+        const ORACLE: &str = include_str!("resutil_oracle.txt");
+        let unhex = |h: &str| -> Vec<u8> {
+            (0..h.len() / 2)
+                .map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).unwrap())
+                .collect()
+        };
+        let hexs = |b: &[u8]| {
+            b.iter()
+                .map(|x| format!("{x:02x}"))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        let file = ORACLE.lines().find_map(|l| l.strip_prefix("F ")).unwrap();
+        let aliases = unhex(file);
+        let mut servers = ResState::ZERO;
+        let mut n = 0;
+        let mut wrong = Vec::new();
+        for line in ORACLE
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("F "))
+        {
+            if let Some(ns) = line.strip_prefix("N ") {
+                let (a, port) = ns.split_once(' ').unwrap();
+                let i = usize::try_from(servers.nscount).unwrap();
+                let a: std::net::Ipv4Addr = a.parse().unwrap();
+                servers.nsaddr_list[i] = crate::socket::SockaddrIn {
+                    sin_family: crate::socket::AF_INET as u16,
+                    sin_port: port.parse::<u16>().unwrap().to_be(),
+                    sin_addr: crate::socket::InAddr {
+                        s_addr: u32::from_ne_bytes(a.octets()),
+                    },
+                    sin_zero: [0; 8],
+                };
+                servers.nscount += 1;
+                continue;
+            }
+            let (call, want) = line.split_once(" = ").unwrap();
+            let f: Vec<&str> = call.split(' ').collect();
+            n += 1;
+            let got = match f[0] {
+                "C" => {
+                    let mut s = untoken(f[1]);
+                    s.push(0);
+                    format!("{}", __dn_count_labels(s.as_ptr()))
+                }
+                "L" => {
+                    let mut o = [0u8; 4];
+                    __putlong(u32::from_str_radix(f[1], 16).unwrap(), o.as_mut_ptr());
+                    hexs(&o)
+                }
+                "H" => {
+                    let mut o = [0u8; 2];
+                    __putshort(u16::from_str_radix(f[1], 16).unwrap(), o.as_mut_ptr());
+                    hexs(&o)
+                }
+                "I" => {
+                    let a: std::net::Ipv4Addr = f[2].parse().unwrap();
+                    let inp = crate::socket::SockaddrIn {
+                        sin_family: f[1].parse().unwrap(),
+                        sin_port: f[3].parse::<u16>().unwrap().to_be(),
+                        sin_addr: crate::socket::InAddr {
+                            s_addr: u32::from_ne_bytes(a.octets()),
+                        },
+                        sin_zero: [0; 8],
+                    };
+                    format!("{}", i32::from(is_our_server(&servers, &inp)))
+                }
+                "Q" => {
+                    let m = unhex(f[1]);
+                    let len: usize = f[2].parse().unwrap();
+                    let mut name = untoken(f[3]);
+                    name.push(0);
+                    // SAFETY: `m` holds `len` bytes and more; `name` is
+                    // NUL-terminated.
+                    let r = unsafe {
+                        __res_nameinquery(
+                            name.as_ptr(),
+                            f[4].parse().unwrap(),
+                            f[5].parse().unwrap(),
+                            m.as_ptr(),
+                            m.as_ptr().add(len),
+                        )
+                    };
+                    format!("{r}")
+                }
+                "M" => {
+                    let (a, b) = (unhex(f[1]), unhex(f[3]));
+                    let (la, lb): (usize, usize) = (f[2].parse().unwrap(), f[4].parse().unwrap());
+                    // SAFETY: each message holds its length and more.
+                    let r = unsafe {
+                        __res_queriesmatch(
+                            a.as_ptr(),
+                            a.as_ptr().add(la),
+                            b.as_ptr(),
+                            b.as_ptr().add(lb),
+                        )
+                    };
+                    format!("{r}")
+                }
+                "A" => {
+                    let mut name = untoken(f[2]);
+                    name.push(0);
+                    let size: usize = f[3].parse().unwrap();
+                    let text = |r: *const u8| -> String {
+                        if r.is_null() {
+                            return "NULL".into();
+                        }
+                        // SAFETY: the answer is a NUL-terminated string.
+                        let s = unsafe { core::slice::from_raw_parts(r, crate::string::strlen(r)) };
+                        String::from_utf8(s.to_vec()).unwrap()
+                    };
+                    let got = match f[1] {
+                        "h" | "u" | "m" => {
+                            // No variable and a variable naming no file are
+                            // both no file.
+                            set_aliases_file(if f[1] == "h" {
+                                AliasesFile::Bytes(aliases.clone())
+                            } else {
+                                AliasesFile::Missing
+                            });
+                            text(__hostalias(name.as_ptr()))
+                        }
+                        mode => {
+                            set_aliases_file(AliasesFile::Bytes(aliases.clone()));
+                            let mut st = ResState::ZERO;
+                            st.options = FRESH_OPTIONS | RES_INIT;
+                            if mode == "n" {
+                                st.options |= RES_NOALIASES;
+                            }
+                            let mut dst = [0xaau8; 64];
+                            // SAFETY: a live state; `dst` holds `size` bytes.
+                            text(unsafe {
+                                __res_hostalias(&st, name.as_ptr(), dst.as_mut_ptr(), size)
+                            })
+                        }
+                    };
+                    set_aliases_file(AliasesFile::Environment);
+                    got
+                }
+                "X" => match f[1] {
+                    // `res_close` touches no state here: what glibc's leaves
+                    // -- RES_INIT as it was, the servers -- a no-op leaves.
+                    "init-before" | "init-after-close-uninit" => "0".into(),
+                    "init-after-close" => {
+                        __res_close();
+                        "1".into()
+                    }
+                    "nscount-after-close" => format!("{}", servers.nscount),
+                    "randomid" => {
+                        let a = __res_randomid();
+                        let ids: Vec<u32> = (0..1000).map(|_| __res_randomid()).collect();
+                        if ids.iter().all(|&b| b <= 0xffff) && ids.iter().any(|&b| b != a) {
+                            "ok".into()
+                        } else {
+                            "bad".into()
+                        }
+                    }
+                    other => panic!("unknown X line {other}"),
+                },
+                other => panic!("unknown line kind {other}"),
+            };
+            if got != want {
+                wrong.push(format!("{call}\n  glibc: {want}\n  ours:  {got}"));
+            }
+        }
+        assert!(n > 90, "the oracle has {n} lines");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// A dot-free name the `HOSTALIASES` file names is searched as its
+    /// alias, as it stands and nothing else, as glibc's
+    /// `__res_context_search` has it; `RES_NOALIASES` turns the file off.
+    #[test]
+    fn a_dot_free_name_is_searched_as_its_alias() {
+        let mut st = ResState::ZERO;
+        store_conf(
+            &mut st,
+            &parse_conf(b"nameserver 127.0.0.1\nsearch nowhere.test\n", b""),
+        );
+        RESPONDER_ON.with(|r| r.set(true));
+        set_aliases_file(AliasesFile::Bytes(b"ftp a.example.test\n".to_vec()));
+        let mut answer = [0u8; 512];
+        // SAFETY: a live state; a NUL-terminated name; `answer` holds 512.
+        let n = unsafe {
+            res_nsearch(
+                &mut st,
+                c"ftp".as_ptr().cast(),
+                1,
+                1,
+                answer.as_mut_ptr(),
+                512,
+            )
+        };
+        assert!(n > 0, "the alias is answered: {n}");
+        let mut name = [0u8; 256];
+        let end = answer.as_ptr().wrapping_add(usize::try_from(n).unwrap());
+        let q = dn_expand(
+            answer.as_ptr(),
+            end,
+            answer.as_ptr().wrapping_add(HFIXEDSZ),
+            name.as_mut_ptr(),
+            256,
+        );
+        assert!(q > 0);
+        let len = name.iter().position(|&c| c == 0).unwrap();
+        assert_eq!(
+            &name[..len],
+            b"a.example.test",
+            "the question asked is the alias"
+        );
+
+        st.options |= RES_NOALIASES;
+        // SAFETY: as above.
+        let n = unsafe {
+            res_nsearch(
+                &mut st,
+                c"ftp".as_ptr().cast(),
+                1,
+                1,
+                answer.as_mut_ptr(),
+                512,
+            )
+        };
+        assert_eq!(
+            n, -1,
+            "without the file, ftp and ftp.nowhere.test are asked, and refused"
+        );
+        assert_eq!(crate::socket::get_h_errno(), crate::socket::HOST_NOT_FOUND);
+        set_aliases_file(AliasesFile::Environment);
+        RESPONDER_ON.with(|r| r.set(false));
     }
 
     /// `send_query`'s hook: the exchange with [`Responder`] when a test has

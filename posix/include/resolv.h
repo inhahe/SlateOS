@@ -15,6 +15,8 @@
 #ifndef _SLATEOS_RESOLV_H
 #define _SLATEOS_RESOLV_H
 
+#include <bits/slateos-features.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -43,6 +45,35 @@ int res_nmkquery(res_state, int, const char *, int, int,
                  unsigned char *, int);
 int res_nsend(res_state, const unsigned char *, int, unsigned char *, int);
 void res_nclose(res_state);
+
+/* libresolv's helpers, each a __ name its public one is #defined to, as
+ * glibc's header has them, and deprecated where glibc's are, in glibc's
+ * words (putlong's and putshort's swapped as glibc's are). */
+#define dn_count_labels __dn_count_labels
+#define putlong __putlong
+#define putshort __putshort
+#define res_close __res_close
+#define res_randomid __res_randomid
+#define res_isourserver __res_isourserver
+#define res_nameinquery __res_nameinquery
+#define res_queriesmatch __res_queriesmatch
+#define hostalias __hostalias
+#define res_hostalias __res_hostalias
+int dn_count_labels(const char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+void putlong(uint32_t, unsigned char *) _SLATEOS_DEPRECATED("use NS_PUT16 instead");
+void putshort(uint16_t, unsigned char *) _SLATEOS_DEPRECATED("use NS_PUT32 instead");
+void res_close(void);
+unsigned int res_randomid(void) _SLATEOS_DEPRECATED("use getentropy instead");
+int res_isourserver(const struct sockaddr_in *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+int res_nameinquery(const char *, int, int, const unsigned char *,
+                    const unsigned char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+int res_queriesmatch(const unsigned char *, const unsigned char *,
+                     const unsigned char *, const unsigned char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+/* The HOSTALIASES file's alias for a name, which res_search asks for in
+ * the name's place when the name has no dot. */
+const char *hostalias(const char *) _SLATEOS_DEPRECATED("use getaddrinfo instead");
+const char *res_hostalias(const res_state, const char *, char *, size_t)
+    _SLATEOS_DEPRECATED("use getaddrinfo instead");
 
 #ifdef __cplusplus
 }

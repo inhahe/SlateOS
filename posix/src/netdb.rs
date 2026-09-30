@@ -696,6 +696,8 @@ pub(crate) struct ThreadDb {
     /// ([`crate::inet`]): the resolver family's one other non-reentrant
     /// answer, kept with these rather than in every thread's block.
     nsap: [u8; crate::inet::NSAP_NTOA_MAX],
+    /// `hostalias`'s answer ([`crate::resolv`]), glibc's static `abuf`.
+    alias: [u8; crate::resolv::NS_MAXDNAME],
 }
 
 impl ThreadDb {
@@ -717,6 +719,7 @@ impl ThreadDb {
         host_ent: Held::new(HOSTENT_EMPTY),
         host_cur: Cursor::CLOSED,
         nsap: [0; crate::inet::NSAP_NTOA_MAX],
+        alias: [0; crate::resolv::NS_MAXDNAME],
     };
 }
 
@@ -788,6 +791,17 @@ pub(crate) fn nsap_ntoa_buffer() -> *mut u8 {
     }
     // SAFETY: the calling thread's live `ThreadDb`.
     unsafe { (&raw mut (*db).nsap).cast() }
+}
+
+/// The calling thread's buffer for `hostalias`'s answer, which holds
+/// [`crate::resolv::NS_MAXDNAME`] bytes; NULL when memory runs out.
+pub(crate) fn hostalias_buffer() -> *mut u8 {
+    let db = thread_db();
+    if db.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the calling thread's live `ThreadDb`.
+    unsafe { (&raw mut (*db).alias).cast() }
 }
 
 /// Free the calling thread's netdb state: called as the thread exits.

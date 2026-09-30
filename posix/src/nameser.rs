@@ -122,7 +122,7 @@ pub unsafe extern "C" fn ns_makecanon(src: *const u8, dst: *mut u8, dstsize: usi
 /// glibc's `__libc_ns_samename` on text: `Some(same)`, or `None` (with
 /// `errno` `EMSGSIZE`) when either will not go canonical in `NS_MAXDNAME`
 /// bytes.
-fn samename(a: &[u8], b: &[u8]) -> Option<bool> {
+pub(crate) fn samename(a: &[u8], b: &[u8]) -> Option<bool> {
     let mut ta = [0u8; NS_MAXDNAME];
     let mut tb = [0u8; NS_MAXDNAME];
     let (la, lb) = match (makecanon(a, &mut ta), makecanon(b, &mut tb)) {

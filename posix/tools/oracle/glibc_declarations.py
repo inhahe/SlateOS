@@ -130,6 +130,9 @@ def main() -> None:
     texts = {}
     for h in overlay.overlay_headers(overlay.OVERLAY):
         t = re.sub(r"/\*.*?\*/", " ", (overlay.OVERLAY / h).read_text(encoding="utf-8"), flags=re.S)
+        # A string's words are no declaration: <resolv.h>'s res_randomid is
+        # deprecated "use getentropy instead", which names getentropy.
+        t = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', t)
         texts[h] = "\n".join(line for line in t.splitlines() if not line.lstrip().startswith("#"))
     renamed = overlay.renaming_macros(overlay.OVERLAY)
     where = {n: declaring_header(n, texts, renamed) for n in names}

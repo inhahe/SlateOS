@@ -445,6 +445,7 @@ pub mod lowlevellock;
 pub mod malloc;
 pub mod math;
 pub mod mathl;
+pub mod mcheck;
 pub mod md5;
 pub mod mman;
 pub mod mntent;

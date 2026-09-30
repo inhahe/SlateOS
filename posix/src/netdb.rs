@@ -698,6 +698,45 @@ pub(crate) struct ThreadDb {
     nsap: [u8; crate::inet::NSAP_NTOA_MAX],
     /// `hostalias`'s answer ([`crate::resolv`]), glibc's static `abuf`.
     alias: [u8; crate::resolv::NS_MAXDNAME],
+    /// The answers [`crate::res_debug`]'s printers keep in glibc's statics.
+    res_debug: ResDebugBufs,
+}
+
+/// [`crate::res_debug`]'s buffers: `sym_ntos`'s and `sym_ntop`'s decimal
+/// for a number in no table, `p_option`'s, `p_time`'s, and `loc_ntoa`'s
+/// given none -- one each, as glibc has one static each.
+struct ResDebugBufs {
+    ntos: [u8; 20],
+    ntop: [u8; 20],
+    option: [u8; 40],
+    time: [u8; 40],
+    loc: [u8; crate::res_debug::LOC_NTOA_MAX],
+}
+
+/// Which of [`ResDebugBufs`]'s buffers.
+#[derive(Clone, Copy)]
+pub(crate) enum ResDebugBuf {
+    /// `sym_ntos`'s (and `p_class`'s, `p_type`'s, `p_rcode`'s).
+    Ntos,
+    /// `sym_ntop`'s.
+    Ntop,
+    /// `p_option`'s.
+    Option,
+    /// `p_time`'s.
+    Time,
+    /// `loc_ntoa`'s.
+    Loc,
+}
+
+impl ResDebugBuf {
+    /// The buffer's size in bytes.
+    pub(crate) const fn size(self) -> usize {
+        match self {
+            Self::Ntos | Self::Ntop => 20,
+            Self::Option | Self::Time => 40,
+            Self::Loc => crate::res_debug::LOC_NTOA_MAX,
+        }
+    }
 }
 
 impl ThreadDb {
@@ -720,6 +759,13 @@ impl ThreadDb {
         host_cur: Cursor::CLOSED,
         nsap: [0; crate::inet::NSAP_NTOA_MAX],
         alias: [0; crate::resolv::NS_MAXDNAME],
+        res_debug: ResDebugBufs {
+            ntos: [0; 20],
+            ntop: [0; 20],
+            option: [0; 40],
+            time: [0; 40],
+            loc: [0; crate::res_debug::LOC_NTOA_MAX],
+        },
     };
 }
 
@@ -802,6 +848,27 @@ pub(crate) fn hostalias_buffer() -> *mut u8 {
     }
     // SAFETY: the calling thread's live `ThreadDb`.
     unsafe { (&raw mut (*db).alias).cast() }
+}
+
+/// The calling thread's buffer `which` for [`crate::res_debug`], which
+/// holds `which.size()` bytes; NULL when memory runs out.
+pub(crate) fn res_debug_buffer(which: ResDebugBuf) -> *mut u8 {
+    let db = thread_db();
+    if db.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the calling thread's live `ThreadDb`.
+    let b = unsafe { &raw mut (*db).res_debug };
+    // SAFETY: as above: a field of it.
+    unsafe {
+        match which {
+            ResDebugBuf::Ntos => (&raw mut (*b).ntos).cast(),
+            ResDebugBuf::Ntop => (&raw mut (*b).ntop).cast(),
+            ResDebugBuf::Option => (&raw mut (*b).option).cast(),
+            ResDebugBuf::Time => (&raw mut (*b).time).cast(),
+            ResDebugBuf::Loc => (&raw mut (*b).loc).cast(),
+        }
+    }
 }
 
 /// Free the calling thread's netdb state: called as the thread exits.

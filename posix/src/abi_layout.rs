@@ -267,6 +267,17 @@ pub(crate) fn abi_asserts() -> String {
         _flags,
         _u
     );
+    // A symbol table's entry, which sym_ntos and its kin take tables of.
+    abi!(
+        out,
+        hdrs,
+        crate::res_debug::ResSym,
+        "struct res_sym",
+        "resolv.h",
+        number,
+        name,
+        humanname
+    );
 
     // --- time: ftime's result -------------------------------------------------
     abi!(

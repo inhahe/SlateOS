@@ -75,6 +75,34 @@ const char *hostalias(const char *) _SLATEOS_DEPRECATED("use getaddrinfo instead
 const char *res_hostalias(const res_state, const char *, char *, size_t)
     _SLATEOS_DEPRECATED("use getaddrinfo instead");
 
+/* The symbol tables and their printers, LOC records' text, and base64:
+ * libresolv's res_debug.c and base64.c, renamed and deprecated as glibc's
+ * are (base64 not deprecated). */
+#define sym_ston __sym_ston
+#define sym_ntos __sym_ntos
+#define sym_ntop __sym_ntop
+#define p_class __p_class
+#define p_type __p_type
+#define p_rcode __p_rcode
+#define p_option __p_option
+#define p_time __p_time
+#define loc_aton __loc_aton
+#define loc_ntoa __loc_ntoa
+#define b64_ntop __b64_ntop
+#define b64_pton __b64_pton
+int sym_ston(const struct res_sym *, const char *, int *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *sym_ntos(const struct res_sym *, int, int *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *sym_ntop(const struct res_sym *, int, int *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *p_class(int) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *p_type(int) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *p_rcode(int) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *p_option(unsigned long) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *p_time(uint32_t) _SLATEOS_ATTRIBUTE_DEPRECATED;
+int loc_aton(const char *, unsigned char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const char *loc_ntoa(const unsigned char *, char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+int b64_ntop(const unsigned char *, size_t, char *, size_t);
+int b64_pton(char const *, unsigned char *, size_t);
+
 #ifdef __cplusplus
 }
 #endif

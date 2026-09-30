@@ -448,6 +448,21 @@ pub struct ShellSession<T: Transport> {
     /// The picture the background surface does hold: the id it was uploaded
     /// under, released before the next is uploaded.
     wallpaper_uploaded: Option<u64>,
+    /// What each photo frame on the desktop has asked the decoding thread
+    /// for, by the frame's widget id: the file and the image id. How an
+    /// answer is known to be still wanted -- and, kept after a failure as the
+    /// wallpaper's is, what stops a file that will not open being read again
+    /// at every paint until the frame moves on.
+    frame_requests: BTreeMap<u64, (PathBuf, u64)>,
+    /// The frames' pictures the background surface holds, by image id:
+    /// released once no frame shows them (`refresh_frame_pictures`).
+    frame_uploaded: std::collections::BTreeSet<u64>,
+    /// The next frame picture's number, below [`FRAME_PICTURE_TAG`](crate::widgets::FRAME_PICTURE_TAG).
+    next_frame_picture: u64,
+    /// The folder the photo frames show -- the user's Pictures
+    /// (`DesktopShell::photo_frame_folder`), found once when the session
+    /// starts: `None` with no home to find it in.
+    frame_folder: Option<PathBuf>,
     /// The thread that decodes pictures, so a photograph's second of decoding
     /// is not a second the desktop stops drawing (`crate::pictures`).
     pictures: PictureWorker,
@@ -875,6 +890,12 @@ impl<T: Transport> ShellSession<T> {
             rotation_loaded: None,
             wallpaper_image: None,
             wallpaper_uploaded: None,
+            frame_requests: BTreeMap::new(),
+            frame_uploaded: std::collections::BTreeSet::new(),
+            next_frame_picture: 1,
+            frame_folder: DesktopShell::photo_frame_folder(
+                std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+            ),
             pictures: PictureWorker::spawn(picture_waker),
             settings_watch: None,
             app_dirs: default_app_dirs(),
@@ -1311,16 +1332,21 @@ impl<T: Transport> ShellSession<T> {
         // shown_picture`), never one still decoding -- the compositor draws
         // *nothing, silently* for an id it holds no pixels under.
         self.refresh_wallpaper_image()?;
+        // And each photo frame's next picture, the same way.
+        self.fetch_frame_pictures();
         let tree = self.background.localize(&self.background_tree());
         if self.background_drawn.as_ref() == Some(&tree) {
-            return Ok(());
+            return self.release_unshown_frame_pictures();
         }
         // The desktop's icons, before the frame that draws them.
         self.upload_icons(self.background.window, &tree)?;
         self.events.submit(self.background.window, &tree)?;
         // Only once it is sent: a refused frame is one to send again.
         self.background_drawn = Some(tree);
-        Ok(())
+        // After the frame that stops naming them: released before it, a
+        // picture the frame on screen still names would draw as nothing were
+        // the compositor to draw that frame again meanwhile.
+        self.release_unshown_frame_pictures()
     }
 
     /// What the background draws now: the wallpaper, the desktop's icons on
@@ -1606,6 +1632,13 @@ impl<T: Transport> ShellSession<T> {
         core::mem::take(&mut self.service_problems)
     }
 
+    /// Show `folder` in the photo frames from now on -- a test's own folder
+    /// of pictures, where the session's is the running user's Pictures.
+    #[cfg(test)]
+    pub(crate) fn set_frame_folder(&mut self, folder: Option<PathBuf>) {
+        self.frame_folder = folder;
+    }
+
     /// Look for service menus in `dirs` from now on, reading them at once --
     /// a test's own directories, where the session's default in this
     /// crate's tests is none.
@@ -1803,6 +1836,40 @@ impl<T: Transport> ShellSession<T> {
                 }
                 self.paint_login()?;
             }
+            Slot::Frame(frame) => {
+                // Still the one asked for, and still wanted: the frame may
+                // have stepped on, or gone, since.
+                let asked = self.frame_requests.get(&frame).map(|(_, id)| *id);
+                if asked != Some(job.id) || !self.shell.widgets.frame_wants(frame, &job.path) {
+                    return Ok(());
+                }
+                let outcome = match result {
+                    Ok(image) => {
+                        self.upload_decoded(self.background.window, job.id, &job.path, &image)?
+                    }
+                    Err(why) => PictureUpload::Failed(why),
+                };
+                match outcome {
+                    PictureUpload::Loaded { width, height } => {
+                        self.frame_uploaded.insert(job.id);
+                        let picture = crate::widgets::FramePicture {
+                            path: job.path.clone(),
+                            image_id: job.id,
+                            width,
+                            height,
+                        };
+                        // The picture it replaces is released by the refresh
+                        // below, once the frame that no longer names it is sent.
+                        self.shell.widgets.frame_picture_ready(frame, picture);
+                    }
+                    PictureUpload::Failed(why) => {
+                        self.shell
+                            .widgets
+                            .frame_picture_failed(frame, &job.path, why);
+                    }
+                }
+                self.refresh_background()?;
+            }
         }
         Ok(())
     }
@@ -1982,6 +2049,80 @@ impl<T: Transport> ShellSession<T> {
     /// Dropping an id that was never successfully uploaded is not an error —
     /// see [`oswindow::WindowHandle::drop_image`] — which is what lets this be
     /// called without first asking whether the last attempt worked.
+    /// Ask for the photo frames' next pictures.
+    ///
+    /// Each frame due a picture chooses it (`DesktopWidgetManager::
+    /// step_frames`, over this session's read of the frames' folder), and
+    /// each wanted picture not yet asked for is asked of the decoding thread,
+    /// scaled to the frame, under an id tagged
+    /// [`FRAME_PICTURE_TAG`](crate::widgets::FRAME_PICTURE_TAG).
+    ///
+    /// Called from `refresh_background`, as the wallpaper's is, so a frame's
+    /// interval ending is noticed at the paint its tick asked for.
+    fn fetch_frame_pictures(&mut self) {
+        // With no home, a frame has no folder: it is stepped over nothing,
+        // and says so, rather than reading a folder named relative to
+        // wherever the desktop was started.
+        let readable = self.frame_folder.is_some();
+        let named = self
+            .frame_folder
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Pictures"));
+        self.shell.widgets.step_frames(&named, &|listed| {
+            if readable {
+                Self::pictures_in(listed, &[])
+            } else {
+                Vec::new()
+            }
+        });
+        for (frame, path, fit) in self.shell.widgets.frames_to_fetch() {
+            if self
+                .frame_requests
+                .get(&frame)
+                .is_some_and(|(asked, _)| *asked == path)
+            {
+                continue;
+            }
+            let id = crate::widgets::FRAME_PICTURE_TAG | self.next_frame_picture;
+            // Numbered below the tag, never zero; wrapping in a session that
+            // lived long enough to show 2^61 pictures would reuse numbers
+            // long since released.
+            self.next_frame_picture = match self.next_frame_picture.checked_add(1) {
+                Some(next) if next < crate::widgets::FRAME_PICTURE_TAG => next,
+                _ => 1,
+            };
+            self.pictures
+                .request_fitted(Slot::Frame(frame), id, path.clone(), Some(fit));
+            self.frame_requests.insert(frame, (path, id));
+        }
+        let widgets = &self.shell.widgets;
+        self.frame_requests
+            .retain(|frame, _| widgets.frame_state(*frame).is_some());
+    }
+
+    /// Release every frame picture the background holds that no frame shows
+    /// any more: a frame stepped on, emptied or removed.
+    ///
+    /// # Errors
+    ///
+    /// A connection that failed while releasing one.
+    fn release_unshown_frame_pictures(&mut self) -> Result<(), Error<T>> {
+        let shown = self.shell.widgets.frame_image_ids();
+        let stale: Vec<u64> = self
+            .frame_uploaded
+            .iter()
+            .filter(|id| !shown.contains(id))
+            .copied()
+            .collect();
+        for id in stale {
+            self.frame_uploaded.remove(&id);
+            if let Some(mut handle) = self.events.window_mut(self.background.window) {
+                handle.drop_image(id)?;
+            }
+        }
+        Ok(())
+    }
+
     fn release_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let Some(id) = self.wallpaper_uploaded.take() else {
             return Ok(());

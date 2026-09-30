@@ -12036,6 +12036,7 @@ impl DesktopShell {
     const MENU_ALIGN_TO_GRID: u64 = 7;
     const MENU_SORT_BY_NAME: u64 = 8;
     const MENU_ADD_NOTE: u64 = 9;
+    const MENU_ADD_PHOTO_FRAME: u64 = 10;
     const MENU_ADD_WIDGET_SUBMENU: u64 = 100;
     const MENU_VIEW_SUBMENU: u64 = 101;
     // An icon's own menu, opened by a right-click on the icon.
@@ -12141,6 +12142,7 @@ impl DesktopShell {
                     item(Self::MENU_ADD_CALENDAR, "Calendar", None),
                     item(Self::MENU_ADD_SYSTEM_MONITOR, "System monitor", None),
                     item(Self::MENU_ADD_NOTE, "Note", None),
+                    item(Self::MENU_ADD_PHOTO_FRAME, "Photo frame", None),
                 ],
             },
             MenuItem::Separator,
@@ -13071,6 +13073,7 @@ impl DesktopShell {
             Self::MENU_ADD_CALENDAR => Some(WidgetKind::Calendar),
             Self::MENU_ADD_SYSTEM_MONITOR => Some(WidgetKind::SystemMonitor),
             Self::MENU_ADD_NOTE => Some(WidgetKind::Notes),
+            Self::MENU_ADD_PHOTO_FRAME => Some(WidgetKind::PhotoFrame),
             Self::MENU_REMOVE_ONE_WIDGET => {
                 // `menu_widget` rather than a fresh hit test: see the field.
                 return self
@@ -13141,6 +13144,16 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             &self.live_readings(),
         )
+    }
+
+    /// The folder the desktop's photo frames show: the user's Pictures -- the
+    /// folder the start menu's Pictures place opens, from the same
+    /// definition, so the two cannot come to name different folders. `None`
+    /// with no home to find it in, when a frame has nothing to show.
+    #[must_use]
+    pub fn photo_frame_folder(home: Option<&Path>) -> Option<PathBuf> {
+        let sub = StartShortcut::Pictures.folder()?;
+        Some(home?.join(sub))
     }
 
     /// The icon layer's draw commands.

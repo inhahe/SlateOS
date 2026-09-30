@@ -4451,6 +4451,129 @@ fn an_idle_desktop_is_woken_to_show_a_tooltip_and_repainted_to_hide_it() {
     );
 }
 
+/// A picture `width` by `height`, of one colour, written as a PNG into
+/// `folder` as `name`.
+fn plain_png(folder: &std::path::Path, name: &str, width: u32, height: u32, argb: u32) {
+    let pixels = vec![argb; (width * height) as usize];
+    let bytes = imagecodec::encode_png(width, height, &pixels).expect("encodes");
+    std::fs::write(folder.join(name), bytes).expect("the temp directory is not writable");
+}
+
+/// **A photo frame on the desktop shows its folder's pictures in turn**:
+/// the first as soon as it is placed, decoded to the frame's size rather
+/// than its own; the next when the loop is woken at the frame's interval,
+/// the old one released only after the frame that stops naming it is sent;
+/// and a frame removed lets its picture go.
+#[test]
+fn a_photo_frame_shows_its_folders_pictures_in_turn() {
+    // A scratch configuration, since placing a widget saves the layout.
+    settingsfile::testing::with_scratch_config("session-photo-frame", |_root| {
+        photo_frame_in_turn();
+    });
+}
+
+fn photo_frame_in_turn() {
+    use crate::widgets::{FRAME_INTERVAL_MS, WidgetKind, is_frame_picture};
+
+    let (mut session, desktop, _turn) = session();
+    let background = session.background().window();
+    let folder = scratch_dir().join("photo-frame-pictures");
+    std::fs::create_dir_all(&folder).expect("the temp directory is not writable");
+    // Larger than any frame, so a picture sent at its own size would show.
+    plain_png(&folder, "a.png", 1600, 1200, 0xFF_20_40_80);
+    plain_png(&folder, "b.png", 1200, 1600, 0xFF_80_40_20);
+    std::fs::write(folder.join("notes.txt"), b"not a picture").expect("writable");
+    session.set_frame_folder(Some(folder.clone()));
+
+    // Placed as a user places one: the desktop menu's "Add widget".
+    session
+        .shell_mut()
+        .activate_desktop_menu_item(DesktopShell::MENU_ADD_PHOTO_FRAME);
+    let frame = session
+        .shell()
+        .widgets
+        .all_widgets()
+        .iter()
+        .find(|w| matches!(w.kind, WidgetKind::PhotoFrame))
+        .map(|w| w.id)
+        .expect("the menu placed no photo frame");
+    session.paint_background().expect("paint");
+    session
+        .settle_pictures()
+        .expect("the first picture went up");
+
+    let frame_uploads = |desktop: &Desktop| -> Vec<(u64, u64, u32, u32, u32, usize)> {
+        uploads(desktop)
+            .into_iter()
+            .filter(|u| is_frame_picture(u.1))
+            .collect()
+    };
+    let sent = frame_uploads(&desktop);
+    assert_eq!(sent.len(), 1, "one picture for one frame: {sent:?}");
+    let (window, first, width, height, _, _) = sent[0];
+    assert_eq!(window, background);
+    let (_, _, content_w, content_h) = session.shell().widgets.content_rect(frame).unwrap();
+    assert!(
+        f64::from(width) <= f64::from(content_w).ceil()
+            && f64::from(height) <= f64::from(content_h).ceil(),
+        "sent at {width}x{height}, not fitted to the frame's {content_w}x{content_h}"
+    );
+    assert!(
+        background_names(&session, first),
+        "no frame names the picture"
+    );
+    assert_eq!(
+        session
+            .shell()
+            .widgets
+            .frame_state(frame)
+            .unwrap()
+            .shown
+            .as_ref()
+            .map(|s| s.path.clone()),
+        Some(folder.join("a.png"))
+    );
+
+    // The loop arms for the frame's interval, and woken then, the frame
+    // shows the next picture.
+    woken_after(&mut session, &desktop, 16);
+    let until = armed_in(&mut session).expect("a frame registered no wake-up");
+    assert!(
+        until <= std::time::Duration::from_millis(FRAME_INTERVAL_MS),
+        "the wake-up is not the frame's next picture: {until:?}"
+    );
+    woken_after(&mut session, &desktop, FRAME_INTERVAL_MS);
+    session.settle_pictures().expect("the next picture went up");
+    let sent = frame_uploads(&desktop);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    let second = sent[1].1;
+    assert_ne!(second, first, "the next picture reused the id");
+    assert!(background_names(&session, second));
+    assert!(!background_names(&session, first));
+    // Released, and only after the frame that stops naming it went out.
+    let order = picture_order(&desktop);
+    let uploaded = order
+        .iter()
+        .position(|e| *e == ("UploadImage", second))
+        .expect("uploaded");
+    let dropped = order
+        .iter()
+        .position(|e| *e == ("DropImage", first))
+        .expect("the first picture was never released");
+    assert!(
+        uploaded < dropped,
+        "released before its replacement: {order:?}"
+    );
+
+    // A frame removed lets its picture go.
+    assert!(session.shell_mut().widgets.remove_widget(frame));
+    session.paint_background().expect("paint");
+    assert!(
+        drops(&desktop).contains(&(background, second)),
+        "a removed frame's picture is still held"
+    );
+}
+
 /// **An idle desktop with a slideshow sleeps until its next picture, and
 /// shows it.** Nothing woke the loop for a slideshow until 2026-09-26: it
 /// moved only when something else happened to tick it, so on a desktop the

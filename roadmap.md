@@ -2066,6 +2066,16 @@ live.
   for once C-Q32 settles which of the two notification systems stays (the
   separate `gui/notifications` program is started by nothing).
 
+- `[x]` `[C]` **A photo frame on the desktop** (`design-decisions.md` §1452)
+  -- done 2026-09-30. "Add widget > Photo frame" shows the Pictures folder's
+  pictures -- the folder the start menu's Pictures place opens -- in name
+  order, one every thirty seconds and round again, each decoded to the
+  frame's size on the decoding thread and fitted in it; an empty folder says
+  so. The old picture is released only after the frame that stops naming it
+  is sent. **Next:** a "Choose folder" row on the frame's menu -- the
+  toolkit's folder chooser's first caller -- with the folder saved in
+  `widgets.yaml`.
+
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from
   that application again"; `design-decisions.md` §1450) -- done 2026-09-29.

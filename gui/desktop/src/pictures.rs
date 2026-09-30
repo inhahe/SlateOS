@@ -56,14 +56,24 @@ pub(crate) enum Slot {
     Wallpaper,
     /// The login screen's background, on the greeter's surface.
     Greeter,
+    /// The picture a photo frame on the desktop shows, by the frame's widget
+    /// id: on the background surface, one per frame.
+    Frame(u64),
 }
 
-/// A picture to decode: for which slot, under which image id, from which file.
+/// A picture to decode: for which slot, under which image id, from which file
+/// -- and how small, for one drawn smaller than itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Job {
     pub slot: Slot,
     pub id: u64,
     pub path: PathBuf,
+    /// Decoded to fit within this many pixels across and down, its
+    /// proportions kept (`imagecodec::decode_scaled`): a photo frame's
+    /// picture, which a photograph at its own size would fill the upload
+    /// budget with pixels nobody sees. `None` at its own size -- the
+    /// wallpaper, which is drawn the size of the screen.
+    pub fit: Option<(u32, u32)>,
 }
 
 /// A decode's outcome, handed back to the loop's thread.
@@ -111,12 +121,33 @@ impl PictureWorker {
         }
     }
 
-    /// Ask for `path` to be decoded for `slot` under `id`.
+    /// Ask for `path` to be decoded for `slot` under `id`, at its own size.
     pub(crate) fn request(&self, slot: Slot, id: u64, path: PathBuf) {
+        self.request_fitted(slot, id, path, None);
+    }
+
+    /// Ask for `path` to be decoded for `slot` under `id`, scaled to fit
+    /// `fit` when there is one (see [`Job::fit`]).
+    pub(crate) fn request_fitted(
+        &self,
+        slot: Slot,
+        id: u64,
+        path: PathBuf,
+        fit: Option<(u32, u32)>,
+    ) {
         // A send fails only if the thread has gone, which leaves the picture
         // undecoded: the desktop keeps its plain background, as it does for a
         // file that will not decode, rather than stopping.
-        if self.requests.send(Job { slot, id, path }).is_ok() {
+        if self
+            .requests
+            .send(Job {
+                slot,
+                id,
+                path,
+                fit,
+            })
+            .is_ok()
+        {
             #[cfg(test)]
             self.outstanding
                 .set(self.outstanding.get().saturating_add(1));
@@ -191,7 +222,7 @@ fn work(jobs: &Receiver<Job>, done: &Sender<Decoded>, waker: Option<&Waker>) {
             }
         }
         for job in newest {
-            let result = recent.decode(&job.path);
+            let result = recent.decode(&job.path, job.fit);
             if done.send(Decoded { job, result }).is_err() {
                 // The session is gone; nobody wants the rest.
                 return;
@@ -216,28 +247,49 @@ fn work(jobs: &Receiver<Job>, done: &Sender<Decoded>, waker: Option<&Waker>) {
 /// the setting.
 #[derive(Default)]
 struct Recent {
-    held: Option<(PathBuf, Stamp, Arc<imagecodec::Image>)>,
+    held: Option<Held>,
+}
+
+/// The picture [`Recent`] holds, and what it was decoded from: which file,
+/// at which fit, and which version of the file.
+struct Held {
+    path: PathBuf,
+    fit: Option<(u32, u32)>,
+    stamp: Stamp,
+    image: Arc<imagecodec::Image>,
 }
 
 /// What identifies a version of a file: its length and when it was written.
 type Stamp = (u64, SystemTime);
 
 impl Recent {
-    /// `path`, decoded -- or the picture just decoded from it, if the file is
-    /// unchanged since.
-    fn decode(&mut self, path: &Path) -> Result<Arc<imagecodec::Image>, String> {
+    /// `path`, decoded to `fit` -- or the picture just decoded from it to the
+    /// same fit, if the file is unchanged since. A picture decoded small is
+    /// never handed to a request for it at its own size, nor the other way.
+    fn decode(
+        &mut self,
+        path: &Path,
+        fit: Option<(u32, u32)>,
+    ) -> Result<Arc<imagecodec::Image>, String> {
         let stamp = stamp(path);
-        if let (Some((held_path, held_stamp, image)), Some(now)) = (&self.held, stamp) {
-            if held_path == path && *held_stamp == now {
-                return Ok(Arc::clone(image));
-            }
+        if let (Some(held), Some(now)) = (&self.held, stamp)
+            && held.path == path
+            && held.fit == fit
+            && held.stamp == now
+        {
+            return Ok(Arc::clone(&held.image));
         }
         // Dropped before decoding, not after: holding one full-screen picture
         // while the next is inflated is two at once for nothing.
         self.held = None;
-        let image = Arc::new(decode(path)?);
+        let image = Arc::new(decode(path, fit)?);
         if let Some(now) = stamp {
-            self.held = Some((path.to_path_buf(), now, Arc::clone(&image)));
+            self.held = Some(Held {
+                path: path.to_path_buf(),
+                fit,
+                stamp: now,
+                image: Arc::clone(&image),
+            });
         }
         Ok(image)
     }
@@ -258,15 +310,20 @@ fn stamp(path: &Path) -> Option<Stamp> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
-/// Read and decode `path`, or say why not, naming the file.
-fn decode(path: &Path) -> Result<imagecodec::Image, String> {
+/// Read and decode `path` -- scaled to fit `fit` when there is one -- or say
+/// why not, naming the file.
+fn decode(path: &Path, fit: Option<(u32, u32)>) -> Result<imagecodec::Image, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // The default limit is the compositor's own buffer ceiling, so a picture
     // refused here is one the compositor would have refused anyway -- and
     // refusing it from the header costs a header rather than a decompressed
     // framebuffer.
-    imagecodec::decode(&bytes, imagecodec::Limits::default())
-        .map_err(|e| format!("{}: {e}", path.display()))
+    let limits = imagecodec::Limits::default();
+    match fit {
+        Some((width, height)) => imagecodec::decode_scaled(&bytes, limits, width, height),
+        None => imagecodec::decode(&bytes, limits),
+    }
+    .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -316,7 +373,12 @@ mod tests {
     }
 
     fn job(slot: Slot, id: u64, path: PathBuf) -> Job {
-        Job { slot, id, path }
+        Job {
+            slot,
+            id,
+            path,
+            fit: None,
+        }
     }
 
     /// **A picture is decoded off the caller's thread, and the loop is woken
@@ -343,6 +405,41 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    /// **A fitted request comes back within its fit, proportions kept; each
+    /// photo frame is a slot of its own; and a picture decoded small is not
+    /// handed to a request for it at its own size**, nor the other way,
+    /// though the two ask for one file in a row.
+    #[test]
+    fn a_fitted_picture_fits_and_is_never_shared_with_a_full_one() {
+        let full_size = decode(&fixture("rgb8"), None).expect("the fixture decodes");
+        let fit = ((full_size.width / 2).max(1), (full_size.height / 3).max(1));
+        let answers = run_over(vec![
+            Job {
+                fit: Some(fit),
+                ..job(Slot::Frame(4), 1, fixture("rgb8"))
+            },
+            job(Slot::Wallpaper, 2, fixture("rgb8")),
+            Job {
+                fit: Some(fit),
+                ..job(Slot::Frame(5), 3, fixture("rgb8"))
+            },
+        ]);
+        let size = |id: u64| {
+            let answer = answers.iter().find(|d| d.job.id == id).expect("answered");
+            let image = answer.result.as_ref().expect("decoded");
+            (image.width, image.height)
+        };
+        let (w, h) = size(1);
+        assert!(w <= fit.0 && h <= fit.1, "{w}x{h} over {fit:?}");
+        assert!(w == fit.0 || h == fit.1, "{w}x{h} smaller than it need be");
+        assert_eq!(size(3), (w, h), "two frames, two slots, both decoded");
+        assert_eq!(
+            size(2),
+            (full_size.width, full_size.height),
+            "the wallpaper was handed the frame's small picture"
+        );
     }
 
     /// A file that is not there comes back as a reason naming it.
@@ -424,9 +521,9 @@ mod tests {
         let path = dir.path("wall.png");
         std::fs::copy(fixture("rgb8"), &path).expect("copy the fixture");
         let mut recent = Recent::default();
-        let before = recent.decode(&path).expect("decodes");
+        let before = recent.decode(&path, None).expect("decodes");
         assert!(
-            Arc::ptr_eq(&before, &recent.decode(&path).expect("decodes")),
+            Arc::ptr_eq(&before, &recent.decode(&path, None).expect("decodes")),
             "an unchanged file was decoded again"
         );
 
@@ -434,7 +531,7 @@ mod tests {
         // saving in place would: new contents, new length, new time.
         let edited = std::fs::read(fixture("gray8")).expect("read the fixture");
         std::fs::write(&path, edited).expect("replace the fixture");
-        let after = recent.decode(&path).expect("decodes");
+        let after = recent.decode(&path, None).expect("decodes");
         assert!(!Arc::ptr_eq(&before, &after), "the edit was not noticed");
         assert_ne!(
             *before, *after,
@@ -447,10 +544,10 @@ mod tests {
     #[test]
     fn a_forgotten_picture_is_decoded_afresh() {
         let mut recent = Recent::default();
-        let first = recent.decode(&fixture("rgb8")).expect("decodes");
+        let first = recent.decode(&fixture("rgb8"), None).expect("decodes");
         recent.forget();
         assert!(recent.held.is_none());
-        let second = recent.decode(&fixture("rgb8")).expect("decodes");
+        let second = recent.decode(&fixture("rgb8"), None).expect("decodes");
         assert!(!Arc::ptr_eq(&first, &second));
         assert_eq!(*first, *second);
     }
@@ -460,10 +557,10 @@ mod tests {
     #[test]
     fn a_failure_is_not_held() {
         let mut recent = Recent::default();
-        recent.decode(&fixture("rgb8")).expect("decodes");
+        recent.decode(&fixture("rgb8"), None).expect("decodes");
         assert!(recent.held.is_some());
         let missing = PathBuf::from("/definitely/not/here.png");
-        assert!(recent.decode(&missing).is_err());
+        assert!(recent.decode(&missing, None).is_err());
         assert!(
             recent.held.is_none(),
             "a picture was held across a decode that replaced it"

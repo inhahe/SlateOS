@@ -753,10 +753,10 @@ const POWER_MENU_TEXT_INSET: f32 = 14.0;
 /// line and the chooser is a list with a sidebar, a path bar and four columns.
 /// Sized so that the name column still has room after the sidebar takes its
 /// fixed share, rather than by matching anything else on the desktop.
-const RUN_BROWSER_WIDTH: f32 = 640.0;
+const CHOOSER_WIDTH: f32 = 640.0;
 /// How tall the chooser is drawn. Enough rows to scan a `/bin` without
 /// scrolling being the only way to see anything.
-const RUN_BROWSER_HEIGHT: f32 = 440.0;
+const CHOOSER_HEIGHT: f32 = 440.0;
 
 // --- Drop shadows ----------------------------------------------------------
 
@@ -2457,22 +2457,22 @@ pub struct DesktopShell {
     /// box itself: a chooser holds a directory listing, and a shell that kept
     /// one for the lifetime of the session would keep a listing of a directory
     /// nobody is looking at, going staler by the hour.
-    run_browser: Option<guitk::dialog::FileDialog>,
+    chooser: Option<guitk::dialog::FileDialog>,
     /// The directory the chooser has actually been given a listing for.
     ///
     /// The shell reads no files — that is what keeps every test in this module
     /// runnable with no filesystem, and it is the same split
     /// [`wallpaper::WallpaperManager`] uses, where the shell names a picture
     /// and the session reads it. So the chooser's listing arrives from outside:
-    /// [`run_browser_wants`](Self::run_browser_wants) reports a directory whose
+    /// [`chooser_wants`](Self::chooser_wants) reports a directory whose
     /// listing has not been delivered yet, and
-    /// [`set_run_browser_entries`](Self::set_run_browser_entries) delivers it.
+    /// [`set_chooser_entries`](Self::set_chooser_entries) delivers it.
     ///
     /// Held as "what was last delivered" and compared against the chooser's
     /// current directory, rather than as a "needs listing" flag that navigation
     /// would have to remember to set. A flag can be forgotten by a new
     /// navigation path; a comparison cannot go stale.
-    run_browser_listed: Option<PathBuf>,
+    chooser_listed: Option<PathBuf>,
     /// The window rules, and the state of the ones that have fired.
     ///
     /// Consulted from exactly one place —
@@ -2835,8 +2835,8 @@ impl DesktopShell {
             // centred on the screen it is opened on instead, in
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
-            run_browser: None,
-            run_browser_listed: None,
+            chooser: None,
+            chooser_listed: None,
             rules: window_rules::WindowRulesManager::new(),
             hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
@@ -5088,8 +5088,8 @@ impl DesktopShell {
         // retype, while dismissing the chooser costs them the navigation that
         // got them to the directory they are looking at. Escape is the way out,
         // and the Cancel button is the visible one.
-        if self.run_browser.is_some() {
-            let (x, y, width, height) = self.run_browser_rect();
+        if self.chooser.is_some() {
+            let (x, y, width, height) = self.chooser_rect();
             // The chooser lays itself out from its own origin — see
             // `FileDialog::frame` — so the event has to arrive in its space or
             // the clicks land somewhere other than the ink.
@@ -5098,9 +5098,9 @@ impl DesktopShell {
                 y: event.y - y,
                 kind: event.kind.clone(),
             };
-            if let Some(dialog) = self.run_browser.as_mut() {
+            if let Some(dialog) = self.chooser.as_mut() {
                 let action = dialog.handle_mouse(&local, width, height);
-                self.apply_run_browser_action(action);
+                self.apply_chooser_action(action);
             }
             return ShellAction::Consumed;
         }
@@ -7091,8 +7091,8 @@ impl DesktopShell {
         // Note that Super+R is *not* special-cased through here the way it is in
         // `key_on_run_dialog`: while a chooser is up, the box the chord toggles
         // is not the surface the user is looking at.
-        if self.run_browser.is_some() {
-            return self.key_on_run_browser(key);
+        if self.chooser.is_some() {
+            return self.key_on_chooser(key);
         }
 
         if self.run_dialog.is_visible() {
@@ -7888,7 +7888,7 @@ impl DesktopShell {
     /// executed something.
     ///
     /// [`Browse`](run_dialog::RunDialogEvent::Browse) puts the file chooser up
-    /// — see [`run_browser`](Self::run_browser). It asks for a *picker*, whose
+    /// — see [`chooser`](Self::chooser). It asks for a *picker*, whose
     /// answer goes back into the command box; starting the file explorer
     /// instead would be the tempting substitute and is the wrong one, because
     /// the user would get a window they did not ask for and an empty command
@@ -7903,7 +7903,7 @@ impl DesktopShell {
         for event in self.run_dialog.drain_events() {
             match event {
                 run_dialog::RunDialogEvent::Execute(request) => launches.push(request),
-                run_dialog::RunDialogEvent::Browse => self.open_run_browser(),
+                run_dialog::RunDialogEvent::Browse => self.open_run_box_chooser(),
                 // No answer needed — the dialog has already hidden itself by the
                 // time it reports these — but they must still be drained, or the
                 // buffer grows by one on every dismissal. That is the whole
@@ -7923,45 +7923,45 @@ impl DesktopShell {
     ///
     /// The chooser arrives with no entries in it. It cannot arrive with any:
     /// listing a directory is a filesystem read and this module performs none.
-    /// The first [`run_browser_wants`](Self::run_browser_wants) after this
+    /// The first [`chooser_wants`](Self::chooser_wants) after this
     /// reports the directory, and the host answers. A host that never answers
     /// gets an empty chooser rather than a wrong one, which is the right way
     /// round for a shell whose tests all run with no filesystem at all.
-    fn open_run_browser(&mut self) {
+    fn open_run_box_chooser(&mut self) {
         let start = self.run_dialog.browse_start();
-        self.run_browser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
-        self.run_browser_listed = None;
+        self.chooser = Some(guitk::dialog::FileDialog::open().with_initial_path(&start));
+        self.chooser_listed = None;
     }
 
     /// Take the chooser down, whether it was cancelled or answered.
-    fn close_run_browser(&mut self) {
-        self.run_browser = None;
-        self.run_browser_listed = None;
+    fn close_chooser(&mut self) {
+        self.chooser = None;
+        self.chooser_listed = None;
     }
 
     /// Whether the Run box's file chooser is on screen.
     #[must_use]
-    pub fn run_browser_open(&self) -> bool {
-        self.run_browser.is_some()
+    pub fn chooser_open(&self) -> bool {
+        self.chooser.is_some()
     }
 
     /// The directory the chooser is showing and has not been given a listing
     /// for, if there is one.
     ///
     /// The read half of the split described on
-    /// `run_browser_listed`: a host that draws this
+    /// `chooser_listed`: a host that draws this
     /// shell should call this before each paint and answer any `Some` with
-    /// [`set_run_browser_entries`](Self::set_run_browser_entries), the way it
+    /// [`set_chooser_entries`](Self::set_chooser_entries), the way it
     /// already answers [`WallpaperManager::current_image_path`] with pixels.
     ///
     /// [`WallpaperManager::current_image_path`]: wallpaper::WallpaperManager::current_image_path
     #[must_use]
-    pub fn run_browser_wants(&self) -> Option<&Path> {
-        let path = self.run_browser.as_ref()?.current_path();
-        (self.run_browser_listed.as_deref() != Some(path)).then_some(path)
+    pub fn chooser_wants(&self) -> Option<&Path> {
+        let path = self.chooser.as_ref()?.current_path();
+        (self.chooser_listed.as_deref() != Some(path)).then_some(path)
     }
 
-    /// Answer [`run_browser_wants`](Self::run_browser_wants) with a listing.
+    /// Answer [`chooser_wants`](Self::chooser_wants) with a listing.
     ///
     /// The entries are recorded as belonging to whatever directory the chooser
     /// is showing *now*, not to whatever it was showing when they were read.
@@ -7972,15 +7972,15 @@ impl DesktopShell {
     ///
     /// Silently ignored when no chooser is up. A listing that arrives after the
     /// user cancelled is not an error; it is a read that was already in flight.
-    pub fn set_run_browser_entries(&mut self, entries: Vec<guitk::dialog::DirEntry>) {
-        let Some(dialog) = self.run_browser.as_mut() else {
+    pub fn set_chooser_entries(&mut self, entries: Vec<guitk::dialog::DirEntry>) {
+        let Some(dialog) = self.chooser.as_mut() else {
             return;
         };
-        self.run_browser_listed = Some(dialog.current_path().to_path_buf());
+        self.chooser_listed = Some(dialog.current_path().to_path_buf());
         dialog.set_entries(entries);
     }
 
-    /// Answer [`run_browser_wants`](Self::run_browser_wants) with "there is no
+    /// Answer [`chooser_wants`](Self::chooser_wants) with "there is no
     /// folder there".
     ///
     /// The chooser goes back to where it was (`FileDialog::refuse_navigation`)
@@ -7988,14 +7988,14 @@ impl DesktopShell {
     /// it stops wanting anything. The folder it opened on has nowhere to go
     /// back to, and is shown empty, once, rather than asked about again on
     /// every paint.
-    pub fn refuse_run_browser_path(&mut self) {
-        let Some(dialog) = self.run_browser.as_mut() else {
+    pub fn refuse_chooser_path(&mut self) {
+        let Some(dialog) = self.chooser.as_mut() else {
             return;
         };
         let refused = dialog.current_path().to_path_buf();
         dialog.refuse_navigation();
         if dialog.current_path() == refused {
-            self.run_browser_listed = Some(refused);
+            self.chooser_listed = Some(refused);
             dialog.set_entries(Vec::new());
         }
     }
@@ -8004,15 +8004,15 @@ impl DesktopShell {
     /// asked since the last call.
     ///
     /// The filesystem half is the session's, as the listing's is; answered
-    /// with [`set_run_browser_completions`](Self::set_run_browser_completions).
-    pub fn take_run_browser_completion_request(&mut self) -> Option<String> {
-        self.run_browser.as_mut()?.take_completion_request()
+    /// with [`set_chooser_completions`](Self::set_chooser_completions).
+    pub fn take_chooser_completion_request(&mut self) -> Option<String> {
+        self.chooser.as_mut()?.take_completion_request()
     }
 
-    /// Answer [`take_run_browser_completion_request`](Self::take_run_browser_completion_request)
+    /// Answer [`take_chooser_completion_request`](Self::take_chooser_completion_request)
     /// with the names in that folder. Ignored when no chooser is up.
-    pub fn set_run_browser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
-        if let Some(dialog) = self.run_browser.as_mut() {
+    pub fn set_chooser_completions(&mut self, items: Vec<guitk::pathbar::CompletionItem>) {
+        if let Some(dialog) = self.chooser.as_mut() {
             dialog.set_completions(items);
         }
     }
@@ -8030,28 +8030,28 @@ impl DesktopShell {
         clippy::cast_precision_loss,
         reason = "screen dimensions are far inside f32's exact-integer range"
     )]
-    fn run_browser_rect(&self) -> (f32, f32, f32, f32) {
+    fn chooser_rect(&self) -> (f32, f32, f32, f32) {
         let screen_w = self.screen_width as f32;
         let screen_h = self.screen_height as f32;
         // Clamped down to the screen, then the origin clamped up to zero: a
         // chooser wider than the display would otherwise be centred by placing
         // its left edge off the left side, where the sidebar and the `^` button
         // are the half that gets cut.
-        let width = RUN_BROWSER_WIDTH.min(screen_w);
-        let height = RUN_BROWSER_HEIGHT.min(screen_h);
+        let width = CHOOSER_WIDTH.min(screen_w);
+        let height = CHOOSER_HEIGHT.min(screen_h);
         let x = ((screen_w - width) / 2.0).max(0.0);
         let y = ((screen_h - height) / 2.0).max(0.0);
         (x, y, width, height)
     }
 
     /// One press while the chooser is up.
-    fn key_on_run_browser(&mut self, key: &KeyEvent) -> HotkeyOutcome {
-        let (_, _, _, height) = self.run_browser_rect();
-        let action = match self.run_browser.as_mut() {
+    fn key_on_chooser(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let (_, _, _, height) = self.chooser_rect();
+        let action = match self.chooser.as_mut() {
             Some(dialog) => dialog.handle_event(key, height),
             None => return HotkeyOutcome::default(),
         };
-        self.apply_run_browser_action(action);
+        self.apply_chooser_action(action);
         // Consumed unconditionally. The chooser is modal, so a press it had no
         // meaning for is still not the desktop's — and certainly not the Run
         // box's, which is directly underneath and would otherwise be typed into
@@ -8060,9 +8060,9 @@ impl DesktopShell {
     }
 
     /// What the chooser did in answer to an event.
-    fn apply_run_browser_action(&mut self, action: guitk::dialog::DialogAction) {
+    fn apply_chooser_action(&mut self, action: guitk::dialog::DialogAction) {
         match action {
-            // A navigation needs nothing done here: `run_browser_wants`
+            // A navigation needs nothing done here: `chooser_wants`
             // compares the chooser's directory against the last one delivered,
             // so the new directory is already reported as wanting a listing.
             guitk::dialog::DialogAction::None | guitk::dialog::DialogAction::NavigatedTo(_) => {}
@@ -8072,11 +8072,11 @@ impl DesktopShell {
             // `RunDialog::set_command_path`.
             guitk::dialog::DialogAction::Selected(path) => {
                 self.run_dialog.set_command_path(&path);
-                self.close_run_browser();
+                self.close_chooser();
             }
             // The box is left exactly as it was, text and all. A Browse that
             // cleared what the user had typed is a Browse nobody uses twice.
-            guitk::dialog::DialogAction::Cancelled => self.close_run_browser(),
+            guitk::dialog::DialogAction::Cancelled => self.close_chooser(),
         }
     }
 
@@ -13513,7 +13513,7 @@ impl DesktopShell {
         // `Browse`, so draining first and closing second is what guarantees a
         // Browse the user asked for a moment before the box was dismissed does
         // not leave a chooser standing over a box that is no longer there.
-        self.close_run_browser();
+        self.close_chooser();
         any
     }
 
@@ -13663,14 +13663,14 @@ impl DesktopShell {
     /// `Vec`, which is a fact nothing outside this file could see.
     ///
     /// Translated rather than laid out in place: [`FileDialog::frame`] draws
-    /// from its own origin, and `run_browser_rect` is the one place that says
+    /// from its own origin, and `chooser_rect` is the one place that says
     /// where that origin is on screen.
     ///
     /// [`FileDialog::frame`]: guitk::dialog::FileDialog::frame
     #[must_use]
-    pub fn render_run_browser(&self) -> Option<RenderTree> {
-        let dialog = self.run_browser.as_ref()?;
-        let (x, y, width, height) = self.run_browser_rect();
+    pub fn render_chooser(&self) -> Option<RenderTree> {
+        let dialog = self.chooser.as_ref()?;
+        let (x, y, width, height) = self.chooser_rect();
         let mut tree = RenderTree::new();
         tree.translate(x, y);
         tree.commands.extend(dialog.render(
@@ -20345,15 +20345,15 @@ mod run_box_wiring_tests {
     fn browse_showing(s: &mut DesktopShell, name: std::ffi::OsString) {
         let (x, y) = button_centre(s, "Browse...");
         assert_eq!(press(s, x, y), ShellAction::Consumed);
-        assert!(s.run_browser_open(), "Browse put no chooser up");
+        assert!(s.chooser_open(), "Browse put no chooser up");
         let wanted = s
-            .run_browser_wants()
+            .chooser_wants()
             .expect("the chooser asked for no listing")
             .to_path_buf();
         assert_eq!(wanted, PathBuf::from("/"), "an empty box browses the root");
-        s.set_run_browser_entries(listing(name));
+        s.set_chooser_entries(listing(name));
         assert!(
-            s.run_browser_wants().is_none(),
+            s.chooser_wants().is_none(),
             "the chooser asked again for a listing it had just been given"
         );
     }
@@ -20361,7 +20361,7 @@ mod run_box_wiring_tests {
     /// The button used to do nothing at all: it reported an intent the shell
     /// dropped on the floor, because a chooser needs directory entries and this
     /// module reads no files. It still reads no files — the listing arrives
-    /// through `set_run_browser_entries` — but the chooser is now real. See
+    /// through `set_chooser_entries` — but the chooser is now real. See
     /// known-issues.md → `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
     #[test]
     fn the_browse_button_puts_a_chooser_up_and_leaves_the_box_under_it() {
@@ -20374,7 +20374,7 @@ mod run_box_wiring_tests {
             "raising a chooser threw the typed command away"
         );
         assert!(
-            s.render_run_browser().is_some(),
+            s.render_chooser().is_some(),
             "a chooser that is up draws nothing"
         );
     }
@@ -20398,10 +20398,7 @@ mod run_box_wiring_tests {
             ShellAction::Consumed,
             "a press past the chooser fell through to whatever is underneath"
         );
-        assert!(
-            s.run_browser_open(),
-            "a press past the chooser took it down"
-        );
+        assert!(s.chooser_open(), "a press past the chooser took it down");
         assert!(
             s.run_dialog.is_visible(),
             "a press past the chooser took the box down with it"
@@ -20428,10 +20425,7 @@ mod run_box_wiring_tests {
                 .is_empty(),
             "choosing a file in the chooser started it, instead of naming it"
         );
-        assert!(
-            !s.run_browser_open(),
-            "the chooser stayed up after choosing"
-        );
+        assert!(!s.chooser_open(), "the chooser stayed up after choosing");
 
         let mut expected = std::ffi::OsString::from("/");
         expected.push(&name);
@@ -20496,7 +20490,7 @@ mod run_box_wiring_tests {
             s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE))
                 .consumed
         );
-        assert!(!s.run_browser_open(), "Escape left the chooser up");
+        assert!(!s.chooser_open(), "Escape left the chooser up");
         assert!(
             s.run_dialog.is_visible(),
             "Escape closed the box as well as the chooser"
@@ -20522,7 +20516,7 @@ mod run_box_wiring_tests {
         browse_showing(&mut s, std::ffi::OsString::from("hello"));
 
         assert!(s.handle_hotkey(&typed('x')).consumed);
-        assert!(s.run_browser_open(), "a letter dismissed the chooser");
+        assert!(s.chooser_open(), "a letter dismissed the chooser");
         let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
 
         let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
@@ -20544,7 +20538,7 @@ mod run_box_wiring_tests {
         let (x, y) = button_centre(&s, "Browse...");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
         assert_eq!(
-            s.run_browser_wants(),
+            s.chooser_wants(),
             Some(Path::new("/usr/bin")),
             "the chooser opened somewhere other than where the command points"
         );
@@ -20564,15 +20558,12 @@ mod run_box_wiring_tests {
         for ch in "no".chars() {
             assert!(s.handle_hotkey(&typed(ch)).consumed);
         }
-        assert_eq!(
-            s.take_run_browser_completion_request().as_deref(),
-            Some("/")
-        );
-        s.set_run_browser_completions(vec![guitk::pathbar::CompletionItem {
+        assert_eq!(s.take_chooser_completion_request().as_deref(), Some("/"));
+        s.set_chooser_completions(vec![guitk::pathbar::CompletionItem {
             name: "notes".to_string(),
             is_directory: true,
         }]);
-        let dialog = s.run_browser.as_ref().expect("the chooser is up");
+        let dialog = s.chooser.as_ref().expect("the chooser is up");
         assert_eq!(
             dialog.address().completions().len(),
             1,
@@ -20583,14 +20574,14 @@ mod run_box_wiring_tests {
             s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE))
                 .consumed
         );
-        assert_eq!(s.run_browser_wants(), Some(Path::new("/no")));
-        s.refuse_run_browser_path();
+        assert_eq!(s.chooser_wants(), Some(Path::new("/no")));
+        s.refuse_chooser_path();
         assert_eq!(
-            s.run_browser_wants(),
+            s.chooser_wants(),
             None,
             "a refused folder is asked about again"
         );
-        let dialog = s.run_browser.as_ref().expect("refusing closed the chooser");
+        let dialog = s.chooser.as_ref().expect("refusing closed the chooser");
         assert_eq!(dialog.current_path(), Path::new("/"));
         assert_eq!(dialog.address().typed_text(), Some("/no"));
         assert_eq!(
@@ -20610,10 +20601,10 @@ mod run_box_wiring_tests {
         let _ = type_command(&mut s, "/nowhere/term");
         let (x, y) = button_centre(&s, "Browse...");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
-        assert_eq!(s.run_browser_wants(), Some(Path::new("/nowhere")));
-        s.refuse_run_browser_path();
-        assert_eq!(s.run_browser_wants(), None);
-        assert!(s.run_browser_open());
+        assert_eq!(s.chooser_wants(), Some(Path::new("/nowhere")));
+        s.refuse_chooser_path();
+        assert_eq!(s.chooser_wants(), None);
+        assert!(s.chooser_open());
     }
 
     /// Dismissing the box takes the chooser with it. A chooser standing over a
@@ -20625,7 +20616,7 @@ mod run_box_wiring_tests {
         s.toggle_run_dialog();
         browse_showing(&mut s, std::ffi::OsString::from("hello"));
         s.dismiss_popups();
-        assert!(!s.run_browser_open(), "the chooser outlived the box");
+        assert!(!s.chooser_open(), "the chooser outlived the box");
         assert!(!s.run_dialog.is_visible());
     }
 

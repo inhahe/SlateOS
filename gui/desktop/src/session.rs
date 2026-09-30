@@ -2137,7 +2137,7 @@ impl<T: Transport> ShellSession<T> {
     /// showing, if it is showing one it has not been given.
     ///
     /// This is the filesystem half of the split described on
-    /// `DesktopShell::run_browser_listed`: the shell holds the chooser and
+    /// `DesktopShell::chooser_listed`: the shell holds the chooser and
     /// knows what directory it is in, and the session does the reading. Keeping
     /// the read out here is what lets the shell's several thousand tests run
     /// with no filesystem at all, and is the same arrangement the wallpaper
@@ -2157,24 +2157,20 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// The address bar's completions are answered here too, from the same
     /// disk, for the same reason.
-    fn refresh_run_browser(&mut self) {
-        if let Some(prefix) = self.shell.take_run_browser_completion_request() {
+    fn refresh_chooser(&mut self) {
+        if let Some(prefix) = self.shell.take_chooser_completion_request() {
             self.shell
-                .set_run_browser_completions(guitk::dialog::path_completions(&prefix));
+                .set_chooser_completions(guitk::dialog::path_completions(&prefix));
             self.dirty = true;
         }
-        let Some(path) = self
-            .shell
-            .run_browser_wants()
-            .map(std::path::Path::to_path_buf)
-        else {
+        let Some(path) = self.shell.chooser_wants().map(std::path::Path::to_path_buf) else {
             return;
         };
         if path.is_dir() {
             let entries = guitk::dialog::list_directory(&path);
-            self.shell.set_run_browser_entries(entries);
+            self.shell.set_chooser_entries(entries);
         } else {
-            self.shell.refuse_run_browser_path();
+            self.shell.refuse_chooser_path();
         }
         // The listing changed what the chooser draws, and nothing else in this
         // paint knows that: the event that caused the navigation was handled
@@ -2193,7 +2189,7 @@ impl<T: Transport> ShellSession<T> {
         // the wallpaper's pixels. The shell reads no files, so a chooser it has
         // put up is showing an empty directory until somebody lists it, and
         // that somebody is here.
-        self.refresh_run_browser();
+        self.refresh_chooser();
         let bar = self.shell.render_taskbar();
         self.send_frame(self.panel, &bar)?;
 
@@ -2275,7 +2271,7 @@ impl<T: Transport> ShellSession<T> {
             // input routing agrees — `handle_mouse_inner` and
             // `handle_hotkey_inner` both offer the chooser every event
             // before the box sees one.
-            self.shell.render_run_browser(),
+            self.shell.render_chooser(),
             // Over everything, the Run box and its chooser included: a shut
             // down waiting on the programs still open, which owns every key
             // and press while it is up.

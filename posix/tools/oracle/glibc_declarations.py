@@ -73,7 +73,8 @@ json.dump(out, open(sys.argv[4], "w"))
 '''.replace("LIBCLANG", repr(LIBCLANG))
 
 
-# Run in WSL: argv = types file (JSON: C type -> header), flags (JSON), output.
+# Run in WSL: argv = types file (JSON: C type -> header), flags (JSON: C type ->
+# the flags its layout is read with), output.
 LAYOUT_READER = r'''
 import json, sys
 import clang.cindex as ci
@@ -82,16 +83,23 @@ types = json.load(open(sys.argv[1]))
 flags = json.load(open(sys.argv[2]))
 idx = ci.Index.create()
 out = {}
+def named_fields(t):
+    # An anonymous struct's or union's members are the outer type's, as C
+    # names them (Dl_serinfo's dls_serpath); the member itself has no name.
+    for f in t.get_fields():
+        if f.is_anonymous():
+            yield from named_fields(f.type.get_canonical())
+        else:
+            yield f.spelling
 for cty, h in types.items():
     src = "#include <%s>\n%s *slateos_probe;\n" % (h, cty)
-    tu = idx.parse("t.c", args=["-x", "c", *flags], unsaved_files=[("t.c", src)])
+    tu = idx.parse("t.c", args=["-x", "c", *flags[cty]], unsaved_files=[("t.c", src)])
     for c in tu.cursor.get_children():
         if c.kind == ci.CursorKind.VAR_DECL and c.spelling == "slateos_probe":
             t = c.type.get_pointee().get_canonical()
             if t.get_size() > 0:
                 out[cty] = {"size": t.get_size(),
-                            "fields": [[f.spelling, t.get_offset(f.spelling) // 8]
-                                       for f in t.get_fields()]}
+                            "fields": [[f, t.get_offset(f) // 8] for f in named_fields(t)]}
 json.dump(out, open(sys.argv[3], "w"))
 '''.replace("LIBCLANG", repr(LIBCLANG))
 
@@ -132,8 +140,8 @@ def main() -> None:
         ver = run("ldd --version | head -1").stdout.strip()
         (d / "types.json").write_text(json.dumps(overlay.OVERLAY_TYPES), encoding="utf-8",
                                       newline="\n")
-        (d / "flags.json").write_text(json.dumps(overlay.LAYOUT_FLAGS), encoding="utf-8",
-                                      newline="\n")
+        flags = {cty: overlay.layout_flags(h) for cty, h in overlay.OVERLAY_TYPES.items()}
+        (d / "flags.json").write_text(json.dumps(flags), encoding="utf-8", newline="\n")
         (d / "layouts.py").write_text(LAYOUT_READER, encoding="utf-8", newline="\n")
         r = run(f"{PYTHON} {wsl_path(d / 'layouts.py')} {wsl_path(d / 'types.json')} "
                 f"{wsl_path(d / 'flags.json')} {wsl_path(d / 'layouts.json')}")

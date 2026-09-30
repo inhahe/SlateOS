@@ -199,6 +199,11 @@ pub struct PerThread {
     /// `ps`: one a function, as C requires, and the thread's own
     /// ([`crate::wchar::internal`]).
     pub mbstate: [crate::wchar::MbstateT; crate::wchar::internal::COUNT],
+
+    /// The thread's `dlerror` state ([`crate::dlfcn`]): the message the last
+    /// failing `dl*` call left, and the one the last `dlerror` returned,
+    /// which the caller may read until the next. Freed as the thread exits.
+    pub dlerror: crate::dlfcn::DlErrorSlot,
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -265,6 +270,7 @@ impl PerThread {
         strsignal: [0; 32],
         seed48: [0; 3],
         mbstate: [crate::wchar::MbstateT::new(); crate::wchar::internal::COUNT],
+        dlerror: crate::dlfcn::DlErrorSlot::ZERO,
     };
 }
 

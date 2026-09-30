@@ -42936,6 +42936,67 @@ it is replacements.
 
 **Where:** `posix/src/argz.rs` (`argz_replace`), its test.
 
+## 1146. RFC 2292's option builders follow the RFC where glibc's part from it, and the multicast source filters are refused
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** two groups of `<netinet/in.h>` calls needed a choice. The
+older IPv6 option builders (RFC 2292, 1998) build a header of options for
+a packet; glibc's builds a valid header but pads it more than the RFC's
+own examples do, reserves too little room for one call's option, and
+reports the end of a header as an error. This library does what the RFC
+says. The multicast source filters ("only accept this group's packets from
+these senders") have nothing under them here; this library says so rather
+than accept the filter and apply nothing.
+
+| Call | Here | glibc 2.39 | Why |
+|---|---|---|---|
+| `inet6_option_append`, `inet6_option_alloc` | the least padding that puts an option on `xn + y`; the header's tail padding moved to the new end | rounds up to a multiple of `x`, then adds `y`; keeps each tail padding | RFC 2292 section 6.3.7's example puts an `8n + 2` option straight after the two header bytes, which glibc's would pad 8 more; both are valid headers |
+| `inet6_option_alloc(cmsg, datalen, ...)` | room for `datalen` data bytes and the type and length bytes | `datalen` bytes | the RFC: `datalen` "is the value of the option data length byte"; a caller following it overruns glibc's reservation |
+| `inet6_option_next` at the end | -1, `*tptrp` NULL | -1, `*tptrp` past the last option | the RFC: NULL means no more; not NULL means an error |
+| `getsourcefilter` and its three kin | -1, `ENOPROTOOPT`, after the descriptor and address checks | the kernel's answer | the sockets keep no source filters, and `setsockopt` accepts options it does not know without acting on them; §1144's rule |
+
+RFC 3542's builders (`inet6_opt_*`, `inet6_rth_*`) are glibc's exactly;
+there the two agree.
+
+**Where:** `posix/src/inet6.rs`.
+
+## 1147. `<dlfcn.h>` answers as glibc's does in a static program, but for `dladdr`, which names the program, and `RTLD_NOLOAD`, which is not an error
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** every program here is linked statically -- nothing is ever
+loaded into it -- so the dynamic linker's calls (`dlopen`, `dladdr` and the
+rest) describe one object, the program, and this library answers them as
+glibc does in a statically linked program, with two exceptions. For an
+address inside the program, `dladdr` names the program instead of saying "no
+object here": that is what glibc says for a dynamically linked program and
+what POSIX describes, static glibc saying nothing only because it keeps no
+address range for its program. And `dlopen` of a file with `RTLD_NOLOAD`
+("only if it is already loaded") returns NULL with no error message, where
+static glibc goes looking for the file and complains when it is missing:
+nothing here looks for files.
+
+| Call | Here | glibc 2.39, statically linked | Why |
+|---|---|---|---|
+| `dladdr(addr)`, `addr` in the program | 1: argv[0], the ELF header, no symbol | 0 | POSIX: the executable is an object `dladdr` describes; glibc's dynamic answer is this one; `backtrace_symbols` and error reporters can then name the program |
+| `dlopen(file, RTLD_NOLOAD)` | NULL, no message | NULL, with `file: cannot open shared object file: No such file or directory` for a missing file and no message for one found and not loaded | nothing is searched here; "not loaded" is the answer asked for, and glibc's own for a file it finds |
+| `dlopen(file)` | NULL, `file: cannot open shared object file: dynamic loading is not supported` | loads it, or says why not | there is no dynamic loader |
+| `dlinfo(RTLD_DI_SERINFOSIZE)` | an empty search path: 16 bytes, no directories | glibc's four default directories | nothing is searched |
+| `dl_iterate_phdr` | one call; `dlpi_adds` 1 | two, the vDSO's too; `dlpi_adds` 2 | there is no vDSO |
+
+Everything else -- `dlopen`'s handles and mode checks, the messages,
+`RTLD_NEXT`, `dlclose`, `dlinfo`'s requests, `dlmopen`'s one namespace,
+`_dl_find_object`'s segment -- is glibc's static answer exactly, replayed by
+`posix/src/dlfcn.rs`'s tests from `posix/tools/oracle/dlfcn_harness.py`'s
+record of it.
+
+**Where:** `posix/src/dlfcn.rs`.
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

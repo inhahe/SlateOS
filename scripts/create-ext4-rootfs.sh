@@ -2624,7 +2624,8 @@ done
 #
 # The same loop answers the staleness question, for both families, because they
 # are two readings of one file: "is the ELF there, and is it behind its inputs".
-# A fixture's inputs are its own directory — main.c, any headers beside it, and
+# A fixture's inputs are its own directory — main.c (main.cpp for the C++ one),
+# any headers beside it, and
 # build.py, which carries the compile and link flags and *is* the whole source
 # for a fastpy fixture — plus the libc.a it statically links. A change anywhere
 # in there means rebuild, so it is enough to find any one of them newer than the
@@ -2716,7 +2717,8 @@ for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy
     if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$_elf" ]; then
         _behind="libc.a"                # links a libc that is no longer in the tree
     fi
-    for _src in "$_dir"/*.c "$_dir"/*.h "$_dir"/build.py; do
+    # *.cpp: the C++ fixture's source (ctest-cxx-throw), as *.c is the C ones'.
+    for _src in "$_dir"/*.c "$_dir"/*.cpp "$_dir"/*.h "$_dir"/build.py; do
         [ -e "$_src" ] || continue      # unmatched glob expands to itself
         [ "$_src" -nt "$_elf" ] || continue
         _behind="${_behind:+$_behind, }$(basename "$_src")"

@@ -158,8 +158,10 @@
 //!   `get_phys_pages`/`get_avphys_pages`, `futimesat`, `tmpnam_r`,
 //!   `scandirat`, `get_current_dir_name`
 //! - **Device Numbers**: `gnu_dev_major`/`gnu_dev_minor`/`gnu_dev_makedev`
-//! - **Dynamic Linking** (stubs): `dlopen`, `dlsym`, `dlclose`, `dlerror`,
-//!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
+//! - **Dynamic Linking** (the program the one object, as in a static glibc
+//!   program): `dlopen`, `dlmopen`, `dlsym`, `dlvsym`, `dlclose`,
+//!   `dlerror`, `dlinfo`, `dladdr`, `dladdr1`, `dl_iterate_phdr`,
+//!   `_dl_find_object`, `__tls_get_addr`
 //! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,
 //!   `seekdir`, `telldir`, `scandir`, `alphasort`, `versionsort`,
 //!   `readdir_r`, `fdopendir` (via path tracking), `dirfd`
@@ -394,6 +396,7 @@ pub(crate) mod iconv_combining;
 pub(crate) mod iconv_prefix;
 pub(crate) mod iconv_translit;
 pub mod inet;
+pub mod inet6;
 pub mod inttypes;
 pub mod ioctl;
 pub mod langinfo;

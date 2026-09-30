@@ -25,8 +25,10 @@
 //!   `string` shall become part of the environment, so altering the string
 //!   shall change the environment." Programs that update a variable by
 //!   rewriting the buffer they `putenv`ed saw no change.
-//! * **`__environ`** was only ever a copy (it still is — see below), but it is
-//!   now kept in step on every change rather than only on a rebuild.
+//! * **`__environ`** was only ever a copy, kept in step on every change this
+//!   module made and on no other: a program that assigned `environ` left it
+//!   behind. It is now the same variable, as are `_environ` and `environ`
+//!   (see below).
 //!
 //! ## Who owns what
 //!
@@ -61,19 +63,50 @@ use crate::string;
 /// allocates a new one.
 static mut EMPTY_ENV: [*const u8; 1] = [core::ptr::null()];
 
-/// The environment list (POSIX `environ`): a NULL-terminated array of
-/// `NAME=VALUE` strings.
-///
-/// Exported under its C name. Starts at [`EMPTY_ENV`] and is pointed at the
-/// kernel-provided list by `__libc_start_main` before `main`.
+// The environment list (POSIX `environ`): a NULL-terminated array of
+// `NAME=VALUE` strings, which starts at `EMPTY_ENV` and is pointed at the
+// kernel-provided list by `__libc_start_main` before `main`.
+//
+// One variable under glibc's three names: `__environ`, and `environ` and
+// `_environ` weak aliases of it. A program may assign any of them and every
+// function here sees it. `__environ` was a second variable until 2026-09-29,
+// written only when this module changed the list, so a program that assigned
+// `environ` left `__environ` behind, and one that assigned `__environ` changed
+// nothing (known-issues.md ->
+// D-POSIX-ENVIRON-AND-THE-PROGRAM-NAMES-WERE-COPIES-NOT-ALIASES). Rust cannot
+// give one static several names, so the storage is defined in assembly, all
+// three labels on one word.
 #[cfg(target_os = "none")]
-#[unsafe(no_mangle)]
-pub static mut environ: *mut *const u8 = (&raw mut EMPTY_ENV).cast::<*const u8>();
+core::arch::global_asm!(
+    ".pushsection .data.slateos_environ,\"aw\",@progbits",
+    ".p2align 3",
+    ".globl __environ",
+    ".type __environ, @object",
+    ".size __environ, 8",
+    ".weak environ",
+    ".type environ, @object",
+    ".size environ, 8",
+    ".weak _environ",
+    ".type _environ, @object",
+    ".size _environ, 8",
+    "__environ:",
+    "environ:",
+    "_environ:",
+    ".quad {empty}",
+    ".popsection",
+    empty = sym EMPTY_ENV,
+);
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// `environ`, by glibc's own name for it; defined by the assembly above.
+    static mut __environ: *mut *const u8;
+}
 
 /// The address of `environ` on the target.
 #[cfg(target_os = "none")]
 fn environ_slot() -> *mut *mut *const u8 {
-    &raw mut environ
+    &raw mut __environ
 }
 
 // On the host, the environment is per test thread, like the rest of this
@@ -119,15 +152,11 @@ fn env_list() -> *mut *const u8 {
     unsafe { environ_slot().read() }
 }
 
-/// Point `environ` — and, on the target, the glibc alias `__environ`, which is
-/// a separate static because Rust cannot alias one symbol to another — at
-/// `list`.
+/// Point `environ` -- every name of it -- at `list`.
 fn set_env_list(list: *mut *const u8) {
-    // SAFETY: plain writes of pointer-sized slots through raw pointers.
+    // SAFETY: a plain write of a pointer-sized slot through a raw pointer.
     unsafe {
         environ_slot().write(list);
-        #[cfg(target_os = "none")]
-        core::ptr::addr_of_mut!(crate::crt::__environ).write(list);
     }
 }
 

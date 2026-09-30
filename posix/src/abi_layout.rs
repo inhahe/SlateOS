@@ -622,6 +622,38 @@ pub(crate) fn abi_asserts() -> String {
         init as "__init",
         a as "__a",
     );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlSerpath,
+        "Dl_serpath",
+        "dlfcn.h",
+        dls_name,
+        dls_flags
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlSerinfo,
+        "Dl_serinfo",
+        "dlfcn.h",
+        dls_size,
+        dls_cnt,
+        dls_serpath
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlFindObject,
+        "struct dl_find_object",
+        "dlfcn.h",
+        dlfo_flags,
+        dlfo_map_start,
+        dlfo_map_end,
+        dlfo_link_map,
+        dlfo_eh_frame,
+        reserved as "__dflo_reserved",
+    );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
     abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
@@ -964,6 +996,33 @@ pub(crate) fn abi_asserts() -> String {
         dli_fbase,
         dli_sname,
         dli_saddr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::LinkMap,
+        "struct link_map",
+        "link.h",
+        l_addr,
+        l_name,
+        l_ld,
+        l_next,
+        l_prev
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlPhdrInfo,
+        "struct dl_phdr_info",
+        "link.h",
+        dlpi_addr,
+        dlpi_name,
+        dlpi_phdr,
+        dlpi_phnum,
+        dlpi_adds,
+        dlpi_subs,
+        dlpi_tls_modid,
+        dlpi_tls_data
     );
     abi!(
         out,

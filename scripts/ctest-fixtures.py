@@ -423,9 +423,9 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     """The files whose content determines the ELF.
 
     `build.py` stands in for the compile/link flags, which live nowhere else.
-    `main.c` exists only for the C fixtures — a fastpy fixture's source is
-    embedded in its `build.py` — so it is included only when present rather
-    than reported as a missing input. Headers beside it are *globbed* rather
+    `main.c` exists only for the C fixtures (`main.cpp` for the C++ one) — a
+    fastpy fixture's source is embedded in its `build.py` — so each is
+    included only when present rather than reported as a missing input. Headers beside it are *globbed* rather
     than named: no fixture has one today, but `create-ext4-rootfs.sh` already
     counts `*.h` as an input, and a builder blind to something its own gate
     rejects would leave the first fixture to grow a header permanently red —
@@ -464,9 +464,11 @@ def _inputs(fixture: Path) -> list[tuple[str, Path, bool]]:
     in a binary — see `sha256_text`.
     """
     got: list[tuple[str, Path, bool]] = [("build.py", fixture / "build.py", True)]
-    main_c = fixture / "main.c"
-    if main_c.is_file():
-        got.append(("main.c", main_c, True))
+    # `main.cpp` for the C++ fixture (`ctest-cxx-throw`), whose source it is
+    # as `main.c` is a C fixture's.
+    for source in ("main.c", "main.cpp"):
+        if (fixture / source).is_file():
+            got.append((source, fixture / source, True))
     for header in sorted(fixture.glob("*.h")):
         got.append((header.name, header, True))
     got.append(("toolchain/sysroot/lib/libc.a", LIBC, False))

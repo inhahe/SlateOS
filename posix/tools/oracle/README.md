@@ -8,7 +8,7 @@ answers come from. Each one builds a C program with gcc under WSL -- whose C
 library is the oracle -- runs it, and records what glibc said.
 
 Everything here needs WSL with the `Ubuntu` distribution (24.04, glibc 2.39)
-and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs`) use
+and gcc in it. The sandboxed ones (`accounts`, `gai`, `hosts`, `netdb`, `ifaddrs`, `wordexp`) use
 `unshare -r`, which needs no root. Build products go in a temporary directory
 (`_wsl.workdir`); a run changes nothing in the tree but its own output.
 
@@ -84,6 +84,7 @@ are in `glibc_2.39-0ubuntu8.9.debian.tar.xz`, Launchpad's source package.
 | `nsprint_harness.py` | `posix/src/nsprint_oracle.txt` (`ns_sprintrrf` over each type's records, whole, short and running on past their data, owners under `name_ctx` and `origin`, classes and types by name and by number, and buffer sizes; `ns_sprintrr` over a message's records; and glibc's own test of its June 2026 fixes, `resolv/tst-ns_sprintrr.c`, its records printed at every size and cut at every length -- 225 lines) | `nameser.rs`, `include_str!` |
 | `getopt_harness.py` | `posix/src/getopt_oracle.txt` (`getopt`, `getopt_long` and `getopt_long_only` over 12 optstrings, two long-option tables and 78 argument lists, `POSIXLY_CORRECT` and `opterr` set and not: every call's answer, `optind`, `optopt`, `optarg` and `longindex`, argv as the parse left it, and what it wrote on `stderr` -- 2,571 parses) | `getopt.rs`, `include_str!` |
 | `strfmon_harness.py` | `posix/src/strfmon_oracle.txt` (`strfmon` in the C locale: 39 formats -- every flag, width, left and right precision, `%%`, malformed ones -- over 20 values, `-0.0`, infinities and NaNs among them, as `double`s and with `L` as `long double`s; and seven formats at every size from 0 to 15 bytes, what a call that does not fit leaves written -- 1,572 calls) | `monetary.rs`, `include_str!` |
+| `wordexp_harness.py` (sandboxed: its own `/etc/passwd`, and a `/bin/sh` that logs each command it runs and its output) | `posix/src/wordexp_oracle.txt` (`wordexp` over glibc's own `posix/wordexp-test.c` table, its 2026 fixes' `tst-wordexp-append.c` and `tst-wordexp-reuse.c`, `tst-wordexp-nocmd.c`, and the edges of each expansion: every call's answer, words and `we_offs`, `var` after it, and the commands its shell was asked -- 320 cases) | `wordexp.rs`, `include_str!` |
 | `getdate_harness.py` | `posix/src/getdate_oracle.txt` | `time.rs`, `include_str!` (`getdate`, `getdate_r`) |
 | `strptime_harness.py` | `posix/src/strptime_oracle.txt` | `time.rs`, `include_str!` (`strptime`) |
 | `timeconv_harness.py` | `posix/src/timeconv_oracle.txt` | `time.rs`, `include_str!` (`gmtime_r`, `localtime_r`, `mktime`, `timegm`, `strftime("%s")`, `asctime`, `ctime`) |

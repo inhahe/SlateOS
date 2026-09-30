@@ -177230,7 +177230,7 @@ now with this case.
 **Where:** `posix/src/signal.rs` (`tgkill`, `proc_task_exists`);
 `services/ctest-pgroup/main.c` (checks 84-88).
 
-## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp and wordexp below; memalign's, getopt's and strfmon's FIXED 2026-09-30)**
+## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp below; memalign's, getopt's, strfmon's and wordexp's FIXED 2026-09-30)**
 
 **In short:** glibc fixed a run of security bugs in 2024-2026, and the
 oracle's glibc -- Ubuntu's 2.39, `2.39-0ubuntu8.9` -- carries the fixes.
@@ -177287,6 +177287,9 @@ standard with glibc as the oracle, as the rest of this library is:
   are ignored (an append leaks the list it replaces), command substitution
   gives back its own text, and there is no arithmetic, no `${...}` form but
   the plain one, no `IFS` splitting, no pathname expansion, no `~user`.
+  **Fixed 2026-09-30**: every POSIX expansion, glibc's answers to 320 cases
+  (`posix/src/wordexp_oracle.txt`) given alike but for 15 where it
+  contradicts POSIX, each recorded in `posix/src/wordexp.rs`.
 - **`strfmon`** (`posix/src/monetary.rs`): not variadic (it takes one
   `double`, so a second conversion prints the first value again); the
   field width, the `-` and `#` flags and `%L` are not honoured; output

@@ -132,11 +132,14 @@ RECORDS_C = {
     "union sigval": ("i64",), "struct in_addr": ("i32",),
     "struct mallinfo": ("mem:mallinfo",), "struct mallinfo2": ("mem:mallinfo2",),
     "cookie_io_functions_t": ("mem:cookie",), "struct _IO_cookie_io_functions_t": ("mem:cookie",),
+    # A parsed DNS message's handle, 80 bytes: ns_msg_getflag takes it whole.
+    "ns_msg": ("mem:ns_msg",), "struct __ns_msg": ("mem:ns_msg",),
 }
 RECORDS_RUST = {
     "DivT": ("i64",), "LdivT": ("i64", "i64"), "LldivT": ("i64", "i64"), "ImaxdivT": ("i64", "i64"),
     "Entry": ("i64", "i64"), "Sigval": ("i64",), "InAddr": ("i32",), "Semun": ("i64",),
     "Mallinfo": ("mem:mallinfo",), "Mallinfo2": ("mem:mallinfo2",), "CookieIoFunctions": ("mem:cookie",),
+    "NsMsg": ("mem:ns_msg",),
     "Complex64": ("f64", "f64"), "Complex32": ("cf32",), "i128": ("i64", "i64"), "u128": ("i64", "i64"),
 }
 

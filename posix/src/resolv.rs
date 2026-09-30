@@ -1495,6 +1495,94 @@ pub unsafe extern "C" fn ns_name_skip(ptrptr: *mut *const u8, eom: *const u8) ->
     }
 }
 
+/// `ns_name_ntol` -- the uncompressed wire name at `src`, its labels in
+/// ASCII lower case, into `dst` (`dstsiz` bytes): the bytes written, the
+/// root label counted, or -1 with `EMSGSIZE` for a compression pointer, a
+/// label over 63 bytes, or too small a `dst` -- glibc's order kept, each
+/// label's length byte written before its size is judged, so a failure
+/// leaves the labels before it (`nsutil_oracle.txt`).
+///
+/// # Safety
+///
+/// `src` is a wire name readable to its root label or to the byte that
+/// stops it; `dst` holds `dstsiz` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_ntol(src: *const u8, dst: *mut u8, dstsiz: usize) -> i32 {
+    if src.is_null() || dst.is_null() || dstsiz == 0 {
+        return name_fail();
+    }
+    // SAFETY: the caller's contract: `dst` holds `dstsiz` bytes.
+    let out = unsafe { core::slice::from_raw_parts_mut(dst, dstsiz) };
+    let mut cp = 0usize;
+    let mut dn = 0usize;
+    loop {
+        // SAFETY: the caller's contract: `src` is readable to the byte that
+        // ends the name, and each byte read is before that one.
+        let n = unsafe { *src.add(cp) };
+        cp += 1;
+        if n == 0 {
+            break;
+        }
+        if n & 0xc0 == 0xc0 {
+            return name_fail();
+        }
+        // The previous label's check left room for this length byte.
+        out[dn] = n;
+        dn += 1;
+        if n > 63 {
+            return name_fail();
+        }
+        let l = usize::from(n);
+        if dn + l >= dstsiz {
+            return name_fail();
+        }
+        for _ in 0..l {
+            // SAFETY: as above, a label byte before the end of the name.
+            out[dn] = unsafe { *src.add(cp) }.to_ascii_lowercase();
+            cp += 1;
+            dn += 1;
+        }
+    }
+    out[dn] = 0;
+    i32::try_from(dn + 1).unwrap_or(i32::MAX)
+}
+
+/// `ns_name_rollback` -- forget the names `dn_comp` (or `ns_name_pack`)
+/// recorded at or past `src`: the first entry of `dnptrs`, before
+/// `lastdnptr` and before a NULL one, that points at or past `src` becomes
+/// NULL, ending the table there -- a message cut back to `src` then leaves
+/// no pointer into what it lost. A NULL table is nothing to do.
+///
+/// # Safety
+///
+/// `dnptrs` is NULL or points into a table of `const u_char *` that
+/// `lastdnptr` bounds.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ns_name_rollback(
+    src: *const u8,
+    dnptrs: *mut *const u8,
+    lastdnptr: *mut *const u8,
+) {
+    if dnptrs.is_null() {
+        return;
+    }
+    let mut p = dnptrs;
+    while (p as usize) < (lastdnptr as usize) {
+        // SAFETY: `p` is before `lastdnptr`, in the caller's table.
+        let entry = unsafe { *p };
+        if entry.is_null() {
+            return;
+        }
+        if entry as usize >= src as usize {
+            // SAFETY: as above.
+            unsafe { *p = core::ptr::null() };
+            return;
+        }
+        // SAFETY: as above: the next entry, or `lastdnptr` itself.
+        p = unsafe { p.add(1) };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ns_get16 / ns_get32 / ns_put16 / ns_put32
 // ---------------------------------------------------------------------------

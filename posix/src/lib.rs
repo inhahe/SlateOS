@@ -453,6 +453,7 @@ pub mod mman;
 pub mod mntent;
 pub mod monetary;
 pub mod mqueue;
+pub mod nameser;
 pub mod narrow;
 pub mod netdb;
 pub mod netgroup;

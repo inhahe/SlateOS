@@ -60,11 +60,15 @@ by a human:
    value the compiler evaluated -- `1 << 4` arrives as `16i32` -- built for
    the SlateOS target, so a `cfg` there is honoured and no Python re-reads a
    Rust expression.
-5. `zig cc -dM -E` over musl's headers (and the overlay's) lists the macros they define; a
-   constant whose name is one of them is a number a caller shares with the
-   library.  The kernel's headers (`linux/...`) answer, in a unit of their
-   own, only for names musl's lack: in one unit `linux/limits.h` would
-   redefine musl's `NGROUPS_MAX`.
+5. `zig cc -dM -E` over every header musl has and every header the overlay
+   adds -- the two directories' contents, read at run time -- lists the
+   macros they define; a constant whose name is one of them is a number a
+   caller shares with the library.  The kernel's headers (`linux/...`)
+   answer, in a unit of their own, only for names musl's lack: in one unit
+   `linux/limits.h` would redefine musl's `NGROUPS_MAX`.  (Until 2026-09-30
+   the headers were a list, which held 105 of musl's 183; the constants of
+   the other 78 -- `<fmtmsg.h>`, `<stropts.h>`, `<sys/param.h>` among them
+   -- had never been compared, and 16 of them were wrong.)
 6. A `_Static_assert` per pair compares the two in the bits both have -- the
    Rust type's width and the C expression's.  So musl's `(1<<31)`, an `int`
    sign-extended on its way to an `unsigned long`, agrees with a Rust `u64` of
@@ -542,26 +546,36 @@ def stale_no_oracle(zig: str, table: dict | None = None) -> list[str]:
 POSIX_DIR = REPO / "posix"
 LIBC_SPEC = POSIX_DIR / "x86_64-slateos-libc.json"
 
-# The headers whose macros are the oracle: the 2026-09-27 audit's list, which
-# is every header a module of the library answers for.  The headers
-# `abi_layout.rs` names are added at run time (`constant_headers()`), so a
-# header the layout half learns about reaches this half too.
-CONSTANT_HEADERS = """
-stdio.h stdlib.h stddef.h unistd.h fcntl.h errno.h signal.h termios.h
-sys/ioctl.h sys/socket.h netinet/in.h netinet/tcp.h netinet/udp.h arpa/inet.h
-netdb.h sys/stat.h sys/mman.h sys/wait.h sys/resource.h sys/time.h time.h
-sys/select.h poll.h sys/epoll.h sys/eventfd.h sys/signalfd.h sys/timerfd.h
-sys/inotify.h sys/prctl.h sys/ptrace.h sys/reboot.h sys/personality.h
-sys/random.h sys/xattr.h sys/statvfs.h sys/vfs.h sys/mount.h sys/swap.h
-sys/sysinfo.h sys/utsname.h sys/uio.h sys/un.h sys/sendfile.h sys/file.h
-sys/klog.h sys/quota.h sys/sem.h sys/shm.h sys/msg.h sys/ipc.h mqueue.h
-semaphore.h pthread.h sched.h spawn.h dlfcn.h locale.h langinfo.h iconv.h
-wchar.h wctype.h ctype.h limits.h float.h stdint.h fnmatch.h glob.h regex.h
-wordexp.h ftw.h getopt.h syslog.h pwd.h grp.h shadow.h utmpx.h utmp.h
-paths.h sysexits.h err.h search.h aio.h ifaddrs.h net/if.h sys/auxv.h
-elf.h link.h sys/fsuid.h sys/timex.h sys/times.h utime.h sys/sysmacros.h
-stdio_ext.h malloc.h sys/membarrier.h
-""".split()
+# The headers whose macros are the oracle: every header musl has, outside
+# bits/ (which its headers include themselves), and every header the overlay
+# adds -- read out of the two directories at run time, not listed. A list was
+# kept here until 2026-09-30, the 2026-09-27 audit's "every header a module of
+# the library answers for"; it held 105 of musl's 183 headers, and the other 78
+# were never compared. Among them were <fmtmsg.h>, whose MM_RECOVER here was
+# 0x10000 where musl's is 64, <stropts.h>, whose I_NREAD here was musl's
+# I_SRDOPT, and <sys/param.h>, whose MAXHOSTNAMELEN here was 256 where both
+# libcs say 64. All of them compile together, with the overlay in front and
+# _GNU_SOURCE, so none needs leaving out. The headers `abi_layout.rs` names
+# are added as before (`constant_headers()`), the kernel's apart.
+def musl_include(zig: str) -> Path | None:
+    """zig's copy of musl's headers."""
+    inc = Path(zig).resolve().parent / "lib" / "libc" / "include" / "generic-musl"
+    return inc if inc.is_dir() else None
+
+
+def header_names(root: Path) -> list[str]:
+    """Every header under `root` that a program includes: not `bits/`."""
+    if not root.is_dir():
+        return []
+    return sorted(p.relative_to(root).as_posix() for p in root.rglob("*.h")
+                  if not p.relative_to(root).as_posix().startswith("bits/"))
+
+
+def oracle_headers(zig: str) -> list[str]:
+    """musl's headers, then the overlay's own -- those musl has none of."""
+    musl = musl_include(zig)
+    ours = header_names(musl) if musl is not None else []
+    return ours + [h for h in header_names(OVERLAY) if h not in set(ours)]
 
 # Section 1119's table: where this library's number is deliberately not
 # musl's.  Keyed by name; every module's constant of that name is exempt.
@@ -584,6 +598,15 @@ KNOWN_DIFFERENT: dict[str, str] = {
         "64 here, 255 in musl: the kernel's real limit (Linux's)",
     "NGROUPS_MAX":
         "65536 here, 32 in musl: the kernel's real limit (Linux's)",
+    "NGROUPS":
+        "65536 here, 32 in musl: NGROUPS_MAX, the kernel's real limit, as "
+        "glibc's <sys/param.h> has it",
+    "NBPG":
+        "16384 here, 4096 in musl's <sys/user.h>: this kernel's 16 KiB pages, "
+        "as PAGE_SIZE",
+    "PAGE_MASK":
+        "~16383 here, ~4095 in musl's <sys/user.h>: this kernel's 16 KiB "
+        "pages, as PAGE_SIZE",
     "MAXQUOTAS":
         "3 here, 2 in musl: the kernel has project quotas; musl's header "
         "predates them",
@@ -754,16 +777,17 @@ def classify_constants(stderr: str, at: dict[int, Const]) -> ConstVerdict:
     return v
 
 
-def constant_headers() -> tuple[list[str], list[str]]:
-    """musl's own headers -- the audit's, and the ones `abi_layout.rs` names --
-    and, apart, the kernel's (`linux/`, `asm/`) that `abi_layout.rs` names.
+def constant_headers(zig: str) -> tuple[list[str], list[str]]:
+    """musl's headers and the overlay's (`oracle_headers`), and those
+    `abi_layout.rs` names; and, apart, the kernel's (`linux/`, `asm/`) that
+    `abi_layout.rs` names.
 
     Apart because a kernel header can redefine a musl name: `linux/limits.h`
     says `NGROUPS_MAX` is 65536 where musl's `limits.h` says 32, and in one
     translation unit whichever comes last wins.  A name musl's own headers
     define is judged by them; a kernel header answers only for the names
     musl's do not have (`PERF_EVENT_IOC_*`, `LANDLOCK_*`, ...)."""
-    libc, kernel = list(CONSTANT_HEADERS), []
+    libc, kernel = oracle_headers(zig), []
     if ABI_LAYOUT.exists():
         for line in ABI_LAYOUT.read_text(encoding="utf-8").splitlines():
             # Code only: the module's docs show the macro's shape with a
@@ -854,7 +878,7 @@ def check_constants(zig: str, list_pairs: bool = False) -> Numbers:
         return Numbers(1, "", broken=True)
     consts, unread = constants_from_rustdoc(doc)
 
-    libc_h, kernel_h = constant_headers()
+    libc_h, kernel_h = constant_headers(zig)
     tables: dict[str, set[str]] = {}
     for side, includes in (("musl", libc_h), ("kernel", kernel_h)):
         if not includes:

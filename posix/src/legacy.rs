@@ -317,19 +317,20 @@ fn decimal(mut n: u32, digits: &mut [u8; 10]) -> &[u8] {
 /// glibc's `<ctype.h>` class bits, the ones `isctype`'s `mask` is made of:
 /// on a little-endian machine a class's bit is its number past 8, or before
 /// it for the four from 8 up.
+#[allow(non_upper_case_globals)] // glibc's names, as the header spells them
 pub mod class {
-    pub const UPPER: i32 = 0x100;
-    pub const LOWER: i32 = 0x200;
-    pub const ALPHA: i32 = 0x400;
-    pub const DIGIT: i32 = 0x800;
-    pub const XDIGIT: i32 = 0x1000;
-    pub const SPACE: i32 = 0x2000;
-    pub const PRINT: i32 = 0x4000;
-    pub const GRAPH: i32 = 0x8000;
-    pub const BLANK: i32 = 0x1;
-    pub const CNTRL: i32 = 0x2;
-    pub const PUNCT: i32 = 0x4;
-    pub const ALNUM: i32 = 0x8;
+    pub const _ISupper: i32 = 0x100;
+    pub const _ISlower: i32 = 0x200;
+    pub const _ISalpha: i32 = 0x400;
+    pub const _ISdigit: i32 = 0x800;
+    pub const _ISxdigit: i32 = 0x1000;
+    pub const _ISspace: i32 = 0x2000;
+    pub const _ISprint: i32 = 0x4000;
+    pub const _ISgraph: i32 = 0x8000;
+    pub const _ISblank: i32 = 0x1;
+    pub const _IScntrl: i32 = 0x2;
+    pub const _ISpunct: i32 = 0x4;
+    pub const _ISalnum: i32 = 0x8;
 }
 
 /// `isctype` (GNU): `c`'s classes that are in `mask` -- nonzero if it is of
@@ -343,18 +344,18 @@ pub extern "C" fn isctype(c: i32, mask: i32) -> i32 {
     }
     use crate::ctype::*;
     let classes = [
-        (isupper(c), class::UPPER),
-        (islower(c), class::LOWER),
-        (isalpha(c), class::ALPHA),
-        (isdigit(c), class::DIGIT),
-        (isxdigit(c), class::XDIGIT),
-        (isspace(c), class::SPACE),
-        (isprint(c), class::PRINT),
-        (isgraph(c), class::GRAPH),
-        (isblank(c), class::BLANK),
-        (iscntrl(c), class::CNTRL),
-        (ispunct(c), class::PUNCT),
-        (isalnum(c), class::ALNUM),
+        (isupper(c), class::_ISupper),
+        (islower(c), class::_ISlower),
+        (isalpha(c), class::_ISalpha),
+        (isdigit(c), class::_ISdigit),
+        (isxdigit(c), class::_ISxdigit),
+        (isspace(c), class::_ISspace),
+        (isprint(c), class::_ISprint),
+        (isgraph(c), class::_ISgraph),
+        (isblank(c), class::_ISblank),
+        (iscntrl(c), class::_IScntrl),
+        (ispunct(c), class::_ISpunct),
+        (isalnum(c), class::_ISalnum),
     ]
     .iter()
     .filter(|(is, _)| *is != 0)
@@ -717,12 +718,13 @@ mod tests {
     fn isctype_is_glibcs() {
         use class::*;
         let masks = [
-            UPPER, LOWER, ALPHA, DIGIT, XDIGIT, SPACE, PRINT, GRAPH, BLANK, CNTRL, PUNCT, ALNUM,
+            _ISupper, _ISlower, _ISalpha, _ISdigit, _ISxdigit, _ISspace, _ISprint, _ISgraph,
+            _ISblank, _IScntrl, _ISpunct, _ISalnum,
         ];
         let got = format!(
-            " upper={UPPER:#x} lower={LOWER:#x} alpha={ALPHA:#x} digit={DIGIT:#x} xdigit={XDIGIT:#x} \
-             space={SPACE:#x} print={PRINT:#x} graph={GRAPH:#x} blank={BLANK:#x} cntrl={CNTRL:#x} \
-             punct={PUNCT:#x} alnum={ALNUM:#x}"
+            " upper={_ISupper:#x} lower={_ISlower:#x} alpha={_ISalpha:#x} digit={_ISdigit:#x} xdigit={_ISxdigit:#x} \
+             space={_ISspace:#x} print={_ISprint:#x} graph={_ISgraph:#x} blank={_ISblank:#x} cntrl={_IScntrl:#x} \
+             punct={_ISpunct:#x} alnum={_ISalnum:#x}"
         );
         assert_eq!(got, oracle("isctype-masks"));
         let mut got = String::new();
@@ -734,8 +736,8 @@ mod tests {
         }
         assert_eq!(got, oracle("isctype"));
         assert_eq!(
-            isctype(b'A'.into(), UPPER | DIGIT),
-            UPPER,
+            isctype(b'A'.into(), _ISupper | _ISdigit),
+            _ISupper,
             "the classes in the mask"
         );
         assert_eq!(isctype(1000, !0), 0);

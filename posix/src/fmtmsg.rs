@@ -20,28 +20,37 @@ use crate::file;
 // Classification flags (long bitmask)
 // ---------------------------------------------------------------------------
 
-// Source subclassification (bits 0-1).
+// musl's and glibc's values, which a program compiled against <fmtmsg.h>
+// passes. (MM_RECOVER and MM_NRECOV were 0x10000 and 0x20000 until
+// 2026-09-30, and MM_APPL, MM_UTIL and MM_OPSYS absent: nothing read
+// them, and scripts/check-libc-abi.py did not read this header.)
 
-/// Message from hardware.
-pub const MM_HARD: i64 = 1;
-/// Message from software.
-pub const MM_SOFT: i64 = 2;
-/// Message from firmware.
-pub const MM_FIRM: i64 = 4;
+/// The condition's source is hardware.
+pub const MM_HARD: i64 = 0x001;
+/// ... software.
+pub const MM_SOFT: i64 = 0x002;
+/// ... firmware.
+pub const MM_FIRM: i64 = 0x004;
 
-// Output channel flags (bits 8-9).
+/// Detected by an application.
+pub const MM_APPL: i64 = 0x008;
+/// ... by a utility.
+pub const MM_UTIL: i64 = 0x010;
+/// ... by the operating system.
+pub const MM_OPSYS: i64 = 0x020;
 
-/// Display to stderr.
-pub const MM_PRINT: i64 = 256;
-/// Display to the system console.
-pub const MM_CONSOLE: i64 = 512;
+/// The error is recoverable.
+pub const MM_RECOVER: i64 = 0x040;
+/// ... not recoverable.
+pub const MM_NRECOV: i64 = 0x080;
 
-// Status flags for recoverability (bits 16-17).
+/// Display the message on standard error.
+pub const MM_PRINT: i64 = 0x100;
+/// ... on the system console.
+pub const MM_CONSOLE: i64 = 0x200;
 
-/// Error is recoverable.
-pub const MM_RECOVER: i64 = 0x1_0000;
-/// Error is non-recoverable.
-pub const MM_NRECOV: i64 = 0x2_0000;
+/// No classification.
+pub const MM_NULLMC: i64 = 0;
 
 // ---------------------------------------------------------------------------
 // Severity levels
@@ -49,6 +58,8 @@ pub const MM_NRECOV: i64 = 0x2_0000;
 
 /// No severity level.
 pub const MM_NOSEV: i32 = 0;
+/// No severity (`MM_NOSEV`, POSIX's null value for the argument).
+pub const MM_NULLSEV: i32 = 0;
 /// Halt — condition requires immediate halt.
 pub const MM_HALT: i32 = 1;
 /// Error — detected fault.
@@ -262,8 +273,9 @@ mod tests {
 
     #[test]
     fn test_recover_constants() {
-        assert_eq!(MM_RECOVER, 0x1_0000);
-        assert_eq!(MM_NRECOV, 0x2_0000);
+        assert_eq!(MM_RECOVER, 0x40);
+        assert_eq!(MM_NRECOV, 0x80);
+        assert_eq!((MM_APPL, MM_UTIL, MM_OPSYS), (0x8, 0x10, 0x20));
     }
 
     #[test]

@@ -144,12 +144,18 @@ pub const RES_DEFNAMES: u64 = 0x0000_0080;
 pub const RES_DNSRCH: u64 = 0x0000_0200;
 /// Rotate among the nameservers.
 pub const RES_ROTATE: u64 = 0x0000_4000;
-/// Never query a dot-free name as it stands.
-pub const RES_NOTLDQUERY: u64 = 0x0010_0000;
+/// Do not look names up under `ip6.int` (accepted; this resolver never
+/// does). musl's header puts it in [`RES_DEFAULT`]; glibc 2.39's retired it.
+pub const RES_NOIP6DOTINT: u64 = 0x0008_0000;
+/// Never query a dot-free name as it stands: glibc's bit. (0x0010_0000
+/// until 2026-09-30, which is `RES_USE_EDNS0` in both headers, so a program
+/// asking for EDNS0 got this instead.)
+pub const RES_NOTLDQUERY: u64 = 0x0100_0000;
 /// Set the AD bit in queries.
 pub const RES_TRUSTAD: u64 = 0x0400_0000;
-/// The options a fresh state starts with.
-pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH;
+/// The options a fresh state starts with: musl's header's, which a program
+/// here is compiled against, and glibc's with `RES_NOIP6DOTINT` besides.
+pub const RES_DEFAULT: u64 = RES_RECURSE | RES_DEFNAMES | RES_DNSRCH | RES_NOIP6DOTINT;
 
 /// `h_errno` for an error that is not the resolver's (see `errno`).
 pub const NETDB_INTERNAL: i32 = -1;

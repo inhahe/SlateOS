@@ -41725,8 +41725,8 @@ eleven are this table, and are not to be "fixed":
 | Name | Here | musl | Why it stays |
 |---|---|---|---|
 | `FD_SETSIZE` | 256 | 1024 | a policy limit, the fd table's size; the `fd_set` layout is musl's 1024 bits (`FD_SET_BITS`, §1011) |
-| `PAGE_SIZE`, `SHMLBA` | 16384 | 4096 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says |
-| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX` | 2 MiB, 64, 65536 | 128 KiB, 255, 32 | the kernel's real limits (Linux's); musl's header states its own |
+| `PAGE_SIZE`, `SHMLBA`, `NBPG`; `PAGE_MASK` | 16384; ~16383 | 4096; ~4095 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says (`NBPG` and `PAGE_MASK` added 2026-09-30) |
+| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX`, `NGROUPS` | 2 MiB, 64, 65536, 65536 | 128 KiB, 255, 32, 32 | the kernel's real limits (Linux's); musl's header states its own (`NGROUPS`, glibc's `<sys/param.h>`'s name for `NGROUPS_MAX`, added 2026-09-30) |
 | `MAXQUOTAS` | 3 | 2 | the kernel has project quotas; musl's header predates them |
 | `O_ACCMODE` | 3 | `3 \| O_PATH` | musl folds `O_SEARCH` into the access mode; the library's own masking is glibc's |
 | `SIGRTMIN`, `MB_CUR_MAX` | 32, 4 | calls | musl's macros call `__libc_current_sigrtmin` and `__ctype_get_mb_cur_max`, which are this library's and answer 32 and 4 |
@@ -41740,7 +41740,9 @@ eleven are this table, and are not to be "fixed":
 **What keeps it true.** The constants half of `scripts/check-libc-abi.py`,
 since 2026-09-27 (§1130): every public constant whose name a musl header
 defines, compared with that header's value on each push that touches
-`posix/src`.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
+`posix/src` -- since 2026-09-30 every header musl has and every header the
+overlay adds, where it was a list of 105 of musl's 183 (known-issues.md,
+`D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED`).  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
 `WEOF` -- compared in the bits both sides have, they agree, as the table says
 -- and less `SIGRTMIN` and `MB_CUR_MAX`, which with `SIGRTMAX` are its
 `NOT_CONSTANT_IN_MUSL`: musl's are calls, which no compile-time check can

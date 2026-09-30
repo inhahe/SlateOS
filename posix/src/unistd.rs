@@ -5277,7 +5277,7 @@ mod tests {
         // the two that can drift silently: nothing else forces the log and the
         // mask to track a change to the size.
         assert_eq!(1usize << crate::sys_param::PAGE_SHIFT, PAGE_SIZE);
-        assert_eq!(crate::sys_param::PAGE_MASK, PAGE_SIZE - 1);
+        assert_eq!(crate::sys_param::PAGE_MASK, !(PAGE_SIZE - 1));
     }
 
     #[test]

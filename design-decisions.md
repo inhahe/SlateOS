@@ -86819,15 +86819,22 @@ picture in `widgets.rs`, and offered by nothing (`roadmap-detailed.md` →
 | Decode at full size, scale when drawing | simpler | memory and decode time for pixels never shown |
 | A timer per frame | independent | the widget layer already dates its widgets (`update_interval_ms`); a second clock is a second thing to arm |
 
-**The folder chooser's first caller.** "Choose folder…" is the first
-use of the toolkit's folder mode (`FileDialog::select_folder`), and the
-first use found what the known-issue entry said it might
+**What choosing a folder found in the toolkit.** "Choose folder…" uses
+the toolkit's folder mode (`FileDialog::select_folder`), as seven of lane
+E's applications already did -- `archivemanager`, `filediff`,
+`filesearch`, `mediaconvert`, `renamer`, `settings`, `soundrecorder`. Its
+test, driving the chooser through the keys a user presses, found what
+`known-issues.md` had warned an end-to-end use might
 (`TD-C-THE-TOOLKIT-CAN-SELECT-A-FOLDER-AND-NO-APPLICATION-ASKS-IT-TO`):
-opening a folder -- a double click, or Enter on it -- *chose* it, so a
-folder below the one the chooser opened on could not be reached. Opening a
-folder now opens it, in every mode; the Select button, or Enter with
-nothing highlighted, chooses the folder highlighted or the one shown -- as
-Windows' and GTK's folder pickers do.
+opening a folder -- a double click, or Enter on it -- *chose* it, so the
+picker could not be walked down a folder at a time; anything deeper than
+the folders listed where it stood was reachable only by typing its path.
+Opening a folder now opens it, in every mode; the Select button, or Enter
+with nothing highlighted, chooses the folder highlighted or the one shown
+-- as Windows' and GTK's folder pickers do. The seven applications share
+the fix with nothing to change, since the toolkit's `FilePicker` lists a
+folder opened as it lists any other
+(`requests/c-e-the-folder-picker-opens-a-folder-now-rather-than-choosing-it.md`).
 
 **Revisit if** users ask for shuffling or a slower pace.
 

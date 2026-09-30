@@ -4,9 +4,10 @@
 //!
 //! The widget layer's tests hold a frame's folder and how it steps through
 //! it; the session's hold the pictures going up. These hold the shell's part
-//! -- and, as the folder picker's first caller, that the picker works end to
-//! end: opened on the right folder, a folder below opened rather than chosen,
-//! an empty one chosen, Escape leaving everything as it was.
+//! -- and that the toolkit's folder picker works end to end, driven by the
+//! keys a user presses: opened on the right folder, a folder below opened
+//! rather than chosen, an empty one chosen, Escape leaving everything as it
+//! was. Driving it so is what found that opening a folder used to choose it.
 
 #![cfg(test)]
 #![allow(

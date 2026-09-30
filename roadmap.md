@@ -2073,9 +2073,9 @@ live.
   frame's size on the decoding thread and fitted in it; an empty folder says
   so. The old picture is released only after the frame that stops naming it
   is sent. "Choose folder…" on the frame's menu picks another folder in
-  the shell's chooser -- the toolkit's folder picker's first caller, which
-  found and fixed that opening a folder in it chose it -- saved with the
-  layout.
+  the shell's chooser, saved with the layout -- and its test found and
+  fixed that opening a folder in the toolkit's folder picker chose it, a
+  fix the seven lane E applications already using the picker share.
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

@@ -527,9 +527,11 @@ impl FileDialog {
     /// - If it is a directory, navigates into it -- in every mode, the
     ///   folder picker's included: choosing a folder is the Select button's
     ///   ([`confirm`](Self::confirm)), which takes the one highlighted or the
-    ///   one being shown. A picker in which opening a folder chose it could
-    ///   choose only folders it started beside, and it did until its first
-    ///   caller, the desktop's photo frame, found so.
+    ///   one being shown. A picker in which opening a folder chose it cannot
+    ///   be walked down a folder at a time: anything deeper than the folders
+    ///   listed where it stands is reachable only by typing its path. This
+    ///   one was such a picker until 2026-09-30, when a test driving it
+    ///   through the desktop's photo frame found so.
     /// - If it is a file (and mode is Open), returns `DialogAction::Selected`.
     pub fn activate_entry(&mut self, index: usize) -> DialogAction {
         let entry = match self.entries.get(index) {

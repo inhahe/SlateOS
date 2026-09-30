@@ -1834,19 +1834,51 @@ unsafe extern "C" {
     fn __signal_trampoline();
 }
 
-/// Register the signal trampoline with the kernel.
+/// Register the signal trampoline with the kernel, and take the signal mask
+/// this image inherited.
 ///
 /// Called once during process startup (from `__libc_start_main`).  After
 /// this, the kernel delivers pending catchable signals by redirecting to
 /// `__signal_trampoline`.  Until a trampoline is registered the kernel
 /// applies signal default actions itself (terminating signals kill the
 /// process; others are dropped).
+///
+/// POSIX has a new image inherit its signal mask across `exec`, so the
+/// program's mask starts as the kernel's, not empty. `SYS_SIGNAL_MASK` only
+/// replaces the mask, answering the old one, so it is read by blocking
+/// everything and putting back what came back -- with one thread, before
+/// `main`, nothing sees the moment between. Until 2026-09-30 the program's
+/// mask started empty whatever the kernel held; the kernel clears the mask
+/// at `exec` itself today (`requests/d-a-exec-must-keep-the-signal-mask.md`),
+/// so the two agreed only by that.
 #[cfg(target_os = "none")]
 pub fn init_signals() {
     let addr = __signal_trampoline as *const () as usize as u64;
     // A failure here just means async delivery stays in the kernel's
     // default-action mode; nothing else in startup depends on it.
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_REGISTER, addr);
+    let mut inherited: u64 = 0;
+    let read = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_MASK,
+        u64::MAX,
+        core::ptr::addr_of_mut!(inherited) as u64,
+    );
+    // A failed read leaves `inherited` 0: the empty mask this library
+    // always started with, which `adopt_inherited_mask` then writes back.
+    adopt_inherited_mask(if read < 0 { 0 } else { inherited });
+}
+
+/// Start the program's mask as `inherited` -- what the kernel held as this
+/// image began -- and write the kernel's to match.
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+fn adopt_inherited_mask(inherited: u64) {
+    // SAFETY: `blocked_mask_ptr()` is this process's; startup has one thread.
+    unsafe {
+        let mut m = blocked_mask_ptr().read();
+        m.bits[0] = inherited & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
+        blocked_mask_ptr().write(m);
+    }
+    mask_changed();
 }
 
 /// Host-build no-op: there is no kernel to register with, and issuing a
@@ -7693,6 +7725,20 @@ mod tests {
         assert_eq!(USR2_RAN.with(core::cell::Cell::get), 1);
         assert_eq!((ctx.rax, ctx.rip), (7, 0x40_1234));
         signal(SIGUSR2, old);
+    }
+
+    /// A new image's mask is the one it inherited: the program's and the
+    /// kernel's both, less the two signals no mask can hold.
+    #[test]
+    fn a_new_image_starts_with_the_mask_it_inherited() {
+        let saved = current_blocked_low();
+        let inherited = sigmask_bit(SIGUSR1) | sigmask_bit(SIGCHLD) | sigmask_bit(SIGKILL);
+        adopt_inherited_mask(inherited);
+        let mut now = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+        assert_eq!(now.bits[0], sigmask_bit(SIGUSR1) | sigmask_bit(SIGCHLD));
+        assert_eq!(kernel_blocked_low(), now.bits[0]);
+        apply_blocked_low(saved);
     }
 
     /// `sigsuspend` restores the mask it replaced.

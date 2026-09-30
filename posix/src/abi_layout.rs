@@ -794,6 +794,17 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::aliases::Aliasent,
+        "struct aliasent",
+        "aliases.h",
+        alias_name,
+        alias_members_len,
+        alias_members,
+        alias_local
+    );
+    abi!(
+        out,
+        hdrs,
         crate::fstab::Fstab,
         "struct fstab",
         "fstab.h",

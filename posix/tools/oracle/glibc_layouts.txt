@@ -9,6 +9,7 @@ cookie_io_functions_t	stdio.h	32	read=0,write=8,seek=16,close=24
 femode_t	fenv.h	8	__control_word=0,__glibc_reserved=2,__mxcsr=4
 glob_t	glob.h	72	gl_pathc=0,gl_pathv=8,gl_offs=16,gl_flags=24,gl_closedir=32,gl_readdir=40,gl_opendir=48,gl_lstat=56,gl_stat=64
 struct aioinit	aio.h	32	aio_threads=0,aio_num=4,aio_locks=8,aio_usedba=12,aio_debug=16,aio_numusers=20,aio_idle_time=24,aio_reserved=28
+struct aliasent	aliases.h	32	alias_name=0,alias_members_len=8,alias_members=16,alias_local=24
 struct dl_find_object	dlfcn.h	96	dlfo_flags=0,dlfo_map_start=8,dlfo_map_end=16,dlfo_link_map=24,dlfo_eh_frame=32,__dflo_reserved=40
 struct drand48_data	stdlib.h	24	__x=0,__old_x=6,__c=12,__init=14,__a=16
 struct fstab	fstab.h	48	fs_spec=0,fs_file=8,fs_vfstype=16,fs_mntops=24,fs_type=32,fs_freq=40,fs_passno=44

@@ -347,6 +347,7 @@ mod abi_layout;
 mod accounts_oracle;
 
 pub mod aio;
+pub mod aliases;
 pub mod alloca;
 pub mod argz;
 pub mod assert;

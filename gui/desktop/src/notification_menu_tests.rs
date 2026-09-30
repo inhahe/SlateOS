@@ -320,6 +320,9 @@ fn a_toasts_menu_opens_beside_the_stack_and_holds_it() {
         assert_eq!(right_click_toast(&mut s, 2), ShellAction::Consumed);
         assert_eq!(rows(&s).unwrap()[0], "Turn off notifications from Mail");
         assert!(!s.start_menu_open, "the start menu stayed open under it");
+        // With nothing else open, the menu itself is what holds Escape for
+        // the shell while a program has the keyboard.
+        assert!(s.any_popup_open(), "the menu is not counted as open");
         let stack = s.toast_extent().expect("the toasts are shown");
         let panel = s
             .notification_menu

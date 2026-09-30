@@ -27582,6 +27582,11 @@ mod start_search_tests {
             names(&shell).iter().all(|n| n != "Display settings"),
             "an action was listed as a program"
         );
+        assert_eq!(
+            names(&shell).iter().filter(|n| *n == "Settings").count(),
+            1,
+            "an action's program was listed again for it"
+        );
     }
 
     /// **Enter starts the action found first** -- the page, as its jump
@@ -27719,21 +27724,23 @@ mod start_search_tests {
             program_ink.a < action_ink.a,
             "the program's name is not dimmer than the action's"
         );
+        // The picture on the action's own row: the menu's right column has a
+        // picture for Settings of its own.
+        let row = shell.start_menu_row_rect(0);
         let pictures: Vec<String> = tree
             .commands
             .iter()
             .filter_map(|c| match c {
-                guitk::render::RenderCommand::Image { image_id, .. } => {
+                guitk::render::RenderCommand::Image { image_id, x, y, .. }
+                    if row.contains(*x, *y) =>
+                {
                     shell.icon_request(*image_id)
                 }
                 _ => None,
             })
             .map(|request| request.name.into_owned())
             .collect();
-        assert!(
-            pictures.iter().any(|p| p == "preferences-system"),
-            "{pictures:?}"
-        );
+        assert_eq!(pictures, ["preferences-system"]);
     }
 
     /// **A right-click on an action's row opens nothing**: the pin menu is a

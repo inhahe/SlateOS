@@ -1292,7 +1292,9 @@ fn call_handler(handler: usize, sig: i32, args: HandlerArgs) {
 enum Origin {
     /// Delivered by the kernel through the trampoline, with its frame of the
     /// interrupted registers -- null where there is none (the host tests'
-    /// stand-in for the kernel).
+    /// stand-in for the kernel). A host build that is not a test has
+    /// neither, so nothing there makes one.
+    #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
     Kernel(*mut SignalContext),
     /// Raised on the calling thread: `raise`, `abort`, `pthread_kill` of
     /// itself. glibc sends these with `tgkill`, which Linux reports as
@@ -1780,27 +1782,31 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 
 /// C entry point invoked by the assembly trampoline.
 ///
-/// Runs the registered disposition for `signum` on the current process
-/// (`dispatch_self_signal` handles SIG_IGN / handler invocation /
-/// default action).  If the disposition terminates the process this
-/// never returns; otherwise control returns to the trampoline, which
-/// issues `SYS_SIGNAL_RETURN`.
+/// Runs the registered disposition for `signum` on this thread, with the
+/// kernel's frame `ctx` for an `SA_SIGINFO` handler's `ucontext_t`
+/// (`dispatch_from` handles SIG_IGN / handler invocation / default
+/// action).  If the disposition terminates the process this never returns;
+/// otherwise control returns to the trampoline, which issues
+/// `SYS_SIGNAL_RETURN`.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __signal_dispatch(signum: i32, ctx: *mut SignalContext) {
-    // Ignore the return value, as `dispatch_delivered` does.
+    // Ignore the return value: the dispatch either terminates the process
+    // (no return) or completes the handler/ignore action.  Any errno it
+    // sets belongs to the interrupted code's context and will be clobbered
+    // when SYS_SIGNAL_RETURN restores RAX anyway.
     let _ = dispatch_from(signum, Origin::Kernel(ctx));
 }
 
-/// What the trampoline does with a signal the kernel delivered: run its
-/// disposition on this thread.  The host tests' stand-in for the kernel
-/// ([`crate::interrupt::script`]) calls it as the trampoline would.
-#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+/// What the trampoline's `__signal_dispatch` does with a signal the kernel
+/// delivered -- run its disposition on this thread -- with no frame: the
+/// host tests' stand-in for the kernel ([`crate::interrupt::script`]) calls
+/// it as the trampoline would.  The tests' alone: the target's trampoline
+/// passes its frame, and until 2026-09-30 this was left in the target's
+/// build unused, its one warning.
+#[cfg(test)]
 pub(crate) fn dispatch_delivered(signum: i32) {
-    // Ignore the return value: dispatch_self_signal either terminates
-    // the process (no return) or completes the handler/ignore action.
-    // Any errno it sets belongs to the interrupted code's context and
-    // will be clobbered when SYS_SIGNAL_RETURN restores RAX anyway.
+    // Ignore the return value, as `__signal_dispatch` does.
     let _ = dispatch_from(signum, Origin::Kernel(core::ptr::null_mut()));
 }
 

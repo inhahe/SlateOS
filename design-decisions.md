@@ -86865,6 +86865,7 @@ gets back a `RibbonEvent` naming its own command numbers, and calls `draw`.
 | contextual tabs under a coloured header naming their set, in the title bar | a band of the user's accent along each contextual tab's own top edge; nothing above the strip |
 | groups shrink by stages (large buttons to medium to small) before collapsing | a group is whole or folded into one button, nothing in between |
 | a gallery previews a choice on the document under the pointer | a gallery chooses on a click and never previews |
+| key tips come in layers: Alt, letters on the tabs, then a tab's own letters | F10 shows one layer: a digit on each tab and a letter on each of the front tab's commands at once; a digit brings its tab forward and the letters follow |
 
 **Choices made within that, each easy to change:**
 
@@ -86880,12 +86881,27 @@ A press on a face acts on release over the same face, as every button does;
 an arrow opens its menu on the press, as a menu opener does. A press outside
 an open menu or panel closes it and does nothing else.
 
-**Not yet:** key tips (keyboard access without a mouse), the Quick Access
-Toolbar, customization (reordering and hiding tabs, commands added to and
-removed from groups) and its saving, the dialog for it, tooltips -- a
-disabled command's reason among them -- and following accent-coloured title
-bars, which needs the toolkit's palette to carry the title bar's colours.
-`roadmap-detailed.md` → *Ribbon Widget* marks each.
+**Key tips** (keyboard access without the pointer): a word's first letter
+where it is free, then another of its letters, then any -- Cut `c`, Copy
+`o` -- and past twenty-six things two letters for every one, so that no tip
+is the start of another. A button or toggle's letter does it; a dropdown's,
+gallery's or split button's opens its menu with the arrows ready (a split
+button's menu gains its face as the first row, so both are in reach); a
+folded group's opens its panel and the letters move onto it. Escape steps
+back -- out of a panel, then out of the tips -- and any other key, or a
+press of the pointer, leaves them and is the application's.
+
+**Tooltips**: the toolkit's own (`menu::Tooltip`), after 600 ms at rest: a
+control's name, then what more it does -- or, for one that cannot be used,
+why, as `design.txt` asks of every disabled control. A pointer event carries
+no time, so the ribbon is told the time (`tick`) rather than keeping a
+second clock, and says when it next needs telling (`tooltip_due_in`).
+
+**Not yet:** the Quick Access Toolbar, customization (reordering and hiding
+tabs, commands added to and removed from groups) and its saving, the dialog
+for it, and following accent-coloured title bars, which needs the toolkit's
+palette to carry the title bar's colours. `roadmap-detailed.md` → *Ribbon
+Widget* marks each.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

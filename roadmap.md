@@ -2084,10 +2084,12 @@ live.
   shown while the application's context is active, groups folding into one
   button each (lowest priority first) when the window is narrow and what
   fits nowhere behind `»`, and minimizing to the tabs alone (a double click
-  on a tab, or Ctrl+F1). Deliberately not Office's where Microsoft licenses
-  the arrangement: no staged shrinking, no gallery preview, no set header
-  above contextual tabs. **Next:** key tips, the Quick Access Toolbar,
-  customization and its saving, tooltips.
+  on a tab, or Ctrl+F1). Key tips from F10 (digits on the tabs and letters
+  on the commands, one layer), and tooltips that say why a disabled command
+  cannot be used. Deliberately not Office's where Microsoft licenses the
+  arrangement: no staged shrinking, no gallery preview, no set header above
+  contextual tabs, no layered key tips. **Next:** the Quick Access Toolbar,
+  customization and its saving.
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

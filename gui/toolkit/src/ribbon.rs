@@ -24,6 +24,10 @@
 //! - **input** ([`Ribbon::handle_mouse`], [`Ribbon::handle_key`]): presses
 //!   and keys turned into a [`RibbonEvent`] -- a command, a toggle, a row of
 //!   a split button's menu, a choice;
+//! - **the keyboard** ([`Ribbon::key_tips`]): F10 puts a digit on each tab
+//!   and a letter on each command, and typing one reaches it;
+//! - **tooltips** ([`Ribbon::tick`]): a control's name after the pointer
+//!   rests on it, and why it cannot be used when it cannot;
 //! - **drawing** ([`draw`]), the strip in the title bar's colour, so that a
 //!   ribbon under a title bar reads as one piece of window.
 //!
@@ -44,6 +48,7 @@
 //! | contextual tabs gathered under a coloured header naming their set, drawn up in the title bar | each contextual tab carries a band of the user's accent along its own top edge; nothing is drawn above the strip |
 //! | groups shrink by stages -- large buttons to medium to small -- before they collapse | a group is shown whole, or folded into one button: nothing in between |
 //! | a gallery previews a choice on the document while the pointer rests on it | a gallery chooses on a click and never previews |
+//! | key tips come in layers: letters on the tabs, then a tab's own letters | F10 shows one layer at once: a digit on each tab and a letter on each command of the tab in front ([`Ribbon::key_tips`]) |
 //!
 //! # Commands are the application's numbers
 //!
@@ -57,7 +62,7 @@ use std::collections::BTreeSet;
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
-use crate::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
+use crate::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId, Tooltip};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
@@ -169,6 +174,16 @@ const GALLERY_MORE: f32 = 16.0;
 
 /// Round a control's corners by this much.
 const RADIUS: f32 = 3.0;
+
+/// How long the pointer rests on a control before its tooltip shows.
+pub const TOOLTIP_DELAY_MS: u32 = 600;
+
+/// A key tip's letters.
+const TIP_SIZE: f32 = 11.0;
+
+/// A key tip's height, and the room on each side of its letters.
+const TIP_HEIGHT: f32 = 16.0;
+const TIP_PAD: f32 = 4.0;
 
 /// The id a submenu row carries in a menu the ribbon builds. Never reported:
 /// a submenu row opens its submenu, and only a leaf row is chosen.
@@ -582,6 +597,38 @@ pub enum Hit {
     Blank,
 }
 
+/// What a key tip leads to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TipTarget {
+    /// A tab, by its place in the tabs the ribbon was given: brought to the
+    /// front, the letters following it.
+    Tab(usize),
+    /// A control of the front tab, by its group's place and its own: a
+    /// button or toggle pressed; a split button's, dropdown's or gallery's
+    /// menu opened, ready for the arrow keys.
+    Control {
+        /// The group, by its place in the front tab.
+        group: usize,
+        /// The control, by its place in the group.
+        control: usize,
+    },
+    /// A folded group: its panel opened, the letters moving onto it.
+    Folded(usize),
+    /// The `»` button: its menu opened.
+    Overflow,
+}
+
+/// A key tip: the keys that reach something, what, and where it is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyTip {
+    /// The keys to type: a digit for a tab, one or two letters otherwise.
+    pub keys: String,
+    /// What typing them reaches.
+    pub target: TipTarget,
+    /// Where the thing reached is.
+    pub rect: Rect,
+}
+
 /// Which part of a control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -647,6 +694,13 @@ pub struct Ribbon {
     pressed: Option<Hit>,
     panel: Option<Panel>,
     menu: Option<OpenMenu>,
+    /// What has been typed of a key tip, while key tips are shown.
+    tips: Option<String>,
+    /// The tooltip of what the pointer rests on, once it is being timed.
+    tooltip: Option<Tooltip>,
+    /// Where the pointer came to rest, and in what window, until the next
+    /// [`tick`](Self::tick) starts timing it: a pointer event carries no time.
+    resting: Option<(f32, f32, (f32, f32))>,
 }
 
 impl Ribbon {
@@ -662,6 +716,9 @@ impl Ribbon {
             pressed: None,
             panel: None,
             menu: None,
+            tips: None,
+            tooltip: None,
+            resting: None,
         };
         ribbon.front = ribbon
             .visible_tabs()
@@ -853,6 +910,141 @@ impl Ribbon {
         self.panel = None;
         self.menu = None;
         self.pressed = None;
+        self.tooltip = None;
+        self.resting = None;
+    }
+
+    /// Keep time: start timing a tooltip for where the pointer came to rest,
+    /// and show it once it has rested long enough. Answers whether the ribbon
+    /// needs drawing again -- a tooltip came up.
+    ///
+    /// Call it after every event given to the ribbon, and when
+    /// [`tooltip_due_in`](Self::tooltip_due_in) says: a pointer event carries
+    /// no time, and a ribbon that asked for a clock of its own would be a
+    /// second clock to keep in step with the application's.
+    pub fn tick(&mut self, now_ms: u64) -> bool {
+        if let Some((x, y, viewport)) = self.resting.take()
+            && let Some(text) = self.tooltip_text()
+        {
+            let mut tip = Tooltip::new(&text).with_delay(TOOLTIP_DELAY_MS);
+            tip.start_hover(x, y, now_ms, viewport);
+            self.tooltip = Some(tip);
+        }
+        match self.tooltip.as_mut() {
+            Some(tip) if !tip.is_visible() => {
+                tip.tick(now_ms);
+                tip.is_visible()
+            }
+            _ => false,
+        }
+    }
+
+    /// How long until a tooltip comes up, for an application that sleeps
+    /// until something is due: none when nothing is waiting to show, and
+    /// nothing at all when the pointer has come to rest and not yet been
+    /// timed.
+    #[must_use]
+    pub fn tooltip_due_in(&self, now_ms: u64) -> Option<u64> {
+        if self.resting.is_some() {
+            return Some(0);
+        }
+        self.tooltip.as_ref().and_then(|tip| tip.due_in(now_ms))
+    }
+
+    /// The tooltip showing now, if one is.
+    #[must_use]
+    pub fn tooltip(&self) -> Option<&Tooltip> {
+        self.tooltip.as_ref().filter(|tip| tip.is_visible())
+    }
+
+    /// What the tooltip for what the pointer is over says: a control's name,
+    /// then why it cannot be used -- `design.txt` asks every disabled control
+    /// to say -- or what more it does; a folded group's name; `»`'s purpose.
+    fn tooltip_text(&self) -> Option<String> {
+        match self.hover? {
+            Hit::Control { group, control, .. } => {
+                let command = self.control_at(group, control)?.command();
+                let more = if command.enabled {
+                    command.tooltip.clone()
+                } else {
+                    Some(
+                        command
+                            .disabled_reason
+                            .clone()
+                            .unwrap_or_else(|| "Not available now".to_owned()),
+                    )
+                };
+                Some(match more {
+                    Some(more) => format!("{}\n{more}", command.label),
+                    None => command.label.clone(),
+                })
+            }
+            Hit::Folded(group) => self.group(group).map(|g| g.label.clone()),
+            Hit::Overflow => Some("More commands".to_owned()),
+            Hit::Tab(_) | Hit::Blank => None,
+        }
+    }
+
+    /// Whether key tips are shown.
+    #[must_use]
+    pub fn tips_shown(&self) -> bool {
+        self.tips.is_some()
+    }
+
+    /// The key tips for `layout`: a digit on each tab, one to ten, and a
+    /// letter -- or two, where there are more than twenty-six -- on each thing
+    /// the front tab shows, or an open panel shows: its controls, its folded
+    /// groups, `»`.
+    ///
+    /// One layer, all at once: a digit brings its tab to the front and the
+    /// letters follow it. Deliberately not Office's sequence of layers --
+    /// letters on the tabs, then a tab's own -- per the roadmap's caution.
+    #[must_use]
+    pub fn key_tips(&self, layout: &RibbonLayout) -> Vec<KeyTip> {
+        let mut tips: Vec<KeyTip> = layout
+            .tabs
+            .iter()
+            .zip("1234567890".chars())
+            .map(|(slot, digit)| KeyTip {
+                keys: digit.to_string(),
+                target: TipTarget::Tab(slot.tab),
+                rect: slot.rect,
+            })
+            .collect();
+        let Some(body) = layout.panel.as_ref().or(layout.body.as_ref()) else {
+            return tips;
+        };
+        let mut targets: Vec<(TipTarget, Rect, &str)> = Vec::new();
+        for g in &body.groups {
+            if let Some(button) = g.button {
+                if let Some(group) = self.group(g.group) {
+                    targets.push((TipTarget::Folded(g.group), button, &group.label));
+                }
+                continue;
+            }
+            for c in &g.controls {
+                if let Some(control) = self.control_at(g.group, c.control) {
+                    targets.push((
+                        TipTarget::Control {
+                            group: g.group,
+                            control: c.control,
+                        },
+                        c.rect,
+                        &control.command().label,
+                    ));
+                }
+            }
+        }
+        if let Some(overflow) = &body.overflow {
+            targets.push((TipTarget::Overflow, overflow.rect, "More"));
+        }
+        let labels: Vec<&str> = targets.iter().map(|(_, _, label)| *label).collect();
+        for ((target, rect, _), keys) in targets.into_iter().zip(tip_letters(&labels)) {
+            if !keys.is_empty() {
+                tips.push(KeyTip { keys, target, rect });
+            }
+        }
+        tips
     }
 
     fn each_control(&mut self, id: CommandId, mut f: impl FnMut(&mut Control)) -> bool {
@@ -1236,6 +1428,47 @@ fn large_lines(label: &str) -> Vec<String> {
     )
 }
 
+/// Key tips for things named `labels`, in order: each the first letter of
+/// one of its name's words that is free, else another letter of its name,
+/// else any free letter -- so Cut is `c` and Copy, coming after it, `o`. Past
+/// twenty-six things every tip is two letters, the first chosen the same way,
+/// so that no tip is the start of another. A thing past 676 gets none.
+fn tip_letters(labels: &[&str]) -> Vec<String> {
+    const ABC: &str = "abcdefghijklmnopqrstuvwxyz";
+    let two = labels.len() > ABC.len();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    labels
+        .iter()
+        .map(|label| {
+            let initials = label
+                .split_whitespace()
+                .filter_map(|word| word.chars().next());
+            let preferred: Vec<char> = initials
+                .chain(label.chars())
+                .chain(ABC.chars())
+                .filter(char::is_ascii_alphabetic)
+                .map(|c| c.to_ascii_lowercase())
+                .collect();
+            let pick = if two {
+                preferred
+                    .iter()
+                    .flat_map(|first| ABC.chars().map(move |second| format!("{first}{second}")))
+                    .find(|tip| !used.contains(tip))
+            } else {
+                preferred
+                    .iter()
+                    .map(char::to_string)
+                    .find(|tip| !used.contains(tip))
+            };
+            let tip = pick.unwrap_or_default();
+            if !tip.is_empty() {
+                used.insert(tip.clone());
+            }
+            tip
+        })
+        .collect()
+}
+
 /// How wide a control is.
 fn control_width(control: &Control) -> f32 {
     let arrow = if matches!(control, Control::Split { .. }) {
@@ -1479,9 +1712,26 @@ impl Ribbon {
             return self.menu_mouse(event);
         }
         let hit = self.hit(layout, x, y);
+        if matches!(event.kind, MouseEventKind::Press(_)) {
+            // The pointer has taken over from the keyboard, and a tooltip is
+            // not wanted over what is being pressed.
+            self.tips = None;
+            self.tooltip = None;
+            self.resting = None;
+        }
         match &event.kind {
             MouseEventKind::Move | MouseEventKind::Enter => {
-                self.hover = hit;
+                if hit != self.hover {
+                    self.hover = hit;
+                    // Something new under the pointer: its tooltip starts
+                    // over, timed from the next tick.
+                    self.tooltip = None;
+                    self.resting = matches!(
+                        hit,
+                        Some(Hit::Control { .. } | Hit::Folded(_) | Hit::Overflow)
+                    )
+                    .then_some((x, y, layout.viewport));
+                }
                 if hit.is_some() || self.panel.is_some() {
                     RibbonEvent::Handled
                 } else {
@@ -1490,6 +1740,8 @@ impl Ribbon {
             }
             MouseEventKind::Leave => {
                 self.hover = None;
+                self.tooltip = None;
+                self.resting = None;
                 RibbonEvent::Handled
             }
             MouseEventKind::Press(MouseButton::Left) => self.press(layout, hit),
@@ -1799,9 +2051,11 @@ impl Ribbon {
         }
     }
 
-    /// Handle a key: the open menu's while one is open; Ctrl+F1 minimizes the
-    /// ribbon or brings it back; Escape closes an open panel.
-    pub fn handle_key(&mut self, key: &KeyEvent) -> RibbonEvent {
+    /// Handle a key, `layout` being where everything was drawn: the open
+    /// menu's while one is open, the key tips' while they are shown; F10
+    /// shows them; Ctrl+F1 minimizes the ribbon or brings it back; Escape
+    /// closes an open panel.
+    pub fn handle_key(&mut self, layout: &RibbonLayout, key: &KeyEvent) -> RibbonEvent {
         if !key.pressed {
             return RibbonEvent::Ignored;
         }
@@ -1823,7 +2077,16 @@ impl Ribbon {
                 Some(MenuAction::None) | None => RibbonEvent::Handled,
             };
         }
+        if self.tips.is_some() {
+            return self.tip_key(layout, key);
+        }
         match key.key {
+            Key::F10 if key.modifiers == crate::event::Modifiers::NONE => {
+                self.tips = Some(String::new());
+                self.tooltip = None;
+                self.resting = None;
+                RibbonEvent::Handled
+            }
             Key::F1 if key.modifiers.ctrl => {
                 self.set_minimized(!self.minimized);
                 RibbonEvent::Customized
@@ -1834,6 +2097,161 @@ impl Ribbon {
             }
             _ => RibbonEvent::Ignored,
         }
+    }
+
+    /// A key while key tips are shown. A tip typed whole does what it leads
+    /// to; the start of a two-letter tip waits for the rest; Escape steps
+    /// back -- out of an open panel, then out of the tips -- and F10 leaves
+    /// them. Any other key leaves them too, and is the application's: the
+    /// user has gone back to typing.
+    fn tip_key(&mut self, layout: &RibbonLayout, key: &KeyEvent) -> RibbonEvent {
+        match key.key {
+            Key::Escape => {
+                if self.panel.is_some() {
+                    self.panel = None;
+                    self.tips = Some(String::new());
+                } else {
+                    self.tips = None;
+                }
+                return RibbonEvent::Handled;
+            }
+            Key::F10 => {
+                self.tips = None;
+                return RibbonEvent::Handled;
+            }
+            Key::Backspace => {
+                if let Some(typed) = self.tips.as_mut() {
+                    typed.pop();
+                }
+                return RibbonEvent::Handled;
+            }
+            _ => {}
+        }
+        let Some(c) = key
+            .text
+            .chars()
+            .next()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+        else {
+            self.tips = None;
+            return RibbonEvent::Ignored;
+        };
+        let mut typed = self.tips.clone().unwrap_or_default();
+        typed.push(c);
+        let tips = self.key_tips(layout);
+        let starting: Vec<&KeyTip> = tips.iter().filter(|t| t.keys.starts_with(&typed)).collect();
+        match starting.as_slice() {
+            // Nothing starts so: start again, rather than leave the user
+            // typing blind into a half-finished tip.
+            [] => {
+                self.tips = Some(String::new());
+                RibbonEvent::Handled
+            }
+            [one] if one.keys == typed => {
+                let target = one.target;
+                self.tips = Some(String::new());
+                self.tip_act(layout, target)
+            }
+            _ => {
+                self.tips = Some(typed);
+                RibbonEvent::Handled
+            }
+        }
+    }
+
+    /// Do what the key tip for `target` leads to. A tab or a folded group
+    /// keeps the tips shown, now for what it brought up; anything else is the
+    /// end of them, a menu it opens taking the keyboard with its first row
+    /// lit.
+    fn tip_act(&mut self, layout: &RibbonLayout, target: TipTarget) -> RibbonEvent {
+        match target {
+            TipTarget::Tab(tab) => self.press_tab(tab),
+            TipTarget::Folded(group) => {
+                let anchor = layout
+                    .body
+                    .iter()
+                    .chain(layout.panel.iter())
+                    .flat_map(|b| &b.groups)
+                    .find(|g| g.group == group)
+                    .map(|g| g.rect);
+                if let Some(anchor) = anchor {
+                    self.panel = Some(Panel::Group { group, anchor });
+                }
+                RibbonEvent::Handled
+            }
+            TipTarget::Overflow => {
+                self.tips = None;
+                let event = self.open_overflow_menu(layout);
+                self.light_first_row(None);
+                event
+            }
+            TipTarget::Control { group, control } => {
+                self.tips = None;
+                match self.control_at(group, control) {
+                    Some(Control::Button { .. } | Control::Toggle { .. }) => {
+                        self.activate(group, control, Part::Face)
+                    }
+                    Some(Control::Split { .. }) => self.open_split_by_key(layout, group, control),
+                    Some(
+                        Control::Dropdown { selected, .. } | Control::Gallery { selected, .. },
+                    ) => {
+                        let selected = *selected;
+                        let event = self.open_control_menu(layout, group, control);
+                        self.light_first_row(selected);
+                        event
+                    }
+                    None => RibbonEvent::Handled,
+                }
+            }
+        }
+    }
+
+    /// Light row `row` -- or the first -- of the open menu, so that Enter
+    /// chooses it and the arrows move from it.
+    fn light_first_row(&mut self, row: Option<usize>) {
+        if let Some(open) = self.menu.as_mut() {
+            open.menu.highlight(row.unwrap_or(0));
+        }
+    }
+
+    /// A split button reached from the keyboard: a menu of its face first --
+    /// what a press on it does -- then its own rows, so that both are within
+    /// reach of the arrow keys.
+    fn open_split_by_key(
+        &mut self,
+        layout: &RibbonLayout,
+        group: usize,
+        control: usize,
+    ) -> RibbonEvent {
+        let Some(anchor) = find_slot(layout, group, control).map(|s| s.rect) else {
+            return RibbonEvent::Handled;
+        };
+        let Some(Control::Split { command, menu, .. }) = self.control_at(group, control) else {
+            return RibbonEvent::Handled;
+        };
+        if !command.enabled {
+            return RibbonEvent::Handled;
+        }
+        let mut acts = vec![Act::Press { group, control }];
+        let mut items = vec![
+            MenuItem::Action {
+                id: 0,
+                label: command.label.clone(),
+                shortcut: None,
+                icon: command.icon.clone(),
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Separator,
+        ];
+        items.extend(split_rows(menu, command.id, &mut acts));
+        let mut menu = ContextMenu::new(items);
+        menu.set_min_width(anchor.w);
+        menu.show(anchor.x, anchor.bottom(), layout.viewport);
+        menu.highlight(0);
+        self.menu = Some(OpenMenu { menu, acts });
+        RibbonEvent::Handled
     }
 }
 
@@ -2016,11 +2434,48 @@ pub fn draw<S: CommandSink + ?Sized>(
         });
         draw_body(sink, p, ribbon, panel, icons, true);
     }
+    if let Some(typed) = &ribbon.tips {
+        // Only the tips that what has been typed still leads to.
+        for tip in ribbon.key_tips(layout) {
+            if tip.keys.starts_with(typed.as_str()) {
+                draw_tip(sink, p, &tip);
+            }
+        }
+    }
     if let Some(open) = &ribbon.menu {
         for command in open.menu.render_with_icons(p, icons) {
             sink.emit(command);
         }
     }
+    if let Some(tip) = ribbon.tooltip() {
+        for command in tip.render(p) {
+            sink.emit(command);
+        }
+    }
+}
+
+/// A key tip: its keys, capitals, on the accent, inside the foot of what it
+/// reaches.
+fn draw_tip<S: CommandSink + ?Sized>(sink: &mut S, p: &Palette, tip: &KeyTip) {
+    let keys = tip.keys.to_uppercase();
+    let width = text::measure(&keys, TIP_SIZE, FontWeightHint::Bold) + 2.0 * TIP_PAD;
+    let badge = Rect::new(
+        tip.rect.x + (tip.rect.w - width) / 2.0,
+        tip.rect.bottom() - TIP_HEIGHT,
+        width,
+        TIP_HEIGHT,
+    );
+    fill(sink, badge, p.accent, CornerRadii::all(RADIUS));
+    sink.emit(RenderCommand::Text {
+        x: badge.x + TIP_PAD,
+        y: text_top(badge.y, badge.h, TIP_SIZE),
+        text: keys,
+        color: p.on_accent(),
+        font_size: TIP_SIZE,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width),
+        overflow: TextOverflow::Clip,
+    });
 }
 
 fn fill<S: CommandSink + ?Sized>(sink: &mut S, r: Rect, color: Color, corner_radii: CornerRadii) {

@@ -565,18 +565,24 @@ fn an_open_menu_has_the_keyboard() {
     let l = wide(&r);
     let font = centre(slot(&r, &l, FONT).rect);
     press(&mut r, &l, font);
-    assert_eq!(r.handle_key(&key(Key::Escape, false)), RibbonEvent::Handled);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Escape, false)),
+        RibbonEvent::Handled
+    );
     assert!(!r.menu_open());
 
     press(&mut r, &l, font);
-    assert_eq!(r.handle_key(&key(Key::Down, false)), RibbonEvent::Handled);
-    let chosen = r.handle_key(&key(Key::Enter, false));
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Down, false)),
+        RibbonEvent::Handled
+    );
+    let chosen = r.handle_key(&l, &key(Key::Enter, false));
     assert!(
         matches!(chosen, RibbonEvent::Chose { id: FONT, .. }),
         "Enter chose nothing: {chosen:?}"
     );
     assert_eq!(
-        r.handle_key(&key(Key::Escape, false)),
+        r.handle_key(&l, &key(Key::Escape, false)),
         RibbonEvent::Ignored,
         "Escape with nothing open was taken"
     );
@@ -721,7 +727,10 @@ fn escape_closes_an_open_panel() {
     let width = whole[0] + whole[1] + small[2];
     let l = layout_at(&r, width);
     press(&mut r, &l, centre(group_slot(&l, 2).button.unwrap()));
-    assert_eq!(r.handle_key(&key(Key::Escape, false)), RibbonEvent::Handled);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Escape, false)),
+        RibbonEvent::Handled
+    );
     assert!(!r.panel_open());
 }
 
@@ -861,10 +870,13 @@ fn a_minimized_ribbon_shows_a_tab_over_the_page() {
     assert_eq!(press(&mut r, &l, (10.0, 600.0)), RibbonEvent::Handled);
     assert!(!r.panel_open(), "a press on the page left the tab open");
 
-    assert_eq!(r.handle_key(&key(Key::F1, true)), RibbonEvent::Customized);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::F1, true)),
+        RibbonEvent::Customized
+    );
     assert!(!r.minimized());
     assert_eq!(
-        r.handle_key(&key(Key::F1, false)),
+        r.handle_key(&l, &key(Key::F1, false)),
         RibbonEvent::Ignored,
         "F1 alone minimized"
     );
@@ -1152,4 +1164,419 @@ fn the_pointer_lights_what_it_is_over() {
     let (x, y) = centre(underline);
     r.handle_mouse(&l, &mouse(x, y, MouseEventKind::Move));
     assert!(!fills(&drawn(&r, &l, &p)).contains(&(underline, p.surface1)));
+}
+
+// ---- key tips ----
+
+/// A letter or digit typed.
+fn typed(c: char) -> KeyEvent {
+    KeyEvent {
+        key: Key::A,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+        text: c.to_string(),
+    }
+}
+
+/// The key tips of `l`, keys to what they reach.
+fn tips_of(r: &Ribbon, l: &RibbonLayout) -> Vec<(String, TipTarget)> {
+    r.key_tips(l)
+        .into_iter()
+        .map(|t| (t.keys, t.target))
+        .collect()
+}
+
+fn control_tip(r: &Ribbon, l: &RibbonLayout, id: CommandId) -> String {
+    let at = slot(r, l, id);
+    r.key_tips(l)
+        .into_iter()
+        .find(|t| {
+            matches!(t.target, TipTarget::Control { control, .. } if control == at.control)
+                && t.rect == at.rect
+        })
+        .map(|t| t.keys)
+        .unwrap_or_else(|| panic!("command {id} has no tip"))
+}
+
+/// **F10 shows a digit on each tab and a letter on each command of the tab
+/// in front -- a word's first letter where it is free.**
+#[test]
+fn f10_shows_a_digit_on_each_tab_and_a_letter_on_each_command() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    assert!(!r.tips_shown());
+    assert_eq!(
+        r.handle_key(&l, &key(Key::F10, false)),
+        RibbonEvent::Handled
+    );
+    assert!(r.tips_shown());
+    let tips = tips_of(&r, &l);
+    assert!(tips.contains(&("1".into(), TipTarget::Tab(0))));
+    assert!(tips.contains(&("2".into(), TipTarget::Tab(1))));
+    for (id, keys) in [
+        (PASTE, "p"),
+        (CUT, "c"),
+        (COPY, "o"),
+        (FONT, "f"),
+        (BOLD, "b"),
+        (ITALIC, "i"),
+        (UNDERLINE, "u"),
+        (STYLES, "s"),
+    ] {
+        assert_eq!(control_tip(&r, &l, id), keys, "command {id}");
+    }
+    let mut r = ribbon();
+    assert_eq!(
+        r.handle_key(&l, &key(Key::F10, true)),
+        RibbonEvent::Ignored,
+        "Ctrl+F10 was taken for the tips"
+    );
+}
+
+/// **A command's letter does it, and ends the tips.**
+#[test]
+fn a_commands_letter_does_it_and_ends_the_tips() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(r.handle_key(&l, &typed('c')), RibbonEvent::Command(CUT));
+    assert!(!r.tips_shown());
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(
+        r.handle_key(&l, &typed('B')),
+        RibbonEvent::Toggled { id: BOLD, on: true },
+        "a capital was not taken"
+    );
+}
+
+/// **A tab's digit brings it to the front, and the letters follow it.**
+#[test]
+fn a_tabs_digit_brings_it_forward_and_the_letters_follow() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(
+        r.handle_key(&l, &typed('2')),
+        RibbonEvent::TabSelected("view".into())
+    );
+    assert!(r.tips_shown(), "the tips went with the tab");
+    let l = wide(&r);
+    assert_eq!(control_tip(&r, &l, ZOOM), "z");
+    assert_eq!(r.handle_key(&l, &typed('z')), RibbonEvent::Command(ZOOM));
+}
+
+/// **A dropdown's letter opens its list with the chosen row lit, for the
+/// arrows and Enter.**
+#[test]
+fn a_dropdowns_letter_opens_its_list_for_the_arrows() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(r.handle_key(&l, &typed('f')), RibbonEvent::Handled);
+    assert!(r.menu_open());
+    assert!(!r.tips_shown());
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Enter, false)),
+        RibbonEvent::Chose { id: FONT, index: 0 }
+    );
+
+    r.set_selected(FONT, Some(2));
+    r.handle_key(&l, &key(Key::F10, false));
+    r.handle_key(&l, &typed('f'));
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Enter, false)),
+        RibbonEvent::Chose { id: FONT, index: 2 },
+        "the chosen row was not the lit one"
+    );
+}
+
+/// **A split button's letter offers its face first, then its own rows.**
+#[test]
+fn a_split_buttons_letter_offers_its_face_and_its_rows() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    r.handle_key(&l, &typed('p'));
+    assert_eq!(menu_labels(&r), ["Paste", "Paste special", "Paste as text"]);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Enter, false)),
+        RibbonEvent::Command(PASTE)
+    );
+
+    r.handle_key(&l, &key(Key::F10, false));
+    r.handle_key(&l, &typed('p'));
+    assert_eq!(
+        choose(&mut r, &["Paste as text"]),
+        RibbonEvent::MenuItem {
+            id: PASTE,
+            item: PASTE_TEXT
+        }
+    );
+}
+
+/// **Escape steps back: out of a folded group's panel, then out of the tips.
+/// A folded group's letter opens it and the letters move onto it.**
+#[test]
+fn escape_steps_back_out_of_a_panel_then_the_tips() {
+    let mut r = ribbon();
+    let (whole, small) = widths(&r);
+    let width = whole[0] + whole[1] + small[2];
+    let l = layout_at(&r, width);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert!(tips_of(&r, &l).contains(&("s".into(), TipTarget::Folded(2))));
+    assert_eq!(r.handle_key(&l, &typed('s')), RibbonEvent::Handled);
+    assert!(r.panel_open());
+    assert!(r.tips_shown());
+    let l = layout_at(&r, width);
+    // The panel's gallery is lettered now, and nothing under the panel is.
+    let tips = tips_of(&r, &l);
+    assert!(
+        tips.iter()
+            .any(|(k, t)| k == "s" && matches!(t, TipTarget::Control { group: 2, .. })),
+        "{tips:?}"
+    );
+    assert!(
+        !tips.iter().any(|(k, _)| k == "c"),
+        "Cut, under the panel, kept a tip"
+    );
+
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Escape, false)),
+        RibbonEvent::Handled
+    );
+    assert!(!r.panel_open());
+    assert!(r.tips_shown(), "Escape out of the panel left the tips too");
+    let l = layout_at(&r, width);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Escape, false)),
+        RibbonEvent::Handled
+    );
+    assert!(!r.tips_shown());
+}
+
+/// **Any key that is not a tip's leaves the tips and is the application's;
+/// so does a press of the pointer.**
+#[test]
+fn another_key_or_a_press_leaves_the_tips() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Left, false)),
+        RibbonEvent::Ignored
+    );
+    assert!(!r.tips_shown());
+
+    r.handle_key(&l, &key(Key::F10, false));
+    press(&mut r, &l, (10.0, 600.0));
+    assert!(!r.tips_shown(), "a press left the tips up");
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(
+        r.handle_key(&l, &key(Key::F10, false)),
+        RibbonEvent::Handled
+    );
+    assert!(!r.tips_shown(), "F10 again did not leave them");
+}
+
+/// **A letter no tip starts with starts the typing again, rather than leave
+/// it half done.**
+#[test]
+fn a_letter_no_tip_starts_with_starts_again() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert_eq!(r.handle_key(&l, &typed('q')), RibbonEvent::Handled);
+    assert!(r.tips_shown());
+    assert_eq!(r.handle_key(&l, &typed('c')), RibbonEvent::Command(CUT));
+}
+
+/// A tab of `n` small buttons, named `Item 1` onwards, numbered from 100.
+fn crowded(n: u64) -> Ribbon {
+    let mut group = Group::new("many", "Many");
+    for i in 0..n {
+        group = group.with(Control::button(
+            Command::new(100 + i, format!("Item {}", i + 1)),
+            ButtonSize::Small,
+        ));
+    }
+    Ribbon::new(vec![RibbonTab::new("crowd", "Crowd").with(group)])
+}
+
+/// **Past twenty-six things every tip is two letters, all different, and a
+/// first letter waits for the second.**
+#[test]
+fn past_twenty_six_every_tip_is_two_letters() {
+    let mut r = crowded(30);
+    let l = layout_at(&r, 4000.0);
+    r.handle_key(&l, &key(Key::F10, false));
+    let letters: Vec<String> = r
+        .key_tips(&l)
+        .into_iter()
+        .filter(|t| matches!(t.target, TipTarget::Control { .. }))
+        .map(|t| t.keys)
+        .collect();
+    assert_eq!(letters.len(), 30);
+    assert!(letters.iter().all(|k| k.len() == 2), "{letters:?}");
+    let unique: BTreeSet<&String> = letters.iter().collect();
+    assert_eq!(unique.len(), 30, "two things share a tip: {letters:?}");
+    let last = letters[29].clone();
+    let mut chars = last.chars();
+    assert_eq!(
+        r.handle_key(&l, &typed(chars.next().unwrap())),
+        RibbonEvent::Handled
+    );
+    assert!(r.tips_shown());
+    assert_eq!(
+        r.handle_key(&l, &typed(chars.next().unwrap())),
+        RibbonEvent::Command(129)
+    );
+
+    // Twenty-six exactly still fit one letter each.
+    let r = crowded(26);
+    let l = layout_at(&r, 4000.0);
+    assert!(r.key_tips(&l).iter().all(|t| t.keys.len() == 1));
+}
+
+/// **Tips take a word's first letter where it is free, then another of its
+/// letters, then any.**
+#[test]
+fn tips_take_a_first_letter_where_it_is_free() {
+    assert_eq!(tip_letters(&["Cut", "Copy", "Cat"]), ["c", "o", "a"]);
+    assert_eq!(
+        tip_letters(&["Page setup", "Paste", "Print"]),
+        ["p", "a", "r"]
+    );
+    assert_eq!(
+        tip_letters(&["", "123"]),
+        ["a", "b"],
+        "a name with no letters got none"
+    );
+    assert_eq!(tip_letters(&[]), Vec::<String>::new());
+}
+
+/// **Minimized, the digits open a tab over the page, and its commands take
+/// letters there.**
+#[test]
+fn minimized_the_digits_open_a_tab_over_the_page() {
+    let mut r = ribbon();
+    r.set_minimized(true);
+    let l = wide(&r);
+    r.handle_key(&l, &key(Key::F10, false));
+    assert!(
+        tips_of(&r, &l)
+            .iter()
+            .all(|(_, t)| matches!(t, TipTarget::Tab(_))),
+        "a hidden command had a tip"
+    );
+    r.handle_key(&l, &typed('1'));
+    assert!(r.panel_open());
+    let l = wide(&r);
+    assert_eq!(r.handle_key(&l, &typed('c')), RibbonEvent::Command(CUT));
+    assert!(!r.panel_open());
+}
+
+/// **The tips are drawn in capitals on the accent; once a first letter is
+/// typed, only the tips it leads to.**
+#[test]
+fn the_tips_are_drawn_in_capitals_on_the_accent() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    let p = Palette::for_mode(false);
+    let before = texts(&drawn(&r, &l, &p));
+    assert!(!before.iter().any(|(t, _)| t == "C"));
+    r.handle_key(&l, &key(Key::F10, false));
+    let cmds = drawn(&r, &l, &p);
+    let texts_now = texts(&cmds);
+    for keys in ["1", "2", "P", "C", "O", "F", "S"] {
+        assert!(
+            texts_now.contains(&(keys.to_owned(), p.on_accent())),
+            "no {keys} tip: {texts_now:?}"
+        );
+    }
+    let cut = slot(&r, &l, CUT).rect;
+    assert!(
+        fills(&cmds)
+            .iter()
+            .any(|(rect, c)| *c == p.accent && rect.bottom() == cut.bottom()),
+        "no badge at the foot of Cut"
+    );
+
+    let mut r = crowded(30);
+    let l = layout_at(&r, 4000.0);
+    r.handle_key(&l, &key(Key::F10, false));
+    let tips = r.key_tips(&l);
+    let first = tips
+        .iter()
+        .find(|t| t.keys.len() == 2)
+        .unwrap()
+        .keys
+        .clone();
+    let lead = first.chars().next().unwrap();
+    r.handle_key(&l, &typed(lead));
+    let shown = texts(&drawn(&r, &l, &p));
+    let upper = lead.to_ascii_uppercase();
+    assert!(
+        shown
+            .iter()
+            .filter(|(_, c)| *c == p.on_accent())
+            .all(|(t, _)| t.starts_with(upper)),
+        "a tip the typing no longer leads to was drawn: {shown:?}"
+    );
+}
+
+// ---- tooltips ----
+
+/// **A control rested on shows its name after a while, and a disabled one
+/// says why it cannot be used.**
+#[test]
+fn a_control_rested_on_says_what_it_is_and_why_it_cannot_be_used() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    let p = Palette::for_mode(false);
+    let delay = u64::from(TOOLTIP_DELAY_MS);
+    let (x, y) = centre(slot(&r, &l, CUT).face);
+    r.handle_mouse(&l, &mouse(x, y, MouseEventKind::Move));
+    assert_eq!(
+        r.tooltip_due_in(1_000),
+        Some(0),
+        "a rest not yet timed is not due at once"
+    );
+    assert!(!r.tick(1_000));
+    assert_eq!(r.tooltip_due_in(1_000), Some(delay));
+    assert!(!r.tick(1_000 + delay - 1));
+    assert!(r.tick(1_000 + delay), "the tooltip did not come up");
+    assert!(r.tooltip().is_some());
+    assert!(texts(&drawn(&r, &l, &p)).iter().any(|(t, _)| t == "Cut"));
+    assert!(!r.tick(5_000), "a tooltip already up asked for a redraw");
+
+    let (x, y) = centre(slot(&r, &l, UNDERLINE).face);
+    r.handle_mouse(&l, &mouse(x, y, MouseEventKind::Move));
+    assert!(
+        r.tooltip().is_none(),
+        "the old tooltip stayed over the new control"
+    );
+    r.tick(6_000);
+    assert!(r.tick(6_000 + delay));
+    let shown = texts(&drawn(&r, &l, &p));
+    assert!(
+        shown.iter().any(|(t, _)| t == "Select some text first"),
+        "{shown:?}"
+    );
+
+    press(&mut r, &l, (x, y));
+    assert!(r.tooltip().is_none(), "a press left the tooltip up");
+}
+
+/// **A tab, or nothing of the ribbon's, has no tooltip.**
+#[test]
+fn a_tab_or_nothing_has_no_tooltip() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    let home = centre(tab_slot(&l, &r, "home"));
+    r.handle_mouse(&l, &mouse(home.0, home.1, MouseEventKind::Move));
+    assert_eq!(r.tooltip_due_in(0), None);
+    r.tick(0);
+    assert!(!r.tick(10_000));
+    r.handle_mouse(&l, &mouse(10.0, 600.0, MouseEventKind::Move));
+    assert_eq!(r.tooltip_due_in(0), None);
 }

@@ -33,6 +33,7 @@
 //! in `known-issues.md`.
 
 use crate::errno;
+use crate::interrupt::Mark;
 use crate::stat::Timespec;
 use crate::syscall::*;
 use crate::types::*;
@@ -106,32 +107,49 @@ pub(crate) fn valid_nanoseconds(ns: i64) -> bool {
     (0..1_000_000_000).contains(&ns)
 }
 
+/// Sleep `ns` nanoseconds on the monotonic clock, handlers counted from
+/// `mark`: `Err(left)` when a signal handler ended it
+/// ([`crate::lowlevellock::sleep_until`]).
+fn sleep_ns(ns: u64, mark: Mark) -> Result<(), Timespec> {
+    let now = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+    let deadline = crate::lowlevellock::after(&now, ns);
+    crate::lowlevellock::sleep_until(CLOCK_MONOTONIC, &deadline, mark)
+}
+
 /// Sleep for a specified number of seconds.
 ///
-/// Returns 0 on success, or the remaining seconds if interrupted.
+/// Returns 0 once they have passed, or -- when a signal handler ends the
+/// sleep, which any does (signal(7) never restarts one) -- the whole seconds
+/// that were still to go, as glibc's `seconds + ts.tv_sec` counts them:
+/// truncated, so a sleep cut short in its last second answers 0.  `errno` is
+/// then `nanosleep`'s `EINTR`, and otherwise left as it was, as glibc's is.
+///
+/// Until 2026-09-30 no signal ended a sleep here: `SYS_SLEEP` sleeps its full
+/// time, and this answered 0 whatever happened.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sleep(seconds: u32) -> u32 {
-    // Convert seconds to nanoseconds for our native SYS_SLEEP.
-    let ns: u64 = u64::from(seconds).saturating_mul(1_000_000_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Sleep was interrupted — return remaining seconds.
-        // Our kernel doesn't report remaining time, so return 0.
-        0
-    } else {
-        0
+    let mark = Mark::now();
+    match sleep_ns(u64::from(seconds).saturating_mul(1_000_000_000), mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            errno::set_errno(errno::EINTR);
+            u32::try_from(left.tv_sec).unwrap_or(u32::MAX)
+        }
     }
 }
 
 /// High-resolution sleep.
 ///
-/// Sleeps for the time specified in `req`.  If interrupted, the
-/// remaining time is stored in `rem` (if non-null).
+/// Sleeps for the time specified in `req` -- or until a signal handler runs
+/// on the thread, `SA_RESTART` or not: -1 with `EINTR`, and the time that
+/// was still to go in `rem` (if non-null).  A signal that runs no handler
+/// here does not end it ([`crate::interrupt`]).  Until 2026-09-30 nothing
+/// did: `SYS_SLEEP` sleeps its full time.
 ///
 /// Returns 0 on success, -1 if interrupted (errno = EINTR).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
+    let mark = Mark::now();
     if req.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -146,40 +164,42 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
         return -1;
     }
 
-    // Convert to nanoseconds (both values are now non-negative, cast is safe).
-    let ns: u64 = (ts.tv_sec as u64)
+    // Both fields are non-negative now.
+    let ns = u64::try_from(ts.tv_sec)
+        .unwrap_or(0)
         .saturating_mul(1_000_000_000)
-        .saturating_add(ts.tv_nsec as u64);
+        .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0));
 
-    let ret = syscall1(SYS_SLEEP, ns);
-
-    if ret < 0 {
-        // Interrupted.  Our kernel doesn't report remaining time,
-        // so set rem to zero.
-        if !rem.is_null() {
-            unsafe {
-                (*rem).tv_sec = 0;
-                (*rem).tv_nsec = 0;
+    match sleep_ns(ns, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            if !rem.is_null() {
+                // SAFETY: a non-null `rem` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(rem, left) };
             }
+            errno::set_errno(errno::EINTR);
+            -1
         }
-        errno::set_errno(errno::EINTR);
-        return -1;
     }
-
-    0
 }
 
 /// Sleep for a specified number of microseconds.
 ///
 /// This is obsolete in POSIX.1-2008 (use `nanosleep` instead) but
-/// many programs still use it.
+/// many programs still use it, and it is glibc's: `nanosleep` of the time,
+/// any number of microseconds, -1 with `EINTR` when a signal handler ends it.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn usleep(usec: u32) -> i32 {
-    let ns: u64 = u64::from(usec).saturating_mul(1_000);
-    let ret = syscall1(SYS_SLEEP, ns);
-    if ret < 0 { -1 } else { 0 }
+    let mark = Mark::now();
+    match sleep_ns(u64::from(usec).saturating_mul(1_000), mark) {
+        Ok(()) => 0,
+        Err(_) => {
+            errno::set_errno(errno::EINTR);
+            -1
+        }
+    }
 }
 
 /// Get time from a specific clock.
@@ -581,6 +601,9 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
+    // Handlers are counted from here: in Linux the call is one system call,
+    // and a signal that comes at any point in it ends the sleep.
+    let mark = Mark::now();
     // glibc 2.39 (sysdeps/unix/sysv/linux/clock_nanosleep.c) answers the
     // calling thread's CPU clock itself, before any other check.
     if clk_id == CLOCK_THREAD_CPUTIME_ID {
@@ -615,55 +638,29 @@ pub extern "C" fn clock_nanosleep(
         return errno::EINVAL;
     }
 
+    // The deadline, on the sleep's own clock: the request itself when
+    // absolute, else the request from now.  A deadline already passed, or a
+    // relative sleep of nothing, returns at once, as `hrtimer_nanosleep` does.
     let absolute = flags & TIMER_ABSTIME != 0;
-    let sleep_ns = if absolute {
-        let mut now = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if clock_gettime(clk_id, &raw mut now) < 0 {
-            return errno::get_errno();
-        }
-        let target = timespec_to_ns_saturating(&req);
-        let current = timespec_to_ns_saturating(&now);
-        if target <= current {
-            return 0;
-        }
-        target.saturating_sub(current)
+    let deadline = if absolute {
+        req
     } else {
-        timespec_to_ns_saturating(&req)
+        let now = crate::lowlevellock::now_on(clk_id);
+        crate::lowlevellock::after(&now, timespec_to_ns_saturating(&req))
     };
-
-    if sleep_ns == 0 {
-        // `hrtimer_nanosleep` of nothing returns at once; so does this, with no
-        // syscall to be interrupted.
-        return 0;
-    }
-    let ret = syscall1(SYS_SLEEP, sleep_ns);
-    if ret < 0 {
-        // The kernel's own answer, which is EINTR when a signal cut the sleep
-        // short -- not EINTR for every failure, as the relative form reported
-        // until 2026-09-26.  Only the relative form reports what is left
-        // (Linux drops `rmtp` for TIMER_ABSTIME), and the kernel does not say,
-        // so it is reported as nothing: the approximation `nanosleep` makes.
-        let e = errno::errno_for(ret);
-        if e == errno::EINTR && !absolute && !remain.is_null() {
-            // SAFETY: a non-null `remain` is writable, per the contract.
-            unsafe {
-                core::ptr::write_unaligned(
-                    remain,
-                    Timespec {
-                        tv_sec: 0,
-                        tv_nsec: 0,
-                    },
-                );
+    match crate::lowlevellock::sleep_until(clk_id, &deadline, mark) {
+        Ok(()) => 0,
+        Err(left) => {
+            // A signal handler ended it, `SA_RESTART` or not.  Only the
+            // relative form reports what is left: Linux drops `rmtp` for
+            // TIMER_ABSTIME.
+            if !absolute && !remain.is_null() {
+                // SAFETY: a non-null `remain` is writable, per the contract.
+                unsafe { core::ptr::write_unaligned(remain, left) };
             }
+            errno::EINTR
         }
-        // The absolute form was never told about an interruption until
-        // 2026-09-26: it slept and answered 0.
-        return e;
     }
-    0
 }
 
 /// A non-negative `timespec` as nanoseconds, saturating at `u64::MAX`: an
@@ -9255,6 +9252,118 @@ mod tests {
                 "flags {flags}"
             );
         }
+    }
+
+    fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
+        let act = crate::signal::Sigaction {
+            sa_handler: handler,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        let rc = unsafe {
+            crate::signal::sigaction(
+                crate::signal::SIGUSR1,
+                &raw const act,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    extern "C" fn nothing(_: i32) {}
+
+    /// A signal handler ends a sleep whatever its `SA_RESTART`, and the sleep
+    /// answers the time that was still to go.  The kernel ending the sleep
+    /// is played by `interrupt::script`.
+    #[test]
+    fn a_signal_handler_ends_a_sleep_with_the_time_still_to_go() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SA_RESTART, SIG_DFL, SIGUSR1};
+        let handler = nothing as *const () as crate::signal::SighandlerT;
+        let five = Timespec {
+            tv_sec: 5,
+            tv_nsec: 0,
+        };
+        for flags in [0, SA_RESTART] {
+            handle_usr1(handler, flags);
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut rem = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            errno::set_errno(0);
+            assert_eq!(nanosleep(&five, &mut rem), -1, "flags {flags:#x}");
+            assert_eq!(errno::get_errno(), errno::EINTR);
+            assert_eq!(rem.tv_sec, 4, "nearly all of it was still to go");
+            assert!((0..1_000_000_000).contains(&rem.tv_nsec));
+            assert_eq!(script::clear(), 0);
+
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(sleep(5), 4, "the whole seconds still to go, truncated");
+            script::set([Step::Signal(SIGUSR1)]);
+            assert_eq!(usleep(5_000_000), -1);
+            assert_eq!(errno::get_errno(), errno::EINTR);
+
+            // clock_nanosleep answers the error, and says what is left only
+            // for a relative sleep.
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut left = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, 0, &five, &mut left),
+                errno::EINTR
+            );
+            assert_eq!(left.tv_sec, 4);
+            let mut at = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            at.tv_sec += 5;
+            script::set([Step::Signal(SIGUSR1)]);
+            let mut untouched = Timespec {
+                tv_sec: -1,
+                tv_nsec: -1,
+            };
+            assert_eq!(
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, &mut untouched),
+                errno::EINTR
+            );
+            assert_eq!((untouched.tv_sec, untouched.tv_nsec), (-1, -1));
+        }
+        handle_usr1(SIG_DFL, 0);
+    }
+
+    /// A signal that runs no handler here -- ignored, or handled on another
+    /// thread -- does not end a sleep: it runs its course.
+    #[test]
+    fn a_signal_that_runs_no_handler_here_does_not_end_a_sleep() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SIG_DFL, SIG_IGN, SIGUSR1};
+        let short = Timespec {
+            tv_sec: 0,
+            tv_nsec: 20_000_000,
+        };
+        handle_usr1(SIG_IGN, 0);
+        for step in [
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {})),
+        ] {
+            script::set([step]);
+            let start = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert_eq!(nanosleep(&short, core::ptr::null_mut()), 0);
+            let end = crate::lowlevellock::now_on(CLOCK_MONOTONIC);
+            assert!(
+                crate::lowlevellock::ns_until(&start, &end).unwrap_or(0) >= 20_000_000,
+                "it slept all of it"
+            );
+            assert_eq!(script::clear(), 0);
+        }
+        // errno is left alone by a sleep that runs its course.
+        errno::set_errno(12345);
+        assert_eq!(sleep(0), 0);
+        assert_eq!(errno::get_errno(), 12345);
+        handle_usr1(SIG_DFL, 0);
     }
 
     /// An absolute deadline far in the future does not overflow: the sum

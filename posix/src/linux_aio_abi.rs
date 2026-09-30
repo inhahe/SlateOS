@@ -1193,33 +1193,10 @@ unsafe fn pgetevents(
             mask = Some(unsafe { sig.sigmask.read_unaligned() });
         }
     }
-    let mark = Mark::now();
-    let old = mask.map(block_only);
     // SAFETY: the caller's contract.
-    let r = unsafe { getevents_interruptibly(ctx_id, min_nr, nr, events, timeout, mark, sleep) };
-    if let Some(old) = old {
-        // `SIG_SETMASK` with a set to read cannot fail.
-        let _ = crate::signal::sigprocmask(
-            crate::signal::SIG_SETMASK,
-            &raw const old,
-            core::ptr::null_mut(),
-        );
-    }
-    r
-}
-
-/// Make `mask` the set of blocked signals, as `set_user_sigmask` does; the
-/// set it replaced.  `mask` is the kernel's `sigset_t`, signal N at bit
-/// N - 1, which is the low word of this library's.
-fn block_only(mask: u64) -> crate::signal::SigsetT {
-    let mut set = crate::signal::SigsetT::EMPTY;
-    if let Some(low) = set.bits.first_mut() {
-        *low = mask;
-    }
-    let mut old = crate::signal::SigsetT::EMPTY;
-    // `SIG_SETMASK` with a set to read and one to write cannot fail.
-    let _ = crate::signal::sigprocmask(crate::signal::SIG_SETMASK, &raw const set, &raw mut old);
-    old
+    crate::signal::under_mask(mask, |mark| unsafe {
+        getevents_interruptibly(ctx_id, min_nr, nr, events, timeout, mark, sleep)
+    })
 }
 
 /// `timespec64_to_ktime`: nanoseconds, `None` for `KTIME_MAX` — no timeout —

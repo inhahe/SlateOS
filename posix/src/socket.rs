@@ -37,6 +37,7 @@
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::syscall::*;
 
 // ---------------------------------------------------------------------------
@@ -1243,6 +1244,8 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 /// `*addrlen` bytes, and `addrlen` must be non-null.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut SocklenT) -> i32 {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1283,7 +1286,7 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut Sock
         let err = translate_net_error(ret);
         if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
             // Blocking mode: poll-wait for a connection.
-            let conn = accept_wait(entry.handle);
+            let conn = accept_wait(entry.handle, mark);
             if conn < 0 {
                 return conn;
             }
@@ -1300,12 +1303,35 @@ pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut Sock
     unsafe { finish_accept(fd, conn_handle, addr, addrlen) }
 }
 
+/// The rule a socket call blocked on data or room ends by
+/// ([`crate::interrupt`]): a handler installed with `SA_RESTART` lets it
+/// wait on, unless the socket has a timeout for the call -- signal(7):
+/// "unless a timeout has been set on the socket".
+fn socket_rule(timeout_ms: u64) -> Restart {
+    if timeout_ms > 0 {
+        Restart::Never
+    } else {
+        Restart::IfAsked
+    }
+}
+
+/// [`socket_rule`] for descriptor `fd`, receiving or sending.
+pub(crate) fn wait_rule(fd: i32, receiving: bool) -> Restart {
+    socket_rule(get_meta(fd).map_or(0, |m| {
+        if receiving {
+            m.rcvtimeo_ms
+        } else {
+            m.sndtimeo_ms
+        }
+    }))
+}
+
 /// Poll-wait for a connection on a blocking listener.
 ///
 /// Retries `SYS_TCP_ACCEPT` (non-blocking) in a loop with 10ms sleeps
 /// until a connection arrives.  Returns the connection handle (≥0) or
 /// -1 with errno set.
-fn accept_wait(listener_handle: u64) -> i32 {
+fn accept_wait(listener_handle: u64, mark: Mark) -> i32 {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     loop {
@@ -1320,7 +1346,13 @@ fn accept_wait(listener_handle: u64) -> i32 {
             return -1;
         }
         // Still no connection — sleep then retry.
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(Restart::IfAsked) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, Restart::IfAsked, mark);
     }
 }
 
@@ -1485,6 +1517,8 @@ pub unsafe extern "C" fn accept4(
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind send handling.
 pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1522,7 +1556,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
                 // semantics.  Linux's blocking send() loops until ALL
                 // bytes are accepted.  Programs depend on this.
                 let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+                return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
@@ -1653,6 +1687,8 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind recv handling.
 pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1716,6 +1752,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                         kern_flags,
                         timeout_ms,
                         ret as usize,
+                        mark,
                     );
                 }
                 return ret as isize;
@@ -1729,9 +1766,17 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
                 if waitall {
-                    return tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0);
+                    return tcp_recv_waitall(
+                        entry.handle,
+                        buf,
+                        len,
+                        kern_flags,
+                        timeout_ms,
+                        0,
+                        mark,
+                    );
                 }
-                return tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms);
+                return tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms, mark);
             }
             errno::set_errno(err);
             -1
@@ -1774,6 +1819,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
                     &mut src_info,
                     kern_flags,
                     timeout_ms,
+                    mark,
                 );
                 return waited;
             }
@@ -1819,6 +1865,7 @@ fn udp_recv_wait(
     src_info: &mut [u8; 6],
     kern_flags: u32,
     timeout_ms: u64,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -1855,7 +1902,13 @@ fn udp_recv_wait(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 }
 
@@ -1871,6 +1924,7 @@ pub(crate) fn tcp_recv_wait(
     len: usize,
     kern_flags: u32,
     timeout_ms: u64,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -1914,7 +1968,13 @@ pub(crate) fn tcp_recv_wait(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 }
 
@@ -1933,6 +1993,7 @@ fn tcp_recv_waitall(
     kern_flags: u32,
     timeout_ms: u64,
     already_read: usize,
+    mark: Mark,
 ) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
@@ -1988,7 +2049,16 @@ fn tcp_recv_waitall(
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            if got > 0 {
+                break;
+            }
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 
     got as isize
@@ -2001,7 +2071,13 @@ fn tcp_recv_waitall(
 /// indefinitely.
 ///
 /// Returns bytes sent or -1 (with errno set).
-pub(crate) fn tcp_send_wait(handle: u64, buf: *const u8, len: usize, timeout_ms: u64) -> isize {
+pub(crate) fn tcp_send_wait(
+    handle: u64,
+    buf: *const u8,
+    len: usize,
+    timeout_ms: u64,
+    mark: Mark,
+) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     let deadline = if timeout_ms > 0 {
@@ -2064,7 +2140,16 @@ pub(crate) fn tcp_send_wait(handle: u64, buf: *const u8, len: usize, timeout_ms:
                 return -1;
             }
         }
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
+        // A handler ends the wait by the call's rule, and only now,
+        // with nothing come (`crate::interrupt`).
+        if mark.interrupted(socket_rule(timeout_ms)) {
+            if sent > 0 {
+                break;
+            }
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        crate::lowlevellock::nap(POLL_NS, socket_rule(timeout_ms), mark);
     }
 
     sent as isize
@@ -2094,6 +2179,8 @@ pub unsafe extern "C" fn sendto(
     dest_addr: *const Sockaddr,
     addrlen: SocklenT,
 ) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2120,7 +2207,7 @@ pub unsafe extern "C" fn sendto(
             // Blocking socket: use tcp_send_wait for full-write
             // semantics (same as send()).
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-            return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+            return tcp_send_wait(entry.handle, buf, len, timeout_ms, mark);
         }
         // Non-blocking: try once.
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
@@ -2254,6 +2341,8 @@ pub unsafe extern "C" fn recvfrom(
     src_addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> isize {
+    // Handlers counted from here (`crate::interrupt`).
+    let mark = Mark::now();
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2321,6 +2410,7 @@ pub unsafe extern "C" fn recvfrom(
                             kern_flags,
                             timeout_ms,
                             ret as usize,
+                            mark,
                         )
                     } else {
                         ret as isize
@@ -2331,9 +2421,17 @@ pub unsafe extern "C" fn recvfrom(
                     let err = translate_net_error(ret);
                     if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
                         if waitall {
-                            tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0)
+                            tcp_recv_waitall(
+                                entry.handle,
+                                buf,
+                                len,
+                                kern_flags,
+                                timeout_ms,
+                                0,
+                                mark,
+                            )
                         } else {
-                            tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                            tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms, mark)
                         }
                     } else {
                         errno::set_errno(err);
@@ -2410,6 +2508,7 @@ pub unsafe extern "C" fn recvfrom(
                         &mut src_info,
                         kern_flags,
                         timeout_ms,
+                        mark,
                     );
                     if waited < 0 {
                         return waited;

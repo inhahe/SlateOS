@@ -403,27 +403,34 @@ fn wait_common(
         WaitTarget::Pgid(pgid) => (u64::from(pgid), kernel_options | K_WPGID),
     };
 
+    // Restarted for a handler installed with `SA_RESTART`, and for a signal
+    // that ran no handler here -- a child's own `SIGCHLD`, ignored by default,
+    // among them -- as Linux's waits are (`crate::interrupt`).
     let ret = match info {
-        None => syscall3(
-            SYS_PROCESS_WAIT_STATUS,
-            arg0,
-            u64::from(options),
-            core::ptr::from_mut(wstatus_out) as u64,
-        ),
-        Some(slot) => {
-            // Zero first: on any path where the kernel declines to write
-            // (WNOHANG miss, error), the caller must see "no data" rather
-            // than our stack.
-            *slot = WaitInfo::default();
-            options |= K_WINFO;
-            syscall5(
+        None => crate::interrupt::restarting(crate::interrupt::Restart::IfAsked, || {
+            syscall3(
                 SYS_PROCESS_WAIT_STATUS,
                 arg0,
                 u64::from(options),
                 core::ptr::from_mut(wstatus_out) as u64,
-                core::ptr::from_mut(slot) as u64,
-                core::mem::size_of::<WaitInfo>() as u64,
             )
+        }),
+        Some(slot) => {
+            options |= K_WINFO;
+            crate::interrupt::restarting(crate::interrupt::Restart::IfAsked, || {
+                // Zero first: on any path where the kernel declines to write
+                // (WNOHANG miss, error), the caller must see "no data"
+                // rather than our stack.
+                *slot = WaitInfo::default();
+                syscall5(
+                    SYS_PROCESS_WAIT_STATUS,
+                    arg0,
+                    u64::from(options),
+                    core::ptr::from_mut(wstatus_out) as u64,
+                    core::ptr::from_mut(slot) as u64,
+                    core::mem::size_of::<WaitInfo>() as u64,
+                )
+            })
         }
     };
 

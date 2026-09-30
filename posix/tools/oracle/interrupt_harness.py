@@ -1,6 +1,7 @@
-"""What a signal does to a call blocked in glibc 2.39 -- the functions that
-wait inside the C library, each blocked on a thread of its own and sent a
-signal five ways -- as the oracle for posix/src/interrupt.rs.
+"""What a signal does to a call blocked in glibc 2.39 on Linux -- the
+functions that wait inside the C library, and the system calls the kernel
+itself sleeps in, each blocked on a thread of its own and sent a signal five
+ways -- as the oracle for posix/src/interrupt.rs.
 
     python posix/tools/oracle/interrupt_harness.py   # writes posix/src/interrupt_oracle.txt
 
@@ -24,7 +25,10 @@ as it ended: glibc's `lio_listio(LIO_WAIT)`, ended by a signal, leaves its
 requests pointing at the waiting list it kept in its own stack frame, so
 their completing afterwards writes into -- and follows pointers out of -- a
 frame that is gone. Before the cases were separated, finishing that one
-wedged every case after it.
+wedged every case after it. A child the probe forks -- to hold a lock, or to
+be waited for -- closes its own copy of the pipe it waits on, so that the
+probe's exit is an end of file to it: left waiting, it would outlive the
+run, and a lock holder would keep the lock from every case after its own.
 """
 
 import sys
@@ -45,18 +49,30 @@ PROGRAM = r'''
 #include <linux/futex.h>
 #include <mqueue.h>
 #include <netdb.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/file.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
+#include <sys/select.h>
 #include <sys/sem.h>
+#include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
+#include <sys/timerfd.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -319,6 +335,279 @@ static void w_futex_timed(void)
     said(syscall(SYS_futex, &word, FUTEX_WAIT_PRIVATE, 0, &t, NULL, 0));
 }
 
+/* ---- The calls the kernel itself sleeps in ---- */
+
+/* The thread that waits: what releases pause, sigsuspend and the signal
+ * waits signals it. */
+static pthread_t waiter_thread;
+
+/* A pipe: empty for the readers, full for the writer. */
+static int pfd[2];
+static void pipe_setup(void) { if (pipe(pfd) != 0) { perror("pipe"); exit(1); } }
+static void pipe_full_setup(void)
+{
+    pipe_setup();
+    static char b[4096];
+    memset(b, 'x', sizeof b);
+    fcntl(pfd[1], F_SETFL, O_NONBLOCK);
+    while (write(pfd[1], b, sizeof b) > 0)
+        ;
+    fcntl(pfd[1], F_SETFL, 0);
+}
+static void pipe_feed(void) { if (write(pfd[1], "r", 1) != 1) perror("write"); }
+static void pipe_drain(void)
+{
+    static char b[1 << 16];
+    if (read(pfd[0], b, sizeof b) < 0) perror("read");
+}
+static void pipe_teardown(void) { close(pfd[0]); close(pfd[1]); }
+static void w_read(void) { char b[8]; said(read(pfd[0], b, sizeof b)); }
+static void w_write(void) { said(write(pfd[1], "w", 1)); }
+static void w_poll(void) { struct pollfd p = { pfd[0], POLLIN, 0 }; said(poll(&p, 1, -1)); }
+static void w_poll_timed(void) { struct pollfd p = { pfd[0], POLLIN, 0 }; said(poll(&p, 1, 10000)); }
+static void w_ppoll(void) { struct pollfd p = { pfd[0], POLLIN, 0 }; said(ppoll(&p, 1, NULL, NULL)); }
+static void w_select(void)
+{
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(pfd[0], &r);
+    said(select(pfd[0] + 1, &r, NULL, NULL, NULL));
+}
+static void w_pselect(void)
+{
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(pfd[0], &r);
+    said(pselect(pfd[0] + 1, &r, NULL, NULL, NULL, NULL));
+}
+static void w_epoll_wait(void)
+{
+    int ep = epoll_create1(0);
+    struct epoll_event e;
+    memset(&e, 0, sizeof e);
+    e.events = EPOLLIN;
+    epoll_ctl(ep, EPOLL_CTL_ADD, pfd[0], &e);
+    struct epoll_event got;
+    said(epoll_wait(ep, &got, 1, -1));
+    close(ep);
+}
+
+/* A socket pair: an empty one, and one with a receive timeout. */
+static int sv[2];
+static void sock_setup(void) { if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) { perror("socketpair"); exit(1); } }
+static void sock_timeout_setup(void)
+{
+    sock_setup();
+    struct timeval tv = { 10, 0 };
+    setsockopt(sv[0], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+}
+static void sock_feed(void) { if (send(sv[1], "r", 1, 0) != 1) perror("send"); }
+static void sock_teardown(void) { close(sv[0]); close(sv[1]); }
+static void w_recv(void) { char b[8]; said(recv(sv[0], b, sizeof b, 0)); }
+
+/* A listening socket no one connects to until the release. */
+static int lfd;
+static struct sockaddr_un where;
+static void accept_setup(void)
+{
+    lfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    memset(&where, 0, sizeof where);
+    where.sun_family = AF_UNIX;
+    strcpy(where.sun_path, "/tmp/interrupt-sock");
+    unlink(where.sun_path);
+    if (bind(lfd, (struct sockaddr *)&where, sizeof where) != 0 || listen(lfd, 1) != 0) {
+        perror("listen");
+        exit(1);
+    }
+}
+static void accept_release(void)
+{
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (connect(c, (struct sockaddr *)&where, sizeof where) != 0) perror("connect");
+}
+static void accept_teardown(void) { close(lfd); unlink(where.sun_path); }
+static void w_accept(void) { int c = accept(lfd, NULL, NULL); said(c >= 0 ? 0 : -1); }
+
+/* A child that lives until the release, and exits 7. */
+static pid_t kid;
+static int kfd[2];
+static void child_setup(void)
+{
+    if (pipe(kfd) != 0) { perror("pipe"); exit(1); }
+    kid = fork();
+    if (kid == 0) {
+        /* Its own copy of the write end closed, so that the probe's exit is
+         * an end of file here: a child left waiting would outlive the run. */
+        close(kfd[1]);
+        char c;
+        if (read(kfd[0], &c, 1) < 0) _exit(1);
+        _exit(7);
+    }
+    close(kfd[0]);
+}
+static void child_release(void) { if (write(kfd[1], "x", 1) != 1) perror("write"); }
+static void w_waitpid(void)
+{
+    int st = 0;
+    pid_t p = waitpid(kid, &st, 0);
+    said(p == kid ? WEXITSTATUS(st) : -1);
+}
+
+/* A FIFO no one opens for writing until the release. */
+static void fifo_setup(void)
+{
+    unlink("/tmp/interrupt-fifo");
+    if (mkfifo("/tmp/interrupt-fifo", 0600) != 0) { perror("mkfifo"); exit(1); }
+}
+static void fifo_release(void)
+{
+    int fd = open("/tmp/interrupt-fifo", O_WRONLY);
+    if (fd >= 0) close(fd);
+}
+static void fifo_teardown(void) { unlink("/tmp/interrupt-fifo"); }
+static void w_open_fifo(void)
+{
+    int fd = open("/tmp/interrupt-fifo", O_RDONLY);
+    said(fd >= 0 ? 0 : -1);
+    if (fd >= 0) close(fd);
+}
+
+/* A lock another process holds until the release: flock's, or fcntl's. */
+static int lockfd;
+static pid_t holder;
+static int hfd[2];
+static void hold(int record)
+{
+    lockfd = open("/tmp/interrupt-lock", O_RDWR | O_CREAT, 0600);
+    int ready[2];
+    if (pipe(hfd) != 0 || pipe(ready) != 0) { perror("pipe"); exit(1); }
+    holder = fork();
+    if (holder == 0) {
+        /* As the waitpid child's: the probe's exit must be an end of file
+         * here, or a holder left waiting keeps the lock from every case
+         * after it. */
+        close(hfd[1]);
+        close(ready[0]);
+        int fd = open("/tmp/interrupt-lock", O_RDWR);
+        if (record) {
+            struct flock fl;
+            memset(&fl, 0, sizeof fl);
+            fl.l_type = F_WRLCK;
+            fl.l_whence = SEEK_SET;
+            fl.l_len = 1;
+            fcntl(fd, F_SETLK, &fl);
+        } else {
+            flock(fd, LOCK_EX);
+        }
+        if (write(ready[1], "l", 1) != 1) _exit(1);
+        char c;
+        if (read(hfd[0], &c, 1) < 0) _exit(1);
+        _exit(0);
+    }
+    close(ready[1]);
+    char c;
+    if (read(ready[0], &c, 1) != 1) { perror("read"); exit(1); }
+    close(ready[0]);
+    close(hfd[0]);
+}
+static void flock_setup(void) { hold(0); }
+static void setlkw_setup(void) { hold(1); }
+static void holder_release(void) { if (write(hfd[1], "x", 1) != 1) perror("write"); }
+static void w_flock(void) { said(flock(lockfd, LOCK_EX)); }
+static void w_setlkw(void)
+{
+    struct flock fl;
+    memset(&fl, 0, sizeof fl);
+    fl.l_type = F_WRLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_len = 1;
+    said(fcntl(lockfd, F_SETLKW, &fl));
+}
+
+/* The sleeps: two seconds, which nothing ends early but a signal; what is
+ * left, in whole seconds. */
+static void w_nanosleep(void)
+{
+    struct timespec t = { 2, 0 }, rem = { 0, 0 };
+    if (nanosleep(&t, &rem) == 0)
+        snprintf(out, sizeof out, "0");
+    else
+        snprintf(out, sizeof out, "-1 %s, %ld s left", en(errno), (long)rem.tv_sec);
+}
+static void w_clock_nanosleep(void)
+{
+    struct timespec t = { 2, 0 }, rem = { 0, 0 };
+    int rc = clock_nanosleep(CLOCK_MONOTONIC, 0, &t, &rem);
+    if (rc == 0)
+        snprintf(out, sizeof out, "0");
+    else
+        snprintf(out, sizeof out, "%s, %ld s left", en(rc), (long)rem.tv_sec);
+}
+static void w_usleep(void) { said(usleep(2000000)); }
+static void w_sleep(void) { snprintf(out, sizeof out, "%u left", sleep(2)); }
+
+/* Waiting for a signal: released by SIGUSR2, whose handler has no
+ * SA_RESTART, sent to the waiting thread -- or, for sigtimedwait, by
+ * SIGUSR2 as the signal it waits for. */
+static void on_usr2(int sig) { (void)sig; }
+static void usr2_release(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sigemptyset(&sa.sa_mask);
+    sa.sa_handler = on_usr2;
+    sigaction(SIGUSR2, &sa, NULL);
+    pthread_kill(waiter_thread, SIGUSR2);
+}
+static void w_pause(void) { said(pause()); }
+static void w_sigsuspend(void) { sigset_t m; sigemptyset(&m); said(sigsuspend(&m)); }
+static void w_sigtimedwait(void)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    struct timespec t = { 10, 0 };
+    said(sigtimedwait(&s, NULL, &t));
+}
+
+/* Event descriptors: an eventfd at zero, a timer ten seconds off, and a
+ * signalfd for SIGUSR2. */
+static int efd;
+static void eventfd_setup(void) { efd = eventfd(0, 0); }
+static void eventfd_release(void) { uint64_t one = 1; if (write(efd, &one, 8) != 8) perror("write"); }
+static void efd_teardown(void) { close(efd); }
+static void w_efd_read(void) { uint64_t v; said(read(efd, &v, 8)); }
+static void timerfd_setup(void)
+{
+    efd = timerfd_create(CLOCK_MONOTONIC, 0);
+    struct itimerspec it;
+    memset(&it, 0, sizeof it);
+    it.it_value.tv_sec = 10;
+    timerfd_settime(efd, 0, &it, NULL);
+}
+static void timerfd_release(void)
+{
+    struct itimerspec it;
+    memset(&it, 0, sizeof it);
+    it.it_value.tv_nsec = 1;
+    timerfd_settime(efd, 0, &it, NULL);
+}
+static void signalfd_setup(void)
+{
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &s, NULL);
+    efd = signalfd(-1, &s, 0);
+}
+static void signalfd_release(void) { pthread_kill(waiter_thread, SIGUSR2); }
+static void w_signalfd_read(void)
+{
+    struct signalfd_siginfo si;
+    said(read(efd, &si, sizeof si));
+}
+
 /* The two POSIX says never answer EINTR, for comparison. */
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -378,6 +667,31 @@ static const Case cases[] = {
     { "getaddrinfo_a GAI_WAIT", gai_wait_setup, w_gai_wait, gai_release, gai_teardown },
     { "futex FUTEX_WAIT", futex_setup, w_futex, futex_release, nothing },
     { "futex FUTEX_WAIT timed", futex_setup, w_futex_timed, futex_release, nothing },
+    { "read, a pipe", pipe_setup, w_read, pipe_feed, pipe_teardown },
+    { "write, a full pipe", pipe_full_setup, w_write, pipe_drain, pipe_teardown },
+    { "recv, a socket", sock_setup, w_recv, sock_feed, sock_teardown },
+    { "recv, a socket with SO_RCVTIMEO", sock_timeout_setup, w_recv, sock_feed, sock_teardown },
+    { "accept", accept_setup, w_accept, accept_release, accept_teardown },
+    { "waitpid", child_setup, w_waitpid, child_release, nothing },
+    { "open, a FIFO", fifo_setup, w_open_fifo, fifo_release, fifo_teardown },
+    { "flock", flock_setup, w_flock, holder_release, nothing },
+    { "fcntl F_SETLKW", setlkw_setup, w_setlkw, holder_release, nothing },
+    { "read, an eventfd", eventfd_setup, w_efd_read, eventfd_release, efd_teardown },
+    { "read, a timerfd", timerfd_setup, w_efd_read, timerfd_release, efd_teardown },
+    { "read, a signalfd", signalfd_setup, w_signalfd_read, signalfd_release, efd_teardown },
+    { "poll", pipe_setup, w_poll, pipe_feed, pipe_teardown },
+    { "poll timed", pipe_setup, w_poll_timed, pipe_feed, pipe_teardown },
+    { "ppoll", pipe_setup, w_ppoll, pipe_feed, pipe_teardown },
+    { "select", pipe_setup, w_select, pipe_feed, pipe_teardown },
+    { "pselect", pipe_setup, w_pselect, pipe_feed, pipe_teardown },
+    { "epoll_wait", pipe_setup, w_epoll_wait, pipe_feed, pipe_teardown },
+    { "nanosleep", nothing, w_nanosleep, nothing, nothing },
+    { "clock_nanosleep", nothing, w_clock_nanosleep, nothing, nothing },
+    { "usleep", nothing, w_usleep, nothing, nothing },
+    { "sleep", nothing, w_sleep, nothing, nothing },
+    { "pause", nothing, w_pause, usr2_release, nothing },
+    { "sigsuspend", nothing, w_sigsuspend, usr2_release, nothing },
+    { "sigtimedwait", nothing, w_sigtimedwait, signalfd_release, nothing },
     { "pthread_cond_wait", cond_setup, w_cond_wait, cond_release, nothing },
     { "pthread_mutex_lock", mutex_setup, w_mutex_lock, mutex_release, nothing },
 };
@@ -444,6 +758,7 @@ static void probe(const Case *c, int way)
     c->setup();
     pthread_t w;
     pthread_create(&w, NULL, waiter, (void *)c);
+    waiter_thread = w;
     while (!atomic_load(&started))
         sched_yield();
     settle();

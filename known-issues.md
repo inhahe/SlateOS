@@ -176931,7 +176931,7 @@ rung is lane A's (`requests/d-a-run-the-ctest-eintr-fixture.md`). The same
 fault in the calls the kernel itself sleeps in is
 `D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL`.
 
-## D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL — a native program's blocking system call fails with EINTR for any signal its trampoline takes: one it ignores, a child's exit, one whose handler asked for SA_RESTART (lane D, 2026-09-30) — **Status: OPEN**
+## D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL — a native program's blocking system call fails with EINTR for any signal its trampoline takes: one it ignores, a child's exit, one whose handler asked for SA_RESTART (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/interrupt.rs`, `posix/src/lowlevellock.rs`)**
 
 **In short:** a program here that is blocked in a system call the kernel
 itself sleeps in -- `read` from a terminal or a pipe, `waitpid`, `accept`,
@@ -176975,3 +176975,61 @@ it was for the waits: `interrupt_harness.py`'s shape, over those calls.
 (`unistd.rs`'s `read` and `write`, `process.rs`'s `waitpid`, `socket.rs`,
 ...); the kernel's side is `deliver_pending_signal` in
 `kernel/src/syscall/handlers.rs`.
+
+**Fixed 2026-09-30.** The library's wrappers of the kernel's blocking calls
+restart as Linux's kernel restarts them (`interrupt::restarting`): `read`
+and `write` on a pipe, a socket pair, the terminal and a pty, the eventfd
+read, and every wait for a child (`process.rs`'s `wait_common`) are issued
+again for as long as the kernel ends them for a signal that ran no handler
+on the thread, or only handlers installed with `SA_RESTART`. The loops the
+library builds from the kernel's non-blocking calls count handlers from the
+call's start and ask after each look: `poll`, `ppoll`, `select`, `pselect`,
+`epoll_wait` and its two end for any handler; the TCP and UDP waits,
+`accept` and `flock` for one without `SA_RESTART` -- or for any, on a socket
+with a timeout; the timerfd and inotify reads as `read` does. Their slices,
+and every sleep (`sleep`, `nanosleep`, `usleep`, `clock_nanosleep`), are
+timed futex waits on a word of their own, which the kernel ends for a signal
+where `SYS_SLEEP` sleeps its full time: a handler ends a sleep at once, with
+the time left (design-decisions §1157). `pause` and `sigsuspend` wait for a
+handler on their own thread the same way instead of polling a process-wide
+count every 2 ms; `sigsuspend` counts from before it sets its mask, which
+closed a lost wake-up. And `ppoll`, `pselect` and `epoll_pwait` hold their
+signal masks for the call, which they had ignored (`signal::under_mask`).
+glibc's answers for 25 more calls -- 240 cases in all -- are in
+`interrupt_oracle.txt`: the host replays the sleeps, `pause` and
+`sigsuspend`, and holds a table of the other calls' rules to glibc's lines;
+`services/ctest-eintr` gained six ring-3 checks (a pipe read through an
+`SA_RESTART` handler and through a child's `SIGCHLD`, `nanosleep`, `poll`,
+`waitpid`, `pause`). Still to do: `sigwait`, `sigtimedwait` and `sigwaitinfo`
+are stubs (`D-POSIX-SIGWAIT-AND-SIGTIMEDWAIT-ARE-STUBS`). Moot for now: a
+FIFO and a signalfd cannot be made here, and a record lock is granted at
+once, so nothing waits in `F_SETLKW`.
+
+## D-POSIX-SIGWAIT-AND-SIGTIMEDWAIT-ARE-STUBS — `sigwait` sleeps a second and answers EINTR, `sigtimedwait` and `sigwaitinfo` answer EAGAIN at once; none takes a signal (lane D, 2026-09-30) — **Status: OPEN**
+
+**In short:** a program that blocks a signal and waits for it with
+`sigwait` -- the usual way a multithreaded server handles `SIGTERM` or
+`SIGHUP`, on a thread of its own -- never gets it here. `sigwait` sleeps
+for a second and returns `EINTR` without having taken anything, and
+`sigtimedwait` and `sigwaitinfo` return -1 with `EAGAIN` at once. Their
+comments still say the system delivers no signals, which stopped being true
+when the trampoline arrived.
+
+**Why it is not simply done:** the native kernel has no call that takes a
+pending signal off the pending set without delivering it, and its signal
+mask is the process's, not the thread's.
+
+**The proper fix:** in the library, beside the trampoline's dispatch. A
+thread in `sigwait` registers the set it accepts -- lock-free, since the
+dispatch runs in signal context and must never wait on a lock the thread it
+interrupted holds -- and lets the set through the mask. The dispatch, on
+whichever thread the kernel delivers to, hands a signal of a registered set
+to its waiter instead of running a handler, and wakes it with a futex wake;
+the waiter blocks the set again. A handler for a signal outside the set ends
+`sigtimedwait` with `EINTR`, `SA_RESTART` or not, and one that runs no handler
+does not end it -- glibc's answers (`interrupt_oracle.txt`, "sigtimedwait").
+The siginfo it can fill is the signal's number: the native frame carries no
+more.
+
+**Where:** `posix/src/signal.rs` (`sigwait`, `sigtimedwait`,
+`sigwaitinfo`, `dispatch_self_signal`).

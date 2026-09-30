@@ -184,92 +184,86 @@ process_global! {
     /// hundred lines below, which asks the kernel via `SYS_SIGNAL_PENDING`.)
     fn blocked_mask_ptr() -> SigsetT = SigsetT::EMPTY;
 
-    /// How many signal handlers this process has actually run.
-    ///
-    /// Bumped by `dispatch_self_signal` immediately before a registered
-    /// handler is invoked, and read by [`wait_for_delivery`], which is what
-    /// `pause(2)` and [`sigsuspend`] wait on.
-    ///
-    /// It has to exist because **a delivered signal otherwise leaves no
-    /// trace a waiter could observe.** Delivery is asynchronous — the kernel
-    /// redirects the thread to `__signal_trampoline`, the handler runs, and
-    /// execution resumes — so afterwards nothing distinguishes "a signal was
-    /// caught" from "nothing happened". `SYS_SIGNAL_PENDING` does not help:
-    /// it reports signals *blocked and queued*, which is the opposite set.
-    ///
-    /// Wrapping is harmless. Both waiters compare for inequality against a
-    /// sample taken before they slept, so only a *change* matters; aliasing
-    /// would need 2^64 handlers to run inside one sleep interval.
-    ///
-    /// **Atomic, and not because of threads.** The other globals in this
-    /// block are plain values on the macro's stated assumption that the
-    /// target is single-threaded. This one is a read-modify-write performed
-    /// *in signal-delivery context*, and a second delivery landing inside it
-    /// would lose an update -- which is not a corrupt count but a missed
-    /// wake: `pause` would stay parked for a signal it was already sent.
-    /// `fetch_add` is what makes the increment survive being interrupted by
-    /// the very thing it is counting.
-    fn deliveries_ptr() -> core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0);
 }
 
-/// Read the delivery counter.
+/// Block until a signal handler has run on this thread since `mark`: the
+/// wait of `pause`, and of `sigsuspend` once its mask is in place.
 ///
-/// On the host this has no caller outside the tests: `wait_for_delivery` is a
-/// stub there, because there is no kernel to deliver anything, so the only
-/// reader of the counter is compiled out. The `allow` is scoped to that build
-/// rather than blanket, so a genuinely dead reader on the target -- which
-/// would mean nothing waits on signals at all -- still warns.
-#[cfg_attr(not(target_os = "none"), allow(dead_code))]
-fn deliveries() -> u64 {
-    // SAFETY: `deliveries_ptr()` is owned solely by this process (this thread
-    // on host builds) and always points at an initialised `AtomicU64`.
-    unsafe { (*deliveries_ptr()).load(core::sync::atomic::Ordering::Relaxed) }
-}
-
-/// Record that a registered handler is about to run.
+/// A futex wait on a word of its own, which nothing wakes and the kernel ends
+/// for every signal it hands the trampoline; the counts the dispatch keeps
+/// per thread say whether a handler ran here ([`crate::interrupt`]).  So a
+/// signal set to `SIG_IGN`, or ignored by default, leaves the wait where it
+/// is, as POSIX has it -- and so does one another thread handles, `pause`
+/// being the thread's.  A signal whose action ends the process never returns
+/// here at all.
 ///
-/// Bumped *before* the call rather than after, so that a handler which never
-/// returns normally — one that `longjmp`s out, as `setjmp`-based error
-/// recovery does — still counts as a delivery.
-fn note_delivery() {
-    // SAFETY: as `deliveries()`.
-    unsafe {
-        (*deliveries_ptr()).fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+/// Until 2026-09-30 this polled a process-wide count of handlers every 2 ms,
+/// sampled only once the wait began: `sigsuspend` sets its mask first, a
+/// signal that mask lets through is delivered as it is set, and so the one
+/// signal `sigsuspend` was waiting for had already been counted -- it then
+/// waited for another.  Counting from `mark`, taken before the mask, is what
+/// makes the mask and the wait one step.
+pub(crate) fn wait_for_handler(mark: crate::interrupt::Mark) {
+    let word = core::sync::atomic::AtomicI32::new(0);
+    while !nothing_to_wait_for() {
+        let waited = crate::lowlevellock::futex_wait_interruptible_since(
+            &word,
+            0,
+            None,
+            crate::interrupt::Restart::Never,
+            mark,
+        );
+        if waited == crate::lowlevellock::Waited::Interrupted {
+            return;
+        }
     }
 }
 
-/// Block until this process runs a signal handler.
+/// Run `call` with `mask` -- the low word of a `sigset_t`, when there is
+/// one -- as the blocked set, and the set it replaced back afterwards: the
+/// mask of `ppoll`, `pselect`, `epoll_pwait` and `io_pgetevents`, which Linux
+/// sets and waits under in one step (`set_user_sigmask`).  `SIGKILL` and
+/// `SIGSTOP` cannot be blocked, and are dropped from it as `sigprocmask`
+/// drops them.
 ///
-/// Polls, because there is nothing else to poll with: the kernel has no
-/// wait-for-signal primitive. The sleep is what makes this a wait rather than
-/// a spin, and 2 ms bounds the latency a caller sees while costing 500
-/// syscalls a second in the rare process that is parked here at all.
-///
-/// A `SYS_SIGNAL_WAIT` would remove the poll and is worth asking for if this
-/// ever shows up in a profile — not before, since a process in `pause` is by
-/// definition doing nothing else.
-///
-/// Note what it does **not** wake for: a signal whose disposition is `SIG_IGN`,
-/// or whose default action is ignore, runs no handler and bumps no counter, so
-/// it correctly leaves `pause` waiting. That is POSIX's rule, and it falls out
-/// of counting handler *invocations* rather than deliveries.
-#[cfg(target_os = "none")]
-pub(crate) fn wait_for_delivery() {
-    let start = deliveries();
-    while deliveries() == start {
-        let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 2_000_000_u64);
-    }
+/// `call` is handed a mark taken before the mask is set.  A pending signal
+/// the mask lets through is delivered as it is set, before `call` sleeps; a
+/// call that counts handlers from that mark ends as Linux's does, for which
+/// the signal would still have been pending when it slept
+/// ([`crate::interrupt`]).
+pub(crate) fn under_mask<R>(
+    mask: Option<u64>,
+    call: impl FnOnce(crate::interrupt::Mark) -> R,
+) -> R {
+    let mark = crate::interrupt::Mark::now();
+    let Some(low) = mask else {
+        return call(mark);
+    };
+    let previous = current_blocked_low();
+    apply_blocked_low(low & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
+    let answer = call(mark);
+    apply_blocked_low(previous);
+    answer
 }
 
-/// Host build: return at once.
-///
-/// There is no kernel here to deliver anything, so the loop above would wait
-/// for something that cannot happen — it would hang `cargo test` rather than
-/// fail it. The host keeps the old immediate return, which is wrong in the
-/// same way it always was and is at least bounded.
-#[cfg(not(target_os = "none"))]
-pub(crate) fn wait_for_delivery() {}
+/// Whether a wait for a signal could never end: on the host, where there is
+/// no kernel to send one, unless a test has scripted one
+/// (`crate::interrupt::script`).  There it returns at once, as it always
+/// has -- wrong in the same way, and bounded.  Never so on the target.
+fn nothing_to_wait_for() -> bool {
+    #[cfg(target_os = "none")]
+    {
+        false
+    }
+    #[cfg(all(not(target_os = "none"), test))]
+    {
+        crate::interrupt::script::is_empty()
+    }
+    #[cfg(all(not(target_os = "none"), not(test)))]
+    {
+        true
+    }
+}
 
 /// Install a signal handler.
 ///
@@ -1135,11 +1129,11 @@ fn dispatch_self_signal(sig: i32) -> i32 {
             // as a valid fn(i32).  We trust they provided a valid pointer.
             let func: extern "C" fn(i32) =
                 unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
-            // Before the call, not after: see `note_delivery`.  The first
-            // count is this thread's, for a wait the signal cut short to
-            // learn whether it was interrupted ([`crate::interrupt`]).
+            // Before the call, not after, so that a handler that leaves by
+            // `longjmp` still counts: this thread's count, for a wait the
+            // signal cut short to learn whether it was interrupted
+            // ([`crate::interrupt`]).
             crate::interrupt::note_handler(sa_flags & SA_RESTART != 0);
-            note_delivery();
             // `SA_ONSTACK` is honoured here and nowhere else. See
             // [`altstack_entry`] for the four conditions, and `known-issues.md`
             // for the one case this still cannot serve.
@@ -1720,9 +1714,14 @@ pub extern "C" fn sigsuspend(mask: *const SigsetT) -> i32 {
     // SAFETY: non-null (checked just above); read unaligned to tolerate a
     // caller buffer that is not naturally aligned, as `setitimer` does.
     let requested = unsafe { core::ptr::read_unaligned(mask) };
+    // Handlers counted from before the mask: one that the mask lets through
+    // runs as it is set, and is the signal this was waiting for.
+    let mark = crate::interrupt::Mark::now();
     let previous = current_blocked_low();
-    apply_blocked_low(requested.bits[0]);
-    wait_for_delivery();
+    // `sigdelsetmask(&newset, sigmask(SIGKILL) | sigmask(SIGSTOP))`, as
+    // Linux's `sigsuspend` has it: those two cannot be blocked.
+    apply_blocked_low(requested.bits[0] & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
+    wait_for_handler(mark);
     // Restored even though every path returns -1: the mask is process state,
     // and a caller looping on `sigsuspend` must not accumulate the mask it
     // passed in.
@@ -6404,50 +6403,46 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The delivery counter, which `pause` and `sigsuspend` wait on.
-    //
-    // These are host tests of a mechanism whose *wait* is bare-metal only
-    // (`wait_for_delivery` is a no-op off-target, or `cargo test` would park
-    // forever waiting for a kernel that is not there). What the host can
-    // still check is the half that decides whether the wait ever ends: that
-    // the counter moves exactly when a handler runs. If it did not move, a
-    // process in `pause` on the target would never wake, and no host test
-    // would have said so.
+    // The wait of `pause` and `sigsuspend`, with the kernel played by
+    // `crate::interrupt::script`.
     // -----------------------------------------------------------------
 
-    /// The counter moves when a handler actually runs.
+    /// A signal that runs no handler here -- ignored, or handled on another
+    /// thread -- leaves the wait where it is; one that runs a handler ends
+    /// it, `SA_RESTART` or not.
     #[test]
-    fn test_delivery_counter_increments_when_a_handler_runs() {
+    fn pause_waits_for_a_handler_on_its_own_thread() {
+        use crate::interrupt::script::{self, Step};
         extern "C" fn handler(_sig: i32) {}
-
-        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
-        let before = deliveries();
-        assert_eq!(raise(SIGUSR1), 0);
-        assert_eq!(
-            deliveries(),
-            before.wrapping_add(1),
-            "a handler ran, so the delivery counter must have moved"
-        );
+        let old = signal(SIGUSR1, SIG_IGN);
+        script::set([
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {
+                // The next signal finds a handler.
+                signal(SIGUSR1, handler as *const () as SighandlerT);
+            })),
+            Step::Signal(SIGUSR1),
+        ]);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::unistd::pause(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
+        assert_eq!(script::clear(), 0, "it waited through the first two");
         signal(SIGUSR1, old);
     }
 
-    /// ...and does not move for a signal that runs no handler.
-    ///
-    /// This is the one that keeps `pause` correct rather than merely awake.
-    /// POSIX says an ignored signal does not end a `pause`, and that falls
-    /// out of counting handler *invocations* rather than deliveries. Count
-    /// deliveries instead and `pause` would return on a signal the process
-    /// asked to ignore.
+    /// A handler that ran after the mark and before the wait -- as one does
+    /// when `sigsuspend`'s mask lets a pending signal through -- ends the
+    /// wait without a sleep.
     #[test]
-    fn test_delivery_counter_ignores_a_signal_with_no_handler() {
-        let old = signal(SIGUSR1, SIG_IGN);
-        let before = deliveries();
+    fn a_handler_since_the_mark_ends_the_wait_at_once() {
+        use crate::interrupt::script::{self, Step};
+        extern "C" fn handler(_sig: i32) {}
+        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
+        let mark = crate::interrupt::Mark::now();
         assert_eq!(raise(SIGUSR1), 0);
-        assert_eq!(
-            deliveries(),
-            before,
-            "SIG_IGN runs no handler, so it must not count as a delivery"
-        );
+        script::set([Step::Wake(std::boxed::Box::new(|| panic!("it slept")))]);
+        wait_for_handler(mark);
+        assert_eq!(script::clear(), 1);
         signal(SIGUSR1, old);
     }
 

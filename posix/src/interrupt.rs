@@ -70,6 +70,24 @@
 //! follows Linux, whose programs count on those `EINTR`s (design-decisions
 //! §1156).
 //!
+//! ## The calls the kernel sleeps in, and the library's loops
+//!
+//! A native call the kernel itself blocks in -- `read` on a pipe or the
+//! terminal, `write` to a full pipe, `waitpid` -- comes back `Interrupted`
+//! for every signal the trampoline takes, ignored ones included, and
+//! whatever the handler's `SA_RESTART`.  [`restarting`] issues it again
+//! unless a handler that ends it ran here: what Linux's kernel does with its
+//! restart sentinels.  The loops the library builds from the kernel's
+//! non-blocking calls -- `poll`, `select`, `epoll_wait`, the socket waits,
+//! `flock`, the timerfd and inotify reads -- sleep their slices in
+//! [`crate::lowlevellock::nap`], which a signal ends at once, and ask their
+//! call's mark after each look; the sleeps sleep in
+//! [`crate::lowlevellock::sleep_until`] (design-decisions §1157).  The rules
+//! are signal(7)'s, and glibc's answers bear them out: `read`, `write`,
+//! `accept`, the waits for a child and `flock` restart under `SA_RESTART`;
+//! `poll` and its family, the sleeps, `pause`, `sigsuspend`, and a socket
+//! call with a timeout end for any handler.
+//!
 //! The calls POSIX forbids to answer `EINTR` -- `pthread_mutex_lock`,
 //! `pthread_cond_wait` and the other thread functions -- wait in
 //! [`crate::lowlevellock::futex_wait`], which does not ask; so do
@@ -130,8 +148,7 @@ impl Mark {
 /// it was installed with `SA_RESTART`.
 ///
 /// Called by the signal dispatch just before it calls the handler, not
-/// after, so that a handler that leaves by `longjmp` still counts -- as
-/// `signal::note_delivery` is, for the same reason.
+/// after, so that a handler that leaves by `longjmp` still counts.
 pub(crate) fn note_handler(sa_restart: bool) {
     let block = crate::perthread::current();
     // SAFETY: as in `Mark::now`.  `fetch_add` because the dispatch may itself
@@ -157,6 +174,25 @@ unsafe fn counter<'a>(p: *mut u32) -> &'a AtomicU32 {
     // `AtomicU32` requires; the rest is the caller's contract.  Only this
     // thread, and the handlers that run on it, ever touch the counts.
     unsafe { AtomicU32::from_ptr(p) }
+}
+
+/// Issue `call` -- a system call the kernel ends for a signal -- again for
+/// as long as it comes back `KernelError::Interrupted` without a handler
+/// having run on this thread that ends a call following `restart`: what
+/// Linux's kernel does with a call it ended in `ERESTARTSYS`, and with any
+/// call it ended when no handler ran.  Its answer otherwise, which is
+/// `Interrupted` when a handler ended it.
+///
+/// Each issue counts handlers afresh, as each of Linux's restarts is the
+/// system call begun again.
+pub(crate) fn restarting(restart: Restart, mut call: impl FnMut() -> i64) -> i64 {
+    loop {
+        let mark = Mark::now();
+        let answer = call();
+        if answer != crate::errno::native::INTERRUPTED || mark.interrupted(restart) {
+            return answer;
+        }
+    }
 }
 
 /// A stand-in for the kernel, for the host tests: what this thread's futex
@@ -195,6 +231,12 @@ pub(crate) mod script {
     /// the host's plain one: it yields, and ends as a wake ends it.
     pub(crate) fn set(steps: impl IntoIterator<Item = Step>) {
         STEPS.with(|s| *s.borrow_mut() = steps.into_iter().collect());
+    }
+
+    /// Whether no step is scripted: a wait for a signal on the host could
+    /// then never end (`signal::wait_for_handler`).
+    pub(crate) fn is_empty() -> bool {
+        STEPS.with(|s| s.borrow().is_empty())
     }
 
     /// How many scripted steps no wait met; they are dropped.
@@ -401,9 +443,15 @@ mod tests {
         call: impl FnOnce() -> String,
         release: impl FnOnce() + 'static,
     ) -> String {
+        replay_with(way, call, Step::Wake(Box::new(release)))
+    }
+
+    /// [`replay_one`] with the release a step of its own: for the calls a
+    /// wake cannot end, which the harness releases with a signal.
+    fn replay_with(way: Way, call: impl FnOnce() -> String, release: Step) -> String {
         RAN.with(|r| r.set(0));
         let signal = way.arrange();
-        script::set([signal, Step::Wake(Box::new(release))]);
+        script::set([signal, release]);
         let answer = call();
         let unmet = script::clear();
         defaults();
@@ -792,15 +840,137 @@ mod tests {
         line
     }
 
+    /// A sleep, as the harness sleeps: two seconds -- or, where glibc's runs
+    /// its course, a short one, since the host would spin out each of those
+    /// two seconds: all that is asserted of them is that the signal did not
+    /// end them, which a short sleep shows as well.  (`sleep` counts whole
+    /// seconds, so its short one is one.)
+    fn sleeping(call: &str, way: Way, runs_its_course: bool) -> String {
+        use crate::time::{CLOCK_MONOTONIC, clock_nanosleep, nanosleep, sleep, usleep};
+        let t = if runs_its_course {
+            Timespec {
+                tv_sec: 0,
+                tv_nsec: 20_000_000,
+            }
+        } else {
+            Timespec {
+                tv_sec: 2,
+                tv_nsec: 0,
+            }
+        };
+        let call = call.to_string();
+        replay_one(
+            way,
+            move || {
+                let mut rem = Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                match call.as_str() {
+                    "nanosleep" => {
+                        if nanosleep(&t, &mut rem) == 0 {
+                            "0".into()
+                        } else {
+                            format!(
+                                "-1 {}, {} s left",
+                                errno_name(errno::get_errno()),
+                                rem.tv_sec
+                            )
+                        }
+                    }
+                    "clock_nanosleep" => match clock_nanosleep(CLOCK_MONOTONIC, 0, &t, &mut rem) {
+                        0 => "0".into(),
+                        e => format!("{}, {} s left", errno_name(e), rem.tv_sec),
+                    },
+                    "usleep" => {
+                        let us = t.tv_sec * 1_000_000 + t.tv_nsec / 1_000;
+                        said(usleep(u32::try_from(us).unwrap()) as isize)
+                    }
+                    _ => format!("{} left", sleep(if runs_its_course { 1 } else { 2 })),
+                }
+            },
+            || {},
+        )
+    }
+
+    /// `pause` and `sigsuspend`, released as the harness releases them: by
+    /// SIGUSR2, whose handler has no `SA_RESTART` and is not counted.
+    fn waiting_for_a_signal(call: &str, way: Way) -> String {
+        use crate::signal::SIGUSR2;
+        extern "C" fn uncounted(_: i32) {}
+        install(SIGUSR2, &act(uncounted as *const () as SighandlerT, 0));
+        let line = replay_with(
+            way,
+            || {
+                let rc = if call == "pause" {
+                    crate::unistd::pause()
+                } else {
+                    crate::signal::sigsuspend(&SigsetT::EMPTY)
+                };
+                said(rc as isize)
+            },
+            Step::Signal(SIGUSR2),
+        );
+        install(SIGUSR2, &act(SIG_DFL, 0));
+        line
+    }
+
+    /// The calls the kernel itself sleeps in, which the host cannot make, and
+    /// the rule each follows here -- `None` for one this library does not
+    /// make wait at all.  [`every_interruption_is_glibcs`] holds each rule to
+    /// glibc's answers for its call; `services/ctest-eintr` runs some of them
+    /// on the target.
+    const KERNEL_CALLS: &[(&str, Option<Restart>)] = &[
+        // `file.rs`'s `read` and `write`: the kernel's calls restarted by
+        // `restarting`, the timerfd loop by its mark.
+        ("read, a pipe", Some(Restart::IfAsked)),
+        ("write, a full pipe", Some(Restart::IfAsked)),
+        ("read, an eventfd", Some(Restart::IfAsked)),
+        ("read, a timerfd", Some(Restart::IfAsked)),
+        // `socket.rs`: a timeout on the socket makes it `Never`.
+        ("recv, a socket", Some(Restart::IfAsked)),
+        ("recv, a socket with SO_RCVTIMEO", Some(Restart::Never)),
+        ("accept", Some(Restart::IfAsked)),
+        // `process.rs`'s `wait_common`, and `file.rs`'s `do_flock`.
+        ("waitpid", Some(Restart::IfAsked)),
+        ("flock", Some(Restart::IfAsked)),
+        // `poll.rs` and `epoll.rs`: their loops' marks.
+        ("poll", Some(Restart::Never)),
+        ("poll timed", Some(Restart::Never)),
+        ("ppoll", Some(Restart::Never)),
+        ("select", Some(Restart::Never)),
+        ("pselect", Some(Restart::Never)),
+        ("epoll_wait", Some(Restart::Never)),
+        // A FIFO cannot be made here (`mknod` of one answers ENOSYS), nor a
+        // signalfd; a record lock is granted at once, so nothing waits in
+        // `F_SETLKW`; and `sigtimedwait` is a stub.
+        ("open, a FIFO", None),
+        ("read, a signalfd", None),
+        ("fcntl F_SETLKW", None),
+        ("sigtimedwait", None),
+    ];
+
+    /// Whether `rule` gives glibc's line for `way`: a handler without
+    /// `SA_RESTART` ends the call with EINTR, one with it only under `Never`,
+    /// and any other way leaves it waiting.
+    fn rule_gives(rule: Restart, way: Way, glibc: &str) -> bool {
+        let ends = way == Way::Handler || way == Way::Restarting && rule == Restart::Never;
+        if ends {
+            glibc.starts_with("ends at once: -1 EINTR ")
+        } else {
+            glibc.starts_with("waits on, then: ")
+        }
+    }
+
     #[test]
     fn every_interruption_is_glibcs() {
-        let mut replayed = 0;
+        let (mut replayed, mut ruled) = (0, 0);
         for line in ORACLE
             .lines()
             .filter(|l| !l.starts_with('#') && *l != "done")
         {
             let (case, glibc) = line.split_once(": ").expect("a case");
-            let (call, way) = case.split_once(", ").expect("a call and a way");
+            let (call, way) = case.rsplit_once(", ").expect("a call and a way");
             let way = Way::named(way);
             let ours = match call {
                 "sem_wait" | "sem_timedwait" | "sem_clockwait" => semaphore(call, way),
@@ -815,16 +985,40 @@ mod tests {
                 "futex FUTEX_WAIT" | "futex FUTEX_WAIT timed" => linux_futex(call, way),
                 "pthread_cond_wait" => condition(way),
                 "pthread_mutex_lock" => mutex(way),
+                "nanosleep" | "clock_nanosleep" | "usleep" | "sleep" => {
+                    sleeping(call, way, glibc.starts_with("waits on"))
+                }
+                "pause" | "sigsuspend" => waiting_for_a_signal(call, way),
                 // glibc's `lio_listio(LIO_WAIT)` sleeps until its requests
                 // are done; this library performs them on the calling thread
                 // as the call is made (`crate::aio`), so it never sleeps in a
                 // futex, and a signal interrupts the transfer itself.
                 "lio_listio" => continue,
-                other => panic!("the oracle has a call no replay knows: {other}"),
+                other => {
+                    let Some(&(_, rule)) = KERNEL_CALLS.iter().find(|(name, _)| *name == other)
+                    else {
+                        panic!("the oracle has a call no replay knows: {other}");
+                    };
+                    if let Some(rule) = rule {
+                        assert!(
+                            rule_gives(rule, way, glibc),
+                            "{other}, {way:?}: {rule:?} is not glibc's {glibc}"
+                        );
+                        ruled += 1;
+                    }
+                    continue;
+                }
             };
             assert_eq!(ours, glibc, "{call}, {way:?}");
             replayed += 1;
         }
-        assert_eq!(replayed, 110, "every line but lio_listio's five");
+        assert_eq!(
+            replayed, 140,
+            "every line the host can make but lio_listio's five"
+        );
+        assert_eq!(
+            ruled, 75,
+            "every kernel call's line that this library makes wait"
+        );
     }
 }

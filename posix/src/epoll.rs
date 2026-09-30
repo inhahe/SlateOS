@@ -57,8 +57,9 @@
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::perprocess::process_global;
-use crate::syscall::{SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall3};
+use crate::syscall::{SYS_CLOCK_MONOTONIC, syscall0, syscall3};
 #[cfg(target_os = "none")]
 use crate::syscall::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
@@ -637,6 +638,27 @@ pub unsafe extern "C" fn epoll_wait(
     maxevents: i32,
     timeout: i32,
 ) -> i32 {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { epoll_wait_until(epfd, events, maxevents, timeout, Mark::now()) }
+}
+
+/// The body of [`epoll_wait`] and its two (Linux's `ep_poll`), a signal
+/// handler that has run on this thread since `mark` ending it: -1 with
+/// `EINTR`, whatever the handler's `SA_RESTART`, since Linux never restarts
+/// `epoll_wait` (signal(7)).  Asked, as `ep_poll` asks, when nothing is ready
+/// and the time has not run out.  A signal that runs no handler here does
+/// not end it.  Until 2026-09-30 nothing did.
+///
+/// # Safety
+///
+/// As [`epoll_wait`].
+unsafe fn epoll_wait_until(
+    epfd: i32,
+    events: *mut EpollEvent,
+    maxevents: i32,
+    timeout: i32,
+    mark: Mark,
+) -> i32 {
     // Sleep interval for the poll loop: 10ms.  Matches poll()/select().
     const POLL_INTERVAL_NS: u64 = 10_000_000;
 
@@ -726,20 +748,26 @@ pub unsafe extern "C" fn epoll_wait(
         if timeout == 0 {
             return 0;
         }
+        let mut slice = POLL_INTERVAL_NS;
         if timeout > 0 {
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             if now >= deadline_ns {
                 return 0;
             }
+            slice = slice.min(deadline_ns.saturating_sub(now));
         }
-        let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
+        if mark.interrupted(Restart::Never) {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
+        // A slice, which a signal ends at once; the scan finds why.
+        crate::lowlevellock::nap(slice, Restart::Never, mark);
     }
 }
 
-/// Wait for events with a signal mask.
-///
-/// We don't deliver signals, so `sigmask` is ignored — delegates to
-/// `epoll_wait`.
+/// Wait for events with a signal mask: the blocked set for the call, the old
+/// one back when it returns ([`crate::signal::under_mask`]).  It was ignored
+/// until 2026-09-30, harmlessly while no signal could end the call.
 ///
 /// # Safety
 ///
@@ -750,9 +778,15 @@ pub unsafe extern "C" fn epoll_pwait(
     events: *mut EpollEvent,
     maxevents: i32,
     timeout: i32,
-    _sigmask: *const u64,
+    sigmask: *const u64,
 ) -> i32 {
-    unsafe { epoll_wait(epfd, events, maxevents, timeout) }
+    // SAFETY: a non-null mask is a readable `sigset_t`, of which the first
+    // word is the kernel's 64 signals.
+    let mask = (!sigmask.is_null()).then(|| unsafe { sigmask.read_unaligned() });
+    // SAFETY: forwarded from this function's contract.
+    crate::signal::under_mask(mask, |mark| unsafe {
+        epoll_wait_until(epfd, events, maxevents, timeout, mark)
+    })
 }
 
 /// Wait for events on an epoll fd with nanosecond timeout (Linux 5.11+).
@@ -770,7 +804,7 @@ pub unsafe extern "C" fn epoll_pwait2(
     events: *mut EpollEvent,
     maxevents: i32,
     timeout: *const crate::stat::Timespec,
-    _sigmask: *const u64,
+    sigmask: *const u64,
 ) -> i32 {
     // Linux validation order (fs/eventpoll.c::do_epoll_pwait2):
     //   1. copy_from_user(timeout)           -> EFAULT
@@ -818,7 +852,8 @@ pub unsafe extern "C" fn epoll_pwait2(
             }
         }
     };
-    unsafe { epoll_wait(epfd, events, maxevents, tms) }
+    // SAFETY: as in `epoll_pwait`.
+    unsafe { epoll_pwait(epfd, events, maxevents, tms, sigmask) }
 }
 
 // ===========================================================================
@@ -980,12 +1015,15 @@ fn eventfd_kernel_create(initval: u64, kernel_flags: u64) -> i64 {
 pub(crate) fn eventfd_kernel_read(handle: u64, nonblocking: bool) -> i64 {
     #[cfg(target_os = "none")]
     {
-        let nr = if nonblocking {
-            SYS_EVENTFD_TRY_READ
+        if nonblocking {
+            crate::syscall::syscall1(SYS_EVENTFD_TRY_READ, handle)
         } else {
-            SYS_EVENTFD_READ
-        };
-        syscall1(nr, handle)
+            // Restarted for a handler installed with `SA_RESTART`, as
+            // Linux's eventfd read is (`ERESTARTSYS`; `crate::interrupt`).
+            crate::interrupt::restarting(Restart::IfAsked, || {
+                crate::syscall::syscall1(SYS_EVENTFD_READ, handle)
+            })
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1014,7 +1052,7 @@ pub(crate) fn eventfd_kernel_write(handle: u64, value: u64) -> i64 {
 pub(crate) fn eventfd_kernel_close(handle: u64) -> i64 {
     #[cfg(target_os = "none")]
     {
-        syscall1(SYS_EVENTFD_CLOSE, handle)
+        crate::syscall::syscall1(SYS_EVENTFD_CLOSE, handle)
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -3120,6 +3158,55 @@ pub extern "C" fn inotify_rm_watch(fd: i32, wd: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    extern "C" fn nothing(_: i32) {}
+
+    fn handle_usr1(handler: crate::signal::SighandlerT, flags: u32) {
+        let act = crate::signal::Sigaction {
+            sa_handler: handler,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        let rc = unsafe {
+            crate::signal::sigaction(
+                crate::signal::SIGUSR1,
+                &raw const act,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0);
+    }
+
+    /// A handler ends `epoll_wait`, `SA_RESTART` or not; a signal that runs
+    /// none here leaves it to the time.  The set is empty, so nothing else
+    /// can end it; the kernel is played by `interrupt::script`.
+    #[test]
+    fn a_signal_handler_ends_epoll_wait_whatever_its_sa_restart() {
+        use crate::interrupt::script::{self, Step};
+        use crate::signal::{SA_RESTART, SIG_DFL, SIG_IGN, SIGUSR1};
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let handler = nothing as *const () as crate::signal::SighandlerT;
+        for flags in [0, SA_RESTART] {
+            handle_usr1(handler, flags);
+            script::set([Step::Signal(SIGUSR1)]);
+            errno::set_errno(0);
+            // SAFETY: a local buffer of one event.
+            assert_eq!(unsafe { epoll_wait(ep, ev.as_mut_ptr(), 1, 5_000) }, -1);
+            assert_eq!(errno::get_errno(), errno::EINTR);
+            assert_eq!(script::clear(), 0);
+        }
+        handle_usr1(SIG_IGN, 0);
+        script::set([Step::Signal(SIGUSR1)]);
+        // SAFETY: as above.
+        assert_eq!(unsafe { epoll_wait(ep, ev.as_mut_ptr(), 1, 30) }, 0);
+        assert_eq!(script::clear(), 0);
+        handle_usr1(SIG_DFL, 0);
+        crate::file::close(ep);
+    }
 
     // -- epoll constants (match Linux) --
 

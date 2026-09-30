@@ -29,7 +29,7 @@ needs no kernel change.
 ## The fixture
 
 `services/ctest-eintr/` (`main.c`, `build.py`), staged at
-`/tests/ctest-eintr.elf` like every `ctest-*`. Eight checks, in order, each
+`/tests/ctest-eintr.elf` like every `ctest-*`. Fourteen checks, in order, each
 printing `[eintr] ok <name>` or `[eintr] FAIL <name>: <code>`. In each the
 fixture -- single-threaded, since delivery is process-directed -- waits,
 and a child it forks sends it the signal under test after 200 ms and, where
@@ -45,6 +45,21 @@ that:
 7. `msgrcv`, a handler with `SA_RESTART` -- `EINTR` at the signal.
 8. `mq_receive`, a handler without `SA_RESTART` -- `EINTR` at the signal.
 
+And, since the same day's later commit, the calls the kernel itself sleeps
+in and the library's loops around its non-blocking ones:
+
+9. `read` on an empty pipe, a handler with `SA_RESTART` -- waits on; `EINTR`
+   at `SIGALRM`.
+10. `read` on an empty pipe, a child's exit (`SIGCHLD`) and `SIGURG`, both
+    ignored by default -- waits on; `EINTR` at `SIGALRM`.
+11. `nanosleep` of five seconds, a handler with `SA_RESTART` -- `EINTR` at
+    the signal, with about 4.8 seconds left.
+12. `poll` on an empty pipe, a handler with `SA_RESTART` -- `EINTR` at the
+    signal.
+13. `waitpid` for the child, a handler with `SA_RESTART` -- waits on;
+    `EINTR` at `SIGALRM`.
+14. `pause`, the signal set to `SIG_IGN` -- waits on; `EINTR` at `SIGALRM`.
+
 ## The rung I am asking for
 
 Shaped like `ctest-altstack`'s:
@@ -52,11 +67,11 @@ Shaped like `ctest-altstack`'s:
 - `pathz_test_elf("ctest-eintr", "ctest-eintr")`.
 - No capability grants. It opens no files; it forks one child per check.
 - `EXPECTED = 42`.
-- **A budget measured in time: 30 seconds is ample.** Each check takes
+- **A budget measured in time: 60 seconds is ample.** Each check takes
   about half a second. It cannot hang: the child that sends the signals
   SIGKILLs the fixture three seconds after its last one unless it has been
   killed first, which the fixture does as soon as its wait is over -- so
-  the worst case is eight checks at 3.5 seconds, and a death by SIGKILL
+  the worst case is fourteen checks at 3.5 seconds, and a death by SIGKILL
   rather than a stuck boot.
 
 **The legend** (also at the top of `main.c`): the tens digit names the

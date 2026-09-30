@@ -16,6 +16,7 @@
 use crate::errno;
 use crate::fcntl;
 use crate::fdtable::{self, HandleKind};
+use crate::interrupt::{Mark, Restart};
 use crate::stat::Stat;
 use crate::syscall::*;
 use crate::types::*;
@@ -333,6 +334,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
+    // Handlers counted from here, for the reads whose waiting is this
+    // library's (`crate::interrupt`).
+    let mark = Mark::now();
     // The descriptor first, whatever `count` is.  `ksys_read`
     // (fs/read_write.c:604) opens with `fdget_pos(fd)` and returns `-EBADF`
     // when it comes back empty; only inside `vfs_read` (:458) does
@@ -367,7 +371,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if is_nb {
                 syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::UnixStream => {
@@ -383,7 +389,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, true), || {
+                    syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::Console => {
@@ -400,7 +408,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // effect from tcsetattr, and — worst — no terminal signals at
             // all, while a Linux-ABI program on the same console got all
             // four.  See design-decisions §114.
-            syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall2(SYS_TTY_READ, buf as u64, count as u64)
+            })
         }
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -426,7 +436,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
-                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms);
+                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms, mark);
             }
             errno::set_errno(posix_err);
             return -1;
@@ -472,7 +482,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                         }
                         // Block: sleep 10ms and retry.  Matches the rest
                         // of our readiness polling.
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -523,7 +537,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                             errno::set_errno(errno::EAGAIN);
                             return -1;
                         }
-                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                        if mark.interrupted(Restart::IfAsked) {
+                            errno::set_errno(errno::EINTR);
+                            return -1;
+                        }
+                        crate::lowlevellock::nap(10_000_000, Restart::IfAsked, mark);
                     }
                     Ok(n) => return n as SsizeT,
                     Err(e) => {
@@ -556,7 +574,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
         HandleKind::PtySlave => {
@@ -589,7 +609,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_SLAVE_READ, entry.handle, buf as u64, count as u64)
+                })
             }
         }
     };
@@ -607,6 +629,8 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
 /// Returns number of bytes written, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
+    // As in `read`.
+    let mark = Mark::now();
     // The descriptor first — `ksys_write` (fs/read_write.c:628) is `fdget_pos`
     // then `vfs_write`, whose `access_ok` (:458, via the same path as
     // `vfs_read`) is what yields `EFAULT`.  See `read` above.
@@ -652,7 +676,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             let ret = if is_nb {
                 syscall3(SYS_PIPE_TRY_WRITE, entry.handle, buf as u64, count as u64)
             } else {
-                syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
@@ -672,7 +698,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(crate::socket::wait_rule(fd, false), || {
+                    syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Peer's read side is gone — POSIX mandates EPIPE.  The
@@ -696,7 +724,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms);
+                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms, mark);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
@@ -804,7 +832,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     count as u64,
                 )
             } else {
-                syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                crate::interrupt::restarting(Restart::IfAsked, || {
+                    syscall3(SYS_PTY_MASTER_WRITE, entry.handle, buf as u64, count as u64)
+                })
             };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Every slave is gone: nothing can ever read these bytes.
@@ -831,7 +861,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             // the `TOSTOP` job-control gate.  The return is counted in the
             // bytes we handed over, not in the CRLF-expanded ones, so a
             // caller looping on a short write makes progress.
-            let ret = syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64);
+            let ret = crate::interrupt::restarting(Restart::IfAsked, || {
+                syscall3(SYS_PTY_SLAVE_WRITE, entry.handle, buf as u64, count as u64)
+            });
             if ret == errno::native::CHANNEL_CLOSED {
                 errno::set_errno(errno::EPIPE);
                 return -1;
@@ -5839,6 +5871,7 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
 
     let lock_type: u64 = u64::from(mode == LOCK_EX);
     let nonblock = operation & LOCK_NB != 0;
+    let mark = Mark::now();
     loop {
         let ret = syscall4(
             SYS_FS_FLOCK,
@@ -5853,8 +5886,17 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
         // Negative return: map to errno (sets errno, yields -1).
         let mapped = errno::translate(ret) as i32;
         if !nonblock && errno::get_errno() == errno::EAGAIN {
-            // Contended blocking request: yield the CPU and retry.
-            let _ = syscall1(SYS_SLEEP, 0);
+            // Contended blocking request: a handler ends the wait unless it
+            // was installed with `SA_RESTART`, as Linux's `flock` is
+            // restarted (`crate::interrupt`); otherwise sleep a little, in a
+            // wait a signal ends at once, and try again.  It yielded and
+            // tried again at once until 2026-09-30, which kept a CPU busy
+            // for as long as the lock was held, and no signal ended it.
+            if mark.interrupted(Restart::IfAsked) {
+                errno::set_errno(errno::EINTR);
+                return -1;
+            }
+            crate::lowlevellock::nap(2_000_000, Restart::IfAsked, mark);
             continue;
         }
         return mapped;

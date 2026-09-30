@@ -2125,13 +2125,13 @@ pub extern "C" fn ualarm(usecs: u32, interval: u32) -> u32 {
 /// caller looping `while (!flag) pause();` merely spun at 1 Hz, but one that
 /// treats the return as proof of a signal acted on a signal that never came.
 ///
-/// The wait is [`crate::signal::wait_for_delivery`], which polls a counter
-/// bumped whenever a handler runs. See it for why a delivered signal
-/// otherwise leaves no trace, and for what `pause` deliberately does *not*
-/// wake for: an ignored signal runs no handler and must not end the wait.
+/// The wait is [`crate::signal::wait_for_handler`]: a futex wait the kernel
+/// ends for every signal, which goes on unless a handler ran on this thread.
+/// See it for what `pause` deliberately does *not* wake for: an ignored
+/// signal runs no handler and must not end the wait.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pause() -> i32 {
-    crate::signal::wait_for_delivery();
+    crate::signal::wait_for_handler(crate::interrupt::Mark::now());
     errno::set_errno(errno::EINTR);
     -1
 }

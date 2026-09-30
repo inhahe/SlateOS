@@ -180,6 +180,47 @@ pub(crate) fn futex_wait_interruptible_since(
     }
 }
 
+/// Sleep until `deadline` on `clock` -- or until a signal handler has run on
+/// this thread since `mark`, whatever its `SA_RESTART`: Linux never restarts
+/// a sleep (signal(7)).  `Err(left)`, the time still to go, when a handler
+/// ended it.  A signal that runs no handler here does not.
+///
+/// The sleep is a timed futex wait on a word of its own, which nothing
+/// wakes, because that is the wait the kernel ends for a signal:
+/// `SYS_SLEEP` sleeps its full time whatever comes, which until 2026-09-30
+/// made every sleep here deaf to signals ([`crate::interrupt`]).
+pub(crate) fn sleep_until(
+    clock: i32,
+    deadline: &crate::stat::Timespec,
+    mark: Mark,
+) -> Result<(), crate::stat::Timespec> {
+    let word = AtomicI32::new(0);
+    loop {
+        let Some(left) = ns_until(&now_on(clock), deadline) else {
+            return Ok(());
+        };
+        let waited = futex_wait_interruptible_since(&word, 0, Some(left), Restart::Never, mark);
+        if waited == Waited::Interrupted {
+            let left = ns_until(&now_on(clock), deadline).unwrap_or(0);
+            return Err(crate::stat::Timespec {
+                tv_sec: i64::try_from(left / 1_000_000_000).unwrap_or(i64::MAX),
+                // Below 1e9, so it fits.
+                tv_nsec: i64::try_from(left % 1_000_000_000).unwrap_or(0),
+            });
+        }
+    }
+}
+
+/// One sleep of a polling loop: `ns` at most, in a futex wait on a word of
+/// its own, which the kernel ends for a signal -- where `SYS_SLEEP` would
+/// sleep it out.  It returns at once, too, when a handler that ends a call
+/// following `restart` has already run here since `mark`.  Why it ended is
+/// the loop's to find: it looks again, and then asks `mark`.
+pub(crate) fn nap(ns: u64, restart: Restart, mark: Mark) {
+    let word = AtomicI32::new(0);
+    let _ = futex_wait_interruptible_since(&word, 0, Some(ns), restart, mark);
+}
+
 /// Wake at most `count` threads asleep on `word`.
 pub(crate) fn futex_wake(word: &AtomicI32, count: i32) {
     #[cfg(target_os = "none")]

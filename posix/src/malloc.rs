@@ -1789,22 +1789,34 @@ mod tests {
     }
 
     /// A block past the mapping threshold lives in a mapping of its own, and
-    /// is counted there and as in use while it is held.
+    /// is counted there and as in use while it is held -- shown on a heap of
+    /// the test's own, counted as `mallinfo2` counts the process's.
+    ///
+    /// Not on the process's heap: whether a block is mapped is not one of the
+    /// things that hold of it whatever other tests are doing. dlmalloc maps a
+    /// large request only when nothing free can serve it, and a free chunk or
+    /// a top another test left behind can hold a megabyte; the order seed
+    /// 3778731252450521024 gives ran one first, and the block was carved from
+    /// it (`hblkhd` 0). Until 2026-09-30 this test used the shared heap.
     #[test]
     fn a_large_block_is_counted_as_mapped_and_in_use() {
         const BIG: usize = 1 << 20;
-        // A block gets a mapping of its own only once the heap exists (C
-        // dlmalloc's rule): the very first allocation, however large, founds
-        // the heap's first segment instead. So found it first, whatever order
-        // the tests run in.
-        let small = malloc(16);
-        let p = malloc(BIG);
-        assert!(!small.is_null() && !p.is_null());
-        let m = mallinfo2();
-        unsafe {
-            free(p);
-            free(small);
-        }
+        let mut heap = dlmalloc::Dlmalloc::new(SlateSystem);
+        // SAFETY: a heap of this test's own; every block is freed before it
+        // is destroyed.
+        let m = unsafe {
+            // A block gets a mapping of its own only once the heap exists (C
+            // dlmalloc's rule): the first allocation, however large, founds
+            // the heap's first segment instead.
+            let small = heap.malloc(16);
+            let p = heap.malloc(BIG);
+            assert!(!small.is_null() && !p.is_null());
+            let m = Mallinfo2::from(heap.stats());
+            heap.free(p);
+            heap.free(small);
+            heap.destroy();
+            m
+        };
         assert!(m.hblkhd >= BIG, "hblkhd {} < {BIG}", m.hblkhd);
         assert!(m.uordblks >= BIG, "uordblks {} < {BIG}", m.uordblks);
     }

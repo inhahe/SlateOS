@@ -48,6 +48,10 @@ impl Fixture {
 const FULL: &str = "\
 [Desktop Entry]
 Type=Service
+Name=Image tools
+Name[de]=Bildwerkzeuge
+Icon=image-x-generic
+Path=/srv/work
 MimeType=image/png;image/jpeg;
 Actions=rotate;flip;
 X-KDE-Submenu=Image
@@ -160,7 +164,7 @@ fn a_service_menu_is_read_whole() {
     assert_eq!(menu.origin, Origin::System);
     assert_eq!(menu.mime_types, ["image/png", "image/jpeg"]);
     assert_eq!(menu.submenu.as_deref(), Some("Image"));
-    assert!(menu.top_level);
+    assert_eq!(menu.priority, Priority::TopLevel);
     assert_eq!(
         menu.counts,
         Counts {
@@ -178,10 +182,14 @@ fn a_service_menu_is_read_whole() {
         ["Rotate right", "Flip"]
     );
     assert_eq!(menu.actions[0].icon.as_deref(), Some("object-rotate-right"));
+    assert_eq!(menu.name.as_deref(), Some("Image tools"));
+    assert_eq!(menu.icon.as_deref(), Some("image-x-generic"));
+    assert_eq!(menu.working_dir.as_deref(), Some(Path::new("/srv/work")));
     let german = Locale::parse("de_DE").unwrap();
     let found = scan(&f.dirs(), Some(&german));
     assert_eq!(found.menus[0].submenu.as_deref(), Some("Bild"));
     assert_eq!(found.menus[0].actions[0].name, "Rechts drehen");
+    assert_eq!(found.menus[0].name.as_deref(), Some("Bildwerkzeuge"));
 }
 
 /// **What is not a menu this desktop offers says why**, and costs only
@@ -189,16 +197,18 @@ fn a_service_menu_is_read_whole() {
 #[test]
 fn what_is_not_offered_says_why() {
     let f = Fixture::new("skipped");
-    let cases: [(&str, String, &str); 9] = [
+    let cases: [(&str, String, &str); 10] = [
         (
-            "no-type.desktop",
-            String::from("[Desktop Entry]\nMimeType=all/all;\n"),
-            "has no Type",
+            "no-group.desktop",
+            String::from("[Desktop Action a]\nName=A\nExec=a\n"),
+            "has no [Desktop Entry] group",
         ),
         (
-            "app.desktop",
-            String::from("[Desktop Entry]\nType=Application\nExec=x\n"),
-            "is of type Application",
+            "only-popup-type.desktop",
+            String::from(
+                "[Desktop Entry]\nServiceTypes=KonqPopupMenu/Plugin\nActions=a;\n[Desktop Action a]\nName=A\nExec=a\n",
+            ),
+            "names no kind of file",
         ),
         (
             "no-mime.desktop",
@@ -230,6 +240,11 @@ fn what_is_not_offered_says_why() {
             "running.desktop",
             with_keys("X-KDE-ShowIfRunning=org.kde.x"),
             "X-KDE-ShowIfRunning",
+        ),
+        (
+            "dbus.desktop",
+            with_keys("X-KDE-ShowIfDBusCall=org.kde.x /x ready"),
+            "X-KDE-ShowIfDBusCall",
         ),
         (
             "remote.desktop",
@@ -297,7 +312,7 @@ fn optional_keys_at_their_edges() {
     let found = scan(&f.dirs(), None);
     let menu = &found.menus[0];
     assert_eq!(menu.submenu, None);
-    assert!(!menu.top_level);
+    assert_eq!(menu.priority, Priority::Ordinary);
     assert_eq!(
         menu.counts,
         Counts {
@@ -308,18 +323,18 @@ fn optional_keys_at_their_edges() {
     );
 }
 
-/// **An item whose command the specification refuses is said, with why**
-/// -- `%f` twice in one line, which the desktop entry specification allows
-/// once -- and the menu's other items are offered.
+/// **An item whose command KDE would refuse is said, with why** -- a quote
+/// never closed -- and the menu's other items are offered. `%f` twice is
+/// not refused: KDE runs it, and menus rely on it.
 #[test]
-fn an_item_the_specification_refuses_is_said() {
-    let f = Fixture::new("twice");
+fn an_item_kde_would_refuse_is_said() {
+    let f = Fixture::new("refused");
     f.install(
         Origin::System,
-        "twice.desktop",
+        "refused.desktop",
         "[Desktop Entry]\nType=Service\nMimeType=all/all;\nActions=bad;good;\n\n\
-         [Desktop Action bad]\nName=Bad\nExec=convert %f %f\n\n\
-         [Desktop Action good]\nName=Good\nExec=mogrify %f\n",
+         [Desktop Action bad]\nName=Bad\nExec=echo 'open %f\n\n\
+         [Desktop Action good]\nName=Good\nExec=convert %f -rotate 90 %f\n",
     );
     let found = scan(&f.dirs(), None);
     let menu = &found.menus[0];
@@ -327,7 +342,7 @@ fn an_item_the_specification_refuses_is_said() {
     assert_eq!(menu.actions[0].name, "Good");
     assert_eq!(menu.unusable.len(), 1, "{:?}", menu.unusable);
     assert!(
-        menu.unusable[0].starts_with("bad: its Exec cannot be used: more than one"),
+        menu.unusable[0].starts_with("bad: its Exec cannot be used: a quote"),
         "{:?}",
         menu.unusable
     );
@@ -401,10 +416,10 @@ fn the_users_copy_shadows_the_systems() {
     let found = scan(&f.dirs(), None);
     let ids: Vec<&OsStr> = found.menus.iter().map(|m| m.id.as_os_str()).collect();
     assert_eq!(ids, ["a.desktop", "e.desktop", "d.desktop"]);
-    assert_eq!(found.menus[1].actions[0].exec.program(), "new-e");
+    assert_eq!(found.menus[1].actions[0].command.as_written(), "new-e");
     assert_eq!(found.menus[0].origin, Origin::User);
-    assert_eq!(found.menus[0].actions[0].exec.program(), "user-a");
-    assert_eq!(found.menus[2].actions[0].exec.program(), "old-d");
+    assert_eq!(found.menus[0].actions[0].command.as_written(), "user-a");
+    assert_eq!(found.menus[2].actions[0].command.as_written(), "old-d");
     assert_eq!(found.skipped.len(), 1, "{:?}", found.skipped);
     assert!(
         found.skipped[0]
@@ -422,9 +437,14 @@ fn a_menu_is_for_the_kinds_it_names() {
         id: OsString::from("m.desktop"),
         origin: Origin::System,
         path: PathBuf::from("m.desktop"),
+        name: None,
+        icon: None,
+        working_dir: None,
         mime_types: mimes.iter().map(|m| (*m).to_owned()).collect(),
         submenu: None,
-        top_level: false,
+        priority: Priority::Ordinary,
+        excluded: Vec::new(),
+        separator_after: false,
         counts: Counts::default(),
         requires_write: false,
         actions: Vec::new(),
@@ -458,9 +478,14 @@ fn counts_and_writability_are_held_to() {
         id: OsString::from("m.desktop"),
         origin: Origin::System,
         path: PathBuf::from("m.desktop"),
+        name: None,
+        icon: None,
+        working_dir: None,
         mime_types: vec![String::from("all/all")],
         submenu: None,
-        top_level: false,
+        priority: Priority::Ordinary,
+        excluded: Vec::new(),
+        separator_after: false,
         counts: Counts {
             min: Some(2),
             max: Some(3),
@@ -492,9 +517,8 @@ fn counts_and_writability_are_held_to() {
     assert!(!m.applies_to(&[file("a/c"), locked]));
 }
 
-/// **An item's command is its `Exec`, the targets put in**: `%f` once per
-/// file, `%F` all at once -- `desktopentry`'s reading of the
-/// specification.
+/// **An item's command is its `Exec`, the targets put in** -- read as KDE
+/// reads it, the menu's name, file and working directory its own.
 #[test]
 fn an_items_command_takes_its_targets() {
     let f = Fixture::new("exec");
@@ -502,10 +526,10 @@ fn an_items_command_takes_its_targets() {
     let found = scan(&f.dirs(), None);
     let menu = &found.menus[0];
     let targets = [file("image/png"), file("image/jpeg")];
-    let rotate = menu.actions[0].command_lines(&targets, menu);
-    assert_eq!(rotate.len(), 2, "%f: one line per file");
+    let rotate = menu.actions[0].runs(&targets, menu, None).unwrap();
+    assert_eq!(rotate.len(), 2, "%f: one run per file");
     assert_eq!(
-        rotate[0],
+        rotate[0].argv,
         [
             OsString::from("mogrify"),
             OsString::from("-rotate"),
@@ -513,9 +537,35 @@ fn an_items_command_takes_its_targets() {
             targets[0].path.clone().into_os_string(),
         ]
     );
-    let flip = menu.actions[1].command_lines(&targets, menu);
-    assert_eq!(flip.len(), 1, "%F: one line for all");
-    assert_eq!(flip[0].len(), 4);
+    assert_eq!(rotate[0].dir.as_deref(), Some(Path::new("/srv/work")));
+    let flip = menu.actions[1].runs(&targets, menu, None).unwrap();
+    assert_eq!(flip.len(), 1, "%F: one run for all");
+    assert_eq!(flip[0].argv.len(), 4);
+    // The menu's own codes.
+    let f = Fixture::new("exec-codes");
+    f.install(
+        Origin::System,
+        "codes.desktop",
+        "[Desktop Entry]\nType=Service\nName=Tools\nMimeType=all/all;\nActions=go;\n\n\
+         [Desktop Action go]\nName=Go\nExec=tool --title %c --menu %k ~/x %f\n",
+    );
+    let found = scan(&f.dirs(), None);
+    let menu = &found.menus[0];
+    let run = &menu.actions[0]
+        .runs(&[file("text/plain")], menu, Some(Path::new("/home/u")))
+        .unwrap()[0];
+    assert_eq!(
+        run.argv,
+        [
+            OsString::from("tool"),
+            OsString::from("--title"),
+            OsString::from("Tools"),
+            OsString::from("--menu"),
+            menu.path.clone().into_os_string(),
+            OsString::from("/home/u/x"),
+            OsString::from("/home/u/file.text-plain"),
+        ]
+    );
 }
 
 /// **A system menu is on until turned off; a user's own is off until
@@ -559,9 +609,14 @@ fn the_choices_survive_a_save() {
         id: OsString::from(id),
         origin,
         path: PathBuf::from(id),
+        name: None,
+        icon: None,
+        working_dir: None,
         mime_types: vec![String::from("all/all")],
         submenu: None,
-        top_level: false,
+        priority: Priority::Ordinary,
+        excluded: Vec::new(),
+        separator_after: false,
         counts: Counts::default(),
         requires_write: false,
         actions: Vec::new(),
@@ -729,8 +784,9 @@ fn a_separator_is_a_line_between_items() {
             .iter()
             .map(|a| (a.id.as_str(), a.separator_before))
             .collect::<Vec<_>>(),
-        [("a", false), ("b", true), ("c", false)]
+        [("a", true), ("b", true), ("c", false)]
     );
+    assert!(menu.separator_after, "the last _SEPARATOR_ is kept");
 }
 
 /// **A kind of file is also what it inherits**: every `text/*` is
@@ -742,9 +798,14 @@ fn a_kind_is_also_what_it_inherits() {
         id: OsString::from("m.desktop"),
         origin: Origin::System,
         path: PathBuf::from("m.desktop"),
+        name: None,
+        icon: None,
+        working_dir: None,
         mime_types: vec![mime.to_owned()],
         submenu: None,
-        top_level: false,
+        priority: Priority::Ordinary,
+        excluded: Vec::new(),
+        separator_after: false,
         counts: Counts::default(),
         requires_write: false,
         actions: Vec::new(),
@@ -761,7 +822,10 @@ fn a_kind_is_also_what_it_inherits() {
     assert!(!menu("application/octet-stream").applies_to(&[folder()]));
     let mut device = file("inode/blockdevice");
     device.is_dir = false;
-    assert!(!menu("application/octet-stream").applies_to(&[device]));
+    // Anything not a folder is a file to KDE's file manager.
+    assert!(menu("application/octet-stream").applies_to(&[device.clone()]));
+    assert!(menu("allfiles").applies_to(&[device]));
+    assert!(!menu("allfiles").applies_to(&[folder()]));
     script.inherits = vec![String::from("text/plain")];
     assert!(menu("text/plain").applies_to(std::slice::from_ref(&script)));
     assert!(menu("text/*").applies_to(std::slice::from_ref(&script)));
@@ -776,9 +840,14 @@ fn a_major_type_is_matched_in_any_case() {
         id: OsString::from("m.desktop"),
         origin: Origin::System,
         path: PathBuf::from("m.desktop"),
+        name: None,
+        icon: None,
+        working_dir: None,
         mime_types: vec![mime.to_owned()],
         submenu: None,
-        top_level: false,
+        priority: Priority::Ordinary,
+        excluded: Vec::new(),
+        separator_after: false,
         counts: Counts::default(),
         requires_write: false,
         actions: Vec::new(),
@@ -800,4 +869,280 @@ fn menus_are_read_in_the_order_of_their_names() {
     let found = scan(&f.dirs(), None);
     let ids: Vec<&OsStr> = found.menus.iter().map(|m| m.id.as_os_str()).collect();
     assert_eq!(ids, ["C.desktop", "a.desktop", "b.desktop"]);
+}
+
+/// **Older menus are read from where older KDE put them**, after every
+/// current one: `kservices5/ServiceMenus`, and `kservices5` itself where a
+/// file is marked as a menu -- anything else there is not reported, and
+/// shadows nothing.
+#[test]
+fn older_places_are_read_after_the_current_one() {
+    let f = Fixture::new("places");
+    f.install_in(
+        Origin::User,
+        "kservices5/ServiceMenus",
+        "x.desktop",
+        simple("all/all;", "user-old-x").as_bytes(),
+    );
+    f.install(
+        Origin::System,
+        "x.desktop",
+        &simple("all/all;", "system-new-x"),
+    );
+    f.install_in(
+        Origin::System,
+        "kservices5",
+        "marked.desktop",
+        b"[Desktop Entry]\nServiceTypes=KonqPopupMenu/Plugin,image/*\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go\n",
+    );
+    f.install_in(
+        Origin::System,
+        "kservices5",
+        "part.desktop",
+        b"[Desktop Entry]\nType=Service\nServiceTypes=KParts/ReadOnlyPart\n",
+    );
+    let found = scan(&f.dirs(), None);
+    let ids: Vec<&OsStr> = found.menus.iter().map(|m| m.id.as_os_str()).collect();
+    assert_eq!(ids, ["x.desktop", "marked.desktop"]);
+    assert_eq!(
+        found.menus[0].actions[0].command.as_written(),
+        "system-new-x",
+        "a current menu comes before an older one of its name, whoever's"
+    );
+    assert_eq!(
+        found.menus[1].mime_types,
+        ["image/*"],
+        "an older menu's kinds are its service types"
+    );
+    assert_eq!(found.skipped, [], "a file that is no menu is not reported");
+    let searched = f.dirs().searched();
+    assert_eq!(searched.len(), 6);
+    assert!(searched[0].ends_with("kio/servicemenus"));
+    assert!(searched[5].ends_with("kservices5"));
+}
+
+/// **What a menu excludes is not offered it**, though its kinds take it in.
+#[test]
+fn excluded_kinds_are_not_offered() {
+    let f = Fixture::new("exclude");
+    f.install(
+        Origin::System,
+        "img.desktop",
+        "[Desktop Entry]\nMimeType=image/*;\nExcludeServiceTypes=image/svg+xml,image/gif\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go\n",
+    );
+    let found = scan(&f.dirs(), None);
+    let menu = &found.menus[0];
+    assert_eq!(menu.excluded, ["image/svg+xml", "image/gif"]);
+    assert!(menu.applies_to(&[file("image/png")]));
+    assert!(!menu.applies_to(&[file("image/svg+xml")]));
+    assert!(!menu.applies_to(&[file("image/png"), file("image/gif")]));
+}
+
+/// **A menu needs no `Type`, and KDE's permission and priority keys are
+/// read**: a file where menus are is a menu; a permission this desktop never
+/// withdraws is granted; `Important` is a priority of its own.
+#[test]
+fn keys_kde_reads_as_it_reads_them() {
+    let f = Fixture::new("kde-keys");
+    f.install(
+        Origin::System,
+        "untyped.desktop",
+        "[Desktop Entry]\nMimeType=all/all;\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go\n",
+    );
+    f.install(
+        Origin::System,
+        "authorized.desktop",
+        &with_keys("X-KDE-AuthorizeAction=shell_access"),
+    );
+    f.install(
+        Origin::System,
+        "important.desktop",
+        &with_keys("X-KDE-Priority=Important"),
+    );
+    let found = scan(&f.dirs(), None);
+    assert_eq!(found.skipped, []);
+    let ids: Vec<&OsStr> = found.menus.iter().map(|m| m.id.as_os_str()).collect();
+    assert_eq!(
+        ids,
+        ["authorized.desktop", "important.desktop", "untyped.desktop"]
+    );
+    assert_eq!(found.menus[1].priority, Priority::Important);
+    assert_eq!(found.menus[0].priority, Priority::Ordinary);
+}
+
+/// **An item is found again by its menu's name and its own**, and nothing
+/// by a name that is gone.
+#[test]
+fn an_item_is_found_by_name() {
+    let f = Fixture::new("find");
+    f.install(Origin::System, "image.desktop", FULL);
+    let found = scan(&f.dirs(), None);
+    let (menu, action) = found
+        .find(OsStr::new("image.desktop"), "flip")
+        .expect("found");
+    assert_eq!(menu.id, "image.desktop");
+    assert_eq!(action.name, "Flip");
+    assert!(found.find(OsStr::new("image.desktop"), "gone").is_none());
+    assert!(found.find(OsStr::new("gone.desktop"), "flip").is_none());
+}
+
+/// A menu for anything: its items `actions`, its keys `keys`.
+fn laid_out(keys: &str, actions: &[&str]) -> String {
+    let mut text = format!(
+        "[Desktop Entry]\nMimeType=all/all;\n{keys}\nActions={};\n",
+        actions.join(";")
+    );
+    for id in actions.iter().filter(|id| **id != "_SEPARATOR_") {
+        text.push_str(&format!("\n[Desktop Action {id}]\nName={id}\nExec={id}\n"));
+    }
+    text
+}
+
+/// The rows as text: an item as its id, a line as `-`, a submenu as its
+/// label and its rows in brackets.
+fn drawn(rows: &[Row<'_>]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match row {
+            Row::Item { action, .. } => action.id.clone(),
+            Row::Separator => String::from("-"),
+            Row::Submenu { label, rows, .. } => format!("{label}[{}]", drawn(rows).join(" ")),
+        })
+        .collect()
+}
+
+/// **The items are laid out as KDE's file manager lays them out**:
+/// `Important` first, then submenus by name, then the rest, each list in
+/// the order of its ids; `TopLevel` after them all.
+#[test]
+fn the_items_are_laid_out_as_kde_lays_them_out() {
+    let f = Fixture::new("layout");
+    f.install(
+        Origin::System,
+        "a.desktop",
+        &laid_out("", &["zeta", "alpha"]),
+    );
+    f.install(
+        Origin::System,
+        "b.desktop",
+        &laid_out("X-KDE-Priority=TopLevel", &["top"]),
+    );
+    f.install(
+        Origin::System,
+        "c.desktop",
+        &laid_out("X-KDE-Submenu=Tools", &["c1"]),
+    );
+    f.install(
+        Origin::System,
+        "d.desktop",
+        &laid_out("X-KDE-Priority=Important", &["imp"]),
+    );
+    f.install(
+        Origin::System,
+        "e.desktop",
+        &laid_out("Icon=tools\nX-KDE-Submenu=Tools", &["b1"]),
+    );
+    let found = scan(&f.dirs(), None);
+    let choices = Choices::default();
+    let rows = found.rows(&choices, &[file("text/plain")]);
+    assert_eq!(
+        drawn(&rows),
+        ["imp", "Tools[b1 c1]", "alpha", "zeta", "top"],
+        "four rows of the others stay in the menu"
+    );
+    // A fifth row of the others puts them all in "Actions"; the top-level
+    // item stays out.
+    f.install(Origin::System, "f.desktop", &laid_out("", &["more"]));
+    let found = scan(&f.dirs(), None);
+    let rows = found.rows(&choices, &[file("text/plain")]);
+    assert_eq!(
+        drawn(&rows),
+        ["Actions[imp Tools[b1 c1] alpha more zeta]", "top"]
+    );
+    let Row::Submenu { icon, .. } = &rows[0] else {
+        panic!("{rows:?}")
+    };
+    assert_eq!(icon.as_deref(), Some(ACTIONS_ICON));
+    // Nothing offered, nothing laid out.
+    assert!(found.rows(&choices, &[]).is_empty());
+}
+
+/// **Lines are drawn where menus ask for them**, one however many are
+/// asked, none at the top -- and the items between two lines are ordered by
+/// id, but never across a line.
+#[test]
+fn lines_are_drawn_where_menus_ask() {
+    let f = Fixture::new("lines");
+    f.install(
+        Origin::System,
+        "a.desktop",
+        // Top level, so its six rows stay in the menu itself.
+        &laid_out(
+            "X-KDE-Priority=TopLevel",
+            &[
+                "_SEPARATOR_",
+                "y",
+                "x",
+                "_SEPARATOR_",
+                "_SEPARATOR_",
+                "b",
+                "a",
+                "_SEPARATOR_",
+            ],
+        ),
+    );
+    let found = scan(&f.dirs(), None);
+    let rows = found.rows(&Choices::default(), &[file("text/plain")]);
+    assert_eq!(drawn(&rows), ["x", "y", "-", "a", "b", "-"]);
+}
+
+/// **A submenu's icon is its first item's**, as KDE takes it.
+#[test]
+fn a_submenus_icon_is_its_first_items() {
+    let f = Fixture::new("submenu-icon");
+    f.install(
+        Origin::System,
+        "a.desktop",
+        "[Desktop Entry]\nMimeType=all/all;\nX-KDE-Submenu=Tools\nActions=go;\n\n[Desktop Action go]\nName=Go\nIcon=wrench\nExec=go\n",
+    );
+    let found = scan(&f.dirs(), None);
+    let rows = found.rows(&Choices::default(), &[file("text/plain")]);
+    let Row::Submenu { label, icon, .. } = &rows[0] else {
+        panic!("{rows:?}")
+    };
+    assert_eq!((label.as_str(), icon.as_deref()), ("Tools", Some("wrench")));
+}
+
+/// **Submenus keep their priority**: an `Important` menu's submenu comes
+/// before an ordinary one's whatever their names, and a `TopLevel` one's
+/// stays out of "Actions" with the other top-level items.
+#[test]
+fn submenus_keep_their_priority() {
+    let f = Fixture::new("submenu-priority");
+    f.install(
+        Origin::System,
+        "a.desktop",
+        &laid_out("X-KDE-Priority=Important\nX-KDE-Submenu=Zed", &["z1"]),
+    );
+    // Named to sort after the top-level one: were that one among the others,
+    // it would come first.
+    f.install(
+        Origin::System,
+        "b.desktop",
+        &laid_out("X-KDE-Submenu=Zzz", &["a1"]),
+    );
+    f.install(
+        Origin::System,
+        "c.desktop",
+        &laid_out("X-KDE-Priority=TopLevel\nX-KDE-Submenu=Top", &["t1"]),
+    );
+    // A top-level item comes after the top-level submenus, as the others'
+    // items come after theirs.
+    f.install(
+        Origin::System,
+        "d.desktop",
+        &laid_out("X-KDE-Priority=TopLevel", &["t0"]),
+    );
+    let found = scan(&f.dirs(), None);
+    let rows = found.rows(&Choices::default(), &[file("text/plain")]);
+    assert_eq!(drawn(&rows), ["Zed[z1]", "Zzz[a1]", "Top[t1]", "t0"]);
 }

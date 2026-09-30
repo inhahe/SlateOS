@@ -23,12 +23,21 @@
 //! may still be asleep -- at the cost of one spurious wake later, never a
 //! lost one.
 //!
+//! ## Signals
+//!
+//! A signal for the process ends a futex wait early.  [`futex_wait`] does
+//! not tell its caller -- the thread functions and the locks re-check and
+//! sleep again, as POSIX has them -- while [`futex_wait_interruptible`] says
+//! whether a signal handler that ran on this thread interrupted the call it
+//! waits for, by the rules [`crate::interrupt`] sets out.
+//!
 //! ## Host builds
 //!
 //! There is no kernel futex on the host, so a wait yields the thread and
 //! returns: every caller already re-checks its condition in a loop, so this
 //! is a correct (if busier) futex that only ever wakes spuriously.  It keeps
-//! the algorithms testable with real threads.
+//! the algorithms testable with real threads.  A test can script what its
+//! thread's waits meet instead ([`crate::interrupt::script`]).
 //!
 //! ## Futex keys
 //!
@@ -38,6 +47,8 @@
 //! reason -- see `pthread::futex_supports_pshared`.
 
 use core::sync::atomic::{AtomicI32, Ordering};
+
+use crate::interrupt::{Mark, Restart};
 
 /// The lock word's states.
 const UNLOCKED: i32 = 0;
@@ -52,49 +63,120 @@ const SPIN: u32 = 100;
 
 /// The futex word's value as the kernel compares it: the same 32 bits,
 /// unsigned.
-#[cfg(target_os = "none")]
 #[allow(clippy::cast_sign_loss)]
-const fn futex_value(v: i32) -> u64 {
-    v as u32 as u64
+const fn futex_value(v: i32) -> u32 {
+    v as u32
+}
+
+/// The kernel's whole answer to a futex wait on the word at `addr`: 1 when
+/// woken, 0 when the word no longer held `expected`, or a native error --
+/// `TimedOut` once `timeout_ns` (if any) ran out, `Interrupted` when a
+/// signal ended the wait.  Every wait here comes down to this; only
+/// [`crate::linux_futex`] reports the answer as it is.
+///
+/// On the host, where there is no kernel futex, a wait yields and answers
+/// "woken" -- a spurious wake, which every caller already re-checks for --
+/// unless a test has scripted it ([`crate::interrupt::script`]).
+pub(crate) fn futex_wait_raw(addr: u64, expected: u32, timeout_ns: Option<u64>) -> i64 {
+    #[cfg(target_os = "none")]
+    {
+        let expected = u64::from(expected);
+        match timeout_ns {
+            None => crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAIT, addr, expected),
+            Some(ns) => {
+                crate::syscall::syscall3(crate::syscall::SYS_FUTEX_WAIT_TIMEOUT, addr, expected, ns)
+            }
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (addr, expected, timeout_ns);
+        #[cfg(test)]
+        if let Some(interrupted) = crate::interrupt::script::next() {
+            return if interrupted {
+                crate::errno::native::INTERRUPTED
+            } else {
+                1
+            };
+        }
+        std::thread::yield_now();
+        1
+    }
+}
+
+/// [`futex_wait_raw`] on `word`: whether the kernel says a signal ended it.
+fn kernel_wait(word: &AtomicI32, expected: i32, timeout_ns: Option<u64>) -> bool {
+    let addr = core::ptr::from_ref(word) as u64;
+    futex_wait_raw(addr, futex_value(expected), timeout_ns) == crate::errno::native::INTERRUPTED
 }
 
 /// Sleep while `*word == expected`, until woken.  May return spuriously --
 /// and at once if the word has already changed -- so callers re-check.
+///
+/// A signal does not end the wait as far as the caller can tell: the kernel
+/// ends it, and the caller, re-checking, sleeps again.  For the calls POSIX
+/// forbids to answer `EINTR` -- the mutexes, condition variables and the
+/// rest -- and every lock; a call that may answer it waits in
+/// [`futex_wait_interruptible`].
 pub(crate) fn futex_wait(word: &AtomicI32, expected: i32) {
-    #[cfg(target_os = "none")]
-    {
-        let addr = core::ptr::from_ref(word) as u64;
-        // The result is 1 (woken), 0 (the value had changed) or an error; in
-        // every case the caller re-reads the word, which is the only answer
-        // that matters.
-        let _ =
-            crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAIT, addr, futex_value(expected));
-    }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = (word, expected);
-        std::thread::yield_now();
-    }
+    // Woken, the word changed, or a signal: in every case the caller re-reads
+    // the word, which is the only answer that matters here.
+    let _ = kernel_wait(word, expected, None);
 }
 
 /// As [`futex_wait`], for at most `timeout_ns` nanoseconds.  The caller
 /// decides whether the deadline passed by reading its clock, not from this.
 pub(crate) fn futex_wait_timeout(word: &AtomicI32, expected: i32, timeout_ns: u64) {
-    #[cfg(target_os = "none")]
-    {
-        let addr = core::ptr::from_ref(word) as u64;
-        // As in `futex_wait`: the caller re-reads the word and its clock.
-        let _ = crate::syscall::syscall3(
-            crate::syscall::SYS_FUTEX_WAIT_TIMEOUT,
-            addr,
-            futex_value(expected),
-            timeout_ns,
-        );
+    // As in `futex_wait`: the caller re-reads the word and its clock.
+    let _ = kernel_wait(word, expected, Some(timeout_ns));
+}
+
+/// Why [`futex_wait_interruptible`] returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Waited {
+    /// Anything but an interruption: a wake, a word that had already
+    /// changed, the time running out, or a signal that ran no handler here
+    /// that ends this call.  The caller re-checks what it waits for, and its
+    /// clock, as after any wake.
+    Woken,
+    /// A signal handler ran on this thread that ends a call following the
+    /// wait's [`Restart`] rule: the call answers `EINTR`, or its own form of
+    /// it.
+    Interrupted,
+}
+
+/// As [`futex_wait`] -- for at most `timeout_ns` nanoseconds if given -- but
+/// a signal handler can end it: [`Waited::Interrupted`] when the kernel ended
+/// the wait for a signal and a handler ran on this thread that ends a call
+/// following `restart` ([`crate::interrupt`] says which).
+pub(crate) fn futex_wait_interruptible(
+    word: &AtomicI32,
+    expected: i32,
+    timeout_ns: Option<u64>,
+    restart: Restart,
+) -> Waited {
+    futex_wait_interruptible_since(word, expected, timeout_ns, restart, Mark::now())
+}
+
+/// As [`futex_wait_interruptible`], counting handlers from `mark` rather than
+/// from the wait: one that ran since `mark` ends it without a sleep.  For a
+/// call that lets signals through before it waits -- `io_pgetevents`, which
+/// sets its mask first -- and must count a handler that runs as they come
+/// through as having interrupted it.
+pub(crate) fn futex_wait_interruptible_since(
+    word: &AtomicI32,
+    expected: i32,
+    timeout_ns: Option<u64>,
+    restart: Restart,
+    mark: Mark,
+) -> Waited {
+    if mark.interrupted(restart) {
+        return Waited::Interrupted;
     }
-    #[cfg(not(target_os = "none"))]
-    {
-        let _ = (word, expected, timeout_ns);
-        std::thread::yield_now();
+    if kernel_wait(word, expected, timeout_ns) && mark.interrupted(restart) {
+        Waited::Interrupted
+    } else {
+        Waited::Woken
     }
 }
 
@@ -195,6 +277,20 @@ pub(crate) fn ns_until(
         None
     } else {
         Some(u64::try_from(left).unwrap_or(u64::MAX))
+    }
+}
+
+/// The instant `ns` nanoseconds after `t`, saturating: a relative timeout as
+/// the deadline it comes to.
+pub(crate) fn after(t: &crate::stat::Timespec, ns: u64) -> crate::stat::Timespec {
+    let total = i128::from(t.tv_sec)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(i128::from(t.tv_nsec))
+        .saturating_add(i128::from(ns));
+    crate::stat::Timespec {
+        tv_sec: i64::try_from(total.div_euclid(1_000_000_000)).unwrap_or(i64::MAX),
+        // In 0..1e9, so it fits.
+        tv_nsec: i64::try_from(total.rem_euclid(1_000_000_000)).unwrap_or(0),
     }
 }
 

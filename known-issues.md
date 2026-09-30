@@ -176868,7 +176868,7 @@ check that `exit` and `freopen` remove what they should, once.
 (`mkstemp` ... `mkdtemp`, `mktemp`, `tmpfile`); `posix/src/stdio.rs`
 (`tmpnam`, `tempnam`, the stream's hold on a temporary name).
 
-## D-POSIX-FUTEX-WAITS-DISCARD-EINTR — libc's futex waits throw the kernel's answer away, so no wait of this library's ends early for a signal handler (lane D, 2026-09-30) — **Status: OPEN**
+## D-POSIX-FUTEX-WAITS-DISCARD-EINTR — libc's futex waits throw the kernel's answer away, so no wait of this library's ends early for a signal handler (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/interrupt.rs`)**
 
 **In short:** when a signal handler runs while a thread is blocked in
 `sem_wait`, POSIX says the call returns -1 with `errno` `EINTR` -- and
@@ -176902,3 +176902,76 @@ thread blocked in `sem_wait`, since the host tests have no signals to send.
 
 **Where:** `posix/src/lowlevellock.rs` (`futex_wait`, `futex_wait_timeout`),
 `posix/src/semaphore.rs`, `posix/src/gai_a.rs` (`gai_suspend`).
+
+**Fixed 2026-09-30.** Every call that waits in this library now asks what
+the signal did (`posix/src/interrupt.rs`). The trampoline's dispatch counts,
+in the thread's `PerThread` block, each handler it runs and those installed
+without `SA_RESTART`; a wait the kernel ends for a signal compares the counts
+with a mark taken before it slept, so a signal that ran no handler on the
+thread -- ignored, ignored by default, or handled on another thread -- ends
+nothing, which the kernel's answer alone could not tell. Which calls end for
+which handlers is glibc's on Linux: 115 cases recorded by
+`posix/tools/oracle/interrupt_harness.py` and replayed by
+`interrupt::tests::every_interruption_is_glibcs`. `sem_wait`, the four
+message-queue calls, and `aio_suspend`, `gai_suspend` and `futex(FUTEX_WAIT)`
+without a timeout end for a handler without `SA_RESTART`; `sem_timedwait`,
+`sem_clockwait`, System V's `msgsnd`, `msgrcv`, `semop` and `semtimedop`,
+`io_getevents`, and the timed `aio_suspend`, `gai_suspend` and `futex` for
+any handler (design-decisions §1156, which records why `SA_RESTART` does not
+restart the second group). The thread functions and `getaddrinfo_a(GAI_WAIT)`
+still end for none, as glibc's do. Two things came with it: `io_pgetevents`
+now holds its signal mask for the call -- it read it and ignored it, which
+was harmless only while nothing could interrupt the call -- and reads its
+timeout before the mask, as Linux does; and Linux's `futex()`, which had the
+opposite fault (`EINTR` for every signal, ignored or `SA_RESTART` alike),
+restarts as Linux's kernel does, to the same deadline. A ring-3 fixture,
+`services/ctest-eintr`, runs the kernel's half -- a real signal ending a real
+futex wait -- for `sem_wait`, `sem_timedwait`, `mq_receive` and `msgrcv`; its
+rung is lane A's (`requests/d-a-run-the-ctest-eintr-fixture.md`). The same
+fault in the calls the kernel itself sleeps in is
+`D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL`.
+
+## D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL — a native program's blocking system call fails with EINTR for any signal its trampoline takes: one it ignores, a child's exit, one whose handler asked for SA_RESTART (lane D, 2026-09-30) — **Status: OPEN**
+
+**In short:** a program here that is blocked in a system call the kernel
+itself sleeps in -- `read` from a terminal or a pipe, `waitpid`, `accept`,
+`recv` -- has it fail with -1 and `errno` `EINTR` whenever a signal reaches
+its process, whatever the signal does: one the program ignores; `SIGCHLD`,
+which every child's exit sends and which is ignored by default; one whose
+handler was installed with `SA_RESTART`; one another thread handles. On
+Linux none of those ends the call -- an ignored signal is never delivered,
+and `SA_RESTART` restarts the call. A program that retries on `EINTR` does
+not notice, but one that takes it for an error fails where on Linux it
+would have waited on.
+
+**Why:** a native process's dispositions are this library's
+(`posix/src/signal.rs`). The kernel knows only that the process registered a
+trampoline, so it hands the trampoline every catchable signal, and as it
+builds the trampoline's frame it turns any restart sentinel into
+`KernelError::Interrupted` (`deliver_pending_signal`,
+`kernel/src/syscall/handlers.rs`: "native handlers cannot request
+SA_RESTART"). The call returns that when the trampoline is done, and the
+library's wrapper answers `EINTR`. The calls that wait inside the library
+had the same fault and no longer do (`D-POSIX-FUTEX-WAITS-DISCARD-EINTR`).
+
+**The proper fix:** the same one, in the library's wrappers of the kernel's
+blocking calls, with no change to the kernel, which must still end the sleep
+and still cannot see a disposition. The dispatch already counts, per thread,
+the handlers it runs and those without `SA_RESTART`
+(`posix/src/interrupt.rs`). A wrapper whose call comes back `Interrupted`
+compares the counts with a mark taken before the call, and issues the call
+again when no handler ran on the thread -- or, for a call Linux restarts
+under `SA_RESTART`, when only such handlers ran. Which calls those are is
+signal(7)'s two lists: `read`, `write` and `ioctl` on slow devices, `open` of
+a FIFO, `wait4` and the other waits, the socket calls without a timeout,
+`flock` and `fcntl(F_SETLKW)` restart; `poll`, `select`, `epoll_wait`, the
+sleeps, `sigsuspend`, `pause` and `sigtimedwait`, and the socket calls with
+a timeout never do, and answer `EINTR` for any handler -- but must still go
+on for a signal that ran none. A restarted timed call needs its remaining
+time, as Linux's restart block keeps it. glibc on Linux is the oracle here as
+it was for the waits: `interrupt_harness.py`'s shape, over those calls.
+
+**Where:** the wrappers of the blocking system calls in `posix/src/`
+(`unistd.rs`'s `read` and `write`, `process.rs`'s `waitpid`, `socket.rs`,
+...); the kernel's side is `deliver_pending_signal` in
+`kernel/src/syscall/handlers.rs`.

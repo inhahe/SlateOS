@@ -1135,7 +1135,10 @@ fn dispatch_self_signal(sig: i32) -> i32 {
             // as a valid fn(i32).  We trust they provided a valid pointer.
             let func: extern "C" fn(i32) =
                 unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
-            // Before the call, not after: see `note_delivery`.
+            // Before the call, not after: see `note_delivery`.  The first
+            // count is this thread's, for a wait the signal cut short to
+            // learn whether it was interrupted ([`crate::interrupt`]).
+            crate::interrupt::note_handler(sa_flags & SA_RESTART != 0);
             note_delivery();
             // `SA_ONSTACK` is honoured here and nowhere else. See
             // [`altstack_entry`] for the four conditions, and `known-issues.md`
@@ -1220,6 +1223,14 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn __signal_dispatch(signum: i32) {
+    dispatch_delivered(signum);
+}
+
+/// What the trampoline does with a signal the kernel delivered: run its
+/// disposition on this thread.  The host tests' stand-in for the kernel
+/// ([`crate::interrupt::script`]) calls it as the trampoline would.
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+pub(crate) fn dispatch_delivered(signum: i32) {
     // Ignore the return value: dispatch_self_signal either terminates
     // the process (no return) or completes the handler/ignore action.
     // Any errno it sets belongs to the interrupted code's context and
@@ -2262,9 +2273,12 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 /// This used to validate `sig` and return 0, ignoring `flag`, above a comment
 /// reading "Since our OS doesn't deliver signals, there is no SA_RESTART
 /// behavior to toggle". That stopped being true: `crt.rs` registers a signal
-/// trampoline so the kernel can deliver to installed handlers, `signal()`
-/// installs with `SA_RESTART`, and the kernel reads the flag. A caller asking
-/// for interruptible syscalls was being told yes and getting restartable ones.
+/// trampoline so the kernel can deliver to installed handlers, and `signal()`
+/// installs with `SA_RESTART`. The flag is read by this library, not by the
+/// kernel, which cannot see it: the calls that wait in the library restart
+/// by it as Linux's do ([`crate::interrupt`]); one the kernel itself sleeps in
+/// does not yet (known-issues
+/// `D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL`).
 ///
 /// Errors (Linux-matching, via glibc's `siginterrupt` implementation
 /// which internally calls `sigaction`):

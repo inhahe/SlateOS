@@ -16,15 +16,14 @@
 //!
 //! A semaphore is a single 32-bit atomic counter: positive means the
 //! resource is available, zero means callers must block.  The counter
-//! doubles as a kernel **futex word** — `sem_wait` blocks via
-//! `SYS_FUTEX_WAIT` (no CPU spin) and `sem_post` wakes a waiter via
-//! `SYS_FUTEX_WAKE`.  The uncontended fast path is a pure userspace CAS
-//! with no syscall.  `sem_timedwait` uses `SYS_FUTEX_WAIT_TIMEOUT`.
+//! doubles as a **futex word** -- `sem_wait` sleeps in a futex wait on it
+//! (no CPU spin) and `sem_post` wakes a waiter ([`crate::lowlevellock`]).
+//! The uncontended fast path is a pure userspace CAS with no syscall.
 //!
-//! On the host build (unit tests) there is no kernel futex, so the
-//! blocking helpers fall back to a cooperative `spin_loop`; the test
-//! suite only exercises the non-blocking paths (CAS success, trywait,
-//! null-pointer validation), so this fallback is never hit in practice.
+//! A signal handler ends a wait as it does on Linux: `sem_wait`'s unless
+//! the handler was installed with `SA_RESTART`, the timed waits' whatever
+//! its flags ([`crate::interrupt`]).  Until 2026-09-30 no wait here ended
+//! early.
 //!
 //! Functions: `sem_init`, `sem_destroy`, `sem_wait`, `sem_trywait`,
 //! `sem_timedwait`, `sem_post`, `sem_getvalue`, `sem_open`,
@@ -37,6 +36,8 @@
 //! tracked in `todo.txt`.
 
 use crate::errno;
+use crate::interrupt::Restart;
+use crate::lowlevellock::Waited;
 use crate::perprocess::process_global;
 
 // ---------------------------------------------------------------------------
@@ -149,72 +150,13 @@ pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
     0
 }
 
-/// Reinterpret the signed counter as the kernel's unsigned 32-bit futex
-/// word (a bit-for-bit reinterpret, not a value conversion — avoids a
-/// sign-loss cast).
-#[cfg(target_os = "none")]
-fn futex_word(expected: i32) -> u64 {
-    u64::from(u32::from_ne_bytes(expected.to_ne_bytes()))
-}
-
-/// Block the calling task until the semaphore value is observed to be
-/// non-zero.  `expected` is the value the caller just read as `<= 0`;
-/// the kernel only blocks if `*word` still equals it, closing the
-/// wait/wake race (a poster that increments and wakes between our load
-/// and this call makes `*word != expected`, so we return immediately and
-/// re-check).
-#[cfg(target_os = "none")]
-fn sem_block(atomic: &core::sync::atomic::AtomicI32, expected: i32) {
-    let addr = atomic.as_ptr() as u64;
-    // SYS_FUTEX_WAIT returns 1 (woken), 0 (value mismatch), or a negative
-    // error.  In every case we simply re-loop and re-evaluate the counter,
-    // so the return value is intentionally ignored.
-    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAIT, addr, futex_word(expected));
-}
-
-/// Host fallback: no kernel futex in the unit-test environment.  The test
-/// suite never blocks (see module docs), so a cooperative spin is fine.
-#[cfg(not(target_os = "none"))]
-fn sem_block(_atomic: &core::sync::atomic::AtomicI32, _expected: i32) {
-    core::hint::spin_loop();
-}
-
-/// Like [`sem_block`] but bounded: block for at most `timeout_ns`
-/// nanoseconds via `SYS_FUTEX_WAIT_TIMEOUT`.
-#[cfg(target_os = "none")]
-fn sem_block_timeout(atomic: &core::sync::atomic::AtomicI32, expected: i32, timeout_ns: u64) {
-    let addr = atomic.as_ptr() as u64;
-    let _ = crate::syscall::syscall3(
-        crate::syscall::SYS_FUTEX_WAIT_TIMEOUT,
-        addr,
-        futex_word(expected),
-        timeout_ns,
-    );
-}
-
-/// Host fallback for the bounded wait.
-#[cfg(not(target_os = "none"))]
-fn sem_block_timeout(_atomic: &core::sync::atomic::AtomicI32, _expected: i32, _timeout_ns: u64) {
-    core::hint::spin_loop();
-}
-
-/// Wake one task blocked on the semaphore's futex word after a post.
-#[cfg(target_os = "none")]
-fn sem_wake_one(atomic: &core::sync::atomic::AtomicI32) {
-    let addr = atomic.as_ptr() as u64;
-    // Wake at most one waiter; a no-op (returns 0) if none are blocked.
-    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAKE, addr, 1);
-}
-
-/// Host fallback: no futex, nothing to wake.
-#[cfg(not(target_os = "none"))]
-fn sem_wake_one(_atomic: &core::sync::atomic::AtomicI32) {}
-
 /// Lock (decrement) a semaphore, blocking if the value is zero.
 ///
 /// The uncontended path is a pure userspace CAS.  When the count is
-/// exhausted the caller blocks in the kernel via `SYS_FUTEX_WAIT` rather
-/// than spinning, so a blocked waiter consumes no CPU.
+/// exhausted the caller sleeps in a futex wait until a post wakes it, so a
+/// blocked waiter consumes no CPU -- or until a signal handler installed
+/// without `SA_RESTART` runs on its thread: -1 with `EINTR`, the count
+/// untouched ([`crate::interrupt`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
@@ -241,8 +183,13 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
             // CAS lost a race; retry immediately without blocking.
             continue;
         }
-        // Count exhausted: block until a poster wakes us, then re-check.
-        sem_block(atomic, current);
+        // Count exhausted: sleep until a poster wakes us, then re-check.
+        if crate::lowlevellock::futex_wait_interruptible(atomic, current, None, Restart::IfAsked)
+            == Waited::Interrupted
+        {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
     }
 }
 
@@ -314,7 +261,7 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
             .is_ok()
         {
             // A resource became available; wake one blocked waiter (if any).
-            sem_wake_one(atomic);
+            crate::lowlevellock::futex_wake(atomic, 1);
             return 0;
         }
     }
@@ -323,7 +270,9 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
 /// Lock a semaphore with a timeout.
 ///
 /// Like `sem_wait` but returns `ETIMEDOUT` if the absolute time
-/// `abstime` passes before the semaphore can be decremented.
+/// `abstime` passes before the semaphore can be decremented -- and `EINTR`
+/// for any signal handler that runs on the thread meanwhile, `SA_RESTART`
+/// or not, as Linux answers a timed wait ([`crate::interrupt`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
     // glibc reads `abstime->tv_nsec` first, then `sem` (nptl/sem_timedwait.c):
@@ -410,32 +359,23 @@ fn sem_wait_until(sem: &SemT, clock: i32, deadline: &crate::stat::Timespec) -> i
             continue;
         }
 
-        // Count exhausted: compute the time remaining until the deadline.
-        let mut now = crate::stat::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let _ = crate::time::clock_gettime(clock, &raw mut now);
-        if now.tv_sec > deadline.tv_sec
-            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
-        {
+        // Count exhausted: sleep until a poster wakes us or the deadline
+        // passes, then re-check the counter and the clock.
+        let now = crate::lowlevellock::now_on(clock);
+        let Some(left) = crate::lowlevellock::ns_until(&now, deadline) else {
             errno::set_errno(errno::ETIMEDOUT);
             return -1;
+        };
+        if crate::lowlevellock::futex_wait_interruptible(
+            atomic,
+            current,
+            Some(left),
+            Restart::Never,
+        ) == Waited::Interrupted
+        {
+            errno::set_errno(errno::EINTR);
+            return -1;
         }
-
-        // Remaining nanoseconds = deadline - now.  Use i128 + saturating
-        // arithmetic so a malformed (huge) deadline can't overflow or
-        // panic; we already know now < deadline, so the result is > 0.
-        let secs = deadline.tv_sec.saturating_sub(now.tv_sec);
-        let total_ns = i128::from(secs)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(i128::from(deadline.tv_nsec))
-            .saturating_sub(i128::from(now.tv_nsec));
-        let timeout_ns = u64::try_from(total_ns).unwrap_or(0);
-
-        // Block (bounded) until a poster wakes us or the timeout elapses,
-        // then re-loop to re-check the counter and the deadline.
-        sem_block_timeout(atomic, current, timeout_ns);
     }
 }
 

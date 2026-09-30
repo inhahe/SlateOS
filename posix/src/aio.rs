@@ -47,6 +47,8 @@
 //! (`known-issues.md` → `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED`.)
 
 use crate::errno;
+use crate::interrupt::Restart;
+use crate::lowlevellock::Waited;
 use crate::sigevent::{SigeventView, notify};
 use core::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
@@ -493,7 +495,10 @@ pub extern "C" fn aio_cancel(fd: i32, aiocbp: *mut Aiocb) -> i32 {
 /// 0 at once when any listed request is not in progress, or when every
 /// entry is NULL; otherwise it sleeps until one completes.  A `timeout` is
 /// relative and measured on `CLOCK_MONOTONIC`; running out is `EAGAIN`, and
-/// a malformed one is `EINVAL` when it comes to be used.
+/// a malformed one is `EINVAL` when it comes to be used.  A signal handler
+/// that runs on the thread meanwhile is `EINTR` -- without a timeout, only
+/// one installed without `SA_RESTART`, as glibc's answers
+/// ([`crate::interrupt`]).
 ///
 /// Until 2026-09-26 this refused `nent == 0`, which glibc accepts, and never
 /// waited: a request another thread was performing was reported complete.
@@ -522,7 +527,11 @@ pub extern "C" fn aio_suspend(
             break 0;
         }
         if timeout.is_null() {
-            crate::lowlevellock::futex_wait(seq, seen);
+            let waited =
+                crate::lowlevellock::futex_wait_interruptible(seq, seen, None, Restart::IfAsked);
+            if waited == Waited::Interrupted {
+                break errno::EINTR;
+            }
             continue;
         }
         let at = match deadline {
@@ -544,7 +553,17 @@ pub extern "C" fn aio_suspend(
         let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
         match crate::lowlevellock::ns_until(&now, &at) {
             None => break errno::EAGAIN,
-            Some(ns) => crate::lowlevellock::futex_wait_timeout(seq, seen, ns),
+            Some(ns) => {
+                let waited = crate::lowlevellock::futex_wait_interruptible(
+                    seq,
+                    seen,
+                    Some(ns),
+                    Restart::Never,
+                );
+                if waited == Waited::Interrupted {
+                    break errno::EINTR;
+                }
+            }
         }
     };
     sleepers.fetch_sub(1, Ordering::SeqCst);
@@ -554,6 +573,25 @@ pub extern "C" fn aio_suspend(
         errno::set_errno(result);
         -1
     }
+}
+
+/// A request another thread is performing, as `aio_suspend` sees one: for
+/// [`crate::interrupt`]'s tests, which suspend on it.
+#[cfg(test)]
+pub(crate) fn test_in_progress() -> Aiocb {
+    // SAFETY: every field is an integer, an atomic integer, a raw pointer or
+    // a byte array, for all of which zero is valid.
+    let cb: Aiocb = unsafe { core::mem::zeroed() };
+    cb.error_code.store(errno::EINPROGRESS, Ordering::Relaxed);
+    cb
+}
+
+/// Finish `cb` as the thread performing it would: for [`crate::interrupt`]'s
+/// tests.
+#[cfg(test)]
+pub(crate) fn test_finish(cb: &Aiocb) {
+    record(cb, 0, 0);
+    completed();
 }
 
 /// Would glibc's `aio_suspend` sleep on this list: is there a non-NULL

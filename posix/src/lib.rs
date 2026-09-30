@@ -401,6 +401,7 @@ pub(crate) mod iconv_prefix;
 pub(crate) mod iconv_translit;
 pub mod inet;
 pub mod inet6;
+pub(crate) mod interrupt;
 pub mod inttypes;
 pub mod ioctl;
 pub mod langinfo;

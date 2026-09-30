@@ -72,6 +72,8 @@
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
 use crate::file::{Iovec, RwPlan, has_iter_ops, plan_rw_flags};
+use crate::interrupt::{Mark, Restart};
+use crate::lowlevellock::Waited;
 use crate::objtable::{Slots, Waits};
 use crate::perprocess::process_global;
 use crate::stat::Timespec;
@@ -1080,20 +1082,64 @@ pub(crate) unsafe fn sys_io_getevents(
     timeout: *const Timespec,
 ) -> Result<i64, i32> {
     // SAFETY: the caller's contract.
-    unsafe {
+    unsafe { getevents_interruptibly(ctx_id, min_nr, nr, events, timeout, Mark::now(), &mut sleep) }
+}
+
+/// The sleep of a call that takes events: on the table's counter, ended by
+/// any signal handler that has run on this thread since `mark`.
+fn sleep(seen: i32, ns: Option<u64>, mark: Mark) -> Waited {
+    waits_ref().wait_interruptible(seen, ns, mark)
+}
+
+/// [`getevents`] as the system call has it towards signals, handlers counted
+/// from `mark`, the call's start.  A handler ends a sleep, `SA_RESTART` or
+/// not -- signal(7) has `io_getevents` among the calls "never restarted" --
+/// and so a signal that comes at any point ends the next sleep, as in Linux,
+/// where it would still be pending then.  The call answers the events it
+/// took, and `EINTR` when it took none and a handler ran: `do_io_getevents`'s
+/// caller's `if (!ret && signal_pending(current)) ret = -EINTR`.  Until
+/// 2026-09-30 no signal ended one ([`crate::interrupt`]).
+///
+/// # Safety
+///
+/// As [`sys_io_getevents`].
+unsafe fn getevents_interruptibly(
+    ctx_id: u64,
+    min_nr: i64,
+    nr: i64,
+    events: *mut IoEvent,
+    timeout: *const Timespec,
+    mark: Mark,
+    sleep: &mut dyn FnMut(i32, Option<u64>, Mark) -> Waited,
+) -> Result<i64, i32> {
+    // SAFETY: the caller's contract.
+    let r = unsafe {
         getevents(ctx_id, min_nr, nr, events, timeout, &mut |seen, ns| {
-            waits_ref().wait(seen, ns);
+            sleep(seen, ns, mark)
         })
+    };
+    if r == Ok(0) && mark.interrupted(Restart::Never) {
+        return Err(errno::EINTR);
     }
+    r
 }
 
 /// `io_pgetevents`: [`sys_io_getevents`] under a signal mask.
 ///
-/// `usig` is read after the timeout and before the context: a mask with a
-/// size other than `sizeof(sigset_t)` (8) is `EINVAL` (`set_user_sigmask`);
-/// no mask is no change.  The mask would be the thread's for the wait, and
-/// nothing here delivers a signal to a waiting thread, so there is nothing
-/// for it to hold off — as with `ppoll` and `epoll_pwait`.
+/// In `SYSCALL_DEFINE6(io_pgetevents)`'s order: the timeout is read
+/// (`EFAULT`), then `usig` (`EFAULT`); a mask of a size other than
+/// `sizeof(sigset_t)` (8) is `EINVAL` and one that cannot be read `EFAULT`
+/// (`set_user_sigmask`); no mask is no change.  Then as `io_getevents`.
+///
+/// The mask is the thread's for the call: a signal it blocks waits until
+/// the call is over, and a handler for one it lets through ends the call as
+/// a handler ends `io_getevents`.  Linux sets the mask and sleeps in one
+/// step, so a signal already pending that the new mask lets through ends
+/// the sleep; here it is delivered as the mask is set, and so handlers are
+/// counted from before that ([`crate::interrupt::Mark`]) -- one run then
+/// ends the call where it would sleep.  The old mask is back when the call
+/// returns.  Until 2026-09-30 the mask was checked and then ignored, which
+/// was harmless while no signal could end the call.
 ///
 /// # Safety
 ///
@@ -1107,6 +1153,29 @@ pub(crate) unsafe fn sys_io_pgetevents(
     timeout: *const Timespec,
     usig: *const AioSigset,
 ) -> Result<i64, i32> {
+    // SAFETY: the caller's contract.
+    unsafe { pgetevents(ctx_id, min_nr, nr, events, timeout, usig, &mut sleep) }
+}
+
+/// [`sys_io_pgetevents`] with the sleep passed in, so the host tests can
+/// look at the mask it sleeps under.
+///
+/// # Safety
+///
+/// As [`sys_io_pgetevents`].
+unsafe fn pgetevents(
+    ctx_id: u64,
+    min_nr: i64,
+    nr: i64,
+    events: *mut IoEvent,
+    timeout: *const Timespec,
+    usig: *const AioSigset,
+    sleep: &mut dyn FnMut(i32, Option<u64>, Mark) -> Waited,
+) -> Result<i64, i32> {
+    if !timeout.is_null() && !crate::uio::access_ok(timeout.addr(), size_of::<Timespec>()) {
+        return Err(errno::EFAULT);
+    }
+    let mut mask = None;
     if !usig.is_null() {
         if !crate::uio::access_ok(usig.addr(), size_of::<AioSigset>()) {
             return Err(errno::EFAULT);
@@ -1120,10 +1189,37 @@ pub(crate) unsafe fn sys_io_pgetevents(
             if !crate::uio::access_ok(sig.sigmask.addr(), size_of::<u64>()) {
                 return Err(errno::EFAULT);
             }
+            // SAFETY: admitted by `access_ok` above.
+            mask = Some(unsafe { sig.sigmask.read_unaligned() });
         }
     }
+    let mark = Mark::now();
+    let old = mask.map(block_only);
     // SAFETY: the caller's contract.
-    unsafe { sys_io_getevents(ctx_id, min_nr, nr, events, timeout) }
+    let r = unsafe { getevents_interruptibly(ctx_id, min_nr, nr, events, timeout, mark, sleep) };
+    if let Some(old) = old {
+        // `SIG_SETMASK` with a set to read cannot fail.
+        let _ = crate::signal::sigprocmask(
+            crate::signal::SIG_SETMASK,
+            &raw const old,
+            core::ptr::null_mut(),
+        );
+    }
+    r
+}
+
+/// Make `mask` the set of blocked signals, as `set_user_sigmask` does; the
+/// set it replaced.  `mask` is the kernel's `sigset_t`, signal N at bit
+/// N - 1, which is the low word of this library's.
+fn block_only(mask: u64) -> crate::signal::SigsetT {
+    let mut set = crate::signal::SigsetT::EMPTY;
+    if let Some(low) = set.bits.first_mut() {
+        *low = mask;
+    }
+    let mut old = crate::signal::SigsetT::EMPTY;
+    // `SIG_SETMASK` with a set to read and one to write cannot fail.
+    let _ = crate::signal::sigprocmask(crate::signal::SIG_SETMASK, &raw const set, &raw mut old);
+    old
 }
 
 /// `timespec64_to_ktime`: nanoseconds, `None` for `KTIME_MAX` — no timeout —
@@ -1153,7 +1249,7 @@ unsafe fn getevents(
     nr: i64,
     events: *mut IoEvent,
     timeout: *const Timespec,
-    wait: &mut dyn FnMut(i32, Option<u64>),
+    wait: &mut dyn FnMut(i32, Option<u64>) -> Waited,
 ) -> Result<i64, i32> {
     let until = if timeout.is_null() {
         None
@@ -1179,14 +1275,15 @@ unsafe fn getevents(
 }
 
 /// `read_events`: take, and wait while that is not yet enough.  Answers
-/// the count taken, or a negated errno when none was.
+/// the count taken, or a negated errno when none was -- `EINTR` when a
+/// signal handler ended a wait (`wait` says so) and taking again found none.
 fn read_events(
     slot: usize,
     min_nr: i64,
     nr: i64,
     events: *mut IoEvent,
     until: Option<i64>,
-    wait: &mut dyn FnMut(i32, Option<u64>),
+    wait: &mut dyn FnMut(i32, Option<u64>) -> Waited,
 ) -> i64 {
     let mut got: i64 = 0;
     let (_, mut seen) = take(slot, min_nr, nr, events, &mut got);
@@ -1207,11 +1304,21 @@ fn read_events(
                 }
             }
         };
-        wait(seen, left);
+        let waited = wait(seen, left);
+        // Taken again even so: `wait_event_interruptible_hrtimeout` looks at
+        // its condition before it looks for a signal.
         let (done, s) = take(slot, min_nr, nr, events, &mut got);
         seen = s;
         if done {
             return got;
+        }
+        if waited == Waited::Interrupted {
+            // Not done, so `got` is the events taken, none of them an error.
+            return if got > 0 {
+                got
+            } else {
+                -i64::from(errno::EINTR)
+            };
         }
     }
 }
@@ -1261,6 +1368,22 @@ fn take(slot: usize, min_nr: i64, nr: i64, events: *mut IoEvent, got: &mut i64) 
     (ret < 0 || *got >= min_nr, seen)
 }
 
+/// A context with nothing in it, for [`crate::interrupt`]'s tests, which
+/// wait on one.
+#[cfg(test)]
+pub(crate) fn test_context() -> u64 {
+    tests::setup(8)
+}
+
+/// Complete one request into `ctx`, as another thread's `io_submit` would,
+/// for [`crate::interrupt`]'s tests.
+#[cfg(test)]
+pub(crate) fn test_complete_one(ctx: u64) {
+    let file = tests::fd(HandleKind::File, crate::fcntl::O_RDWR);
+    let mut c = [tests::fsync_on(file)];
+    assert_eq!(tests::submit_ok(ctx, &mut c, 1), Ok(1));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1281,7 +1404,7 @@ mod tests {
     // so the transfer is played by `exec` closures; `run_request` itself is
     // exercised on the target.
 
-    fn setup(nr: u32) -> u64 {
+    pub(super) fn setup(nr: u32) -> u64 {
         let mut ctx: u64 = 0;
         // SAFETY: a local context id.
         unsafe { sys_io_setup(nr, &raw mut ctx) }.unwrap();
@@ -1294,7 +1417,7 @@ mod tests {
         unsafe { &*(ctx as *const AioRing) }
     }
 
-    fn fd(kind: HandleKind, status: i32) -> i32 {
+    pub(super) fn fd(kind: HandleKind, status: i32) -> i32 {
         fdtable::alloc_fd_with_flags(kind, 0x7000, status).unwrap()
     }
 
@@ -1307,7 +1430,7 @@ mod tests {
     }
 
     /// A sync request on a file: the smallest one `prepare` accepts.
-    fn fsync_on(fd: i32) -> Iocb {
+    pub(super) fn fsync_on(fd: i32) -> Iocb {
         iocb(IOCB_CMD_FSYNC, fd)
     }
 
@@ -1329,11 +1452,11 @@ mod tests {
         (r, notified)
     }
 
-    fn submit_ok(ctx: u64, iocbs: &mut [Iocb], res: i64) -> Result<i64, i32> {
+    pub(super) fn submit_ok(ctx: u64, iocbs: &mut [Iocb], res: i64) -> Result<i64, i32> {
         submit_with(ctx, iocbs, &mut |_| Ok(res)).0
     }
 
-    fn no_wait(_: i32, _: Option<u64>) {
+    fn no_wait(_: i32, _: Option<u64>) -> Waited {
         panic!("this call must not wait");
     }
 
@@ -1896,6 +2019,7 @@ mod tests {
                 // The other thread: one request per wake-up.
                 let mut c = [fsync_on(file)];
                 assert_eq!(submit_ok(ctx, &mut c, 7), Ok(1));
+                Waited::Woken
             })
         };
         assert_eq!(r, Ok(2));
@@ -1925,6 +2049,7 @@ mod tests {
                     asked = Some(ns);
                     let mut c = [fsync_on(file)];
                     assert_eq!(submit_ok(ctx, &mut c, 1), Ok(1));
+                    Waited::Woken
                 },
             )
         };
@@ -1949,6 +2074,7 @@ mod tests {
                 &mut |_, _| {
                     // The other thread's io_destroy, up to its own wait.
                     slot = Some(kill(ctx).unwrap());
+                    Waited::Woken
                 },
             )
         };
@@ -2041,6 +2167,209 @@ mod tests {
         assert_eq!(call(&raw const no_mask), Ok(0));
         assert_eq!(call(&raw const good), Ok(0));
         assert_eq!(call(core::ptr::null()), Ok(0));
+        assert_eq!(sys_io_destroy(ctx), Ok(()));
+    }
+
+    // -- signals --
+
+    #[test]
+    fn an_interrupted_sleep_answers_the_events_taken_or_eintr() {
+        let ctx = setup(8);
+        let mut out = [IoEvent::zeroed(); 2];
+        // SAFETY (each): a local buffer of two events.
+        let r = unsafe {
+            getevents(
+                ctx,
+                1,
+                1,
+                out.as_mut_ptr(),
+                core::ptr::null(),
+                &mut |_, _| Waited::Interrupted,
+            )
+        };
+        assert_eq!(r, Err(errno::EINTR), "none taken");
+        let file = fd(HandleKind::File, O_RDWR);
+        assert_eq!(submit_ok(ctx, &mut [fsync_on(file)], 1), Ok(1));
+        let r = unsafe {
+            getevents(
+                ctx,
+                2,
+                2,
+                out.as_mut_ptr(),
+                core::ptr::null(),
+                &mut |_, _| Waited::Interrupted,
+            )
+        };
+        assert_eq!(r, Ok(1), "one of the two asked for");
+        // One that comes as the handler runs is taken, not lost.
+        let r = unsafe {
+            getevents(
+                ctx,
+                1,
+                1,
+                out.as_mut_ptr(),
+                core::ptr::null(),
+                &mut |_, _| {
+                    assert_eq!(submit_ok(ctx, &mut [fsync_on(file)], 1), Ok(1));
+                    Waited::Interrupted
+                },
+            )
+        };
+        assert_eq!(r, Ok(1));
+        assert_eq!(sys_io_destroy(ctx), Ok(()));
+    }
+
+    fn handle_usr1(flags: u32) {
+        extern "C" fn nothing(_: i32) {}
+        let act = crate::signal::Sigaction {
+            sa_handler: nothing as *const () as crate::signal::SighandlerT,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: flags,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        assert_eq!(
+            unsafe {
+                crate::signal::sigaction(
+                    crate::signal::SIGUSR1,
+                    &raw const act,
+                    core::ptr::null_mut(),
+                )
+            },
+            0
+        );
+    }
+
+    #[test]
+    fn a_handler_during_a_call_that_took_nothing_is_eintr() {
+        let ctx = setup(8);
+        let mut out = [IoEvent::zeroed(); 1];
+        let zero = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SA_RESTART or not: io_getevents is never restarted.
+        handle_usr1(crate::signal::SA_RESTART);
+        let mark = Mark::now();
+        assert_eq!(crate::signal::raise(crate::signal::SIGUSR1), 0);
+        let never = &mut |_: i32, _: Option<u64>, _: Mark| -> Waited { panic!("no time to wait") };
+        // SAFETY (each): a local buffer and timeout.
+        let r = unsafe {
+            getevents_interruptibly(ctx, 1, 1, out.as_mut_ptr(), &raw const zero, mark, never)
+        };
+        assert_eq!(r, Err(errno::EINTR));
+        // An event that is there is taken instead.
+        let file = fd(HandleKind::File, O_RDWR);
+        assert_eq!(submit_ok(ctx, &mut [fsync_on(file)], 1), Ok(1));
+        let r = unsafe {
+            getevents_interruptibly(ctx, 1, 1, out.as_mut_ptr(), &raw const zero, mark, never)
+        };
+        assert_eq!(r, Ok(1));
+        // And one counted from before the handler ended the sleep: no sleep.
+        let r = unsafe {
+            getevents_interruptibly(
+                ctx,
+                1,
+                1,
+                out.as_mut_ptr(),
+                core::ptr::null(),
+                mark,
+                &mut sleep,
+            )
+        };
+        assert_eq!(r, Err(errno::EINTR));
+        handle_usr1_default();
+        assert_eq!(sys_io_destroy(ctx), Ok(()));
+    }
+
+    fn handle_usr1_default() {
+        let act = crate::signal::Sigaction {
+            sa_handler: crate::signal::SIG_DFL,
+            sa_mask: crate::signal::SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        assert_eq!(
+            unsafe {
+                crate::signal::sigaction(
+                    crate::signal::SIGUSR1,
+                    &raw const act,
+                    core::ptr::null_mut(),
+                )
+            },
+            0
+        );
+    }
+
+    fn blocked(sig: i32) -> bool {
+        let mut now = crate::signal::SigsetT::EMPTY;
+        let _ =
+            crate::signal::sigprocmask(crate::signal::SIG_BLOCK, core::ptr::null(), &raw mut now);
+        now.bits[0] & (1u64 << (sig - 1)) != 0
+    }
+
+    #[test]
+    fn io_pgetevents_sleeps_under_its_mask_and_puts_the_old_one_back() {
+        use crate::signal::{SIG_BLOCK, SIG_SETMASK, SIGUSR1, SIGUSR2, SigsetT, sigprocmask};
+        let ctx = setup(8);
+        let file = fd(HandleKind::File, O_RDWR);
+        let mut usr1 = SigsetT::EMPTY;
+        usr1.bits[0] = 1u64 << (SIGUSR1 - 1);
+        let mut old = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, &raw const usr1, &raw mut old), 0);
+        let mask: u64 = 1u64 << (SIGUSR2 - 1);
+        let sig = AioSigset {
+            sigmask: &raw const mask,
+            sigsetsize: 8,
+        };
+        let mut out = [IoEvent::zeroed(); 1];
+        let mut slept = false;
+        // SAFETY: local arguments.
+        let r = unsafe {
+            pgetevents(
+                ctx,
+                1,
+                1,
+                out.as_mut_ptr(),
+                core::ptr::null(),
+                &raw const sig,
+                &mut |_, _, _| {
+                    slept = true;
+                    assert!(
+                        !blocked(SIGUSR1) && blocked(SIGUSR2),
+                        "the call's mask while it sleeps"
+                    );
+                    assert_eq!(submit_ok(ctx, &mut [fsync_on(file)], 1), Ok(1));
+                    Waited::Woken
+                },
+            )
+        };
+        assert_eq!((r, slept), (Ok(1), true));
+        assert!(blocked(SIGUSR1) && !blocked(SIGUSR2), "the old mask after");
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const old, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(sys_io_destroy(ctx), Ok(()));
+    }
+
+    #[test]
+    fn io_pgetevents_reads_the_timeout_before_the_mask() {
+        let ctx = setup(8);
+        let mut out = [IoEvent::zeroed(); 1];
+        let mask: u64 = 0;
+        let bad = AioSigset {
+            sigmask: &raw const mask,
+            sigsetsize: 7,
+        };
+        // An unreadable timeout is EFAULT before a mask of the wrong size is
+        // EINVAL, as Linux reads them.
+        // A kernel-half address, which `access_ok` refuses.
+        let kernel = (1usize << 63) as *const Timespec;
+        // SAFETY: the timeout is refused before it is read.
+        let r = unsafe { sys_io_pgetevents(ctx, 1, 1, out.as_mut_ptr(), kernel, &raw const bad) };
+        assert_eq!(r, Err(errno::EFAULT));
         assert_eq!(sys_io_destroy(ctx), Ok(()));
     }
 

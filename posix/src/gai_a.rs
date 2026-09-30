@@ -37,10 +37,9 @@
 //! came in: a `GAI_WAIT` caller returns and a `GAI_NOWAIT` batch is
 //! notified, where glibc's would wait, and stay silent, for ever.
 //!
-//! **Not here**: a signal handler does not cut `gai_suspend` short with
-//! `EAI_INTR` -- the waits this library has report no interruption; the
-//! wait goes on once the handler returns (known-issues
-//! `D-POSIX-FUTEX-WAITS-DISCARD-EINTR`).
+//! A signal handler that runs on the thread cuts `gai_suspend` short with
+//! `EAI_INTR`: without a timeout, one installed without `SA_RESTART`; with
+//! one, any -- as glibc's answers ([`crate::interrupt`]).
 //!
 //! glibc 2.39's answers -- a waited batch of numbers, hosts-file names and
 //! failures, notification by thread, a suspended wait, the cancellation of a
@@ -53,7 +52,10 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::errno;
-use crate::lowlevellock::{futex_wait, futex_wait_timeout, futex_wake_all, lll_lock, lll_unlock};
+use crate::interrupt::Restart;
+use crate::lowlevellock::{
+    Waited, futex_wait, futex_wait_interruptible, futex_wake_all, lll_lock, lll_unlock,
+};
 use crate::sigevent::SigeventView;
 use crate::socket::{Addrinfo, EAI_AGAIN, EAI_MEMORY, EAI_SYSTEM};
 
@@ -573,15 +575,18 @@ pub unsafe extern "C" fn gai_suspend(
         if answered {
             return 0;
         }
-        match deadline {
-            None => futex_wait(&FINISHED, seen),
+        let waited = match deadline {
+            None => futex_wait_interruptible(&FINISHED, seen, None, Restart::IfAsked),
             Some(d) => {
                 let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
                 let Some(left) = crate::lowlevellock::ns_until(&now, &d) else {
                     return EAI_AGAIN;
                 };
-                futex_wait_timeout(&FINISHED, seen, left);
+                futex_wait_interruptible(&FINISHED, seen, Some(left), Restart::Never)
             }
+        };
+        if waited == Waited::Interrupted {
+            return EAI_INTR;
         }
         seen = FINISHED.load(Ordering::Acquire);
     }
@@ -643,7 +648,7 @@ pub(crate) mod tests {
     /// whole test process's.
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
         SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -656,7 +661,7 @@ pub(crate) mod tests {
     const HOSTS: &[u8] =
         b"127.0.0.1 localhost\n10.1.2.3 alpha alpha.example\n::1 localhost ip6-localhost\n";
 
-    fn eai(e: i32) -> String {
+    pub(crate) fn eai(e: i32) -> String {
         match e {
             0 => "0".into(),
             crate::socket::EAI_NONAME => "EAI_NONAME".into(),

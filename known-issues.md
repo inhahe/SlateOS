@@ -147220,7 +147220,16 @@ Take them one at a time, when touching the application for another reason.
 
 ## TD-C-CONTEXT-MENU-EXTENSIONS-ARE-IMPLEMENTED-TWICE-AND-REACHED-NEITHER-TIME
 
-**Date:** 2026-09-14. **Lane:** C.
+**Date:** 2026-09-14. **Lane:** C. **FIXED 2026-09-29, by neither copy:**
+the feature was built a third way, as declarations rather than a run-time
+registry -- KDE's service-menu files (`gui/servicemenus`, design-decisions
+§1448), which ported programs already ship -- and wired into the desktop's
+icon menus. The read this entry asked for was done first: both copies
+modelled programs registering items with a running shell and a handler
+timer, matched by extension or glob rather than by kind, and handed out
+menu ids with no way back to what an id meant; nothing in either was worth
+carrying over. Both are deleted, and dropped from
+`scripts/orphan-modules-baseline.txt`.
 
 **In short:** `design.txt` specifies that programs can add items to context
 menus -- "Open with…", "Compress to .zip" -- behind a capability, loaded lazily
@@ -176146,3 +176155,44 @@ launch list anywhere), so the toasts it draws are not on screen in a booted
 system at all. Whether it is meant to run beside the shell's own
 notification pane (`gui/desktop/src/notif_pane.rs`), or be folded into it,
 is the question to answer before wiring it.
+
+### [C] TD-C-MENU-ROWS-DRAW-NO-ICONS -- 2026-09-29
+
+**In short:** a menu row has a field for its picture, and nothing draws it.
+Every menu in the desktop and the applications is text only -- which is
+fine while nothing asks for a picture, and now something does: an item a
+program adds to a file's right-click menu names its icon
+(`Icon=object-rotate-right`), as KDE shows it.
+
+**Where:** `guitk::menu::MenuItem::{Action, Submenu}` carry
+`icon: Option<String>`; `ContextMenu::render` never reads it, and every
+caller passes `None`. The desktop's service-menu rows
+(`DesktopShell::service_menu_items`) pass `None` too, with a comment, though
+`servicemenus::MenuAction::icon` and `Row::Submenu::icon` hold the names.
+What the field means -- an icon-theme name, a path, a glyph -- was never
+written down.
+
+**The proper fix:** say that `icon` is an icon-theme name or an absolute
+path, as a desktop entry's `Icon` is; have `ContextMenu` reserve a column
+for it when any row has one and draw it through the icon theme the taskbar
+already resolves program pictures with; then pass the service menus' names
+through.
+
+### [C] TD-C-YAMLDOC-PUTS-A-NEW-KEY-ABOVE-A-LONE-HEADER-COMMENT -- 2026-09-29
+
+**In short:** when a settings file holds nothing but a comment -- a header
+such as `# my menus` -- and the first setting is saved into it, the new key
+is written *above* the comment instead of under it. Nothing is lost (the
+comment is kept, and the file reads back the same), but a header a person
+wrote ends up in the middle of the file.
+
+**Where:** `yamldoc` (`Document::set_seq` into a document whose only
+content is a comment; found through `servicemenus::ChoicesFile`, whose test
+`the_choices_survive_a_save` checks the comment is kept, not where).
+`yamldoc` has no lane in the ownership map (`scripts/which-lane.py` gives
+`-`), so this is logged rather than changed from lane C.
+
+**The proper fix:** when inserting the first key of a mapping, place it
+after any leading comment block that is separated from nothing below it --
+i.e. treat a document of only comments as a header -- and add a test that
+`# header` then a saved key reads `# header` first.

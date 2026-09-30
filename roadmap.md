@@ -2018,6 +2018,24 @@ live.
   E:** the Settings picker for the axis and its applications' own fields and
   scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
+- `[-]` `[C]` **Programs add to a file's right-click menu**
+  (`design-decisions.md` §1448; `roadmap-detailed.md` → *Context menu
+  extension API*) -- the shell's half done 2026-09-29: KDE's service-menu
+  files, read from where KDE reads them (`gui/servicemenus`), each item's
+  command run as KDE runs it -- a port of KDE's own expansion and splitting,
+  so `sh -c "cd %d && make"`, `%f` in quotes and a pipe all do what they do
+  there, a file's name never read as shell -- one program per file where
+  the command takes one at a time, in the file's folder. A right-click on a
+  desktop icon offers them after Open, laid out as KDE lays them out
+  (submenus, `Important` and `TopLevel`, an "Actions" submenu past four
+  rows). Installed menus are on until turned off, the user's own off until
+  turned on (`context-menus.yaml`); a menu that cannot be used is reported
+  with why. **Lane E:** the file manager's menus and the Settings page that
+  lists and switches them
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). **Lane C
+  next:** menu rows draw no icons yet
+  (`TD-C-MENU-ROWS-DRAW-NO-ICONS`).
+
 - `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
   open question C-Q32) -- the shell's half done 2026-09-29: every
   notification the desktop files pops up at the bottom-right corner above

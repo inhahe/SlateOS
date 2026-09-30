@@ -2726,14 +2726,18 @@ unsafe fn execl_body(path: *const u8, ap: *mut VaList, mode: ExecLMode) -> i32 {
     ret
 }
 
-/// `execl(path, arg0, ..., NULL)` — `execv` with a literal argument list.
+/// `execl(path, arg0, ..., NULL)` — `execv` with a literal argument list:
+/// the `va_list` target `execl`'s trampoline jumps to. The three are named in
+/// the implementation's namespace, not the program's: exported as `vexecl`
+/// and the rest until 2026-09-29, names no header declares
+/// (known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES).
 ///
 /// # Safety
 /// `ap` must be a conformant `va_list` of NUL-terminated `char *` values
 /// terminated by a NULL pointer.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexecl(path: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexecl(path: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(path, ap, ExecLMode::Direct) }
 }
@@ -2741,10 +2745,10 @@ pub unsafe extern "C" fn vexecl(path: *const u8, ap: *mut VaList) -> i32 {
 /// `execlp(file, arg0, ..., NULL)` — `execvp` with a literal argument list.
 ///
 /// # Safety
-/// As [`vexecl`].
+/// As [`__slate_vexecl`].
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(file, ap, ExecLMode::SearchPath) }
 }
@@ -2752,20 +2756,20 @@ pub unsafe extern "C" fn vexeclp(file: *const u8, ap: *mut VaList) -> i32 {
 /// `execle(path, arg0, ..., NULL, envp)` — `execve` with a literal argument list.
 ///
 /// # Safety
-/// As [`vexecl`], plus: one `char *const *` must follow the terminating NULL.
+/// As [`__slate_vexecl`], plus: one `char *const *` must follow the terminating NULL.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vexecle(path: *const u8, ap: *mut VaList) -> i32 {
+pub unsafe extern "C" fn __slate_vexecle(path: *const u8, ap: *mut VaList) -> i32 {
     // SAFETY: forwarded from the caller's contract.
     unsafe { execl_body(path, ap, ExecLMode::WithEnv) }
 }
 
 #[cfg(target_os = "none")]
-va_trampoline!("execl", "vexecl", "8", "rsi");
+va_trampoline!("execl", "__slate_vexecl", "8", "rsi");
 #[cfg(target_os = "none")]
-va_trampoline!("execlp", "vexeclp", "8", "rsi");
+va_trampoline!("execlp", "__slate_vexeclp", "8", "rsi");
 #[cfg(target_os = "none")]
-va_trampoline!("execle", "vexecle", "8", "rsi");
+va_trampoline!("execle", "__slate_vexecle", "8", "rsi");
 
 // ---------------------------------------------------------------------------
 // Helpers

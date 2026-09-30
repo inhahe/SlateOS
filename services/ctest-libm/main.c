@@ -39,6 +39,16 @@
  * 42 is deliberately never used as a failure code.
  */
 
+/*
+ * The 80s below call what musl's <math.h> and <fenv.h> do not declare and
+ * posix/include, the overlay in front of them, does (design-decisions
+ * §1141): C23's and ISO/IEC TS 18661-1's functions, which glibc -- and so the
+ * overlay -- declares for these two macros as for _GNU_SOURCE.
+ */
+#define __STDC_WANT_IEC_60559_BFP_EXT__ 1
+#define __STDC_WANT_IEC_60559_EXT__ 1
+
+#include <fenv.h>
 #include <math.h>
 
 /*
@@ -334,6 +344,76 @@ int main(void)
     /* sqrt of a negative is NaN, not a trap and not a wrong finite number. */
     if (isnan(sqrt(opaque(-1.0))) == 0) {
         return 76;
+    }
+
+    /* ===== 80s: what only posix/include declares -- each call compiles ===== */
+    /* ===== through it, links against libc.a and runs here             ===== */
+
+    /* nextup/nextdown: the neighbours of 1, a unit either side of it. */
+    if (!exact(nextup(opaque(1.0)), 1.0 + 0x1p-52) ||
+        !exact(nextdown(opaque(1.0)), 1.0 - 0x1p-53)) {
+        return 80;
+    }
+    /* roundeven: ties to even, as rint does only to nearest. */
+    if (!exact(roundeven(opaque(2.5)), 2.0) || !exact(roundeven(opaque(-3.5)), -4.0)) {
+        return 81;
+    }
+    /* The narrowing operations, rounded once, to float: 2^-25 is less than
+     * half a float unit above 1, and 1 + 2^-23 + 2^-24 a tie, to even. */
+    if (!exact((double)fadd(opaque(1.0), opaque(0x1p-25)), 1.0) ||
+        !exact((double)fadd(opaque(1.0 + 0x1p-23), opaque(0x1p-24)), 1.0 + 0x1p-22) ||
+        !exact((double)fmul(opaque(3.0), opaque(0.5)), 1.5) ||
+        !exact((double)ffma(opaque(2.0), opaque(3.0), opaque(4.0)), 10.0)) {
+        return 82;
+    }
+    /* llogb: the exponent, as a long; FP_LLOGB0 for zero. */
+    if (llogb(opaque(1024.0)) != 10 || llogb(opaque(0.0)) != FP_LLOGB0) {
+        return 83;
+    }
+    /* fromfp and ufromfp: to an integer of a width, in a direction. */
+    if (fromfp(opaque(2.5), FP_INT_TONEAREST, 32) != 2 ||
+        fromfp(opaque(-2.5), FP_INT_UPWARD, 32) != -2 ||
+        ufromfp(opaque(3.5), FP_INT_TONEARESTFROMZERO, 8) != 4UL) {
+        return 84;
+    }
+    {
+        /* The total order puts -0 before +0; a NaN's payload goes in and
+         * comes out; a double is its own canonical encoding. */
+        double mz = opaque(-0.0), pz = opaque(0.0), nan_x = 0.0, in = opaque(1.5), out = 0.0;
+        if (!totalorder(&mz, &pz) || totalorder(&pz, &mz)) {
+            return 85;
+        }
+        if (setpayload(&nan_x, opaque(42.0)) != 0 || !exact(getpayload(&nan_x), 42.0)) {
+            return 86;
+        }
+        if (canonicalize(&out, &in) != 0 || !exact(out, 1.5)) {
+            return 87;
+        }
+    }
+    /* fmaxmag: the one of larger magnitude, TS 18661-1's. */
+    if (!exact(fmaxmag(opaque(-3.0), opaque(2.0)), -3.0)) {
+        return 88;
+    }
+    /* gamma is glibc's old name for lgamma, ln Gamma(3) = ln 2; isinff and
+     * isnanf are functions, where <math.h>'s isinf and isnan are macros. */
+    if (!close_rel(gamma(opaque(3.0)), 0.69314718055994530942, 1e-12) ||
+        isinff(opaquef(INFINITY)) == 0 || isnanf(opaquef(1.5f)) != 0) {
+        return 89;
+    }
+    {
+        /* fegetmode and fesetmode: a rounding direction saved, lost and put
+         * back, rint following it; FE_DFL_MODE to nearest again. */
+        femode_t mode;
+        int ok;
+        fesetround(FE_UPWARD);
+        ok = fegetmode(&mode) == 0;
+        fesetround(FE_TONEAREST);
+        ok = ok && fesetmode(&mode) == 0 && fegetround() == FE_UPWARD;
+        ok = ok && exact(rint(opaque(2.5)), 3.0);
+        ok = ok && fesetmode(FE_DFL_MODE) == 0 && fegetround() == FE_TONEAREST;
+        if (!ok) {
+            return 90;
+        }
     }
 
     return 42;

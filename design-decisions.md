@@ -42717,6 +42717,225 @@ to the order: minutes at 2^31, where this takes at most 6 ms. The phase at such 
 of itself, so the answer there is good to about 2^-97 of the amplitude --
 correctly rounded but next to a zero or in the rare hard case.
 
+
+## 1141. C reaches this library's extensions through a header overlay in front of musl's: `-I posix/include`, each header `#include_next`ing musl's and declaring the rest as glibc 2.39 does
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a C program here is compiled against musl's headers, and those
+declare only what musl has. This library has more -- glibc's extensions
+(`error`, `fts_open`, `backtrace`, `close_range`, `arc4random` ...) and
+C23's additions (`nextup`, `fadd`, `fegetmode` ...), 195 functions and
+variables in all -- and C could call none of them, because clang refuses a
+call to a function no header declares. They are declared now by the headers
+in `posix/include/`, which a build puts in front of musl's with `-I`: each
+includes musl's header of the same name and adds what is missing, under the
+feature macros glibc uses (`rawmemchr` only with `_GNU_SOURCE`, `j0l` by
+default, `fadd` for C23). Five headers musl has no version of at all --
+`<fts.h>`, `<error.h>`, `<execinfo.h>`, `<gnu/libc-version.h>`,
+`<sys/pidfd.h>` -- are whole files there. A program written for glibc then
+compiles as it does against glibc, and a gate holds every declaration to
+glibc's: the same header, the same type, visible under exactly the same
+feature macros.
+
+**Alternatives:**
+
+- **Patched copies of musl's headers** in the sysroot. One place per
+  declaration and no `#include_next`; but every musl update becomes a merge,
+  and the change is a diff against a vendored tree instead of a file that
+  says what it adds and why.
+- **One SlateOS header** declaring everything. Simple -- but a glibc
+  program includes `<stdio.h>` for `renameat2`, not a header of ours, and
+  would not compile unchanged, which is the point of having the functions.
+- **glibc's headers themselves.** They declare exactly glibc's set; but
+  they are LGPL (open-questions D-Q6), declare hundreds of functions this
+  library does not have, and lay out types (`struct stat`, `sigset_t`,
+  `pthread_mutex_t`) as glibc does, where this library's ABI is musl's.
+- **Declarations generated from the Rust definitions.** They could not
+  drift from the definitions; but a Rust signature carries neither C's
+  `const`, nor the feature macros, nor which header a function belongs in.
+
+**`-I`, not `-isystem`:** zig's driver searches its own libc headers before
+any `-isystem` directory, so `-isystem posix/include` would put the overlay
+behind the headers it extends -- silently: `#include <stdio.h>` finds
+musl's, and nothing fails until a program calls an overlay function. Each
+overlay header marks itself a system header (`#pragma GCC system_header`),
+as musl's are by where they live, so that a program's `-Werror` is not
+about them; the gate turns that off to hold them to `-Wall -Wextra` itself.
+
+**What holds it:** `scripts/check-libc-overlay.py` -- every header compiles,
+alone and with the others, in eleven feature-macro settings, C99, gnu89 and
+two C++ ones; the names the overlay adds to musl's are exactly the
+reference's, which `posix/tools/oracle/glibc_declarations.py` reads out of
+glibc 2.39's headers with libclang; and each appears, after its header, in
+exactly the settings glibc's does, with a type `__builtin_types_compatible_p`
+finds compatible with glibc's; and each type the overlay defines itself
+(`femode_t`, `FTS`, `struct mallinfo` ...) has glibc's size and field
+offsets. `scripts/check-libc-prototypes.py` checks each declaration against
+its Rust definition by the x86-64 calling convention, and
+`scripts/check-libc-abi.py`, which compiles against musl's headers with the
+overlay in front, the library's Rust types against the overlay's.
+
+**Where it parts from glibc, on purpose:** the LFS64 names (`open64`,
+`stat64` ...) stay as musl has them, macros under `_LARGEFILE64_SOURCE`
+only -- musl 1.2.4 stopped giving them to `_GNU_SOURCE`, deliberately, and
+this does not undo that -- but `fcntl64`, which musl has no macro for, is
+declared under both; `pidfd_send_signal` is absent from a strict ISO C
+build, where musl has no `siginfo_t` for it to take; and of glibc's
+non-portable mutex names only the aliases of musl's own types are there
+(`PTHREAD_MUTEX_RECURSIVE_NP` ...), since this library has no adaptive
+mutex and its initialisers are musl's.
+
+**Widened too (2026-09-29, the same day):** where musl's own headers declare
+a name `libc.a` defines under narrower feature macros than glibc's --
+`fgetpwent` and `mempcpy` only for `_GNU_SOURCE` where glibc gives them by
+default, `strdup` and `gmtime_r` not for C23, which made them ISO C -- the
+overlay declares it again under glibc's (31 names; a redundant declaration
+of the same type is legal C), and the gate holds those to glibc's headers as
+it does the rest. `posix/tools/oracle/header_audit.py` finds them
+(known-issues.md -> D-POSIX-MUSL-HEADERS-DECLARE-NARROWER-THAN-GLIBCS).
+
+## 1142. `random` and `rand` give glibc's sequences; the `rand48` family is race-free where POSIX requires it, and its draws stay unlocked where POSIX exempts them
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program that seeds the C library's random-number generator
+with a fixed number -- a test suite comparing its output with a recorded
+file, a simulation replaying a run -- gets a particular sequence, and which
+one is the library's choice. This library now gives glibc's, number for
+number, for `rand`, `random` and `rand_r` (the `rand48` family's POSIX
+fixes outright). Before, `random` was the wrong kind of generator and
+`rand`'s sequence was nobody's (known-issues
+D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB). And POSIX requires more of
+the `rand48` family than glibc gives -- the functions that set its state
+must be safe to call from several threads at once -- which this library now
+meets without slowing the functions that draw numbers, which POSIX exempts.
+
+**The sequences.** POSIX fixes `random`'s kind of generator -- additive
+feedback, 31 numbers of state by default, `initstate`'s five sizes -- but
+not how a seed fills its table, and `rand`'s not at all:
+
+| Option | *What changes:* |
+|---|---|
+| **glibc's** (taken) | A seed gives what it gives on Linux. `rand` is `random` there, so the two share one generator: one seed gives both one sequence, and a program calling both sees it split between them. |
+| musl's | `rand` a 64-bit linear congruential generator, `random`'s table seeded musl's own way: what Alpine and zig's default target give, and not what programs are likely to have recorded output against. |
+| our own | What no other system gives; no reason to. |
+
+glibc's is what programs have been run against and their outputs recorded
+on, and the library follows glibc wherever POSIX leaves the choice (§1141).
+
+**Thread safety.** POSIX.1-2024 (XSH 2.9.1) exempts `rand`, `srand`,
+`drand48`, `lrand48` and `mrand48` from thread safety, and not `random`,
+`srandom`, `initstate`, `setstate`, `srand48`, `seed48`, `lcong48`,
+`erand48`, `nrand48` or `jrand48`; and `rand` "shall avoid data races with
+all functions other than non-thread-safe pseudo-random sequence generation
+functions". So:
+
+- `random` and its three take one lock, as glibc's and musl's do; `rand`,
+  being `random`, takes it too.
+- The `rand48` family's state and parameters are atomics -- the multiplier
+  and addend in one word, so nothing reads one from one `lcong48` and the
+  other from another -- and the three initializers take a lock among
+  themselves. glibc's lock none of this family.
+- `drand48`, `lrand48` and `mrand48` stay unlocked, as glibc's are. A lock
+  would make every draw contend in the programs -- OpenMP ones above all --
+  that share one generator among threads, in breach of POSIX, and get away
+  with it on glibc. Unlocked, two threads drawing at once can draw one
+  number twice, which POSIX allows; the state being atomic, it is never
+  undefined behaviour.
+- `seed48` returns the state it replaced in three words of the calling
+  thread's own, where glibc's are one static every thread shares, so that
+  another thread's `seed48` cannot overwrite them while they are read.
+- `fork` holds both locks across the system call, so a child of a threaded
+  parent never finds one held by a thread it does not have.
+
+**Where it parts from glibc's**, on purpose: `setstate` refuses an array
+whose recorded position is past its generator's end, where glibc's would
+read and write past the array; `initstate`, `setstate` and the `_r` forms
+refuse a NULL pointer, and `random_r` and `srandom_r` a `struct
+random_data` never set up, with `EINVAL`, where glibc's follow the pointer;
+`rand_r(NULL)` gives 0.
+
+**Where:** `posix/src/prng.rs`; `posix/src/process.rs` (`fork`).
+
+## 1143. The multibyte conversions keep a NULL `ps`'s state per function and per thread, refuse a sequence at the first byte that makes it impossible, and read a NULL `s` as C words it
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program converting text a byte at a time may leave it to
+the C library to remember a character half-read, by passing no state of its
+own. This library keeps a separate memory for each function and for each
+thread, where glibc keeps one per function for the whole program -- so two
+threads doing this at once cannot mix up each other's characters. And it
+refuses a malformed byte sequence as soon as no further byte could make it a
+character, where glibc's `mbrtowc` waits for the sequence's end.
+
+| Choice | Taken | glibc 2.39 | Why |
+|---|---|---|---|
+| a NULL `ps`'s state | per function, per thread: 13 states, 104 bytes of each thread's block (`posix/src/perthread.rs`) | per function, per process | POSIX lets these functions be unsafe for threads when `ps` is NULL, so both conform; per thread there is no race to be unsafe with -- and in Rust a process-wide static written from two threads is undefined behaviour, not merely a wrong answer. Only a program that begins a character in one thread and finishes it in another would see a difference. |
+| when an invalid sequence is refused | at its first impossible byte, by Unicode's table 3-7 | `mbrtowc`: at the sequence's end; `c8rtomb`: at the first impossible byte | C's `(size_t)-2` means "incomplete (but potentially valid)", and `E0 80` is not potentially valid. A caller feeding one byte at a time sees -1 a call or two sooner; valid text is unaffected. |
+| code points past U+10FFFF | refused, both ways | `mbrtowc` reads `F4 90 80 80`; `c32rtomb` writes the old five- and six-byte forms | RFC 3629; nothing here would read them back |
+| a NULL `s` | exactly C's equivalence: `c16rtomb(NULL, ...)` after a lone high surrogate is `c16rtomb(buf, u'\0', ps)`, an encoding error; `mbrtoc16(NULL, NULL, 0, ps)` hands a low surrogate still to come to no one | `c16rtomb` answers 1 and forgets the surrogate; `mbrtoc16` writes through the NULL pointer and crashes | C's words, which glibc's own `c8rtomb` follows |
+
+**Where:** `posix/src/wchar.rs` (`state_for`, `internal`, `decode`),
+`posix/src/uchar.rs`; known-issues
+D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED.
+
+## 1144. Of the old calls glibc keeps, the ones that cannot work safely here are refused rather than pretended: `sigstack` and a starting `profil` are `ENOSYS`
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** glibc still carries calls from 1980s Unix. Most can be given
+their old meaning over the modern calls (`posix/src/legacy.rs`); two cannot,
+and for those this library says "not supported" where glibc says "done".
+`sigstack` sets a stack for signal handlers but gives no size; glibc guesses
+one and places it past the end of the caller's memory. `profil` starts
+profiling that needs a timer this system does not have; answering "done"
+would leave a program waiting for data that never comes.
+
+| Call | Here | glibc 2.39 | Why |
+|---|---|---|---|
+| `sigstack(ss, oss)` | -1, `ENOSYS` | 0: `sigaltstack` with `ss_sp` as the base and `MINSIGSTKSZ` bytes up from it | By the old convention `ss_sp` is the stack's *top*, so the kernel is handed memory above the caller's buffer, and a signal frame written there corrupts whatever follows it. `sigaltstack` is the call that works. |
+| `profil(buf, ...)` starting | -1, `ENOSYS` | profiling by `SIGPROF` | There is no `ITIMER_PROF` to drive it; `setitimer` refuses it the same way (§1004). Stopping (a NULL buffer or a scale of 0) is 0, as there. |
+| `isfdtype` on a bad descriptor | -1, `errno` `EBADF` | -1, `errno` put back as it was | The manual says `errno` is set; a -1 with `errno` unchanged cannot be told from a stale one. |
+| `sigblock`, `sigsetmask`, `siggetmask` | signal 32 is bit 31 | bit 31 always clear | Signal 32 is `SIGRTMIN` here; glibc keeps 32 and 33 for its threads. The same difference as `strsignal`'s real-time numbers (commit f7a524b0d). |
+
+Refusing leaves a program a fallback it can act on, which "done" does not
+-- §1004's argument, applied again.
+
+**Where:** `posix/src/legacy.rs`.
+
+## 1145. `argz_replace` counts what glibc's manual says it counts, not what glibc's code counts
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `argz_replace` replaces a piece of text in a list of strings
+and can report how many replacements it made. glibc's manual says it adds
+"the number of replacements performed"; glibc's code adds one for each
+string it changed, however many replacements that string had. This library
+does what the manual says.
+
+| Option | *What changes:* |
+|---|---|
+| **The manual's** (taken) | Replacing `ab` in `ababab` adds 3. |
+| glibc's code | It adds 1. |
+
+A program that reads the count only as "did anything change" -- the usual
+use -- sees no difference; one that reads the number was told by the manual
+it is replacements.
+
+**Where:** `posix/src/argz.rs` (`argz_replace`), its test.
+
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22

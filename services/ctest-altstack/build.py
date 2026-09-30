@@ -79,6 +79,7 @@ def main() -> None:
         "-fno-builtin",           # call the sysroot, don't inline/fold
         "-mcmodel=large",         # match codegen code-model=large
         "-fno-pic", "-fno-pie",   # match relocation-model=static
+        "-I", str(OS_ROOT / "posix" / "include"),  # the overlay: what musl's headers lack
         "-Wall", "-Wextra", "-Werror",
         str(HERE / "main.c"),
         "-o", str(obj),

@@ -257,6 +257,19 @@ REPLACEABLE = frozenset(
         # added with them 2026-09-26 (lane D): gnulib's wcpcpy/wcpncpy
         # modules supply these where the libc lacks them, as this one did
         "wcpcpy", "wcpncpy",
+        # added 2026-09-29 (lane D): gnulib's random_r module supplies these
+        # four under their own names where the libc lacks them, as musl
+        # does; they are `posix::prng::gnu_random_r`'s member
+        "random_r", "srandom_r", "initstate_r", "setstate_r",
+        # added 2026-09-29 (lane D): gnulib's group-member module defines it
+        # where the libc lacks it, as musl does -- posix::legacy's
+        # gnu_group_member member
+        "group_member",
+        # added 2026-09-29 (lane D): gnulib's argz module defines these where
+        # the libc lacks them, as musl does -- posix::argz's gnu_argz member
+        "argz_create", "argz_create_sep", "argz_count", "argz_extract",
+        "argz_stringify", "argz_append", "argz_add", "argz_add_sep",
+        "argz_delete", "argz_insert", "argz_replace", "argz_next",
         # stdio-ish
         "getline", "getdelim", "fseeko", "ftello", "vasprintf", "asprintf",
         # stdio_ext.h: gnulib's freadahead/freadptr/fpending/fpurge/fseterr

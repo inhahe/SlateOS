@@ -42,76 +42,178 @@ pub type WcharT = i32;
 /// when interpreted as `i32`).
 pub const WEOF: WcharT = -1;
 
-/// Multibyte conversion state for restartable functions (`mbrtowc`, `wcrtomb`).
+/// Multibyte conversion state, `mbstate_t`: for the restartable conversions
+/// here -- `mbrtowc`, `wcrtomb` and their kin -- and `<uchar.h>`'s
+/// ([`crate::uchar`]). Eight bytes, musl's size and glibc's:
 ///
-/// Tracks a partially decoded UTF-8 sequence.  Layout:
-/// - bytes 0..3: accumulated input bytes of the partial character
-/// - byte 4: number of bytes accumulated so far
-/// - byte 5: total bytes expected for this character (0 = initial state)
-/// - bytes 6..7: reserved (zero)
+/// | bytes | what |
+/// |---|---|
+/// | 0..4 | the bytes of a character begun and not finished -- `mbrtowc`'s input so far, `c8rtomb`'s code units so far -- or, with byte 6 set, what is still to be handed out |
+/// | 4 | how many bytes of the character have come |
+/// | 5 | how many it needs; 0, none begun |
+/// | 6 | what is still to be handed out: 0, nothing; [`MbstateT::LOW_SURROGATE`], [`MbstateT::UTF8_UNITS`] or [`MbstateT::HIGH_SURROGATE`] |
+/// | 7 | for `UTF8_UNITS`, how many are left |
+///
+/// All zeros is the initial state, as C requires of a zeroed `mbstate_t`.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MbstateT {
     opaque: [u8; 8],
 }
 
 impl MbstateT {
-    /// Create a zero-initialized (initial) shift state.
-    pub(crate) const fn new() -> Self {
+    /// `mbrtoc16` has the second unit of a surrogate pair to hand out, in
+    /// bytes 0 and 1.
+    pub(crate) const LOW_SURROGATE: u8 = 1;
+    /// `mbrtoc8` has a character's code units to hand out, in bytes 0 to 2.
+    pub(crate) const UTF8_UNITS: u8 = 2;
+    /// `c16rtomb` has the first unit of a surrogate pair, in bytes 0 and 1,
+    /// and waits for the second.
+    pub(crate) const HIGH_SURROGATE: u8 = 3;
+
+    /// The initial conversion state.
+    #[must_use]
+    pub const fn new() -> Self {
         Self { opaque: [0; 8] }
     }
 
-    /// Check if this is the initial shift state.
-    #[allow(clippy::indexing_slicing)] // indices 4,5 always in bounds for [u8; 8]
-    fn is_initial(self) -> bool {
-        self.opaque[4] == 0 && self.opaque[5] == 0
+    /// Whether this is the initial state: no character begun, nothing to
+    /// hand out.
+    pub(crate) fn is_initial(self) -> bool {
+        let [_, _, _, _, count, expected, pending, left] = self.opaque;
+        count == 0 && expected == 0 && pending == 0 && left == 0
     }
 
-    /// Get accumulated byte count.
-    #[allow(clippy::indexing_slicing)] // index 4 always in bounds for [u8; 8]
-    fn count(self) -> usize {
-        self.opaque[4] as usize
+    /// How many bytes of the character begun have come.
+    pub(crate) fn count(self) -> usize {
+        usize::from(self.opaque[4])
     }
 
-    /// Get expected total byte count (0 = initial).
-    #[allow(clippy::indexing_slicing)] // index 5 always in bounds for [u8; 8]
-    fn expected(self) -> usize {
-        self.opaque[5] as usize
+    /// How many bytes the character begun needs; 0, none begun.
+    pub(crate) fn expected(self) -> usize {
+        usize::from(self.opaque[5])
     }
 
-    /// Store an accumulated byte.
-    #[allow(clippy::indexing_slicing)] // idx < 4 is checked; indices 4 always in bounds for [u8; 8]
-    fn push(&mut self, b: u8) {
-        let idx = self.opaque[4] as usize;
-        if idx < 4 {
-            self.opaque[idx] = b;
+    /// The first byte of the character begun.
+    pub(crate) fn lead(self) -> u8 {
+        self.opaque[0]
+    }
+
+    /// Begin a character of `len` bytes (2 to 4) with `lead`.
+    pub(crate) fn begin(&mut self, len: usize, lead: u8) {
+        self.reset();
+        // At most 4, from `utf8_seq_len`.
+        self.opaque[5] = len.min(4) as u8;
+        self.push(lead);
+    }
+
+    /// The character begun's next byte. A fifth is never kept: none needs it.
+    pub(crate) fn push(&mut self, b: u8) {
+        let at = self.count();
+        if let Some(slot) = self.opaque.get_mut(at).filter(|_| at < 4) {
+            *slot = b;
             self.opaque[4] = self.opaque[4].wrapping_add(1);
         }
     }
 
-    /// Set the expected byte count for the current character.
-    #[allow(clippy::indexing_slicing)] // index 5 always in bounds for [u8; 8]
-    fn set_expected(&mut self, n: u8) {
-        self.opaque[5] = n;
+    /// The bytes of the character begun, and how many there are.
+    pub(crate) fn bytes(self) -> ([u8; 4], usize) {
+        let [a, b, c, d, ..] = self.opaque;
+        ([a, b, c, d], self.count().min(4))
     }
 
-    /// Get the accumulated bytes.
-    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-    fn bytes(self, n: usize) -> [u8; 4] {
-        let mut out = [0u8; 4];
-        let count = if n < 4 { n } else { 4 };
-        let mut i = 0;
-        while i < count {
-            out[i] = self.opaque[i];
-            i += 1;
+    /// What is to be handed out: 0, or one of the three kinds above.
+    pub(crate) fn pending(self) -> u8 {
+        self.opaque[6]
+    }
+
+    /// Keep the surrogate `unit`, of kind [`Self::LOW_SURROGATE`] or
+    /// [`Self::HIGH_SURROGATE`].
+    pub(crate) fn keep_surrogate(&mut self, kind: u8, unit: u16) {
+        self.reset();
+        let [lo, hi] = unit.to_le_bytes();
+        self.opaque[0] = lo;
+        self.opaque[1] = hi;
+        self.opaque[6] = kind;
+    }
+
+    /// The surrogate kept.
+    pub(crate) fn surrogate(self) -> u16 {
+        u16::from_le_bytes([self.opaque[0], self.opaque[1]])
+    }
+
+    /// Keep `units`, at most three of a character's code units, to hand out
+    /// in order.
+    pub(crate) fn keep_units(&mut self, units: &[u8]) {
+        self.reset();
+        for (slot, &u) in self.opaque.iter_mut().zip(units.iter().take(3)) {
+            *slot = u;
         }
-        out
+        self.opaque[6] = Self::UTF8_UNITS;
+        self.opaque[7] = units.len().min(3) as u8;
     }
 
-    /// Reset to initial state.
-    fn reset(&mut self) {
+    /// The next unit kept, taken; after the last the state is initial again.
+    pub(crate) fn next_unit(&mut self) -> u8 {
+        let [unit, b, c, ..] = self.opaque;
+        self.opaque[0] = b;
+        self.opaque[1] = c;
+        self.opaque[2] = 0;
+        self.opaque[7] = self.opaque[7].saturating_sub(1);
+        if self.opaque[7] == 0 {
+            self.reset();
+        }
+        unit
+    }
+
+    /// Back to the initial state.
+    pub(crate) fn reset(&mut self) {
         self.opaque = [0; 8];
     }
+}
+
+impl Default for MbstateT {
+    /// The initial state.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Which internal state a restartable function uses for a NULL `ps`: its
+/// own, as C requires ("each function uses its own internal mbstate_t
+/// object"), in the calling thread's block ([`crate::perthread`]), so that
+/// two threads each passing NULL do not share one character half-read. Until
+/// 2026-09-29 `mbrtowc` had one process-wide state, which `mbrlen` and the
+/// string forms borrowed, and `<uchar.h>`'s functions none.
+pub(crate) mod internal {
+    pub(crate) const MBRTOWC: usize = 0;
+    pub(crate) const MBRLEN: usize = 1;
+    pub(crate) const WCRTOMB: usize = 2;
+    pub(crate) const MBSRTOWCS: usize = 3;
+    pub(crate) const MBSNRTOWCS: usize = 4;
+    pub(crate) const WCSRTOMBS: usize = 5;
+    pub(crate) const WCSNRTOMBS: usize = 6;
+    pub(crate) const MBRTOC8: usize = 7;
+    pub(crate) const MBRTOC16: usize = 8;
+    pub(crate) const MBRTOC32: usize = 9;
+    pub(crate) const C8RTOMB: usize = 10;
+    pub(crate) const C16RTOMB: usize = 11;
+    pub(crate) const C32RTOMB: usize = 12;
+    /// How many there are.
+    pub(crate) const COUNT: usize = 13;
+}
+
+/// `ps`, or for a NULL `ps` the calling thread's internal state for the
+/// function `which` names ([`internal`]).
+pub(crate) fn state_for(ps: *mut MbstateT, which: usize) -> *mut MbstateT {
+    if !ps.is_null() {
+        return ps;
+    }
+    // SAFETY: the calling thread's block; only the address is formed.
+    let states = unsafe { core::ptr::addr_of_mut!((*crate::perthread::current()).mbstate) };
+    states
+        .cast::<MbstateT>()
+        .wrapping_add(which.min(internal::COUNT.wrapping_sub(1)))
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +249,99 @@ fn utf8_seq_len(lead: u8) -> usize {
 fn is_cont(b: u8) -> bool {
     b & 0xC0 == 0x80
 }
+
+/// Whether `b` may follow `lead` as the second byte of a well-formed
+/// sequence: Unicode's table 3-7, which rules out the overlong forms, the
+/// surrogates and what is past U+10FFFF at the second byte already. So a
+/// sequence no completion could make valid is refused at the byte that makes
+/// it so -- C's "(size_t)(-2)" is for an incomplete "but potentially valid"
+/// character -- where glibc's `mbrtowc` refuses it at its last byte.
+fn second_byte_ok(lead: u8, b: u8) -> bool {
+    let (low, high) = match lead {
+        0xE0 => (0xA0, 0xBF),
+        0xED => (0x80, 0x9F),
+        0xF0 => (0x90, 0xBF),
+        0xF4 => (0x80, 0x8F),
+        _ => (0x80, 0xBF),
+    };
+    (low..=high).contains(&b)
+}
+
+/// What [`decode`] made of the bytes it was given.
+pub(crate) enum Decoded {
+    /// A whole character, and how many of the bytes given it took.
+    Char { cp: u32, took: usize },
+    /// The bytes begin a character without finishing it; the state keeps
+    /// them all.
+    Incomplete,
+    /// No character begins so. The state is initial again.
+    Invalid,
+}
+
+/// Decode the character `state` has begun, or the next one, from up to `n`
+/// bytes at `s`: the heart of [`mbrtowc`], its kin and `<uchar.h>`'s
+/// `mbrtoc8`, `mbrtoc16` and `mbrtoc32`. Strict UTF-8 -- RFC 3629, Unicode's
+/// table 3-7 -- each byte checked as it comes ([`second_byte_ok`]).
+///
+/// # Safety
+///
+/// `s` has `n` readable bytes.
+pub(crate) unsafe fn decode(state: &mut MbstateT, s: *const u8, n: usize) -> Decoded {
+    let mut took: usize = 0;
+    if state.expected() == 0 {
+        if n == 0 {
+            return Decoded::Incomplete;
+        }
+        // SAFETY: n >= 1.
+        let lead = unsafe { s.read() };
+        took = 1;
+        match utf8_seq_len(lead) {
+            0 => {
+                state.reset();
+                return Decoded::Invalid;
+            }
+            1 => {
+                state.reset();
+                return Decoded::Char {
+                    cp: u32::from(lead),
+                    took,
+                };
+            }
+            len => state.begin(len, lead),
+        }
+    }
+    while state.count() < state.expected() {
+        if took >= n {
+            return Decoded::Incomplete;
+        }
+        // SAFETY: took < n.
+        let b = unsafe { s.add(took).read() };
+        let fits = if state.count() == 1 {
+            second_byte_ok(state.lead(), b)
+        } else {
+            is_cont(b)
+        };
+        if !fits {
+            state.reset();
+            return Decoded::Invalid;
+        }
+        state.push(b);
+        took = took.wrapping_add(1);
+    }
+    let (bytes, len) = state.bytes();
+    state.reset();
+    // The checks above leave nothing for this to refuse; it has the last word
+    // all the same.
+    match utf8_decode(&bytes, len) {
+        Some(cp) => Decoded::Char { cp, took },
+        None => Decoded::Invalid,
+    }
+}
+
+/// `(size_t)(-2)`: incomplete, all given bytes kept.
+pub(crate) const INCOMPLETE: usize = usize::MAX.wrapping_sub(1);
+/// `(size_t)(-1)`: an encoding error, `errno` `EILSEQ`.
+pub(crate) const ILSEQ: usize = usize::MAX;
 
 /// Decode a complete UTF-8 sequence from `bytes[..len]` into a code point.
 ///
@@ -195,9 +390,9 @@ fn utf8_decode(bytes: &[u8], len: usize) -> Option<u32> {
 /// Encode a Unicode code point as UTF-8 into `buf`.
 ///
 /// Returns the number of bytes written (1..=4), or 0 if the code point
-/// is invalid (> U+10FFFF or a surrogate).
+/// is invalid (> U+10FFFF or a surrogate). `<uchar.h>`'s encoder too.
 #[allow(clippy::arithmetic_side_effects)]
-fn utf8_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
+pub(crate) fn utf8_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
     if cp <= 0x7F {
         buf[0] = cp as u8;
         1
@@ -535,133 +730,54 @@ pub extern "C" fn mbsinit(ps: *const MbstateT) -> i32 {
 // Restartable multibyte conversion
 // ---------------------------------------------------------------------------
 
-/// Internal static state for `mbrtowc`/`wcrtomb` when caller passes null `ps`.
-static mut INTERNAL_MBSTATE: MbstateT = MbstateT::new();
-
 /// Restartable multibyte (UTF-8) → wide character.
 ///
 /// Reads up to `n` bytes from `s`, continuing from the partial state in
-/// `*ps`.  Stores the decoded code point in `*pwc`.
+/// `*ps` (this function's own per-thread state for a NULL `ps`), and stores
+/// the decoded code point in `*pwc` unless it is NULL.
 ///
 /// Returns:
 /// - 0 if the decoded character is null (U+0000)
 /// - 1..4: number of bytes consumed to complete a character
 /// - `(size_t)-2`: incomplete but valid so far (state updated)
-/// - `(size_t)-1`: invalid byte sequence (errno = EILSEQ)
+/// - `(size_t)-1`: invalid byte sequence (errno = EILSEQ), found at the first
+///   byte no completion could make valid ([`decode`])
+///
+/// A NULL `s` is `mbrtowc(NULL, "", 1, ps)`, as C says: the initial state
+/// back, or `EILSEQ` in the middle of a character.
+///
+/// # Safety
+///
+/// `s` is NULL or has `n` readable bytes; `pwc` NULL or writable; `ps` NULL or
+/// a valid `mbstate_t`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn mbrtowc(
     pwc: *mut WcharT,
     s: *const u8,
     n: usize,
     ps: *mut MbstateT,
 ) -> usize {
-    // Use internal state if ps is null.
-    let state = if ps.is_null() {
-        // SAFETY: Single-threaded access; matches POSIX spec for null ps.
-        unsafe { &mut *core::ptr::addr_of_mut!(INTERNAL_MBSTATE) }
+    // SAFETY: the caller's state, or this thread's own for this function.
+    let state = unsafe { &mut *state_for(ps, internal::MBRTOWC) };
+    let (pwc, s, n) = if s.is_null() {
+        (core::ptr::null_mut(), b"\0".as_ptr(), 1)
     } else {
-        unsafe { &mut *ps }
+        (pwc, s, n)
     };
-
-    // s == NULL: equivalent to mbrtowc(NULL, "", 1, ps) — reset state.
-    if s.is_null() {
-        state.reset();
-        return 0;
-    }
-
-    if n == 0 {
-        return usize::MAX.wrapping_sub(1); // -2: need more bytes.
-    }
-
-    // If we have no partial state, start fresh.
-    if state.is_initial() {
-        let lead = unsafe { *s };
-        if lead == 0 {
+    // SAFETY: `s` has `n` readable bytes, by the contract or as the literal.
+    match unsafe { decode(state, s, n) } {
+        Decoded::Char { cp, took } => {
             if !pwc.is_null() {
-                unsafe {
-                    *pwc = 0;
-                }
+                // SAFETY: the caller's writable `wchar_t`. A code point is
+                // at most 0x10FFFF, so it fits.
+                unsafe { pwc.write(cp as WcharT) };
             }
-            return 0;
+            if cp == 0 { 0 } else { took }
         }
-
-        let seq_len = utf8_seq_len(lead);
-        if seq_len == 0 {
+        Decoded::Incomplete => INCOMPLETE,
+        Decoded::Invalid => {
             crate::errno::set_errno(crate::errno::EILSEQ);
-            return usize::MAX; // -1: EILSEQ.
-        }
-
-        // Start accumulating.
-        state.reset();
-        state.set_expected(seq_len as u8);
-        state.push(lead);
-
-        // Try to consume remaining bytes from input.
-        let mut consumed: usize = 1;
-        while state.count() < state.expected() && consumed < n {
-            let b = unsafe { *s.add(consumed) };
-            if !is_cont(b) {
-                state.reset();
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                return usize::MAX; // -1: EILSEQ.
-            }
-            state.push(b);
-            consumed += 1;
-        }
-
-        if state.count() < state.expected() {
-            return usize::MAX.wrapping_sub(1); // -2: incomplete.
-        }
-
-        // Decode the complete sequence.
-        let buf = state.bytes(state.count());
-        let seq_len = state.expected();
-        state.reset();
-
-        if let Some(cp) = utf8_decode(&buf, seq_len) {
-            if !pwc.is_null() {
-                unsafe {
-                    *pwc = cp as WcharT;
-                }
-            }
-            if cp == 0 { 0 } else { consumed }
-        } else {
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            usize::MAX // -1: EILSEQ.
-        }
-    } else {
-        // Continue from partial state.
-        let mut consumed: usize = 0;
-        while state.count() < state.expected() && consumed < n {
-            let b = unsafe { *s.add(consumed) };
-            if !is_cont(b) {
-                state.reset();
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                return usize::MAX; // -1: EILSEQ.
-            }
-            state.push(b);
-            consumed += 1;
-        }
-
-        if state.count() < state.expected() {
-            return usize::MAX.wrapping_sub(1); // -2: incomplete.
-        }
-
-        let buf = state.bytes(state.count());
-        let seq_len = state.expected();
-        state.reset();
-
-        if let Some(cp) = utf8_decode(&buf, seq_len) {
-            if !pwc.is_null() {
-                unsafe {
-                    *pwc = cp as WcharT;
-                }
-            }
-            if cp == 0 { 0 } else { consumed }
-        } else {
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            usize::MAX
+            ILSEQ
         }
     }
 }
@@ -675,10 +791,13 @@ pub unsafe extern "C" fn mbrtowc(
 /// Returns the number of bytes written, or `(size_t)-1` on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, _ps: *mut MbstateT) -> usize {
+pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, ps: *mut MbstateT) -> usize {
     if s.is_null() {
-        // "Reset to initial state" — no-op for UTF-8, returns 1
-        // (the number of bytes to encode the null character).
+        // `wcrtomb(buf, L'\0', ps)`: the state initial again -- UTF-8 has no
+        // shift states, so there is nothing else to undo -- and the NUL's
+        // one byte.
+        // SAFETY: the caller's state, or this thread's own for this function.
+        unsafe { (*state_for(ps, internal::WCRTOMB)).reset() };
         return 1;
     }
 
@@ -954,9 +1073,13 @@ pub extern "C" fn towupper(wc: WcharT) -> WcharT {
 
 /// Opaque handle for a character class (returned by `wctype()`).
 ///
-/// POSIX defines `wctype_t` as a scalar.  We encode each class as
-/// a small nonzero integer so `0` means "invalid."
-pub type WctypeT = u32;
+/// POSIX defines `wctype_t` as a scalar; musl's `<wctype.h>` makes it an
+/// `unsigned long`, so it is 64 bits wide here too -- a caller's
+/// `wctype_t` holds all of what `wctype` returns, and `wctype("x") == 0`
+/// tests all of it. (It was a `u32` until 2026-09-29: the caller read the
+/// return register's upper half, which nothing had set.) We encode each
+/// class as a small nonzero integer so `0` means "invalid."
+pub type WctypeT = usize;
 
 // Class IDs — keep in sync with wctype() and iswctype().
 const WC_ALNUM: WctypeT = 1;
@@ -1043,8 +1166,10 @@ pub extern "C" fn iswctype(wc: WcharT, ct: WctypeT) -> i32 {
 // wctrans / towctrans — generic transformation dispatch (<wctype.h>)
 // ---------------------------------------------------------------------------
 
-/// Opaque handle for a character transformation (returned by `wctrans()`).
-pub type WctransT = u32;
+/// Opaque handle for a character transformation (returned by `wctrans()`):
+/// pointer-wide, as musl's `<wctype.h>` makes `wctrans_t` a `const int *`
+/// (a `u32` until 2026-09-29, `wctype_t`'s fault too).
+pub type WctransT = usize;
 
 const WT_TOLOWER: WctransT = 1;
 const WT_TOUPPER: WctransT = 2;
@@ -1220,6 +1345,74 @@ pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
         }
         i = i.wrapping_add(1);
     }
+}
+
+/// `wcschrnul(s, wc)` -- [`wcschr`], but the terminating NUL rather than NULL
+/// where `wc` is not in `s` (a GNU extension).
+///
+/// # Safety
+///
+/// `s` must be a valid NUL-terminated wide string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcschrnul(s: *const WcharT, wc: WcharT) -> *const WcharT {
+    let mut i: usize = 0;
+    loop {
+        // SAFETY: within the caller's string, up to and including its NUL.
+        let c = unsafe { *s.add(i) };
+        if c == wc || c == 0 {
+            // SAFETY: as above.
+            return unsafe { s.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// `wcslcpy(dst, src, size)` -- [`crate::string::strlcpy`] for wide strings:
+/// at most `size - 1` characters copied, and a NUL after them if `size` is
+/// not 0. Returns `wcslen(src)`; a result not below `size` means the copy was
+/// cut short (glibc 2.38's, and the BSDs').
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` wide characters, and `src` a valid
+/// NUL-terminated wide string not overlapping it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcslcpy(dst: *mut WcharT, src: *const WcharT, size: usize) -> usize {
+    // SAFETY: the caller's NUL-terminated string.
+    let len = unsafe { wcslen(src) };
+    if size > 0 {
+        let n = len.min(size.wrapping_sub(1));
+        // SAFETY: `n < size`, within `dst`; `src` has `len >= n` characters.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, n);
+            *dst.add(n) = 0;
+        }
+    }
+    len
+}
+
+/// `wcslcat(dst, src, size)` -- [`crate::string::strlcat`] for wide strings:
+/// `src` appended to the wide string in `dst`'s `size` characters, cut short
+/// to fit with its NUL. Returns the length the whole would have had; where
+/// `dst` holds no NUL within `size`, `size + wcslen(src)`, and nothing is
+/// written (glibc 2.38's, and the BSDs').
+///
+/// # Safety
+///
+/// `dst` must be valid for `size` wide characters, and `src` a valid
+/// NUL-terminated wide string not overlapping it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcslcat(dst: *mut WcharT, src: *const WcharT, size: usize) -> usize {
+    // SAFETY: at most `size` characters of `dst` are read.
+    let dlen = unsafe { wcsnlen(dst, size) };
+    // SAFETY: the caller's NUL-terminated string.
+    let slen = unsafe { wcslen(src) };
+    if dlen == size {
+        return size.wrapping_add(slen);
+    }
+    // SAFETY: `dlen < size`: the room left is `size - dlen`, one of it the NUL.
+    unsafe { wcslcpy(dst.add(dlen), src, size.wrapping_sub(dlen)) };
+    dlen.wrapping_add(slen)
 }
 
 /// Find the last occurrence of a wide character.
@@ -1582,6 +1775,99 @@ pub unsafe extern "C" fn wcstoull(
     unsafe { wcstoul(nptr, endptr, base) }
 }
 
+// The conversions in an explicit locale (GNU), which is always C's here --
+// see `locale.rs` -- and the 4.4BSD names for the `long long` ones.
+
+/// `wcstol_l` -- [`wcstol`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstol_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstol(nptr, endptr, base) }
+}
+
+/// `wcstoul_l` -- [`wcstoul`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoul_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoul(nptr, endptr, base) }
+}
+
+/// `wcstoll_l` -- [`wcstoll`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoll_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoll(nptr, endptr, base) }
+}
+
+/// `wcstoull_l` -- [`wcstoull`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoull_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+    _loc: crate::locale::LocaleT,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoull(nptr, endptr, base) }
+}
+
+/// `wcstoq` -- 4.4BSD's name for [`wcstoll`].
+///
+/// # Safety
+///
+/// As [`wcstol`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstoq(nptr: *const WcharT, endptr: *mut *const WcharT, base: i32) -> i64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoll(nptr, endptr, base) }
+}
+
+/// `wcstouq` -- 4.4BSD's name for [`wcstoull`].
+///
+/// # Safety
+///
+/// As [`wcstoul`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstouq(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> u64 {
+    // SAFETY: forwarded.
+    unsafe { wcstoull(nptr, endptr, base) }
+}
+
 /// A wide string as a source of bytes for the shared float scanner.
 ///
 /// Every character a float literal can contain is ASCII, so a wide character
@@ -1672,6 +1958,36 @@ pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT)
     if negative { -value } else { value }
 }
 
+/// `wcstod_l` -- [`wcstod`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstod`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstod_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> f64 {
+    // SAFETY: forwarded.
+    unsafe { wcstod(nptr, endptr) }
+}
+
+/// `wcstof_l` -- [`wcstof`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstof`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn wcstof_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> f32 {
+    // SAFETY: forwarded.
+    unsafe { wcstof(nptr, endptr) }
+}
+
 /// `wcstold` — convert a wide string to `long double`.
 ///
 /// The wide sibling of [`crate::stdlib::strtold`], over the same scanner and
@@ -1719,6 +2035,34 @@ unsafe extern "C" fn __slate_ld_wcstold(
     unsafe { out.write(wcstold(nptr, endptr)) }
 }
 crate::ld_c!(l_pp "wcstold" => __slate_ld_wcstold);
+
+/// `wcstold_l` -- [`wcstold`] in a locale, C's.
+///
+/// # Safety
+///
+/// As [`wcstold`].
+pub unsafe fn wcstold_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    _loc: crate::locale::LocaleT,
+) -> crate::x87::LongDouble {
+    // SAFETY: forwarded.
+    unsafe { wcstold(nptr, endptr) }
+}
+
+/// `wcstold_l` for C, through the thunk: the result into `out`.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn __slate_ld_wcstold_l(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    loc: crate::locale::LocaleT,
+    out: *mut crate::x87::LongDouble,
+) {
+    // SAFETY: as in `__slate_ld_wcstold`.
+    unsafe { out.write(wcstold_l(nptr, endptr, loc)) }
+}
+crate::ld_c!(l_ppp "wcstold_l" => __slate_ld_wcstold_l);
 
 /// Scan a float subject sequence from a wide string and set `*endptr`.
 ///
@@ -1768,7 +2112,9 @@ pub const MB_CUR_MAX: usize = 4;
 /// decoded character.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbstateT) -> usize {
-    unsafe { mbrtowc(core::ptr::null_mut(), s, n, ps) }
+    // SAFETY: forwarded; for a NULL `ps`, mbrlen's own state, as C requires --
+    // it was mbrtowc's until 2026-09-29.
+    unsafe { mbrtowc(core::ptr::null_mut(), s, n, state_for(ps, internal::MBRLEN)) }
 }
 
 /// Concatenate at most `n` wide characters from `src` to `dst`.
@@ -2178,9 +2524,7 @@ pub unsafe extern "C" fn wcsxfrm_l(
 /// Convert a multibyte string to a wide string (restartable).
 ///
 /// Converts at most `len` wide characters from the multibyte string
-/// pointed to by `*src`.  On success, `*src` is updated to point past
-/// the last byte consumed (or set to NULL if the entire string was
-/// converted including the null terminator).
+/// pointed to by `*src` -- see [`mbs_to_wcs`] for the rules.
 ///
 /// # Safety
 ///
@@ -2193,14 +2537,21 @@ pub unsafe extern "C" fn mbsrtowcs(
     len: usize,
     ps: *mut MbstateT,
 ) -> usize {
-    // Delegate to mbsnrtowcs with nms = SIZE_MAX (no byte limit).
-    unsafe { mbsnrtowcs(dst, src, usize::MAX, len, ps) }
+    // SAFETY: forwarded, with this function's own state for a NULL `ps`.
+    unsafe {
+        mbs_to_wcs(
+            dst,
+            src,
+            usize::MAX,
+            len,
+            state_for(ps, internal::MBSRTOWCS),
+        )
+    }
 }
 
-/// Convert a multibyte string to a wide string (restartable, n-limited).
-///
-/// Converts at most `len` wide characters, consuming at most `nms` bytes
-/// from the multibyte string pointed to by `*src`.
+/// Convert a multibyte string to a wide string (restartable, n-limited):
+/// at most `nms` bytes of it, and at most `len` wide characters -- see
+/// [`mbs_to_wcs`].
 ///
 /// # Safety
 ///
@@ -2213,76 +2564,105 @@ pub unsafe extern "C" fn mbsnrtowcs(
     len: usize,
     ps: *mut MbstateT,
 ) -> usize {
+    // SAFETY: forwarded, with this function's own state for a NULL `ps`.
+    unsafe { mbs_to_wcs(dst, src, nms, len, state_for(ps, internal::MBSNRTOWCS)) }
+}
+
+/// What `mbsrtowcs` and `mbsnrtowcs` do, as POSIX and glibc 2.39 do it
+/// (`posix/tools/oracle/multibyte_harness.py`):
+///
+/// - Convert from `*src`, reading at most `nms` bytes, writing at most `len`
+///   wide characters to `dst`; the count converted, the terminator not
+///   counted.
+/// - With a NULL `dst` only count: `len` limits nothing, and `*src` and the
+///   state are left as they were. (Until 2026-09-29 `len` limited the count,
+///   so `mbsrtowcs(NULL, &src, 0, &st)` -- the usual way to ask how long the
+///   result will be -- answered 0, and `*src` moved.)
+/// - Otherwise `*src` is left past the last character converted, or NULL
+///   after the terminator (the state then initial); and when the `nms` bytes
+///   end in the middle of a character, past them, the character's bytes kept
+///   in the state for the next call. (It stopped before them, and the next
+///   call read them a second time, as an encoding error.)
+/// - An encoding error is -1, `errno` `EILSEQ`, with `*src` at the character
+///   that is not one.
+///
+/// # Safety
+///
+/// `src` NULL or pointing to a NULL or NUL-terminated string's pointer (or
+/// one with `nms` readable bytes); `dst` NULL or writable for `len`; `ps` a
+/// valid state.
+unsafe fn mbs_to_wcs(
+    dst: *mut WcharT,
+    src: *mut *const u8,
+    nms: usize,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    // SAFETY: the caller's pointers, checked before each use.
     if src.is_null() || unsafe { (*src).is_null() } {
         return 0;
     }
-
-    let mut s = unsafe { *src };
+    let counting = dst.is_null();
+    // SAFETY: the caller's source pointer and state.
+    let (start, mut state) = unsafe { (*src, *ps) };
+    let mut at = start;
+    let mut used: usize = 0;
     let mut written: usize = 0;
-    let mut bytes_consumed: usize = 0;
-
-    while written < len && bytes_consumed < nms {
-        let remaining_bytes = nms.saturating_sub(bytes_consumed);
-        // Limit n to remaining bytes available.
-        let n = if remaining_bytes > 4 {
-            4
-        } else {
-            remaining_bytes
-        };
-        if n == 0 {
-            break;
+    let result = loop {
+        if !counting && written >= len {
+            break written;
         }
-
-        let mut wc: WcharT = 0;
-        let pwc = if dst.is_null() {
-            core::ptr::null_mut()
-        } else {
-            &raw mut wc
-        };
-
-        let ret = unsafe { mbrtowc(pwc, s, n, ps) };
-
-        if ret == 0 {
-            // Null terminator encountered.
-            if !dst.is_null() {
-                unsafe {
-                    *dst.add(written) = 0;
+        let left = nms.saturating_sub(used);
+        if left == 0 {
+            break written;
+        }
+        let n = left.min(MB_CUR_MAX);
+        // SAFETY: the caller's string: at most `n` bytes read, none past its
+        // terminator, which ends every character begun.
+        match unsafe { decode(&mut state, at, n) } {
+            Decoded::Char { cp, took } => {
+                if !counting {
+                    // SAFETY: written < len, within the caller's array.
+                    unsafe { dst.add(written).write(cp as WcharT) };
                 }
+                if cp == 0 {
+                    if !counting {
+                        // SAFETY: the caller's pointers.
+                        unsafe {
+                            *src = core::ptr::null();
+                            (*ps).reset();
+                        }
+                    }
+                    return written;
+                }
+                written = written.wrapping_add(1);
+                at = at.wrapping_add(took);
+                used = used.wrapping_add(took);
             }
-            unsafe {
-                *src = core::ptr::null();
+            Decoded::Incomplete => {
+                // The bytes ran out inside a character: all of them are in
+                // the state now.
+                at = at.wrapping_add(n);
+                used = used.wrapping_add(n);
             }
-            return written;
-        }
-        if ret == usize::MAX {
-            // Encoding error.
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            return usize::MAX;
-        }
-        if ret == usize::MAX.wrapping_sub(1) {
-            // Incomplete sequence and we've run out of bytes.
-            break;
-        }
-        if !dst.is_null() {
-            unsafe {
-                *dst.add(written) = wc;
+            Decoded::Invalid => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                break ILSEQ;
             }
         }
-        s = unsafe { s.add(ret) };
-        bytes_consumed = bytes_consumed.wrapping_add(ret);
-        written = written.wrapping_add(1);
+    };
+    if !counting {
+        // SAFETY: the caller's pointers.
+        unsafe {
+            *src = at;
+            *ps = state;
+        }
     }
-
-    unsafe {
-        *src = s;
-    }
-    written
+    result
 }
 
-/// Convert a wide string to a multibyte string (restartable).
-///
-/// Converts at most `len` bytes worth of wide characters from the
-/// wide string pointed to by `*src`.
+/// Convert a wide string to a multibyte string (restartable): at most `len`
+/// bytes of it -- see [`wcs_to_mbs`].
 ///
 /// # Safety
 ///
@@ -2295,19 +2675,26 @@ pub unsafe extern "C" fn wcsrtombs(
     len: usize,
     ps: *mut MbstateT,
 ) -> usize {
-    // Delegate to wcsnrtombs with nwc = SIZE_MAX (no character limit).
-    unsafe { wcsnrtombs(dst, src, usize::MAX, len, ps) }
+    // SAFETY: forwarded, with this function's own state for a NULL `ps`.
+    unsafe {
+        wcs_to_mbs(
+            dst,
+            src,
+            usize::MAX,
+            len,
+            state_for(ps, internal::WCSRTOMBS),
+        )
+    }
 }
 
-/// Convert a wide string to a multibyte string (restartable, n-limited).
-///
-/// Converts at most `nwc` wide characters, producing at most `len` bytes.
+/// Convert a wide string to a multibyte string (restartable, n-limited): at
+/// most `nwc` wide characters, producing at most `len` bytes -- see
+/// [`wcs_to_mbs`].
 ///
 /// # Safety
 ///
 /// Same as `wcsrtombs`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcsnrtombs(
     dst: *mut u8,
     src: *mut *const WcharT,
@@ -2315,59 +2702,83 @@ pub unsafe extern "C" fn wcsnrtombs(
     len: usize,
     ps: *mut MbstateT,
 ) -> usize {
+    // SAFETY: forwarded, with this function's own state for a NULL `ps`.
+    unsafe { wcs_to_mbs(dst, src, nwc, len, state_for(ps, internal::WCSNRTOMBS)) }
+}
+
+/// What `wcsrtombs` and `wcsnrtombs` do, by [`mbs_to_wcs`]'s rules the other
+/// way: at most `nwc` characters, at most `len` bytes -- a character that
+/// would not fit whole stops it, the terminator included -- `*src` past the
+/// last converted or NULL after the terminator; with a NULL `dst` only
+/// counting, `len` ignored and `*src` left alone; an unencodable character
+/// (a surrogate, past U+10FFFF, negative) -1 `EILSEQ` with `*src` at it.
+///
+/// # Safety
+///
+/// `src` NULL or pointing to a NULL or NUL-terminated wide string's pointer
+/// (or one with `nwc` readable characters); `dst` NULL or writable for `len`;
+/// `ps` a valid state.
+unsafe fn wcs_to_mbs(
+    dst: *mut u8,
+    src: *mut *const WcharT,
+    nwc: usize,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    // SAFETY: the caller's pointers, checked before each use.
     if src.is_null() || unsafe { (*src).is_null() } {
         return 0;
     }
-
-    let mut s = unsafe { *src };
+    let counting = dst.is_null();
+    // SAFETY: the caller's source pointer.
+    let mut at = unsafe { *src };
     let mut written: usize = 0;
-    let mut chars_consumed: usize = 0;
-    let mut buf: [u8; 4] = [0; 4];
-
-    while chars_consumed < nwc {
-        let wc = unsafe { *s };
-
-        // Encode into temporary buffer to know the byte count.
-        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), wc, ps) };
-
-        if ret == usize::MAX {
-            // Encoding error.
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            return usize::MAX;
-        }
-
-        // Check if output would overflow.
-        if written.wrapping_add(ret) > len {
-            break;
-        }
-
-        // Copy to destination.
-        if !dst.is_null() {
-            let mut k: usize = 0;
-            while k < ret {
-                unsafe {
-                    *dst.add(written.wrapping_add(k)) = buf[k];
+    let mut done: usize = 0;
+    while done < nwc {
+        // SAFETY: the caller's wide string, not read past its terminator.
+        let wc = unsafe { at.read() };
+        let mut buf = [0u8; 4];
+        let k = if wc == 0 {
+            1
+        } else {
+            match u32::try_from(wc).map(|cp| utf8_encode(cp, &mut buf)) {
+                Ok(k @ 1..=4) => k,
+                _ => {
+                    crate::errno::set_errno(crate::errno::EILSEQ);
+                    if !counting {
+                        // SAFETY: the caller's pointer.
+                        unsafe { *src = at };
+                    }
+                    return ILSEQ;
                 }
-                k = k.wrapping_add(1);
+            }
+        };
+        if !counting {
+            if written.saturating_add(k) > len {
+                break;
+            }
+            for (i, &b) in buf.iter().take(k).enumerate() {
+                // SAFETY: written + k <= len, within the caller's array.
+                unsafe { dst.add(written.wrapping_add(i)).write(b) };
             }
         }
-
-        written = written.wrapping_add(ret);
-        chars_consumed = chars_consumed.wrapping_add(1);
-
         if wc == 0 {
-            // Null terminator — don't count it in written, set src to null.
-            unsafe {
-                *src = core::ptr::null();
+            if !counting {
+                // SAFETY: the caller's pointers.
+                unsafe {
+                    *src = core::ptr::null();
+                    (*ps).reset();
+                }
             }
-            return written.wrapping_sub(ret); // Exclude the null byte from count.
+            return written;
         }
-
-        s = unsafe { s.add(1) };
+        written = written.wrapping_add(k);
+        at = at.wrapping_add(1);
+        done = done.wrapping_add(1);
     }
-
-    unsafe {
-        *src = s;
+    if !counting {
+        // SAFETY: the caller's pointer.
+        unsafe { *src = at };
     }
     written
 }
@@ -4107,17 +4518,36 @@ mod tests {
     #[test]
     fn test_mbstate_push_reset() {
         let mut st = MbstateT::new();
-        st.set_expected(3);
-        st.push(0xE2);
+        st.begin(3, 0xE2);
         assert_eq!(st.count(), 1);
         assert!(!st.is_initial());
         st.push(0x82);
         st.push(0xAC);
         assert_eq!(st.count(), 3);
-        let bytes = st.bytes(3);
-        assert_eq!(&bytes[..3], &[0xE2, 0x82, 0xAC]);
+        let (bytes, n) = st.bytes();
+        assert_eq!(&bytes[..n], &[0xE2, 0x82, 0xAC]);
         st.reset();
         assert!(st.is_initial());
+    }
+
+    /// The units kept to hand out, and a surrogate kept, make a state that
+    /// is not initial; the last unit taken makes it initial again.
+    #[test]
+    fn test_mbstate_pending() {
+        let mut st = MbstateT::new();
+        st.keep_units(&[0x9F, 0x98, 0x80]);
+        assert!(!st.is_initial());
+        assert_eq!(st.pending(), MbstateT::UTF8_UNITS);
+        assert_eq!([st.next_unit(), st.next_unit()], [0x9F, 0x98]);
+        assert!(!st.is_initial());
+        assert_eq!(st.next_unit(), 0x80);
+        assert!(st.is_initial());
+        st.keep_surrogate(MbstateT::HIGH_SURROGATE, 0xD83D);
+        assert_eq!(
+            (st.pending(), st.surrogate()),
+            (MbstateT::HIGH_SURROGATE, 0xD83D)
+        );
+        assert_eq!(mbsinit(&raw const st), 0);
     }
 
     // -- wctype / iswctype --
@@ -6046,5 +6476,275 @@ mod tests {
         assert_eq!(ret, 2);
         assert_eq!(buf[0], b'h' as WcharT);
         assert_eq!(buf[1], b'i' as WcharT);
+    }
+
+    /// `wcschrnul` finds as `wcschr` does, and the NUL where `wcschr` finds
+    /// nothing; searching for NUL finds the NUL.
+    #[test]
+    fn wcschrnul_ends_at_the_nul() {
+        let s: [WcharT; 4] = [b'a' as WcharT, b'b' as WcharT, b'c' as WcharT, 0];
+        let p = s.as_ptr();
+        // SAFETY: a NUL-terminated wide string.
+        unsafe {
+            assert_eq!(wcschrnul(p, b'b' as WcharT), p.add(1));
+            assert_eq!(wcschrnul(p, b'z' as WcharT), p.add(3));
+            assert_eq!(wcschrnul(p, 0), p.add(3));
+            assert!(wcschr(p, b'z' as WcharT).is_null());
+        }
+    }
+
+    /// `wcslcpy` and `wcslcat` as the BSDs' and glibc 2.38's: what fits, a NUL
+    /// always, and the length the whole would have had.
+    #[test]
+    fn wcslcpy_and_wcslcat_cut_short_and_say_so() {
+        let w = |s: &str| -> std::vec::Vec<WcharT> {
+            s.chars()
+                .map(|c| c as WcharT)
+                .chain(core::iter::once(0))
+                .collect()
+        };
+        let src = w("hello");
+        let mut dst: [WcharT; 4] = [7; 4];
+        // SAFETY: `dst` holds 4; `src` is NUL-terminated.
+        unsafe {
+            assert_eq!(wcslcpy(dst.as_mut_ptr(), src.as_ptr(), 4), 5, "cut short");
+            assert_eq!(&dst, &w("hel")[..]);
+            assert_eq!(
+                wcslcpy(dst.as_mut_ptr(), src.as_ptr(), 0),
+                5,
+                "size 0: nothing written"
+            );
+            assert_eq!(&dst, &w("hel")[..]);
+        }
+        let mut buf: [WcharT; 8] = [0; 8];
+        // SAFETY: `buf` holds 8.
+        unsafe {
+            assert_eq!(wcslcpy(buf.as_mut_ptr(), w("ab").as_ptr(), 8), 2);
+            assert_eq!(wcslcat(buf.as_mut_ptr(), w("cdef").as_ptr(), 8), 6);
+            assert_eq!(&buf[..7], &w("abcdef")[..]);
+            assert_eq!(
+                wcslcat(buf.as_mut_ptr(), w("ghij").as_ptr(), 8),
+                10,
+                "cut short"
+            );
+            assert_eq!(&buf, &w("abcdefg")[..]);
+            // No NUL within size: nothing written, size + wcslen(src).
+            let mut full: [WcharT; 3] = [b'x' as WcharT; 3];
+            assert_eq!(wcslcat(full.as_mut_ptr(), w("yz").as_ptr(), 3), 5);
+            assert_eq!(full, [b'x' as WcharT; 3]);
+        }
+    }
+
+    /// The `_l` conversions and the BSD `q` names answer as the functions
+    /// they stand for.
+    #[test]
+    fn the_locale_and_q_forms_are_their_functions() {
+        let num: std::vec::Vec<WcharT> = "-0x7fz".chars().map(|c| c as WcharT).chain([0]).collect();
+        let p = num.as_ptr();
+        let mut end_a: *const WcharT = core::ptr::null();
+        let mut end_b: *const WcharT = core::ptr::null();
+        // SAFETY: a NUL-terminated wide string; the end pointers are locals.
+        unsafe {
+            assert_eq!(
+                wcstol_l(p, &raw mut end_a, 16, 0),
+                wcstol(p, &raw mut end_b, 16)
+            );
+            assert_eq!(end_a, end_b);
+            assert_eq!(wcstoll_l(p, core::ptr::null_mut(), 0, 0), -0x7f);
+            assert_eq!(wcstoq(p, core::ptr::null_mut(), 0), -0x7f);
+            assert_eq!(
+                wcstoul_l(p, core::ptr::null_mut(), 16, 0),
+                wcstoul(p, core::ptr::null_mut(), 16)
+            );
+            assert_eq!(
+                wcstoull_l(p, core::ptr::null_mut(), 16, 0),
+                wcstouq(p, core::ptr::null_mut(), 16)
+            );
+        }
+        let f: std::vec::Vec<WcharT> = "2.5e3".chars().map(|c| c as WcharT).chain([0]).collect();
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                wcstod_l(f.as_ptr(), core::ptr::null_mut(), 0).to_bits(),
+                2500.0f64.to_bits()
+            );
+            assert_eq!(
+                wcstof_l(f.as_ptr(), core::ptr::null_mut(), 0).to_bits(),
+                2500.0f32.to_bits()
+            );
+            assert_eq!(
+                wcstold_l(f.as_ptr(), core::ptr::null_mut(), 0),
+                wcstold(f.as_ptr(), core::ptr::null_mut())
+            );
+        }
+    }
+
+    /// `mbsnrtowcs` and `wcsnrtombs` against glibc 2.39's answers
+    /// (`posix/tools/oracle/multibyte_harness.py`): a character cut in two by
+    /// `nms`, carried to the next call; counting that leaves `*src` and the
+    /// state alone and ignores `len`; `*src` at an invalid character.
+    #[test]
+    fn the_string_forms_are_glibcs() {
+        let oracle = include_str!("multibyte_oracle.txt");
+        let unhex = |h: &str| -> Vec<u8> {
+            (0..h.len() / 2)
+                .map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap())
+                .collect()
+        };
+        // Owns the bytes `base` and `src` point into.
+        let mut input: Vec<u8>;
+        let mut base: *const u8 = core::ptr::null();
+        let mut src: *const u8 = core::ptr::null();
+        let mut st = MbstateT::new();
+        let mut calls = 0;
+        for line in oracle.lines().filter(|l| l.starts_with("mbsnrtowcs ")) {
+            let (head, want) = line.split_once(" = ").unwrap();
+            let f: Vec<&str> = head.split(' ').collect();
+            if f[1] != "then" {
+                input = unhex(f[1]);
+                base = input.as_ptr();
+                src = base;
+                st = MbstateT::new();
+            }
+            let (nms, len): (usize, usize) = (f[2].parse().unwrap(), f[3].parse().unwrap());
+            let dst = f[4] == "buf";
+            let mut out = [0x5555 as WcharT; 16];
+            crate::errno::set_errno(0);
+            let r = unsafe {
+                mbsnrtowcs(
+                    if dst {
+                        out.as_mut_ptr()
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                    &raw mut src,
+                    nms,
+                    len,
+                    &raw mut st,
+                )
+            };
+            let mut got = format!("{}", r as isize);
+            if r == usize::MAX {
+                got += if crate::errno::get_errno() == crate::errno::EILSEQ {
+                    "!EILSEQ"
+                } else {
+                    "!other"
+                };
+            }
+            got += &if src.is_null() {
+                " src=NULL ".to_string()
+            } else {
+                format!(" src+{} ", unsafe { src.offset_from(base) })
+            };
+            if dst && r != usize::MAX {
+                for c in &out[..r] {
+                    got += &format!("{c:04x}.");
+                }
+            }
+            got += &format!("- {}", mbsinit(&raw const st));
+            assert_eq!(got, want, "{line}");
+            calls += 1;
+        }
+        assert_eq!(calls, 12);
+        let wide: [WcharT; 4] = [0x61, 0xE9, 0x20AC, 0];
+        let mut calls = 0;
+        for line in oracle
+            .lines()
+            .filter(|l| l.starts_with("wcsnrtombs ") && !l.contains("surrogate"))
+        {
+            let (head, want) = line.split_once(" = ").unwrap();
+            let f: Vec<&str> = head.split(' ').collect();
+            let (nwc, len): (usize, usize) = (f[2].parse().unwrap(), f[3].parse().unwrap());
+            let dst = f[4] == "buf";
+            let mut src: *const WcharT = wide.as_ptr();
+            let mut st = MbstateT::new();
+            let mut out = [0x55u8; 32];
+            let r = unsafe {
+                wcsnrtombs(
+                    if dst {
+                        out.as_mut_ptr()
+                    } else {
+                        core::ptr::null_mut()
+                    },
+                    &raw mut src,
+                    nwc,
+                    len,
+                    &raw mut st,
+                )
+            };
+            let mut got = format!("{}", r as isize);
+            got += &if src.is_null() {
+                " src=NULL ".to_string()
+            } else {
+                format!(" src+{} ", unsafe { src.offset_from(wide.as_ptr()) })
+            };
+            if dst && r != usize::MAX {
+                for b in &out[..r] {
+                    got += &format!("{b:02x}");
+                }
+            }
+            got += &format!("- {}", mbsinit(&raw const st));
+            assert_eq!(got, want, "{line}");
+            calls += 1;
+        }
+        assert_eq!(calls, 5);
+        let bad: [WcharT; 4] = [0x61, 0xD800, 0x62, 0];
+        let mut src: *const WcharT = bad.as_ptr();
+        let mut out = [0u8; 16];
+        crate::errno::set_errno(0);
+        let r = unsafe {
+            wcsnrtombs(
+                out.as_mut_ptr(),
+                &raw mut src,
+                10,
+                10,
+                core::ptr::null_mut(),
+            )
+        };
+        let got = format!(
+            "{}{} src+{}",
+            r as isize,
+            if crate::errno::get_errno() == crate::errno::EILSEQ {
+                "!EILSEQ"
+            } else {
+                ""
+            },
+            unsafe { src.offset_from(bad.as_ptr()) }
+        );
+        let want = oracle
+            .lines()
+            .find_map(|l| l.strip_prefix("wcsnrtombs surrogate = "))
+            .unwrap();
+        assert_eq!(got, want);
+    }
+
+    /// The usual way to ask how long a conversion will be -- a NULL `dst`
+    /// and a `len` of 0 -- answers the length: `len` limited it, and it was 0.
+    #[test]
+    fn counting_ignores_len() {
+        let text = "a\u{e9}\u{20ac}\u{1f600}\0";
+        let mut src = text.as_ptr();
+        let n = unsafe {
+            mbsrtowcs(
+                core::ptr::null_mut(),
+                &raw mut src,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(n, 4);
+        assert_eq!(src, text.as_ptr(), "*src untouched");
+        let wide: [WcharT; 5] = [0x61, 0xE9, 0x20AC, 0x1F600, 0];
+        let mut wsrc = wide.as_ptr();
+        let n = unsafe {
+            wcsrtombs(
+                core::ptr::null_mut(),
+                &raw mut wsrc,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(n, 10);
+        assert_eq!(wsrc, wide.as_ptr());
     }
 }

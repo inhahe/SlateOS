@@ -496,6 +496,133 @@ pub(crate) fn abi_asserts() -> String {
         mxcsr as "__mxcsr",
     );
 
+    // --- what only posix/include defines: types musl's headers lack, which
+    // the overlay C is compiled with here lays out as glibc does
+    // (design-decisions §1141) -- and `check-libc-overlay.py` holds the
+    // overlay's to glibc's own ---------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::fenv::FemodeT,
+        "femode_t",
+        "fenv.h",
+        control_word as "__control_word",
+        mxcsr as "__mxcsr",
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fts::Fts,
+        "FTS",
+        "fts.h",
+        fts_cur,
+        fts_child,
+        fts_array,
+        fts_dev,
+        fts_path,
+        fts_rfd,
+        fts_pathlen,
+        fts_nitems,
+        fts_compar,
+        fts_options
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fts::FtsEnt,
+        "FTSENT",
+        "fts.h",
+        fts_cycle,
+        fts_parent,
+        fts_link,
+        fts_number,
+        fts_pointer,
+        fts_accpath,
+        fts_path,
+        fts_errno,
+        fts_symfd,
+        fts_pathlen,
+        fts_namelen,
+        fts_ino,
+        fts_dev,
+        fts_nlink,
+        fts_level,
+        fts_info,
+        fts_flags,
+        fts_instr,
+        fts_statp,
+        fts_name
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::malloc::Mallinfo,
+        "struct mallinfo",
+        "malloc.h",
+        arena,
+        ordblks,
+        smblks,
+        hblks,
+        hblkhd,
+        usmblks,
+        fsmblks,
+        uordblks,
+        fordblks,
+        keepcost
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::malloc::Mallinfo2,
+        "struct mallinfo2",
+        "malloc.h",
+        arena,
+        ordblks,
+        smblks,
+        hblks,
+        hblkhd,
+        usmblks,
+        fsmblks,
+        uordblks,
+        fordblks,
+        keepcost
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::legacy::Sigstack,
+        "struct sigstack",
+        "signal.h",
+        ss_sp,
+        ss_onstack
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::RandomData,
+        "struct random_data",
+        "stdlib.h",
+        fptr,
+        rptr,
+        state,
+        rand_type,
+        rand_deg,
+        rand_sep,
+        end_ptr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::prng::Drand48Data,
+        "struct drand48_data",
+        "stdlib.h",
+        x as "__x",
+        old_x as "__old_x",
+        c as "__c",
+        init as "__init",
+        a as "__a",
+    );
+
     // --- regex: `regex_t` is declared by value too ---------------------------
     abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
     abi!(
@@ -797,7 +924,7 @@ pub(crate) fn abi_asserts() -> String {
         "wordexp_t",
         "wordexp.h"
     );
-    abi!(out, hdrs, crate::uchar::MbstateT, "mbstate_t", "wchar.h");
+    abi!(out, hdrs, crate::wchar::MbstateT, "mbstate_t", "wchar.h");
     abi!(
         out,
         hdrs,

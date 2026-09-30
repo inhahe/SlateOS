@@ -79,7 +79,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-kshell-rungs-vs-bash.py` | Check rung 115's assertions against real bash, exactly as written. |
 | `scripts/check-lane-signals.py` | Cross-lane operational signalling, over the one directory all lanes share. |
 | `scripts/check-libc-abi.py` | Check our `#[repr(C)]` types against musl's headers, using musl as the oracle. |
-| `scripts/check-libc-declared.py` | Refuse a function musl's headers declare that `libc.a` does not define. |
+| `scripts/check-libc-declared.py` | Refuse a function musl's headers declare that `libc.a` does not define -- |
+| `scripts/check-libc-overlay.py` | Check posix/include -- the C header overlay -- against glibc 2.39's headers. |
+| `scripts/check-libc-prototypes.py` | Refuse a C prototype that disagrees with its Rust definition in `libc.a`. |
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
@@ -416,4 +418,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_406 scripts._
+_408 scripts._

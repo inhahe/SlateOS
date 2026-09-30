@@ -252,12 +252,15 @@ fn now_ns() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// fd_set manipulation macros (as functions)
+// What <sys/select.h>'s FD_ZERO and FD_SET do, for select's own use (its
+// FD_ISSET is `is_set_in`). C has the macros; these are not exported. (They
+// were until 2026-09-29, with an FD_CLR and a second FD_ISSET, as
+// `fd_set_zero` ..., names in the program's namespace no header declared:
+// known-issues.md -> D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES.)
 // ---------------------------------------------------------------------------
 
 /// Clear all bits in an `fd_set`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fd_set_zero(set: *mut FdSet) {
+pub(crate) fn fd_set_zero(set: *mut FdSet) {
     if set.is_null() {
         return;
     }
@@ -268,8 +271,7 @@ pub extern "C" fn fd_set_zero(set: *mut FdSet) {
 }
 
 /// Set a bit in an `fd_set`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fd_set_set(fd: i32, set: *mut FdSet) {
+pub(crate) fn fd_set_set(fd: i32, set: *mut FdSet) {
     if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
         return;
     }
@@ -280,44 +282,6 @@ pub extern "C" fn fd_set_set(fd: i32, set: *mut FdSet) {
         let bit_idx = idx % 64;
         if let Some(word) = (*set).fds_bits.get_mut(word_idx) {
             *word |= 1u64 << bit_idx;
-        }
-    }
-}
-
-/// Clear a bit in an `fd_set`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fd_set_clr(fd: i32, set: *mut FdSet) {
-    if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
-        return;
-    }
-    let idx = fd as usize;
-    // SAFETY: bounds checked above.
-    unsafe {
-        let word_idx = idx / 64;
-        let bit_idx = idx % 64;
-        if let Some(word) = (*set).fds_bits.get_mut(word_idx) {
-            *word &= !(1u64 << bit_idx);
-        }
-    }
-}
-
-/// Test a bit in an `fd_set`.
-///
-/// Returns non-zero if `fd` is set, 0 if not.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
-    if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
-        return 0;
-    }
-    let idx = fd as usize;
-    // SAFETY: bounds checked above.
-    unsafe {
-        let word_idx = idx / 64;
-        let bit_idx = idx % 64;
-        if let Some(&word) = (*set).fds_bits.get(word_idx) {
-            i32::from(word & (1u64 << bit_idx) != 0)
-        } else {
-            0
         }
     }
 }
@@ -991,31 +955,17 @@ mod tests {
         fd_set_set(255, &raw mut set);
 
         // Check they're set.
-        assert_ne!(fd_set_isset(0, &raw const set), 0);
-        assert_ne!(fd_set_isset(1, &raw const set), 0);
-        assert_ne!(fd_set_isset(63, &raw const set), 0);
-        assert_ne!(fd_set_isset(64, &raw const set), 0);
-        assert_ne!(fd_set_isset(255, &raw const set), 0);
+        assert!(is_set_in(0, &set));
+        assert!(is_set_in(1, &set));
+        assert!(is_set_in(63, &set));
+        assert!(is_set_in(64, &set));
+        assert!(is_set_in(255, &set));
 
         // Check others are not set.
-        assert_eq!(fd_set_isset(2, &raw const set), 0);
-        assert_eq!(fd_set_isset(62, &raw const set), 0);
-        assert_eq!(fd_set_isset(65, &raw const set), 0);
-        assert_eq!(fd_set_isset(254, &raw const set), 0);
-    }
-
-    #[test]
-    fn test_fd_set_clr() {
-        let mut set = FdSet {
-            fds_bits: [0; FD_SET_WORDS],
-        };
-        fd_set_zero(&raw mut set);
-
-        fd_set_set(42, &raw mut set);
-        assert_ne!(fd_set_isset(42, &raw const set), 0);
-
-        fd_set_clr(42, &raw mut set);
-        assert_eq!(fd_set_isset(42, &raw const set), 0);
+        assert!(!is_set_in(2, &set));
+        assert!(!is_set_in(62, &set));
+        assert!(!is_set_in(65, &set));
+        assert!(!is_set_in(254, &set));
     }
 
     #[test]
@@ -1027,11 +977,11 @@ mod tests {
 
         // Negative fd — should be silently ignored.
         fd_set_set(-1, &raw mut set);
-        assert_eq!(fd_set_isset(-1, &raw const set), 0);
+        assert!(!is_set_in(-1, &set));
 
         // Out of range — should be silently ignored.
         fd_set_set(256, &raw mut set);
-        assert_eq!(fd_set_isset(256, &raw const set), 0);
+        assert!(!is_set_in(256, &set));
     }
 
     #[test]
@@ -1039,8 +989,6 @@ mod tests {
         // All operations should handle null gracefully.
         fd_set_zero(core::ptr::null_mut());
         fd_set_set(0, core::ptr::null_mut());
-        fd_set_clr(0, core::ptr::null_mut());
-        assert_eq!(fd_set_isset(0, core::ptr::null()), 0);
     }
 
     // -- is_set_in helper tests --
@@ -1278,36 +1226,13 @@ mod tests {
     }
 
     #[test]
-    fn test_fd_set_clr_preserves_others() {
-        let mut set = FdSet {
-            fds_bits: [0; FD_SET_WORDS],
-        };
-        fd_set_set(10, &raw mut set);
-        fd_set_set(11, &raw mut set);
-        fd_set_set(12, &raw mut set);
-        fd_set_clr(11, &raw mut set);
-        assert_ne!(fd_set_isset(10, &raw const set), 0);
-        assert_eq!(fd_set_isset(11, &raw const set), 0);
-        assert_ne!(fd_set_isset(12, &raw const set), 0);
-    }
-
-    #[test]
     fn test_fd_set_double_set() {
         let mut set = FdSet {
             fds_bits: [0; FD_SET_WORDS],
         };
         fd_set_set(50, &raw mut set);
         fd_set_set(50, &raw mut set); // Idempotent.
-        assert_ne!(fd_set_isset(50, &raw const set), 0);
-    }
-
-    #[test]
-    fn test_fd_set_clr_unset_is_noop() {
-        let mut set = FdSet {
-            fds_bits: [0; FD_SET_WORDS],
-        };
-        fd_set_clr(50, &raw mut set); // Nothing to clear — no crash.
-        assert_eq!(fd_set_isset(50, &raw const set), 0);
+        assert!(is_set_in(50, &set));
     }
 
     #[test]
@@ -1318,11 +1243,7 @@ mod tests {
         fd_set_zero(&raw mut set);
         // Every fd should be unset.
         for fd in [0, 1, 63, 64, 127, 128, 200, 255] {
-            assert_eq!(
-                fd_set_isset(fd, &raw const set),
-                0,
-                "fd {fd} should be clear"
-            );
+            assert!(!is_set_in(fd, &set), "fd {fd} should be clear");
         }
     }
 
@@ -1337,18 +1258,6 @@ mod tests {
         // All bits should still be 0.
         for word in &set.fds_bits {
             assert_eq!(*word, 0);
-        }
-    }
-
-    #[test]
-    fn test_fd_set_clr_out_of_range() {
-        let mut set = FdSet {
-            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS],
-        };
-        fd_set_clr(300, &raw mut set); // Out of range — no crash.
-        // All bits should still be set.
-        for word in &set.fds_bits {
-            assert_eq!(*word, u64::MAX);
         }
     }
 
@@ -1399,9 +1308,9 @@ mod tests {
         fd_set_set(10, &raw mut set1);
         fd_set_set(200, &raw mut set1);
         let set2 = set1;
-        assert_ne!(fd_set_isset(10, &raw const set2), 0);
-        assert_ne!(fd_set_isset(200, &raw const set2), 0);
-        assert_eq!(fd_set_isset(11, &raw const set2), 0);
+        assert!(is_set_in(10, &set2));
+        assert!(is_set_in(200, &set2));
+        assert!(!is_set_in(11, &set2));
     }
 
     // -- NfdsT --

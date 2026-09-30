@@ -1033,6 +1033,14 @@ impl FmtOutput {
         }
     }
 
+    /// Whether a byte emitted now is only counted: there is no buffer, or a
+    /// bounded one is full. A streaming buffer is never: it is drained.
+    fn lands_nowhere(&self) -> bool {
+        self.buf.is_null()
+            || (matches!(self.sink, Sink::Bounded)
+                && self.pos.wrapping_sub(self.flushed) >= self.size)
+    }
+
     /// Hand the buffered bytes to the sink and empty the buffer.  `false`
     /// for a bounded buffer, which has no sink and is never emptied.
     fn drain(&mut self) -> bool {
@@ -1340,10 +1348,15 @@ fn dispatch_spec(
 ///
 /// Returns the number of characters that would have been written
 /// (not counting null), even if `out_size` was too small (snprintf
-/// semantics).
+/// semantics); or -1 if a conversion failed -- a `long double`'s digits
+/// could not get the memory they need (`errno` `ENOMEM`), or the count
+/// passed `INT_MAX` (`EOVERFLOW`). Until 2026-09-29 a failed conversion was
+/// left out of the output and the call returned the rest's length, as if it
+/// had succeeded.
 fn format_core(out: *mut u8, out_size: usize, fmt: *const u8, args: &mut Args) -> i32 {
     let mut dst = FmtOutput::new(out, out_size);
-    format_into(&mut dst, fmt, args)
+    let n = format_into(&mut dst, fmt, args);
+    if dst.failed { -1 } else { n }
 }
 
 /// The engine behind [`format_core`] and [`format_to_sink`]: format `fmt`
@@ -1379,7 +1392,12 @@ fn format_into(dst: &mut FmtOutput, fmt: *const u8, args: &mut Args) -> i32 {
         fpos = dispatch_spec(dst, fmt, fpos, spec_start, &spec, args);
     }
 
-    dst.pos as i32
+    // POSIX: "[EOVERFLOW] The value to be returned is greater than
+    // {INT_MAX}." It was cast, and came out negative.
+    i32::try_from(dst.pos).unwrap_or_else(|_| {
+        crate::errno::set_errno(crate::errno::EOVERFLOW);
+        -1
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1428,12 +1446,18 @@ fn emit_byte(dst: &mut FmtOutput, byte: u8) {
 }
 
 /// Emit `count` copies of `pad_char`.
+///
+/// Once the bytes land nowhere -- there is no buffer, as for
+/// `snprintf(NULL, 0, ...)`, or a bounded one is full -- the rest are only
+/// counted, at once rather than a byte at a time: a width of two thousand
+/// million costs nothing to count.
 fn emit_padding(dst: &mut FmtOutput, pad_char: u8, count: usize) {
-    let mut i: usize = 0;
-    while i < count {
+    let mut left = count;
+    while left > 0 && !dst.lands_nowhere() {
         emit_byte(dst, pad_char);
-        i = i.wrapping_add(1);
+        left = left.wrapping_sub(1);
     }
+    dst.pos = dst.pos.wrapping_add(left);
 }
 
 /// Emit a byte slice.
@@ -2636,6 +2660,152 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
 
     trim_end
 }
+
+// ---------------------------------------------------------------------------
+// strfromd, strfromf, strfroml (C23 7.24.1.3)
+// ---------------------------------------------------------------------------
+
+/// The one conversion a `strfrom*` format may hold: `%`, an optional
+/// precision -- `.` and decimal digits, none meaning 0 -- and one of `a A e E
+/// f F g G`, which ends it. `Err(EINVAL)` for anything else -- which C23
+/// leaves undefined, and glibc answers with abort() -- and `Err(EOVERFLOW)`
+/// for a precision past `INT_MAX`.
+fn strfrom_spec(format: &[u8]) -> Result<(u8, Option<usize>), i32> {
+    let Some(rest) = format.strip_prefix(b"%") else {
+        return Err(crate::errno::EINVAL);
+    };
+    let (precision, rest) = match rest.strip_prefix(b".") {
+        None => (None, rest),
+        Some(digits) => {
+            let n = digits.iter().take_while(|b| b.is_ascii_digit()).count();
+            let (number, rest) = digits.split_at(n);
+            let mut p: usize = 0;
+            for &d in number {
+                p = p
+                    .checked_mul(10)
+                    .and_then(|p| p.checked_add(usize::from(d.wrapping_sub(b'0'))))
+                    .filter(|&p| p <= i32::MAX as usize)
+                    .ok_or(crate::errno::EOVERFLOW)?;
+            }
+            (Some(p), rest)
+        }
+    };
+    match rest {
+        [conv @ (b'a' | b'A' | b'e' | b'E' | b'f' | b'F' | b'g' | b'G')] => Ok((*conv, precision)),
+        _ => Err(crate::errno::EINVAL),
+    }
+}
+
+/// `strfromd` and its two: `value` by `format` into `s`, as
+/// `snprintf(s, n, format, value)` would -- at most `n` bytes, the NUL among
+/// them, and the length the whole text has. -1, with `errno` set, for a
+/// format [`strfrom_spec`] refuses or a conversion that fails.
+///
+/// # Safety
+///
+/// `s` is NULL or `n` writable bytes; `format` a NUL-terminated string.
+unsafe fn strfrom(s: *mut u8, n: usize, format: *const u8, value: FloatArg) -> i32 {
+    if format.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: the caller's NUL-terminated format.
+    let format = unsafe { core::ffi::CStr::from_ptr(format.cast()) }.to_bytes();
+    let (conv, precision) = match strfrom_spec(format) {
+        Ok(spec) => spec,
+        Err(e) => {
+            crate::errno::set_errno(e);
+            return -1;
+        }
+    };
+    let bounded = !s.is_null() && n > 0;
+    let mut dst = if bounded {
+        FmtOutput::new(s, n)
+    } else {
+        FmtOutput::new(core::ptr::null_mut(), 0)
+    };
+    let flags = FormatFlags::new();
+    let upper = conv.is_ascii_uppercase();
+    match conv.to_ascii_lowercase() {
+        b'f' => format_float_fixed(&mut dst, value, upper, &flags, 0, precision.unwrap_or(6)),
+        b'e' => format_float_sci(&mut dst, value, upper, &flags, 0, precision.unwrap_or(6)),
+        b'g' => {
+            let p = match precision {
+                Some(0) => 1,
+                p => p.unwrap_or(6),
+            };
+            format_float_general(&mut dst, value, upper, &flags, 0, p);
+        }
+        _ => format_float_hex(&mut dst, value, upper, &flags, 0, precision),
+    }
+    let len = if dst.failed {
+        -1
+    } else {
+        i32::try_from(dst.pos).unwrap_or_else(|_| {
+            crate::errno::set_errno(crate::errno::EOVERFLOW);
+            -1
+        })
+    };
+    if bounded {
+        // The NUL after the text, or in the last byte when it does not fit.
+        let at = usize::try_from(len).map_or(n.wrapping_sub(1), |l| l.min(n.wrapping_sub(1)));
+        // SAFETY: `at < n`, inside the caller's buffer.
+        unsafe { s.add(at).write(0) };
+    }
+    len
+}
+
+/// Own archive member -- names only glibc and C23 have, which a program may
+/// define for itself where the C library lacks them (see string.rs's module
+/// header).
+mod strfrom_forms {
+    use super::{FloatArg, strfrom};
+
+    /// `strfromd` (C23): `fp` as `snprintf(s, n, format, fp)` would give it,
+    /// the format `%`, an optional precision and one of `a A e E f F g G`
+    /// -- nothing else, where glibc's abort()s on anything else and this
+    /// returns -1 with `errno` EINVAL.
+    ///
+    /// # Safety
+    ///
+    /// `s` is NULL or `n` writable bytes; `format` a NUL-terminated string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strfromd(s: *mut u8, n: usize, format: *const u8, fp: f64) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { strfrom(s, n, format, FloatArg::Double(fp)) }
+    }
+
+    /// `strfromf` (C23): [`strfromd`]'s, for a `float` -- which formats as
+    /// the `double` it converts to exactly, as glibc's does.
+    ///
+    /// # Safety
+    ///
+    /// As [`strfromd`].
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn strfromf(s: *mut u8, n: usize, format: *const u8, fp: f32) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { strfrom(s, n, format, FloatArg::Double(f64::from(fp))) }
+    }
+
+    /// `strfroml` (C23): [`strfromd`]'s, for a `long double`, which reaches
+    /// here by pointer through `ld_abi.rs`'s thunk.
+    ///
+    /// # Safety
+    ///
+    /// As [`strfromd`], and `fp` a readable `long double`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_strfroml(
+        s: *mut u8,
+        n: usize,
+        format: *const u8,
+        fp: *const crate::x87::LongDouble,
+    ) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { strfrom(s, n, format, FloatArg::Long(fp.read())) }
+    }
+    crate::ld_c!(i_pnpl "strfroml" => __slate_ld_strfroml);
+}
+pub use strfrom_forms::{__slate_ld_strfroml, strfromd, strfromf};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -5014,5 +5184,176 @@ mod tests {
         let (out, n) = swprintf_str(8, "", &[], &[]);
         assert_eq!(n, 0);
         assert_eq!(out, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Counting past INT_MAX, and padding that lands nowhere
+    // -----------------------------------------------------------------------
+
+    /// A count past `INT_MAX` is -1 with `EOVERFLOW`: it was cast, and came
+    /// out negative -- and counting the widths byte by byte took seconds.
+    #[test]
+    fn a_count_past_int_max_is_eoverflow() {
+        crate::errno::set_errno(0);
+        let n = with_args(&[1, 1], &[], |a| {
+            _snprintf_impl(
+                core::ptr::null_mut(),
+                0,
+                b"%2147483647d%2147483647d\0".as_ptr(),
+                a,
+            )
+        });
+        assert_eq!(n, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOVERFLOW);
+        // One that fits is counted, the padding past a small buffer too.
+        let mut buf = [0u8; 4];
+        let n = with_args(&[7], &[], |a| {
+            _snprintf_impl(buf.as_mut_ptr(), buf.len(), b"%2147483646d\0".as_ptr(), a)
+        });
+        assert_eq!(n, 2_147_483_646);
+        assert_eq!(&buf, b"   \0");
+    }
+
+    // -----------------------------------------------------------------------
+    // strfromd, strfromf, strfroml -- replayed against glibc 2.39's answers
+    // -----------------------------------------------------------------------
+
+    /// glibc 2.39's (`posix/tools/oracle/strfrom_harness.py`).
+    const STRFROM_ORACLE: &str = include_str!("strfrom_oracle.txt");
+
+    /// The oracle's C-escaped text, unescaped.
+    fn unescape(t: &str) -> Vec<u8> {
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'\\') {
+                out.push(b'\\');
+                i += 2;
+            } else if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).unwrap());
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Every line of the oracle: each function, format, value and size, the
+    /// result and the buffer's text.
+    #[test]
+    fn strfrom_is_glibcs() {
+        let mut seen = [0usize; 3];
+        for line in STRFROM_ORACLE.lines().filter(|l| l.starts_with("strfrom")) {
+            let f: Vec<&str> = line.split('\t').collect();
+            let [func, format, value, size, result, text] = f[..] else {
+                panic!("{line}");
+            };
+            let size: usize = size.parse().unwrap();
+            let want: i32 = result.parse().unwrap();
+            let mut fmt = format.as_bytes().to_vec();
+            fmt.push(0);
+            let mut buf = vec![0x55u8; size.max(1)];
+            let s = if size == 0 {
+                core::ptr::null_mut()
+            } else {
+                buf.as_mut_ptr()
+            };
+            let (kind, bits) = value.split_once(':').unwrap();
+            let got = unsafe {
+                match (func, kind) {
+                    ("strfromd", "d") => {
+                        seen[0] += 1;
+                        strfromd(
+                            s,
+                            size,
+                            fmt.as_ptr(),
+                            f64::from_bits(u64::from_str_radix(bits, 16).unwrap()),
+                        )
+                    }
+                    ("strfromf", "f") => {
+                        seen[1] += 1;
+                        strfromf(
+                            s,
+                            size,
+                            fmt.as_ptr(),
+                            f32::from_bits(u32::from_str_radix(bits, 16).unwrap()),
+                        )
+                    }
+                    ("strfroml", "l") => {
+                        seen[2] += 1;
+                        let se = u16::from_str_radix(&bits[..4], 16).unwrap();
+                        let sig = u64::from_str_radix(&bits[4..], 16).unwrap();
+                        let x = crate::x87::LongDouble::from_bits(se, sig);
+                        __slate_ld_strfroml(s, size, fmt.as_ptr(), &raw const x)
+                    }
+                    _ => panic!("{line}"),
+                }
+            };
+            assert_eq!(got, want, "{line}");
+            if size > 0 {
+                let end = buf.iter().position(|&b| b == 0).expect("NUL-terminated");
+                assert_eq!(buf[..end], unescape(text)[..], "{line}");
+            }
+        }
+        assert!(seen.iter().all(|&n| n > 400), "{seen:?}");
+    }
+
+    /// Only `%`, a precision and one conversion: anything else is -1 with
+    /// `EINVAL` (glibc's abort()s), and a precision past `INT_MAX` `EOVERFLOW`.
+    #[test]
+    fn strfrom_refuses_other_formats() {
+        let mut buf = [0x55u8; 32];
+        for bad in [
+            &b"\0"[..],
+            b"%\0",
+            b"%d\0",
+            b"%Lf\0",
+            b"%lf\0",
+            b"%5f\0",
+            b"%-f\0",
+            b"%+f\0",
+            b"%#f\0",
+            b"%.*f\0",
+            b"%f \0",
+            b" %f\0",
+            b"x%f\0",
+            b"%ff\0",
+            b"%n\0",
+            b"%s\0",
+            b"%.3.4f\0",
+            b"%%\0",
+        ] {
+            crate::errno::set_errno(0);
+            let r = unsafe { strfromd(buf.as_mut_ptr(), buf.len(), bad.as_ptr(), 1.5) };
+            assert_eq!(r, -1, "{:?}", core::str::from_utf8(bad));
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        crate::errno::set_errno(0);
+        let r = unsafe {
+            strfromd(
+                buf.as_mut_ptr(),
+                buf.len(),
+                b"%.2147483648f\0".as_ptr(),
+                1.5,
+            )
+        };
+        assert_eq!(
+            (r, crate::errno::get_errno()),
+            (-1, crate::errno::EOVERFLOW)
+        );
+        assert_eq!(
+            unsafe { strfromd(buf.as_mut_ptr(), 32, core::ptr::null(), 1.5) },
+            -1
+        );
+        // A precision of INT_MAX is a precision.
+        assert_eq!(
+            strfrom_spec(b"%.2147483647a"),
+            Ok((b'a', Some(2_147_483_647)))
+        );
+        assert_eq!(strfrom_spec(b"%.G"), Ok((b'G', Some(0))));
+        assert_eq!(strfrom_spec(b"%F"), Ok((b'F', None)));
     }
 }

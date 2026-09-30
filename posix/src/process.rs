@@ -931,8 +931,15 @@ pub extern "C" fn fork() -> PidT {
     // the child does not have, would deadlock the child's first `malloc`.
     crate::malloc::lock_for_fork();
 
+    // The pseudo-random generators' locks, so that the child's `random` and
+    // `srand48` are not left half-changed by a thread it does not have. They
+    // are leaves -- nothing is taken while one is held -- so their place in
+    // this order is free: taken last, given back first.
+    crate::prng::lock_for_fork();
+
     let pid = fork_raw();
 
+    crate::prng::unlock_after_fork();
     if pid == 0 {
         crate::malloc::unlock_after_fork_child();
         crate::stdio::unlock_after_fork_child();

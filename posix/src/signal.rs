@@ -131,6 +131,9 @@ pub const SIG_DFL: SighandlerT = 0;
 pub const SIG_IGN: SighandlerT = 1;
 /// Error return from signal().
 pub const SIG_ERR: SighandlerT = usize::MAX;
+/// `sigset`'s disposition that blocks the signal rather than changing what
+/// is done with it (XSI; musl's and glibc's value).
+pub const SIG_HOLD: SighandlerT = 2;
 
 // ---------------------------------------------------------------------------
 // sigprocmask `how` argument constants
@@ -1551,10 +1554,19 @@ pub extern "C" fn killpg(pgrp: i32, sig: i32) -> i32 {
 /// * Dispatches via `dispatch_self_signal()`, which checks the
 ///   registered handler table and applies the appropriate action.
 ///
+/// Signal 0 sends nothing and succeeds: POSIX makes `raise(sig)`
+/// `pthread_kill(pthread_self(), sig)`, and for that "if sig is zero, error
+/// checking shall be performed but no signal shall actually be sent" -- the
+/// calling thread always exists. (It was `EINVAL` until 2026-09-29; glibc's
+/// answers 0.)
+///
 /// Errors (Linux-matching):
 /// * `EINVAL` — `sig` is not a valid signal number.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn raise(sig: i32) -> i32 {
+    if sig == 0 {
+        return 0;
+    }
     if !(1..NSIG).contains(&sig) {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1593,7 +1605,7 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
     if !set.is_null() {
         // SAFETY: set verified non-null.
         let new_set = unsafe { *set };
-        let new_mask = match how {
+        let mut new_mask = match how {
             SIG_BLOCK => {
                 // Add signals in `set` to the blocked set.
                 let mut result = current;
@@ -1623,6 +1635,11 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
                 return -1;
             }
         };
+        // POSIX: "It is not possible to block those signals which cannot be
+        // ignored. This shall be enforced by the system without causing an
+        // error to be indicated." Until 2026-09-29 SIGKILL and SIGSTOP were
+        // kept, and reported back as blocked.
+        new_mask.bits[0] &= !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
         // SAFETY: single-threaded access.
         unsafe {
             blocked_mask_ptr().write(new_mask);
@@ -2011,6 +2028,53 @@ pub extern "C" fn sigpause(sig: i32) -> i32 {
     sigsuspend(&raw const mask)
 }
 
+/// Set `sig`'s disposition, or with [`SIG_HOLD`] block it (XSI's `sigset`,
+/// obsolescent, which musl's `<signal.h>` declares -- and which nothing
+/// defined until 2026-09-29, `check-libc-declared.py` having read its
+/// declaration, a function returning a function pointer, as a variable). Any
+/// other `disp` becomes the action, with an empty handler mask and no flags,
+/// and `sig` leaves the mask; `SIG_HOLD` leaves the action and puts `sig` in
+/// the mask. Returns `SIG_HOLD` if `sig` was blocked, its previous action if
+/// not, and `SIG_ERR` -- with `EINVAL` -- for a number that is no signal, or
+/// an action `sigaction` refuses (`SIGKILL`'s and `SIGSTOP`'s).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigset(sig: i32, disp: SighandlerT) -> SighandlerT {
+    let Some(set) = only(sig) else {
+        return SIG_ERR;
+    };
+    let mut old = DEFAULT_SIGACTION;
+    let mut old_mask = SigsetT::EMPTY;
+    if disp == SIG_HOLD {
+        // SAFETY: no new action; the old one into a local.
+        if unsafe { sigaction(sig, core::ptr::null(), &raw mut old) } != 0 {
+            return SIG_ERR;
+        }
+        if sigprocmask(SIG_BLOCK, &raw const set, &raw mut old_mask) != 0 {
+            return SIG_ERR;
+        }
+    } else {
+        let act = Sigaction {
+            sa_handler: disp,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        // SAFETY: a local action, the old one into a local.
+        if unsafe { sigaction(sig, &raw const act, &raw mut old) } != 0 {
+            return SIG_ERR;
+        }
+        if sigprocmask(SIG_UNBLOCK, &raw const set, &raw mut old_mask) != 0 {
+            return SIG_ERR;
+        }
+    }
+    // SAFETY: a local set.
+    if unsafe { sigismember(&raw const old_mask, sig) } == 1 {
+        SIG_HOLD
+    } else {
+        old.sa_handler
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sigaltstack — alternate signal stack
 // ---------------------------------------------------------------------------
@@ -2276,25 +2340,87 @@ static SIGNAL_NAMES: [&[u8]; 32] = [
     b"Bad system call\0",          // 31 SIGSYS
 ];
 
-/// Unknown signal message buffer.
+/// Return a string describing a signal number: glibc's texts, and for a
+/// real-time signal "Real-time signal N", counted from this library's
+/// `SIGRTMIN` (32, where glibc's is 34: its thread library keeps 32 and 33,
+/// this one keeps none), and "Unknown signal N" for a number that is no
+/// signal's.
 ///
-/// Used when the signal number is out of range.  Not reentrant but
-/// matches POSIX specification.
-static UNKNOWN_SIGNAL: [u8; 32] = *b"Unknown signal\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
-
-/// Return a string describing a signal number.
-///
-/// The returned pointer is valid until the next call to `strsignal`.
-/// Not thread-safe (matches POSIX spec).
+/// The numbered texts are in the calling thread's own buffer, valid until
+/// its next call; the others are static.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strsignal(signum: i32) -> *const u8 {
-    if signum >= 0
-        && (signum as usize) < SIGNAL_NAMES.len()
-        && let Some(name) = SIGNAL_NAMES.get(signum as usize)
+    if let Some(name) = usize::try_from(signum)
+        .ok()
+        .and_then(|i| SIGNAL_NAMES.get(i))
     {
         return name.as_ptr();
     }
-    UNKNOWN_SIGNAL.as_ptr()
+    // SAFETY: the calling thread's block, touched by no other thread.
+    let buf = unsafe { &mut (*crate::perthread::current()).strsignal };
+    if (SIGRTMIN..=SIGRTMAX).contains(&signum) {
+        crate::perthread::numbered(buf, "Real-time signal ", signum.wrapping_sub(SIGRTMIN))
+    } else {
+        crate::perthread::numbered(buf, "Unknown signal ", signum)
+    }
+}
+
+/// Each signal number's abbreviation, glibc's (`sigabbrev_np`): its `SIG*`
+/// constant's name without the `SIG`. None for 0, which is no signal.
+static SIGNAL_ABBREVS: [Option<&core::ffi::CStr>; 32] = [
+    None,
+    Some(c"HUP"),
+    Some(c"INT"),
+    Some(c"QUIT"),
+    Some(c"ILL"),
+    Some(c"TRAP"),
+    Some(c"ABRT"),
+    Some(c"BUS"),
+    Some(c"FPE"),
+    Some(c"KILL"),
+    Some(c"USR1"),
+    Some(c"SEGV"),
+    Some(c"USR2"),
+    Some(c"PIPE"),
+    Some(c"ALRM"),
+    Some(c"TERM"),
+    Some(c"STKFLT"),
+    Some(c"CHLD"),
+    Some(c"CONT"),
+    Some(c"STOP"),
+    Some(c"TSTP"),
+    Some(c"TTIN"),
+    Some(c"TTOU"),
+    Some(c"URG"),
+    Some(c"XCPU"),
+    Some(c"XFSZ"),
+    Some(c"VTALRM"),
+    Some(c"PROF"),
+    Some(c"WINCH"),
+    Some(c"POLL"),
+    Some(c"PWR"),
+    Some(c"SYS"),
+];
+
+/// `sigabbrev_np(sig)` -- `"INT"` for `SIGINT`; NULL for a number that is no
+/// signal's, and for a real-time signal's, which has none (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigabbrev_np(sig: i32) -> *const u8 {
+    usize::try_from(sig)
+        .ok()
+        .and_then(|i| SIGNAL_ABBREVS.get(i).copied().flatten())
+        .map_or(core::ptr::null(), |s| s.as_ptr().cast())
+}
+
+/// `sigdescr_np(sig)` -- [`strsignal`]'s text for a signal, `"Interrupt"` for
+/// `SIGINT`; NULL where [`sigabbrev_np`] is (glibc 2.32's).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sigdescr_np(sig: i32) -> *const u8 {
+    if sigabbrev_np(sig).is_null() {
+        core::ptr::null()
+    } else {
+        strsignal(sig)
+    }
 }
 
 /// Print a signal description to stderr.
@@ -2699,6 +2825,64 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(sigignore(0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `sigset`: `SIG_HOLD` blocks and reports the action it leaves; any
+    /// other disposition is installed, unblocks, and reports `SIG_HOLD` if
+    /// the signal had been blocked. (`SIGPWR`: no other test changes its
+    /// action, which is the process's, not the thread's.)
+    #[test]
+    fn sigset_holds_installs_and_reports_what_it_replaced() {
+        let mut before_act = DEFAULT_SIGACTION;
+        let mut before_mask = SigsetT::EMPTY;
+        unsafe {
+            assert_eq!(sigaction(SIGPWR, core::ptr::null(), &raw mut before_act), 0);
+        }
+        assert_eq!(
+            sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut before_mask),
+            0
+        );
+        let blocked = || {
+            let mut now = SigsetT::EMPTY;
+            assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+            unsafe { sigismember(&raw const now, SIGPWR) == 1 }
+        };
+        let action = || {
+            let mut now = DEFAULT_SIGACTION;
+            unsafe { assert_eq!(sigaction(SIGPWR, core::ptr::null(), &raw mut now), 0) };
+            now.sa_handler
+        };
+        // From a known state: SIG_DFL, unblocked.
+        assert_ne!(sigset(SIGPWR, SIG_DFL), SIG_ERR);
+        assert!(!blocked());
+        // Hold: blocked, the action unchanged and reported.
+        assert_eq!(sigset(SIGPWR, SIG_HOLD), SIG_DFL);
+        assert!(blocked());
+        assert_eq!(action(), SIG_DFL);
+        // Ignore: unblocked, and the hold is what it replaced.
+        assert_eq!(sigset(SIGPWR, SIG_IGN), SIG_HOLD);
+        assert!(!blocked());
+        assert_eq!(action(), SIG_IGN);
+        // Back to the default: the previous action reported.
+        assert_eq!(sigset(SIGPWR, SIG_DFL), SIG_IGN);
+        assert_eq!(action(), SIG_DFL);
+        // No signal, and one whose action cannot change.
+        errno::set_errno(0);
+        assert_eq!(sigset(0, SIG_IGN), SIG_ERR);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(sigset(SIGKILL, SIG_IGN), SIG_ERR);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        unsafe {
+            assert_eq!(
+                sigaction(SIGPWR, &raw const before_act, core::ptr::null_mut()),
+                0
+            );
+        }
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before_mask, core::ptr::null_mut()),
+            0
+        );
     }
 
     // -- sigaltstack: the stack is stored, reported and used --
@@ -4839,11 +5023,12 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_zero_returns_einval() {
-        // sig == 0 is out of the valid signal range (1..NSIG).
+    fn test_raise_zero_checks_and_sends_nothing() {
+        // POSIX: raise(0) is pthread_kill(pthread_self(), 0) -- error
+        // checking only, and the calling thread exists.
         errno::set_errno(0);
-        assert_eq!(raise(0), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(raise(0), 0);
+        assert_eq!(errno::get_errno(), 0);
     }
 
     // -- pthread_sigmask --
@@ -5078,11 +5263,31 @@ mod tests {
 
     // ---- raise() ----
 
+    /// SIGKILL and SIGSTOP cannot be blocked: they are dropped from the mask
+    /// without an error, whichever way the mask is set.
     #[test]
-    fn test_raise_zero_einval() {
+    fn sigkill_and_sigstop_are_never_blocked() {
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP) | sigmask_bit(SIGUSR1);
+        for how in [SIG_BLOCK, SIG_SETMASK] {
+            let mut clear = SigsetT::EMPTY;
+            assert_eq!(
+                sigprocmask(SIG_SETMASK, &raw const clear, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(sigprocmask(how, &raw const set, core::ptr::null_mut()), 0);
+            assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut clear), 0);
+            assert_eq!(clear.bits[0], sigmask_bit(SIGUSR1), "how {how}");
+        }
+        let clear = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, &raw const clear, core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_raise_zero_is_zero() {
         crate::errno::set_errno(0);
-        assert_eq!(raise(0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(raise(0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 
     #[test]
@@ -6552,5 +6757,46 @@ mod tests {
         let ret = unsafe { sigismember(core::ptr::null(), -1) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// glibc 2.39's abbreviations and descriptions for every number from -2
+    /// to 69 (`strname_oracle.txt`), NULL for 0, for numbers that are no
+    /// signal's and for the real-time signals.
+    #[test]
+    fn signal_names_are_glibcs() {
+        use core::ffi::CStr;
+        const ORACLE: &str = include_str!("strname_oracle.txt");
+        let text = |p: *const u8| -> Option<String> {
+            // SAFETY: each returns NULL or a static NUL-terminated string.
+            (!p.is_null()).then(|| {
+                unsafe { CStr::from_ptr(p.cast()) }
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            })
+        };
+        let mut seen = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (lhs, want) = line.split_once(" = ").unwrap();
+            let (func, n) = lhs.split_once(' ').unwrap();
+            let n: i32 = n.parse().unwrap();
+            let want = (want != "NULL").then(|| want.trim_matches('"').to_string());
+            let got = match func {
+                "strsignal" => text(strsignal(n)),
+                "sigabbrev_np" => text(sigabbrev_np(n)),
+                "sigdescr_np" => text(sigdescr_np(n)),
+                _ => continue,
+            };
+            // The one difference, on purpose: a real-time signal is counted
+            // from this library's SIGRTMIN, 32, and glibc's is 34.
+            let want = if func == "strsignal" && (SIGRTMIN..=SIGRTMAX).contains(&n) {
+                Some(format!("Real-time signal {}", n - SIGRTMIN))
+            } else {
+                want
+            };
+            assert_eq!(got, want, "{func}({n})");
+            seen += 1;
+        }
+        assert_eq!(seen, 3 * 72, "the oracle's signal lines");
     }
 }

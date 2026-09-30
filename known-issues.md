@@ -175282,8 +175282,9 @@ reached from Rust's standard library.
   **Done 2026-09-27** (`posix/src/fenv.rs`): glibc 2.39's `sysdeps/x86_64/fpu`,
   both units, with `feenableexcept`/`fedisableexcept`/`fegetexcept`,
   `fesetexcept`/`fetestexceptflag` and `__flt_rounds`; `nearbyint` holds the
-  flags as glibc's does. Only C23's `fegetmode`/`fesetmode` wait -- musl's
-  headers, which the ABI gate checks against, have no `femode_t`.
+  flags as glibc's does. C23's `fegetmode`/`fesetmode` followed on
+  2026-09-29, with the `femode_t` musl's headers lack declared by
+  `posix/include/fenv.h`, the header overlay (design-decisions §1141).
 - **`long double`** -- on x86-64 an 80-bit x87 value: musl's
   `src/math/x86_64/*.s` for the functions the x87 unit computes (`sqrtl`,
   `fabsl`, `rintl`, `floorl` ... `expl`, `logl`, `atan2l`), and its generic
@@ -175635,7 +175636,7 @@ numbers there, no argument can land near it: about 16 integers deep for
 double, 20 for long double. For float, CORE-MATH's correctly rounded
 `lgammaf` (MIT) is a ready alternative.
 
-## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: OPEN (the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the six `long double` Bessel functions 2026-09-29, `posix/src/besl.rs`, written from the mathematics (design-decisions §1140): 13,338 of 13,339 values mpmath's correctly rounded ones in all four directions, glibc's special values, flags and `errno` at 8,136 calls. Left: `fegetmode` and `fesetmode`, which wait on musl's headers)**
+## D-POSIX-LIBM-LACKS-GLIBC-EXTENSIONS — glibc's libm exports about 150 functions ours does not: the long double complex and Bessel functions, and C23's newer families (lane D, 2026-09-28) — **Status: FIXED 2026-09-29, the last two `fegetmode` and `fesetmode` (`posix/src/fenv.rs`, glibc's `fegetmode.c` and `fesetmode.c`, with `posix/include/fenv.h`'s `femode_t`). Before them: the 22 `long double` complex functions done 2026-09-28, `posix/src/complexl.rs`: replayed against glibc 2.39 for 27,134 calls, and from C in ring 3, `ctest-longdouble` 92-99; the exact C23 functions -- `nextup` to `fminimum_mag_num`, all three precisions -- and `scalbl` done the same day, `posix/src/c23math.rs`, every value, flag and `errno` of glibc 2.39's for 21,390 calls; the eighteen narrowing functions the same day, `posix/src/narrow.rs`, glibc's round to odd, every value, flag and `errno` of its for 52,876 calls in the four rounding directions; `clog10`, `clog10f` and `clog10l` the same day, glibc's algorithm in `complex.rs` and `complexl.rs`, replayed against glibc for 3,212 calls; the six `long double` Bessel functions 2026-09-29, `posix/src/besl.rs`, written from the mathematics (design-decisions §1140): 13,338 of 13,339 values mpmath's correctly rounded ones in all four directions, glibc's special values, flags and `errno` at 8,136 calls)**
 
 **In short:** a C program that calls one of the functions below does not
 link. None is in C99; they are C23 additions, GNU extensions, or the `long
@@ -175652,7 +175653,7 @@ every name glibc 2.39's `libm.so.6` exports that `libc.a` does not, less the
 | C23, `long double` only | `fmaximuml` `fminimuml` `fmaximum_numl` `fminimum_numl` | **done 2026-09-28**, all twelve (`c23math.rs`, with oracle rows): the `double` and `float` ones are ours now, where they were compiler_builtins' weak exports |
 | C23 narrowing | `fadd` `faddl` `fsub` `fsubl` `fmul` `fmull` `fdiv` `fdivl` `fsqrt` `fsqrtl` `ffma` `ffmal` `daddl` `dsubl` `dmull` `ddivl` `dsqrtl` `dfmal` | **done 2026-09-28** (`narrow.rs`): round-to-odd in the wider one, then round, as glibc's `math-narrow.h` |
 | XSI, obsolete | `scalbl` | removed from POSIX in 2008; glibc keeps them (`scalb` and `scalbf`, which musl declares, done 2026-09-28; `scalbl` the same day, `c23math.rs`: glibc's x87 `e_scalbl.S`, operation for operation) |
-| fenv | `fegetmode` `fesetmode` | waits on musl's headers (D-POSIX-MATH-HAS-NO-FENV-LONG-DOUBLE-OR-COMPLEX) |
+| fenv | `fegetmode` `fesetmode` | **done 2026-09-29** (`fenv.rs`): glibc's -- the x87 control word and `MXCSR`, the flags left alone -- with `femode_t` and `FE_DFL_MODE` from `posix/include/fenv.h`, which musl's headers lack; a caller's `MXCSR` held to the bits the processor implements, where glibc's faults on one no `fegetmode` made |
 
 `matherr` (an SVID hook glibc keeps only for old binaries) is deliberately
 absent.
@@ -176128,6 +176129,250 @@ for `Y`, Miller's downward for `J`), about `n^(1/3)` steps. The same
 double-long-double arithmetic and the same oracle (mpmath, which evaluates
 large orders directly) test it.
 
+## D-POSIX-PROTOTYPES-DISAGREED-WITH-THEIR-DEFINITIONS — eleven functions took or returned a different width than musl's headers declare, and `sigset` was declared but never defined (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 -- the definitions changed to the declarations', `sigset` written, and `scripts/check-libc-prototypes.py` refuses a new disagreement (run by `toolchain/build-sysroot.ps1`)**
+
+**In short:** a C program calls this library's functions through musl's
+headers, and the linker joins the two by name alone -- nothing checked that
+a function takes and returns what its header says. A new check compares the
+two for all 1,475 functions both have, by what the x86-64 calling convention
+does with each argument, and found eleven that disagreed. None would stop a
+program building; each could make one quietly misbehave.
+
+| Function | Header said | Definition was | What a caller got |
+|---|---|---|---|
+| `timer_create` | `timer_t` is `void *`, 8 bytes | `i32`, 4 | 4 bytes of its 8-byte `timer_t` written, 4 left as they were: comparing two, or one with `NULL`, compared garbage |
+| `timer_delete`, `timer_settime`, `timer_gettime`, `timer_getoverrun` | the same | the same | the id read from half the register |
+| `wctype`, `wctype_l` | `wctype_t` is `unsigned long` | `u32` | `wctype("x") == 0` tested an upper half nothing had set |
+| `wctrans`, `wctrans_l` | `wctrans_t` is `const int *` | `u32` | the same |
+| `iswctype`, `iswctype_l`, `towctrans`, `towctrans_l` | take them back at 8 bytes | at 4 | harmless while the handles were small |
+| `readahead` | returns `ssize_t` | `i32` | an error's -1 read as 4,294,967,295 bytes |
+| `__fpurge` | returns `int` (musl; glibc says `void`) | nothing | a caller testing the result tested an unset register |
+| `sigset` | declared (`<signal.h>`) | **not defined** | a program calling it did not link -- and `check-libc-declared.py`, reading its declaration (a function returning a function pointer) as a variable's, never said so |
+
+**Also:** `ioctl`'s request is `int` in musl's header and `unsigned long` in
+glibc's; it now reads only the low 32 bits, since a caller of the first
+leaves the rest of the register undefined. Five differences remain, each
+harmless and named in the gate's `EXCEPTIONS` with why.
+
+**Where:** `posix/src/time.rs`, `wchar.rs`, `file.rs`, `stdio.rs`,
+`ioctl.rs`, `signal.rs`; `scripts/check-libc-prototypes.py`,
+`scripts/check-libc-declared.py`.
+
+
+## D-POSIX-EXTENSIONS-HAVE-NO-DECLARATIONS — 263 functions `libc.a` defines are declared by no header a C program here can include, so C cannot call them, and a port's `configure` will say they exist (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 -- `posix/include` declares the 195 of them glibc 2.39's headers declare, where and as glibc's do (held to glibc's by `scripts/check-libc-overlay.py`; design-decisions §1141), and the C fixtures are built with it; `scripts/check-libc-declared.py` now refuses a public name `libc.a` defines that no header declares, and of the rest fifteen stopped being exported (D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES) and each other one is excused with its reason. Still to come, when there is something to take it: the rootfs's `/usr/include`, for a native toolchain, and each port's build, when it is next rebuilt**
+
+**In short:** C on SlateOS is compiled against musl's headers (`zig cc
+--target=x86_64-linux-musl`), and musl's headers declare only what musl
+has. The C library here has more: glibc's extensions and C23's additions,
+written since -- `j0l`, `clog10`, `nextup`, the narrowing functions, `fts_*`,
+`error`, `backtrace`, `close_range`, `renameat2`, `arc4random`, `getcpu` and
+some two hundred more. A C program cannot call any of them without writing
+its own prototype, because clang refuses a call to an undeclared function.
+Worse, a port's `configure` script decides what exists by *linking* a test
+program with a dummy declaration of its own -- which succeeds -- and then
+the port's real code, calling the function through the headers, does not
+compile.
+
+**Measured** (2026-09-29): the functions `libc.a` defines, that glibc 2.39
+exports as public interface, and that no header under zig's `generic-musl`
+declares with `_GNU_SOURCE`, `_BSD_SOURCE` and `_LARGEFILE64_SOURCE`: 263.
+Some are the pattern's false positives (variables such as `stdin`,
+`environ`, `signgam`; macros musl makes of `isnan`); the rest, by where they
+belong:
+
+| Header | Undeclared |
+|---|---|
+| `<math.h>` | `j0l` ... `ynl`; C23's `nextup`, `nextdown`, `llogb`, `canonicalize`, `fromfp` ... `ufromfpx`, `getpayload`, `setpayload`, `setpayloadsig`, `totalorder`, `totalordermag`, `fmaximum` ... `fminimum_mag_num`, `roundeven`, and every `f`/`l` form; the narrowing `fadd` ... `dfmal`; `scalbl`, `gammal`, `significandl`, `finitel`, `dreml`; the `f128` functions |
+| `<complex.h>` | `clog10`, `clog10f`, `clog10l` |
+| `<fenv.h>` | `feenableexcept`, `fedisableexcept`, `fegetexcept`, `fesetexcept`, `fetestexceptflag` |
+| no header in musl | `<fts.h>` (`fts_open` ...), `<error.h>` (`error`, `error_at_line` and their variables), `<execinfo.h>` (`backtrace` ...), `<gnu/libc-version.h>` |
+| `<stdlib.h>`, `<string.h>`, `<stdio.h>`, `<wchar.h>` | `arc4random`, `arc4random_buf`, `arc4random_uniform`, `canonicalize_file_name`, `ecvt_r`, `fcvt_r`, `on_exit`, `rawmemchr`, `fcloseall`, `tmpnam_r`, `wmempcpy` |
+| `<unistd.h>`, `<fcntl.h>`, `<stdio.h>`, `<sys/*.h>` | `close_range`, `closefrom`, `getcpu`, `renameat2`, `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `epoll_pwait2`, `sethostid`, `sysctl`, `arch_prctl`, `capget`, `capset`, `init_module`, `delete_module`, the LFS64 names (`open64`, `stat64` ... which musl 1.2.4 dropped) |
+| `<pthread.h>`, `<semaphore.h>` | the `clock*` waits, the `*_np` robust-mutex names, `sem_clockwait` |
+| `<malloc.h>`, `<search.h>`, `<time.h>`, others | `mallinfo`, `mallinfo2`, `malloc_trim`, `malloc_stats`, `pvalloc`, `twalk_r`, `timelocal`, `getdate_r`, the `*_r` database iterators |
+
+**The proper fix:** a header overlay -- `posix/include/`, searched before
+musl's with `-isystem`, each file `#include_next`ing musl's header of the
+same name and adding the declarations for what this library defines,
+under the feature macros glibc declares them under (`_GNU_SOURCE`, C23 by
+`__STDC_VERSION__`, `__STDC_WANT_IEC_60559_*`); and whole headers for the
+families musl has none of. Every C build here -- the `services/` fixtures,
+and the rootfs's `/usr/include` for the native toolchain to come -- takes
+it. A gate that fails when `libc.a` defines a public name no header
+declares, and a C program that includes every overlay header with
+`-Wall -Werror` and calls each declared function, so a declaration that
+disagrees with the definition's types is caught at compile time.
+
+**Where:** `posix/include/` (new), `services/*/build.py`,
+`scripts/create-ext4-rootfs.sh`, a gate beside
+`scripts/check-libc-declared.py`.
+
+## D-POSIX-LIBC-EXPORTED-NAMES-NO-HEADER-DECLARES — `libc.a` exported fifteen names into the program's namespace that no header declared: `<limits.h>`'s constants as data, `select`'s helpers, `execl`'s internal targets, and `readdir64_r` misspelt (lane D, 2026-09-29) — **Status: FIXED 2026-09-29**
+
+**In short:** a C library may give a program only the names its headers
+declare, and names reserved to itself (a leading underscore). This one
+exported fifteen more: `OPEN_MAX`, `CHILD_MAX`, `LINK_MAX`, `MQ_OPEN_MAX`,
+`PATH_MAX_LIMIT`, `SYMLINK_MAX` and `TIMER_MAX` as data -- with 58 more of
+`<limits.h>`'s constants, which musl's macros happened to hide; `select`'s
+own helpers `fd_set_zero`, `fd_set_set`, `fd_set_clr` and `fd_set_isset`;
+`vexecl`, `vexeclp` and `vexecle`, where `execl`'s trampolines jump; and
+`readdir_r64`, a misspelling of glibc's `readdir64_r`. A program with a
+global of one of those names of its own -- `OPEN_MAX`, in a program that
+does not include `<limits.h>`, is legal C -- could fail to link, with two
+definitions; and a program built against glibc that calls `readdir64_r`
+could not link at all. Found by the second half of
+`scripts/check-libc-declared.py`, new the same day, which asks whether every
+public name the library defines is declared by some header.
+
+**Fixed:** the limits are Rust constants and nothing more (`limits.rs`, not
+`no_mangle`); `select`'s `fd_set_zero` and `fd_set_set` are `pub(crate)`
+and unexported, and its `fd_set_clr`, which nothing called, and
+`fd_set_isset`, a second copy of the `is_set_in` it reads sets with, are
+gone (`poll.rs`); `execl`'s targets are `__slate_vexecl` and the rest, named as
+the library's other internal symbols are (`spawn.rs`); and `readdir64_r`
+has its name (`dirent.rs`). The gate refuses a new one.
+
+**What the gate lets stand, on purpose** (`UNDECLARED_OK`, each with its
+reason): seventeen Linux system calls glibc 2.39 declares no function for
+either (`clone3`, `openat2`, `futex` ...), which C makes through
+`syscall()`; `sysctl`, `sys_errlist` and `sys_nerr`, which glibc stopped
+declaring; the six XSI STREAMS functions, which POSIX.1-2024 removed;
+`fpurge`, BSD's name for `__fpurge`; gnulib's `verror` and
+`verror_at_line`; SlateOS's own `setkeylayout` and `slateos_spawn_caps`,
+whose C declarations wait on a header set for SlateOS's own calls; and the
+compiler runtime's 35 `_Float16` and `_Float128` functions, which are the
+compiler's to declare.
+
+**Where:** `posix/src/limits.rs`, `poll.rs`, `spawn.rs`, `dirent.rs`;
+`scripts/check-libc-declared.py`.
+
+## D-POSIX-MUSL-HEADERS-DECLARE-NARROWER-THAN-GLIBCS — functions `libc.a` defines that glibc's headers declare for a program and musl's hide under the same feature macros: `fgetpwent`, `mempcpy`, `ecvt` for a program that asks for nothing, `strdup` and `gmtime_r` for C23 (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 for 31, by declaring them in `posix/include` as glibc does; the LFS64 names left as musl has them, on purpose**
+
+**In short:** a C header decides what it declares by the "feature-test
+macros" a program defines -- `_GNU_SOURCE` for everything, none for the
+default, `-std=c2x` for C23 and so on -- and musl's headers answer more
+narrowly than glibc's in places. A program written on Linux calls
+`fgetpwent` or `mempcpy` with the default settings, and glibc's headers
+declare them; musl's only for `_GNU_SOURCE`, so here the program did not
+compile. Compiled as C23, `strdup`, `strndup`, `memccpy`, `gmtime_r`,
+`localtime_r`, `timegm` and `exp10` -- all ISO C now -- were missing
+outright, musl's headers predating C23. Measured by
+`posix/tools/oracle/header_audit.py` (new): each header both libraries have,
+in each of eleven feature-macro settings, glibc's own declarations of
+`libc.a`'s names against ours.
+
+**Fixed** -- the overlay declares each under glibc's conditions, and
+`scripts/check-libc-overlay.py`, which now counts every name the overlay
+declares and not only those it adds, holds them to glibc's headers like
+the rest (226 names):
+
+| Where | Names | glibc declares them | musl's header did |
+|---|---|---|---|
+| `<string.h>` | `strdup` `strndup` `memccpy` | also for C23 | not for C23 |
+| `<time.h>` | `gmtime_r` `localtime_r` `timegm` | also for C23 | not for C23 |
+| `<math.h>` | `exp10` `exp10f` `exp10l` | for C23 and `_GNU_SOURCE` | only `_GNU_SOURCE` |
+| `<string.h>` | `mempcpy` `strchrnul` `strcasestr` | by default | only `_GNU_SOURCE` |
+| `<stdlib.h>` | `ecvt` `fcvt` `gcvt` | by default | only `_GNU_SOURCE` |
+| `<math.h>` | `lgammal_r` | by default | only `_GNU_SOURCE` |
+| `<stdio.h>` | `fopencookie` (and its types) | by default | only `_GNU_SOURCE` |
+| `<pwd.h>`, `<grp.h>` | `fgetpwent` `putpwent` `fgetgrent` | by default | only `_GNU_SOURCE` |
+| `<strings.h>` | `bcmp` `bcopy` `bzero` `index` `rindex` `ffs` | for strict ISO C too | not for strict ISO C |
+| `<netdb.h>` | `gethostbyname` `gethostbyaddr` | always | not for POSIX.1-2008 alone |
+| `<malloc.h>` | `reallocarray` | here as in `<stdlib.h>` | only in `<stdlib.h>` |
+| `<sys/random.h>` | `getentropy` | here as in `<unistd.h>` | only in `<unistd.h>` |
+| `<time.h>` | `clock_adjtime` | here (`_GNU_SOURCE`) | only in `<sys/timex.h>` |
+
+**Left as musl has them, on purpose:** the LFS64 names (`open64`, `stat64`,
+`readdir64` and the rest, some twenty), which glibc declares for `_GNU_SOURCE` and musl 1.2.4
+gives only to `_LARGEFILE64_SOURCE` -- design-decisions §1141; glibc's GNU
+`basename` in `<string.h>`, which never modifies its argument, since this
+library's `basename` is POSIX's, which may (a program asking for the GNU one
+fails to compile, rather than being handed the other); and
+`pidfd_send_signal` in strict ISO C, where musl has no `siginfo_t`. The
+report also lists 178 names musl's headers declare *more* widely than
+glibc's (`header_audit.py --all`), which only a strictly conforming program
+defining one of them itself could notice; none is known to matter.
+
+**Where:** `posix/include/string.h`, `time.h`, `math.h`, `stdlib.h`,
+`stdio.h`, `pwd.h`, `grp.h`, `malloc.h`, `netdb.h`, and new `strings.h`,
+`sys/random.h`; `scripts/check-libc-overlay.py`;
+`posix/tools/oracle/header_audit.py`.
+
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`)**
+
+**In short:** a program written for glibc can call anything glibc's headers
+declare. This library already has most of it -- every function musl's
+headers declare, and the 226 glibc and C23 names `posix/include` adds --
+but not all: of what glibc 2.39 exports and declares, some 380 names had no
+definition here (besides about 500 `_Float32`, `_Float64` ... aliases the
+compiler has no types for). A port that calls one fails to link, or -- where
+the overlay does not declare it either -- to compile, and a port that
+probes for one (`configure`) takes its fallback. Measured by
+`posix/tools/oracle/header_audit.py --missing`; rerun it to see what is left.
+
+| Family | Names | Header |
+|---|---|---|
+| C23 bit utilities | `stdc_leading_zeros_uc` ... `stdc_bit_ceil_ull`, 70 | `<stdbit.h>` -- **done 2026-09-29** |
+| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` -- **done 2026-09-29** |
+| reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` -- **done 2026-09-29** (`posix/src/prng.rs`) |
+| locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
+| glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
+| old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... -- **done 2026-09-29** (`posix/src/legacy.rs`) |
+| Linux calls | `execveat` (**done 2026-09-29**) `tgkill` `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
+| threads | `pthread_attr_{get,set}affinity_np` `pthread_attr_{get,set}sigmask_np` `pthread_clockjoin_np` `pthread_rwlockattr_{get,set}kind_np` `pthread_yield` `pthread_attr_{get,set}stackaddr` | `<pthread.h>` |
+| name services | `getaddrinfo_a` `gai_suspend` `gai_error` `gai_cancel`; netgroups; the RPC database; `rcmd` `rexec` `ruserok` and their `_af` forms; `res_nquery` and the reentrant resolver; `ns_name_*`; mail aliases (`<aliases.h>`) | `<netdb.h>`, `<resolv.h>` ... |
+| IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` |
+| GNU libraries in libc | argz (12) and envz (6) -- **done 2026-09-29** (`posix/src/argz.rs`) -- argp (10), obstack's four, the old GNU regex API (`re_compile_pattern` ... 9), printf's registration (7), `mcheck` and `mtrace` (6) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
+| system databases | `/etc/gshadow` (`getsgnam` ... 11), `/etc/fstab` (`getfsent` ... 5), `/etc/ttys` (`getttyent` ... 4), `getutmp`, `login` `logout` `logwtmp` | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
+| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s, `rpmatch`, `getpt`, `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym`, `glob_pattern_p`, `getdirentries`, `addseverity`, `monstartup` `sprofil` `vlimit`, and some twenty LFS64 names musl's headers have only as macros (`mkstemp64`, `pread64` ...) | |
+
+**The proper fix, family by family:** each written from its specification
+-- the C standard, POSIX, the Linux man pages -- with glibc 2.39 as the
+oracle it is replayed against, and declared by `posix/include` where musl's
+headers do not, as glibc's do (design-decisions §1141). The overlay's gate
+then holds each declaration to glibc's, and `check-libc-declared.py` each to
+`libc.a`. Some want lane A first: the new mount API, the memory protection
+keys, `pidfd_spawn`. The argz, envz, argp and obstack families are the ones
+GNU programs carry copies of (gnulib) where the C library has none, so they
+matter least.
+
+**Where:** `posix/src/`, a module per family; `posix/include/`.
+
+## D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB — `random()` was a linear congruential generator, `initstate` and `setstate` did nothing and returned the wrong array, `drand48`'s unseeded state was nobody's, and the `rand48` initializers raced (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/prng.rs`)**
+
+**In short:** POSIX specifies `random()` as a particular kind of generator
+-- additive feedback over a table of 31 numbers, with `initstate` and
+`setstate` to give it other tables and switch between them. Ours was a
+simpler one, shared with `rand()`; `initstate` and `setstate` took a table
+and ignored it, and both returned the table they were given instead of the
+one they replaced, so a program that saved the generator and put it back
+got the wrong one. And what a seed gave was nobody's sequence -- not
+glibc's, not musl's -- so a program's recorded output (a test suite's
+expected file, a replay) differed from Linux's for the same seed.
+
+| What | Was | Is |
+|---|---|---|
+| `random`, `srandom` | `rand`'s generator: `x * 6364136223846793005 + 1` in 64 bits, bits 33 up returned, under a comment calling it glibc's | POSIX's additive feedback generator, glibc's sequences to the number |
+| `initstate` | seeded that generator and returned its argument | lays the generator the size picks (8, 32, 64, 128, 256 bytes) out in the caller's array; returns the array it replaced, NULL under 8 bytes |
+| `setstate` | returned its argument and did nothing else | takes up the generator in the array where it was left; returns the array it replaced, NULL for one no generator wrote |
+| `rand`, `srand` | the generator above, unlocked | `random` and `srandom`, as glibc's are, and locked: POSIX requires `random` to be thread-safe and `rand` to avoid data races with it |
+| `rand_r` | one step of a 32-bit generator | glibc's three-step form |
+| the `rand48` family, unseeded | started from `0x330EABCD1234`, BSD's starting value with its words reversed | from 0, as glibc's |
+| `srand48`, `seed48`, `lcong48`, `erand48`, `nrand48`, `jrand48` | unlocked reads and writes of three plain statics | race-free: POSIX exempts only `drand48`, `lrand48` and `mrand48` |
+| `seed48`'s returned array | one static all threads shared | the calling thread's own |
+| `erand48`, `nrand48`, `jrand48`, `seed48` | safe Rust functions dereferencing a caller's pointer | `unsafe`, their contracts stated |
+
+Found writing the reentrant `_r` forms (D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE),
+which need a real generator to be reentrant forms of. Replayed against
+glibc 2.39 (`posix/src/random_oracle.txt`: every state size with eight
+seeds, `setstate`'s switches, all of the `_r` forms) and against POSIX's
+own example on its `drand48` page. The choices -- glibc's sequences, and
+which functions lock -- are design-decisions §1142.
+
+**Where:** `posix/src/prng.rs`, moved out of `stdlib.rs`;
+`posix/src/process.rs` (`fork` holds the two generators' locks across the
+system call).
+
 ### [C] The linker-script grammar does not know all of ld's language -- 2026-09-29
 
 **Status:** OPEN -- a limitation, not a failure: the file is coloured, and
@@ -176243,3 +176488,82 @@ content is a comment; found through `servicemenus::ChoicesFile`, whose test
 after any leading comment block that is separated from nothing below it --
 i.e. treat a document of only comments as a header -- and add a test that
 `# header` then a saved key reads `# header` first.
+
+## D-POSIX-SNPRINTF-HID-A-FAILED-CONVERSION — `snprintf` and `sprintf` returned a length after a conversion that failed, and a negative one past `INT_MAX` (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/printf.rs`)**
+
+**In short:** when `snprintf` could not print a number -- a `long double`
+with thousands of digits and no memory for them -- it left the number out
+and reported success, with the length of the rest; a program had no way to
+know its text was missing a piece. And a result longer than about two
+thousand million characters came back as a negative length instead of an
+error. Both now fail as POSIX says: -1, with `errno` `ENOMEM` or
+`EOVERFLOW`.
+
+The bounded formatter (`format_core`, behind `snprintf`, `sprintf`,
+`vsnprintf` and now `strfromd`) never read the engine's failure flag, which
+only the stream path (`format_to_sink`) did; and `format_into` cast its
+count to `i32`. Found writing `strfromd` over the engine. The same change
+counts padding that lands nowhere -- no buffer, or a full one -- at once
+rather than a byte at a time, which is what makes a test of the overflow
+(`%2147483647d%2147483647d`) take no time.
+
+**Where:** `posix/src/printf.rs`: `format_core`, `format_into`,
+`emit_padding`, `FmtOutput::lands_nowhere`.
+
+## D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED — `mbrtoc16`, `mbrtoc32` and their reverses refused every character past ASCII; asking `mbsrtowcs` how long a result would be answered 0; a character cut in two by `mbsnrtowcs`'s limit was lost (lane D, 2026-09-29) — **Status: FIXED 2026-09-29**
+
+**In short:** the functions that turn text from bytes into Unicode
+characters and back disagreed with each other. `mbrtowc` reads UTF-8, but
+its siblings for 16- and 32-bit characters (`<uchar.h>`) refused any byte
+past plain ASCII, so a program converting "é" with them got an error. The
+functions that convert a whole string answered 0 when asked only how long
+the result would be -- the usual way to size a buffer for it -- and one
+stopped by a byte limit in the middle of a character lost that character on
+the next call.
+
+| What | Was | Is |
+|---|---|---|
+| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | ASCII only: every byte above 0x7F `EILSEQ` | UTF-8, as `mbrtowc`: UTF-16 surrogate pairs across two calls |
+| `mbrtoc8`, `c8rtomb` (C23) | missing | UTF-8 code units, one a call |
+| `mbsrtowcs`, `mbsnrtowcs`, `wcsrtombs`, `wcsnrtombs` with a NULL `dst` (counting only) | `len` limited the count, so `len` 0 answered 0; and `*src` moved | `len` ignored; `*src` and the state left as they were (POSIX, glibc) |
+| `mbsnrtowcs`, `nms` ending inside a character | stopped before the character, its bytes already in the state: the next call read them twice, as an encoding error | `*src` past them, the character carried in the state |
+| `wcsnrtombs` at an unencodable character | `*src` moved on | `*src` at it |
+| an invalid sequence | refused at its last byte (`E0 80 AF`: -2, -2, -1) | at the first byte no completion could make valid (-2, -1): C's -2 is for an incomplete "but potentially valid" character |
+| a NULL `ps` | one process-wide state of `mbrtowc`'s, borrowed by `mbrlen` and the string forms; `<uchar.h>`'s none | each function its own, as C requires, and each thread's own |
+| `<uchar.h>`'s six | safe Rust functions dereferencing a caller's pointer | `unsafe`, their contracts stated |
+
+Found writing `mbrtoc8` and `c8rtomb`, which need a real decoder under them.
+Replayed against glibc 2.39 in its C.UTF-8 locale
+(`posix/tools/oracle/multibyte_harness.py`, `multibyte_oracle.txt`), through
+a model of C's rules and strict UTF-8 written in the test from Unicode's
+table alone: the library gives what the model gives, and the model gives
+glibc's answer wherever glibc's decoder is strict. Where glibc's differs --
+a laxer decoder, `c32rtomb` past U+10FFFF, `c16rtomb(NULL, ...)` after a
+lone high surrogate, a crash in `mbrtoc16(NULL, NULL, 0, ps)` -- is
+`posix/src/uchar.rs`'s module documentation and design-decisions §1143.
+
+**Where:** `posix/src/wchar.rs` (`decode`, `MbstateT`, `internal`,
+`mbs_to_wcs`, `wcs_to_mbs`), `posix/src/uchar.rs`, `posix/src/perthread.rs`
+(the states), `posix/include/uchar.h` (`char8_t`, the two new functions).
+
+## D-POSIX-SIGPROCMASK-KEPT-SIGKILL-AND-RAISE-0-FAILED — `sigprocmask` put `SIGKILL` and `SIGSTOP` in the blocked mask and reported them blocked; `raise(0)` was an error (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/signal.rs`)**
+
+**In short:** two small ways the signal functions answered differently
+from what POSIX requires, found replaying glibc's answers for the old BSD
+calls built on them. A program asking to block every signal was told that
+`SIGKILL` and `SIGSTOP` -- which can never be blocked -- were blocked; and
+`raise(0)`, which a program may use to check that it can signal itself,
+failed where it should succeed.
+
+- `sigprocmask`: POSIX -- "It is not possible to block those signals which
+  cannot be ignored. This shall be enforced by the system without causing
+  an error to be indicated." Both were kept in the mask this library
+  stores and reports back (the kernel ignored them). Now dropped, by every
+  `how`; `sigblock(sigmask(SIGKILL) | sigmask(SIGUSR1))` reports `SIGUSR1`
+  alone, as glibc's does.
+- `raise(0)`: POSIX makes `raise(sig)` `pthread_kill(pthread_self(), sig)`,
+  and for that "if sig is zero, error checking shall be performed but no
+  signal shall actually be sent". It was `EINVAL` -- two tests pinned
+  that, on the premise that 0 is out of range -- and is 0 now, as glibc's.
+
+**Where:** `posix/src/signal.rs`: `sigprocmask`, `raise`, and their tests.

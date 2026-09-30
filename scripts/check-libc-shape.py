@@ -136,8 +136,9 @@ for _stream in (sys.stdout, sys.stderr):
 
 # --- what we assert -----------------------------------------------------------
 #
-# Three checks, because they fail for different reasons and generalise
-# differently.
+# Four checks. The first three are about which names share a member, and
+# they fail for different reasons and generalise differently; CHECK 4, below
+# them, is about names that must be one variable.
 #
 # CHECK 1 (strict, narrow): for each family below, the member defining it must
 # define *nothing else*. This is the exact property glibc has, and it is the
@@ -353,6 +354,31 @@ AR_MAGIC = b"!<arch>\n"
 MIN_MEMBERS = 100
 MIN_SYMBOLS = 500
 
+# CHECK 4: a variable C knows by several names is one variable.
+#
+# glibc gives three of its variables more than one name, and a program may
+# assign through one what the C library reads through another: gnulib's
+# `set_program_name` assigns `program_invocation_name` and glibc's `error`
+# prints it as `__progname_full`; `env -i`-style launchers assign `environ` and
+# the library's own `getenv` reads `__environ`. Rust cannot give one static two
+# names, so posix defines each in assembly with every label on one word
+# (`posix/src/environ.rs`, `posix/src/crt.rs`). This holds the archive to that:
+# each group's names defined by one member, at one address in one section, the
+# first strong and the rest weak -- as glibc has them, so that a program that
+# defines a weak one itself still links. A group none of whose names the
+# archive defines is not graded here (a libc without `environ` fails every
+# link first); one partly defined is a violation. Until 2026-09-29 these were
+# separate variables and nothing looked (known-issues.md ->
+# D-POSIX-ENVIRON-AND-THE-PROGRAM-NAMES-WERE-COPIES-NOT-ALIASES).
+ALIASES: list[tuple[str, ...]] = [
+    ("__environ", "environ", "_environ"),
+    ("__progname", "program_invocation_short_name"),
+    ("__progname_full", "program_invocation_name"),
+]
+
+#: ELF symbol bindings, as `st_info >> 4` holds them.
+STB_GLOBAL, STB_WEAK = 1, 2
+
 #: What `scripts/mutate-gate.py` breaks to check that the floor above, and the
 #: shape checks below it, are load-bearing rather than decorative. Each row is
 #: (label, exact source text, replacement); the sweep applies one at a time and
@@ -381,6 +407,21 @@ SELFTEST_MUTANTS = [
      "    if len(members) < MIN_MEMBERS:"),
     ("MIN_MEMBERS gutted to 1", "MIN_MEMBERS = 100", "MIN_MEMBERS = 1"),
     ("MIN_SYMBOLS gutted to 1", "MIN_SYMBOLS = 500", "MIN_SYMBOLS = 1"),
+
+    # CHECK 4: is each of its three properties -- one member, one address,
+    # strong then weak -- actually compared?
+    ("the alias check never runs",
+     "    for group in ALIASES:\n",
+     "    for group in []:\n"),
+    ("aliases in different members pass",
+     "        if len(hosts) != 1:\n",
+     "        if False:\n"),
+    ("aliases at different addresses pass",
+     "        if len(places) != 1:\n",
+     "        if False:\n"),
+    ("aliases of the wrong binding pass",
+     "        if binds != want:\n",
+     "        if False:\n"),
 
     # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
     # "the checker found something" and prints a refusal naming code that is
@@ -479,6 +520,46 @@ def parse_symbol_index(path: Path) -> dict[int, set[str]]:
     return members
 
 
+def member_body(data: bytes, offset: int) -> bytes:
+    """The contents of the member whose header is at `offset`."""
+    header = data[offset : offset + 60]
+    try:
+        size = int(header[48:58])
+    except ValueError as exc:
+        raise ArchiveError(f"unparsable member size at offset {offset}") from exc
+    return data[offset + 60 : offset + 60 + size]
+
+
+def elf_defined_symbols(obj: bytes) -> dict[str, tuple[int, int, int]]:
+    """name -> (section index, value, binding) for each symbol an ELF64
+    little-endian object defines -- what `nm` would print, read straight out
+    of the object's symbol table, for the same no-external-tools reason as the
+    index reader."""
+    if obj[:4] != b"\x7fELF" or len(obj) < 64 or obj[4] != 2 or obj[5] != 1:
+        raise ArchiveError("a member is not an ELF64 little-endian object")
+    (shoff,) = struct.unpack_from("<Q", obj, 0x28)
+    shentsize, shnum = struct.unpack_from("<HH", obj, 0x3A)
+    try:
+        sections = [struct.unpack_from("<IIQQQQIIQQ", obj, shoff + i * shentsize)
+                    for i in range(shnum)]
+        out: dict[str, tuple[int, int, int]] = {}
+        for _name, sh_type, _fl, _addr, off, size, link, _info, _al, _ent in sections:
+            if sh_type != 2:  # SHT_SYMTAB
+                continue
+            str_off = sections[link][4]
+            for k in range(size // 24):
+                st_name, st_info, _other, st_shndx, st_value, _size = struct.unpack_from(
+                    "<IBBHQQ", obj, off + 24 * k)
+                if st_shndx == 0:  # undefined here
+                    continue
+                start = str_off + st_name
+                name = obj[start : obj.index(b"\0", start)].decode("utf-8", "replace")
+                out[name] = (st_shndx, st_value, st_info >> 4)
+        return out
+    except (struct.error, IndexError, ValueError) as exc:
+        raise ArchiveError(f"a member's ELF symbol table is malformed: {exc}") from exc
+
+
 def member_name(path: Path, offset: int) -> str:
     """Best-effort human name for the member at `offset`, for error messages."""
     try:
@@ -575,6 +656,56 @@ def check(path: Path, verbose: bool) -> list[str]:
             f"string.rs's module header), not by widening this script's lists."
         )
 
+    # --- CHECK 4: a variable's names are one variable -----------------------
+    where = {sym: off for off, syms in members.items() for sym in syms}
+    data = path.read_bytes()
+    for group in ALIASES:
+        defined = [n for n in group if n in where]
+        if not defined:
+            continue
+        if len(defined) != len(group):
+            missing = ", ".join(n for n in group if n not in where)
+            violations.append(
+                f"[alias] {', '.join(defined)} defined but not {missing}: the names of one "
+                f"variable, which a program may assign through one and the C library read "
+                f"through another."
+            )
+            continue
+        hosts = {where[n] for n in group}
+        if len(hosts) != 1:
+            violations.append(
+                f"[alias] {', '.join(group)} are defined by {len(hosts)} different members, so "
+                f"they are different variables: an assignment through one is not seen through "
+                f"the others."
+            )
+            continue
+        syms = elf_defined_symbols(member_body(data, hosts.pop()))
+        absent = [n for n in group if n not in syms]
+        if absent:
+            violations.append(
+                f"[alias] the member the index names for {', '.join(group)} does not define "
+                f"{', '.join(absent)} in its own symbol table: the index and the object "
+                f"disagree."
+            )
+            continue
+        places = {syms[n][:2] for n in group}
+        if len(places) != 1:
+            violations.append(
+                f"[alias] {', '.join(group)} are at {len(places)} different addresses in their "
+                f"member: they are different variables."
+            )
+            continue
+        binds = [syms[n][2] for n in group]
+        want = [STB_GLOBAL] + [STB_WEAK] * (len(group) - 1)
+        if binds != want:
+            violations.append(
+                f"[alias] {', '.join(group)} are bound {binds}, not {want}: {group[0]} is the "
+                f"variable and the rest weak aliases of it, as glibc has them, so that a "
+                f"program that defines one of those itself still links."
+            )
+        elif verbose:
+            print(f"  ok  {', '.join(group)}: one variable")
+
     return violations
 
 
@@ -639,8 +770,12 @@ def _ar_header(name: str, size: int) -> bytes:
             .encode() + b"`\n")
 
 
-def synth_archive(members: list[tuple[str, list[str]]]) -> bytes:
+def synth_archive(members: list[tuple]) -> bytes:
     """Build a GNU `ar` archive whose symbol index says exactly this.
+
+    Each member is `(name, symbols)`, or `(name, symbols, body)` for one whose
+    contents CHECK 4 reads -- an object from `synth_elf`; the rest are empty,
+    only their headers being read.
 
     Written out here rather than shelled out to `ar` on purpose: this gate's
     subject *is* the archive format, so a fixture produced by the same family
@@ -648,25 +783,55 @@ def synth_archive(members: list[tuple[str, list[str]]]) -> bytes:
     the layout untested. Two passes, because the index has to name member
     offsets that only exist once the index's own length is known.
     """
-    all_syms = [s for _n, syms in members for s in syms]
+    all_syms = [s for member in members for s in member[1]]
     index_size = 4 + 4 * len(all_syms) + sum(len(s) + 1 for s in all_syms)
     pos = len(AR_MAGIC) + 60 + index_size + (index_size % 2)
 
     offsets, blobs = [], []
-    for name, _syms in members:
+    for member in members:
+        name = member[0]
+        body = member[2] if len(member) > 2 else b""
         offsets.append(pos)
-        body = b""  # nothing reads a member's contents, only its header
-        blobs.append(_ar_header(name + "/", len(body)) + body)
-        pos += 60 + len(body)
+        # Members start on even offsets: an odd body is padded with "\n".
+        pad = b"\n" if len(body) % 2 else b""
+        blobs.append(_ar_header(name + "/", len(body)) + body + pad)
+        pos += 60 + len(body) + len(pad)
 
-    sym_offsets = [off for off, (_n, syms) in zip(offsets, members)
-                   for _ in syms]
+    sym_offsets = [off for off, member in zip(offsets, members)
+                   for _ in member[1]]
     index = (struct.pack(">I", len(all_syms))
              + b"".join(struct.pack(">I", o) for o in sym_offsets)
              + b"".join(s.encode() + b"\0" for s in all_syms))
     pad = b"\n" if index_size % 2 else b""
     return (AR_MAGIC + _ar_header("/", index_size) + index + pad
             + b"".join(blobs))
+
+
+def synth_elf(symbols: list[tuple[str, int, int, int]]) -> bytes:
+    """A minimal ELF64 relocatable object defining `symbols`, each `(name,
+    section index, value, binding)`: an ELF header, a `.data` (section 1), a
+    symbol table and its string table -- as much of an object as
+    `elf_defined_symbols` reads, built by hand for the reason `synth_archive`
+    is."""
+    strtab = b"\0"
+    entries = b"\0" * 24  # the null symbol
+    for name, shndx, value, bind in symbols:
+        entries += struct.pack("<IBBHQQ", len(strtab), (bind << 4) | 1, 0, shndx, value, 8)
+        strtab += name.encode() + b"\0"
+    data_off = 64
+    symtab_off = data_off + 16
+    strtab_off = symtab_off + len(entries)
+    shoff = (strtab_off + len(strtab) + 7) // 8 * 8
+    header = (b"\x7fELF" + bytes([2, 1, 1]) + b"\0" * 9
+              + struct.pack("<HHIQQQIHHHHHH", 1, 62, 1, 0, 0, shoff, 0, 64, 0, 0, 64, 4, 0))
+    sections = [
+        struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        struct.pack("<IIQQQQIIQQ", 0, 1, 3, 0, data_off, 16, 0, 0, 8, 0),
+        struct.pack("<IIQQQQIIQQ", 0, 2, 0, 0, symtab_off, len(entries), 3, 1, 8, 24),
+        struct.pack("<IIQQQQIIQQ", 0, 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
+    ]
+    body = header + b"\0" * 16 + entries + strtab
+    return body + b"\0" * (shoff - len(body)) + b"".join(sections)
 
 
 def _selftest() -> int:
@@ -699,10 +864,22 @@ def _selftest() -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="libcshape-"))
 
-    def graded(members):
-        """Violations for a synthetic archive with these members."""
+    # The variables CHECK 4 grades, laid out as posix lays them out: each
+    # group's names on one word of `.data`, the first strong, the rest weak.
+    def var_member(name, layout):
+        """A member defining `layout`, each `(symbol, section, value, binding)`."""
+        return (name, [s for s, *_rest in layout], synth_elf(layout))
+
+    good_layout = [(n, 1, 8 * i, STB_GLOBAL if k == 0 else STB_WEAK)
+                   for i, group in enumerate(ALIASES) for k, n in enumerate(group)]
+    good_vars = var_member("vars", good_layout)
+
+    def graded(members, variables=good_vars):
+        """Violations for a synthetic archive with these members, and the
+        variables' member (a well-laid-out one unless a case says otherwise;
+        `None` for none)."""
         p = tmp / "t.a"
-        p.write_bytes(synth_archive(members))
+        p.write_bytes(synth_archive(members + ([variables] if variables else [])))
         return check(p, False)
 
     def tags(vs):
@@ -717,7 +894,9 @@ def _selftest() -> int:
     # "fam0" silently meant getopt where the case said error -- and the two
     # disagreed about which member they were talking about.
     clean = [(family, sorted(syms)) for family, syms in STRICT_FAMILIES.items()]
-    clean.append(("core", sorted(UNAVOIDABLE)))
+    # The aliased names (`environ` is an unavoidable one) live in the
+    # variables' member, as they do in the real archive; see `graded`.
+    clean.append(("core", sorted(UNAVOIDABLE - {n for g in ALIASES for n in g})))
 
     try:
         # --- the format reader ------------------------------------------
@@ -839,6 +1018,33 @@ def _selftest() -> int:
                tags(vs) == ["[rider]"])
         check_("...and a member of only replaceable names is not",
                graded(clean + [("ok", [repl])]) == [])
+
+        # CHECK 4 [alias]: each property of "one variable" broken alone. The
+        # well-laid-out case is every `graded(clean) == []` above.
+        env = ALIASES[0]
+        # The index names all three; the object defines one of them.
+        vs = graded(clean, ("a", list(env), synth_elf([(env[0], 1, 0, STB_GLOBAL)])))
+        split = graded(clean + [var_member("b", [(n, 1, 0, STB_WEAK) for n in env[1:]])],
+                       var_member("a", [e for e in good_layout if e[0] not in env[1:]]))
+        # By the message, not only the tag: the object check below would also
+        # fire here, so a tag alone could not tell this check from that one.
+        check_("[alias] a variable's names in two members are caught",
+               tags(split) == ["[alias]"] and "different members" in split[0])
+        moved = [(n, s, 4 if n == env[1] else v, b) for n, s, v, b in good_layout]
+        check_("[alias] one of its names at another address is caught",
+               tags(graded(clean, var_member("vars", moved))) == ["[alias]"])
+        strong = [(n, s, v, STB_GLOBAL if n == env[1] else b) for n, s, v, b in good_layout]
+        check_("[alias] an alias bound strong is caught",
+               tags(graded(clean, var_member("vars", strong))) == ["[alias]"])
+        partial = [e for e in good_layout if e[0] != env[2]]
+        check_("[alias] a variable defined under some of its names is caught",
+               tags(graded(clean, var_member("vars", partial))) == ["[alias]"])
+        check_("...as is one of whose names the index and the object disagree",
+               tags(vs) == ["[alias]"])
+        check_("...and variables the archive does not define at all are not graded",
+               graded(clean, None) == [])
+        check_("the ELF reader reads what synth_elf wrote",
+               elf_defined_symbols(synth_elf(good_layout))[env[1]] == (1, 0, STB_WEAK))
 
         # --- is_collidable, which the two above depend on ----------------
         check_("C names are collidable", is_collidable("getopt"))

@@ -176514,3 +176514,61 @@ lane A adds its rung.
 **Where:** `posix/src/dlfcn.rs`; `posix/src/tls.rs` (`ProgramHeaders`, the
 program's own headers, which the TLS set-up and `<dlfcn.h>` both read);
 `posix/include/dlfcn.h`; `services/ctest-cxx-throw/`.
+
+## D-POSIX-ENVIRON-AND-THE-PROGRAM-NAMES-WERE-COPIES-NOT-ALIASES — `environ` and `__environ`, `program_invocation_name` and `__progname_full`, `program_invocation_short_name` and `__progname` were separate variables, so a program assigning one name changed nothing the others showed (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/environ.rs`, `posix/src/crt.rs`)**
+
+**In short:** C gives three of its variables several names each -- the
+environment list (`environ`, `__environ`, `_environ`), the program's name as
+it was started (`program_invocation_name`, `__progname_full`), and its last
+component (`program_invocation_short_name`, `__progname`) -- and in glibc
+each group is one variable, so a program can assign through any name and
+the C library sees it through all of them. Here each name was a variable of
+its own. So a program that set its name for error messages the way gnulib
+does (every GNU tool: `set_program_name` assigns `program_invocation_name`)
+went on being reported under the old name, and one that replaced its
+environment through `__environ` did not replace it at all; `_environ` did not
+exist.
+
+| Names | Was | Is |
+|---|---|---|
+| `environ`, `__environ`, `_environ` | `environ`, and `__environ` a copy written only when `setenv` and its kin changed the list -- not when the program assigned `environ`; no `_environ` | one variable: `__environ`, and `environ` and `_environ` weak aliases of it |
+| `program_invocation_name`, `__progname_full` | two variables, both set at start-up and never again | one variable: `__progname_full`, and a weak alias |
+| `program_invocation_short_name`, `__progname` | two variables, likewise | one variable: `__progname`, and a weak alias |
+
+Rust cannot give a static two names, so each variable is defined in
+assembly with all its labels on one word, strong and weak as glibc has them
+(a program that defines one of the weak names itself still links).
+`scripts/check-libc-shape.py`'s new CHECK 4 holds `libc.a` to that: each
+group's names in one member, at one address, the first strong and the rest
+weak. Run on the archive before the fix, it reports all three.
+
+**Where:** `posix/src/environ.rs`, `posix/src/crt.rs`;
+`scripts/check-libc-shape.py` (CHECK 4).
+
+## D-POSIX-ERROR-PRINTED-THE-SHORT-NAME-AND-CUT-LONG-MESSAGES — `error` and `error_at_line` printed the wrong program name, a space glibc's does not, cut messages at 1023 bytes and flushed nothing; `err` and `warn` cut them too; both wrote around the `stderr` stream (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/error.rs`, `posix/src/err.rs`)**
+
+**In short:** GNU programs report errors through `error()`, BSD-derived ones
+through `err()` and `warn()`. Ours printed something close to glibc's, but
+not the same: `error` named the program by the last part of its path where
+glibc names it as it was started, put `error_at_line`'s file after a space
+(`prog: f.c:12:` where glibc prints `prog:f.c:12:`), silently cut any message
+longer than 1023 bytes, and did not first flush what the program had written
+to standard output -- so when both went to one file, the error could appear
+before the output that led to it. Test suites that compare a tool's output
+against a recorded file saw the difference.
+
+| | Was | Is (glibc 2.39's) |
+|---|---|---|
+| `error`'s name | `__progname`, argv[0]'s last component | `program_invocation_name`, argv[0] as started |
+| `error_at_line`'s place | `prog: file:12: `; nothing for a NULL file | `prog:file:12: `; one space for a NULL file |
+| a message over 1023 bytes | cut, silently (`error`, `err`, `warn` alike) | whole |
+| `stdout` before `error` | not flushed | flushed first, so earlier output comes first |
+| `stderr` | written around the stream, to file descriptor 2 | through the stream, under its lock, flushed after |
+
+`err` and `warn` already named the short name, as glibc's do, and do not
+flush `stdout` -- glibc's do not either. `posix/tools/oracle/errfns_harness.py`
+records glibc's output for each case, the two streams on one pipe as a
+redirected program's are, and the tests replay it through two streams over
+one sink.
+
+**Where:** `posix/src/error.rs`, `posix/src/err.rs`.

@@ -818,8 +818,8 @@ pub unsafe extern "C" fn __libc_start_main(
         // SAFETY: actual_argc > 0 guarantees argv[0] exists.
         let argv0 = unsafe { *actual_argv };
         if !argv0.is_null() {
+            // One write for each variable: each is both of its names.
             unsafe {
-                addr_of_mut!(program_invocation_name).write(argv0);
                 addr_of_mut!(__progname_full).write(argv0);
             }
             // Find basename (after last '/').
@@ -839,7 +839,6 @@ pub unsafe extern "C" fn __libc_start_main(
                 unsafe { last_slash.add(1) }
             };
             unsafe {
-                addr_of_mut!(program_invocation_short_name).write(short);
                 addr_of_mut!(__progname).write(short);
             }
         }
@@ -1141,29 +1140,64 @@ pub static __dso_handle: u8 = 0;
 /// Default program name when argv[0] is not available.
 static UNKNOWN_PROG: [u8; 8] = *b"unknown\0";
 
-/// GNU extension: full path of the program (from argv[0]).
-///
-/// Set during `__libc_start_main`.  Programs that read this symbol
-/// expect it to point to argv[0].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut program_invocation_name: *const u8 = UNKNOWN_PROG.as_ptr();
+// Two variables, each with two names, as in glibc: `__progname_full`, which
+// GNU calls `program_invocation_name` -- argv[0] as the program was started
+// -- and `__progname`, GNU's `program_invocation_short_name`, its last
+// component. One name is not a copy of the other: a program that assigns one
+// and a library function that reads the other see the same pointer, as
+// gnulib's `set_program_name` (which assigns `program_invocation_name`) and
+// glibc's `error` (which reads it) both depend on. They were four separate
+// variables until 2026-09-29, so an assignment to one was seen through none of
+// the others (known-issues.md ->
+// D-POSIX-ENVIRON-AND-THE-PROGRAM-NAMES-WERE-COPIES-NOT-ALIASES).
+//
+// Rust cannot give one static two names, so on the target the storage is
+// defined here in assembly, both labels on one word; the `__` names are the
+// variables and the GNU names weak aliases of them, as glibc has them, so a
+// program that defines one of those itself links. The host has no C program
+// to share them with, and keeps the two variables as plain statics.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".pushsection .data.slateos_progname,\"aw\",@progbits",
+    ".p2align 3",
+    ".globl __progname_full",
+    ".type __progname_full, @object",
+    ".size __progname_full, 8",
+    ".weak program_invocation_name",
+    ".type program_invocation_name, @object",
+    ".size program_invocation_name, 8",
+    "__progname_full:",
+    "program_invocation_name:",
+    ".quad {unknown}",
+    ".globl __progname",
+    ".type __progname, @object",
+    ".size __progname, 8",
+    ".weak program_invocation_short_name",
+    ".type program_invocation_short_name, @object",
+    ".size program_invocation_short_name, 8",
+    "__progname:",
+    "program_invocation_short_name:",
+    ".quad {unknown}",
+    ".popsection",
+    unknown = sym UNKNOWN_PROG,
+);
 
-/// GNU extension: basename of the program.
-///
-/// Set during `__libc_start_main`.  Points into the same string as
-/// `program_invocation_name` but after the last '/'.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut program_invocation_short_name: *const u8 = UNKNOWN_PROG.as_ptr();
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// argv[0], as the program was started (`program_invocation_name`).
+    /// Set by `__libc_start_main`; the assembly above defines it.
+    pub static mut __progname_full: *const u8;
+    /// Its last component (`program_invocation_short_name`).
+    pub static mut __progname: *const u8;
+}
 
-/// BSD/common: short program name.
-///
-/// Alias for `program_invocation_short_name`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
-
-/// Full program name (BSD alias).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+/// argv[0], as the program was started (`program_invocation_name`).
+#[cfg(not(target_os = "none"))]
 pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
+
+/// Its last component (`program_invocation_short_name`).
+#[cfg(not(target_os = "none"))]
+pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
 
 // ---------------------------------------------------------------------------
 // GCC initialization/finalization stubs
@@ -1472,23 +1506,6 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// __environ — glibc alias for environ
-// ---------------------------------------------------------------------------
-
-/// glibc internal name for the environment pointer.
-///
-/// Some programs reference `__environ` directly instead of `environ`.
-/// Must point to the same location as `crate::environ::environ`.
-// NOTE: This is a separate static that should ideally alias
-// `crate::environ::environ`, but Rust doesn't support symbol aliasing.
-// Programs that reference __environ will get this (initially null)
-// pointer.  `init_environ` in environ.rs sets the real `environ`.
-// For programs that need __environ, they should use `environ` instead.
-// This exists purely for link compatibility.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut __environ: *mut *const u8 = core::ptr::null_mut();
 
 /// The C++ ABI symbols that **`libc++abi` also defines**, in their own inline
 /// module and therefore their own object file inside `libc.a`.
@@ -2455,18 +2472,6 @@ mod tests {
     }
 
     // -- Program invocation globals accessible --
-
-    #[test]
-    fn test_program_invocation_name_not_null() {
-        let ptr = unsafe { core::ptr::addr_of!(program_invocation_name).read() };
-        assert!(!ptr.is_null());
-    }
-
-    #[test]
-    fn test_program_invocation_short_name_not_null() {
-        let ptr = unsafe { core::ptr::addr_of!(program_invocation_short_name).read() };
-        assert!(!ptr.is_null());
-    }
 
     #[test]
     fn test_progname_not_null() {

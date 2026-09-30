@@ -375,7 +375,7 @@ unsafe fn bytes<'a>(s: *const u8) -> &'a [u8] {
 fn program_name<'a>() -> &'a [u8] {
     // SAFETY: a plain read of the pointer, which `__libc_start_main` sets
     // once to argv[0]'s last component, or leaves at a static string.
-    let p = unsafe { core::ptr::addr_of!(crate::crt::program_invocation_short_name).read() };
+    let p = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
     // SAFETY: the start-up string or the static one, both the process's.
     unsafe { bytes(p) }
 }
@@ -672,7 +672,7 @@ unsafe fn addr_info(ph: Option<ProgramHeaders>, addr: *const c_void, info: *mut 
         return 0;
     }
     // SAFETY: a plain read of the pointer `__libc_start_main` set to argv[0].
-    let name = unsafe { core::ptr::addr_of!(crate::crt::program_invocation_name).read() };
+    let name = unsafe { core::ptr::addr_of!(crate::crt::__progname_full).read() };
     // SAFETY: the caller's contract.
     unsafe {
         info.write(DlInfo {
@@ -1437,7 +1437,7 @@ mod tests {
                 // SAFETY: the same pointer, read directly.
                 unsafe {
                     CStr::from_ptr(
-                        core::ptr::addr_of!(crate::crt::program_invocation_name)
+                        core::ptr::addr_of!(crate::crt::__progname_full)
                             .read()
                             .cast(),
                     )

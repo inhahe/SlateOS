@@ -163,7 +163,11 @@ def layout_flags(header: str) -> list[str]:
 # `__sigset_t` is glibc's unnamed struct behind sigset_t; musl's has the tag
 # `struct __sigset_t` and no typedef of that name. `__mbstate_t` is the same
 # for mbstate_t (<uchar.h>'s mbrtoc8 and c8rtomb).
-TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t"}
+# `utmp` is `utmpx`: musl's <utmp.h> defines `struct utmp` as `struct utmpx`
+# (`#define utmp utmpx`), so glibc's `getutmp (const struct utmpx *, struct
+# utmp *)` is the overlay's with `struct utmpx *` twice -- in a unit that has
+# not included <utmp.h> there is no `struct utmp` to name.
+TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utmpx"}
 
 # How clang says a name is not declared -- for a library function it knows
 # the type of, "undeclared library function".

@@ -28,6 +28,13 @@ int getutid_r(const struct utmp *, struct utmp *, struct utmp **);
 int getutline_r(const struct utmp *, struct utmp *, struct utmp **);
 #endif
 
+/* libutil's: record a login on this process's terminal in the database and
+ * the history; mark a line's login ended; append a login or logout to the
+ * history. */
+void login(const struct utmp *);
+int logout(const char *);
+void logwtmp(const char *, const char *, const char *);
+
 #ifdef __cplusplus
 }
 #endif

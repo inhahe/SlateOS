@@ -1692,6 +1692,34 @@ pub extern "C" fn getdents(fd: i32, dirp: *mut u8, count: usize) -> i64 {
     getdents_common(fd, dirp, count, DirentRecord::Legacy)
 }
 
+/// `getdirentries(fd, buf, nbytes, basep)` (BSD, glibc): the directory's
+/// records into `buf` -- a `struct dirent` each, [`getdents64`]'s, which is
+/// what glibc's gives on a 64-bit system -- and in `*basep` the position
+/// they were read from, as glibc's: `lseek`'s answer, not checked, stored
+/// only when the read succeeds. A NULL `basep`, which glibc's writes
+/// through, is not written.
+///
+/// # Safety
+///
+/// `buf` must hold `nbytes` bytes; `basep` must be NULL or valid.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdirentries(
+    fd: i32,
+    buf: *mut u8,
+    nbytes: usize,
+    basep: *mut i64,
+) -> i64 {
+    let base = crate::file::lseek(fd, 0, crate::fcntl::SEEK_CUR);
+    let r = getdents64(fd, buf, nbytes);
+    if r != -1 {
+        // SAFETY: the caller's pointer, NULL or valid.
+        if let Some(b) = unsafe { basep.as_mut() } {
+            *b = base;
+        }
+    }
+    r
+}
+
 // ---------------------------------------------------------------------------
 // scandirat — scan directory relative to a directory fd
 // ---------------------------------------------------------------------------
@@ -3024,5 +3052,34 @@ mod tests {
         let ret = getdents(3, core::ptr::null_mut(), 4096);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// `getdirentries` is `getdents64`'s answer, and stores the position
+    /// only when the read succeeded -- a descriptor that is not open leaves
+    /// `*basep` as it was.
+    #[test]
+    fn test_getdirentries_stores_nothing_for_a_failed_read() {
+        let mut buf = [0u8; 256];
+        let mut base: i64 = 1234;
+        crate::errno::set_errno(0);
+        // SAFETY: a buffer and a position of this frame's; NULL basep is
+        // not written.
+        unsafe {
+            assert_eq!(
+                getdirentries(40, buf.as_mut_ptr(), buf.len(), &raw mut base),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+            assert_eq!(base, 1234);
+            assert_eq!(
+                getdirentries(40, buf.as_mut_ptr(), buf.len(), core::ptr::null_mut()),
+                -1
+            );
+        }
+        assert_eq!(
+            getdents64(40, buf.as_mut_ptr(), buf.len()),
+            -1,
+            "the same answer"
+        );
     }
 }

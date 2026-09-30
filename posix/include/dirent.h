@@ -16,7 +16,10 @@
 #define _SLATEOS_DIRENT_H
 
 #define __NEED_ssize_t
+#define __NEED_off_t
 #include <bits/alltypes.h>
+
+#include <bits/slateos-features.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +36,11 @@ int scandirat(int, const char *__restrict, struct dirent ***__restrict,
 #ifndef getdents64
 ssize_t getdents64(int, void *, size_t);
 #endif
+#endif
+
+#ifdef _SLATEOS_USE_MISC
+/* getdents64's records, and the position they were read from. */
+ssize_t getdirentries(int, char *__restrict, size_t, off_t *__restrict);
 #endif
 
 #ifdef __cplusplus

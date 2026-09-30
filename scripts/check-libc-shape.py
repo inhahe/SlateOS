@@ -260,6 +260,8 @@ REPLACEABLE = frozenset(
         # gnulib's glob module defines this plainly where the C library lacks
         # it, as musl does; it is its own member, as in glibc (2026-09-29)
         "glob_pattern_p",
+        # gnulib's rpmatch module, for yesno(): musl has none (2026-09-30)
+        "rpmatch",
         "error", "error_at_line", "verror", "verror_at_line",
         "error_message_count", "error_one_per_line", "error_print_progname",
         # regex: gnulib vendors the whole engine

@@ -83,6 +83,13 @@ int lcong48_r(unsigned short[7], struct drand48_data *);
 #ifdef _GNU_SOURCE
 /* realpath(name, NULL). */
 char *canonicalize_file_name(const char *);
+/* posix_openpt(O_RDWR). */
+int getpt(void);
+#endif
+
+#ifdef _SLATEOS_USE_MISC
+/* 1 for a yes, 0 for a no, by the locale's YESEXPR and NOEXPR; else -1. */
+int rpmatch(const char *);
 #endif
 
 /* ecvt, fcvt and gcvt: glibc declares them by default, musl's header only

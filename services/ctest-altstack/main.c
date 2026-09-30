@@ -25,19 +25,24 @@
  * one *without* `SA_ONSTACK` does not, and that the reported state moves
  * through `SS_DISABLE` → 0 → `SS_ONSTACK` → 0 as POSIX says.
  *
- * It cannot see the case the feature exists for — a handler recovering from a
- * stack overflow — because the kernel builds the signal frame on the
- * interrupted stack before any of this code runs. That is the open half, in
- * `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`, and a
- * fixture asserting it would fail today by design rather than by regression.
+ * Checks 43-49 are the other road in: a signal the *kernel* delivers, whose
+ * frame it builds at the top of the alternate stack (lane A's 87ef09d0b), so
+ * that the trampoline and libc's dispatch already run there when the handler
+ * is looked up. Until 2026-09-30 libc then moved the handler to the top a
+ * second time, and a handler using more than a few words of stack wrote over
+ * the kernel's saved context and the dispatch's own frames; the handler here
+ * uses 8 KiB. What it still cannot see is a handler recovering from a real
+ * stack overflow: a native fault is an exception here, not a signal.
  *
  * ## It cannot hang
  *
- * Every signal here is raised with `raise()`, which dispatches synchronously
- * in-process. Nothing waits, nothing reads, nothing sleeps. The worst case is
- * a wrong exit code. That is deliberate: a sibling fixture once cost the
- * kernel lane two hours by blocking a boot test on a read that could not
- * return.
+ * Checks 1-37 raise their signals with `raise()`, which dispatches
+ * synchronously in-process. Checks 43-49 send theirs with `kill(0, sig)` to a
+ * process group this fixture is alone in, which the kernel delivers as that
+ * very system call returns -- no child, nothing waited for. Nothing reads,
+ * nothing sleeps. The worst case is a wrong exit code. That is deliberate: a
+ * sibling fixture once cost the kernel lane two hours by blocking a boot test
+ * on a read that could not return.
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `return` values below).
@@ -48,6 +53,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /*
  * 64 KiB, far above MINSIGSTKSZ, and static so its address is known before
@@ -95,6 +101,50 @@ static void on_alt(int sig)
      * frames of this very function are on that memory.
      */
     other.ss_sp = alt_stack;      /* value irrelevant; the refusal is the point */
+    other.ss_flags = 0;
+    other.ss_size = ALT_SIZE;
+    errno = 0;
+    g_change_ret = sigaltstack(&other, NULL);
+    g_change_errno = errno;
+
+    g_handler_ran = 1;
+}
+
+/*
+ * The handler for the kernel's road in: the same questions as `on_alt`, asked
+ * with 8 KiB of the stack in use -- far past the few hundred bytes the
+ * kernel's frame, the trampoline and the dispatch take at its top, all of
+ * which a second move to the top put under this buffer.
+ */
+#define DEEP 8192
+static volatile unsigned long g_deep_sum;
+
+static unsigned long deep_pattern_sum(void)
+{
+    unsigned long sum = 0;
+    for (unsigned i = 0; i < DEEP; i++)
+        sum += (unsigned char)(i * 7u);
+    return sum;
+}
+
+static void on_alt_deep(int sig)
+{
+    volatile unsigned char buf[DEEP];
+    unsigned long sum = 0;
+    stack_t oss;
+    stack_t other;
+
+    (void)sig;
+    g_handler_sp = (unsigned long)(uintptr_t)&buf[0];
+    for (unsigned i = 0; i < DEEP; i++)
+        buf[i] = (unsigned char)(i * 7u);
+    for (unsigned i = 0; i < DEEP; i++)
+        sum += buf[i];
+    g_deep_sum = sum;
+
+    memset(&oss, 0, sizeof oss);
+    g_handler_flags = sigaltstack(NULL, &oss) == 0 ? oss.ss_flags : -1;
+    other.ss_sp = alt_stack;
     other.ss_flags = 0;
     other.ss_size = ALT_SIZE;
     errno = 0;
@@ -296,6 +346,65 @@ int main(void)
         /* …and nothing it was not given. */
         if (sigismember(&got.sa_mask, SIGALRM))
             return 37;
+    }
+
+    /*
+     * 43-49. The kernel's road in. In a process group of its own, `kill(0,
+     * sig)` goes through the kernel -- libc dispatches only a signal aimed at
+     * its own pid in-process -- and comes back as the call returns: for
+     * SA_ONSTACK, through a frame the kernel built on the alternate stack.
+     * (42 is the all-passed code, so the numbers skip it.)
+     */
+    {
+        volatile unsigned long canary = 0x5a17c0de5a17c0deUL;
+
+        if (setpgid(0, 0) != 0 && getpgrp() != getpid())
+            return 43;
+        if (getpgrp() != getpid())
+            return 43;
+        ss.ss_sp = alt_stack;
+        ss.ss_flags = 0;
+        ss.ss_size = ALT_SIZE;
+        if (sigaltstack(&ss, NULL) != 0)
+            return 43;
+        if (install(SIGUSR1, on_alt_deep, SA_ONSTACK) != 0)
+            return 43;
+
+        /* 44. It runs, on the alternate stack, and returns intact. */
+        g_handler_ran = 0;
+        g_handler_sp = 0;
+        g_deep_sum = 0;
+        g_handler_flags = -1;
+        if (kill(0, SIGUSR1) != 0)
+            return 44;
+        if (!g_handler_ran || !inside_alt(g_handler_sp))
+            return 44;
+        /* 45. Its 8 KiB were its own. */
+        if (g_deep_sum != deep_pattern_sum())
+            return 45;
+        /* 46. It knew it was on the stack the kernel put it on... */
+        if (g_handler_flags != SS_ONSTACK)
+            return 46;
+        /* 47. ...and could not move it. */
+        if (g_change_ret != -1 || g_change_errno != EPERM)
+            return 47;
+        /* 48. What this frame held came back as it was. */
+        if (canary != 0x5a17c0de5a17c0deUL)
+            return 48;
+
+        /* 49. No SA_ONSTACK: the kernel's road leaves it where it was. */
+        if (install(SIGUSR2, on_ordinary, 0) != 0)
+            return 49;
+        g_handler_ran = 0;
+        g_handler_sp = 0;
+        if (kill(0, SIGUSR2) != 0 || !g_handler_ran || inside_alt(g_handler_sp))
+            return 49;
+
+        ss.ss_sp = NULL;
+        ss.ss_flags = SS_DISABLE;
+        ss.ss_size = 0;
+        if (sigaltstack(&ss, NULL) != 0)
+            return 49;
     }
 
     return 42;

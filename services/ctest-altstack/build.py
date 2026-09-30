@@ -24,9 +24,10 @@ Rust agrees with itself even when both sides are wrong.
 
 ## It cannot hang
 
-Every signal is raised with `raise()`, which dispatches synchronously
-in-process — nothing waits, reads or sleeps.  The worst case is a wrong exit
-code.  Deliberate: `ctest-pty` once blocked a boot test for two hours on a
+Checks 1-37 raise their signals with `raise()`, which dispatches synchronously
+in-process; checks 43-49 send theirs with `kill(0, sig)` to a process group
+the fixture is alone in, which the kernel delivers as that call returns --
+nothing waits, reads or sleeps.  The worst case is a wrong exit code.  Deliberate: `ctest-pty` once blocked a boot test for two hours on a
 read that could not return.
 
 `-fno-builtin` keeps clang from folding anything into a precomputed answer

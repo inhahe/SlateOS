@@ -1006,10 +1006,12 @@ struct AltStack {
     /// stack pointer starts at `sp + size` because x86 stacks grow down.
     sp: usize,
     size: usize,
-    /// Whether a handler is running on it right now. POSIX's `SS_ONSTACK`,
-    /// and the reason changing the stack is `EPERM` while it is set: moving
-    /// the ground out from under a running handler is not a request that can
-    /// be honoured.
+    /// Whether this library moved a handler onto it ([`run_handler`]) and
+    /// the handler has not returned. One of the two ways to be on it -- see
+    /// [`on_the_alt_stack`], which is what POSIX's `SS_ONSTACK` reports, and
+    /// the reason changing the stack is `EPERM` while it holds: moving the
+    /// ground out from under a running handler is not a request that can be
+    /// honoured.
     on: bool,
     /// `SS_AUTODISARM`, remembered so `sigaltstack` reports back what it was
     /// given. Nothing acts on it yet -- see the note in [`sigaltstack`].
@@ -1112,8 +1114,11 @@ fn publish_altstack() {
 ///
 /// * the handler asked, with `SA_ONSTACK`;
 /// * a stack is registered;
-/// * we are not already on it -- a nested delivery must not restart at the
-///   top and overwrite the frames of the handler it interrupted;
+/// * we are not already on it ([`on_the_alt_stack`]) -- a nested delivery
+///   must not restart at the top and overwrite the frames of the handler it
+///   interrupted, and a signal the kernel delivered onto it must not either:
+///   the kernel built its frame at the top, and the trampoline and this
+///   dispatch run just below it;
 /// * it is big enough, which `sigaltstack` already enforced, so this is a
 ///   restatement rather than a check.
 fn altstack_entry(sa_flags: u32) -> Option<usize> {
@@ -1121,10 +1126,37 @@ fn altstack_entry(sa_flags: u32) -> Option<usize> {
         return None;
     }
     let alt = altstack();
-    if alt.sp == 0 || alt.on {
+    if alt.sp == 0 || on_the_alt_stack(&alt) {
         return None;
     }
     alt.sp.checked_add(alt.size)
+}
+
+/// Whether a handler is running on the registered alternate stack now:
+/// this library moved it there ([`AltStack::on`]), or the stack pointer is
+/// inside the region.
+///
+/// The second is how the kernel starts one. Since lane A's 87ef09d0b it
+/// builds an `SA_ONSTACK` signal's frame at the top of the alternate stack,
+/// so the trampoline, this dispatch and the frame are all there already when
+/// the handler is looked up -- and nothing of this library's has run to note
+/// it. Until 2026-09-30 only the first was asked: [`altstack_entry`] then
+/// moved such a handler to the top a second time, where its frames overwrote
+/// the kernel's saved context and the dispatch below it, and a handler that
+/// used more than a few words of stack never returned intact.
+fn on_the_alt_stack(alt: &AltStack) -> bool {
+    alt.on || stack_pointer_in(alt)
+}
+
+/// Whether this thread's stack pointer is inside `alt`'s region -- the
+/// kernel's own test in `altstack_top_for`.
+#[inline(never)]
+fn stack_pointer_in(alt: &AltStack) -> bool {
+    let here = 0u8;
+    // A local's address is in this call's frame, on the stack in use; the
+    // black box keeps it a real stack slot.
+    let sp = core::hint::black_box(core::ptr::addr_of!(here)) as usize;
+    alt.sp != 0 && (alt.sp..alt.sp.saturating_add(alt.size)).contains(&sp)
 }
 
 /// Record that a handler is (or is no longer) running on the alternate stack.
@@ -2482,7 +2514,7 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 
         // Before anything else: the running handler's frames live on this
         // memory, so it cannot be moved out from under it.
-        if old.on {
+        if on_the_alt_stack(&old) {
             errno::set_errno(errno::EPERM);
             return -1;
         }
@@ -2529,7 +2561,7 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 
     // Last, so that a rejected `ss` leaves it alone.
     if !oss.is_null() {
-        let flags = if old.on {
+        let flags = if on_the_alt_stack(&old) {
             SS_ONSTACK
         } else if old.sp == 0 {
             SS_DISABLE
@@ -3245,6 +3277,51 @@ mod tests {
     fn clear() {
         let off = stack_at(0, 0, SS_DISABLE);
         assert_eq!(sigaltstack(&raw const off, core::ptr::null_mut()), 0);
+    }
+
+    /// A handler the kernel started on the alternate stack -- its frame built
+    /// at the top, the dispatch just below -- is not moved to the top again;
+    /// and while it runs, `sigaltstack` reports `SS_ONSTACK` and refuses a
+    /// change. The kernel's doing is stood in for by registering a region
+    /// around this test's own stack, which is where the stack pointer then
+    /// is; nothing switches to it.
+    #[test]
+    fn a_handler_the_kernel_started_on_the_alternate_stack_stays_where_it_is() {
+        let here = 0u8;
+        let sp = core::hint::black_box(core::ptr::addr_of!(here)) as usize;
+        // SAFETY: this thread's registration (the host's is per thread); the
+        // region is only compared with, never written.
+        unsafe {
+            *altstack_ptr() = AltStack {
+                sp: sp - 32768,
+                size: 65536,
+                on: false,
+                autodisarm: false,
+            };
+        }
+        assert_eq!(altstack_entry(SA_ONSTACK), None, "already on it");
+        assert_eq!(query().ss_flags, SS_ONSTACK);
+        let other = stack_at(0x1000, MINSIGSTKSZ, 0);
+        crate::errno::set_errno(0);
+        assert_eq!(sigaltstack(&raw const other, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+
+        // A region the stack pointer is not in is still switched to.
+        // SAFETY: as above.
+        unsafe {
+            *altstack_ptr() = AltStack {
+                sp: 0x1000,
+                size: 65536,
+                on: false,
+                autodisarm: false,
+            };
+        }
+        assert_eq!(altstack_entry(SA_ONSTACK), Some(0x1000 + 65536));
+        assert_eq!(query().ss_flags, 0);
+        // SAFETY: as above.
+        unsafe {
+            *altstack_ptr() = AltStack::NONE;
+        }
     }
 
     // ---- the SA_ONSTACK mask the kernel is told about ----

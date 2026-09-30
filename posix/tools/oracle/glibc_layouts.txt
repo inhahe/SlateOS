@@ -15,6 +15,7 @@ struct fstab	fstab.h	48	fs_spec=0,fs_file=8,fs_vfstype=16,fs_mntops=24,fs_type=3
 struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblks=20,fsmblks=24,uordblks=28,fordblks=32,keepcost=36
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
 struct random_data	stdlib.h	48	fptr=0,rptr=8,state=16,rand_type=24,rand_deg=28,rand_sep=32,end_ptr=40
+struct rpcent	rpc/netdb.h	24	r_name=0,r_aliases=8,r_number=16
 struct sgrp	gshadow.h	32	sg_namp=0,sg_passwd=8,sg_adm=16,sg_mem=24
 struct sigstack	signal.h	16	ss_sp=0,ss_onstack=8
 struct ttyent	ttyent.h	48	ty_name=0,ty_getty=8,ty_type=16,ty_status=24,ty_window=32,ty_comment=40

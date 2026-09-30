@@ -17,6 +17,12 @@
 
 #include <bits/slateos-features.h>
 
+#ifdef _SLATEOS_USE_MISC
+/* The RPC program database, which glibc's <netdb.h> includes for these
+ * extensions. */
+#include <rpc/netdb.h>
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -3,8 +3,8 @@
 // checked.  Clippy cannot see the bounds.
 #![allow(clippy::arithmetic_side_effects)]
 //! `<netdb.h>`'s flat-file databases -- `/etc/services`, `/etc/protocols`,
-//! `/etc/networks`, `/etc/ethers` -- read as glibc 2.40's `nss_files`
-//! reads them.
+//! `/etc/networks`, `/etc/ethers` -- and `<rpc/netdb.h>`'s `/etc/rpc`, read
+//! as glibc 2.40's `nss_files` reads them.
 //!
 //! - **Lines** are `__nss_readline`'s ([`crate::nss_files::lines`]): leading
 //!   white space skipped, empty lines and `#` comments not entries, and a
@@ -14,22 +14,25 @@
 //!   each database's parser names, clamped to 32 bits, and must be followed
 //!   by its terminator or the end; aliases are every white-space-separated
 //!   word after that.  A line the parser refuses is not an entry.
-//! - **Lookups** scan the whole file for the first match: services and
-//!   protocols by name or alias exactly (`strcmp`), networks and ethers by
-//!   name ignoring case (`strcasecmp`).
+//! - **Lookups** scan the whole file for the first match: services,
+//!   protocols and RPC programs by name or alias exactly (`strcmp`),
+//!   networks and ethers by name ignoring case (`strcasecmp`).
 //! - **Answers** follow glibc's `getXXbyYY_r`: 0 whether found or not, with
 //!   `*result` saying which, `ERANGE` when the caller's buffer is too small
 //!   -- and the non-reentrant forms grow their block and retry, as
 //!   glibc's `getXXbyYY` does.
 //!
 //! **A missing file** answers from a built-in copy ([`SERVICES`],
-//! [`PROTOCOLS`], [`NETWORKS`]), as `/etc/passwd`'s does from its `root`
-//! entry (design-decisions.md section 1113): the booted system has no
-//! `/etc` of its own yet, and "no service is called `http`" would be a
+//! [`PROTOCOLS`], [`NETWORKS`], [`RPC`]), as `/etc/passwd`'s does from its
+//! `root` entry (design-decisions.md section 1113): the booted system has
+//! no `/etc` of its own yet, and "no service is called `http`" would be a
 //! worse answer than the registry's.  The copies are this project's, from
 //! the IANA registries, in the file's own format and read by the same
 //! parser -- so a file, when there is one, simply takes their place.  There
-//! is no built-in `/etc/ethers`.
+//! is no built-in `/etc/ethers`.  (glibc, with no file, has nothing to
+//! read: its lookups answer the open's error, `ENOENT`, and its
+//! enumerations end at once with `errno` as it was -- as these do for a
+//! file that exists and cannot be read.)
 //!
 //! **Per thread, not per process.**  The non-reentrant functions' results,
 //! and the `set*ent`/`get*ent`/`end*ent` cursors, belong to the calling
@@ -108,6 +111,26 @@ impl Netent {
         n_aliases: core::ptr::null(),
         n_addrtype: 0,
         n_net: 0,
+    };
+}
+
+/// `struct rpcent` (`<rpc/netdb.h>`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Rpcent {
+    /// The program's official name.
+    pub r_name: *const u8,
+    /// Alias list (NULL-terminated).
+    pub r_aliases: *const *const u8,
+    /// The ONC RPC program number.
+    pub r_number: i32,
+}
+
+impl Rpcent {
+    const EMPTY: Self = Self {
+        r_name: core::ptr::null(),
+        r_aliases: core::ptr::null(),
+        r_number: 0,
     };
 }
 
@@ -308,6 +331,51 @@ mptcp 262 MPTCP
 /// `/etc/networks` when there is none.
 pub(crate) const NETWORKS: &[u8] = b"\
 link-local 169.254.0.0
+";
+
+/// `/etc/rpc` when there is none: the programs of the IANA Remote
+/// Procedure Call Program Numbers registry that Linux systems name, under
+/// those names -- Sun's assignments, and SGI's File Alteration Monitor.
+/// (Linux's files also name three programs from the range the registry
+/// leaves to users, 0x20000000 up, which no registry vouches for; they are
+/// not here.)  `posix/tools/oracle/rpc_harness.py` reads it from this file:
+/// no escapes, and nothing after the last line.
+pub(crate) const RPC: &[u8] = b"\
+portmapper 100000 portmap sunrpc rpcbind
+rstatd 100001 rstat rstat_svc rup perfmeter
+rusersd 100002 rusers
+nfs 100003 nfsprog
+ypserv 100004 ypprog
+mountd 100005 mount showmount
+ypbind 100007
+walld 100008 rwall shutdown
+yppasswdd 100009 yppasswd
+etherstatd 100010 etherstat
+rquotad 100011 rquotaprog quota rquota
+sprayd 100012 spray
+3270_mapper 100013
+rje_mapper 100014
+selection_svc 100015 selnsvc
+database_svc 100016
+rexd 100017 rex
+alis 100018
+sched 100019
+llockmgr 100020
+nlockmgr 100021
+x25.inr 100022
+statmon 100023
+status 100024
+bootparam 100026
+ypupdated 100028 ypupdate
+keyserv 100029 keyserver
+tfsd 100037
+nsed 100038
+nsemntd 100039
+ypxfrd 100069
+nfs_acl 100227
+pcnfsd 150001
+amd 300019 amq
+sgi_fam 391002
 ";
 
 // ---------------------------------------------------------------------------
@@ -617,6 +685,9 @@ pub(crate) struct ThreadDb {
     net: Held<Netent>,
     net_ent: Held<Netent>,
     net_cur: Cursor,
+    rpc: Held<Rpcent>,
+    rpc_ent: Held<Rpcent>,
+    rpc_cur: Cursor,
     host: Held<crate::socket::Hostent>,
     host_rev: Held<crate::socket::Hostent>,
     host_ent: Held<crate::socket::Hostent>,
@@ -634,6 +705,9 @@ impl ThreadDb {
         net: Held::new(Netent::EMPTY),
         net_ent: Held::new(Netent::EMPTY),
         net_cur: Cursor::CLOSED,
+        rpc: Held::new(Rpcent::EMPTY),
+        rpc_ent: Held::new(Rpcent::EMPTY),
+        rpc_cur: Cursor::CLOSED,
         host: Held::new(HOSTENT_EMPTY),
         host_rev: Held::new(HOSTENT_EMPTY),
         host_ent: Held::new(HOSTENT_EMPTY),
@@ -669,6 +743,9 @@ field!(proto_cur, proto_cur, Cursor);
 field!(net_held_block, net, Held<Netent>);
 field!(net_ent_held, net_ent, Held<Netent>);
 field!(net_cur, net_cur, Cursor);
+field!(rpc_held, rpc, Held<Rpcent>);
+field!(rpc_ent_held, rpc_ent, Held<Rpcent>);
+field!(rpc_cur, rpc_cur, Cursor);
 field!(pub(crate) host_held_block, host, Held<crate::socket::Hostent>);
 field!(pub(crate) host_rev_held, host_rev, Held<crate::socket::Hostent>);
 field!(pub(crate) host_ent_held, host_ent, Held<crate::socket::Hostent>);
@@ -719,6 +796,9 @@ pub(crate) fn thread_cleanup() {
         db.net.release();
         db.net_ent.release();
         db.net_cur.close();
+        db.rpc.release();
+        db.rpc_ent.release();
+        db.rpc_cur.close();
         db.host.release();
         db.host_rev.release();
         db.host_ent.release();
@@ -1056,28 +1136,29 @@ pub(crate) fn close_cursor(cursor: fn(*mut ThreadDb) -> *mut Cursor) {
 // Protocols
 // ---------------------------------------------------------------------------
 
-/// A `/etc/protocols` line: `name number aliases...`.
-struct ProtoLine<'a> {
+/// A `/etc/protocols` or `/etc/rpc` line: `name number aliases...`.
+struct NumberedLine<'a> {
     name: &'a [u8],
     number: i32,
     aliases: Line<'a>,
 }
 
-/// `files-proto.c`'s parser: the number is decimal and followed by white
-/// space or the end.
-fn parse_proto(line: &[u8]) -> Option<ProtoLine<'_>> {
+/// `files-proto.c`'s parser, and `files-rpc.c`'s, which is the same: the
+/// number is decimal and followed by white space or the end.
+fn parse_numbered(line: &[u8]) -> Option<NumberedLine<'_>> {
     let mut l = Line::new(line);
     let name = l.string();
-    // `p_proto` is an `int`: 32 bits, as the file's number clamped.
+    // `p_proto` and `r_number` are `int`s: 32 bits, as the file's number
+    // clamped.
     let number = l.int(space, true, 10)? as i32;
-    Some(ProtoLine {
+    Some(NumberedLine {
         name,
         number,
         aliases: l,
     })
 }
 
-fn fill_proto(p: &ProtoLine<'_>, room: &mut Room) -> Result<Protoent, i32> {
+fn fill_proto(p: &NumberedLine<'_>, room: &mut Room) -> Result<Protoent, i32> {
     Ok(Protoent {
         p_name: room.string(p.name)?,
         p_proto: p.number,
@@ -1113,7 +1194,7 @@ pub unsafe extern "C" fn getprotobyname_r(
             }
             let name = bytes(name);
             scan(Which::Protocols, PROTOCOLS, |line| {
-                let p = parse_proto(line)?;
+                let p = parse_numbered(line)?;
                 names_match(name, p.name, &p.aliases).then(|| fill_proto(&p, room))
             })
         })
@@ -1137,7 +1218,7 @@ pub unsafe extern "C" fn getprotobynumber_r(
     unsafe {
         nss_files::reentrant(result_buf, buf, buflen, result, |room| {
             scan(Which::Protocols, PROTOCOLS, |line| {
-                let p = parse_proto(line)?;
+                let p = parse_numbered(line)?;
                 (p.number == proto).then(|| fill_proto(&p, room))
             })
         })
@@ -1186,7 +1267,7 @@ pub unsafe extern "C" fn getprotoent_r(
             proto_cur,
             Which::Protocols,
             PROTOCOLS,
-            |line, room| parse_proto(line).map(|p| fill_proto(&p, room)),
+            |line, room| parse_numbered(line).map(|p| fill_proto(&p, room)),
             result_buf,
             buf,
             buflen,
@@ -1215,6 +1296,152 @@ pub extern "C" fn setprotoent(_stayopen: i32) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endprotoent() {
     close_cursor(proto_cur);
+}
+
+// ---------------------------------------------------------------------------
+// RPC programs: <rpc/netdb.h>
+// ---------------------------------------------------------------------------
+
+fn fill_rpc(p: &NumberedLine<'_>, room: &mut Room) -> Result<Rpcent, i32> {
+    Ok(Rpcent {
+        r_name: room.string(p.name)?,
+        r_aliases: fill_list(
+            room,
+            Line {
+                rest: p.aliases.rest,
+            }
+            .words(),
+        )?,
+        r_number: p.number,
+    })
+}
+
+/// Look up an RPC program by name or alias: glibc's `getrpcbyname_r`.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated; `result_buf` and `result` writable; `buf`
+/// writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getrpcbyname_r(
+    name: *const u8,
+    result_buf: *mut Rpcent,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Rpcent,
+) -> i32 {
+    // SAFETY: the caller's pointers, checked non-null by `reentrant`.
+    unsafe {
+        nss_files::reentrant(result_buf, buf, buflen, result, |room| {
+            if name.is_null() {
+                return Ok(None);
+            }
+            let name = bytes(name);
+            scan(Which::Rpc, RPC, |line| {
+                let p = parse_numbered(line)?;
+                names_match(name, p.name, &p.aliases).then(|| fill_rpc(&p, room))
+            })
+        })
+    }
+}
+
+/// Look up an RPC program by number: glibc's `getrpcbynumber_r`.
+///
+/// # Safety
+///
+/// As [`getrpcbyname_r`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getrpcbynumber_r(
+    number: i32,
+    result_buf: *mut Rpcent,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Rpcent,
+) -> i32 {
+    // SAFETY: the caller's pointers, checked non-null by `reentrant`.
+    unsafe {
+        nss_files::reentrant(result_buf, buf, buflen, result, |room| {
+            scan(Which::Rpc, RPC, |line| {
+                let p = parse_numbered(line)?;
+                (p.number == number).then(|| fill_rpc(&p, room))
+            })
+        })
+    }
+}
+
+/// [`getrpcbyname_r`] into the calling thread's block.
+///
+/// # Safety
+///
+/// `name` is NUL-terminated.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getrpcbyname(name: *const u8) -> *const Rpcent {
+    nss_files::lookup_result(held(
+        rpc_held,
+        // SAFETY: the caller's string; the thread's block.
+        |p, b, l, r| unsafe { getrpcbyname_r(name, p, b, l, r) },
+    ))
+}
+
+/// [`getrpcbynumber_r`] into the calling thread's block.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getrpcbynumber(number: i32) -> *const Rpcent {
+    nss_files::lookup_result(held(
+        rpc_held,
+        // SAFETY: the thread's block.
+        |p, b, l, r| unsafe { getrpcbynumber_r(number, p, b, l, r) },
+    ))
+}
+
+/// The calling thread's next RPC program: 0, `ENOENT` at the end,
+/// `ERANGE`.
+///
+/// # Safety
+///
+/// `result_buf` and `result` writable; `buf` writable for `buflen` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getrpcent_r(
+    result_buf: *mut Rpcent,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Rpcent,
+) -> i32 {
+    // SAFETY: the caller's pointers; `db` is the thread's live block.
+    unsafe {
+        next_entry(
+            rpc_cur,
+            Which::Rpc,
+            RPC,
+            |line, room| parse_numbered(line).map(|p| fill_rpc(&p, room)),
+            result_buf,
+            buf,
+            buflen,
+            result,
+        )
+    }
+}
+
+/// The calling thread's next RPC program, or NULL at the end.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getrpcent() -> *const Rpcent {
+    nss_files::enumerated(held(
+        rpc_ent_held,
+        // SAFETY: the thread's block.
+        |p, b, l, r| unsafe { getrpcent_r(p, b, l, r) },
+    ))
+}
+
+/// Start the calling thread's enumeration of the RPC programs again.
+/// `stayopen` changes nothing, as for the other databases.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setrpcent(_stayopen: i32) {
+    close_cursor(rpc_cur);
+}
+
+/// End the calling thread's enumeration of the RPC programs.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endrpcent() {
+    close_cursor(rpc_cur);
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,10 +2162,11 @@ mod tests {
     #[test]
     fn every_built_in_line_parses() {
         let serv_ok: fn(&[u8]) -> bool = |l| parse_serv(l).is_some();
-        let proto_ok: fn(&[u8]) -> bool = |l| parse_proto(l).is_some();
+        let numbered_ok: fn(&[u8]) -> bool = |l| parse_numbered(l).is_some();
         for (name, text, parse) in [
             ("services", SERVICES, serv_ok),
-            ("protocols", PROTOCOLS, proto_ok),
+            ("protocols", PROTOCOLS, numbered_ok),
+            ("rpc", RPC, numbered_ok),
         ] {
             for (line, _) in nss_files::lines(text, 0) {
                 assert!(parse(line), "{name}: {:?}", String::from_utf8_lossy(line));
@@ -2119,9 +2347,324 @@ mod tests {
             assert_eq!((rc, r.is_null()), (0, true));
             assert!(getprotobyname(core::ptr::null()).is_null());
             assert!(getnetbyname(core::ptr::null()).is_null());
+            assert!(getrpcbyname(core::ptr::null()).is_null());
             let mut e = EtherAddr::ZERO;
             assert_eq!(ether_hostton(core::ptr::null(), &mut e), -1);
         }
+    }
+
+    // <rpc/netdb.h>, replayed against posix/tools/oracle/rpc_harness.py's
+    // program: its lines for each of its three runs.
+
+    /// glibc 2.39's answers, and the files it read.
+    const RPC_ORACLE: &str = include_str!("rpc_oracle.txt");
+
+    /// The harness's names and numbers, in its order.
+    const RPC_NAMES: &[&core::ffi::CStr] = &[
+        c"portmapper",
+        c"sunrpc",
+        c"rpcbind",
+        c"nfsprog",
+        c"ypserv",
+        c"ypprog",
+        c"mountd",
+        c"showmount",
+        c"bad100006",
+        c"nonum",
+        c"hex",
+        c"neg",
+        c"trailing",
+        c"big",
+        c"wrapped",
+        c"dup",
+        c"again",
+        c"nlockmgr",
+        c"tabs",
+        c"status",
+        c"last",
+        c"comment",
+        c"a",
+        c"missing",
+        c"",
+        c"rquota",
+        c"keyserver",
+        c"x25.inr",
+        c"sgi_fam",
+        c"amq",
+        c"NFS",
+    ];
+    const RPC_NUMBERS: &[i32] = &[
+        100_000,
+        100_001,
+        100_003,
+        100_004,
+        100_005,
+        100_006,
+        100_007,
+        0,
+        31,
+        -5,
+        1,
+        100_021,
+        100_024,
+        100_099,
+        42,
+        100_227,
+        150_001,
+        391_002,
+        545_580_417,
+    ];
+
+    /// The oracle's input `name`, its escapes undone.
+    fn rpc_input(name: &str) -> Vec<u8> {
+        let prefix = format!("input {name} = ");
+        let line = RPC_ORACLE
+            .lines()
+            .find_map(|l| l.strip_prefix(prefix.as_str()))
+            .unwrap();
+        let mut out = Vec::new();
+        let mut bytes = line.bytes();
+        while let Some(b) = bytes.next() {
+            if b != b'\\' {
+                out.push(b);
+                continue;
+            }
+            out.push(match bytes.next() {
+                Some(b'n') => b'\n',
+                Some(b't') => b'\t',
+                Some(b'\\') => b'\\',
+                other => panic!("{name}: escape {other:?}"),
+            });
+        }
+        out
+    }
+
+    /// The harness's `en`: errno's name, `kept` for its marker.
+    fn rpc_en(e: i32) -> String {
+        match e {
+            0 => "0".into(),
+            12345 => "kept".into(),
+            errno::ENOENT => "ENOENT".into(),
+            errno::ERANGE => "ERANGE".into(),
+            errno::EINVAL => "EINVAL".into(),
+            e => format!("e{e}"),
+        }
+    }
+
+    /// The harness's `entry`.
+    fn rpc_entry(r: &Rpcent) -> String {
+        let mut aliases = Vec::new();
+        for i in 0.. {
+            // SAFETY: an answer's NULL-terminated array of strings, read up
+            // to its NULL.
+            let a = unsafe { *r.r_aliases.add(i) };
+            if a.is_null() {
+                break;
+            }
+            aliases.push(text(a));
+        }
+        format!("{}|{}|[{}]", text(r.r_name), r.r_number, aliases.join(","))
+    }
+
+    /// The harness's `show`, `errno` read now.
+    fn rpc_show(run: &str, what: &str, r: *const Rpcent) -> String {
+        let answer = if r.is_null() {
+            "NULL".into()
+        } else {
+            // SAFETY: a non-null answer from the functions under test.
+            rpc_entry(unsafe { &*r })
+        };
+        format!(
+            "{run} {what} = {answer} errno={}",
+            rpc_en(errno::get_errno())
+        )
+    }
+
+    /// A `_r` form's answer as the harness prints it: the entry when it
+    /// was delivered into `r`, else where `res` was left -- NULL, or
+    /// `untouched` (still `unset`), or elsewhere.
+    fn rpc_delivered(rc: i32, r: &Rpcent, res: *const Rpcent, unset: *const Rpcent) -> String {
+        if rc == 0 && core::ptr::eq(res, r) {
+            rpc_entry(r)
+        } else if res.is_null() {
+            "NULL".into()
+        } else if core::ptr::eq(res, unset) {
+            "untouched".into()
+        } else {
+            "other".into()
+        }
+    }
+
+    /// The harness's `main`, call for call: the lines it prints as `run`.
+    fn rpc_probes(run: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for n in 0..64 {
+            errno::set_errno(12345);
+            let r = getrpcent();
+            out.push(rpc_show(run, &format!("getrpcent #{n}"), r));
+            if r.is_null() {
+                break;
+            }
+        }
+        setrpcent(0);
+        errno::set_errno(12345);
+        out.push(rpc_show(run, "getrpcent after setrpcent(0)", getrpcent()));
+        setrpcent(1);
+        errno::set_errno(12345);
+        out.push(rpc_show(run, "getrpcent after setrpcent(1)", getrpcent()));
+        errno::set_errno(12345);
+        out.push(rpc_show(run, "getrpcent after that", getrpcent()));
+        endrpcent();
+        errno::set_errno(12345);
+        out.push(rpc_show(run, "getrpcent after endrpcent", getrpcent()));
+        endrpcent();
+        for name in RPC_NAMES {
+            errno::set_errno(12345);
+            // SAFETY: a NUL-terminated name.
+            let r = unsafe { getrpcbyname(name.as_ptr().cast()) };
+            let what = format!("getrpcbyname({})", name.to_str().unwrap());
+            out.push(rpc_show(run, &what, r));
+        }
+        for &number in RPC_NUMBERS {
+            errno::set_errno(12345);
+            let r = getrpcbynumber(number);
+            out.push(rpc_show(run, &format!("getrpcbynumber({number})"), r));
+        }
+        let unset = core::ptr::dangling::<Rpcent>();
+        let mut buf = [0u8; 1024];
+        for size in (0..=96).step_by(8) {
+            for by_name in [true, false] {
+                let mut r = Rpcent::EMPTY;
+                let mut res = unset;
+                errno::set_errno(12345);
+                let b = buf.as_mut_ptr();
+                // SAFETY: a NUL-terminated name; `size` bytes of `buf`,
+                // which has 1024; outputs this test owns.
+                let (what, rc) = unsafe {
+                    if by_name {
+                        let name = c"portmapper".as_ptr().cast();
+                        let rc = getrpcbyname_r(name, &mut r, b, size, &mut res);
+                        ("getrpcbyname_r(portmapper", rc)
+                    } else {
+                        let rc = getrpcbynumber_r(100_001, &mut r, b, size, &mut res);
+                        ("getrpcbynumber_r(100001", rc)
+                    }
+                };
+                out.push(format!(
+                    "{run} {what}, {size}) = {} {} errno={}",
+                    rpc_en(rc),
+                    rpc_delivered(rc, &r, res, unset),
+                    rpc_en(errno::get_errno())
+                ));
+            }
+        }
+        let mut r = Rpcent::EMPTY;
+        let mut res = unset;
+        errno::set_errno(12345);
+        // SAFETY: a NUL-terminated name; the buffer's size; outputs this
+        // test owns.
+        let rc = unsafe {
+            getrpcbyname_r(
+                c"missing".as_ptr().cast(),
+                &mut r,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut res,
+            )
+        };
+        out.push(format!(
+            "{run} getrpcbyname_r(missing) = {} {} errno={}",
+            rpc_en(rc),
+            if res.is_null() { "NULL" } else { "other" },
+            rpc_en(errno::get_errno())
+        ));
+        setrpcent(0);
+        for n in 0..64 {
+            let mut r = Rpcent::EMPTY;
+            let mut res = unset;
+            errno::set_errno(12345);
+            let len = if n == 1 { 8 } else { buf.len() };
+            // SAFETY: `len` bytes of `buf`; outputs this test owns.
+            let rc = unsafe { getrpcent_r(&mut r, buf.as_mut_ptr(), len, &mut res) };
+            let answer = match rpc_delivered(rc, &r, res, unset) {
+                a if a == "untouched" => "other".into(),
+                a => a,
+            };
+            out.push(format!(
+                "{run} getrpcent_r #{n} = {} {answer} errno={}",
+                rpc_en(rc),
+                rpc_en(errno::get_errno())
+            ));
+            if rc != 0 && rc != errno::ERANGE {
+                break;
+            }
+        }
+        endrpcent();
+        out
+    }
+
+    /// Every probe of every run answers as glibc's did: `files` over the
+    /// harness's test file; `builtin` with no file, so from [`RPC`] -- which
+    /// glibc read as `/etc/rpc`; `none` with a file that cannot be opened
+    /// (`ENOENT`), which glibc answers as it does no file.
+    ///
+    /// A `_r` lookup that glibc found a buffer too small for may fit here:
+    /// `nss_files` copies the whole line into the buffer and takes it apart
+    /// there, so where its `ERANGE` starts is its layout's, not the
+    /// interface -- as `LAYOUT_DEPENDENT` above.  Such a probe must then give
+    /// the entry glibc gives with room; and wherever glibc's fits, ours must.
+    #[test]
+    fn every_rpc_answer_is_glibcs() {
+        let file: &'static [u8] = Vec::leak(rpc_input("rpc"));
+        assert_eq!(
+            String::from_utf8_lossy(&rpc_input("builtin")),
+            String::from_utf8_lossy(RPC),
+            "RPC is not the copy the oracle was made from: rerun rpc_harness.py"
+        );
+        let mut wrong = Vec::new();
+        for run in ["files", "builtin", "none"] {
+            match run {
+                "files" => set_test_text(Which::Rpc, Some(file)),
+                "builtin" => set_test_text(Which::Rpc, None),
+                _ => set_test_error(Which::Rpc, errno::ENOENT),
+            }
+            let want: Vec<&str> = RPC_ORACLE
+                .lines()
+                .filter(|l| l.strip_prefix(run).is_some_and(|r| r.starts_with(' ')))
+                .collect();
+            let ours = rpc_probes(run);
+            // glibc's answer to each sized lookup at the largest size.
+            let roomy = |line: &str| -> Option<String> {
+                let (probe, _) = line.split_once(", ")?;
+                let last = format!("{probe}, 96) = ");
+                want.iter()
+                    .find_map(|w| w.strip_prefix(last.as_str()).map(String::from))
+            };
+            for i in 0..want.len().max(ours.len()) {
+                let (w, o) = (want.get(i).copied(), ours.get(i).map(String::as_str));
+                let layout = match (w, o) {
+                    (Some(w), Some(o)) if w.ends_with("= ERANGE NULL errno=ERANGE") => {
+                        let (probe, _) = w.split_once(" = ").unwrap();
+                        roomy(w)
+                            .is_some_and(|a| a.starts_with("0 ") && o == format!("{probe} = {a}"))
+                    }
+                    _ => false,
+                };
+                if w != o && !layout {
+                    wrong.push(format!(
+                        "{run} line {}\n  glibc: {w:?}\n  ours:  {o:?}",
+                        i + 1
+                    ));
+                }
+            }
+        }
+        set_test_text(Which::Rpc, None);
+        assert!(
+            wrong.is_empty(),
+            "{} differ:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
     }
 
     // Generated by posix/tools/oracle/netdb_harness.py: the database files, the

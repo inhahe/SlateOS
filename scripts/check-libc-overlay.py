@@ -167,6 +167,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct sgrp": "gshadow.h",
     "struct fstab": "fstab.h",
     "struct ttyent": "ttyent.h",
+    "struct rpcent": "rpc/netdb.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.

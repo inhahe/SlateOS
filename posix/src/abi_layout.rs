@@ -1160,6 +1160,16 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::netdb::Rpcent,
+        "struct rpcent",
+        "rpc/netdb.h",
+        r_name,
+        r_aliases,
+        r_number
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Hostent,
         "struct hostent",
         "netdb.h",

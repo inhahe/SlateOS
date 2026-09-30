@@ -43,12 +43,14 @@ pub(crate) enum Which {
     GaiConf,
     /// `/etc/shells` -- the login shells `getusershell` lists.
     Shells,
+    /// `/etc/rpc` -- the ONC RPC programs `<rpc/netdb.h>` looks up.
+    Rpc,
 }
 
 impl Which {
     /// How many there are: the host tests keep a slot for each.
     #[cfg(test)]
-    const COUNT: usize = 12;
+    const COUNT: usize = 13;
 }
 
 impl Which {
@@ -67,6 +69,7 @@ impl Which {
             Which::HostConf => b"/etc/host.conf\0",
             Which::GaiConf => b"/etc/gai.conf\0",
             Which::Shells => b"/etc/shells\0",
+            Which::Rpc => b"/etc/rpc\0",
         }
     }
 }

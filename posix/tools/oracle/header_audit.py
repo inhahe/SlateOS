@@ -26,12 +26,20 @@ report marks: the LFS64 names, which musl gives only to _LARGEFILE64_SOURCE.
 printed with --all.
 
 `--missing` asks the other question: which functions and objects glibc
-2.39 exports (libc.so.6 and libm.so.6, at their default versions) and its
-headers declare, with every feature macro on, that libc.a does not define
-at all -- what a program written for glibc may call and find nothing to link
-against. Listed by the header glibc declares each in; the _FloatN aliases
-(`sinf128`, `strtof64` ...), which the compiler here has no types for, as a
-count per header (known-issues.md -> D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE).
+2.39 exports (libc.so.6, libm.so.6 and libresolv.so.2, at their default
+versions) and its headers declare, with every feature macro on, that libc.a
+does not define at all -- what a program written for glibc may call and find
+nothing to link against. libresolv is glibc's own library and not libc's,
+but a program here links libc.a alone for all of them (-lresolv as -lm), so
+what it lacks is libc.a's to lack. A name is the one a program writes: an
+identifier not reserved to the implementation, or a reserved export that
+glibc's header gives a public name by macro -- `res_ninit` is its
+`#define res_ninit __res_ninit`, printed `res_ninit (__res_ninit)`. Listed
+by the header glibc declares each in; the _FloatN aliases (`sinf128`,
+`strtof64` ...), which the compiler here has no types for, as a count per
+header (known-issues.md -> D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE).
+Until 2026-09-30 it read libc.so.6 and libm.so.6 only, and no reserved name
+at all, which hid libresolv's `inet_net_pton` and the renamed ones.
 
 Needs WSL with glibc 2.39's headers and libclang's Python bindings, as
 glibc_declarations.py does (its docstring says how), and zig (FASTPY_ZIG or
@@ -108,10 +116,11 @@ json.dump(out, open(sys.argv[4], "w"))
 
 LFS64 = "LFS64: musl's headers give it only to _LARGEFILE64_SOURCE, on purpose"
 
-# Run in WSL: argv = names file, headers file, output (JSON: name -> the file
-# glibc declares it in).
+# Run in WSL: argv = names file, headers file, output (JSON: "where", name ->
+# the file glibc declares it in; "renames", a name -> the public names glibc's
+# headers `#define` to it, as `res_ninit` is to `__res_ninit`).
 MISSING_READER = r'''
-import json, sys
+import json, re, sys
 import clang.cindex as ci
 ci.Config.set_library_file(LIBCLANG)
 names = set(open(sys.argv[1]).read().split())
@@ -119,32 +128,74 @@ headers = open(sys.argv[2]).read().split()
 idx = ci.Index.create()
 flags = ["-x", "c", "-std=gnu2x", "-D_GNU_SOURCE", "-D__STDC_WANT_IEC_60559_TYPES_EXT__",
          "-D__STDC_WANT_IEC_60559_FUNCS_EXT__"]
-out = {}
+public = re.compile(r"[A-Za-z][A-Za-z0-9_]*$")
+out, renames, seen = {}, {}, set()
 for h in headers:
-    tu = idx.parse("t.c", args=flags, unsaved_files=[("t.c", "#include <%s>\n" % h)])
+    tu = idx.parse("t.c", args=flags, unsaved_files=[("t.c", "#include <%s>\n" % h)],
+                   options=ci.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
     for c in tu.cursor.get_children():
-        if c.kind in (ci.CursorKind.FUNCTION_DECL, ci.CursorKind.VAR_DECL) \
-                and c.spelling in names and c.location.file is not None:
-            f = c.location.file.name
+        if c.location.file is None:
+            continue
+        f = c.location.file.name
+        if c.kind == ci.CursorKind.MACRO_DEFINITION:
+            # An object-like macro that is one other name: a rename. A file's
+            # macros are read the first time it is included, not again.
+            if f in seen:
+                continue
+            toks = [t.spelling for t in c.get_tokens()]
+            if len(toks) == 2 and toks[1] in names and public.match(toks[0]):
+                pubs = renames.setdefault(toks[1], [])
+                if toks[0] not in pubs:
+                    pubs.append(toks[0])
+        elif c.kind in (ci.CursorKind.FUNCTION_DECL, ci.CursorKind.VAR_DECL) \
+                and c.spelling in names:
             for pre in ("/usr/include/x86_64-linux-gnu/", "/usr/include/"):
                 if f.startswith(pre):
                     f = f[len(pre):]
+                    break
             out.setdefault(c.spelling, f)
-json.dump(out, open(sys.argv[3], "w"))
+    seen |= {inc.include.name for inc in tu.get_includes() if inc.include is not None}
+json.dump({"where": out, "renames": renames}, open(sys.argv[3], "w"))
 '''.replace("LIBCLANG", repr(LIBCLANG))
 
 FLOATN = re.compile(r".+f(?:16|32|64|128)x?(?:_r|_l)?$")
 
+# glibc's libraries a program here gets from libc.a alone.
+LIBS = ("libc.so.6", "libm.so.6", "libresolv.so.2")
 
-def missing(public: set[str]) -> None:
-    """--missing: glibc's exported, declared names libc.a does not define."""
+# A name a program may write: not reserved to the implementation.
+PUBLIC = re.compile(r"[A-Za-z]\w*")
+
+
+def writable(where: dict[str, str], renames: dict[str, list[str]],
+             defined: set[str]) -> dict[str, list[str]]:
+    """header -> the names a program writes for `where`'s: each one that is
+    not reserved, and each public name a macro gives a reserved one, as
+    `res_ninit (__res_ninit)` -- unless libc.a defines the public name
+    itself, which a program here links when the headers here do not rename
+    it: glibc's <libgen.h> makes `basename` `__xpg_basename`, musl's leaves
+    it `basename`. A reserved name no macro renames is glibc's own business
+    -- `__libc_start_main`, `__ctype_b_loc` -- and not a program's."""
+    by_file: dict[str, list[str]] = {}
+    for n, f in where.items():
+        if PUBLIC.fullmatch(n):
+            by_file.setdefault(f, []).append(n)
+        by_file.setdefault(f, []).extend(f"{pub} ({n})" for pub in renames.get(n, [])
+                                         if pub not in defined)
+    return {f: ns for f, ns in by_file.items() if ns}
+
+
+def missing(defined: set[str]) -> None:
+    """--missing: glibc's exported, declared names libc.a does not define --
+    every name libc.a defines, reserved or not, being `defined`."""
     with workdir() as t:
         d = Path(t)
-        r = run("nm -D --defined-only /lib/x86_64-linux-gnu/libc.so.6 "
-                "/lib/x86_64-linux-gnu/libm.so.6")
+        r = run("nm -D --defined-only " + " ".join(f"/lib/x86_64-linux-gnu/{lib}" for lib in LIBS))
+        if r.returncode != 0:
+            sys.exit(f"nm failed:\n{r.stderr}")
         exported = {line.split()[-1].split("@")[0] for line in r.stdout.splitlines()
                     if "@@" in line}
-        names = sorted(n for n in exported if not n.startswith("_") and n not in public)
+        names = sorted(exported - defined)
         r = run("dpkg -L libc6-dev | grep '[.]h$'")
         headers = sorted({h.replace("/usr/include/x86_64-linux-gnu/", "").replace("/usr/include/", "")
                           for h in r.stdout.split() if "/bits/" not in h and "/gnu/stubs" not in h})
@@ -155,23 +206,23 @@ def missing(public: set[str]) -> None:
                 f"{wsl_path(d / 'headers.txt')} {wsl_path(d / 'out.json')}")
         if r.returncode != 0:
             sys.exit(f"the reader failed:\n{r.stderr}")
-        where = json.loads((d / "out.json").read_text(encoding="utf-8"))
-    by_file: dict[str, list[str]] = {}
-    for n, f in where.items():
-        by_file.setdefault(f, []).append(n)
-    total = floatn = 0
+        found = json.loads((d / "out.json").read_text(encoding="utf-8"))
+    by_file = writable(found["where"], found["renames"], defined)
+    total = floatn = renamed = 0
     for f in sorted(by_file, key=lambda k: (-len(by_file[k]), k)):
         plain = sorted(n for n in by_file[f] if not FLOATN.fullmatch(n))
         fl = len(by_file[f]) - len(plain)
         total += len(plain)
         floatn += fl
+        renamed += sum(" (" in n for n in plain)
         extra = f" (and {fl} _FloatN)" if fl else ""
         if plain:
             print(f"<{f}> {len(plain)}{extra}: {' '.join(plain)}")
         elif fl:
             print(f"<{f}> {fl} _FloatN only")
-    print(f"{len(names)} names glibc exports that libc.a does not define; {len(where)} of them "
-          f"declared by glibc's headers: {total}, and {floatn} _FloatN aliases")
+    print(f"{len(names)} names glibc exports ({', '.join(LIBS)}) that libc.a does not define; "
+          f"{total + floatn} of them a program can write and glibc's headers declare: {total} "
+          f"({renamed} by the name a macro gives a reserved one), and {floatn} _FloatN aliases")
 
 
 def ours(zig: str, header: str, names: list[str]) -> dict[str, set[str]]:
@@ -197,10 +248,10 @@ def main() -> None:
     if musl is None:
         sys.exit("needs zig (FASTPY_ZIG or PATH)")
     shape = declared.shape_module()
-    public = declared.public_names(shape.parse_symbol_index(
-        ROOT / "toolchain" / "sysroot" / "lib" / "libc.a"))
+    members = shape.parse_symbol_index(ROOT / "toolchain" / "sysroot" / "lib" / "libc.a")
+    public = declared.public_names(members)
     if "--missing" in sys.argv:
-        missing(public)
+        missing(set().union(*members.values()))
         return
     heads = sorted({p.relative_to(b).as_posix() for b in (musl, overlay.OVERLAY)
                     for p in b.rglob("*.h") if not p.relative_to(b).as_posix().startswith("bits/")})

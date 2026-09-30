@@ -511,6 +511,7 @@ pub(crate) mod sysv_ipc;
 pub mod sysv_msg;
 pub mod sysv_sem;
 pub mod sysv_shm;
+pub(crate) mod tempname;
 pub mod threads;
 pub mod time;
 pub mod tls;

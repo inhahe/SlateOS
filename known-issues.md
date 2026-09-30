@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`; and `<dlfcn.h>`'s `dladdr1`, `dlmopen`, `dlvsym` and `_dl_find_object`, the rest of it made glibc's static one on the way -- `dl_iterate_phdr` never called back, so no C++ exception could be caught, D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT; and on 2026-09-30 `glob_pattern_p`, with `glob` and `fnmatch` rewritten; `addseverity`, with `fmtmsg` rewritten (D-POSIX-FMTMSG-KNEW-NONE-OF-ITS-VARIABLES); libutil's `login`, `logout` and `logwtmp` and glibc's `getutmp` and `getutmpx` (`posix/src/utmpx.rs`); `vlimit`, `rpmatch`, `getpt` and `getdirentries`; and the `long double` forms of `ecvt`, `fcvt` and `gcvt`, `qecvt` ... `qfcvt_r`: 16 more; and glibc's large-file names, 35 of the 40 -- all but `mkstemp64` ... `mkostemps64` and `tmpfile64`, which wait on the temporary-file functions' rewrite; and `aio_init`, with <aio.h>'s `struct aioinit`)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`; and `<dlfcn.h>`'s `dladdr1`, `dlmopen`, `dlvsym` and `_dl_find_object`, the rest of it made glibc's static one on the way -- `dl_iterate_phdr` never called back, so no C++ exception could be caught, D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT; and on 2026-09-30 `glob_pattern_p`, with `glob` and `fnmatch` rewritten; `addseverity`, with `fmtmsg` rewritten (D-POSIX-FMTMSG-KNEW-NONE-OF-ITS-VARIABLES); libutil's `login`, `logout` and `logwtmp` and glibc's `getutmp` and `getutmpx` (`posix/src/utmpx.rs`); `vlimit`, `rpmatch`, `getpt` and `getdirentries`; and the `long double` forms of `ecvt`, `fcvt` and `gcvt`, `qecvt` ... `qfcvt_r`: 16 more; and glibc's large-file names, all 40 -- `mkstemp64` ... `mkostemps64` and `tmpfile64` with the temporary-file functions made glibc's, D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS; and `aio_init`, with <aio.h>'s `struct aioinit`)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176280,7 +176280,7 @@ probes for one (`configure`) takes its fallback. Measured by
 | IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` -- **done 2026-09-29** (`posix/src/inet6.rs`; the source filters refused) |
 | GNU libraries in libc | argz (12) and envz (6) -- **done 2026-09-29** (`posix/src/argz.rs`) -- argp (10), obstack's four, the old GNU regex API (`re_compile_pattern` ... 9), printf's registration (7), `mcheck` and `mtrace` (6) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
 | system databases | `/etc/gshadow` (`getsgnam` ... 11), `/etc/fstab` (`getfsent` ... 5), `/etc/ttys` (`getttyent` ... 4); `getutmp` `getutmpx` and `login` `logout` `logwtmp` -- **done 2026-09-30** (`posix/src/utmpx.rs`) | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
-| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s (**done 2026-09-30**, `posix/src/stdlib.rs`), `rpmatch` `getpt` `getdirentries` `vlimit` (**done 2026-09-30**), `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym` (**done 2026-09-29**, `posix/src/dlfcn.rs`), `glob_pattern_p` and `addseverity` (**done 2026-09-30**), `monstartup` `sprofil`, and the forty large-file names musl's headers have only as macros (`mkstemp64`, `pread64` ...) -- 35 **done 2026-09-30**, `mkstemp64` ... `mkostemps64` and `tmpfile64` not yet | |
+| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s (**done 2026-09-30**, `posix/src/stdlib.rs`), `rpmatch` `getpt` `getdirentries` `vlimit` (**done 2026-09-30**), `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym` (**done 2026-09-29**, `posix/src/dlfcn.rs`), `glob_pattern_p` and `addseverity` (**done 2026-09-30**), `monstartup` `sprofil`, and the forty large-file names musl's headers have only as macros (`mkstemp64`, `pread64` ...) -- **done 2026-09-30** | |
 
 **The proper fix, family by family:** each written from its specification
 -- the C standard, POSIX, the Linux man pages -- with glibc 2.39 as the
@@ -176807,3 +176807,63 @@ written a second way, agrees with glibc on all 804 in glibc's order and
 writes the deviations in this library's.
 
 **Where:** `posix/src/fmtmsg.rs`; `posix/include/fmtmsg.h` (`addseverity`).
+
+## D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS — `tmpfile` never removed its file; `mkstemp` and its family drew six letters from 36 with a bias and gave up after 100; `mkostemp` or'd the caller's access mode into `O_RDWR`; `mktemp` never checked its name was free (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/tempname.rs`), but for one difference the kernel forces: see "Still open"**
+
+**In short:** these are the functions a program calls for a scratch file or
+a name for one. `tmpfile` must make a file that disappears when it is
+closed or the program exits; ours left every one in `/tmp` for good, so a
+program calling it in a loop filled the disk. `mkstemp` and its relatives
+must pick an unused name from the template's `XXXXXX`; ours picked from
+fewer letters than glibc (36, not 62), slightly unevenly, and gave up after
+100 tries where glibc tries 238,328; and a failed draw of random bytes
+(ignored) made every try the same name. `mkostemp(t, O_WRONLY)` asked
+`open` for an access mode that does not exist. `mktemp` returned a name
+without checking that nothing had it, and NULL where glibc and SUSv2
+return the template emptied.
+
+| | Was | Is (glibc 2.39's) |
+|---|---|---|
+| `tmpfile` | `/tmp/tmpXXXXXX`, never removed | `O_TMPFILE` if the kernel has it (it does not yet), else `/tmp/tmpfXXXXXX`, removed when the stream is closed, `freopen`ed onto another file, or at `exit` -- by the process that made it |
+| a name's six bytes | `[0-9a-z]`, `byte % 36` (the first four digits a little likelier), from `getrandom`, its failure ignored | `[a-zA-Z0-9]` in glibc's order, drawn from `arc4random` without bias |
+| names tried | 100, then `EEXIST` | 62 cubed (glibc's `ATTEMPTS_MIN`), then `EEXIST` |
+| `mkostemp`'s flags | or'd with `O_RDWR | O_CREAT | O_EXCL` | their access mode replaced by `O_RDWR`, as glibc's `try_file` |
+| `mktemp` | a name, not checked; NULL for a bad template | a name `lstat` says is free; the template always, emptied on any failure |
+| `errno` after a success | whatever `open` left | as it was |
+| `mkstemp64`, `mkostemp64`, `mkstemps64`, `mkostemps64`, `tmpfile64` | missing | glibc's large-file names for the same functions |
+
+`tmpnam`, `tmpnam_r` and `tempnam` were glibc's already (the stdio rewrite,
+`D-POSIX-STDIO-WAS-SIXTEEN-UNLOCKED-SLOTS`); their name generator and directory search moved into
+`posix/src/tempname.rs` with the rest, so that there is one of each.
+
+**Still open -- `tmpfile`'s file has a name while it is open.** glibc
+unlinks it at once and the file lives on through the descriptor. This
+kernel's descriptors reach a file through its name (`kernel/src/fs/handle.rs`
+re-resolves the path on every read and write), so an unlinked open file is
+lost to its own descriptor; and `O_TMPFILE` is refused
+(`posix/src/file.rs`, `EOPNOTSUPP`). So the name stays until the stream lets
+go of the file. What differs from glibc: another process can see
+`/tmp/tmpfXXXXXX` while it is open; `fstat` says one link, not none; and a
+program that ends without `exit` (`_exit`, a fault) leaves the file, which
+ISO C allows ("whether an open temporary file is removed is
+implementation-defined"). A stream a child inherits across `fork` is not
+removed by the child. **The proper fix** is the kernel's: a descriptor that
+outlives its file's name (an inode or object reference, orphan inodes
+reclaimed at last close), or a working `O_TMPFILE` -- lane A's, recorded
+in `todo.txt` under the `O_TMPFILE` entry. When either lands, `tmpfile`
+needs no change for `O_TMPFILE` (it is tried first), or one line to unlink
+at once. design-decisions.md §1151.
+
+**Tests:** `posix/tools/oracle/tempfile_harness.py` records glibc 2.39's
+answers (`tempfile_oracle.txt`, 554 probes): 34 template shapes through the
+ten functions, each run eight times so that the bytes a name replaces are
+told from those it keeps; the flags the `o` forms take and what the
+descriptor has; the modes under three umasks; `tmpfile` with and without
+`$TMPDIR`; `tempnam` over nine directories, six prefixes and four
+`$TMPDIR`s; `tmpnam` and `tmpnam_r`. The tests replay them through the
+functions themselves over a filesystem in memory (`tempname::fake`), and
+check that `exit` and `freopen` remove what they should, once.
+
+**Where:** `posix/src/tempname.rs` (new); `posix/src/stdlib.rs`
+(`mkstemp` ... `mkdtemp`, `mktemp`, `tmpfile`); `posix/src/stdio.rs`
+(`tmpnam`, `tempnam`, the stream's hold on a temporary name).

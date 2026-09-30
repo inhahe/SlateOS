@@ -214,6 +214,12 @@ pub struct File {
     /// `fgetln`'s line.
     getln_buf: *mut u8,
     getln_size: usize,
+    /// The name of the file, if the stream is `tmpfile`'s and the file had
+    /// to be made with one: removed when the stream lets go of the file
+    /// ([`hold_temporary`]).  `malloc`ed, or NULL.
+    tmp_name: *mut u8,
+    /// The process that made it, which alone removes it.
+    tmp_owner: i32,
 }
 
 impl File {
@@ -248,6 +254,8 @@ impl File {
             pipe_pid: 0,
             getln_buf: core::ptr::null_mut(),
             getln_size: 0,
+            tmp_name: core::ptr::null_mut(),
+            tmp_owner: 0,
         }
     }
 }
@@ -1154,7 +1162,49 @@ unsafe fn free_stream(f: *mut File) {
     // null.
     unsafe {
         crate::malloc::free((*f).getln_buf);
+        crate::malloc::free((*f).tmp_name);
         crate::malloc::free(f.cast());
+    }
+}
+
+/// Have stream `f` remove `name` -- the file it was made on -- when it lets
+/// go of the file: [`fclose`], [`freopen`] onto another, or `exit`'s
+/// [`exit_cleanup`].  `tmpfile`'s, for a kernel whose descriptors cannot
+/// outlive their file's name (see `stdlib.rs`'s `tmpfile`).  Only this
+/// process removes it: a child that inherits the stream across `fork` and
+/// closes it leaves the file to its parent, which still has it open.
+///
+/// # Safety
+///
+/// `stream` is a stream `fdopen` just made, and `name` a `malloc`ed C
+/// string the stream now owns.
+pub(crate) unsafe fn hold_temporary(stream: *mut u8, name: *mut u8) {
+    let f = stream.cast::<File>();
+    // SAFETY: the caller's contract; no other thread has the stream yet.
+    unsafe {
+        (*f).tmp_name = name;
+        (*f).tmp_owner = crate::process::getpid();
+    }
+}
+
+/// Remove the file stream `f` holds the name of, if this process made it,
+/// and forget the name.
+///
+/// # Safety
+///
+/// `f` is a live stream, locked or not yet shared.
+unsafe fn release_temporary(f: *mut File) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let name = (*f).tmp_name;
+        if name.is_null() {
+            return;
+        }
+        if (*f).tmp_owner == crate::process::getpid() {
+            crate::tempname::remove_name(name);
+        }
+        crate::malloc::free(name);
+        (*f).tmp_name = core::ptr::null_mut();
     }
 }
 
@@ -1448,7 +1498,9 @@ fn flush_all() -> i32 {
 /// What `exit` does to the streams, as glibc's `_IO_cleanup` does: every
 /// stream's output flushed, and every stream the program used synced -- an
 /// input stream's descriptor moved back to where the program stopped
-/// reading, so a process that inherits it continues from there.
+/// reading, so a process that inherits it continues from there.  And every
+/// `tmpfile` this process made that is still open removed, which glibc's
+/// had done when it was made (see [`hold_temporary`]).
 pub(crate) fn exit_cleanup() {
     for_each_stream(|f| {
         // SAFETY: a live stream, locked for the flush.
@@ -1458,6 +1510,8 @@ pub(crate) fn exit_cleanup() {
             if (*f).mode != 0 || (*f).rpos != (*f).rend {
                 let _ = sync(f); // as above
             }
+            // ISO C: "all files created by the tmpfile function are removed".
+            release_temporary(f);
         }
     });
 }
@@ -1491,6 +1545,7 @@ pub extern "C" fn fclose(stream: *mut u8) -> i32 {
             file.wpos = core::ptr::null_mut();
             file.wend = core::ptr::null_mut();
             file.fd = -1;
+            release_temporary(f);
         }
     }
     // SAFETY: the flags are ours to read; the stream is closed.
@@ -1623,6 +1678,11 @@ pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut 
             }
             crate::file::close(newfd);
         }
+    }
+    if !path.is_null() {
+        // The stream is another file's now: a temporary one it was is gone.
+        // SAFETY: locked.
+        unsafe { release_temporary(f) };
     }
     // SAFETY: locked.
     let fd = unsafe { (*f).fd };
@@ -3768,140 +3828,25 @@ pub extern "C" fn remove(path: *const u8) -> i32 {
 pub const L_TMPNAM: usize = 20;
 /// `TMP_MAX`: how many distinct names [`tmpnam`] promises -- musl's header's
 /// 10000, the number a C program compiled here reads (design-decisions.md
-/// section 1119).  `tmpnam` itself tries glibc's [`TMPNAM_ATTEMPTS`].
+/// section 1119).  `tmpnam` itself tries glibc's 62 cubed,
+/// `crate::tempname::ATTEMPTS`.
 pub const TMP_MAX: u32 = 10_000;
 
-/// How many names [`tmpnam`] tries before it gives up: glibc's
-/// `ATTEMPTS_MIN`, 62 cubed, which is also glibc's `TMP_MAX`.
-const TMPNAM_ATTEMPTS: u32 = 62 * 62 * 62;
-
-/// Whether `path` names a directory.
-fn dir_exists(path: *const u8) -> bool {
-    let saved = errno::get_errno();
-    // SAFETY: an all-zero `Stat` is a valid output buffer.
-    let mut st: crate::stat::Stat = unsafe { core::mem::zeroed() };
-    let ok = crate::file::stat(path, &raw mut st) == 0 && st.st_mode & 0o170_000 == 0o040_000;
-    errno::set_errno(saved);
-    ok
-}
-
-/// glibc's `__path_search`: `dir/pfxXXXXXX` into `buf`, with `dir` the first
-/// that is a directory of `$TMPDIR` (if `try_tmpdir`), `dir`, and `/tmp`,
-/// and `pfx` at most five bytes of it (`"file"` if NULL or empty); a
-/// trailing `/` on `dir` is dropped.  The length before the `X`s, or `None`
-/// with `ENOENT` (no directory) or `EINVAL` (does not fit).
-///
-/// # Safety
-///
-/// `dir` and `pfx` are C strings or NULL.
-unsafe fn path_search(
-    buf: &mut [u8],
-    dir: *const u8,
-    pfx: *const u8,
-    try_tmpdir: bool,
-) -> Option<usize> {
-    let mut d: *const u8 = core::ptr::null();
-    if try_tmpdir {
-        // SAFETY: a C string.
-        let env = unsafe { crate::environ::secure_getenv(c"TMPDIR".as_ptr().cast()) };
-        if !env.is_null() && dir_exists(env) {
-            d = env;
-        }
-    }
-    if d.is_null() && !dir.is_null() && dir_exists(dir) {
-        d = dir;
-    }
-    if d.is_null() {
-        if !dir_exists(c"/tmp".as_ptr().cast()) {
-            errno::set_errno(errno::ENOENT);
-            return None;
-        }
-        d = c"/tmp".as_ptr().cast();
-    }
-    // SAFETY: C strings.
-    let dir_bytes = unsafe { core::slice::from_raw_parts(d, crate::string::strlen(d)) };
-    let mut dlen = dir_bytes.len();
-    while dlen > 1 && dir_bytes.get(dlen.wrapping_sub(1)) == Some(&b'/') {
-        dlen = dlen.wrapping_sub(1);
-    }
-    // SAFETY: as above.
-    let pfx_bytes: &[u8] = if pfx.is_null() || unsafe { *pfx } == 0 {
-        b"file"
-    } else {
-        // SAFETY: as above.
-        unsafe { core::slice::from_raw_parts(pfx, crate::string::strlen(pfx)) }
-    };
-    let plen = pfx_bytes.len().min(5);
-    let stem = dlen.saturating_add(1).saturating_add(plen);
-    if stem.saturating_add(7) > buf.len() {
-        errno::set_errno(errno::EINVAL);
-        return None;
-    }
-    let parts: [&[u8]; 4] = [
-        dir_bytes.get(..dlen).unwrap_or(&[]),
-        b"/",
-        pfx_bytes.get(..plen).unwrap_or(&[]),
-        b"XXXXXX\0",
-    ];
-    let mut at = 0usize;
-    for part in parts {
-        for &b in part {
-            if let Some(slot) = buf.get_mut(at) {
-                *slot = b;
-            }
-            at = at.wrapping_add(1);
-        }
-    }
-    Some(stem)
-}
-
-/// glibc's `__gen_tempname(…, __GT_NOCREATE)`: fill the six `X`s at `at`
-/// with random letters and digits until the name does not exist -- `lstat`
-/// says `ENOENT` -- trying [`TMPNAM_ATTEMPTS`] times.  `false` with `EEXIST` if every
-/// name was taken, or with `lstat`'s error if it failed otherwise.
-fn gen_tempname_nocreate(buf: &mut [u8], at: usize) -> bool {
-    const LETTERS: &[u8; 62] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let saved = errno::get_errno();
-    for _ in 0..TMPNAM_ATTEMPTS {
-        let mut r =
-            u64::from(crate::random::arc4random()) << 32 | u64::from(crate::random::arc4random());
-        for i in 0..6usize {
-            let pick = usize::try_from(r % 62).unwrap_or(0);
-            r /= 62;
-            if let Some(slot) = buf.get_mut(at.wrapping_add(i)) {
-                *slot = LETTERS.get(pick).copied().unwrap_or(b'x');
-            }
-        }
-        // SAFETY: an all-zero `Stat` is a valid output buffer; `buf` is a C
-        // string (its NUL follows the `X`s).
-        let mut st: crate::stat::Stat = unsafe { core::mem::zeroed() };
-        if crate::file::lstat(buf.as_ptr(), &raw mut st) == 0 {
-            continue;
-        }
-        if errno::get_errno() == errno::ENOENT {
-            errno::set_errno(saved);
-            return true;
-        }
-        return false;
-    }
-    errno::set_errno(errno::EEXIST);
-    false
-}
-
 /// A name for a temporary file, `/tmp/fileXXXXXX` with the `X`s chosen so no
-/// file has it yet (glibc's).  Into `s` (at least `L_tmpnam` bytes) if not
-/// NULL, else into a static buffer the next call overwrites.  NULL if no
-/// name could be made.
+/// file has it yet (glibc's; see `crate::tempname`).  Into `s` (at least
+/// `L_tmpnam` bytes) if not NULL, else into a static buffer the next call
+/// overwrites.  NULL if no name could be made.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
+    use crate::tempname::{Kind, gen_tempname, path_search};
     static mut NAME: [u8; L_TMPNAM] = [0; L_TMPNAM];
     let mut tmp = [0u8; L_TMPNAM];
     // SAFETY: NULLs for the directory and prefix.
-    let Some(at) = (unsafe { path_search(&mut tmp, core::ptr::null(), core::ptr::null(), false) })
-    else {
+    if unsafe { path_search(&mut tmp, core::ptr::null(), core::ptr::null(), false) }.is_none() {
         return core::ptr::null_mut();
-    };
-    if !gen_tempname_nocreate(&mut tmp, at) {
+    }
+    // SAFETY: `path_search` wrote a C string.
+    if unsafe { gen_tempname(tmp.as_mut_ptr(), 0, Kind::NoCreate) } < 0 {
         return core::ptr::null_mut();
     }
     let out = if s.is_null() {
@@ -3916,15 +3861,22 @@ pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
 }
 
 /// A name for a temporary file in `dir` with prefix `pfx`, as glibc's
-/// `tempnam` chooses it (see [`path_search`]): a `malloc`'d string, or NULL.
+/// `tempnam` chooses it (see `crate::tempname`): a `malloc`'d string, or
+/// NULL.
+///
+/// # Safety
+///
+/// `dir` and `pfx` are NULL or C strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn tempnam(dir: *const u8, pfx: *const u8) -> *mut u8 {
-    let mut buf = [0u8; 4096];
+    use crate::tempname::{Kind, gen_tempname, path_search};
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
     // SAFETY: the caller's C strings.
-    let Some(at) = (unsafe { path_search(&mut buf, dir, pfx, true) }) else {
+    if unsafe { path_search(&mut buf, dir, pfx, true) }.is_none() {
         return core::ptr::null_mut();
-    };
-    if !gen_tempname_nocreate(&mut buf, at) {
+    }
+    // SAFETY: `path_search` wrote a C string.
+    if unsafe { gen_tempname(buf.as_mut_ptr(), 0, Kind::NoCreate) } < 0 {
         return core::ptr::null_mut();
     }
     // SAFETY: `buf` is a C string.
@@ -5108,20 +5060,75 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Temporary names
+    // tmpfile's streams: the name removed when the stream lets go of it
     // -----------------------------------------------------------------------
 
+    /// The names `tmpfile` made, in order, from the filesystem in memory.
+    fn temporary_names() -> std::vec::Vec<std::vec::Vec<u8>> {
+        crate::tempname::fake::with(|fs| fs.opened.iter().map(|o| o.0.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    fn removed_names() -> std::vec::Vec<std::vec::Vec<u8>> {
+        crate::tempname::fake::with(|fs| fs.removed.clone()).unwrap_or_default()
+    }
+
+    /// `exit` removes each temporary file this process made -- once: a
+    /// stream closed after it removes nothing more -- and leaves one a
+    /// parent made (a stream inherited across `fork`) to the parent.
     #[test]
-    fn path_search_builds_glibcs_template() {
-        // No directory exists on the host, so glibc's answer is ENOENT.
-        let mut buf = [0u8; 64];
-        errno::set_errno(0);
+    fn exit_removes_this_processs_temporary_files() {
+        let _g = lock_std_streams_for_test();
+        crate::tempname::fake::install(crate::tempname::fake::Fs::harness());
+        let mine = crate::stdlib::tmpfile();
+        let parents = crate::stdlib::tmpfile();
+        assert!(!mine.is_null() && !parents.is_null());
+        // SAFETY: a live stream of this test's: as a child sees its parent's.
+        unsafe {
+            (*parents.cast::<File>()).tmp_owner = crate::process::getpid().wrapping_add(1);
+        }
+        let names = temporary_names();
+        exit_cleanup();
+        assert_eq!(removed_names(), [names[0].clone()]);
+        // (The host's close of a descriptor the fake made fails -- its system
+        // call is a stub -- and the stream is gone either way.)
+        let _ = fclose(mine);
+        let _ = fclose(parents);
         assert_eq!(
-            unsafe { path_search(&mut buf, core::ptr::null(), core::ptr::null(), false) },
-            None
+            removed_names(),
+            [names[0].clone()],
+            "removed once, and only mine"
         );
-        assert_eq!(errno::get_errno(), errno::ENOENT);
-        assert!(tmpnam(core::ptr::null_mut()).is_null());
+        crate::tempname::fake::take();
+    }
+
+    /// `freopen` onto another file lets go of a temporary one -- here the
+    /// open fails, and the stream is closed, which removes it just the same
+    /// -- and `freopen(NULL, ...)`, the same file again, keeps it.
+    #[test]
+    fn freopen_lets_go_of_a_temporary_file() {
+        crate::tempname::fake::install(crate::tempname::fake::Fs::harness());
+        let f = crate::stdlib::tmpfile();
+        assert!(!f.is_null());
+        // SAFETY: a live stream; C strings.
+        let g = unsafe { freopen(c"/nonexistent/x".as_ptr().cast(), c"w".as_ptr().cast(), f) };
+        assert!(g.is_null());
+        assert_eq!(removed_names(), temporary_names());
+
+        let f = crate::stdlib::tmpfile();
+        assert!(!f.is_null());
+        // SAFETY: as above.
+        let g = unsafe { freopen(core::ptr::null(), c"r+".as_ptr().cast(), f) };
+        let names = temporary_names();
+        if g.is_null() {
+            // Not reopened (nothing at /proc/self/fd here): closed, removed.
+            assert_eq!(removed_names(), names);
+        } else {
+            assert_eq!(removed_names(), [names[0].clone()], "kept while open");
+            let _ = fclose(g); // as above
+            assert_eq!(removed_names(), names);
+        }
+        crate::tempname::fake::take();
     }
 
     #[test]

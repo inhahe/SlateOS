@@ -1391,183 +1391,145 @@ pub unsafe extern "C" fn bsearch(
 // ---------------------------------------------------------------------------
 // Temporary files
 // ---------------------------------------------------------------------------
+//
+// Each over crate::tempname -- glibc's __gen_tempname and __path_search --
+// where what a template must be, and what becomes of it, is written down.
+// mkstemp, mkostemp, mkstemps, mkostemps and mkdtemp are archive members of
+// their own (gnulib replaces them: check-libc-shape.py's REPLACEABLE), and
+// their large-file names one more, written over crate::tempname rather than
+// over them: a program that brings its own mkstemp is neither given this
+// library's by mkstemp64 nor has its own run by it.
 
 /// Own archive member — gnulib replaces `mkstemp`. See string.rs's module header.
 mod gnu_mkstemp {
-    /// Create a unique temporary file.
-    ///
-    /// The `template` string must end with exactly six 'X' characters
-    /// (e.g., `"/tmp/fileXXXXXX"`).  These are replaced with unique
-    /// characters and the file is created atomically.
-    ///
-    /// Returns an open file descriptor on success, or -1 on error.
+    /// `mkstemp(template)`: a new file, named by the template with its last
+    /// six `X`s made letters and digits, opened `O_RDWR`, mode 0600 before
+    /// the umask.  Its descriptor, or -1 with `errno`: `EINVAL` for a
+    /// template that does not end in six `X`s (or is NULL, where glibc's
+    /// faults), `EEXIST` when every name tried was taken, else the `open`'s
+    /// (the template then holding the name that failed).
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
-        if template.is_null() {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Generate random bytes for the suffix.  Use getrandom (backed
-            // by RDRAND) for unpredictability — predictable temp file names
-            // are a security vulnerability (symlink attacks).
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            // Fill the 6 X's with alphanumeric characters from random bytes.
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                // SAFETY: suffix_start + j < len, template is writable.
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // Try to create the file exclusively.
-            let flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-            let fd = crate::file::open(template, flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            // If EEXIST, try again.  Any other error, bail.
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, 0) }
     }
 }
 pub use gnu_mkstemp::mkstemp;
 
-/// Generate a unique temporary filename (DEPRECATED — use `mkstemp`).
+/// `mktemp(template)`: the template's last six `X`s made a name nothing has
+/// yet, as `mkstemp` makes one, but nothing created -- which is why it is
+/// obsolete: the name is free when it is returned and anyone's after.
 ///
-/// Replaces the last 6 'X' characters in `template` with random
-/// characters to create a unique filename.  Does NOT create the file,
-/// which is inherently racy (TOCTOU vulnerability).
-///
-/// Returns `template` on success, or sets errno and returns NULL on
-/// failure.
+/// Returns `template`, always, as SUSv2 and glibc have it: empty (its first
+/// byte NUL) if no name could be made, whatever the reason, with `errno`
+/// saying which -- `EINVAL` for a template that does not end in six `X`s,
+/// `ENOTDIR` for one inside a file, `EEXIST` when every name was taken.  (It
+/// returned NULL for some of those until 2026-09-30.)  A NULL template,
+/// where glibc's faults, is NULL with `EINVAL`.
 ///
 /// # Safety
 ///
-/// `template` must be a writable null-terminated string with at least
-/// 6 trailing 'X' characters.
+/// `template` must be NULL or a writable C string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return core::ptr::null_mut();
     }
-
-    let len = unsafe { crate::string::strlen(template) };
-    if len < 6 {
-        crate::errno::set_errno(crate::errno::EINVAL);
-        // POSIX: mktemp sets template[0] = '\0' on error.
-        unsafe {
-            *template = 0;
-        }
-        return core::ptr::null_mut();
+    // SAFETY: a writable C string, the caller's.
+    if unsafe { crate::tempname::gen_tempname(template, 0, crate::tempname::Kind::NoCreate) } < 0 {
+        // SAFETY: as above; the string has at least its NUL.
+        unsafe { *template = 0 };
     }
-
-    // Verify the last 6 characters are 'X'.
-    let suffix_start = len.wrapping_sub(6);
-    let mut i: usize = 0;
-    while i < 6 {
-        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            unsafe {
-                *template = 0;
-            }
-            return core::ptr::null_mut();
-        }
-        i = i.wrapping_add(1);
-    }
-
-    // Generate random suffix.
-    let mut rand_bytes = [0u8; 6];
-    crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-    let mut j: usize = 0;
-    while j < 6 {
-        let rb = rand_bytes.get(j).copied().unwrap_or(0);
-        let idx = rb % 36;
-        let ch = if idx < 10 {
-            b'0'.wrapping_add(idx)
-        } else {
-            b'a'.wrapping_add(idx.wrapping_sub(10))
-        };
-        unsafe {
-            *template.add(suffix_start.wrapping_add(j)) = ch;
-        }
-        j = j.wrapping_add(1);
-    }
-
     template
 }
 
-/// Create a temporary file.
+/// `tmpfile()`: a new file, read and written through the stream returned
+/// (`w+b`), and removed when the stream is closed or the program exits, as
+/// ISO C has it.  NULL, with `errno`, if none could be made.
 ///
-/// Returns a FILE* stream for a unique temporary file opened in "w+b"
-/// mode, or null on error.  The file is automatically deleted when
-/// closed.
+/// glibc makes the file nameless -- `O_TMPFILE` in `/tmp` -- and failing
+/// that makes `/tmp/tmpfXXXXXX` as `mkstemp` makes a name and unlinks it at
+/// once, the file living on through its descriptor.  The first is tried
+/// here too.  The second cannot be done as glibc does it: this kernel's
+/// descriptors reach a file through its name, so unlinking an open file
+/// cuts every descriptor off from it.  The name stays, then, until the
+/// stream lets go of the file -- `fclose`, `freopen` onto another, `exit` --
+/// and is removed then, by the process that made it (a child that inherits
+/// the stream leaves it to the parent).  A program that ends otherwise
+/// (`_exit`, a fault) leaves the file, which ISO C allows
+/// (design-decisions.md §1151).  It never did anything else: until
+/// 2026-09-30 the file was `/tmp/tmpXXXXXX` and was never removed at all.
 ///
-/// Note: Automatic deletion is not implemented (no unlink-on-close
-/// support yet).  The file persists until manually removed.
+/// A success leaves `errno` as it was, as glibc's does where the nameless
+/// file can be made.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tmpfile() -> *mut u8 {
-    let mut template: [u8; 20] = *b"/tmp/tmpXXXXXX\0\0\0\0\0\0";
-    let fd = unsafe { mkstemp(template.as_mut_ptr()) };
+    use crate::fcntl::{O_EXCL, O_RDWR, O_TMPFILE};
+    use crate::tempname::{FILE_MODE, Kind, gen_tempname, path_search, remove_name};
+    let saved = crate::errno::get_errno();
+    // glibc's __gen_tempfd: a nameless file, where there are any.
+    let fd = crate::file::open(
+        c"/tmp".as_ptr().cast(),
+        O_RDWR | O_TMPFILE | O_EXCL,
+        FILE_MODE,
+    );
+    if fd >= 0 {
+        crate::errno::set_errno(saved);
+        // SAFETY: a C string for the mode.
+        let f = unsafe { crate::stdio::fdopen(fd, c"w+b".as_ptr().cast()) };
+        if f.is_null() {
+            let e = crate::errno::get_errno();
+            crate::file::close(fd);
+            crate::errno::set_errno(e);
+        }
+        return f;
+    }
+    crate::errno::set_errno(saved);
+    let mut name = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: NULL for the directory, a C string for the prefix.
+    if unsafe { path_search(&mut name, core::ptr::null(), c"tmpf".as_ptr().cast(), false) }
+        .is_none()
+    {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: `path_search` wrote a C string into `name`.
+    let fd = unsafe { gen_tempname(name.as_mut_ptr(), 0, Kind::File(0)) };
     if fd < 0 {
         return core::ptr::null_mut();
     }
-    // Return a FILE* (not a raw fd) per POSIX.
-    // SAFETY: a C string for the mode.
-    let f = unsafe { crate::stdio::fdopen(fd, c"w+".as_ptr().cast::<u8>()) };
+    // The name, for the stream to remove; without room for it, the file is
+    // removed now, as there would be nothing to remove it by later.
+    // SAFETY: a C string.
+    let held = unsafe { crate::string::strdup(name.as_ptr()) };
+    let f = if held.is_null() {
+        core::ptr::null_mut()
+    } else {
+        // SAFETY: a C string for the mode.
+        unsafe { crate::stdio::fdopen(fd, c"w+b".as_ptr().cast()) }
+    };
     if f.is_null() {
-        // The descriptor is ours to close if no stream took it.
         let e = crate::errno::get_errno();
         crate::file::close(fd);
+        remove_name(name.as_ptr());
+        // SAFETY: strdup's allocation, or NULL.
+        unsafe { crate::malloc::free(held) };
         crate::errno::set_errno(e);
+        return core::ptr::null_mut();
     }
+    // SAFETY: a stream just made, and a name `malloc`ed for it.
+    unsafe { crate::stdio::hold_temporary(f, held) };
     f
+}
+
+/// `tmpfile64`: [`tmpfile`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tmpfile64() -> *mut u8 {
+    tmpfile()
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,80 +1538,19 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 
 /// Own archive member — gnulib replaces `mkostemp`. See string.rs's module header.
 mod gnu_mkostemp {
-    /// Create a unique temporary file with additional open flags.
-    ///
-    /// Like `mkstemp` but `flags` can include `O_CLOEXEC`, `O_APPEND`,
-    /// etc.  Currently, the flags are accepted but not enforced (our open
-    /// implementation doesn't support `O_CLOEXEC`).
+    /// `mkostemp(template, flags)`: [`mkstemp`](super::mkstemp) with
+    /// `flags` for the `open` -- `O_APPEND`, `O_CLOEXEC`, `O_SYNC` and the
+    /// rest -- their access mode replaced by `O_RDWR`, as glibc's is; the
+    /// rest are the `open`'s to judge.  (Until 2026-09-30 an access mode was
+    /// or'd into `O_RDWR`, and `O_WRONLY` made an `open` of mode 3.)
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
-        if template.is_null() {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Use getrandom for unpredictable suffix (same rationale as mkstemp).
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
-            // mandatory O_RDWR | O_CREAT | O_EXCL flags.
-            let open_flags =
-                crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
-            let fd = crate::file::open(template, open_flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, flags) }
     }
 }
 pub use gnu_mkostemp::mkostemp;
@@ -1660,23 +1561,18 @@ pub use gnu_mkostemp::mkostemp;
 
 /// Own archive member — gnulib replaces `mkstemps`. See string.rs's module header.
 mod gnu_mkstemps {
-    use super::*;
-
-    /// Create a unique temporary file with a user-specified suffix.
-    ///
-    /// Like `mkstemp`, but the last `suffixlen` characters of `template`
-    /// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
-    /// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
-    /// with unique characters.
-    ///
-    /// Returns an open fd on success, -1 on error.
+    /// `mkstemps(template, suffixlen)`: [`mkstemp`](super::mkstemp) with the
+    /// six `X`s before the template's last `suffixlen` bytes, which stay
+    /// (`"/tmp/fileXXXXXX.txt"`, 4).  A negative `suffixlen`, or one that
+    /// leaves no room for six `X`s, is `EINVAL`.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
-        unsafe { mkostemps(template, suffixlen, 0) }
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, 0) }
     }
 }
 pub use gnu_mkstemps::mkstemps;
@@ -1687,82 +1583,76 @@ pub use gnu_mkstemps::mkstemps;
 
 /// Own archive member — gnulib replaces `mkostemps`. See string.rs's module header.
 mod gnu_mkostemps {
-    /// Create a unique temporary file with a suffix and open flags.
-    ///
-    /// Combines `mkstemps` (suffix support) with `mkostemp` (additional
-    /// open flags like `O_CLOEXEC`).
-    ///
-    /// Returns an open fd on success, -1 on error.
+    /// `mkostemps(template, suffixlen, flags)`: [`mkstemps`](super::mkstemps)
+    /// with [`mkostemp`](super::mkostemp)'s flags.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
-        if template.is_null() || suffixlen < 0 {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        let slen = suffixlen as usize;
-        let len = unsafe { crate::string::strlen(template) };
-        // Need at least 6 'X' before the suffix.
-        if len < 6_usize.wrapping_add(slen) {
-            crate::errno::set_errno(crate::errno::EINVAL);
-            return -1;
-        }
-
-        // Check that the 6 chars before the suffix are 'X'.
-        let x_start = len.wrapping_sub(slen).wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return -1;
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                // `j < 6 == rand_bytes.len()`, so the index is in bounds.
-                #[allow(clippy::indexing_slicing)]
-                let ch = rand_bytes[j] % 36;
-                let c = if ch < 10 {
-                    b'0'.wrapping_add(ch)
-                } else {
-                    b'a'.wrapping_add(ch.wrapping_sub(10))
-                };
-                unsafe {
-                    *template.add(x_start.wrapping_add(j)) = c;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
-            let fd = crate::file::open(template, base_flags | flags, 0o600);
-            if fd >= 0 {
-                return fd;
-            }
-
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return -1;
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        -1
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, flags) }
     }
 }
 pub use gnu_mkostemps::mkostemps;
+
+// ---------------------------------------------------------------------------
+// The large-file names of the four
+// ---------------------------------------------------------------------------
+
+/// glibc's `mkstemp64`, `mkostemp64`, `mkstemps64` and `mkostemps64` (its
+/// `O_LARGEFILE`, all they add, is 0 on x86_64): an archive member of their
+/// own, over crate::tempname -- see this section's head.
+mod lfs_mkstemp {
+    /// `mkstemp64`: [`mkstemp`](super::mkstemp) by glibc's large-file name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemp64(template: *mut u8) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, 0) }
+    }
+
+    /// `mkostemp64`: [`mkostemp`](super::mkostemp) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemp64(template: *mut u8, flags: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, 0, flags) }
+    }
+
+    /// `mkstemps64`: [`mkstemps`](super::mkstemps) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkstemps64(template: *mut u8, suffixlen: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, 0) }
+    }
+
+    /// `mkostemps64`: [`mkostemps`](super::mkostemps) by glibc's large-file
+    /// name.
+    ///
+    /// # Safety
+    ///
+    /// `template` must be NULL or a writable C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn mkostemps64(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
+        // SAFETY: the caller's contract.
+        unsafe { crate::tempname::make_file(template, suffixlen, flags) }
+    }
+}
+pub use lfs_mkstemp::{mkostemp64, mkostemps64, mkstemp64, mkstemps64};
 
 // ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
@@ -1770,79 +1660,24 @@ pub use gnu_mkostemps::mkostemps;
 
 /// Own archive member — gnulib replaces `mkdtemp`. See string.rs's module header.
 mod gnu_mkdtemp {
-    /// Create a unique temporary directory.
-    ///
-    /// Modifies `template` in-place (replacing the trailing 6 'X' chars
-    /// with a unique suffix) and creates the directory with mode 0700.
-    /// Returns `template` on success, or null on error.
+    /// `mkdtemp(template)`: a new directory, named as
+    /// [`mkstemp`](super::mkstemp) names a file, mode 0700 before the
+    /// umask.  `template`, or NULL with `errno` as `mkstemp`'s.
     ///
     /// # Safety
     ///
-    /// `template` must be a writable null-terminated string with at least
-    /// 6 trailing 'X' characters.
+    /// `template` must be NULL or a writable C string.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
     pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
         if template.is_null() {
             crate::errno::set_errno(crate::errno::EINVAL);
             return core::ptr::null_mut();
         }
-
-        let len = unsafe { crate::string::strlen(template) };
-        if len < 6 {
-            crate::errno::set_errno(crate::errno::EINVAL);
+        // SAFETY: a writable C string, the caller's.
+        if unsafe { crate::tempname::gen_tempname(template, 0, crate::tempname::Kind::Dir) } < 0 {
             return core::ptr::null_mut();
         }
-
-        // Verify the last 6 characters are 'X'.
-        let suffix_start = len.wrapping_sub(6);
-        let mut i: usize = 0;
-        while i < 6 {
-            if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
-                crate::errno::set_errno(crate::errno::EINVAL);
-                return core::ptr::null_mut();
-            }
-            i = i.wrapping_add(1);
-        }
-
-        // Try up to 100 unique names.
-        let mut attempt: u32 = 0;
-        while attempt < 100 {
-            // Generate a cryptographically random suffix via RDRAND-backed getrandom.
-            let mut rand_bytes = [0u8; 6];
-            crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
-
-            let mut j: usize = 0;
-            while j < 6 {
-                let rb = rand_bytes.get(j).copied().unwrap_or(0);
-                let idx = rb % 36;
-                let ch = if idx < 10 {
-                    b'0'.wrapping_add(idx)
-                } else {
-                    b'a'.wrapping_add(idx.wrapping_sub(10))
-                };
-                // SAFETY: suffix_start + j < len, template is writable.
-                unsafe {
-                    *template.add(suffix_start.wrapping_add(j)) = ch;
-                }
-                j = j.wrapping_add(1);
-            }
-
-            // Try to create the directory.
-            let ret = crate::file::mkdir(template, 0o700);
-            if ret == 0 {
-                return template;
-            }
-
-            // If EEXIST, try again.
-            if crate::errno::get_errno() != crate::errno::EEXIST {
-                return core::ptr::null_mut();
-            }
-
-            attempt = attempt.wrapping_add(1);
-        }
-
-        crate::errno::set_errno(crate::errno::EEXIST);
-        core::ptr::null_mut()
+        template
     }
 }
 pub use gnu_mkdtemp::mkdtemp;

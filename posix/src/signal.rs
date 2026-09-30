@@ -2237,12 +2237,16 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// caller learnt it cannot carry the signal into some other process. This
 /// process's threads are this library's own to know
 /// ([`crate::pthread::thread_is_live`]); another's are looked for in
-/// `/proc/<tgid>/task/<tid>`.
+/// `/proc/<tgid>/task/<tid>` -- which a process without a File capability
+/// with METADATA rights may not look at, and then the thread is not
+/// signalled: `EPERM` (or `ESRCH` when the process is not there at all),
+/// never a guess.
 ///
 /// Errors, in Linux's order: `EINVAL` for a `tgid` or `tid` not above
-/// zero; `ESRCH` when `tid` is not a thread of `tgid`; `EINVAL` for a signal
-/// outside `0..NSIG`; then what the kernel answers the send, `EPERM` among
-/// it. Signal 0 checks, and sends nothing.
+/// zero; `ESRCH` when `tid` is not a thread of `tgid`, `EPERM` when that
+/// cannot be checked; `EINVAL` for a signal outside `0..NSIG`; then what
+/// the kernel answers the send, `EPERM` among it. Signal 0 checks, and
+/// sends nothing.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig: i32) -> i32 {
     if tgid <= 0 || tid <= 0 {
@@ -2256,7 +2260,23 @@ pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig:
     } else if own {
         u64::try_from(tid).is_ok_and(crate::pthread::thread_is_live)
     } else {
-        proc_task_exists(tgid, tid)
+        match proc_task_exists(tgid, tid) {
+            Some(e) => e,
+            None => {
+                // This process may not look at `/proc` (procfs's stat
+                // wants a File capability with METADATA rights). A process
+                // that is not there is still ESRCH; a thread that cannot
+                // be checked is not signalled -- tgkill's point is that a
+                // thread id another thread has since been given is not
+                // hit -- and the refusal is EPERM, never a false ESRCH.
+                #[allow(clippy::cast_sign_loss)]
+                let alive =
+                    crate::syscall::syscall1(crate::syscall::SYS_PROCESS_IS_READY, tgid as u64)
+                        >= 0;
+                errno::set_errno(if alive { errno::EPERM } else { errno::ESRCH });
+                return -1;
+            }
+        }
     };
     if !exists {
         errno::set_errno(errno::ESRCH);
@@ -2282,8 +2302,12 @@ pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig:
 }
 
 /// Whether `/proc/<tgid>/task/<tid>` exists: whether `tid` is a thread of
-/// process `tgid`, as procfs sees it.
-fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> bool {
+/// process `tgid`, as procfs sees it -- or `None` when this process may not
+/// look (`EACCES`: procfs's stat wants a File capability with METADATA
+/// rights, which a process started without capabilities lacks; the pgroup
+/// rung starts its fixture so). Until 2026-09-30 a refusal read as "no such
+/// thread", and tgkill answered a false ESRCH in such a process.
+fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> Option<bool> {
     /// The path, NUL-terminated, in a buffer of its own.
     struct PathBuf {
         buf: [u8; 48],
@@ -2307,9 +2331,12 @@ fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> bool {
     // Two ten-digit numbers and the rest fit in 48; a path that did not
     // would name no thread.
     if core::fmt::write(&mut path, format_args!("/proc/{tgid}/task/{tid}\0")).is_err() {
-        return false;
+        return Some(false);
     }
-    crate::file::access(path.buf.as_ptr(), crate::fcntl::F_OK) == 0
+    if crate::file::access(path.buf.as_ptr(), crate::fcntl::F_OK) == 0 {
+        return Some(true);
+    }
+    (errno::get_errno() != errno::EACCES).then_some(false)
 }
 
 /// Examine and change blocked signals.
@@ -7901,9 +7928,10 @@ mod tests {
     #[test]
     fn proc_task_exists_asks_for_the_thread_s_directory() {
         // Nothing on the host has it; the digits are what is under test, by
-        // way of numbers whose paths cannot exist.
-        assert!(!proc_task_exists(1_234_567_890, 2_147_483_647));
-        assert!(!proc_task_exists(7, 1));
+        // way of numbers whose paths cannot exist -- whether the host's
+        // answer is "not there" or "may not look".
+        assert_ne!(proc_task_exists(1_234_567_890, 2_147_483_647), Some(true));
+        assert_ne!(proc_task_exists(7, 1), Some(true));
     }
 
     /// `sigsuspend` restores the mask it replaced.

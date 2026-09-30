@@ -80,6 +80,21 @@ libc and kernel have to change in the same instant:
    number for it would let libc use it. Delivery to the named thread itself
    is the larger piece -- per-thread pending sets -- and not asked for here.
 
+   **Added 2026-09-30, after a red boot:** the procfs check needs more than
+   it should. `SYS_FS_STAT` wants a File capability with METADATA rights, and
+   the pgroup rung starts `ctest-pgroup` with none, so libc could not look
+   at `/proc/<kid>/task/<tid>` and read the refusal as "no such thread":
+   check 84 failed (`build/serial-failures/20260930T183819Z-98b061083-rc1.txt`).
+   libc now answers such a refusal `EPERM` -- the thread cannot be checked,
+   so it is not signalled -- and `ESRCH` only when `SYS_PROCESS_IS_READY`
+   says the process is not there; the fixture checks that branch when it
+   may not look (84-87) and runs the full checks when it may. A process's
+   right to signal its own child should not hang on a filesystem capability,
+   which is one more reason for the native send: it would make the check the
+   kernel's, capability-free, and the full checks would run on the rung. The
+   rung's legend in `self_test_cpgroup` has no 80s band yet: 80-88 are
+   `tgkill`'s (`services/ctest-pgroup/main.c`'s header says which is which).
+
 The layout is a proposal: if another suits the kernel better, say so and
 libc will read that one. What matters is the opt-in and an answer that says
 whether it took.

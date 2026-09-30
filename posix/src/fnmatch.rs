@@ -74,34 +74,43 @@ pub const FNM_EXTMATCH: i32 = 32;
 /// No memory for an extended group's table of positions: `fnmatch`'s -1.
 pub(crate) struct NoMemory;
 
-/// Match `string` against `pattern`: 0 if it matches, [`FNM_NOMATCH`] if
-/// not, -1 (with `errno` `ENOMEM`) if an extended pattern needed memory there
-/// was none of.
-///
-/// # Safety
-///
-/// Both must be NUL-terminated C strings (NULL is taken for no match).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fnmatch(pattern: *const u8, string: *const u8, flags: i32) -> i32 {
-    if pattern.is_null() || string.is_null() {
-        return FNM_NOMATCH;
-    }
-    // SAFETY: C strings, the caller's.
-    let (p, s) = unsafe {
-        (
-            core::slice::from_raw_parts(pattern, crate::string::strlen(pattern)),
-            core::slice::from_raw_parts(string, crate::string::strlen(string)),
-        )
-    };
-    match matches(p, s, flags) {
-        Ok(true) => 0,
-        Ok(false) => FNM_NOMATCH,
-        Err(NoMemory) => {
-            crate::errno::set_errno(crate::errno::ENOMEM);
-            -1
+/// Own archive member -- the matcher below is glob's too (glob.rs calls
+/// [`matches`]), and a program that brings its own `fnmatch`, as GNU make
+/// can, must still be able to link this library's `glob` without this
+/// definition coming along. See string.rs's module header.
+mod gnu_fnmatch {
+    use super::{FNM_NOMATCH, NoMemory, matches};
+
+    /// Match `string` against `pattern`: 0 if it matches, [`FNM_NOMATCH`]
+    /// if not, -1 (with `errno` `ENOMEM`) if an extended pattern needed
+    /// memory there was none of.
+    ///
+    /// # Safety
+    ///
+    /// Both must be NUL-terminated C strings (NULL is taken for no match).
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn fnmatch(pattern: *const u8, string: *const u8, flags: i32) -> i32 {
+        if pattern.is_null() || string.is_null() {
+            return FNM_NOMATCH;
+        }
+        // SAFETY: C strings, the caller's.
+        let (p, s) = unsafe {
+            (
+                core::slice::from_raw_parts(pattern, crate::string::strlen(pattern)),
+                core::slice::from_raw_parts(string, crate::string::strlen(string)),
+            )
+        };
+        match matches(p, s, flags) {
+            Ok(true) => 0,
+            Ok(false) => FNM_NOMATCH,
+            Err(NoMemory) => {
+                crate::errno::set_errno(crate::errno::ENOMEM);
+                -1
+            }
         }
     }
 }
+pub use gnu_fnmatch::fnmatch;
 
 /// [`fnmatch`] over byte slices.
 pub(crate) fn matches(pattern: &[u8], string: &[u8], flags: i32) -> Result<bool, NoMemory> {

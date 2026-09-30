@@ -8,7 +8,9 @@ lacks some of them (`-I posix/include` -- zig's driver searches its own libc
 headers before any `-isystem` directory); the overlay header includes musl's
 (`#include_next`) and declares the rest, under the feature macros
 glibc declares them under. It also has whole headers for the families musl
-has none of (<fts.h>, <error.h>, <execinfo.h> ...). A C program written for
+has none of (<fts.h>, <error.h>, <execinfo.h> ...), and one in place of musl's:
+<glob.h>, whose glob_t must name the fields musl's hides (a struct is declared
+once, so it cannot be musl's with more after it). A C program written for
 glibc compiles against it, then, as it does against glibc -- which is the
 claim this gate holds it to.
 
@@ -139,6 +141,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "Dl_serpath": "dlfcn.h",
     "Dl_serinfo": "dlfcn.h",
     "struct dl_find_object": "dlfcn.h",
+    "glob_t": "glob.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.

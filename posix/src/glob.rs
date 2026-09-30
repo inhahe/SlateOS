@@ -1,87 +1,172 @@
-//! POSIX pathname pattern expansion.
+//! POSIX `glob()` and `globfree()` (XSH `glob`, XCU 2.13.3 "Patterns Used
+//! for Filename Expansion"), with glibc's GNU flags; and glibc's
+//! `glob_pattern_p`.
 //!
-//! Implements `glob()` and `globfree()` for shell-style pathname
-//! matching per POSIX.1-2024.
+//! ## What it does
 //!
-//! ## How It Works
+//! Each `/`-separated component of the pattern is matched against the
+//! entries of the directories the components before it named, with
+//! [`crate::fnmatch`] -- a leading `.` only by a `.` in the pattern, unless
+//! `GLOB_PERIOD` -- and a component with no wildcard in it is looked up
+//! rather than read. The names are sorted (the C locale's order: bytes)
+//! unless `GLOB_NOSORT`.
 //!
-//! 1. Split the pattern at the last `/` to get (directory, filename-pattern).
-//! 2. Open the directory with `opendir()`.
-//! 3. Match each entry against the filename pattern using `fnmatch()`.
-//! 4. Collect matching full paths into a dynamically-allocated result list.
+//! - POSIX's flags: `GLOB_APPEND`, `GLOB_DOOFFS`, `GLOB_ERR` (and the
+//!   `errfunc`, told of every directory that cannot be read -- a stop from
+//!   either is `GLOB_ABORTED`), `GLOB_MARK`, `GLOB_NOCHECK` (the pattern
+//!   itself, when nothing matches), `GLOB_NOESCAPE`, `GLOB_NOSORT`.
+//! - glibc's: `GLOB_PERIOD`; `GLOB_BRACE`, `{a,b}` as the patterns `a` and
+//!   `b`, nested and repeated; `GLOB_TILDE` and `GLOB_TILDE_CHECK`, `~` and
+//!   `~user`; `GLOB_NOMAGIC`, the pattern itself if it has no wildcard;
+//!   `GLOB_ONLYDIR`; `GLOB_ALTDIRFUNC`, the program's own `opendir`,
+//!   `readdir`, `closedir`, `stat` and `lstat` through `glob_t`'s
+//!   `gl_opendir` ...; and `GLOB_MAGCHAR` in `gl_flags`.
 //!
-//! ## Limitations
+//! A wildcard in a directory part never matches a leading `.`, even under
+//! `GLOB_PERIOD` -- which is the last component's -- as in glibc, so that
+//! `*/*` does not walk through `..`. A pattern ending in a slash names the
+//! directories the pattern before it names, each with its slash.
 //!
-//! - No recursive glob (`**`) support — that is a GNU extension.
-//! - Only matches in a single directory (no multi-component patterns
-//!   like `src/*/foo.rs`).
-//! - Maximum 512 matches per glob call.
-//! - Does not expand `~` (tilde) — that is a shell feature.
+//! glibc 2.39's answers are the oracle for everything neither POSIX nor
+//! glibc's manual pins down: `posix/tools/oracle/glob_harness.py` runs
+//! glibc's `glob` over a directory tree of its own through
+//! `GLOB_ALTDIRFUNC` (`glob_oracle.txt`, 1,568 probes), and the tests replay
+//! each through the same callbacks. Two of glibc's answers are not followed
+//! (design-decisions §1149; `glob_deviations.txt` lists the 23 probes):
+//! glibc reads `*/` and `?/` -- one character before a trailing slash -- by
+//! a path of its own, so that `GLOB_MARK` doubles their slash, `GLOB_PERIOD`
+//! does not apply and `GLOB_MAGCHAR` is not set, unlike `**/` and `[!x]/`,
+//! which match the same names; and its `GLOB_NOCHECK` answer for `??/` is
+//! `??`, where POSIX's is the pattern.
+//!
+//! Until 2026-09-29 this read one directory -- `src/*/foo.rs` found nothing
+//! -- kept at most 512 names and dropped the rest silently, knew four of
+//! POSIX's seven flags and none of glibc's, never called `errfunc`, and
+//! copied the directory part into a 4096-byte stack buffer, a longer one
+//! cut short and left unterminated (known-issues.md ->
+//! D-POSIX-GLOB-READ-ONE-DIRECTORY-AND-KEPT-512-NAMES). Names and lists are
+//! `malloc`'s now, of any length.
+//!
+//! ## `glob_t`
+//!
+//! glibc's layout, which is musl's with its reserved words named: after the
+//! three POSIX fields, `gl_flags` and the five `GLOB_ALTDIRFUNC` functions.
+//! `posix/include/glob.h` declares it so, where musl's names the words
+//! `__dummy1` and `__dummy2`.
 
-use crate::dirent;
-use crate::fnmatch;
-use crate::malloc;
-use crate::string;
+use core::ffi::c_void;
+
+use crate::dirent::Dirent;
+use crate::stat::Stat;
 
 // ---------------------------------------------------------------------------
-// Constants
+// Constants: glibc's and musl's values
 // ---------------------------------------------------------------------------
 
 /// Return on read error (stop scanning).
-pub const GLOB_ERR: i32 = 1;
-/// Mark directories with a trailing slash.
-pub const GLOB_MARK: i32 = 2;
-/// Return the pattern itself if no matches.
-pub const GLOB_NOCHECK: i32 = 16;
-/// Append results to an existing `glob_t`.
-pub const GLOB_APPEND: i32 = 32;
+pub const GLOB_ERR: i32 = 0x01;
+/// Append a slash to each directory name.
+pub const GLOB_MARK: i32 = 0x02;
+/// Do not sort the names.
+pub const GLOB_NOSORT: i32 = 0x04;
+/// Reserve `gl_offs` NULL slots at the front of `gl_pathv`.
+pub const GLOB_DOOFFS: i32 = 0x08;
+/// Return the pattern itself if nothing matches.
+pub const GLOB_NOCHECK: i32 = 0x10;
+/// Append to the results of an earlier call.
+pub const GLOB_APPEND: i32 = 0x20;
+/// Backslash is an ordinary character.
+pub const GLOB_NOESCAPE: i32 = 0x40;
+/// A leading `.` may be matched by a wildcard (glibc).
+pub const GLOB_PERIOD: i32 = 0x80;
+/// Set in `gl_flags` when wildcards were matched (glibc).
+pub const GLOB_MAGCHAR: i32 = 0x100;
+/// Use `gl_opendir` and its kin (glibc).
+pub const GLOB_ALTDIRFUNC: i32 = 0x200;
+/// Expand `{a,b}` (glibc).
+pub const GLOB_BRACE: i32 = 0x400;
+/// The pattern itself, if it has no wildcards and matches nothing (glibc).
+pub const GLOB_NOMAGIC: i32 = 0x800;
+/// Expand `~` and `~user` (glibc).
+pub const GLOB_TILDE: i32 = 0x1000;
+/// Only directories are wanted (glibc).
+pub const GLOB_ONLYDIR: i32 = 0x2000;
+/// `GLOB_TILDE`, and no match for an unknown user (glibc).
+pub const GLOB_TILDE_CHECK: i32 = 0x4000;
 
-/// No matches found.
-pub const GLOB_NOMATCH: i32 = 3;
-/// Memory allocation error.
+/// Every flag a caller may pass; `GLOB_MAGCHAR` is glob's to set.
+const GLOB_FLAGS: i32 = GLOB_ERR
+    | GLOB_MARK
+    | GLOB_NOSORT
+    | GLOB_DOOFFS
+    | GLOB_NOCHECK
+    | GLOB_APPEND
+    | GLOB_NOESCAPE
+    | GLOB_PERIOD
+    | GLOB_ALTDIRFUNC
+    | GLOB_BRACE
+    | GLOB_NOMAGIC
+    | GLOB_TILDE
+    | GLOB_ONLYDIR
+    | GLOB_TILDE_CHECK;
+
+/// Out of memory.
 pub const GLOB_NOSPACE: i32 = 1;
-/// Read error.
+/// A read error, and `GLOB_ERR` or `errfunc` asked to stop.
 pub const GLOB_ABORTED: i32 = 2;
-
-/// Maximum matches per glob() call.
-const MAX_MATCHES: usize = 512;
+/// Nothing matched.
+pub const GLOB_NOMATCH: i32 = 3;
+/// Not implemented (never returned here).
+pub const GLOB_NOSYS: i32 = 4;
 
 // ---------------------------------------------------------------------------
-// Types
+// glob_t
 // ---------------------------------------------------------------------------
 
-/// Result structure for glob().
+/// `glob_t`, as glibc lays it out -- musl's, with its reserved words named.
 #[repr(C)]
 pub struct GlobT {
     /// Number of matched pathnames.
     pub gl_pathc: usize,
-    /// Array of matched pathnames (null-terminated).
+    /// The pathnames, after `gl_offs` NULLs, and a NULL.
     pub gl_pathv: *mut *mut u8,
-    /// Slots reserved at the front of `gl_pathv`.
+    /// Slots reserved at the front of `gl_pathv` (`GLOB_DOOFFS`).
     pub gl_offs: usize,
-    /// The 48 bytes of musl's `glob_t` past the three POSIX-visible fields.
-    ///
-    /// Never read or written.  In musl and glibc this space holds `gl_flags`
-    /// and the six `GLOB_ALTDIRFUNC` replacement-function pointers
-    /// (`gl_closedir`, `gl_readdir`, `gl_opendir`, `gl_lstat`, `gl_stat`, and
-    /// glibc's `gl_readdir64`/`gl_stat64` variants), none of which we
-    /// implement.  Present so `size_of::<GlobT>()` equals what `<glob.h>`
-    /// declares — see the assertion below.
-    _reserved: [u8; 48],
+    /// The flags, and `GLOB_MAGCHAR` (glibc).
+    pub gl_flags: i32,
+    /// `GLOB_ALTDIRFUNC`'s `closedir`.
+    pub gl_closedir: Option<unsafe extern "C" fn(*mut c_void)>,
+    /// `GLOB_ALTDIRFUNC`'s `readdir`.
+    pub gl_readdir: Option<unsafe extern "C" fn(*mut c_void) -> *mut Dirent>,
+    /// `GLOB_ALTDIRFUNC`'s `opendir`.
+    pub gl_opendir: Option<unsafe extern "C" fn(*const u8) -> *mut c_void>,
+    /// `GLOB_ALTDIRFUNC`'s `lstat`.
+    pub gl_lstat: Option<unsafe extern "C" fn(*const u8, *mut Stat) -> i32>,
+    /// `GLOB_ALTDIRFUNC`'s `stat`.
+    pub gl_stat: Option<unsafe extern "C" fn(*const u8, *mut Stat) -> i32>,
 }
 
+const _: () = {
+    assert!(
+        size_of::<GlobT>() == 72,
+        "glibc's and musl's glob_t is 72 bytes"
+    );
+};
+
 impl GlobT {
-    /// An empty glob result: no matches, no vector, no reserved slots.
-    ///
-    /// Constructed through this rather than with a struct literal so the
-    /// `_reserved` tail can track its header without touching a call site.
+    /// An empty `glob_t`: no names, no callbacks.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             gl_pathc: 0,
             gl_pathv: core::ptr::null_mut(),
             gl_offs: 0,
-            _reserved: [0; 48],
+            gl_flags: 0,
+            gl_closedir: None,
+            gl_readdir: None,
+            gl_opendir: None,
+            gl_lstat: None,
+            gl_stat: None,
         }
     }
 }
@@ -92,865 +177,1650 @@ impl Default for GlobT {
     }
 }
 
-/// Our `glob_t` is exactly the one the caller's `<glob.h>` reserved.
-///
-/// See `pthread.rs`'s module note for why this is a `const` rather than a
-/// `#[test]`.  All three fields we implement are the POSIX-visible ones and
-/// sit at the offsets glibc puts them at (0, 8, 16), so a caller reading
-/// `gl_pathc`, `gl_pathv` or `gl_offs` reads ours; the `_reserved` tail brings
-/// the object to musl's 72 bytes so that `globfree`-style by-value handling —
-/// or a caller that `memcpy`s its `glob_t` — moves our bytes and only ours.
-const _: () = {
-    assert!(size_of::<GlobT>() == 72, "musl/glibc glob_t is 72 bytes");
-    assert!(align_of::<GlobT>() <= 8);
-};
-
-// SAFETY: GlobT contains a raw pointer to heap-allocated path arrays.
-// Only one thread accesses the glob result at a time per POSIX.
-unsafe impl Sync for GlobT {}
-
 // ---------------------------------------------------------------------------
-// Pattern / directory split
+// Owned bytes and lists, from malloc
 // ---------------------------------------------------------------------------
 
-/// Parsed pattern split into directory and filename portions.
-struct PatternParts {
-    /// Buffer holding the null-terminated directory path.
-    dir_buf: [u8; 4096],
-    /// Offset into the original pattern where the filename portion starts.
-    file_start: usize,
-    /// Whether the original pattern contained a '/'.
-    has_slash: bool,
-    /// Position of the last '/' in the pattern (only valid if `has_slash`).
-    last_slash: usize,
-    /// Total length of the original pattern.
-    pat_len: usize,
+/// Memory could not be had: `GLOB_NOSPACE`.
+struct NoSpace;
+
+/// Why a glob stopped early.
+enum Stop {
+    NoSpace,
+    Aborted,
 }
 
-/// Split a pattern into directory and filename components.
-fn split_pattern(pattern: *const u8) -> PatternParts {
-    let pat_len = unsafe { string::strlen(pattern) };
-    let mut parts = PatternParts {
-        dir_buf: [0u8; 4096],
-        file_start: 0,
-        has_slash: false,
-        last_slash: 0,
-        pat_len,
-    };
+impl From<NoSpace> for Stop {
+    fn from(_: NoSpace) -> Self {
+        Self::NoSpace
+    }
+}
 
-    // Find last '/'.
-    let mut idx: usize = 0;
-    while idx < pat_len {
-        if unsafe { *pattern.add(idx) } == b'/' {
-            parts.last_slash = idx;
-            parts.has_slash = true;
+impl From<crate::fnmatch::NoMemory> for Stop {
+    fn from(_: crate::fnmatch::NoMemory) -> Self {
+        Self::NoSpace
+    }
+}
+
+/// A NUL-terminated byte string in a block from `malloc`.
+struct Owned {
+    ptr: *mut u8,
+    len: usize,
+}
+
+impl Owned {
+    fn from_parts(parts: &[&[u8]]) -> Result<Self, NoSpace> {
+        let len = parts
+            .iter()
+            .try_fold(0usize, |n, p| n.checked_add(p.len()))
+            .ok_or(NoSpace)?;
+        let ptr = crate::malloc::malloc(len.checked_add(1).ok_or(NoSpace)?);
+        if ptr.is_null() {
+            return Err(NoSpace);
         }
-        idx = idx.wrapping_add(1);
+        let mut at = 0usize;
+        for p in parts {
+            // SAFETY: `ptr` holds `len + 1` bytes and the parts sum to `len`.
+            unsafe { core::ptr::copy_nonoverlapping(p.as_ptr(), ptr.add(at), p.len()) };
+            at = at.saturating_add(p.len());
+        }
+        // SAFETY: as above; `at == len`.
+        unsafe { ptr.add(at).write(0) };
+        Ok(Self { ptr, len })
     }
 
-    if parts.has_slash {
-        let dir_len = parts.last_slash.wrapping_add(1);
-        let mut ci: usize = 0;
-        while ci < dir_len {
-            if let Some(slot) = parts.dir_buf.get_mut(ci) {
-                *slot = unsafe { *pattern.add(ci) };
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `len` bytes this owns.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    /// Hand the block over: its owner frees it now.
+    fn take(self) -> *mut u8 {
+        let p = self.ptr;
+        core::mem::forget(self);
+        p
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        // SAFETY: the block is this one's own, from `malloc`.
+        unsafe { crate::malloc::free(self.ptr) };
+    }
+}
+
+/// A name found, and whether it is known to be a directory.
+struct Found {
+    path: Owned,
+    is_dir: bool,
+}
+
+/// A growable array from `malloc`.
+struct List<T> {
+    ptr: *mut T,
+    len: usize,
+    cap: usize,
+}
+
+impl<T> List<T> {
+    const fn new() -> Self {
+        Self {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }
+    }
+
+    fn push(&mut self, v: T) -> Result<(), NoSpace> {
+        if self.len == self.cap {
+            let cap = self.cap.max(4).checked_mul(2).ok_or(NoSpace)?;
+            let bytes = cap.checked_mul(size_of::<T>()).ok_or(NoSpace)?;
+            // SAFETY: `ptr` is NULL or this list's own block.
+            let p = unsafe { crate::malloc::realloc(self.ptr.cast(), bytes) }.cast::<T>();
+            if p.is_null() {
+                return Err(NoSpace);
             }
-            ci = ci.wrapping_add(1);
+            self.ptr = p;
+            self.cap = cap;
         }
-        if let Some(slot) = parts.dir_buf.get_mut(dir_len) {
-            *slot = 0;
-        }
-        parts.file_start = dir_len;
-    } else {
-        parts.dir_buf[0] = b'.';
-        parts.dir_buf[1] = 0;
+        // SAFETY: `len < cap`: room for one more.
+        unsafe { self.ptr.add(self.len).write(v) };
+        self.len = self.len.saturating_add(1);
+        Ok(())
     }
 
-    parts
+    fn as_slice(&self) -> &[T] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: `len` initialised elements.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        if self.ptr.is_null() {
+            return &mut [];
+        }
+        // SAFETY: as above, and `&mut self` makes it unique.
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    /// Move every element of `other` onto the end of this one, in order.
+    fn append(&mut self, mut other: Self) -> Result<(), NoSpace> {
+        let n = other.len;
+        let mut moved = 0usize;
+        let result = loop {
+            if moved == n {
+                break Ok(());
+            }
+            // SAFETY: element `moved`, initialised and not yet moved.
+            let v = unsafe { other.ptr.add(moved).read() };
+            // Consumed either way: pushed, or dropped by a push that failed.
+            moved = moved.saturating_add(1);
+            if let Err(e) = self.push(v) {
+                break Err(e);
+            }
+        };
+        // What was moved is this list's now; what was not is dropped with
+        // `other`, which must see only those.
+        if moved < n {
+            // SAFETY: shift the unmoved tail to the front: initialised
+            // elements within the block, possibly overlapping.
+            unsafe { core::ptr::copy(other.ptr.add(moved), other.ptr, n.saturating_sub(moved)) };
+        }
+        other.len = n.saturating_sub(moved);
+        result
+    }
+}
+
+impl<T> Drop for List<T> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            // SAFETY: each initialised element, dropped once.
+            unsafe { core::ptr::drop_in_place(self.ptr.add(i)) };
+        }
+        // SAFETY: NULL or this list's own block.
+        unsafe { crate::malloc::free(self.ptr.cast()) };
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Match collection
+// Where directories are read
 // ---------------------------------------------------------------------------
 
-/// Collect matching entries from a directory into a match array.
-///
-/// Returns:
-/// - `>= 0`: number of matches found
-/// - `-1`: allocation failure
-/// - `-2`: directory open failure
-fn collect_matches(
-    pattern: *const u8,
-    parts: &PatternParts,
-    flags: i32,
-    match_ptrs: &mut [*mut u8; MAX_MATCHES],
-) -> i32 {
-    let file_pattern = unsafe { pattern.add(parts.file_start) };
+/// The program's own directory functions (`GLOB_ALTDIRFUNC`).
+#[derive(Clone, Copy)]
+struct Alt {
+    opendir: unsafe extern "C" fn(*const u8) -> *mut c_void,
+    readdir: unsafe extern "C" fn(*mut c_void) -> *mut Dirent,
+    closedir: unsafe extern "C" fn(*mut c_void),
+    stat: unsafe extern "C" fn(*const u8, *mut Stat) -> i32,
+    lstat: unsafe extern "C" fn(*const u8, *mut Stat) -> i32,
+}
 
-    let dirp = dirent::opendir(parts.dir_buf.as_ptr());
-    if dirp.is_null() {
-        return -2; // Distinct from -1 (alloc failure): dir open error.
+/// The C library's directory calls, or the program's.
+#[derive(Clone, Copy)]
+struct Fs {
+    alt: Option<Alt>,
+}
+
+impl Fs {
+    /// `GLOB_ALTDIRFUNC`'s functions, if the flag is set and all five are
+    /// there; the C library's own otherwise (glibc's would call through a
+    /// NULL one).
+    fn of(g: &GlobT, flags: i32) -> Self {
+        if flags & GLOB_ALTDIRFUNC == 0 {
+            return Self { alt: None };
+        }
+        let alt = match (
+            g.gl_opendir,
+            g.gl_readdir,
+            g.gl_closedir,
+            g.gl_stat,
+            g.gl_lstat,
+        ) {
+            (Some(opendir), Some(readdir), Some(closedir), Some(stat), Some(lstat)) => Some(Alt {
+                opendir,
+                readdir,
+                closedir,
+                stat,
+                lstat,
+            }),
+            _ => None,
+        };
+        Self { alt }
     }
 
-    let mut count: usize = 0;
-
-    loop {
-        let entry = dirent::readdir(dirp);
-        if entry.is_null() {
-            break;
+    /// Open `path`: the stream, or `errno`.
+    fn opendir(&self, path: &Owned) -> Result<*mut c_void, i32> {
+        crate::errno::set_errno(0);
+        let d = match self.alt {
+            // SAFETY: the program's function, given a C string.
+            Some(a) => unsafe { (a.opendir)(path.ptr) },
+            None => crate::dirent::opendir(path.ptr).cast(),
+        };
+        if d.is_null() {
+            return Err(crate::errno::get_errno());
         }
+        Ok(d)
+    }
 
-        let dir_entry = unsafe { &*entry };
-        let name = dir_entry.d_name.as_ptr();
+    /// The next entry: its name, copied, and its type.
+    fn readdir(&self, d: *mut c_void) -> Result<Option<(Owned, u8)>, NoSpace> {
+        let e = match self.alt {
+            // SAFETY: the program's function, on the stream it opened.
+            Some(a) => unsafe { (a.readdir)(d) },
+            None => crate::dirent::readdir(d.cast()),
+        };
+        if e.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: a `struct dirent` the stream owns until its next read;
+        // `d_name` is NUL-terminated within its array.
+        let (name, d_type) = unsafe {
+            let name = &(*e).d_name;
+            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            (name.get(..len).unwrap_or(&[]), (*e).d_type)
+        };
+        Ok(Some((Owned::from_parts(&[name])?, d_type)))
+    }
 
-        // Skip . and .. unless pattern explicitly starts with '.'.
-        if should_skip_dot(name, file_pattern) {
+    fn closedir(&self, d: *mut c_void) {
+        match self.alt {
+            // SAFETY: the program's function, on the stream it opened.
+            Some(a) => unsafe { (a.closedir)(d) },
+            None => {
+                // A stream this read and is done with: a failure to close it
+                // loses nothing glob reports.
+                let _ = crate::dirent::closedir(d.cast());
+            }
+        }
+    }
+
+    /// Does `path` name anything? `lstat`'s answer: a dangling link counts.
+    fn exists(&self, path: &Owned) -> bool {
+        // SAFETY: all-zero is a `Stat`.
+        let mut st: Stat = unsafe { core::mem::zeroed() };
+        let r = match self.alt {
+            // SAFETY: the program's function, a C string and a `Stat`.
+            Some(a) => unsafe { (a.lstat)(path.ptr, &raw mut st) },
+            None => crate::file::lstat(path.ptr, &raw mut st),
+        };
+        r == 0
+    }
+
+    /// Is `path` a directory? `stat`'s answer: a link to one is one.
+    fn is_dir(&self, path: &Owned) -> bool {
+        // SAFETY: all-zero is a `Stat`.
+        let mut st: Stat = unsafe { core::mem::zeroed() };
+        let r = match self.alt {
+            // SAFETY: as above.
+            Some(a) => unsafe { (a.stat)(path.ptr, &raw mut st) },
+            None => crate::file::stat(path.ptr, &raw mut st),
+        };
+        r == 0 && st.st_mode & crate::fcntl::S_IFMT == crate::fcntl::S_IFDIR
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Patterns
+// ---------------------------------------------------------------------------
+
+/// Does the pattern hold an unescaped `*`, `?` or `[`?
+fn has_magic(p: &[u8], flags: i32) -> bool {
+    let mut i = 0usize;
+    while let Some(&c) = p.get(i) {
+        if c == b'\\' && flags & GLOB_NOESCAPE == 0 {
+            i = i.saturating_add(2);
             continue;
         }
-
-        // Match against pattern.
-        // FNM_PERIOD: POSIX requires that leading dots in filenames
-        // only match explicit dots in the pattern (e.g. "*" must not
-        // match ".bashrc").
-        if unsafe { fnmatch::fnmatch(file_pattern, name, fnmatch::FNM_PERIOD) } != 0 {
-            continue;
+        if matches!(c, b'*' | b'?' | b'[') {
+            return true;
         }
-
-        // Build full path.
-        let path = build_match_path(pattern, parts, name, dir_entry.d_type, flags);
-        if path.is_null() {
-            cleanup_matches(match_ptrs, count);
-            dirent::closedir(dirp);
-            return -1; // Allocation failure.
-        }
-
-        if count < MAX_MATCHES {
-            if let Some(slot) = match_ptrs.get_mut(count) {
-                *slot = path;
-            }
-            count = count.wrapping_add(1);
-        } else {
-            // SAFETY: path was allocated by malloc above.
-            unsafe {
-                malloc::free(path);
-            }
-        }
-    }
-
-    dirent::closedir(dirp);
-    count as i32
-}
-
-/// Check if a directory entry name (`.` or `..`) should be skipped.
-fn should_skip_dot(name: *const u8, file_pattern: *const u8) -> bool {
-    let first = unsafe { *name };
-    if first != b'.' {
-        return false;
-    }
-    let second = unsafe { *name.add(1) };
-    if second == 0 || (second == b'.' && unsafe { *name.add(2) } == 0) {
-        // Skip unless pattern starts with '.'.
-        return unsafe { *file_pattern } != b'.';
+        i = i.saturating_add(1);
     }
     false
 }
 
-/// Allocate and build the full path for a matched entry.
-fn build_match_path(
-    pattern: *const u8,
-    parts: &PatternParts,
-    name: *const u8,
-    entry_type: u8,
-    flags: i32,
-) -> *mut u8 {
-    let name_len = unsafe { string::strlen(name) };
-
-    let full_len = if parts.has_slash {
-        parts.last_slash.wrapping_add(1).wrapping_add(name_len)
-    } else {
-        name_len
-    };
-
-    let needs_slash = flags & GLOB_MARK != 0 && entry_type == dirent::DT_DIR;
-    let alloc_len = full_len
-        .wrapping_add(usize::from(needs_slash))
-        .wrapping_add(1);
-
-    let path = malloc::malloc(alloc_len);
-    if path.is_null() {
-        return core::ptr::null_mut();
-    }
-
-    let mut pos: usize = 0;
-
-    // Copy directory prefix.
-    if parts.has_slash {
-        let dir_len = parts.last_slash.wrapping_add(1);
-        let mut ci: usize = 0;
-        while ci < dir_len {
-            unsafe {
-                *path.add(pos) = *pattern.add(ci);
-            }
-            pos = pos.wrapping_add(1);
-            ci = ci.wrapping_add(1);
-        }
-    }
-
-    // Copy filename.
-    let mut ci: usize = 0;
-    while ci < name_len {
-        unsafe {
-            *path.add(pos) = *name.add(ci);
-        }
-        pos = pos.wrapping_add(1);
-        ci = ci.wrapping_add(1);
-    }
-
-    if needs_slash {
-        unsafe {
-            *path.add(pos) = b'/';
-        }
-        pos = pos.wrapping_add(1);
-    }
-
-    unsafe {
-        *path.add(pos) = 0;
-    }
-    path
+/// Is the pattern matched against a directory's entries, rather than
+/// looked up? When it holds a wildcard -- or an escape, as glibc reads it,
+/// so that `\*` is matched as the name `*`, `GLOB_ONLYDIR` applying.
+fn needs_scan(p: &[u8], flags: i32) -> bool {
+    has_magic(p, flags) || (flags & GLOB_NOESCAPE == 0 && p.contains(&b'\\'))
 }
 
+/// The pattern with its escapes removed: the name it stands for.
+fn unescape(p: &[u8], flags: i32) -> Result<Owned, NoSpace> {
+    let out = Owned::from_parts(&[p])?;
+    if flags & GLOB_NOESCAPE != 0 {
+        return Ok(out);
+    }
+    let (mut r, mut w) = (0usize, 0usize);
+    // SAFETY: `out` holds `p.len()` bytes and a NUL; `w <= r` throughout.
+    unsafe {
+        while r < p.len() {
+            let mut c = *out.ptr.add(r);
+            if c == b'\\' && r.saturating_add(1) < p.len() {
+                r = r.saturating_add(1);
+                c = *out.ptr.add(r);
+            }
+            *out.ptr.add(w) = c;
+            w = w.saturating_add(1);
+            r = r.saturating_add(1);
+        }
+        *out.ptr.add(w) = 0;
+    }
+    let ptr = out.take();
+    Ok(Owned { ptr, len: w })
+}
+
+/// The patterns a pattern's braces stand for (`GLOB_BRACE`): its first
+/// `{...}` group cut at its top-level commas, each alternative in the
+/// group's place and expanded again; the pattern alone if it has no
+/// balanced group.
+fn brace_expand(p: &[u8], flags: i32, out: &mut List<Owned>) -> Result<(), NoSpace> {
+    let escapes = flags & GLOB_NOESCAPE == 0;
+    let mut i = 0usize;
+    while let Some(&c) = p.get(i) {
+        if c == b'\\' && escapes {
+            i = i.saturating_add(2);
+            continue;
+        }
+        if c == b'{' {
+            let mut depth = 0usize;
+            let mut j = i;
+            let mut cuts = List::<usize>::new();
+            cuts.push(i)?;
+            let mut closed = false;
+            while let Some(&d) = p.get(j) {
+                if d == b'\\' && escapes {
+                    j = j.saturating_add(2);
+                    continue;
+                }
+                match d {
+                    b'{' => depth = depth.saturating_add(1),
+                    b'}' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    b',' if depth == 1 => cuts.push(j)?,
+                    _ => {}
+                }
+                j = j.saturating_add(1);
+            }
+            if !closed {
+                break;
+            }
+            cuts.push(j)?;
+            let head = p.get(..i).unwrap_or(&[]);
+            let tail = p.get(j.saturating_add(1)..).unwrap_or(&[]);
+            for w in cuts.as_slice().windows(2) {
+                let (a, b) = (
+                    w.first().copied().unwrap_or(0),
+                    w.get(1).copied().unwrap_or(0),
+                );
+                let alt = p.get(a.saturating_add(1)..b).unwrap_or(&[]);
+                let joined = Owned::from_parts(&[head, alt, tail])?;
+                brace_expand(joined.bytes(), flags, out)?;
+            }
+            return Ok(());
+        }
+        i = i.saturating_add(1);
+    }
+    out.push(Owned::from_parts(&[p])?)
+}
+
+/// Own archive member -- glibc and gnulib define `glob_pattern_p` in an
+/// object of its own, apart from `glob`, and so does a program that brings
+/// only one of the two. See string.rs's module header.
+mod gnu_glob_pattern_p {
+    /// glibc's `glob_pattern_p`: does `pattern` hold a `*`, a `?`, or a `[`
+    /// that a later `]` closes -- unescaped, if `quote`?
+    ///
+    /// # Safety
+    ///
+    /// `pattern` must be NULL or a C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn glob_pattern_p(pattern: *const u8, quote: i32) -> i32 {
+        if pattern.is_null() {
+            return 0;
+        }
+        // SAFETY: a C string, the caller's.
+        let p = unsafe { core::slice::from_raw_parts(pattern, crate::string::strlen(pattern)) };
+        let mut bracket = false;
+        let mut i = 0usize;
+        while let Some(&c) = p.get(i) {
+            match c {
+                b'?' | b'*' => return 1,
+                // An escape hides the byte after it; a last one, nothing.
+                b'\\' if quote != 0 && i.saturating_add(1) < p.len() => i = i.saturating_add(1),
+                b'[' => bracket = true,
+                b']' if bracket => return 1,
+                _ => {}
+            }
+            i = i.saturating_add(1);
+        }
+        0
+    }
+}
+pub use gnu_glob_pattern_p::glob_pattern_p;
+
 // ---------------------------------------------------------------------------
-// Result assembly
+// The walk
 // ---------------------------------------------------------------------------
 
-/// Build the pathv array from collected matches and store in GlobT.
-///
-/// Returns 0 on success, `GLOB_NOSPACE` on allocation failure.
-fn assemble_results(
-    glob_res: &mut GlobT,
-    match_ptrs: &mut [*mut u8; MAX_MATCHES],
-    match_count: usize,
-) -> i32 {
-    sort_paths(match_ptrs, match_count);
+/// A `glob` caller's `errfunc`.
+type ErrFunc = unsafe extern "C" fn(*const u8, i32) -> i32;
 
-    let old_count = glob_res.gl_pathc;
-    let new_count = old_count.wrapping_add(match_count);
-    // Each entry is a pointer (8 bytes on x86_64), plus one null sentinel.
-    let array_bytes = new_count
-        .wrapping_add(1)
-        .wrapping_mul(core::mem::size_of::<*mut u8>());
+/// One glob over one pattern: the flags it reads with, and what it saw.
+struct Globber {
+    flags: i32,
+    fs: Fs,
+    errfunc: Option<ErrFunc>,
+    /// `GLOB_MAGCHAR`, glibc's way: a last component read from a directory
+    /// that found something -- or that `GLOB_NOCHECK` would answer for.
+    magchar: bool,
+    /// For `GLOB_NOCHECK`'s answer: a wildcard directory part that found a
+    /// directory.
+    dir_magic_found: bool,
+}
 
-    let new_pathv = if glob_res.gl_pathv.is_null() {
-        malloc::malloc(array_bytes)
+impl Globber {
+    const fn fnmatch_flags(&self) -> i32 {
+        let mut f = 0;
+        if self.flags & GLOB_PERIOD == 0 {
+            f |= crate::fnmatch::FNM_PERIOD;
+        }
+        if self.flags & GLOB_NOESCAPE != 0 {
+            f |= crate::fnmatch::FNM_NOESCAPE;
+        }
+        f
+    }
+
+    /// Tell the caller a directory could not be read: should glob stop?
+    fn unreadable(&self, path: &Owned, errno: i32) -> bool {
+        let told = match self.errfunc {
+            // SAFETY: the program's function, given a C string.
+            Some(f) => unsafe { f(path.ptr, errno) != 0 },
+            None => false,
+        };
+        told || self.flags & GLOB_ERR != 0
+    }
+
+    /// The entries of the directory `dir` ("" for the current one) that
+    /// `pat` matches, as `prefix` and their names, onto `out`.
+    fn in_dir(
+        &mut self,
+        dir: &[u8],
+        prefix: &[u8],
+        pat: &[u8],
+        only_dirs: bool,
+        out: &mut List<Found>,
+    ) -> Result<(), Stop> {
+        let open = Owned::from_parts(&[if dir.is_empty() { b"." } else { dir }])?;
+        let d = match self.fs.opendir(&open) {
+            Ok(d) => d,
+            Err(errno) => {
+                // A name that is not a directory holds nothing: not an error.
+                if errno != crate::errno::ENOTDIR && self.unreadable(&open, errno) {
+                    return Err(Stop::Aborted);
+                }
+                return Ok(());
+            }
+        };
+        let before = out.len;
+        let result = self.read_matches(d, prefix, pat, only_dirs, out);
+        self.fs.closedir(d);
+        result?;
+        if out.len > before || self.flags & GLOB_NOCHECK != 0 {
+            self.magchar = true;
+        }
+        Ok(())
+    }
+
+    /// Is it worth a `stat` to know whether a name is a directory? Only for
+    /// a caller that keeps directories alone, or marks them.
+    const fn wants_kind(&self, only_dirs: bool) -> bool {
+        only_dirs || self.flags & GLOB_MARK != 0
+    }
+
+    fn read_matches(
+        &self,
+        d: *mut c_void,
+        prefix: &[u8],
+        pat: &[u8],
+        only_dirs: bool,
+        out: &mut List<Found>,
+    ) -> Result<(), Stop> {
+        while let Some((name, d_type)) = self.fs.readdir(d)? {
+            // The entry's type, where the directory says it: a link or an
+            // unknown type is `stat`'s to settle.
+            let known = match d_type {
+                crate::linux_dirent_types::DT_DIR => Some(true),
+                crate::linux_dirent_types::DT_UNKNOWN | crate::linux_dirent_types::DT_LNK => None,
+                _ => Some(false),
+            };
+            if only_dirs && known == Some(false) {
+                continue;
+            }
+            if !crate::fnmatch::matches(pat, name.bytes(), self.fnmatch_flags())? {
+                continue;
+            }
+            let path = Owned::from_parts(&[prefix, name.bytes()])?;
+            let is_dir =
+                known.unwrap_or_else(|| self.wants_kind(only_dirs) && self.fs.is_dir(&path));
+            if only_dirs && !is_dir {
+                continue;
+            }
+            out.push(Found { path, is_dir })?;
+        }
+        Ok(())
+    }
+
+    /// A name, looked up rather than read: onto `out` if it exists. The
+    /// empty pathname names no file (XBD 4.13) -- the empty pattern matches
+    /// nothing, whatever `GLOB_ALTDIRFUNC`'s `lstat` would say of "".
+    fn look_up(&self, path: Owned, only_dirs: bool, out: &mut List<Found>) -> Result<(), Stop> {
+        if !path.bytes().is_empty() && self.fs.exists(&path) {
+            let is_dir = self.wants_kind(only_dirs) && self.fs.is_dir(&path);
+            out.push(Found { path, is_dir })?;
+        }
+        Ok(())
+    }
+
+    /// Everything `pattern` names, with whether each is a directory.
+    fn expand(&mut self, pattern: &[u8], only_dirs: bool) -> Result<List<Found>, Stop> {
+        let mut out = List::new();
+        if !needs_scan(pattern, self.flags) {
+            self.look_up(unescape(pattern, self.flags)?, only_dirs, &mut out)?;
+            return Ok(out);
+        }
+        if pattern.len() > 1 && pattern.last() == Some(&b'/') {
+            // "X/": the directories X names, each with its slash back -- X's
+            // last component read with the caller's own flags.
+            let inner = self.expand(
+                pattern
+                    .get(..pattern.len().saturating_sub(1))
+                    .unwrap_or(&[]),
+                true,
+            )?;
+            for f in inner.as_slice().iter().filter(|f| f.is_dir) {
+                out.push(Found {
+                    path: Owned::from_parts(&[f.path.bytes(), b"/"])?,
+                    is_dir: true,
+                })?;
+            }
+            return Ok(out);
+        }
+        let Some(slash) = pattern.iter().rposition(|&b| b == b'/') else {
+            self.in_dir(b"", b"", pattern, only_dirs, &mut out)?;
+            return Ok(out);
+        };
+        let dirpart = pattern.get(..slash).unwrap_or(&[]);
+        let filepart = pattern.get(slash.saturating_add(1)..).unwrap_or(&[]);
+        let mut dirs = List::new();
+        if dirpart.is_empty() {
+            dirs.push(Found {
+                path: Owned::from_parts(&[b"/"])?,
+                is_dir: true,
+            })?;
+        } else if needs_scan(dirpart, self.flags) {
+            // The directories, with only the flags that say how to read them:
+            // a wildcard there never matches "." or ".." by GLOB_PERIOD, and
+            // nothing is marked, sorted or answered for NOCHECK -- glibc's
+            // reading.
+            let mut sub = Self {
+                flags: (self.flags & (GLOB_ERR | GLOB_NOESCAPE | GLOB_ALTDIRFUNC))
+                    | GLOB_NOSORT
+                    | GLOB_ONLYDIR,
+                fs: self.fs,
+                errfunc: self.errfunc,
+                magchar: false,
+                dir_magic_found: false,
+            };
+            dirs = sub.expand(dirpart, true)?;
+            if dirs.len > 0 {
+                self.dir_magic_found = true;
+            }
+        } else {
+            dirs.push(Found {
+                path: unescape(dirpart, self.flags)?,
+                is_dir: true,
+            })?;
+        }
+        let scan = needs_scan(filepart, self.flags);
+        let name = if scan {
+            None
+        } else {
+            Some(unescape(filepart, self.flags)?)
+        };
+        for d in dirs.as_slice() {
+            let dir = d.path.bytes();
+            let prefix = if dir == b"/" {
+                Owned::from_parts(&[b"/"])?
+            } else {
+                Owned::from_parts(&[dir, b"/"])?
+            };
+            match &name {
+                None => self.in_dir(dir, prefix.bytes(), filepart, only_dirs, &mut out)?,
+                Some(n) => self.look_up(
+                    Owned::from_parts(&[prefix.bytes(), n.bytes()])?,
+                    only_dirs,
+                    &mut out,
+                )?,
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// The home directory `~user` names (`user` empty: the caller's own).
+type HomeOf<'h> = &'h dyn Fn(&[u8]) -> Option<Owned>;
+
+/// The system's answer: `HOME` for the caller's own, else the password
+/// database's.
+fn system_home(user: &[u8]) -> Option<Owned> {
+    let dir: *const u8 = if user.is_empty() {
+        // SAFETY: a C string literal.
+        let h = unsafe { crate::environ::getenv(c"HOME".as_ptr().cast()) };
+        // SAFETY: getenv's answer: NULL or a C string.
+        if !h.is_null() && unsafe { *h } != 0 {
+            h
+        } else {
+            let pw = crate::pwd::getpwuid(crate::unistd::getuid());
+            if pw.is_null() {
+                return None;
+            }
+            // SAFETY: getpwuid's entry, valid until its next call.
+            unsafe { (*pw).pw_dir }
+        }
     } else {
-        // SAFETY: gl_pathv was allocated by malloc, realloc is valid.
-        unsafe { malloc::realloc(glob_res.gl_pathv.cast::<u8>(), array_bytes) }
+        let name = Owned::from_parts(&[user]).ok()?;
+        // SAFETY: a C string.
+        let pw = unsafe { crate::pwd::getpwnam(name.ptr) };
+        if pw.is_null() {
+            return None;
+        }
+        // SAFETY: as above.
+        unsafe { (*pw).pw_dir }
     };
+    if dir.is_null() {
+        return None;
+    }
+    // SAFETY: a C string the environment or the database holds.
+    let bytes = unsafe { core::slice::from_raw_parts(dir, crate::string::strlen(dir)) };
+    Owned::from_parts(&[bytes]).ok()
+}
 
-    if new_pathv.is_null() {
-        cleanup_matches(match_ptrs, match_count);
+/// `~` and `~user` expanded (`GLOB_TILDE`): the pattern, and whether it is
+/// a bare `~` or `~user` -- returned as it is, looked for nowhere, as glibc
+/// returns it. `None` for `GLOB_TILDE_CHECK`'s unknown user.
+fn tilde(p: &[u8], flags: i32, home: HomeOf<'_>) -> Result<Option<(Owned, bool)>, NoSpace> {
+    if p.first() != Some(&b'~') || flags & (GLOB_TILDE | GLOB_TILDE_CHECK) == 0 {
+        return Ok(Some((Owned::from_parts(&[p])?, false)));
+    }
+    let end = p.iter().position(|&b| b == b'/').unwrap_or(p.len());
+    let user = p.get(1..end).unwrap_or(&[]);
+    let rest = p.get(end..).unwrap_or(&[]);
+    match home(user) {
+        Some(h) => Ok(Some((
+            Owned::from_parts(&[h.bytes(), rest])?,
+            rest.is_empty(),
+        ))),
+        None if flags & GLOB_TILDE_CHECK != 0 => Ok(None),
+        None => Ok(Some((Owned::from_parts(&[p])?, rest.is_empty()))),
+    }
+}
+
+impl Globber {
+    /// Every pattern the braces make, each globbed, marked and sorted.
+    fn all(&mut self, pattern: &[u8], home: HomeOf<'_>) -> Result<List<Found>, Stop> {
+        let flags = self.flags;
+        let mut patterns = List::new();
+        if flags & GLOB_BRACE != 0 {
+            brace_expand(pattern, flags, &mut patterns)?;
+        } else {
+            patterns.push(Owned::from_parts(&[pattern])?)?;
+        }
+        let mut all = List::new();
+        for p in patterns.as_slice() {
+            let Some((t, bare)) = tilde(p.bytes(), flags, home)? else {
+                continue;
+            };
+            let mut r = if bare {
+                let is_dir = flags & GLOB_MARK != 0 && self.fs.is_dir(&t);
+                let mut one = List::new();
+                one.push(Found { path: t, is_dir })?;
+                one
+            } else {
+                self.expand(t.bytes(), flags & GLOB_ONLYDIR != 0)?
+            };
+            if flags & GLOB_MARK != 0 {
+                for f in r.as_mut_slice() {
+                    // A name ending in a slash says it is a directory already.
+                    if f.is_dir && f.path.bytes().last() != Some(&b'/') {
+                        f.path = Owned::from_parts(&[f.path.bytes(), b"/"])?;
+                    }
+                }
+            }
+            if flags & GLOB_NOSORT == 0 {
+                r.as_mut_slice()
+                    .sort_unstable_by(|a, b| a.path.bytes().cmp(b.path.bytes()));
+            }
+            all.append(r)?;
+        }
+        Ok(all)
+    }
+}
+
+/// [`glob`] over a byte string, `~`'s homes from `home`.
+fn glob_bytes(
+    pattern: &[u8],
+    flags: i32,
+    errfunc: Option<ErrFunc>,
+    g: &mut GlobT,
+    home: HomeOf<'_>,
+) -> i32 {
+    // gl_offs means nothing without GLOB_DOOFFS, and is 0 then -- so that
+    // globfree knows where the names start -- as glibc has it.
+    if flags & GLOB_DOOFFS == 0 {
+        g.gl_offs = 0;
+    }
+    if flags & GLOB_APPEND == 0 {
+        g.gl_pathc = 0;
+        g.gl_pathv = core::ptr::null_mut();
+    }
+    let mut globber = Globber {
+        flags,
+        fs: Fs::of(g, flags),
+        errfunc,
+        magchar: false,
+        dir_magic_found: false,
+    };
+    let mut found = match globber.all(pattern, home) {
+        Ok(f) => f,
+        Err(Stop::NoSpace) => return GLOB_NOSPACE,
+        Err(Stop::Aborted) => {
+            g.gl_flags = flags | if globber.magchar { GLOB_MAGCHAR } else { 0 };
+            return GLOB_ABORTED;
+        }
+    };
+    let mut magchar = globber.magchar;
+    if found.len == 0 {
+        let nomagic =
+            flags & GLOB_NOMAGIC != 0 && !pattern.is_empty() && !needs_scan(pattern, flags);
+        if flags & GLOB_NOCHECK == 0 && !nomagic {
+            g.gl_flags = flags;
+            return GLOB_NOMATCH;
+        }
+        let pushed = Owned::from_parts(&[pattern]).and_then(|path| {
+            found.push(Found {
+                path,
+                is_dir: false,
+            })
+        });
+        if pushed.is_err() {
+            return GLOB_NOSPACE;
+        }
+        magchar = magchar || globber.dir_magic_found;
+    }
+    // gl_pathv: the reserved NULLs, what an earlier call left, these, NULL.
+    let offs = g.gl_offs;
+    let old = if g.gl_pathv.is_null() { 0 } else { g.gl_pathc };
+    let new = found.len;
+    let Some(total) = offs
+        .checked_add(old)
+        .and_then(|n| n.checked_add(new))
+        .and_then(|n| n.checked_add(1))
+    else {
+        return GLOB_NOSPACE;
+    };
+    let Some(bytes) = total.checked_mul(size_of::<*mut u8>()) else {
+        return GLOB_NOSPACE;
+    };
+    let fresh = g.gl_pathv.is_null();
+    // SAFETY: NULL or the array an earlier call made, from `malloc`.
+    let v = unsafe { crate::malloc::realloc(g.gl_pathv.cast(), bytes) }.cast::<*mut u8>();
+    if v.is_null() {
         return GLOB_NOSPACE;
     }
-
-    // SAFETY: malloc returns 8-byte aligned pointers on x86_64, which
-    // satisfies the alignment requirement for *mut u8 pointers.
-    #[allow(clippy::cast_ptr_alignment)]
-    let pathv = new_pathv.cast::<*mut u8>();
-
-    let mut idx: usize = 0;
-    while idx < match_count {
-        let ptr = match_ptrs
-            .get(idx)
-            .copied()
-            .unwrap_or(core::ptr::null_mut());
-        unsafe {
-            *pathv.add(old_count.wrapping_add(idx)) = ptr;
-        }
-        idx = idx.wrapping_add(1);
-    }
-
-    // Null-terminate the array.
+    // SAFETY: `v` has `total` slots: the reserved ones (NULLed when new),
+    // the old names (kept by realloc), the new ones, and the terminator.
     unsafe {
-        *pathv.add(new_count) = core::ptr::null_mut();
+        if fresh {
+            for i in 0..offs {
+                v.add(i).write(core::ptr::null_mut());
+            }
+        }
+        let at = offs.saturating_add(old);
+        for i in 0..new {
+            let f = found.ptr.add(i).read();
+            v.add(at.saturating_add(i)).write(f.path.take());
+        }
+        // Every element was moved out: the list owns none of them now.
+        found.len = 0;
+        v.add(at.saturating_add(new)).write(core::ptr::null_mut());
     }
-
-    glob_res.gl_pathv = pathv;
-    glob_res.gl_pathc = new_count;
-
+    g.gl_pathv = v;
+    g.gl_pathc = old.saturating_add(new);
+    g.gl_flags = flags | if magchar { GLOB_MAGCHAR } else { 0 };
     0
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Expand a pathname pattern into matching filenames.
-///
-/// Returns 0 on success, `GLOB_NOMATCH` if no matches (unless
-/// `GLOB_NOCHECK`), `GLOB_NOSPACE` on allocation failure.
+/// `glob(pattern, flags, errfunc, pglob)`: the pathnames `pattern` matches,
+/// in `pglob->gl_pathv`. 0, or [`GLOB_NOMATCH`], [`GLOB_ABORTED`],
+/// [`GLOB_NOSPACE`]; -1 with `errno` `EINVAL` for a NULL argument or a flag
+/// not glob's, as glibc.
 ///
 /// # Safety
 ///
-/// `pattern` must be a valid null-terminated string.
-/// `pglob` must point to a valid `GlobT`.
+/// `pattern` must be a C string and `pglob` a valid `glob_t` -- with
+/// `GLOB_APPEND`, one an earlier `glob` filled; with `GLOB_ALTDIRFUNC`, its
+/// functions valid to call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn glob(
     pattern: *const u8,
     flags: i32,
-    _errfunc: Option<unsafe extern "C" fn(*const u8, i32) -> i32>,
+    errfunc: Option<ErrFunc>,
     pglob: *mut GlobT,
 ) -> i32 {
-    if pattern.is_null() || pglob.is_null() {
-        return GLOB_ABORTED;
+    if pattern.is_null() || pglob.is_null() || flags & !GLOB_FLAGS != 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
     }
-
-    let glob_res = unsafe { &mut *pglob };
-
-    // If not appending, initialize.
-    if flags & GLOB_APPEND == 0 {
-        glob_res.gl_pathc = 0;
-        glob_res.gl_pathv = core::ptr::null_mut();
-        glob_res.gl_offs = 0;
-    }
-
-    let parts = split_pattern(pattern);
-
-    // Collect matches from the directory.
-    let mut match_ptrs: [*mut u8; MAX_MATCHES] = [core::ptr::null_mut(); MAX_MATCHES];
-    let match_result = collect_matches(pattern, &parts, flags, &mut match_ptrs);
-
-    if match_result == -1 {
-        return GLOB_NOSPACE;
-    }
-
-    // -2 = directory open failure (distinct from "no matches").
-    if match_result == -2 {
-        if flags & GLOB_ERR != 0 {
-            return GLOB_ABORTED;
-        }
-        // Treat unreadable dir same as no matches.
-        if flags & GLOB_NOCHECK != 0 {
-            return add_single_path(glob_res, pattern, parts.pat_len);
-        }
-        return GLOB_NOMATCH;
-    }
-
-    let match_count = match_result as usize;
-
-    if match_count == 0 {
-        // Directory opened fine but nothing matched the pattern.
-        if flags & GLOB_NOCHECK != 0 {
-            return add_single_path(glob_res, pattern, parts.pat_len);
-        }
-        return GLOB_NOMATCH;
-    }
-
-    assemble_results(glob_res, &mut match_ptrs, match_count)
+    // SAFETY: a C string, the caller's.
+    let p = unsafe { core::slice::from_raw_parts(pattern, crate::string::strlen(pattern)) };
+    // SAFETY: the caller's `glob_t`.
+    glob_bytes(p, flags, errfunc, unsafe { &mut *pglob }, &system_home)
 }
 
-/// Free memory allocated by `glob()`.
+/// `globfree(pglob)`: free what `glob` put in it.
+///
+/// # Safety
+///
+/// `pglob` must be NULL or a `glob_t` `glob` filled (or an empty one).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn globfree(pglob: *mut GlobT) {
     if pglob.is_null() {
         return;
     }
-
-    let glob_res = unsafe { &mut *pglob };
-
-    if !glob_res.gl_pathv.is_null() {
-        let mut idx: usize = 0;
-        while idx < glob_res.gl_pathc {
-            let entry = unsafe { *glob_res.gl_pathv.add(idx) };
-            if !entry.is_null() {
-                // SAFETY: each entry was allocated by malloc.
-                unsafe {
-                    malloc::free(entry);
-                }
-            }
-            idx = idx.wrapping_add(1);
+    // SAFETY: the caller's `glob_t`.
+    let g = unsafe { &mut *pglob };
+    if !g.gl_pathv.is_null() {
+        for i in 0..g.gl_pathc {
+            // SAFETY: each name glob stored, after the reserved slots.
+            unsafe { crate::malloc::free(*g.gl_pathv.add(g.gl_offs.saturating_add(i))) };
         }
-        // SAFETY: gl_pathv was allocated via malloc, cast back to *mut u8.
-        #[allow(clippy::cast_ptr_alignment)]
-        unsafe {
-            malloc::free(glob_res.gl_pathv.cast::<u8>());
-        }
+        // SAFETY: the array glob made.
+        unsafe { crate::malloc::free(g.gl_pathv.cast()) };
     }
-
-    glob_res.gl_pathc = 0;
-    glob_res.gl_pathv = core::ptr::null_mut();
+    g.gl_pathv = core::ptr::null_mut();
+    g.gl_pathc = 0;
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Add the pattern itself as a match (for `GLOB_NOCHECK`).
-///
-/// Appends to existing results when `GLOB_APPEND` was used, rather
-/// than replacing them.
-fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> i32 {
-    let alloc_len = pat_len.wrapping_add(1);
-    let path = malloc::malloc(alloc_len);
-    if path.is_null() {
-        return GLOB_NOSPACE;
-    }
-
-    let mut idx: usize = 0;
-    while idx < pat_len {
-        unsafe {
-            *path.add(idx) = *pattern.add(idx);
-        }
-        idx = idx.wrapping_add(1);
-    }
-    unsafe {
-        *path.add(pat_len) = 0;
-    }
-
-    let old_count = glob_res.gl_pathc;
-    let new_count = old_count.wrapping_add(1);
-    // Allocate space for existing entries + new entry + null sentinel.
-    let array_bytes = new_count
-        .wrapping_add(1)
-        .wrapping_mul(core::mem::size_of::<*mut u8>());
-
-    let pathv_raw = if glob_res.gl_pathv.is_null() {
-        malloc::malloc(array_bytes)
-    } else {
-        // SAFETY: gl_pathv was allocated by malloc.
-        unsafe { malloc::realloc(glob_res.gl_pathv.cast::<u8>(), array_bytes) }
-    };
-
-    if pathv_raw.is_null() {
-        // SAFETY: path was allocated by malloc above.
-        unsafe {
-            malloc::free(path);
-        }
-        return GLOB_NOSPACE;
-    }
-
-    // SAFETY: malloc returns 8-byte aligned on x86_64.
-    #[allow(clippy::cast_ptr_alignment)]
-    let pathv = pathv_raw.cast::<*mut u8>();
-    // Place new entry after existing entries (preserves GLOB_APPEND data).
-    unsafe {
-        *pathv.add(old_count) = path;
-        *pathv.add(new_count) = core::ptr::null_mut();
-    }
-
-    glob_res.gl_pathv = pathv;
-    glob_res.gl_pathc = new_count;
-
-    0
-}
-
-/// Free partially-collected matches on error.
-fn cleanup_matches(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
-    let mut idx: usize = 0;
-    while idx < count {
-        if let Some(&ptr) = ptrs.get(idx)
-            && !ptr.is_null()
-        {
-            // SAFETY: each ptr was allocated by malloc.
-            unsafe {
-                malloc::free(ptr);
-            }
-        }
-        idx = idx.wrapping_add(1);
-    }
-}
-
-/// Insertion sort on an array of C string pointers.
-fn sort_paths(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
-    if count <= 1 {
-        return;
-    }
-
-    let mut outer: usize = 1;
-    while outer < count {
-        let key = ptrs.get(outer).copied().unwrap_or(core::ptr::null_mut());
-        let mut inner = outer;
-        while inner > 0 {
-            let prev = ptrs
-                .get(inner.wrapping_sub(1))
-                .copied()
-                .unwrap_or(core::ptr::null_mut());
-            if unsafe { string::strcmp(prev, key) } <= 0 {
-                break;
-            }
-            if let Some(slot) = ptrs.get_mut(inner) {
-                *slot = prev;
-            }
-            inner = inner.wrapping_sub(1);
-        }
-        if let Some(slot) = ptrs.get_mut(inner) {
-            *slot = key;
-        }
-        outer = outer.wrapping_add(1);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::linux_dirent_types::{DT_DIR, DT_REG};
+    use std::borrow::ToOwned;
+    use std::boxed::Box;
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, HashSet};
+    use std::format;
+    use std::string::{String, ToString};
+    use std::sync::OnceLock;
+    use std::vec;
+    use std::vec::Vec;
 
-    // -- ABI layout --
+    const ORACLE: &str = include_str!("glob_oracle.txt");
+    const DEVIATIONS: &str = include_str!("glob_deviations.txt");
 
-    /// `glob_t` is 72 bytes and its three POSIX-visible members sit where
-    /// glibc puts them: `gl_pathc` at 0, `gl_pathv` at 8, `gl_offs` at 16.
-    ///
-    /// This is the field-order test the *existing* `test_glob_t_initial`
-    /// could not be: that one only proved the three fields read back as
-    /// zero, which would still hold if they were reordered.  A caller
-    /// compiled against `<glob.h>` reads by offset, not by name.
-    ///
-    /// The size is also a `const` assertion above; this adds the offsets.
-    #[test]
-    fn test_glob_t_matches_glibc_layout() {
-        use core::mem::{align_of, size_of};
-        assert_eq!(size_of::<GlobT>(), 72, "musl/glibc glob_t is 72 bytes");
-        assert_eq!(align_of::<GlobT>(), 8);
-        let g = GlobT::new();
-        let base = (&raw const g).cast::<u8>() as usize;
-        assert_eq!((&raw const g.gl_pathc).cast::<u8>() as usize - base, 0);
-        assert_eq!((&raw const g.gl_pathv).cast::<u8>() as usize - base, 8);
-        assert_eq!((&raw const g.gl_offs).cast::<u8>() as usize - base, 16);
-        assert_eq!((&raw const g._reserved).cast::<u8>() as usize - base, 24);
-        assert_eq!(g._reserved, [0u8; 48]);
+    // -- The oracle's escapes -----------------------------------------------
+
+    /// `\xNN` escapes back to bytes, as `glob_harness.py` writes them; `\x`
+    /// alone is the empty string.
+    fn from_oracle(t: &str) -> Vec<u8> {
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                if i + 4 <= b.len() {
+                    out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).unwrap());
+                    i += 4;
+                } else {
+                    i += 2;
+                }
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
     }
 
-    // -- Flag constants match glibc --
-
-    #[test]
-    fn test_glob_input_flags() {
-        assert_eq!(GLOB_ERR, 1); // (1 << 0)
-        assert_eq!(GLOB_MARK, 2); // (1 << 1)
-        assert_eq!(GLOB_NOCHECK, 16); // (1 << 4)
-        assert_eq!(GLOB_APPEND, 32); // (1 << 5)
+    /// Bytes as the harness writes them.
+    fn to_oracle(b: &[u8]) -> String {
+        if b.is_empty() {
+            return "\\x".to_owned();
+        }
+        let mut s = String::new();
+        for &c in b {
+            if c == b'\\' || c <= b' ' || c > b'~' {
+                s.push_str(&format!("\\x{c:02x}"));
+            } else {
+                s.push(char::from(c));
+            }
+        }
+        s
     }
 
-    #[test]
-    fn test_glob_error_codes() {
-        assert_eq!(GLOB_NOSPACE, 1);
-        assert_eq!(GLOB_ABORTED, 2);
-        assert_eq!(GLOB_NOMATCH, 3);
+    fn c_bytes<'a>(p: *const u8) -> &'a [u8] {
+        // SAFETY: glob hands its callbacks C strings.
+        unsafe { core::slice::from_raw_parts(p, crate::string::strlen(p)) }
     }
 
-    #[test]
-    fn test_glob_error_codes_distinct() {
-        // Error codes must be distinct from each other.
-        assert_ne!(GLOB_NOSPACE, GLOB_ABORTED);
-        assert_ne!(GLOB_NOSPACE, GLOB_NOMATCH);
-        assert_ne!(GLOB_ABORTED, GLOB_NOMATCH);
+    // -- A directory tree in memory, through GLOB_ALTDIRFUNC ----------------
+
+    /// A directory tree as the harness's is: each directory's names in the
+    /// tree's order, and which nodes are directories. Node "" is the
+    /// current directory, "/" the root; "noperm" cannot be opened.
+    struct Tree {
+        children: HashMap<Vec<u8>, Vec<Vec<u8>>>,
+        dirs: HashSet<Vec<u8>>,
     }
 
-    // -- GlobT layout --
+    impl Tree {
+        /// From paths, directories with a trailing slash, parents first.
+        fn new(entries: &[Vec<u8>]) -> Self {
+            let mut children: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+            let mut dirs = HashSet::new();
+            for node in [&b""[..], b"/"] {
+                children.insert(node.to_vec(), Vec::new());
+                dirs.insert(node.to_vec());
+            }
+            for entry in entries {
+                let is_dir = entry.last() == Some(&b'/');
+                let path = &entry[..entry.len() - usize::from(is_dir)];
+                let (parent, name) = match path.iter().rposition(|&b| b == b'/') {
+                    Some(0) => (b"/".to_vec(), path[1..].to_vec()),
+                    Some(i) => (path[..i].to_vec(), path[i + 1..].to_vec()),
+                    None => (Vec::new(), path.to_vec()),
+                };
+                children.entry(parent).or_default().push(name);
+                if is_dir {
+                    children.entry(path.to_vec()).or_default();
+                    dirs.insert(path.to_vec());
+                }
+            }
+            Self { children, dirs }
+        }
 
-    #[test]
-    fn test_glob_t_initial() {
-        let g = GlobT::new();
-        assert_eq!(g.gl_pathc, 0);
-        assert!(g.gl_pathv.is_null());
-        assert_eq!(g.gl_offs, 0);
-    }
+        /// The harness's, from the oracle's `# tree:` line.
+        fn oracle() -> &'static Self {
+            static TREE: OnceLock<Tree> = OnceLock::new();
+            TREE.get_or_init(|| {
+                let line = ORACLE
+                    .lines()
+                    .find_map(|l| l.strip_prefix("# tree: "))
+                    .unwrap();
+                Self::new(&line.split(' ').map(from_oracle).collect::<Vec<_>>())
+            })
+        }
 
-    // -- split_pattern --
+        fn child(parent: &[u8], name: &[u8]) -> Vec<u8> {
+            match parent {
+                b"" => name.to_vec(),
+                b"/" => [b"/", name].concat(),
+                _ => [parent, b"/", name].concat(),
+            }
+        }
 
-    #[test]
-    fn test_split_pattern_no_slash() {
-        let parts = split_pattern(b"*.txt\0".as_ptr());
-        assert!(!parts.has_slash);
-        assert_eq!(parts.file_start, 0);
-        assert_eq!(parts.pat_len, 5);
-        // dir_buf should be "."
-        assert_eq!(parts.dir_buf[0], b'.');
-        assert_eq!(parts.dir_buf[1], 0);
-    }
-
-    #[test]
-    fn test_split_pattern_with_dir() {
-        let parts = split_pattern(b"/foo/*.txt\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 4); // Position of second '/'
-        assert_eq!(parts.file_start, 5); // "*.txt" starts at 5
-        assert_eq!(parts.pat_len, 10);
-        // dir_buf should be "/foo/"
-        assert_eq!(&parts.dir_buf[..5], b"/foo/");
-        assert_eq!(parts.dir_buf[5], 0);
-    }
-
-    #[test]
-    fn test_split_pattern_root() {
-        let parts = split_pattern(b"/*.txt\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 0);
-        assert_eq!(parts.file_start, 1);
-        assert_eq!(&parts.dir_buf[..1], b"/");
-        assert_eq!(parts.dir_buf[1], 0);
-    }
-
-    #[test]
-    fn test_split_pattern_nested() {
-        // "/a/b/c/d.txt" — positions: /=0, a=1, /=2, b=3, /=4, c=5, /=6, d=7...
-        let parts = split_pattern(b"/a/b/c/d.txt\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 6); // Last '/' at position 6
-        assert_eq!(parts.file_start, 7); // "d.txt" starts at 7
-        assert_eq!(&parts.dir_buf[..7], b"/a/b/c/");
-    }
-
-    // -- should_skip_dot --
-
-    #[test]
-    fn test_skip_dot_entry() {
-        // Pattern does NOT start with '.', so skip "."
-        assert!(should_skip_dot(b".\0".as_ptr(), b"*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_skip_dotdot_entry() {
-        // Pattern does NOT start with '.', so skip ".."
-        assert!(should_skip_dot(b"..\0".as_ptr(), b"*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_dont_skip_dot_when_pattern_starts_with_dot() {
-        // Pattern starts with '.', so do NOT skip "."
-        assert!(!should_skip_dot(b".\0".as_ptr(), b".*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_dont_skip_dotdot_when_pattern_starts_with_dot() {
-        assert!(!should_skip_dot(b"..\0".as_ptr(), b"..\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_dont_skip_normal_name() {
-        // Regular name (doesn't start with '.') is never skipped.
-        assert!(!should_skip_dot(b"hello\0".as_ptr(), b"*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_dont_skip_dotfile() {
-        // ".bashrc" starts with '.' but is not "." or ".."
-        assert!(!should_skip_dot(b".bashrc\0".as_ptr(), b"*\0".as_ptr()));
-    }
-
-    // -- sort_paths --
-
-    #[test]
-    fn test_sort_paths_empty() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        sort_paths(&mut ptrs, 0); // Should not crash.
-    }
-
-    #[test]
-    fn test_sort_paths_single() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        let mut s = *b"hello\0";
-        ptrs[0] = s.as_mut_ptr();
-        sort_paths(&mut ptrs, 1); // Should not crash.
-        assert_eq!(ptrs[0], s.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_sort_paths_already_sorted() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        let mut a = *b"alpha\0";
-        let mut b = *b"beta\0\0";
-        let mut c = *b"gamma\0";
-        ptrs[0] = a.as_mut_ptr();
-        ptrs[1] = b.as_mut_ptr();
-        ptrs[2] = c.as_mut_ptr();
-        sort_paths(&mut ptrs, 3);
-        // Should remain in order: alpha, beta, gamma.
-        assert_eq!(ptrs[0], a.as_mut_ptr());
-        assert_eq!(ptrs[1], b.as_mut_ptr());
-        assert_eq!(ptrs[2], c.as_mut_ptr());
-    }
-
-    #[test]
-    fn test_sort_paths_reverse() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        let mut c = *b"gamma\0";
-        let mut b = *b"beta\0\0";
-        let mut a = *b"alpha\0";
-        ptrs[0] = c.as_mut_ptr();
-        ptrs[1] = b.as_mut_ptr();
-        ptrs[2] = a.as_mut_ptr();
-        sort_paths(&mut ptrs, 3);
-        // Should now be: alpha, beta, gamma.
-        assert_eq!(ptrs[0], a.as_mut_ptr());
-        assert_eq!(ptrs[1], b.as_mut_ptr());
-        assert_eq!(ptrs[2], c.as_mut_ptr());
-    }
-
-    // -- MAX_MATCHES --
-
-    #[test]
-    fn test_max_matches() {
-        assert_eq!(MAX_MATCHES, 512);
-    }
-
-    // -- glob null checks --
-
-    #[test]
-    fn test_glob_null_pattern() {
-        let mut g = GlobT::new();
-        let ret = unsafe { glob(core::ptr::null(), 0, None, &raw mut g) };
-        assert_eq!(ret, GLOB_ABORTED);
-    }
-
-    #[test]
-    fn test_glob_null_pglob() {
-        let ret = unsafe { glob(b"*\0".as_ptr(), 0, None, core::ptr::null_mut()) };
-        assert_eq!(ret, GLOB_ABORTED);
-    }
-
-    // -- globfree null safety --
-
-    #[test]
-    fn test_globfree_null() {
-        // Should not crash.
-        unsafe {
-            globfree(core::ptr::null_mut());
+        /// The node `path` names, as the harness's lookup finds it: "." and
+        /// ".." resolved, ".." back along the path taken and staying at the
+        /// top; "" is the current directory. Else the errno it gives.
+        fn lookup(&self, path: &[u8]) -> Result<Vec<u8>, i32> {
+            let mut node = if path.first() == Some(&b'/') {
+                b"/".to_vec()
+            } else {
+                Vec::new()
+            };
+            let mut taken = Vec::new();
+            for comp in path.split(|&b| b == b'/') {
+                match comp {
+                    b"" | b"." => {}
+                    b".." => {
+                        if let Some(up) = taken.pop() {
+                            node = up;
+                        }
+                    }
+                    _ => {
+                        if !self.dirs.contains(&node) {
+                            return Err(crate::errno::ENOTDIR);
+                        }
+                        if !self.children[&node].iter().any(|n| n == comp) {
+                            return Err(crate::errno::ENOENT);
+                        }
+                        let next = Self::child(&node, comp);
+                        taken.push(core::mem::replace(&mut node, next));
+                    }
+                }
+            }
+            if path.last() == Some(&b'/') && !self.dirs.contains(&node) {
+                return Err(crate::errno::ENOTDIR);
+            }
+            Ok(node)
         }
     }
 
-    #[test]
-    fn test_globfree_empty() {
-        let mut g = GlobT::new();
-        unsafe {
-            globfree(&raw mut g);
+    thread_local! {
+        /// The tree this thread's callbacks read.
+        static CURRENT: Cell<Option<&'static Tree>> = const { Cell::new(None) };
+        /// What `on_error` was told, as the harness logs it.
+        static ERRLOG: RefCell<String> = const { RefCell::new(String::new()) };
+        /// Whether `on_error` asks glob to stop.
+        static STOP: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn tree() -> &'static Tree {
+        CURRENT.get().unwrap_or_else(Tree::oracle)
+    }
+
+    struct Stream {
+        entries: Vec<(Vec<u8>, bool)>,
+        next: usize,
+        entry: Dirent,
+    }
+
+    unsafe extern "C" fn tree_opendir(path: *const u8) -> *mut c_void {
+        let t = tree();
+        let node = match t.lookup(c_bytes(path)) {
+            Ok(n) => n,
+            Err(e) => {
+                crate::errno::set_errno(e);
+                return core::ptr::null_mut();
+            }
+        };
+        if !t.dirs.contains(&node) {
+            crate::errno::set_errno(crate::errno::ENOTDIR);
+            return core::ptr::null_mut();
         }
-        assert_eq!(g.gl_pathc, 0);
-        assert!(g.gl_pathv.is_null());
+        if node == b"noperm" {
+            crate::errno::set_errno(crate::errno::EACCES);
+            return core::ptr::null_mut();
+        }
+        let mut entries = vec![(b".".to_vec(), true), (b"..".to_vec(), true)];
+        for n in &t.children[&node] {
+            entries.push((n.clone(), t.dirs.contains(&Tree::child(&node, n))));
+        }
+        // SAFETY: all-zero is a `Dirent`.
+        let entry = unsafe { core::mem::zeroed() };
+        Box::into_raw(Box::new(Stream {
+            entries,
+            next: 0,
+            entry,
+        }))
+        .cast()
     }
 
-    // -- split_pattern edge cases --
-
-    #[test]
-    fn test_split_pattern_trailing_slash() {
-        // "/dir/" — last_slash at position 4
-        let parts = split_pattern(b"/dir/\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 4);
-        assert_eq!(parts.file_start, 5);
-        assert_eq!(parts.pat_len, 5);
+    unsafe extern "C" fn tree_readdir(d: *mut c_void) -> *mut Dirent {
+        // SAFETY: a stream `tree_opendir` made.
+        let s = unsafe { &mut *d.cast::<Stream>() };
+        let Some((name, is_dir)) = s.entries.get(s.next) else {
+            return core::ptr::null_mut();
+        };
+        s.next += 1;
+        s.entry.d_name = [0; 256];
+        s.entry.d_name[..name.len()].copy_from_slice(name);
+        s.entry.d_type = if *is_dir { DT_DIR } else { DT_REG };
+        &raw mut s.entry
     }
 
-    #[test]
-    fn test_split_pattern_only_slash() {
-        let parts = split_pattern(b"/\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 0);
-        assert_eq!(parts.file_start, 1);
-        assert_eq!(parts.pat_len, 1);
+    unsafe extern "C" fn tree_closedir(d: *mut c_void) {
+        // SAFETY: a stream `tree_opendir` made, closed once.
+        drop(unsafe { Box::from_raw(d.cast::<Stream>()) });
     }
 
-    #[test]
-    fn test_split_pattern_empty() {
-        let parts = split_pattern(b"\0".as_ptr());
-        assert!(!parts.has_slash);
-        assert_eq!(parts.file_start, 0);
-        assert_eq!(parts.pat_len, 0);
-        assert_eq!(parts.dir_buf[0], b'.');
-        assert_eq!(parts.dir_buf[1], 0);
-    }
-
-    #[test]
-    fn test_split_pattern_deep_nesting() {
-        // /a/b/c/d/e/f — positions: /=0 a=1 /=2 b=3 /=4 c=5 /=6 d=7 /=8 e=9 /=10 f=11
-        let parts = split_pattern(b"/a/b/c/d/e/f\0".as_ptr());
-        assert!(parts.has_slash);
-        assert_eq!(parts.last_slash, 10); // Last '/' at position 10
-        assert_eq!(parts.file_start, 11); // "f" at position 11
-    }
-
-    // -- sort_paths more edge cases --
-
-    #[test]
-    fn test_sort_paths_duplicates() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        let mut a1 = *b"same\0";
-        let mut a2 = *b"same\0";
-        let mut a3 = *b"same\0";
-        ptrs[0] = a1.as_mut_ptr();
-        ptrs[1] = a2.as_mut_ptr();
-        ptrs[2] = a3.as_mut_ptr();
-        // Sorting identical strings must not crash.
-        sort_paths(&mut ptrs, 3);
-    }
-
-    #[test]
-    fn test_sort_paths_two_elements() {
-        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
-        let mut b_str = *b"beta\0";
-        let mut a_str = *b"alph\0";
-        ptrs[0] = b_str.as_mut_ptr();
-        ptrs[1] = a_str.as_mut_ptr();
-        sort_paths(&mut ptrs, 2);
-        assert_eq!(ptrs[0], a_str.as_mut_ptr());
-        assert_eq!(ptrs[1], b_str.as_mut_ptr());
-    }
-
-    // -- should_skip_dot more cases --
-
-    #[test]
-    fn test_dont_skip_dot_with_dotstar_pattern() {
-        // Pattern ".*" starts with '.', so we should NOT skip "." or "..".
-        assert!(!should_skip_dot(b".\0".as_ptr(), b".*\0".as_ptr()));
-        assert!(!should_skip_dot(b"..\0".as_ptr(), b".*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_skip_dot_with_star_pattern() {
-        // Pattern "*" does NOT start with '.', so skip "." and "..".
-        assert!(should_skip_dot(b".\0".as_ptr(), b"*\0".as_ptr()));
-        assert!(should_skip_dot(b"..\0".as_ptr(), b"*\0".as_ptr()));
-    }
-
-    #[test]
-    fn test_skip_dot_question_mark_pattern() {
-        // Pattern "?" does NOT start with '.'.
-        assert!(should_skip_dot(b".\0".as_ptr(), b"?\0".as_ptr()));
-    }
-
-    // -- GlobT struct size: see `test_glob_t_matches_glibc_layout` at the top
-    // of this module.  The `test_glob_t_size` that used to sit here asserted
-    // 24 bytes — "usize(8) + ptr(8) + usize(8)", which is the size of *our*
-    // three fields rather than the size `<glob.h>` declares.  A test written
-    // from our own definition can only ever agree with it; the contract it
-    // needed to check was against the header.
-
-    // -- Flag combinations --
-
-    #[test]
-    fn test_glob_flags_are_distinct_bits() {
-        // All flag values must be distinct (no overlap).
-        let flags = [GLOB_ERR, GLOB_MARK, GLOB_NOCHECK, GLOB_APPEND];
-        for i in 0..flags.len() {
-            for j in (i + 1)..flags.len() {
-                assert_ne!(
-                    flags[i], flags[j],
-                    "flags at indices {i} and {j} must be distinct"
-                );
+    unsafe extern "C" fn tree_stat(path: *const u8, st: *mut Stat) -> i32 {
+        let t = tree();
+        match t.lookup(c_bytes(path)) {
+            Ok(node) => {
+                // SAFETY: glob's `Stat`; all-zero is one.
+                unsafe {
+                    st.write(core::mem::zeroed());
+                    (*st).st_mode = if t.dirs.contains(&node) {
+                        crate::fcntl::S_IFDIR | 0o755
+                    } else {
+                        crate::fcntl::S_IFREG | 0o644
+                    };
+                }
+                0
+            }
+            Err(e) => {
+                crate::errno::set_errno(e);
+                -1
             }
         }
     }
 
-    // -- GLOB_NOCHECK and GLOB_APPEND should be combinable --
+    unsafe extern "C" fn on_error(path: *const u8, errno: i32) -> i32 {
+        ERRLOG.with_borrow_mut(|l| {
+            l.push(' ');
+            l.push_str(&to_oracle(c_bytes(path)));
+            l.push(':');
+            l.push_str(&errno.to_string());
+        });
+        i32::from(STOP.get())
+    }
 
+    /// A `glob_t` reading the tree.
+    fn tree_glob_t() -> GlobT {
+        let mut g = GlobT::new();
+        g.gl_opendir = Some(tree_opendir);
+        g.gl_readdir = Some(tree_readdir);
+        g.gl_closedir = Some(tree_closedir);
+        g.gl_stat = Some(tree_stat);
+        g.gl_lstat = Some(tree_stat);
+        g
+    }
+
+    /// The homes the harness's system has: `HOME` is /home/u, and root's.
+    fn harness_home(user: &[u8]) -> Option<Owned> {
+        match user {
+            b"" => Owned::from_parts(&[b"/home/u"]).ok(),
+            b"root" => Owned::from_parts(&[b"/root"]).ok(),
+            _ => None,
+        }
+    }
+
+    /// `glob` over the tree, flags as `glob_t`'s callbacks want them.
+    fn run(g: &mut GlobT, pattern: &[u8], flags: i32) -> i32 {
+        glob_bytes(
+            pattern,
+            flags | GLOB_ALTDIRFUNC,
+            Some(on_error),
+            g,
+            &harness_home,
+        )
+    }
+
+    /// The names glob returned.
+    fn names(g: &GlobT) -> Vec<String> {
+        (0..g.gl_pathc)
+            .map(|i| {
+                // SAFETY: glob's names, after the reserved slots.
+                let p = unsafe { *g.gl_pathv.add(g.gl_offs + i) };
+                String::from_utf8(c_bytes(p).to_vec()).unwrap()
+            })
+            .collect()
+    }
+
+    /// The oracle's flag names: the flags, and whether the errfunc stops.
+    fn flag_set(names: &str) -> (i32, bool) {
+        names
+            .split('|')
+            .fold((0, false), |(f, stop), name| match name {
+                "0" => (f, stop),
+                "ERR" => (f | GLOB_ERR, stop),
+                "MARK" => (f | GLOB_MARK, stop),
+                "NOSORT" => (f | GLOB_NOSORT, stop),
+                "NOCHECK" => (f | GLOB_NOCHECK, stop),
+                "NOESCAPE" => (f | GLOB_NOESCAPE, stop),
+                "PERIOD" => (f | GLOB_PERIOD, stop),
+                "BRACE" => (f | GLOB_BRACE, stop),
+                "NOMAGIC" => (f | GLOB_NOMAGIC, stop),
+                "TILDE" => (f | GLOB_TILDE, stop),
+                "TILDE_CHECK" => (f | GLOB_TILDE_CHECK, stop),
+                "ONLYDIR" => (f | GLOB_ONLYDIR, stop),
+                "ERRSTOP" => (f, true),
+                other => panic!("{other}"),
+            })
+    }
+
+    /// One probe, answered here and written as the harness writes glibc's:
+    /// `<flags> <pattern> = <return> <magchar> <path>... |<errfunc calls>`.
+    fn probe(fname: &str, pattern: &[u8]) -> String {
+        let (flags, stop) = flag_set(fname);
+        let mut g = tree_glob_t();
+        ERRLOG.with_borrow_mut(String::clear);
+        STOP.set(stop);
+        let r = run(&mut g, pattern, flags);
+        let mut line = format!(
+            "{fname} {} = {r} {}",
+            to_oracle(pattern),
+            i32::from(g.gl_flags & GLOB_MAGCHAR != 0)
+        );
+        if r == 0 || r == GLOB_NOMATCH || r == GLOB_ABORTED {
+            for name in names(&g) {
+                line.push(' ');
+                line.push_str(&to_oracle(name.as_bytes()));
+            }
+        }
+        line.push_str(" |");
+        line.push_str(&ERRLOG.with_borrow(Clone::clone));
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+        line
+    }
+
+    // -- glibc 2.39's answers, and where they are not these ----------------
+
+    /// Every probe of `glob_oracle.txt` answered as glibc 2.39 answers it --
+    /// its return, `GLOB_MAGCHAR`, the names in their order, and each call
+    /// of the errfunc -- except those `glob_deviations.txt` lists, answered
+    /// as it says (design-decisions §1149).
     #[test]
-    fn test_glob_flags_combinable() {
-        // Combining GLOB_NOCHECK | GLOB_APPEND should produce a distinct value.
-        let combined = GLOB_NOCHECK | GLOB_APPEND;
-        assert_ne!(combined, GLOB_NOCHECK);
-        assert_ne!(combined, GLOB_APPEND);
-        assert_eq!(combined & GLOB_NOCHECK, GLOB_NOCHECK);
-        assert_eq!(combined & GLOB_APPEND, GLOB_APPEND);
+    fn glob_is_glibcs_but_where_glibc_is_not_its_flags() {
+        let mut deviations = HashMap::new();
+        let mut lines = DEVIATIONS.lines().filter(|l| !l.starts_with('#'));
+        while let Some(glibc) = lines.next() {
+            let here = lines.next().unwrap();
+            deviations.insert(
+                glibc.strip_prefix("glibc ").unwrap(),
+                here.strip_prefix("here  ").unwrap(),
+            );
+        }
+        let (mut n, mut used) = (0usize, 0usize);
+        let mut bad = Vec::new();
+        for line in ORACLE.lines() {
+            if line.starts_with('#') || line.starts_with("pattern_p ") {
+                continue;
+            }
+            let (head, _) = line.split_once(" = ").unwrap();
+            let (fname, pat) = head.split_once(' ').unwrap();
+            let want = match deviations.get(line) {
+                Some(here) => {
+                    used += 1;
+                    *here
+                }
+                None => line,
+            };
+            let got = probe(fname, &from_oracle(pat));
+            n += 1;
+            if got != want {
+                bad.push(format!("want {want}\n got {got}"));
+            }
+        }
+        assert_eq!(
+            used,
+            deviations.len(),
+            "every listed deviation is a line of the oracle: the list is stale"
+        );
+        assert!(n >= 1504, "{n} probes");
+        assert!(
+            bad.is_empty(),
+            "{} of {n} probes wrong, the first:\n{}",
+            bad.len(),
+            bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// The departures, each reasoned from what it follows (the deviation
+    /// list is `glob_model.py`'s; these are not generated).
+    #[test]
+    fn where_glibc_departs_this_follows_the_flags() {
+        // glibc reads `*/` and `?/` by a path of their own; here they are
+        // answered as glibc answers `**/` and `[!x]/`, which match the same
+        // names -- the oracle holds this library to glibc's answers for
+        // those two, whatever the flags.
+        for fname in [
+            "0",
+            "MARK",
+            "NOSORT",
+            "NOCHECK",
+            "NOESCAPE",
+            "PERIOD",
+            "BRACE",
+            "NOMAGIC",
+            "TILDE",
+            "ONLYDIR",
+            "MARK|ONLYDIR",
+            "ERR",
+            "ERRSTOP",
+        ] {
+            let answer = |pat: &str| {
+                probe(fname, pat.as_bytes())
+                    .split_once(" = ")
+                    .unwrap()
+                    .1
+                    .replace(pat, "P")
+            };
+            assert_eq!(answer("*/"), answer("**/"), "{fname}");
+            assert_eq!(answer("?/"), answer("[!x]/"), "{fname}");
+        }
+        // So GLOB_MARK does not double the slash of a name that ends in one,
+        assert_eq!(
+            probe("MARK", b"*/"),
+            "MARK */ = 0 1 dir1/ dir2/ empty/ noperm/ |"
+        );
+        // GLOB_PERIOD lets the star match "." and "..", as it does in `*`,
+        assert_eq!(
+            probe("PERIOD", b"*/"),
+            "PERIOD */ = 0 1 ../ ./ dir1/ dir2/ empty/ noperm/ |"
+        );
+        assert_eq!(probe("PERIOD", b"?/"), "PERIOD ?/ = 0 1 ./ |");
+        assert!(probe("PERIOD", b"*").starts_with("PERIOD * = 0 1 * . .. .h2"));
+        // and GLOB_MAGCHAR is set: the star was matched.
+        assert_eq!(probe("0", b"*/"), "0 */ = 0 1 dir1/ dir2/ empty/ noperm/ |");
+        // GLOB_NOCHECK: "a list consisting of only pattern" -- all of it,
+        // the slash too, as glibc answers for `a/` and `?/` and not `??/`.
+        assert_eq!(probe("NOCHECK", b"??/"), "NOCHECK ??/ = 0 1 ??/ |");
+        assert_eq!(probe("NOCHECK", b"a/"), "NOCHECK a/ = 0 0 a/ |");
+    }
+
+    /// glibc's `glob_pattern_p`, as the oracle has it, for both `quote`s.
+    #[test]
+    fn glob_pattern_p_is_glibcs() {
+        let mut n = 0;
+        for line in ORACLE.lines().filter_map(|l| l.strip_prefix("pattern_p ")) {
+            let (head, want) = line.split_once(" = ").unwrap();
+            let (quote, pat) = head.split_once(' ').unwrap();
+            let mut p = from_oracle(pat);
+            p.push(0);
+            // SAFETY: a C string.
+            let got = unsafe { glob_pattern_p(p.as_ptr(), quote.parse().unwrap()) };
+            assert_eq!(got.to_string(), want, "{line}");
+            n += 1;
+        }
+        assert_eq!(n, 50);
+        // SAFETY: NULL is allowed.
+        assert_eq!(unsafe { glob_pattern_p(core::ptr::null(), 1) }, 0);
+    }
+
+    // -- gl_pathv, gl_offs and GLOB_APPEND ----------------------------------
+
+    /// GLOB_DOOFFS reserves gl_offs NULLs; GLOB_APPEND adds after the names
+    /// already there, keeping them and the NULLs; a later NOMATCH leaves
+    /// them alone; globfree frees it all and empties the `glob_t`.
+    #[test]
+    fn dooffs_reserves_and_append_adds() {
+        let mut g = tree_glob_t();
+        g.gl_offs = 2;
+        assert_eq!(run(&mut g, b"a*", GLOB_DOOFFS), 0);
+        assert_eq!(names(&g), ["a", "ab", "abc"]);
+        // SAFETY: gl_offs + gl_pathc + 1 slots.
+        unsafe {
+            assert!((*g.gl_pathv).is_null() && (*g.gl_pathv.add(1)).is_null());
+            assert!((*g.gl_pathv.add(5)).is_null());
+        }
+        assert_eq!(run(&mut g, b"*.c", GLOB_DOOFFS | GLOB_APPEND), 0);
+        assert_eq!(names(&g), ["a", "ab", "abc", "x.c", "y.c"]);
+        // SAFETY: as above.
+        unsafe {
+            assert!((*g.gl_pathv).is_null() && (*g.gl_pathv.add(1)).is_null());
+            assert!((*g.gl_pathv.add(7)).is_null());
+        }
+        assert_eq!(
+            run(&mut g, b"nothing*", GLOB_DOOFFS | GLOB_APPEND),
+            GLOB_NOMATCH
+        );
+        assert_eq!(names(&g), ["a", "ab", "abc", "x.c", "y.c"]);
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+        assert!(g.gl_pathv.is_null());
+        assert_eq!(g.gl_pathc, 0);
+        // SAFETY: globfree again, and on NULL, is harmless.
+        unsafe {
+            globfree(&raw mut g);
+            globfree(core::ptr::null_mut());
+        }
+    }
+
+    /// Without GLOB_APPEND the `glob_t` starts empty, whatever it held;
+    /// without GLOB_DOOFFS gl_offs is 0, as glibc makes it.
+    #[test]
+    fn a_new_glob_starts_empty() {
+        let mut g = tree_glob_t();
+        g.gl_offs = 7;
+        g.gl_pathc = 99;
+        g.gl_pathv = core::ptr::dangling_mut();
+        assert_eq!(run(&mut g, b"dir1/f*", 0), 0);
+        assert_eq!(g.gl_offs, 0);
+        assert_eq!(names(&g), ["dir1/f1", "dir1/f2"]);
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+        // NOMATCH: nothing, and nothing to free.
+        assert_eq!(run(&mut g, b"zz*", 0), GLOB_NOMATCH);
+        assert_eq!(g.gl_pathc, 0);
+        assert!(g.gl_pathv.is_null());
+    }
+
+    /// GLOB_NOCHECK's pattern is the pattern as given, escapes and all.
+    #[test]
+    fn nocheck_returns_the_pattern_itself() {
+        let mut g = tree_glob_t();
+        assert_eq!(run(&mut g, b"no\\*such", GLOB_NOCHECK), 0);
+        assert_eq!(names(&g), ["no\\*such"]);
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+    }
+
+    /// A NULL argument or a flag glob does not take is EINVAL, -1, as glibc
+    /// answers -- GLOB_MAGCHAR included: it is glob's to set.
+    #[test]
+    fn bad_arguments_are_einval() {
+        let mut g = GlobT::new();
+        for (pattern, pglob, flags) in [
+            (core::ptr::null(), &raw mut g, 0),
+            (c"*".as_ptr().cast::<u8>(), core::ptr::null_mut(), 0),
+            (c"*".as_ptr().cast(), &raw mut g, GLOB_MAGCHAR),
+            (c"*".as_ptr().cast(), &raw mut g, 0x8000),
+        ] {
+            crate::errno::set_errno(0);
+            // SAFETY: NULLs and a valid glob_t; glob refuses before reading.
+            assert_eq!(unsafe { glob(pattern, flags, None, pglob) }, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+    }
+
+    /// gl_offs so large the array cannot be sized is GLOB_NOSPACE, not an
+    /// overflowed allocation.
+    #[test]
+    fn an_impossible_gl_offs_is_nospace() {
+        for offs in [usize::MAX, usize::MAX / 8] {
+            let mut g = tree_glob_t();
+            g.gl_offs = offs;
+            assert_eq!(run(&mut g, b"a", GLOB_DOOFFS), GLOB_NOSPACE);
+            assert!(g.gl_pathv.is_null());
+        }
+    }
+
+    // -- Beyond what the old one could hold ---------------------------------
+
+    /// Thousands of names, all of them, sorted -- the glob this replaced
+    /// kept 512 and dropped the rest -- and a path longer than 4096 bytes,
+    /// which it could not build.
+    #[test]
+    fn many_names_and_long_paths() {
+        let mut entries = vec![b"big/".to_vec()];
+        for i in (0..3000).rev() {
+            entries.push(format!("big/f{i:04}").into_bytes());
+        }
+        let long = [b'n'; 250];
+        let mut deep = Vec::new();
+        for _ in 0..20 {
+            deep.extend_from_slice(&long);
+            deep.push(b'/');
+            entries.push(deep.clone());
+        }
+        let mut leaf = deep.clone();
+        leaf.extend_from_slice(b"leaf");
+        entries.push(leaf.clone());
+        CURRENT.set(Some(Box::leak(Box::new(Tree::new(&entries)))));
+
+        let mut g = tree_glob_t();
+        assert_eq!(run(&mut g, b"big/f*", 0), 0);
+        let got = names(&g);
+        assert_eq!(got.len(), 3000);
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "sorted");
+        assert_eq!(got[0], "big/f0000");
+        assert_eq!(got[2999], "big/f2999");
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+
+        let mut pattern = Vec::new();
+        for _ in 0..20 {
+            pattern.extend_from_slice(b"n*/");
+        }
+        pattern.extend_from_slice(b"l?af");
+        assert_eq!(run(&mut g, &pattern, 0), 0);
+        let got = names(&g);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].as_bytes(), &leaf[..]);
+        assert!(leaf.len() > 5000);
+        // SAFETY: what glob filled.
+        unsafe { globfree(&raw mut g) };
+        CURRENT.set(None);
+    }
+
+    // -- The pieces ----------------------------------------------------------
+
+    fn braces(p: &[u8], flags: i32) -> Vec<String> {
+        let mut out = List::new();
+        assert!(brace_expand(p, flags, &mut out).is_ok());
+        out.as_slice()
+            .iter()
+            .map(|o| String::from_utf8(o.bytes().to_vec()).unwrap())
+            .collect()
+    }
+
+    /// GLOB_BRACE: every group, nested ones inside out, in order; an
+    /// unbalanced or escaped brace is itself.
+    #[test]
+    fn braces_expand_in_order() {
+        assert_eq!(braces(b"a{b,c{d,e}}f", 0), ["abf", "acdf", "acef"]);
+        assert_eq!(braces(b"{a,b}{c,d}", 0), ["ac", "ad", "bc", "bd"]);
+        assert_eq!(braces(b"x{,y}", 0), ["x", "xy"]);
+        assert_eq!(braces(b"{}", 0), [""]);
+        assert_eq!(braces(b"{a,b", 0), ["{a,b"]);
+        assert_eq!(braces(b"\\{a,b}", 0), ["\\{a,b}"]);
+        assert_eq!(braces(b"{a\\,b,c}", 0), ["a\\,b", "c"]);
+        // Without escapes, a backslash is a character like another.
+        assert_eq!(braces(b"{a\\,b,c}", GLOB_NOESCAPE), ["a\\", "b", "c"]);
+        assert_eq!(braces(b"plain", 0), ["plain"]);
+    }
+
+    /// `~` and `~user`: the home, with the rest after it; an unknown user
+    /// is the pattern as it is -- or nothing, for GLOB_TILDE_CHECK.
+    #[test]
+    fn tilde_expands_homes() {
+        let t = |p: &[u8], flags| {
+            tilde(p, flags, &harness_home)
+                .ok()
+                .unwrap()
+                .map(|(o, bare)| (String::from_utf8(o.bytes().to_vec()).unwrap(), bare))
+        };
+        assert_eq!(t(b"~", GLOB_TILDE), Some(("/home/u".to_owned(), true)));
+        assert_eq!(t(b"~/x", GLOB_TILDE), Some(("/home/u/x".to_owned(), false)));
+        assert_eq!(t(b"~root", GLOB_TILDE), Some(("/root".to_owned(), true)));
+        assert_eq!(t(b"~who/x", GLOB_TILDE), Some(("~who/x".to_owned(), false)));
+        assert_eq!(t(b"~who", GLOB_TILDE_CHECK), None);
+        assert_eq!(t(b"~/x", 0), Some(("~/x".to_owned(), false)));
+        assert_eq!(t(b"a~", GLOB_TILDE), Some(("a~".to_owned(), false)));
+    }
+
+    /// The pattern's escapes removed; not, with GLOB_NOESCAPE.
+    #[test]
+    fn unescape_removes_escapes() {
+        let u = |p: &[u8], flags| unescape(p, flags).ok().unwrap().bytes().to_vec();
+        assert_eq!(u(b"a\\*b\\\\c", 0), b"a*b\\c");
+        assert_eq!(u(b"trailing\\", 0), b"trailing\\");
+        assert_eq!(u(b"a\\*b", GLOB_NOESCAPE), b"a\\*b");
+        assert!(needs_scan(b"a\\b", 0) && !needs_scan(b"a\\b", GLOB_NOESCAPE));
+        assert!(has_magic(b"a[", 0) && !has_magic(b"a\\[", 0));
+    }
+
+    /// `append` moves every element over, in order.
+    #[test]
+    fn list_append_keeps_order() {
+        let mut a = List::new();
+        let mut b = List::new();
+        for i in 0..3 {
+            assert!(a.push(i).is_ok());
+        }
+        for i in 3..40 {
+            assert!(b.push(i).is_ok());
+        }
+        assert!(a.append(b).is_ok());
+        assert_eq!(a.as_slice(), (0..40).collect::<Vec<_>>());
+    }
+
+    // -- The C library's own directories --------------------------------------
+
+    /// Without GLOB_ALTDIRFUNC -- or with it and no functions given -- the
+    /// directories are the C library's to read. On the host there is no
+    /// kernel behind its system calls (syscall.rs), so the current
+    /// directory cannot be opened: glob tells the errfunc so, with the
+    /// errno `opendir` gave, and stops for GLOB_ERR.
+    #[test]
+    fn the_c_librarys_directories_without_altdirfunc() {
+        for flags in [0, GLOB_ALTDIRFUNC] {
+            let mut g = GlobT::new();
+            ERRLOG.with_borrow_mut(String::clear);
+            STOP.set(false);
+            // SAFETY: a C string and a valid glob_t.
+            let r = unsafe { glob(c"*".as_ptr().cast(), flags, Some(on_error), &raw mut g) };
+            assert_eq!(r, GLOB_NOMATCH);
+            let told = ERRLOG.with_borrow(Clone::clone);
+            let errno: i32 = told.strip_prefix(" .:").unwrap().parse().unwrap();
+            assert!(errno > 0, "{told}");
+            assert!(crate::dirent::opendir(c".".as_ptr().cast()).is_null());
+            assert_eq!(crate::errno::get_errno(), errno, "opendir's own errno");
+            // SAFETY: as above.
+            let r = unsafe { glob(c"*".as_ptr().cast(), flags | GLOB_ERR, None, &raw mut g) };
+            assert_eq!(r, GLOB_ABORTED);
+        }
+    }
+
+    // -- ABI -------------------------------------------------------------------
+
+    /// `glob_t` is glibc's: 72 bytes, each field where glibc's header puts
+    /// it (check-libc-abi.py holds the overlay's <glob.h> to the same).
+    #[test]
+    fn glob_t_is_glibcs() {
+        assert_eq!(size_of::<GlobT>(), 72);
+        assert_eq!(align_of::<GlobT>(), 8);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_pathc), 0);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_pathv), 8);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_offs), 16);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_flags), 24);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_closedir), 32);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_readdir), 40);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_opendir), 48);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_lstat), 56);
+        assert_eq!(core::mem::offset_of!(GlobT, gl_stat), 64);
+    }
+
+    /// The flags and returns are glibc's values, which are musl's.
+    #[test]
+    fn constants_are_glibcs() {
+        let flags = [
+            GLOB_ERR,
+            GLOB_MARK,
+            GLOB_NOSORT,
+            GLOB_DOOFFS,
+            GLOB_NOCHECK,
+            GLOB_APPEND,
+            GLOB_NOESCAPE,
+            GLOB_PERIOD,
+            GLOB_MAGCHAR,
+            GLOB_ALTDIRFUNC,
+            GLOB_BRACE,
+            GLOB_NOMAGIC,
+            GLOB_TILDE,
+            GLOB_ONLYDIR,
+            GLOB_TILDE_CHECK,
+        ];
+        for (bit, f) in flags.iter().enumerate() {
+            assert_eq!(*f, 1 << bit);
+        }
+        assert_eq!(GLOB_FLAGS, 0x7fff & !GLOB_MAGCHAR);
+        assert_eq!(
+            (GLOB_NOSPACE, GLOB_ABORTED, GLOB_NOMATCH, GLOB_NOSYS),
+            (1, 2, 3, 4)
+        );
     }
 }

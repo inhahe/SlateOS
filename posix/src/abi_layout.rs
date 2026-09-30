@@ -948,7 +948,25 @@ pub(crate) fn abi_asserts() -> String {
     // promise.
     abi!(out, hdrs, crate::poll::FdSet, "fd_set", "sys/select.h");
     abi!(out, hdrs, crate::signal::SiginfoT, "siginfo_t", "signal.h");
-    abi!(out, hdrs, crate::glob::GlobT, "glob_t", "glob.h");
+    // Not opaque: posix/include's <glob.h> names glibc's fields, which musl's
+    // calls __dummy1 and __dummy2 -- GLOB_ALTDIRFUNC's functions among them,
+    // which a program sets.
+    abi!(
+        out,
+        hdrs,
+        crate::glob::GlobT,
+        "glob_t",
+        "glob.h",
+        gl_pathc,
+        gl_pathv,
+        gl_offs,
+        gl_flags,
+        gl_closedir,
+        gl_readdir,
+        gl_opendir,
+        gl_lstat,
+        gl_stat
+    );
     abi!(
         out,
         hdrs,

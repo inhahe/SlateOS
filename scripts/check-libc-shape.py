@@ -244,6 +244,9 @@ REPLACEABLE = frozenset(
         "optarg", "opterr", "optind", "optopt", "optreset",
         "__getopt_initialized",
         "glob", "globfree", "glob64", "globfree64", "fnmatch",
+        # gnulib's glob module defines this plainly where the C library lacks
+        # it, as musl does; it is its own member, as in glibc (2026-09-29)
+        "glob_pattern_p",
         "error", "error_at_line", "verror", "verror_at_line",
         "error_message_count", "error_one_per_line", "error_print_progname",
         # regex: gnulib vendors the whole engine

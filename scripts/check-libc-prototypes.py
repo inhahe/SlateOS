@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import functools
 import hashlib
 import json
 import os
@@ -76,6 +77,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rustlex  # noqa: E402  (beside this file)
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "posix" / "src"
@@ -381,9 +385,16 @@ SHAPES = {
 }
 
 
+@functools.lru_cache(maxsize=None)
 def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    """The text with Rust's comments blanked and its literals kept, as
+    `rustlex` reads them: a `/*` inside a `//` comment or a string -- a glob
+    pattern like `src/*/*.rs` -- is not a comment. The regexes this replaced
+    took it for one and deleted everything up to the next `*/` anywhere later,
+    definitions included; posix/src/glob.rs's patterns hid three that way on
+    2026-09-30 ("declared, and no definition this reading can compare"). Kept
+    once a file: every reader here asks for the same text."""
+    return rustlex.strip_noise(text, keep_literals=True)
 
 
 def split_params(s: str) -> list[str]:
@@ -716,6 +727,14 @@ def self_test() -> int:
                          'b: usize) -> i64 { 0 }')
     check("a callback's `->` and a comment do not split parameters",
           fns.get("f") == (["i32", 'Option<extern "C" fn(i32, i32) -> i32>', "usize"], "i64", False))
+    # A `/*` in a doc comment, and a `*/` in a string: no block comment, so
+    # neither definition between them is lost (glob.rs's, 2026-09-30).
+    fns = rust_functions('/// expands `src/*/*.rs`\npub extern "C" fn g(a: i32) -> i32 { 0 }\n'
+                         'const P: &[u8] = b"*/";\npub unsafe extern "C" fn h(b: i64) {}\n'
+                         '/* a real /* nested */ comment: pub extern "C" fn gone(c: u8) {} */\n')
+    check("a `/*` in a line comment or a string opens no comment",
+          fns.get("g") == (["i32"], "i32", False) and fns.get("h") == (["i64"], "()", False))
+    check("...and a real, nested block comment still hides what is in it", "gone" not in fns)
     decls = {"timer_delete": (("i64",), "i32", False, "time.h"),
              "open": (("i64", "i32"), "i32", True, "fcntl.h"),
              "printf": (("i64",), "i32", True, "stdio.h"),

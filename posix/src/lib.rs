@@ -389,6 +389,7 @@ pub mod gai;
 pub mod getopt;
 pub mod getpass;
 pub mod glob;
+pub mod gshadow;
 pub mod hosts;
 pub mod iconv;
 pub(crate) mod iconv_8bit;

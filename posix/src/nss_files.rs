@@ -30,6 +30,8 @@ pub(crate) enum Which {
     Passwd,
     Group,
     Shadow,
+    /// `/etc/gshadow` -- the groups' shadow file.
+    Gshadow,
     Services,
     Protocols,
     Networks,
@@ -46,7 +48,7 @@ pub(crate) enum Which {
 impl Which {
     /// How many there are: the host tests keep a slot for each.
     #[cfg(test)]
-    const COUNT: usize = 11;
+    const COUNT: usize = 12;
 }
 
 impl Which {
@@ -56,6 +58,7 @@ impl Which {
             Which::Passwd => b"/etc/passwd\0",
             Which::Group => b"/etc/group\0",
             Which::Shadow => b"/etc/shadow\0",
+            Which::Gshadow => b"/etc/gshadow\0",
             Which::Services => b"/etc/services\0",
             Which::Protocols => b"/etc/protocols\0",
             Which::Networks => b"/etc/networks\0",

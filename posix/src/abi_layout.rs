@@ -783,6 +783,17 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::gshadow::Sgrp,
+        "struct sgrp",
+        "gshadow.h",
+        sg_namp,
+        sg_passwd,
+        sg_adm,
+        sg_mem
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Msghdr,
         "struct msghdr",
         "sys/socket.h",

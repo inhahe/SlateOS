@@ -382,6 +382,10 @@ SHAPES = {
     # from one (`i_l`: `ilogbl`, `lrintl`): `None` means "the shim's".
     "x_ll": (["x87", "x87"], None), "x_lll": (["x87", "x87", "x87"], None),
     "i_l": (["x87"], None), "n_lii": (["x87", "i32", "i32"], None),
+    # glibc's q forms of ecvt, fcvt and gcvt (stdlib.rs): a pointer back, and
+    # the _r forms' int.
+    "p_lipp": (["x87", "i32", "i64", "i64"], "i64"), "p_lip": (["x87", "i32", "i64"], "i64"),
+    "i_lipppn": (["x87", "i32", "i64", "i64", "i64", "i64"], "i32"),
 }
 
 

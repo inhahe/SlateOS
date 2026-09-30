@@ -1967,11 +1967,53 @@ fn put_digit(out: &mut [u8], len: &mut usize, b: u8) -> Option<()> {
     Some(())
 }
 
+/// A value as the digit routines take it: a `double`'s or a `long double`'s
+/// class and sign, and a finite one's magnitude, exactly expanded.
+struct Cvt<D> {
+    nan: bool,
+    infinite: bool,
+    negative: bool,
+    zero: bool,
+    dec: crate::decfloat::Decimal<D>,
+}
+
+impl Cvt<[u8; crate::decfloat::MAX_DIGITS]> {
+    fn of_f64(value: f64) -> Self {
+        Self {
+            nan: value.is_nan(),
+            infinite: value.is_infinite(),
+            negative: value.is_sign_negative(),
+            zero: value == 0.0,
+            dec: crate::decfloat::Decimal::new(if value.is_finite() { value.abs() } else { 0.0 }),
+        }
+    }
+}
+
+impl Cvt<crate::decfloat::DigitBuf> {
+    /// A `long double`: `None` when a value far outside a `double`'s range
+    /// cannot get the memory its expansion needs.
+    fn of_ld(l: crate::x87::LongDouble) -> Option<Self> {
+        let finite = l.is_finite();
+        let dec = if finite {
+            crate::printf::long_expansion(l)?
+        } else {
+            crate::decfloat::Decimal::of_parts(0, 0)?
+        };
+        Some(Self {
+            nan: l.is_nan(),
+            infinite: l.is_infinite(),
+            negative: l.is_sign_negative(),
+            zero: finite && l.is_zero(),
+            dec,
+        })
+    }
+}
+
 /// What `printf("%.*f")` writes for a non-finite value: `inf`, `-inf`,
 /// `nan` or `-nan` -- which `fcvt` hands back as its "digits", with
 /// `decpt` 0 and `sign` 0, as glibc does.
-fn non_finite_text(value: f64) -> &'static [u8] {
-    match (value.is_nan(), value.is_sign_negative()) {
+fn non_finite_text(nan: bool, negative: bool) -> &'static [u8] {
+    match (nan, negative) {
         (true, false) => b"nan",
         (true, true) => b"-nan",
         (false, false) => b"inf",
@@ -1981,26 +2023,34 @@ fn non_finite_text(value: f64) -> &'static [u8] {
 
 /// `fcvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
 /// sign)`, or `None` when `out` is too small.
+fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    fcvt_parts(Cvt::of_f64(value), ndigit, NDIGIT_MAX, out)
+}
+
+/// [`fcvt_digits`], for either precision: at most `max` fraction digits.
 ///
-/// glibc's recipe, computed exactly: `printf("%.*f", min(ndigit, 17))` of
+/// glibc's recipe, computed exactly: `printf("%.*f", min(ndigit, max))` of
 /// `|value|`; the integer digits, then the fraction's, with the point
 /// dropped; `decpt` the number of integer digits -- and a value below 1 that
 /// is not zero has its `0.` and the zeros after it stripped, each lowering
 /// `decpt`, so 0.00123 is "123" with `decpt` -2. A negative `ndigit` rounds
 /// to the left of the point, to `10^-ndigit` -- but, glibc's loop, never so
 /// far that the value would drop below 1: 5 with `ndigit` -2 stays "5".
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+fn fcvt_parts<D: AsRef<[u8]> + AsMut<[u8]>>(
+    v: Cvt<D>,
+    ndigit: i32,
+    max: i32,
+    out: &mut [u8],
+) -> Option<(usize, i32, bool)> {
     let mut len = 0usize;
-    if !value.is_finite() {
-        for &b in non_finite_text(value) {
+    if v.nan || v.infinite {
+        for &b in non_finite_text(v.nan, v.negative) {
             put_digit(out, &mut len, b)?;
         }
         return Some((len, 0, false));
     }
-    let sign = value.is_sign_negative();
-    let v = value.abs();
-    let mut dec = crate::decfloat::Decimal::new(v);
+    let sign = v.negative;
+    let mut dec = v.dec;
     // The place to round at, and the fraction digits written.
     let precision = if ndigit < 0 {
         // Integer digits, 0 below 1; the scaling stops at one.
@@ -2017,7 +2067,7 @@ fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, b
         );
         0
     } else {
-        let p = ndigit.min(NDIGIT_MAX);
+        let p = ndigit.min(max);
         dec.round_to_place_in(p, crate::decfloat::Rounding::current(), sign);
         p
     };
@@ -2028,7 +2078,7 @@ fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, b
     } else {
         decpt
     };
-    let strip = precision > 0 && v != 0.0 && (dec.is_zero() || decpt <= 0);
+    let strip = precision > 0 && !v.zero && (dec.is_zero() || decpt <= 0);
     if !strip {
         for i in 0..int_len {
             let d = if dec.is_zero() || decpt <= 0 {
@@ -2064,49 +2114,53 @@ fn fcvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, b
 
 /// `ecvt_r`'s digits for `value` into `out` (unterminated): `(len, decpt,
 /// sign)`, or `None` when `out` is too small.
-///
-/// `min(ndigit, 17)` significant digits, correctly rounded, `decpt` where
-/// the point goes. glibc's conventions: an `ndigit` of 0 or less is no
-/// digits, `decpt` still the value's; zero is that many zeros with `decpt` 1; the
-/// infinities and NaNs are `fcvt`'s text; and a rounding that carries into a
-/// new leading digit is written with one digit more -- 9.9999 to one digit
-/// is "10", `decpt` 2 -- as glibc's scaled `fcvt` writes it.
 fn ecvt_digits(value: f64, ndigit: i32, out: &mut [u8]) -> Option<(usize, i32, bool)> {
+    ecvt_parts(Cvt::of_f64(value), ndigit, NDIGIT_MAX, out)
+}
+
+/// [`ecvt_digits`], for either precision: at most `max` digits.
+///
+/// `min(ndigit, max)` significant digits, correctly rounded, `decpt` where
+/// the point goes. glibc's conventions: an `ndigit` of 0 or less is no
+/// digits, `decpt` still the value's; zero is that many zeros with `decpt`
+/// 1; the infinities and NaNs are `fcvt`'s text; and a rounding that carries
+/// into a new leading digit is written with one digit more -- 9.9999 to one
+/// digit is "10", `decpt` 2 -- as glibc's scaled `fcvt` writes it.
+fn ecvt_parts<D: AsRef<[u8]> + AsMut<[u8]>>(
+    v: Cvt<D>,
+    ndigit: i32,
+    max: i32,
+    out: &mut [u8],
+) -> Option<(usize, i32, bool)> {
+    let finite = !v.nan && !v.infinite;
     if ndigit <= 0 {
         // No digits -- but `decpt` still says where the point is, as glibc's
         // adds the value's exponent after its early branch: 1 for zero and
         // the non-finite, else the value's own.
-        let decpt = if value.is_finite() && value != 0.0 {
-            crate::decfloat::Decimal::new(value.abs()).decpt()
-        } else {
-            1
-        };
-        return Some((0, decpt, value.is_finite() && value.is_sign_negative()));
+        let decpt = if finite && !v.zero { v.dec.decpt() } else { 1 };
+        return Some((0, decpt, finite && v.negative));
     }
-    if !value.is_finite() {
-        return fcvt_digits(value, 0, out);
+    if !finite {
+        return fcvt_parts(v, 0, max, out);
     }
-    let n = ndigit.min(NDIGIT_MAX);
+    let n = ndigit.min(max);
     let mut len = 0usize;
-    if value == 0.0 {
+    if v.zero {
         for _ in 0..n {
             put_digit(out, &mut len, b'0')?;
         }
-        return Some((len, 1, value.is_sign_negative()));
+        return Some((len, 1, v.negative));
     }
-    let mut dec = crate::decfloat::Decimal::new(value.abs());
+    let negative = v.negative;
+    let mut dec = v.dec;
     let before = dec.decpt();
-    dec.round_to_significant_in(
-        n,
-        crate::decfloat::Rounding::current(),
-        value.is_sign_negative(),
-    );
+    dec.round_to_significant_in(n, crate::decfloat::Rounding::current(), negative);
     let carried = dec.decpt() > before;
     let digits = if carried { n.saturating_add(1) } else { n };
     for i in 0..digits {
         put_digit(out, &mut len, dec.digit(i))?;
     }
-    Some((len, dec.decpt(), value.is_sign_negative()))
+    Some((len, dec.decpt(), negative))
 }
 
 /// Write `(digits, decpt, sign)` out through the C pointers; `buf` gets the
@@ -2242,6 +2296,173 @@ pub unsafe extern "C" fn gcvt(value: f64, ndigit: i32, buf: *mut u8) -> *mut u8 
     unsafe { crate::printf::format_g_into(buf, value, p) };
     buf
 }
+
+// ---------------------------------------------------------------------------
+// qecvt, qfcvt, qgcvt: the same, for a long double
+// ---------------------------------------------------------------------------
+//
+// glibc's `q` forms (<stdlib.h>, `__USE_MISC`): the conventions above with
+// glibc's limit for a `long double`, 21 digits, and exact digits here too --
+// glibc's scale the value by repeated multiplication by ten in `long double`
+// arithmetic and get the last digit wrong some of the time
+// (`posix/tools/oracle/qcvt_harness.py` counts 156 of 2,160 calls;
+// design-decisions §1135). A `long double` reaches each through
+// `ld_abi.rs`'s thunk, by pointer.
+
+/// glibc's `NDIGIT_MAX` for a `long double`.
+const QNDIGIT_MAX: i32 = 21;
+/// glibc's `qecvt` buffer: `NDIGIT_MAX + 12`.
+const QECVT_BUF: usize = 33;
+/// glibc's `qfcvt` buffer: `LDBL_MAX_10_EXP` more, for `LDBL_MAX`'s 4,933
+/// integer digits.
+const QFCVT_BUF: usize = 4932 + 33;
+
+mod q_forms {
+    use super::{Cvt, QECVT_BUF, QFCVT_BUF, QNDIGIT_MAX, cvt_finish, ecvt_parts, fcvt_parts};
+    use crate::x87::LongDouble;
+
+    /// The `_r` forms' shared body.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `buf` NULL or `len` bytes;
+    /// `decpt` and `sign` NULL or valid.
+    unsafe fn q_r(
+        ecvt: bool,
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        if buf.is_null() {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        // SAFETY: the thunk's pointer to the caller's argument.
+        let Some(v) = Cvt::of_ld(unsafe { value.read() }) else {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return -1;
+        };
+        // SAFETY: `len` bytes at `buf`, the caller's.
+        let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+        let r = if ecvt {
+            ecvt_parts(v, ndigit, QNDIGIT_MAX, out)
+        } else {
+            fcvt_parts(v, ndigit, QNDIGIT_MAX, out)
+        };
+        // SAFETY: this function's contract.
+        unsafe { cvt_finish(r, buf, len, decpt, sign) }
+    }
+
+    /// `qecvt_r` (glibc): [`ecvt_r`](super::ecvt_r) of a `long double`, at
+    /// most 21 digits.
+    ///
+    /// # Safety
+    ///
+    /// As `ecvt_r`, and `value` a readable `long double`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qecvt_r(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { q_r(true, value, ndigit, decpt, sign, buf, len) }
+    }
+    crate::ld_c!(i_lipppn "qecvt_r" => __slate_ld_qecvt_r);
+
+    /// `qfcvt_r` (glibc): [`fcvt_r`](super::fcvt_r) of a `long double`, at
+    /// most 21 fraction digits.
+    ///
+    /// # Safety
+    ///
+    /// As `fcvt_r`, and `value` a readable `long double`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qfcvt_r(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+        buf: *mut u8,
+        len: usize,
+    ) -> i32 {
+        // SAFETY: this function's contract.
+        unsafe { q_r(false, value, ndigit, decpt, sign, buf, len) }
+    }
+    crate::ld_c!(i_lipppn "qfcvt_r" => __slate_ld_qfcvt_r);
+
+    /// `qecvt` (glibc): [`qecvt_r`](__slate_ld_qecvt_r) into storage the
+    /// next call reuses.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `decpt` and `sign` valid. Not
+    /// thread-safe (one buffer), as in every C library.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qecvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+    ) -> *mut u8 {
+        static mut BUF: [u8; QECVT_BUF] = [0; QECVT_BUF];
+        let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+        // SAFETY: the static buffer's own size, which every result fits: 22
+        // digits and a terminator. A value whose expansion finds no memory
+        // leaves the buffer as it was, as nothing better can be said here.
+        let _ = unsafe { q_r(true, value, ndigit, decpt, sign, buf, QECVT_BUF) };
+        buf
+    }
+    crate::ld_c!(p_lipp "qecvt" => __slate_ld_qecvt);
+
+    /// `qfcvt` (glibc): [`qfcvt_r`](__slate_ld_qfcvt_r) into storage the
+    /// next call reuses.
+    ///
+    /// # Safety
+    ///
+    /// As [`__slate_ld_qecvt`].
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qfcvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        decpt: *mut i32,
+        sign: *mut i32,
+    ) -> *mut u8 {
+        static mut BUF: [u8; QFCVT_BUF] = [0; QFCVT_BUF];
+        let buf = core::ptr::addr_of_mut!(BUF).cast::<u8>();
+        // SAFETY: as in qecvt; `LDBL_MAX` with 21 fraction digits fits.
+        let _ = unsafe { q_r(false, value, ndigit, decpt, sign, buf, QFCVT_BUF) };
+        buf
+    }
+    crate::ld_c!(p_lipp "qfcvt" => __slate_ld_qfcvt);
+
+    /// `qgcvt` (glibc): `sprintf(buf, "%.*Lg", min(ndigit, 21), value)`.
+    ///
+    /// # Safety
+    ///
+    /// `value` is a readable `long double`; `buf` has room for the result:
+    /// 32 bytes always do.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __slate_ld_qgcvt(
+        value: *const LongDouble,
+        ndigit: i32,
+        buf: *mut u8,
+    ) -> *mut u8 {
+        let p = usize::try_from(ndigit.clamp(0, QNDIGIT_MAX)).unwrap_or(0);
+        // SAFETY: this function's contract.
+        unsafe { crate::printf::format_lg_into(buf, value.read(), p) };
+        buf
+    }
+    crate::ld_c!(p_lip "qgcvt" => __slate_ld_qgcvt);
+}
+pub use q_forms::{
+    __slate_ld_qecvt, __slate_ld_qecvt_r, __slate_ld_qfcvt, __slate_ld_qfcvt_r, __slate_ld_qgcvt,
+};
 
 // ---------------------------------------------------------------------------
 // getsubopt — parse suboption strings
@@ -2747,6 +2968,130 @@ mod tests {
             bad.len(),
             bad.join("\n")
         );
+    }
+
+    /// glibc's `q` forms (`posix/tools/oracle/qcvt_harness.py`): one call a
+    /// line, `<fn> <sexp>:<significand> <ndigit> = <glibc's digits>|<decpt>|
+    /// <sign> <exact digits>|<exact decpt>` for qecvt and qfcvt, `qgcvt ... =
+    /// <text>`; `\x` is the empty string.
+    const QCVT_ORACLE: &str = include_str!("qcvt_oracle.txt");
+
+    /// Every call of the oracle answered with the value's exact digits --
+    /// glibc's own where they are exact, which is all but 156 -- glibc's
+    /// sign, and glibc's `qgcvt` text.
+    #[test]
+    fn qecvt_qfcvt_and_qgcvt_answer_as_glibc_does_but_exactly() {
+        let unesc = |t: &str| if t == "\\x" { "" } else { t }.to_owned();
+        let (mut n, mut inexact) = (0, 0);
+        let mut bad = Vec::new();
+        for line in QCVT_ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (head, rest) = line.split_once(" = ").unwrap();
+            let mut h = head.split(' ');
+            let (f, bits, nd) = (h.next().unwrap(), h.next().unwrap(), h.next().unwrap());
+            let nd: i32 = nd.parse().unwrap();
+            let (se, sig) = bits.split_once(':').unwrap();
+            let x = crate::x87::LongDouble::from_bits(
+                u16::from_str_radix(se, 16).unwrap(),
+                u64::from_str_radix(sig, 16).unwrap(),
+            );
+            n += 1;
+            if f == "qgcvt" {
+                let mut buf = [0u8; 64];
+                // SAFETY: a long double and a buffer of this frame's.
+                unsafe { __slate_ld_qgcvt(&raw const x, nd, buf.as_mut_ptr()) };
+                let got = core::ffi::CStr::from_bytes_until_nul(&buf).unwrap();
+                if got.to_str().unwrap() != unesc(rest) {
+                    bad.push(format!("{line}\n    ours {got:?}"));
+                }
+                continue;
+            }
+            let (glibc, exact) = rest.split_once(' ').unwrap();
+            let mut g = glibc.split('|');
+            let (gd, gdp, gsg) = (g.next().unwrap(), g.next().unwrap(), g.next().unwrap());
+            let (xd, xdp) = exact.split_once('|').unwrap();
+            if (gd, gdp) != (xd, xdp) {
+                inexact += 1;
+            }
+            let (mut dp, mut sg) = (i32::MIN, i32::MIN);
+            // SAFETY: a long double and out-pointers of this frame's; the
+            // result is the function's buffer, terminated.
+            let got = unsafe {
+                let r = if f == "qecvt" {
+                    __slate_ld_qecvt(&raw const x, nd, &raw mut dp, &raw mut sg)
+                } else {
+                    __slate_ld_qfcvt(&raw const x, nd, &raw mut dp, &raw mut sg)
+                };
+                core::ffi::CStr::from_ptr(r.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            if (got.as_str(), dp.to_string(), sg.to_string())
+                != (unesc(xd).as_str(), xdp.to_owned(), gsg.to_owned())
+            {
+                bad.push(format!("{line}\n    ours {got}|{dp}|{sg}"));
+            }
+        }
+        assert_eq!(n, 2160, "calls");
+        assert!(
+            inexact >= 100,
+            "glibc's inexact answers, held to the exact: {inexact}"
+        );
+        assert!(
+            bad.is_empty(),
+            "{} of {n} differ:\n{}",
+            bad.len(),
+            bad.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// The `q` `_r` forms refuse as the double ones do: `EINVAL` for a NULL
+    /// buffer, -1 for one too small.
+    #[test]
+    fn the_q_r_forms_refuse_a_null_or_small_buffer() {
+        let x = crate::x87::LongDouble::from_bits(0x3FFF, 0xC000_0000_0000_0000); // 1.5
+        let (mut dp, mut sg) = (0, 0);
+        let mut small = [0u8; 2];
+        // SAFETY: a long double and pointers of this frame's.
+        unsafe {
+            crate::errno::set_errno(0);
+            assert_eq!(
+                __slate_ld_qecvt_r(
+                    &raw const x,
+                    5,
+                    &raw mut dp,
+                    &raw mut sg,
+                    core::ptr::null_mut(),
+                    9
+                ),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(
+                __slate_ld_qfcvt_r(
+                    &raw const x,
+                    5,
+                    &raw mut dp,
+                    &raw mut sg,
+                    small.as_mut_ptr(),
+                    2
+                ),
+                -1
+            );
+            let mut buf = [0u8; 16];
+            assert_eq!(
+                __slate_ld_qecvt_r(
+                    &raw const x,
+                    3,
+                    &raw mut dp,
+                    &raw mut sg,
+                    buf.as_mut_ptr(),
+                    16
+                ),
+                0
+            );
+            assert_eq!(&buf[..4], b"150\0");
+            assert_eq!((dp, sg), (1, 0));
+        }
     }
 
     #[test]

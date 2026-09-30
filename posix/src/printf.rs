@@ -1814,7 +1814,7 @@ impl FloatArg {
 /// reading as 1 (the subnormals, and the pseudo-denormals the unit reads as
 /// their value). On the stack for a value within about a `double`'s range;
 /// `None` when the blocks one far outside it needs cannot be allocated.
-fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
+pub(crate) fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
     // A 15-bit field less the bias and the significand's 63 places: no wrap.
     let e = i32::from(l.biased_exponent().max(1)).wrapping_sub(16383 + 63);
     Decimal::of_parts(l.significand, e)
@@ -2107,6 +2107,36 @@ pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> 
     format_float_general(
         &mut out,
         FloatArg::Double(val),
+        false,
+        &FormatFlags::new(),
+        0,
+        prec,
+    );
+    let n = out.pos;
+    // SAFETY: the caller's buffer has room for the terminator after `n`.
+    unsafe { buf.add(n).write(0) };
+    n
+}
+
+/// `sprintf(buf, "%.*Lg", precision, val)`, for `qgcvt`: [`format_g_into`]
+/// of a `long double`. A value whose digits cannot get the memory they need
+/// leaves what was written before the failure, terminated.
+///
+/// # Safety
+///
+/// `buf` has room for the conversion and its terminator -- at most 32 bytes
+/// for a precision of 21 or less.
+pub(crate) unsafe fn format_lg_into(
+    buf: *mut u8,
+    val: crate::x87::LongDouble,
+    precision: usize,
+) -> usize {
+    let mut out = FmtOutput::new(buf, usize::MAX);
+    // `%.0Lg` is `%.1Lg`, as the dispatcher treats it.
+    let prec = if precision == 0 { 1 } else { precision };
+    format_float_general(
+        &mut out,
+        FloatArg::Long(val),
         false,
         &FormatFlags::new(),
         0,

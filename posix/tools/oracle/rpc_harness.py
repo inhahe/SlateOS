@@ -182,8 +182,16 @@ def builtin() -> str:
 
 
 def escape(text: str) -> str:
-    """`text` with \\, newline and tab escaped, for the tests to read back."""
-    return text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+    """`text` with \\, newline, tab and carriage return escaped, for the tests
+    to read back. Any other control character is refused rather than written
+    raw: the tests have no escape for it, and a raw one is a byte of the
+    oracle file that an editor or a line-ending conversion is free to change."""
+    out = (text.replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+           .replace("\r", "\\r"))
+    raw = sorted({f"{ord(c):#04x}" for c in out if ord(c) < 0x20 or ord(c) == 0x7F})
+    if raw:
+        sys.exit(f"escape: no escape for {', '.join(raw)}")
+    return out
 
 
 def main() -> None:

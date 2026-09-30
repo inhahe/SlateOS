@@ -2432,6 +2432,7 @@ mod tests {
             out.push(match bytes.next() {
                 Some(b'n') => b'\n',
                 Some(b't') => b'\t',
+                Some(b'r') => b'\r',
                 Some(b'\\') => b'\\',
                 other => panic!("{name}: escape {other:?}"),
             });

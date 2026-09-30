@@ -43333,6 +43333,7 @@ name for that case, and programs written against glibc have met only this.
 
 **Date:** 2026-09-30
 **Decided by:** Claude (autonomous)
+**Lane:** D
 
 **In short:** some calls wait inside this library rather than in the
 kernel -- `sem_wait`, the message queues, System V's `msgrcv` and `semop`,
@@ -43346,7 +43347,7 @@ programs written for it count on those interruptions.
 
 ### The decision
 
-Three rules, from glibc 2.39's answers on Linux -- 105 cases in
+Three rules, from glibc 2.39's answers on Linux -- 115 cases in
 `posix/src/interrupt_oracle.txt` (`posix/tools/oracle/interrupt_harness.py`),
 replayed by `interrupt::tests::every_interruption_is_glibcs`:
 

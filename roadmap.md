@@ -2077,6 +2077,18 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[-]` `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
+  Widget*; `design-decisions.md` §1453) -- begun 2026-09-30. `guitk::ribbon`:
+  tabs of named groups of controls -- large, medium and small buttons,
+  toggles, split buttons, dropdowns, galleries -- with contextual tabs
+  shown while the application's context is active, groups folding into one
+  button each (lowest priority first) when the window is narrow and what
+  fits nowhere behind `»`, and minimizing to the tabs alone (a double click
+  on a tab, or Ctrl+F1). Deliberately not Office's where Microsoft licenses
+  the arrangement: no staged shrinking, no gallery preview, no set header
+  above contextual tabs. **Next:** key tips, the Quick Access Toolbar,
+  customization and its saving, tooltips.
+
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from
   that application again"; `design-decisions.md` §1450) -- done 2026-09-29.

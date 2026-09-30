@@ -61,6 +61,7 @@ pub mod probe;
 pub mod radio;
 pub mod ratio;
 pub mod render;
+pub mod ribbon;
 pub mod surface;
 /// Random numbers — see [`randrange`] for the whole story.
 ///

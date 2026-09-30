@@ -86838,6 +86838,55 @@ folder opened as it lists any other
 
 **Revisit if** users ask for shuffling or a slower pace.
 
+## 1453. A ribbon in the toolkit: tabs of grouped commands, deliberately not Office's
+
+**Date:** 2026-09-30 &middot; **Decided by:** Claude (autonomous), within the
+operator's rule in `roadmap-detailed.md` → *Ribbon Widget* (implement the
+general tabbed pattern; stop short of the arrangements Microsoft licenses)
+&middot; **Lane:** C
+
+**In short:** An application with many commands -- a word processor, an
+image editor, the file manager -- can now put them in a ribbon: a row of tabs
+(Home, View, ...), each showing its commands under it in named groups, as big
+buttons, small ones, on/off switches, buttons with a menu, dropdown lists and
+rows of picture choices. When the window is too narrow, whole groups fold
+into single buttons that show the group when pressed. It is part of the
+toolkit (`guitk::ribbon`); applications adopt it when they choose to.
+
+**The shape** is the dock's (`guitk::dock`, 2026-09-28): state and functions over
+it, every case testable without a window. The application owns the
+`Ribbon`, calls `layout` each frame, hands pointer and key events to it and
+gets back a `RibbonEvent` naming its own command numbers, and calls `draw`.
+
+**Deliberately not Office's.** The roadmap entry's caution, applied:
+
+| Office | Here |
+|---|---|
+| contextual tabs under a coloured header naming their set, in the title bar | a band of the user's accent along each contextual tab's own top edge; nothing above the strip |
+| groups shrink by stages (large buttons to medium to small) before collapsing | a group is whole or folded into one button, nothing in between |
+| a gallery previews a choice on the document under the pointer | a gallery chooses on a click and never previews |
+
+**Choices made within that, each easy to change:**
+
+| Question | Chosen | Instead |
+|---|---|---|
+| Which group folds first | the application's per-group priority, lowest first, the rightmost among equals | by width (folds whatever is biggest, which is often what users reach for most) |
+| What fits nowhere, even folded | behind a `»` button whose menu holds each group as a submenu of its controls | clipped (commands unreachable); scroll arrows (a second way to move along the ribbon) |
+| A gallery's full list | the toolkit's menu, the chosen row checked | a grid of pictures (nicer for styles; a later refinement) |
+| Minimizing | a double click on a tab, or Ctrl+F1; a tab pressed then shows its commands over the page until one is used | a pin button (more chrome for the same thing) |
+| The strip's colour | the focused title bar's role, so a ribbon under a title bar reads as one piece | its own role (the join shows) |
+
+A press on a face acts on release over the same face, as every button does;
+an arrow opens its menu on the press, as a menu opener does. A press outside
+an open menu or panel closes it and does nothing else.
+
+**Not yet:** key tips (keyboard access without a mouse), the Quick Access
+Toolbar, customization (reordering and hiding tabs, commands added to and
+removed from groups) and its saving, the dialog for it, tooltips -- a
+disabled command's reason among them -- and following accent-coloured title
+bars, which needs the toolkit's palette to carry the title bar's colours.
+`roadmap-detailed.md` → *Ribbon Widget* marks each.
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

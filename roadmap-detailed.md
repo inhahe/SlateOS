@@ -1988,16 +1988,16 @@ _Click selected radio button to deselect (returns group to no-selection state)._
 #### Ribbon Widget
 _A tabbed command surface (Office-style) for command-dense applications: file explorer, text editor, image editor, etc. The ribbon is a widget, not a mandatory chrome — apps that don't want one use traditional menus and toolbars instead._
 
-- [ ] Tabbed top bar: each tab is a category of commands (e.g., Home, View, Tools)
-- [ ] Each tab divided into named groups; groups contain buttons, split-buttons, dropdowns, galleries, toggles
-- [ ] Three button sizes within a group (large with icon-above-label, medium with icon+label side-by-side, small icon-only)
-- [ ] Contextual tabs that appear only when relevant content is selected (e.g., a "Picture Tools" tab when an image is selected — appears with a distinct color band)
+- [x] Tabbed top bar: each tab is a category of commands (e.g., Home, View, Tools) — *2026-09-30 (§1453): `guitk::ribbon` -- a tab pressed comes to the front; its groups are the body under the strip.*
+- [x] Each tab divided into named groups; groups contain buttons, split-buttons, dropdowns, galleries, toggles — *2026-09-30: `Control::{Button, Toggle, Split, Dropdown, Gallery}`; a split button's arrow, a dropdown and a gallery's "all choices" open the toolkit's menu.*
+- [x] Three button sizes within a group (large with icon-above-label, medium with icon+label side-by-side, small icon-only) — *2026-09-30: `ButtonSize`; a large one takes a column, the others stack three to a column.*
+- [x] Contextual tabs that appear only when relevant content is selected (e.g., a "Picture Tools" tab when an image is selected — appears with a distinct color band) — *2026-09-30: `RibbonTab::contextual`, shown while `Ribbon::set_context` says so, after the ordinary tabs; the band is the accent along each such tab's own top edge (no set header -- the patent caution below).*
 - [ ] Keyboard access via key tips (overlay letters/numbers on every command, navigable like Office Alt-sequences)
-- [ ] Minimize/expand ribbon (double-click a tab or hotkey toggles full-height vs. tabs-only)
-- [ ] Adaptive group collapsing when window is too narrow: groups collapse to a single dropdown button showing their label and icon, expanding to the full group on click — the collapse order is per-group priority defined by the app
+- [x] Minimize/expand ribbon (double-click a tab or hotkey toggles full-height vs. tabs-only) — *2026-09-30: a double click on a tab, or Ctrl+F1; minimized, a tab pressed shows its commands over the page until one is used.*
+- [x] Adaptive group collapsing when window is too narrow: groups collapse to a single dropdown button showing their label and icon, expanding to the full group on click — the collapse order is per-group priority defined by the app — *2026-09-30: `Group::priority`, lowest first, the rightmost among equals; whole or folded, no stages between; what fits nowhere waits behind `»`.*
 - [ ] Quick Access Toolbar (small always-visible row above or below the ribbon for user-pinned commands)
 - [ ] Customization UI: user can reorder tabs, add/remove commands from groups, hide tabs they don't use
-- [ ] Theme-aware rendering: ribbon chrome uses the same window-decoration tokens as the title bar so it blends with the active theme (Aero glass by default)
+- [-] Theme-aware rendering: ribbon chrome uses the same window-decoration tokens as the title bar so it blends with the active theme (Aero glass by default) — *2026-09-30: the strip is the focused title bar's palette role; accent-coloured title bars are not followed yet (the toolkit's palette does not carry that setting).*
 
 _Patent caution: Microsoft holds patents covering specific aspects of ribbon layout — particularly the "Office Fluent UI" licensing program covers the precise tab/group/contextual-tab arrangement, the gallery-on-hover preview behavior, and the specific collapse heuristics. **Implement the general tabbed-command pattern, which is not patentable, but stop short of the specific arrangements, animations, and behaviors covered by Microsoft's claims.** Concretely: don't replicate Office's exact contextual-tab color rules, don't copy the specific gallery live-preview UX verbatim, and don't reproduce Office's exact key-tip overlay sequence.  This is intentional under-implementation — better to ship a deliberately-different ribbon than risk an infringement claim._
 

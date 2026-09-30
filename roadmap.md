@@ -2102,8 +2102,9 @@ live.
   comes back mid-slide. **Lane E:** the Settings picker for the axis
   (`requests/c-e-a-theme-can-set-the-motion.md`). **Lane F:** window
   animations, when the compositor has them, take their curve from the
-  palette. **Lane C next:** the toast daemon's colours
-  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`).
+  palette. The toast daemon's colours followed the same day
+  (`TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`, fixed); whether the
+  daemon runs at all is C-Q32.
 
 - `[C]` **A code editor in the toolkit** (`roadmap-detailed.md` →
   *Code-Aware TextEdit Widget*) -- done 2026-09-28: `guitk::textbuffer` (a
@@ -3908,7 +3909,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
   - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
   - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
-  - [x] GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests)
+  - [-] GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests) -- *corrected 2026-09-30 (lane C): the dialog is written and tested and constructed by nothing, and cannot be yet: no syscall lets a userspace process answer requests, so every one is auto-denied, and approving one -- in the kernel shell, the only place it can be done -- grants nothing. Asked of lanes A, B and F in `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`; `known-issues.md` `TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE`.*
 - [x] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
   - [x] CPUID detection of SHSTK and IBT support
   - [x] MSR configuration (IA32_S_CET, IA32_U_CET, PL0/PL3 SSP)

@@ -27,6 +27,10 @@
 //!   `sigqueue` cannot deliver one yet; plain `raise` is glibc's own choice
 //!   on a system without queued signals.
 //!
+//! With no pool, glibc's `aio_init` has nothing to tune: it takes its
+//! `struct aioinit` and ignores it ([`aio_init`]).  glibc's large-file
+//! names, `aio_read64` ... `lio_listio64`, are the same functions.
+//!
 //! ## What changed on 2026-09-26
 //!
 //! Every request's outcome used to live in a 16-entry table keyed by the
@@ -796,6 +800,46 @@ pub extern "C" fn lio_listio64(
 }
 
 // ---------------------------------------------------------------------------
+// aio_init -- glibc's tuning of its thread pool
+// ---------------------------------------------------------------------------
+
+/// glibc's `struct aioinit` (`<aio.h>`, `_GNU_SOURCE`): how [`aio_init`]
+/// should size glibc's thread pool. 32 bytes, eight `int`s.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AioInit {
+    /// The most threads the pool may have.
+    pub aio_threads: i32,
+    /// How many requests are expected at once.
+    pub aio_num: i32,
+    /// Unused, in glibc too.
+    pub aio_locks: i32,
+    /// Unused, in glibc too.
+    pub aio_usedba: i32,
+    /// Unused, in glibc too.
+    pub aio_debug: i32,
+    /// Unused, in glibc too.
+    pub aio_numusers: i32,
+    /// How many seconds an idle thread waits for work before it ends.
+    pub aio_idle_time: i32,
+    /// Reserved.
+    pub aio_reserved: i32,
+}
+
+/// `aio_init(init)` (GNU): tune the implementation. glibc sizes its thread
+/// pool from `aio_threads` and `aio_num`, until the pool first exists, and
+/// takes how long an idle worker waits from `aio_idle_time`; the other
+/// fields it ignores, and it answers nothing.
+///
+/// This library has no pool -- each request is performed in the calling
+/// thread before its call returns (the module's documentation) -- so there
+/// is nothing to size, and every field is ignored. No caller can tell:
+/// glibc's tuning changes which threads carry the requests, never what the
+/// requests do. A NULL `init`, which glibc's reads through, is ignored too.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_init(_init: *const AioInit) {}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1187,6 +1231,58 @@ mod tests {
         };
         let at = add_timespec(&now, &rel);
         assert_eq!((at.tv_sec, at.tv_nsec), (12, 100_000_000));
+    }
+
+    // -- aio_init --
+
+    #[test]
+    fn test_aioinit_is_glibcs_layout() {
+        assert_eq!(size_of::<AioInit>(), 32);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_num), 4);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_idle_time), 24);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_reserved), 28);
+    }
+
+    /// Any tuning, NULL too, is accepted, and changes nothing a request does:
+    /// a write and a read after it complete as they do without it.
+    #[test]
+    fn test_aio_init_changes_no_outcome() {
+        let tunings = [
+            AioInit::default(),
+            AioInit {
+                aio_threads: 1,
+                aio_num: 1,
+                aio_idle_time: 1,
+                ..AioInit::default()
+            },
+            AioInit {
+                aio_threads: -5,
+                aio_num: i32::MAX,
+                aio_locks: -1,
+                aio_usedba: -1,
+                aio_debug: -1,
+                aio_numusers: -1,
+                aio_idle_time: i32::MIN,
+                aio_reserved: -1,
+            },
+        ];
+        errno::set_errno(4321);
+        aio_init(core::ptr::null());
+        for t in &tunings {
+            aio_init(t);
+        }
+        assert_eq!(errno::get_errno(), 4321, "aio_init leaves errno alone");
+        let fd = eventfd();
+        let mut seven = 7u64;
+        let mut w = write_request(fd, &mut seven);
+        assert_eq!(aio_write(&raw mut w), 0);
+        assert_eq!((aio_error(&w), aio_return(&raw mut w)), (0, 8));
+        let mut got = 0u64;
+        let mut r = write_request(fd, &mut got);
+        assert_eq!(aio_read(&raw mut r), 0);
+        assert_eq!((aio_error(&r), aio_return(&raw mut r)), (0, 8));
+        assert_eq!(got, 7);
+        crate::file::close(fd);
     }
 
     // -- glibc's large-file names --

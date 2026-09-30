@@ -1007,6 +1007,21 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::aio::AioInit,
+        "struct aioinit",
+        "aio.h",
+        aio_threads,
+        aio_num,
+        aio_locks,
+        aio_usedba,
+        aio_debug,
+        aio_numusers,
+        aio_idle_time,
+        aio_reserved
+    );
+    abi!(
+        out,
+        hdrs,
         crate::dlfcn::DlInfo,
         "Dl_info",
         "dlfcn.h",

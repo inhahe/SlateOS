@@ -26,7 +26,9 @@ What it checks
    something declared there (`lfs64_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
    a program, as musl's are, and their warnings not its business;
    `_SLATEOS_OVERLAY_WARNINGS` makes them ordinary ones here, to be held to
-   these warnings themselves.
+   these warnings themselves. Where musl's own header does not compile --
+   MUSL_UNCOMPILABLE, each with its reason, each confirmed on every run --
+   the overlay's, which includes it, cannot either, and is left out.
 2. **The overlay declares exactly the reference's names** -- those it adds to
    musl's headers, and those musl's headers declare under narrower feature
    macros than glibc's, which it declares again under glibc's: nothing glibc
@@ -128,6 +130,22 @@ KNOWN: dict[tuple[str, str], str] = {
        for cfg in ("c17", "c23", "bfp", "ext", "lfs64")},
 }
 
+# (header, setting) -> why musl's own header does not compile there. The
+# overlay's includes it, so cannot either: it is left out of that setting's
+# builds, and declares nothing there -- which is compared with glibc's, as any
+# visibility is. Each entry is confirmed on every run (`stale_uncompilable`):
+# one whose musl header has come to compile is refused, to be deleted.
+#
+# All are strict ISO C compilations -- no POSIX feature macro -- of a POSIX
+# header that uses a type musl's headers give only to POSIX. (Not C++: the
+# compiler defines _GNU_SOURCE for it.)
+_STRICT_ISO = ("c17", "c23", "bfp", "ext", "lfs64", "c99")
+MUSL_UNCOMPILABLE: dict[tuple[str, str], str] = {
+    ("aio.h", cfg): "musl's <aio.h> embeds struct sigevent in struct aiocb, and musl's "
+                    "<signal.h> defines struct sigevent only for a POSIX compilation"
+    for cfg in _STRICT_ISO
+}
+
 # The types the overlay defines itself -- musl's headers have none of them, so
 # their layouts are the overlay's to get right -- and the header each is in.
 # Check 4 holds each to glibc's; `defined_types` sees that none is missing.
@@ -145,6 +163,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "Dl_serinfo": "dlfcn.h",
     "struct dl_find_object": "dlfcn.h",
     "glob_t": "glob.h",
+    "struct aioinit": "aio.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -153,9 +172,10 @@ FIELD_NAMES: dict[tuple[str, str], str] = {("femode_t", "__glibc_reserved"): "__
 # Where the layouts are read, both sides: C23, for femode_t; not _GNU_SOURCE,
 # so that <stdio.h>'s cookie types are the overlay's own and not musl's.
 LAYOUT_FLAGS = ["-std=gnu2x"]
-# ... and what a header's types need besides: <dlfcn.h>'s are _GNU_SOURCE's
-# alone, in glibc's header and the overlay's alike.
-LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"]}
+# ... and what a header's types need besides: <dlfcn.h>'s and <aio.h>'s are
+# _GNU_SOURCE's alone, in glibc's header and the overlay's alike.
+LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"],
+                                            "aio.h": ["-D_GNU_SOURCE"]}
 
 
 def layout_flags(header: str) -> list[str]:
@@ -441,13 +461,33 @@ def lfs64_uses(overlay: Path) -> str:
     return "\n".join(src) + "\n"
 
 
+def stale_uncompilable(zig: str) -> list[str]:
+    """Each MUSL_UNCOMPILABLE entry whose musl header compiles after all."""
+    settings = {**CONFIGS, **EXTRA_BUILDS}
+
+    def compiles(entry):
+        (h, cfg) = entry
+        rc, _ = compile_c(zig, f"#include <{h}>\n", settings[cfg] + ["-w"], None)
+        return entry, rc == 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+        return [f"MUSL_UNCOMPILABLE[{h!r}, {cfg!r}]: musl's <{h}> compiles in the {cfg} setting "
+                f"now: delete the entry" for (h, cfg), ok in pool.map(compiles, MUSL_UNCOMPILABLE)
+                if ok]
+
+
 def check_builds(zig: str, overlay: Path) -> list[str]:
-    """Check 1: the headers compile, alone and together, everywhere."""
+    """Check 1: the headers compile, alone and together, everywhere (but
+    where MUSL_UNCOMPILABLE says musl's own header does not)."""
     heads = overlay_headers(overlay)
-    together = "".join(f"#include <{h}>\n" for h in heads)
+
+    def together(cfg: str) -> str:
+        return "".join(f"#include <{h}>\n" for h in heads if (h, cfg) not in MUSL_UNCOMPILABLE)
+
     jobs = [(f"<{h}> alone ({cfg})", f"#include <{h}>\n", flags)
-            for h in heads for cfg, flags in (("gnu", CONFIGS["gnu"]), ("c17", CONFIGS["c17"]))]
-    jobs += [(f"every header together ({cfg})", together, flags)
+            for h in heads for cfg, flags in (("gnu", CONFIGS["gnu"]), ("c17", CONFIGS["c17"]))
+            if (h, cfg) not in MUSL_UNCOMPILABLE]
+    jobs += [(f"every header together ({cfg})", together(cfg), flags)
              for cfg, flags in {**CONFIGS, **EXTRA_BUILDS}.items()]
     jobs += [(f"<stdbit.h>'s type-generic macros ({cfg})", macro_uses(), flags)
              for cfg, flags in (("c11", ["-std=c11"]), ("c23", CONFIGS["c23"]),
@@ -461,7 +501,7 @@ def check_builds(zig: str, overlay: Path) -> list[str]:
         rc, diag = compile_c(zig, src, flags + strict, overlay)
         return what, rc, diag
 
-    problems = []
+    problems = stale_uncompilable(zig)
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
         for what, rc, diag in pool.map(run, jobs):
             if rc != 0:
@@ -488,6 +528,8 @@ def check_declarations(zig: str, overlay: Path,
 
     def probe(job):
         h, cfg = job
+        if (h, cfg) in MUSL_UNCOMPILABLE:
+            return h, cfg, set()  # nothing declared where nothing compiles
         return h, cfg, visible(zig, h, by_header[h], CONFIGS[cfg], overlay)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
@@ -585,6 +627,19 @@ def self_test() -> int:
             check("a wrong type is caught, a right one passes", bad == {"printf"})
             check("the overlay's names are what it adds to musl's",
                   overlay_names(zig, d) == {"fcloseall"})
+            saved_unc = dict(MUSL_UNCOMPILABLE)
+            try:
+                MUSL_UNCOMPILABLE.clear()
+                MUSL_UNCOMPILABLE[("aio.h", "c17")] = "a header musl cannot compile there"
+                check("an entry for a musl header that does not compile stands",
+                      stale_uncompilable(zig) == [])
+                MUSL_UNCOMPILABLE[("stdio.h", "c17")] = "a header musl compiles everywhere"
+                check("an entry for one that compiles is refused",
+                      [e for e in stale_uncompilable(zig) if "'stdio.h'" in e] != []
+                      and all("'aio.h'" not in e for e in stale_uncompilable(zig)))
+            finally:
+                MUSL_UNCOMPILABLE.clear()
+                MUSL_UNCOMPILABLE.update(saved_unc)
             lfs = d / "lfs"
             (lfs / "sys").mkdir(parents=True)
             (lfs / "sys" / "al.h").write_text(
@@ -658,7 +713,8 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         return 1
     print(f"check-libc-overlay: {len(overlay_headers(overlay))} headers compile in "
-          f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings; {compared} declarations appear where "
+          f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings (but {len(MUSL_UNCOMPILABLE)} where "
+          f"musl's own does not); {compared} declarations appear where "
           f"glibc 2.39's do ({len(CONFIGS)} settings each), with glibc's types; "
           f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts; "
           f"{len(lfs64_aliases(overlay))} large-file aliases name what they alias")

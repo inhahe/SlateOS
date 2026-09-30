@@ -1406,11 +1406,16 @@ staff:x:50:bob,alice
         let mut result: *const Passwd = core::ptr::null();
         // SAFETY: the caller's objects.
         unsafe {
+            errno::set_errno(12345);
             assert_eq!(
                 getpwent_r(&mut pwd, small.as_mut_ptr(), 4, &mut result),
                 errno::ERANGE
             );
+            // As glibc's `getpwent_r`: its backend reports it in `errno`.
+            assert_eq!(errno::get_errno(), errno::ERANGE);
+            errno::set_errno(12345);
             assert_eq!(getpwent_r(&mut pwd, big.as_mut_ptr(), 256, &mut result), 0);
+            assert_eq!(errno::get_errno(), 12345, "success leaves errno alone");
         }
         assert_eq!(s(pwd.pw_name), b"root", "the entry that did not fit");
         endpwent();

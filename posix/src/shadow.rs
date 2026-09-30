@@ -834,13 +834,18 @@ mod tests {
         let mut big = [0u8; 64];
         let mut result: *const Spwd = core::ptr::null();
 
+        errno::set_errno(12345);
         let rc = unsafe { getspent_r(&mut sp, small.as_mut_ptr(), small.len(), &mut result) };
         assert_eq!(rc, errno::ERANGE);
+        // In `errno` too, as glibc's `getspent_r` has it.
+        assert_eq!(errno::get_errno(), errno::ERANGE);
 
         // Retrying with a large enough buffer must still yield root: a failed
         // read that swallowed the entry would silently drop database rows.
+        errno::set_errno(12345);
         let rc = unsafe { getspent_r(&mut sp, big.as_mut_ptr(), big.len(), &mut result) };
         assert_eq!(rc, 0);
+        assert_eq!(errno::get_errno(), 12345, "success leaves errno alone");
         assert!(!result.is_null());
         assert_eq!(cstr(sp.sp_namp), b"root");
         endspent();

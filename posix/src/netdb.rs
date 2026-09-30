@@ -571,6 +571,11 @@ impl Cursor {
 
     /// The database's text, opening it first if need be: `None` when the
     /// file exists and cannot be read.
+    ///
+    /// `errno` is left as it was then: glibc's `_nss_files_getXXent_r`
+    /// saves it around the open it makes when nothing is open, and puts it
+    /// back whatever the open did, so the enumeration ends (`ENOENT` from
+    /// the `_r` form, NULL from the other) with the caller's `errno`.
     fn text(&mut self, which: Which, builtin: &'static [u8]) -> Option<&[u8]> {
         if !self.open {
             match nss_files::read(which) {
@@ -585,10 +590,8 @@ impl Cursor {
                     self.len = builtin.len();
                     self.owned = false;
                 }
-                Err(e) => {
-                    errno::set_errno(e);
-                    return None;
-                }
+                // The open's error is not the enumeration's answer.
+                Err(_) => return None,
             }
             self.open = true;
             self.at = 0;
@@ -741,7 +744,8 @@ pub(crate) fn held<T>(
 /// The next entry of an enumeration, by the calling thread's cursor --
 /// `take` parses and fills one line, `None` for a line that is no entry:
 /// 0, `ENOENT` at the end, `ENOMEM`, or the fill's `ERANGE`, after which
-/// the same entry comes again.
+/// the same entry comes again.  `errno` is glibc's: the fill's error, and
+/// otherwise as it was -- at the end, and when the file cannot be read.
 ///
 /// # Safety
 ///
@@ -794,7 +798,13 @@ pub(crate) unsafe fn next_entry<T>(
                 unsafe { nss_files::deliver(value, out, result) };
                 0
             }
-            Err(e) => e,
+            // In `errno` too, as glibc's backend reports it
+            // (`*errnop = ERANGE`) -- where success and the end leave
+            // `errno` as it was.
+            Err(e) => {
+                errno::set_errno(e);
+                e
+            }
         };
     }
     c.at = c.len;
@@ -1959,7 +1969,72 @@ mod tests {
         // SAFETY: NUL-terminated name.
         assert!(unsafe { getservbyname(c"http".as_ptr().cast(), core::ptr::null()) }.is_null());
         assert_eq!(errno::get_errno(), errno::EACCES);
+        // An enumeration just ends, with `errno` as it was: glibc's
+        // `_nss_files_getservent_r` puts it back after the failed open.
+        endservent();
+        errno::set_errno(12345);
+        assert!(getservent().is_null());
+        assert_eq!(errno::get_errno(), 12345);
+        // SAFETY: outputs this test owns.
+        let rc = unsafe { getservent_r(&mut sb, buf.as_mut_ptr(), 256, &mut r) };
+        assert_eq!(rc, errno::ENOENT);
+        assert!(r.is_null());
+        assert_eq!(errno::get_errno(), 12345);
+        // The file is tried again: readable now, it is enumerated.
+        set_test_text(Which::Services, Some(b"echo 7/tcp\n"));
+        // SAFETY: outputs this test owns.
+        let rc = unsafe { getservent_r(&mut sb, buf.as_mut_ptr(), 256, &mut r) };
+        assert_eq!(serv(r, rc), "name=echo port=7 proto=tcp aliases=[]");
+        endservent();
         set_test_text(Which::Services, None);
+    }
+
+    /// A buffer too small for the next entry is `ERANGE` in `errno` as well,
+    /// as glibc's `getservent_r` and `getprotoent_r` have it; the entry comes
+    /// again, and success and the end leave `errno` alone.
+    #[test]
+    fn an_enumeration_reports_erange_in_errno_too() {
+        with_files();
+        let mut sb = Servent::EMPTY;
+        let mut sr: *const Servent = core::ptr::null();
+        let mut pb = Protoent::EMPTY;
+        let mut pr: *const Protoent = core::ptr::null();
+        let mut small = [0u8; 4];
+        let mut big = [0u8; 256];
+        setservent(0);
+        setprotoent(0);
+        // SAFETY: outputs this test owns; each buffer's own size.
+        unsafe {
+            errno::set_errno(12345);
+            let rc = getservent_r(&mut sb, small.as_mut_ptr(), 4, &mut sr);
+            assert_eq!(
+                (rc, sr.is_null(), errno::get_errno()),
+                (errno::ERANGE, true, errno::ERANGE)
+            );
+            errno::set_errno(12345);
+            let rc = getservent_r(&mut sb, big.as_mut_ptr(), 256, &mut sr);
+            assert_eq!(
+                serv(sr, rc),
+                "name=http port=80 proto=tcp aliases=[www,www-http]"
+            );
+            assert_eq!(errno::get_errno(), 12345);
+            errno::set_errno(12345);
+            let rc = getprotoent_r(&mut pb, small.as_mut_ptr(), 4, &mut pr);
+            assert_eq!(
+                (rc, pr.is_null(), errno::get_errno()),
+                (errno::ERANGE, true, errno::ERANGE)
+            );
+            errno::set_errno(12345);
+            let rc = getprotoent_r(&mut pb, big.as_mut_ptr(), 256, &mut pr);
+            assert_eq!(proto(pr, rc), "name=ip proto=0 aliases=[IP]");
+            assert_eq!(errno::get_errno(), 12345);
+            while getprotoent_r(&mut pb, big.as_mut_ptr(), 256, &mut pr) == 0 {}
+            errno::set_errno(12345);
+            let rc = getprotoent_r(&mut pb, big.as_mut_ptr(), 256, &mut pr);
+            assert_eq!((rc, errno::get_errno()), (errno::ENOENT, 12345), "the end");
+        }
+        endservent();
+        endprotoent();
     }
 
     #[test]

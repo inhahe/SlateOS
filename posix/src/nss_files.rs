@@ -696,7 +696,9 @@ impl Cursor {
 
 /// The next entry of an enumeration, which `take` parses and fills -- `None`
 /// for a line that is no entry: 0, `ENOENT` at the end, or the fill's
-/// `ERANGE`, after which the same entry comes again.
+/// `ERANGE`, after which the same entry comes again.  `errno` is glibc's:
+/// the fill's error, and otherwise as it was -- at the end, and when the
+/// file cannot be read.
 ///
 /// # Safety
 ///
@@ -744,7 +746,13 @@ pub(crate) unsafe fn next_entry<T>(
                 unsafe { deliver(value, out, result) };
                 0
             }
-            Err(err) => err,
+            // In `errno` too, as glibc's backend reports it
+            // (`*errnop = ERANGE`) -- where success and the end leave
+            // `errno` as it was.
+            Err(err) => {
+                errno::set_errno(err);
+                err
+            }
         };
     }
     c.at = text.len();

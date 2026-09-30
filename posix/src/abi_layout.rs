@@ -794,6 +794,33 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::fstab::Fstab,
+        "struct fstab",
+        "fstab.h",
+        fs_spec,
+        fs_file,
+        fs_vfstype,
+        fs_mntops,
+        fs_type,
+        fs_freq,
+        fs_passno
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ttyent::Ttyent,
+        "struct ttyent",
+        "ttyent.h",
+        ty_name,
+        ty_getty,
+        ty_type,
+        ty_status,
+        ty_window,
+        ty_comment
+    );
+    abi!(
+        out,
+        hdrs,
         crate::socket::Msghdr,
         "struct msghdr",
         "sys/socket.h",

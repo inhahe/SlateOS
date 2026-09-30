@@ -369,6 +369,11 @@ def candidates(overlay: Path) -> list[str]:
         text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
         names |= set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))
         names |= set(re.findall(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(", text))
+        # A declaration whose name is in parentheses, which a function-like
+        # macro of the name does not expand: `int (ns_msg_getflag)(ns_msg,
+        # int);` beside musl's macro. (A cast before a parenthesis matches
+        # too -- `(uint32_t)(x)` -- and the probe finds it no object.)
+        names |= set(re.findall(r"\(\s*([A-Za-z_]\w*)\s*\)\s*\(", text))
         # Not past a `{`: `extern "C" {` opens a block, and the first field
         # of a struct after it -- <sys/timex.h>'s `struct timeval time;` --
         # is no extern object, though a function may have its name.
@@ -668,6 +673,12 @@ def self_test() -> int:
         check("a comment's words are not", "comment" not in c)
         check("a macro is not", "M" not in c)
         check("a reserved name is not", "_r" not in c)
+        (d / "paren").mkdir()
+        (d / "paren" / "p.h").write_text("int (pg)(int, int);\nint (*fp)(void);\n",
+                                         encoding="utf-8", newline="")
+        c = candidates(d / "paren")
+        check("a declaration with its name in parentheses is a candidate",
+              "pg" in c and "fp" in c)
         (d / "ren").mkdir()
         (d / "ren" / "r.h").write_text(
             "#define rn __rn\nint rn(int);\n#define alias64 alias\n#define N 1\n"

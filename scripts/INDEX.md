@@ -83,6 +83,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-libc-overlay.py` | Check posix/include -- the C header overlay -- against glibc 2.39's headers. |
 | `scripts/check-libc-prototypes.py` | Refuse a C prototype that disagrees with its Rust definition in `libc.a`. |
 | `scripts/check-libc-shape.py` | Assert that `libc.a` has the *object granularity* a libc archive must have. |
+| `scripts/check-libc-target-warnings.py` | Refuse a warning in the libc's own sources, compiled as it ships. |
 | `scripts/check-linux-only-capabilities.py` | A kernel capability reachable from the Linux ABI table and from no native one. |
 | `scripts/check-live-counter-reads.py` | Guard the rule that a self-test may not compare two readings of one counter. |
 | `scripts/check-manifest-producers.py` | Refuse a manifest entry that nothing in the tree can produce. |
@@ -418,4 +419,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_408 scripts._
+_409 scripts._

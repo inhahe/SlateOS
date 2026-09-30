@@ -730,6 +730,72 @@ pub extern "C" fn lio_listio(
 }
 
 // ---------------------------------------------------------------------------
+// glibc's large-file names
+// ---------------------------------------------------------------------------
+//
+// glibc's `struct aiocb64` is its `struct aiocb` with a 64-bit offset, which
+// on x86_64 `aio_offset` is already, and each `*64` call its twin under a
+// second name. musl's <aio.h> makes the names macros for the standard ones
+// under `_LARGEFILE64_SOURCE`; these are for code that declares them itself.
+
+/// `aio_read64` -- [`aio_read`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_read64(aiocbp: *mut Aiocb) -> i32 {
+    aio_read(aiocbp)
+}
+
+/// `aio_write64` -- [`aio_write`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_write64(aiocbp: *mut Aiocb) -> i32 {
+    aio_write(aiocbp)
+}
+
+/// `aio_error64` -- [`aio_error`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_error64(aiocbp: *const Aiocb) -> i32 {
+    aio_error(aiocbp)
+}
+
+/// `aio_return64` -- [`aio_return`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_return64(aiocbp: *mut Aiocb) -> isize {
+    aio_return(aiocbp)
+}
+
+/// `aio_cancel64` -- [`aio_cancel`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_cancel64(fd: i32, aiocbp: *mut Aiocb) -> i32 {
+    aio_cancel(fd, aiocbp)
+}
+
+/// `aio_fsync64` -- [`aio_fsync`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_fsync64(op: i32, aiocbp: *mut Aiocb) -> i32 {
+    aio_fsync(op, aiocbp)
+}
+
+/// `aio_suspend64` -- [`aio_suspend`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_suspend64(
+    list: *const *const Aiocb,
+    nent: i32,
+    timeout: *const crate::stat::Timespec,
+) -> i32 {
+    aio_suspend(list, nent, timeout)
+}
+
+/// `lio_listio64` -- [`lio_listio`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lio_listio64(
+    mode: i32,
+    list: *const *mut Aiocb,
+    nent: i32,
+    sig: *mut crate::time::Sigevent,
+) -> i32 {
+    lio_listio(mode, list, nent, sig)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1121,6 +1187,77 @@ mod tests {
         };
         let at = add_timespec(&now, &rel);
         assert_eq!((at.tv_sec, at.tv_nsec), (12, 100_000_000));
+    }
+
+    // -- glibc's large-file names --
+
+    /// What `f` returned and the errno it left, errno cleared first.
+    fn outcome<T>(f: impl FnOnce() -> T) -> (T, i32) {
+        errno::set_errno(0);
+        let r = f();
+        (r, errno::get_errno())
+    }
+
+    /// Each `*64` name is its base: a request cycle through them alone, and
+    /// their refusals with their bases' errno.
+    #[test]
+    fn test_large_file_names_are_their_bases() {
+        let fd = eventfd();
+        let (mut a, mut b) = (4u64, 6u64);
+        let mut w = write_request(fd, &mut a);
+        assert_eq!(aio_write64(&raw mut w), 0);
+        assert_eq!(aio_error64(&w), 0);
+        assert_eq!(aio_return64(&raw mut w), 8);
+        let mut lw = write_request(fd, &mut b);
+        lw.aio_lio_opcode = LIO_WRITE;
+        let list = [&raw mut lw];
+        assert_eq!(
+            lio_listio64(LIO_WAIT, list.as_ptr(), 1, core::ptr::null_mut()),
+            0
+        );
+        let mut got = 0u64;
+        let mut r = write_request(fd, &mut got);
+        assert_eq!(aio_read64(&raw mut r), 0);
+        let done = [&raw const r];
+        assert_eq!(aio_suspend64(done.as_ptr(), 1, core::ptr::null()), 0);
+        assert_eq!((aio_error64(&r), aio_return64(&raw mut r)), (0, 8));
+        assert_eq!(got, 10, "an eventfd's counter sums its writes");
+        assert_eq!(aio_cancel64(fd, core::ptr::null_mut()), AIO_ALLDONE);
+        let mut sync = blank();
+        sync.aio_fildes = fd;
+        assert_eq!(aio_fsync64(crate::fcntl::O_SYNC, &raw mut sync), 0);
+        assert_eq!(aio_error64(&sync), 0);
+        crate::file::close(fd);
+
+        let null = core::ptr::null_mut::<Aiocb>();
+        assert_eq!(outcome(|| aio_read64(null)), outcome(|| aio_read(null)));
+        assert_eq!(outcome(|| aio_write64(null)), outcome(|| aio_write(null)));
+        assert_eq!(outcome(|| aio_error64(null)), outcome(|| aio_error(null)));
+        assert_eq!(outcome(|| aio_return64(null)), outcome(|| aio_return(null)));
+        for fd in [-1, 250] {
+            assert_eq!(
+                outcome(|| aio_cancel64(fd, null)),
+                outcome(|| aio_cancel(fd, null))
+            );
+        }
+        for op in [0, 99, crate::fcntl::O_SYNC] {
+            assert_eq!(
+                outcome(|| aio_fsync64(op, null)),
+                outcome(|| aio_fsync(op, null))
+            );
+        }
+        for nent in [-1, 0, 5] {
+            assert_eq!(
+                outcome(|| aio_suspend64(core::ptr::null(), nent, core::ptr::null())),
+                outcome(|| aio_suspend(core::ptr::null(), nent, core::ptr::null()))
+            );
+            for mode in [LIO_WAIT, LIO_NOWAIT, 42] {
+                assert_eq!(
+                    outcome(|| lio_listio64(mode, core::ptr::null(), nent, core::ptr::null_mut())),
+                    outcome(|| lio_listio(mode, core::ptr::null(), nent, core::ptr::null_mut()))
+                );
+            }
+        }
     }
 
     // -- lio_listio --

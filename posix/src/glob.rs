@@ -1061,6 +1061,40 @@ pub unsafe extern "C" fn globfree(pglob: *mut GlobT) {
     g.gl_pathc = 0;
 }
 
+/// `glob64` -- [`glob`] by glibc's large-file name: its `glob64_t` is
+/// `glob_t` with `struct dirent64` and `struct stat64` in the
+/// `GLOB_ALTDIRFUNC` functions' types, which on x86_64 are `struct dirent`
+/// and `struct stat`. In `glob`'s archive member, as glibc's is an alias in
+/// `glob`'s object and as `scripts/check-libc-shape.py`'s glob family has
+/// it: a program has all of the family from itself or all from here, and
+/// one that brings its own `glob` and still calls `glob64` fails to link
+/// instead of running half of each.
+///
+/// # Safety
+///
+/// As [`glob`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn glob64(
+    pattern: *const u8,
+    flags: i32,
+    errfunc: Option<ErrFunc>,
+    pglob: *mut GlobT,
+) -> i32 {
+    // SAFETY: the caller's contract is glob's.
+    unsafe { glob(pattern, flags, errfunc, pglob) }
+}
+
+/// `globfree64` -- [`globfree`] by glibc's large-file name.
+///
+/// # Safety
+///
+/// As [`globfree`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn globfree64(pglob: *mut GlobT) {
+    // SAFETY: the caller's contract is globfree's.
+    unsafe { globfree(pglob) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1614,6 +1648,55 @@ mod tests {
             assert_eq!(unsafe { glob(pattern, flags, None, pglob) }, -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
+    }
+
+    /// glob64 and globfree64 are glob and globfree: the same answers and
+    /// names for the same patterns over the tree, and the same refusals.
+    #[test]
+    fn the_large_file_names_are_glob_and_globfree() {
+        for pattern in [c"*", c"*/*", c"/*", c"nomatch*", c"[a-c]*", c"*/"] {
+            for flags in [0, GLOB_MARK | GLOB_NOCHECK, GLOB_NOSORT | GLOB_PERIOD] {
+                let (mut a, mut b) = (tree_glob_t(), tree_glob_t());
+                // SAFETY: C strings, and glob_ts whose functions are the
+                // tree's.
+                let (ra, rb) = unsafe {
+                    (
+                        glob64(
+                            pattern.as_ptr().cast(),
+                            flags | GLOB_ALTDIRFUNC,
+                            Some(on_error),
+                            &raw mut a,
+                        ),
+                        glob(
+                            pattern.as_ptr().cast(),
+                            flags | GLOB_ALTDIRFUNC,
+                            Some(on_error),
+                            &raw mut b,
+                        ),
+                    )
+                };
+                assert_eq!(ra, rb, "{pattern:?} {flags:#x}");
+                assert_eq!(names(&a), names(&b), "{pattern:?} {flags:#x}");
+                assert_eq!(a.gl_flags, b.gl_flags);
+                // SAFETY: glob_ts glob filled.
+                unsafe {
+                    globfree64(&raw mut a);
+                    globfree(&raw mut b);
+                }
+                assert!(a.gl_pathv.is_null());
+                assert_eq!(a.gl_pathc, 0);
+            }
+        }
+        let mut g = GlobT::new();
+        crate::errno::set_errno(0);
+        // SAFETY: a NULL pattern, refused before anything is read.
+        assert_eq!(
+            unsafe { glob64(core::ptr::null(), 0, None, &raw mut g) },
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // SAFETY: NULL is globfree's no-op.
+        unsafe { globfree64(core::ptr::null_mut()) };
     }
 
     /// gl_offs so large the array cannot be sized is GLOB_NOSPACE, not an

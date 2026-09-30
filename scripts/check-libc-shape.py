@@ -167,13 +167,13 @@ for _stream in (sys.stdout, sys.stderr):
 # reported as an intruder the moment we implement it.
 #
 # Some listed names are in fact absent today, deliberately: `optreset` is a
-# BSD-ism we do not provide, `__getopt_initialized` is glibc-internal, and
-# `glob64`/`globfree64` are the large-file aliases (our off_t is already 64-bit,
-# so there is nothing for them to alias). Listing them anyway means that if any
-# is added later it must land in its family's member, which is the correct
-# constraint -- an LFS alias in a different object file from the function it
-# aliases would be a duplicate-definition hazard of exactly the kind this
-# script exists to catch.
+# BSD-ism we do not provide, and `__getopt_initialized` is glibc-internal.
+# Listing them anyway means that if either is added later it must land in its
+# family's member. `glob64`/`globfree64`, the large-file names, were absent
+# until 2026-09-30 and are in glob's member now, as glibc's are aliases in the
+# objects of `glob` and `globfree`: a program that brings its own `glob` and
+# still calls `glob64` fails to link, instead of running this library's
+# `glob64` over its own `glob`.
 #
 # Data symbols are listed alongside the functions on purpose: `optarg` and
 # friends are as much a duplicate-definition hazard as `getopt` itself, and

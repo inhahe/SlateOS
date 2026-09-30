@@ -121,6 +121,19 @@ int fts_set(FTS *, FTSENT *, int);
 /* End the walk and free what it holds. */
 int fts_close(FTS *);
 
+#if defined(_LARGEFILE64_SOURCE)
+/* glibc's large-file names, as musl's headers give the rest of them: macros
+ * for the standard ones, whose inode numbers and struct stat are 64-bit
+ * already. */
+#define FTS64 FTS
+#define FTSENT64 FTSENT
+#define fts64_open fts_open
+#define fts64_read fts_read
+#define fts64_children fts_children
+#define fts64_set fts_set
+#define fts64_close fts_close
+#endif
+
 #ifdef __cplusplus
 }
 #endif

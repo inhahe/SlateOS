@@ -1180,6 +1180,47 @@ pub extern "C" fn scandir64(
     scandir(dirname, namelist, filter, compar)
 }
 
+/// `scandirat64` -- LFS64 alias for [`scandirat`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scandirat64(
+    dirfd: i32,
+    dirname: *const u8,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<extern "C" fn(*const Dirent) -> i32>,
+    compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
+) -> i32 {
+    scandirat(dirfd, dirname, namelist, filter, compar)
+}
+
+/// `alphasort64` -- LFS64 alias for [`alphasort`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn alphasort64(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
+    alphasort(a, b)
+}
+
+/// `versionsort64` -- LFS64 alias for [`versionsort`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn versionsort64(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
+    versionsort(a, b)
+}
+
+/// `getdirentries64` -- LFS64 alias for [`getdirentries`].
+///
+/// # Safety
+///
+/// As [`getdirentries`]: `buf` must hold `nbytes` bytes; `basep` must be
+/// NULL or valid.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getdirentries64(
+    fd: i32,
+    buf: *mut u8,
+    nbytes: usize,
+    basep: *mut i64,
+) -> i64 {
+    // SAFETY: the caller's contract is getdirentries'.
+    unsafe { getdirentries(fd, buf, nbytes, basep) }
+}
+
 // ---------------------------------------------------------------------------
 // getdents / getdents64 — raw Linux directory entry syscalls
 // ---------------------------------------------------------------------------
@@ -3081,5 +3122,72 @@ mod tests {
             -1,
             "the same answer"
         );
+    }
+
+    /// A directory entry named `name` for the sort functions.
+    fn entry_named(name: &[u8]) -> Dirent {
+        let mut d = Dirent {
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
+            d_name: [0u8; 256],
+        };
+        d.d_name[..name.len()].copy_from_slice(name);
+        d
+    }
+
+    /// The LFS64 names answer as their bases do, to the sign of a comparison
+    /// and the errno of a refusal.
+    #[test]
+    fn test_lfs64_names_are_their_bases() {
+        let names: [&[u8]; 7] = [b"", b"a", b"b", b"file2", b"file10", b"File10", b"file010"];
+        for x in names {
+            for y in names {
+                let (a, b) = (entry_named(x), entry_named(y));
+                let (pa, pb): (*const Dirent, *const Dirent) = (&a, &b);
+                assert_eq!(alphasort64(&pa, &pb), alphasort(&pa, &pb));
+                assert_eq!(versionsort64(&pa, &pb), versionsort(&pa, &pb));
+            }
+        }
+        for (dirfd, path) in [
+            (crate::file::AT_FDCWD, core::ptr::null()),
+            (
+                crate::file::AT_FDCWD,
+                b"/nonexistent-scandirat64\0".as_ptr(),
+            ),
+            (40, b"relative\0".as_ptr()),
+            (-1, b"relative\0".as_ptr()),
+        ] {
+            let mut list: *mut *mut Dirent = core::ptr::null_mut();
+            crate::errno::set_errno(0);
+            let r64 = scandirat64(dirfd, path, &raw mut list, None, None);
+            let e64 = crate::errno::get_errno();
+            crate::errno::set_errno(0);
+            let r = scandirat(dirfd, path, &raw mut list, None, None);
+            assert_eq!(
+                (r64, e64),
+                (r, crate::errno::get_errno()),
+                "scandirat64({dirfd})"
+            );
+            assert_eq!(r, -1);
+        }
+        let mut buf = [0u8; 256];
+        let mut base: i64 = 1234;
+        for fd in [-1, 40] {
+            crate::errno::set_errno(0);
+            // SAFETY: a buffer and a position of this frame's.
+            let r64 = unsafe { getdirentries64(fd, buf.as_mut_ptr(), buf.len(), &raw mut base) };
+            let e64 = crate::errno::get_errno();
+            crate::errno::set_errno(0);
+            // SAFETY: as above.
+            let r = unsafe { getdirentries(fd, buf.as_mut_ptr(), buf.len(), &raw mut base) };
+            assert_eq!(
+                (r64, e64),
+                (r, crate::errno::get_errno()),
+                "getdirentries64({fd})"
+            );
+            assert_eq!(base, 1234);
+        }
     }
 }

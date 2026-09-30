@@ -20,7 +20,10 @@ What it checks
    -- with `-Wall -Wextra -Werror`, in each of CONFIGS and in EXTRA_BUILDS
    (older C, C++), so that no feature-macro setting a program might use
    breaks it; and <stdbit.h>'s type-generic macros, expanded on each type
-   they take, choose the function for its type (`macro_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
+   they take, choose the function for its type (`macro_uses`); and each
+   large-file alias the overlay defines as a macro (`#define fts64_open
+   fts_open`), expanded where the large-file names are visible, names
+   something declared there (`lfs64_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
    a program, as musl's are, and their warnings not its business;
    `_SLATEOS_OVERLAY_WARNINGS` makes them ordinary ones here, to be held to
    these warnings themselves.
@@ -410,6 +413,34 @@ def macro_uses() -> str:
     return "\n".join(src) + "\n"
 
 
+def lfs64_aliases(overlay: Path) -> list[tuple[str, str]]:
+    """The large-file aliases the overlay's headers define as macros, as
+    musl's headers do (`#define glob64 glob`, `#define FTS64 FTS`): each
+    `#define` of a name with 64 in it to another name, sorted."""
+    found: set[tuple[str, str]] = set()
+    for p in overlay.rglob("*.h"):
+        text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
+        for alias, name in re.findall(
+                r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*$",
+                text, flags=re.M):
+            if "64" in alias:
+                found.add((alias, name))
+    return sorted(found)
+
+
+def lfs64_uses(overlay: Path) -> str:
+    """A translation unit that includes every overlay header and names each
+    large-file alias through `__typeof__`, which takes a type or an
+    expression alike: an alias whose standard name is not declared where
+    the alias is visible -- a misspelling, a feature macro missed -- does not
+    compile. A header that only defines a macro never expands it; this
+    expands every one."""
+    src = [f"#include <{h}>" for h in overlay_headers(overlay)]
+    for i, (alias, _) in enumerate(lfs64_aliases(overlay)):
+        src.append(f"typedef __typeof__({alias}) *lfs64_use{i};")
+    return "\n".join(src) + "\n"
+
+
 def check_builds(zig: str, overlay: Path) -> list[str]:
     """Check 1: the headers compile, alone and together, everywhere."""
     heads = overlay_headers(overlay)
@@ -421,6 +452,8 @@ def check_builds(zig: str, overlay: Path) -> list[str]:
     jobs += [(f"<stdbit.h>'s type-generic macros ({cfg})", macro_uses(), flags)
              for cfg, flags in (("c11", ["-std=c11"]), ("c23", CONFIGS["c23"]),
                                 ("gnu", CONFIGS["gnu"]))]
+    jobs.append(("the large-file aliases (gnu+lfs64)", lfs64_uses(overlay),
+                 EXTRA_BUILDS["gnu+lfs64"]))
     strict = ["-D_SLATEOS_OVERLAY_WARNINGS", "-Wall", "-Wextra", "-Werror"]
 
     def run(job):
@@ -529,6 +562,13 @@ def self_test() -> int:
         check("the layouts are read",
               read_layouts(d / "l.txt") == {"femode_t": ("fenv.h", 8, [("__control_word", 0),
                                                                      ("__mxcsr", 4)])})
+        (d / "lfs").mkdir()
+        (d / "lfs" / "c.h").write_text(
+            "#define f64 f\n  #  define T64 T\n#define __NEED_off64_t\n#define N64 1\n"
+            "/* #define gone64 gone */\n#define g64(x) g(x)\n#define h h64\n",
+            encoding="utf-8", newline="")
+        check("a large-file alias is found, and nothing else is",
+              lfs64_aliases(d / "lfs") == [("T64", "T"), ("f64", "f")])
     zig = find_zig()
     if zig and musl_include(zig):
         with tempfile.TemporaryDirectory() as t:
@@ -545,6 +585,17 @@ def self_test() -> int:
             check("a wrong type is caught, a right one passes", bad == {"printf"})
             check("the overlay's names are what it adds to musl's",
                   overlay_names(zig, d) == {"fcloseall"})
+            lfs = d / "lfs"
+            (lfs / "sys").mkdir(parents=True)
+            (lfs / "sys" / "al.h").write_text(
+                "#include <sys/stat.h>\n#include <glob.h>\n#define fstatx64 fstat\n"
+                "#define globx64_t glob_t\n", encoding="utf-8", newline="")
+            ok, _ = compile_c(zig, lfs64_uses(lfs), EXTRA_BUILDS["gnu+lfs64"] + ["-Werror"], lfs)
+            check("an alias for a declared function or type compiles", ok == 0)
+            (lfs / "sys" / "al.h").write_text(
+                "#include <sys/stat.h>\n#define fstatx64 fstatt\n", encoding="utf-8", newline="")
+            bad, _ = compile_c(zig, lfs64_uses(lfs), EXTRA_BUILDS["gnu+lfs64"] + ["-Werror"], lfs)
+            check("an alias for an undeclared name does not", bad != 0)
             (d / "sys").mkdir()
             (d / "sys" / "lay.h").write_text("typedef struct { int a; long b; } lay_t;\n",
                                              encoding="utf-8", newline="")
@@ -609,7 +660,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"check-libc-overlay: {len(overlay_headers(overlay))} headers compile in "
           f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings; {compared} declarations appear where "
           f"glibc 2.39's do ({len(CONFIGS)} settings each), with glibc's types; "
-          f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts")
+          f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts; "
+          f"{len(lfs64_aliases(overlay))} large-file aliases name what they alias")
     return 0
 
 

@@ -1344,6 +1344,45 @@ pub extern "C" fn fts_close(ftsp: *mut Fts) -> i32 {
     0
 }
 
+// glibc's large-file names. Its `FTS64` and `FTSENT64` are `FTS` and
+// `FTSENT` with 64-bit inode numbers and a `struct stat64`, which on x86_64
+// they are already; <fts.h> makes the names macros for the standard ones
+// under `_LARGEFILE64_SOURCE`, as musl's headers do for the rest.
+
+/// `fts64_open` -- [`fts_open`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fts64_open(
+    argv: *const *const u8,
+    options: i32,
+    compar: Option<FtsCompar>,
+) -> *mut Fts {
+    fts_open(argv, options, compar)
+}
+
+/// `fts64_read` -- [`fts_read`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fts64_read(ftsp: *mut Fts) -> *mut FtsEnt {
+    fts_read(ftsp)
+}
+
+/// `fts64_children` -- [`fts_children`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fts64_children(ftsp: *mut Fts, instr: i32) -> *mut FtsEnt {
+    fts_children(ftsp, instr)
+}
+
+/// `fts64_set` -- [`fts_set`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fts64_set(ftsp: *mut Fts, p: *mut FtsEnt, instr: i32) -> i32 {
+    fts_set(ftsp, p, instr)
+}
+
+/// `fts64_close` -- [`fts_close`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fts64_close(ftsp: *mut Fts) -> i32 {
+    fts_close(ftsp)
+}
+
 /// Free a stream and everything it holds (glibc's `fts_close`).
 ///
 /// From the current entry, every live entry is reached through `fts_link`
@@ -2598,5 +2637,54 @@ mod tests {
         // SAFETY: live entry.
         assert_eq!(unsafe { (*e).fts_info }, FTS_NS);
         assert_eq!(fts_close(sp), 0);
+    }
+
+    /// glibc's large-file names walk as the standard ones do, and refuse
+    /// what they refuse.
+    #[test]
+    fn the_large_file_names_are_the_standard_ones() {
+        let (_o, ptrs) = cstrings(&["/definitely/not/here"]);
+        let sp = fts64_open(ptrs.as_ptr(), FTS_PHYSICAL, None);
+        assert!(!sp.is_null());
+        let e = fts64_read(sp);
+        assert!(!e.is_null());
+        // SAFETY: live entry.
+        assert_eq!(unsafe { (*e).fts_info }, FTS_NS);
+        assert_eq!(fts64_set(sp, e, FTS_AGAIN), 0);
+        // SAFETY: live entry.
+        assert_eq!(i32::from(unsafe { (*e).fts_instr }), FTS_AGAIN);
+        assert_eq!(fts64_read(sp), e, "FTS_AGAIN returns the entry again");
+        errno::set_errno(0);
+        assert!(fts64_children(sp, 0).is_null(), "not a directory");
+        assert_eq!(fts64_close(sp), 0);
+
+        let no_stream: *mut Fts = core::ptr::null_mut();
+        let no_entry: *mut FtsEnt = core::ptr::null_mut();
+        let outcome = |r: bool| (r, errno::get_errno());
+        errno::set_errno(0);
+        let r64 = outcome(fts64_read(no_stream).is_null());
+        errno::set_errno(0);
+        assert_eq!(r64, outcome(fts_read(no_stream).is_null()));
+        for instr in [0, 5] {
+            errno::set_errno(0);
+            let r64 = outcome(fts64_children(no_stream, instr).is_null());
+            errno::set_errno(0);
+            assert_eq!(r64, outcome(fts_children(no_stream, instr).is_null()));
+        }
+        for instr in [0, FTS_SKIP, 99] {
+            errno::set_errno(0);
+            let r64 = (fts64_set(no_stream, no_entry, instr), errno::get_errno());
+            errno::set_errno(0);
+            assert_eq!(
+                r64,
+                (fts_set(no_stream, no_entry, instr), errno::get_errno())
+            );
+        }
+        errno::set_errno(0);
+        assert_eq!(fts64_close(no_stream), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        errno::set_errno(0);
+        assert!(fts64_open(ptrs.as_ptr(), 0x1000, None).is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 }

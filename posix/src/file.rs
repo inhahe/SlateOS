@@ -6832,6 +6832,103 @@ pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i
 }
 
 // ---------------------------------------------------------------------------
+// The rest of glibc's large-file names
+// ---------------------------------------------------------------------------
+//
+// glibc exports a `*64` twin of every call that takes or returns a file
+// offset, for 32-bit programs built with `_FILE_OFFSET_BITS=64`; on x86_64
+// each is the same function under a second name (glibc's are aliases). A C
+// program compiled against this library's headers never names one: musl's
+// headers define them as macros for the standard names, and only under
+// `_LARGEFILE64_SOURCE`. They are here for code that declares them itself --
+// a Rust crate written for linux-gnu, a configure probe, an object built
+// against glibc's headers -- which would otherwise fail to link.
+
+/// `pread64` -- [`pread`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pread64(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
+    pread(fd, buf, count, offset)
+}
+
+/// `pwrite64` -- [`pwrite`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwrite64(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
+    pwrite(fd, buf, count, offset)
+}
+
+/// `preadv64` -- [`preadv`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    preadv(fd, iov, iovcnt, offset)
+}
+
+/// `pwritev64` -- [`pwritev`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    pwritev(fd, iov, iovcnt, offset)
+}
+
+/// `preadv64v2` -- [`preadv2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    preadv2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `pwritev64v2` -- [`pwritev2`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev64v2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    flags: i32,
+) -> SsizeT {
+    pwritev2(fd, iov, iovcnt, offset, flags)
+}
+
+/// `truncate64` -- [`truncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn truncate64(path: *const u8, length: OffT) -> i32 {
+    truncate(path, length)
+}
+
+/// `ftruncate64` -- [`ftruncate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ftruncate64(fd: Fd, length: OffT) -> i32 {
+    ftruncate(fd, length)
+}
+
+/// `creat64` -- [`creat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn creat64(path: *const u8, mode: ModeT) -> Fd {
+    creat(path, mode)
+}
+
+/// `openat64` -- [`openat`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn openat64(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    openat(dirfd, path, flags, mode)
+}
+
+/// `posix_fadvise64` -- [`posix_fadvise`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_fadvise64(fd: Fd, offset: OffT, len: OffT, advice: i32) -> i32 {
+    posix_fadvise(fd, offset, len, advice)
+}
+
+/// `fallocate64` -- [`fallocate`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fallocate64(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
+    fallocate(fd, mode, offset, len)
+}
+
+// ---------------------------------------------------------------------------
 // glibc __xstat family — internal stat wrappers
 // ---------------------------------------------------------------------------
 //
@@ -10611,6 +10708,133 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    // -- the rest of glibc's large-file names: each its base, to the errno --
+
+    /// What `f` returned and the errno it left, errno cleared first.
+    fn outcome<T>(f: impl FnOnce() -> T) -> (T, i32) {
+        errno::set_errno(0);
+        let r = f();
+        (r, errno::get_errno())
+    }
+
+    #[test]
+    fn test_large_file_io_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        let mut byte = [0u8; 1];
+        let buf = byte.as_mut_ptr();
+        let iov = Iovec {
+            iov_base: buf,
+            iov_len: 1,
+        };
+        // Every case fails, or does nothing, before any byte moves: a
+        // descriptor that is not open, a console (not seekable), a negative
+        // offset, a NULL buffer, a count of 0, a bad iovcnt, unknown flags.
+        // (preadv2 and pwritev2 at offset -1 are readv and writev, which on
+        // the console would read or write it: only a bad count is tried
+        // there.)
+        for fd in [-1, 900, console] {
+            for offset in [0, -1, -2, 1 << 40] {
+                for (p, n) in [(buf, 0), (buf, 1), (core::ptr::null_mut(), 1)] {
+                    assert_eq!(
+                        outcome(|| pread64(fd, p, n, offset)),
+                        outcome(|| pread(fd, p, n, offset)),
+                        "pread64({fd}, {n}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwrite64(fd, p.cast_const(), n, offset)),
+                        outcome(|| pwrite(fd, p.cast_const(), n, offset)),
+                        "pwrite64({fd}, {n}, {offset})"
+                    );
+                }
+                for cnt in [-1, 0, 1, 1025] {
+                    assert_eq!(
+                        outcome(|| preadv64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| preadv(fd, &raw const iov, cnt, offset)),
+                        "preadv64({fd}, {cnt}, {offset})"
+                    );
+                    assert_eq!(
+                        outcome(|| pwritev64(fd, &raw const iov, cnt, offset)),
+                        outcome(|| pwritev(fd, &raw const iov, cnt, offset)),
+                        "pwritev64({fd}, {cnt}, {offset})"
+                    );
+                    if fd == console && offset == -1 && (cnt == 0 || cnt == 1) {
+                        continue;
+                    }
+                    for flags in [0, -1, 0x40] {
+                        assert_eq!(
+                            outcome(|| preadv64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| preadv2(fd, &raw const iov, cnt, offset, flags)),
+                            "preadv64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                        assert_eq!(
+                            outcome(|| pwritev64v2(fd, &raw const iov, cnt, offset, flags)),
+                            outcome(|| pwritev2(fd, &raw const iov, cnt, offset, flags)),
+                            "pwritev64v2({fd}, {cnt}, {offset}, {flags})"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = close(console);
+    }
+
+    #[test]
+    fn test_large_file_path_and_size_names_are_their_bases() {
+        let console = fdtable::alloc_fd(HandleKind::Console, 0).expect("fd available");
+        for length in [-1, 0, 1 << 40] {
+            assert_eq!(
+                outcome(|| truncate64(core::ptr::null(), length)),
+                outcome(|| truncate(core::ptr::null(), length))
+            );
+            assert_eq!(
+                outcome(|| truncate64(b"\0".as_ptr(), length)),
+                outcome(|| truncate(b"\0".as_ptr(), length))
+            );
+            for fd in [-1, 900, console] {
+                assert_eq!(
+                    outcome(|| ftruncate64(fd, length)),
+                    outcome(|| ftruncate(fd, length)),
+                    "ftruncate64({fd}, {length})"
+                );
+            }
+        }
+        assert_eq!(
+            outcome(|| creat64(core::ptr::null(), 0o600)),
+            outcome(|| creat(core::ptr::null(), 0o600))
+        );
+        assert_eq!(
+            outcome(|| creat64(b"\0".as_ptr(), 0o600)),
+            outcome(|| creat(b"\0".as_ptr(), 0o600))
+        );
+        for dirfd in [-1, 900, console] {
+            for path in [core::ptr::null(), b"\0".as_ptr(), b"relative\0".as_ptr()] {
+                assert_eq!(
+                    outcome(|| openat64(dirfd, path, fcntl::O_RDONLY, 0)),
+                    outcome(|| openat(dirfd, path, fcntl::O_RDONLY, 0)),
+                    "openat64({dirfd})"
+                );
+            }
+        }
+        for fd in [-1, 900, console] {
+            for (offset, len) in [(0, 0), (-1, 0), (0, -1), (1 << 40, 1)] {
+                for advice in [POSIX_FADV_NORMAL, POSIX_FADV_DONTNEED, 99] {
+                    assert_eq!(
+                        outcome(|| posix_fadvise64(fd, offset, len, advice)),
+                        outcome(|| posix_fadvise(fd, offset, len, advice)),
+                        "posix_fadvise64({fd}, {offset}, {len}, {advice})"
+                    );
+                }
+                for mode in [0, FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE, -1] {
+                    assert_eq!(
+                        outcome(|| fallocate64(fd, mode, offset, len)),
+                        outcome(|| fallocate(fd, mode, offset, len)),
+                        "fallocate64({fd}, {mode}, {offset}, {len})"
+                    );
+                }
+            }
+        }
+        let _ = close(console);
+    }
     // -- LP64 aliases (64-bit variants) delegate to base functions --
 
     #[test]

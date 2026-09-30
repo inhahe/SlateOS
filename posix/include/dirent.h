@@ -43,6 +43,13 @@ ssize_t getdents64(int, void *, size_t);
 ssize_t getdirentries(int, char *__restrict, size_t, off_t *__restrict);
 #endif
 
+#if defined(_LARGEFILE64_SOURCE)
+/* glibc's large-file names for the two above, as musl's <dirent.h> gives
+ * the rest of them: macros for the standard names. */
+#define scandirat64 scandirat
+#define getdirentries64 getdirentries
+#endif
+
 #ifdef __cplusplus
 }
 #endif

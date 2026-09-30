@@ -30,6 +30,23 @@ extern "C" {
 #define PTHREAD_MUTEX_STALLED_NP PTHREAD_MUTEX_STALLED
 #define PTHREAD_MUTEX_ROBUST_NP PTHREAD_MUTEX_ROBUST
 
+#if defined(_SLATEOS_USE_POSIX2008) || (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE + 0 >= 500) 	|| (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE + 0 >= 200112L)
+/* Whom a read-write lock prefers (pthread_rwlockattr_setkind_np): readers,
+ * the default; writers, which glibc and this library take to mean readers,
+ * since a reader locking again while a writer waits would wait for itself;
+ * and writers, readers never locking again -- while a writer waits, no new
+ * reader joins the readers holding the lock. */
+enum {
+	PTHREAD_RWLOCK_PREFER_READER_NP,
+	PTHREAD_RWLOCK_PREFER_WRITER_NP,
+	PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP,
+	PTHREAD_RWLOCK_DEFAULT_NP = PTHREAD_RWLOCK_PREFER_READER_NP
+};
+
+int pthread_rwlockattr_getkind_np(const pthread_rwlockattr_t *__restrict, int *__restrict);
+int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *, int);
+#endif
+
 /* The stack by its top, the address it grows down from, as the obsolete
  * interface took it (pthread_attr_setstack takes its lowest address). */
 int pthread_attr_getstackaddr(const pthread_attr_t *__restrict, void **__restrict)
@@ -39,6 +56,10 @@ int pthread_attr_setstackaddr(pthread_attr_t *, void *)
 
 #ifdef _GNU_SOURCE
 #define PTHREAD_MUTEX_FAST_NP PTHREAD_MUTEX_TIMED_NP
+
+/* A writer-preferring read-write lock, statically: the fourth int of the
+ * lock is its preference (posix/src/pthread.rs, PthreadRwlockT). */
+#define PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP {{{0, 0, 0, 1}}}
 
 /* The CPUs threads created with the attributes may run on: every one, here,
  * and pthread_create refuses a set of fewer. */

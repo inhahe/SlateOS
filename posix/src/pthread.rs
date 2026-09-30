@@ -2374,6 +2374,13 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
 /// - 0: unlocked
 /// - positive N: N readers holding the lock
 /// - -1: one writer holding the lock
+///
+/// Readers are preferred -- glibc's default -- unless the lock was made
+/// with [`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`]: then, while a
+/// writer waits, a new reader does not join the readers holding the lock
+/// but waits with the writer, so that the read phase ends and the writer
+/// gets its turn.  A reader asking again for a lock it holds would then wait
+/// for itself, which is why glibc calls it non-recursive.
 #[repr(C)]
 pub struct PthreadRwlockT {
     /// 0 unlocked, N > 0 held by N readers, [`RWLOCK_WRITER`] held by a
@@ -2385,7 +2392,15 @@ pub struct PthreadRwlockT {
     /// The writer's task id while `state` is [`RWLOCK_WRITER`], for
     /// `EDEADLK`.
     writer: AtomicI32,
-    _pad: [u8; 44],
+    /// 1 if writers are preferred ([`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`]),
+    /// else 0.  At byte 12 -- the fourth `int` of musl's `pthread_rwlock_t`
+    /// -- where posix/include's `PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP`
+    /// puts it.
+    prefer_writer: AtomicI32,
+    /// Writers waiting for a writer-preferring lock; the futex readers held
+    /// back by them sleep on.  Kept only on such a lock.
+    writers_waiting: AtomicI32,
+    _pad: [u8; 36],
 }
 
 /// [`PthreadRwlockT::state`] while a writer holds the lock.
@@ -2410,24 +2425,58 @@ pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
     state: AtomicI32::new(0),
     waiters: AtomicI32::new(0),
     writer: AtomicI32::new(0),
-    _pad: [0; 44],
+    prefer_writer: AtomicI32::new(0),
+    writers_waiting: AtomicI32::new(0),
+    _pad: [0; 36],
 };
+
+/// Readers preferred, glibc's default (`pthread_rwlockattr_setkind_np`): a
+/// reader is not held back by a waiting writer, so a reader may lock again.
+pub const PTHREAD_RWLOCK_PREFER_READER_NP: i32 = 0;
+/// Writers preferred -- in name: glibc takes it as
+/// [`PTHREAD_RWLOCK_PREFER_READER_NP`], since a reader locking again while a
+/// writer waits would wait for itself, and so does this library.
+pub const PTHREAD_RWLOCK_PREFER_WRITER_NP: i32 = 1;
+/// Writers preferred, readers never locking again (see [`PthreadRwlockT`]).
+pub const PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP: i32 = 2;
+/// The default kind: [`PTHREAD_RWLOCK_PREFER_READER_NP`].
+pub const PTHREAD_RWLOCK_DEFAULT_NP: i32 = PTHREAD_RWLOCK_PREFER_READER_NP;
+
+/// Where a `pthread_rwlockattr_t` keeps its kind: the second `unsigned` of
+/// musl's two (the first is the process-shared flag).
+const RWLOCKATTR_OFF_KIND: usize = 4;
 
 /// Initialize a read-write lock.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_init(
     rwlock: *mut PthreadRwlockT,
-    _attr: *const PthreadRwlockattrT,
+    attr: *const PthreadRwlockattrT,
 ) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
+    // Writers are preferred only for the non-recursive kind: glibc's
+    // `__flags` is set for it alone (nptl/pthread_rwlock_init.c).
+    // SAFETY: NULL or the caller's attribute object.
+    let kind = unsafe { attr.as_ref() }.map_or(PTHREAD_RWLOCK_DEFAULT_NP, rwlockattr_kind);
+    // SAFETY: non-null, the caller's lock, not in use (POSIX's contract).
     unsafe {
         (*rwlock).state = AtomicI32::new(0);
         (*rwlock).waiters = AtomicI32::new(0);
         (*rwlock).writer = AtomicI32::new(0);
+        (*rwlock).prefer_writer = AtomicI32::new(i32::from(
+            kind == PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP,
+        ));
+        (*rwlock).writers_waiting = AtomicI32::new(0);
     }
     0
+}
+
+/// The kind an attribute object holds.
+fn rwlockattr_kind(attr: &PthreadRwlockattrT) -> i32 {
+    attr.get(RWLOCKATTR_OFF_KIND..RWLOCKATTR_OFF_KIND + 4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(PTHREAD_RWLOCK_DEFAULT_NP, i32::from_ne_bytes)
 }
 
 /// Destroy a read-write lock.
@@ -2460,6 +2509,13 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let rw = unsafe { &*rwlock };
     let current = rw.state.load(Ordering::Acquire);
     if current < 0 {
+        return errno::EBUSY;
+    }
+    // A writer-preferring lock with a writer waiting is busy to a reader
+    // (glibc's `pthread_rwlock_tryrdlock`).
+    if rw.prefer_writer.load(Ordering::Relaxed) != 0
+        && rw.writers_waiting.load(Ordering::Acquire) > 0
+    {
         return errno::EBUSY;
     }
     if current == i32::MAX {
@@ -2647,6 +2703,32 @@ fn rwlock_sleep(
     in_time
 }
 
+/// Sleep while `writers_waiting` is still `seen` -- a reader held back by a
+/// writer on a writer-preferring lock -- or until `deadline`: `false` once it
+/// has passed.  The writer wakes it when it stops waiting, with the lock or
+/// without.
+fn held_back_sleep(
+    rw: &PthreadRwlockT,
+    seen: i32,
+    deadline: Option<&(i32, crate::stat::Timespec)>,
+) -> bool {
+    match deadline {
+        None => {
+            crate::lowlevellock::futex_wait(&rw.writers_waiting, seen);
+            true
+        }
+        Some((clock, at)) => {
+            match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(*clock), at) {
+                None => false,
+                Some(ns) => {
+                    crate::lowlevellock::futex_wait_timeout(&rw.writers_waiting, seen, ns);
+                    true
+                }
+            }
+        }
+    }
+}
+
 /// The read lock, with an optional deadline.
 fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
     if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
@@ -2654,9 +2736,23 @@ fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
     {
         return errno::EDEADLK;
     }
+    let prefer_writer = rw.prefer_writer.load(Ordering::Relaxed) != 0;
     loop {
         let s = rw.state.load(Ordering::Acquire);
         if s >= 0 {
+            // Readers hold it and a writer waits: on a writer-preferring
+            // lock, wait with the writer rather than extend the read phase.
+            // With no reader holding it, race the writer for it, as glibc's
+            // does -- one of the two was going to win anyway.
+            if prefer_writer && s > 0 {
+                let w = rw.writers_waiting.load(Ordering::Acquire);
+                if w > 0 {
+                    if !held_back_sleep(rw, w, deadline.as_ref()) {
+                        return errno::ETIMEDOUT;
+                    }
+                    continue;
+                }
+            }
             if s == i32::MAX {
                 return errno::EAGAIN;
             }
@@ -2676,6 +2772,10 @@ fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
 }
 
 /// The write lock, with an optional deadline.
+///
+/// On a writer-preferring lock a writer that has to wait says so in
+/// `writers_waiting`, which holds new readers back, and on leaving it -- with
+/// the lock or without -- wakes the readers it held back to look again.
 fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
     let self_id = current_tid();
     if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
@@ -2683,23 +2783,37 @@ fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
     {
         return errno::EDEADLK;
     }
-    loop {
+    let prefer_writer = rw.prefer_writer.load(Ordering::Relaxed) != 0;
+    let mut waiting = false;
+    let answer = loop {
         if rw
             .state
             .compare_exchange_weak(0, RWLOCK_WRITER, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             rw.writer.store(self_id, Ordering::Relaxed);
-            return 0;
+            break 0;
         }
         let s = rw.state.load(Ordering::Acquire);
         if s == 0 {
             continue;
         }
-        if !rwlock_sleep(rw, s, deadline.as_ref()) {
-            return errno::ETIMEDOUT;
+        if prefer_writer && !waiting {
+            // Counted before the sleep, and the lock looked at again after,
+            // so that no reader can join in between unseen.
+            rw.writers_waiting.fetch_add(1, Ordering::SeqCst);
+            waiting = true;
+            continue;
         }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            break errno::ETIMEDOUT;
+        }
+    };
+    if waiting {
+        rw.writers_waiting.fetch_sub(1, Ordering::SeqCst);
+        crate::lowlevellock::futex_wake_all(&rw.writers_waiting);
     }
+    answer
 }
 
 // ---------------------------------------------------------------------------
@@ -4480,6 +4594,48 @@ pub extern "C" fn pthread_rwlockattr_getpshared(
         *pshared = core::ptr::read_unaligned(attr.cast::<i32>());
     }
     0
+}
+
+/// `pthread_rwlockattr_setkind_np(attr, pref)` (GNU): whom locks made with
+/// the object prefer -- [`PTHREAD_RWLOCK_PREFER_READER_NP`] (the default),
+/// [`PTHREAD_RWLOCK_PREFER_WRITER_NP`] (which glibc takes as the first), or
+/// [`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`].  Any other is
+/// `EINVAL`, judged before the object, as glibc judges it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlockattr_setkind_np(attr: *mut PthreadRwlockattrT, pref: i32) -> i32 {
+    if !matches!(
+        pref,
+        PTHREAD_RWLOCK_PREFER_READER_NP
+            | PTHREAD_RWLOCK_PREFER_WRITER_NP
+            | PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+    ) {
+        return errno::EINVAL;
+    }
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(a) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if let Some(slot) = a.get_mut(RWLOCKATTR_OFF_KIND..RWLOCKATTR_OFF_KIND + 4) {
+        slot.copy_from_slice(&pref.to_ne_bytes());
+    }
+    0
+}
+
+/// `pthread_rwlockattr_getkind_np(attr, &pref)` (GNU): the kind the object
+/// holds, [`PTHREAD_RWLOCK_PREFER_READER_NP`] until it is set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlockattr_getkind_np(
+    attr: *const PthreadRwlockattrT,
+    pref: *mut i32,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object and pointer.
+    match unsafe { (attr.as_ref(), pref.as_mut()) } {
+        (Some(a), Some(out)) => {
+            *out = rwlockattr_kind(a);
+            0
+        }
+        _ => errno::EFAULT,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6650,11 +6806,19 @@ mod tests {
             state: AtomicI32::new(42),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0xFF; 44],
+            prefer_writer: AtomicI32::new(7),
+            writers_waiting: AtomicI32::new(7),
+            _pad: [0xFF; 36],
         };
         let ret = pthread_rwlock_init(&mut rwlock, core::ptr::null());
         assert_eq!(ret, 0);
         assert_eq!(rwlock.state.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            rwlock.prefer_writer.load(Ordering::Relaxed),
+            0,
+            "readers, by default"
+        );
+        assert_eq!(rwlock.writers_waiting.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -6671,7 +6835,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_rwlock_destroy(&mut rwlock), 0);
     }
@@ -7616,7 +7782,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         // Read-lock.
         assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
@@ -7636,7 +7804,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         // Write-lock.
         assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
@@ -9055,6 +9225,191 @@ mod tests {
         .unwrap();
         assert_eq!(r, errno::ETIMEDOUT);
         assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
+    }
+
+    // -- the rwlock's kinds: glibc's pthread_rwlockattr_setkind_np --
+
+    /// A lock as `pthread_rwlock_init` would find one: every byte 0xAA.
+    fn scribbled_rwlock() -> PthreadRwlockT {
+        PthreadRwlockT {
+            state: AtomicI32::new(0),
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            prefer_writer: AtomicI32::new(0x5555),
+            writers_waiting: AtomicI32::new(0x5555),
+            _pad: [0xAA; 36],
+        }
+    }
+
+    fn rwlock_of_kind(kind: i32) -> PthreadRwlockT {
+        let mut a: PthreadRwlockattrT = [0; 8];
+        assert_eq!(pthread_rwlockattr_init(&mut a), 0);
+        assert_eq!(pthread_rwlockattr_setkind_np(&mut a, kind), 0);
+        let mut rw = scribbled_rwlock();
+        assert_eq!(pthread_rwlock_init(&mut rw, &a), 0);
+        rw
+    }
+
+    #[test]
+    fn rwlockattr_kinds_are_glibcs() {
+        assert_eq!(
+            (
+                PTHREAD_RWLOCK_PREFER_READER_NP,
+                PTHREAD_RWLOCK_PREFER_WRITER_NP,
+                PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP,
+                PTHREAD_RWLOCK_DEFAULT_NP
+            ),
+            (0, 1, 2, 0)
+        );
+        let mut a: PthreadRwlockattrT = [0xAA; 8];
+        assert_eq!(pthread_rwlockattr_init(&mut a), 0);
+        let mut k = -1;
+        assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+        assert_eq!(k, PTHREAD_RWLOCK_PREFER_READER_NP, "the default");
+        for kind in [2, 1, 0, 2] {
+            assert_eq!(pthread_rwlockattr_setkind_np(&mut a, kind), 0);
+            assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+            assert_eq!(k, kind);
+        }
+        for bad in [3, -1, i32::MAX, i32::MIN] {
+            assert_eq!(pthread_rwlockattr_setkind_np(&mut a, bad), errno::EINVAL);
+            assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+            assert_eq!(k, 2, "a refusal changes nothing");
+        }
+        // The kind and the process-shared flag are apart.
+        assert_eq!(
+            pthread_rwlockattr_setpshared(&mut a, PTHREAD_PROCESS_PRIVATE),
+            0
+        );
+        assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+        assert_eq!(k, 2);
+        let mut shared = -1;
+        assert_eq!(pthread_rwlockattr_getpshared(&a, &mut shared), 0);
+        assert_eq!(shared, PTHREAD_PROCESS_PRIVATE);
+        // The kind is judged before the object, as glibc's; NULLs, where
+        // glibc's fault, are EFAULT.
+        assert_eq!(
+            pthread_rwlockattr_setkind_np(core::ptr::null_mut(), 9),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlockattr_setkind_np(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_rwlockattr_getkind_np(core::ptr::null(), &mut k),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_rwlockattr_getkind_np(&a, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    /// Writers are preferred for the non-recursive kind alone -- glibc takes
+    /// PREFER_WRITER_NP as PREFER_READER_NP -- and a NULL attribute is the
+    /// default; C's `PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP`,
+    /// `{{{0, 0, 0, 1}}}`, is a writer-preferring lock.
+    #[test]
+    fn only_the_nonrecursive_kind_prefers_writers() {
+        for (kind, prefers) in [(0, 0), (1, 0), (2, 1)] {
+            let rw = rwlock_of_kind(kind);
+            assert_eq!(
+                rw.prefer_writer.load(Ordering::Relaxed),
+                prefers,
+                "kind {kind}"
+            );
+            assert_eq!(rw.writers_waiting.load(Ordering::Relaxed), 0);
+        }
+        let mut rw = scribbled_rwlock();
+        assert_eq!(pthread_rwlock_init(&mut rw, core::ptr::null()), 0);
+        assert_eq!(rw.prefer_writer.load(Ordering::Relaxed), 0);
+        assert_eq!(core::mem::offset_of!(PthreadRwlockT, prefer_writer), 12);
+        let mut ints = [0i32; 14];
+        ints[3] = 1;
+        // SAFETY: 56 bytes of integers, which every field of the lock is.
+        let c_init: PthreadRwlockT = unsafe { core::mem::transmute(ints) };
+        assert_eq!(c_init.prefer_writer.load(Ordering::Relaxed), 1);
+        assert_eq!(c_init.state.load(Ordering::Relaxed), 0, "and unlocked");
+    }
+
+    /// While a writer waits, a writer-preferring lock takes no new reader --
+    /// not even one that already holds it, which is why glibc calls the kind
+    /// non-recursive -- and the other kinds do.
+    #[test]
+    fn a_waiting_writer_holds_readers_back_only_where_writers_are_preferred() {
+        for (kind, held_back) in [(0, false), (1, false), (2, true)] {
+            let mut rw = rwlock_of_kind(kind);
+            assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+            let rp = Shared(&raw mut rw);
+            let writer = std::thread::spawn(move || {
+                let rw = rp.get();
+                let got = pthread_rwlock_wrlock(rw);
+                assert_eq!(pthread_rwlock_unlock(rw), 0);
+                got
+            });
+            if held_back {
+                // SAFETY: the lock outlives both threads; an atomic read.
+                while unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) } == 0 {
+                    std::thread::yield_now();
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let again = pthread_rwlock_tryrdlock(&raw mut rw);
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            let timed = pthread_rwlock_timedrdlock(&raw mut rw, &raw const soon);
+            if held_back {
+                assert_eq!(
+                    again,
+                    errno::EBUSY,
+                    "kind {kind}: busy while the writer waits"
+                );
+                assert_eq!(
+                    timed,
+                    errno::ETIMEDOUT,
+                    "kind {kind}: a reader waits with it"
+                );
+            } else {
+                assert_eq!((again, timed), (0, 0), "kind {kind}: readers go first");
+                assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+                assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+            }
+            assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+            assert_eq!(writer.join().unwrap(), 0, "kind {kind}: the writer's turn");
+        }
+    }
+
+    /// A writer that gives up waiting lets in the readers it held back.
+    #[test]
+    fn a_writer_that_gives_up_lets_the_readers_it_held_back_in() {
+        let mut rw = rwlock_of_kind(PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+        let rp = Shared(&raw mut rw);
+        let writer = std::thread::spawn(move || {
+            let later = in_ms(crate::time::CLOCK_MONOTONIC, 400);
+            pthread_rwlock_clockwrlock(rp.get(), crate::time::CLOCK_MONOTONIC, &raw const later)
+        });
+        // SAFETY: the lock outlives both threads; an atomic read.
+        while unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) } == 0 {
+            std::thread::yield_now();
+        }
+        let reader = std::thread::spawn(move || {
+            let rw = rp.get();
+            let got = pthread_rwlock_rdlock(rw);
+            assert_eq!(pthread_rwlock_unlock(rw), 0);
+            got
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!reader.is_finished(), "held back while the writer waits");
+        assert_eq!(writer.join().unwrap(), errno::ETIMEDOUT);
+        assert_eq!(reader.join().unwrap(), 0, "in once the writer gave up");
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) },
+            0
+        );
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
     }
 
     /// `pthread_mutex_clocklock` judges its clock before the mutex.

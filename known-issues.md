@@ -177230,7 +177230,7 @@ now with this case.
 **Where:** `posix/src/signal.rs` (`tgkill`, `proc_task_exists`);
 `services/ctest-pgroup/main.c` (checks 84-88).
 
-## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp, wordexp and strfmon below; memalign's and getopt's FIXED 2026-09-30)**
+## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp and wordexp below; memalign's, getopt's and strfmon's FIXED 2026-09-30)**
 
 **In short:** glibc fixed a run of security bugs in 2024-2026, and the
 oracle's glibc -- Ubuntu's 2.39, `2.39-0ubuntu8.9` -- carries the fixes.
@@ -177292,7 +177292,8 @@ standard with glibc as the oracle, as the rest of this library is:
   field width, the `-` and `#` flags and `%L` are not honoured; output
   that does not fit is cut short and counted as success, where glibc
   answers -1 with `E2BIG` -- glibc's own test of CVE-2026-19499 gets 4
-  back here.
+  back here. **Fixed 2026-09-30**: glibc's in the C locale, all 1,572
+  calls in `posix/src/strfmon_oracle.txt` answered alike.
 - **`memalign`** (`posix/src/malloc.rs`) refused 0, 3 or 24 as an
   alignment, being `aligned_alloc`; glibc's takes 0 as `malloc` and rounds
   the others up to a power of two. **Fixed 2026-09-30.**

@@ -101,9 +101,6 @@ EXCEPTIONS: dict[str, str] = {
     "membarrier": "takes Linux's third argument, `cpu_id`, which musl does not declare: it is "
                   "read only with MEMBARRIER_CMD_FLAG_CPU, which only the RSEQ command accepts, "
                   "and that fails EINVAL here before the argument is used",
-    "strfmon": "variadic in C; defined taking one `double` (`monetary.rs`): a variadic call "
-               "passes it in %xmm0 as a fixed argument is passed, so one value formats",
-    "strfmon_l": "as `strfmon`",
 }
 
 # Declared functions whose definition this reading cannot find, as of when

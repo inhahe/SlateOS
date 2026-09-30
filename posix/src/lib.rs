@@ -85,8 +85,8 @@
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
 //!   (C locale date/time formats, day/month names, codeset, etc.)
-//! - **Monetary Formatting**: `strfmon`, `strfmon_l` (C locale
-//!   decimal formatting with `%n`/`%i` specifiers)
+//! - **Monetary Formatting**: `strfmon`, `strfmon_l` (glibc's in the C
+//!   locale: widths, left and right precisions, `(`, `=f`, `L`)
 //! - **Search / Data Structures** (`<search.h>`): red-black tree `tsearch`,
 //!   `tfind`, `tdelete`, `twalk`, `twalk_r`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,

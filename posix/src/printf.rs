@@ -443,7 +443,7 @@ pub unsafe fn va_arg_int(va: &mut VaList) -> u64 {
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`].
-unsafe fn va_arg_double(va: &mut VaList) -> u64 {
+pub(crate) unsafe fn va_arg_double(va: &mut VaList) -> u64 {
     if (va.fp_offset as usize) < 176 && !va.reg_save_area.is_null() {
         // SAFETY: fp_offset < 176 stays within the XMM save area.
         let p = unsafe { va.reg_save_area.add(va.fp_offset as usize) };
@@ -477,7 +477,7 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`], except the argument occupies 16 bytes.
-unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
+pub(crate) unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
     let area = va.overflow_arg_area;
     if area.is_null() {
         return crate::x87::LongDouble::from_bits(0, 0);
@@ -1777,7 +1777,7 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
 /// every digit of it, where this printed the value's nearest `double`
 /// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
 #[derive(Clone, Copy)]
-enum FloatArg {
+pub(crate) enum FloatArg {
     /// A `double` (and a `float`, promoted to one).
     Double(f64),
     /// A `long double`: x87's 80-bit format, integer bit explicit.
@@ -1805,6 +1805,22 @@ impl FloatArg {
         match self {
             Self::Double(v) => v.is_sign_negative(),
             Self::Long(l) => l.is_sign_negative(),
+        }
+    }
+
+    /// `x < 0` as C compares it: false for a zero, `-0.0` too, and a NaN.
+    pub(crate) fn below_zero(self) -> bool {
+        match self {
+            Self::Double(v) => v < 0.0,
+            Self::Long(l) => l.is_sign_negative() && !l.is_nan() && !l.is_zero(),
+        }
+    }
+
+    /// `-x`.
+    pub(crate) fn negated(self) -> Self {
+        match self {
+            Self::Double(v) => Self::Double(-v),
+            Self::Long(l) => Self::Long(l.negate()),
         }
     }
 }
@@ -2146,6 +2162,92 @@ pub(crate) unsafe fn format_lg_into(
     // SAFETY: the caller's buffer has room for the terminator after `n`.
     unsafe { buf.add(n).write(0) };
     n
+}
+
+/// A number's `%f` text for this library's own callers that sign and pad it
+/// themselves (`strfmon`): `head`, then `zeros` zeros, then `tail` -- the
+/// zeros past what the value's expansion holds are counted, not written, so
+/// that a precision of a million costs no million bytes. For a value that is
+/// not finite, `head` is `inf` or `nan`.
+pub(crate) struct FixedText<'a> {
+    pub(crate) head: &'a [u8],
+    pub(crate) zeros: usize,
+    pub(crate) tail: &'a [u8],
+    /// Not `inf` or `nan`: `printf` pads those with spaces whatever the pad.
+    pub(crate) finite: bool,
+    /// The value's sign bit, which `printf` would print as `-` -- for `-0.0`
+    /// and a negative NaN too.
+    pub(crate) negative: bool,
+}
+
+impl FixedText<'_> {
+    /// The text's length, without a sign.
+    pub(crate) fn len(&self) -> usize {
+        self.head
+            .len()
+            .saturating_add(self.zeros)
+            .saturating_add(self.tail.len())
+    }
+}
+
+/// `%.*f` of `arg` -- `%.*Lf` of a `long double` -- without its sign, rounded
+/// to `precision` places in the current direction, handed to `f`: `printf`'s
+/// own digits, so that `strfmon` rounds as `printf` does. `None` when a
+/// `long double`'s digits cannot get the memory they need.
+pub(crate) fn with_fixed_text<R>(
+    arg: FloatArg,
+    precision: usize,
+    f: impl FnOnce(&FixedText<'_>) -> R,
+) -> Option<R> {
+    let negative = arg.is_sign_negative();
+    if arg.is_nan() || arg.is_infinite() {
+        let head: &[u8] = if arg.is_nan() { b"nan" } else { b"inf" };
+        return Some(f(&FixedText {
+            head,
+            zeros: 0,
+            tail: b"",
+            finite: false,
+            negative,
+        }));
+    }
+    match arg {
+        FloatArg::Double(v) => fixed_text_of(Decimal::new(v.abs()), precision, negative, f),
+        FloatArg::Long(l) => fixed_text_of(long_expansion(l)?, precision, negative, f),
+    }
+}
+
+/// [`with_fixed_text`] of a finite value's expansion.
+fn fixed_text_of<D: AsRef<[u8]> + AsMut<[u8]>, R>(
+    mut dec: Decimal<D>,
+    precision: usize,
+    negative: bool,
+    f: impl FnOnce(&FixedText<'_>) -> R,
+) -> Option<R> {
+    dec.round_to_place_in(
+        i32::try_from(precision).unwrap_or(i32::MAX),
+        Rounding::current(),
+        negative,
+    );
+    let run = |buf: &mut [u8]| {
+        let text = render_fixed(&dec, precision, buf);
+        let written = buf.get(..text.len).unwrap_or(&[]);
+        let (head, tail) = written.split_at(text.zeros_at.min(written.len()));
+        f(&FixedText {
+            head,
+            zeros: text.zeros,
+            tail,
+            finite: true,
+            negative,
+        })
+    };
+    let need = fixed_len(&dec, precision);
+    if need <= FLOAT_BUF {
+        let mut buf = [0u8; FLOAT_BUF];
+        Some(run(&mut buf))
+    } else {
+        let mut heap = MallocBuf::<u8>::zeroed(need)?;
+        Some(run(heap.as_mut()))
+    }
 }
 
 /// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).

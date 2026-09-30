@@ -454,13 +454,31 @@ unsafe fn free_perturb(ptr: *mut u8, len: usize) {
 /// what `max_align_t` requires.
 const MALLOC_ALIGN: usize = 2 * core::mem::size_of::<usize>();
 
+/// The largest block, and the largest alignment, this allocator will try
+/// for: `PTRDIFF_MAX`, as glibc's (malloc/malloc.c has refused more since
+/// 2.30). No C object may be larger than a pointer difference can span, so a
+/// size -- or an alignment, whose padding a block must also hold -- above it
+/// is `ENOMEM` before the heap sees it. glibc's CVE-2026-0861 was this check
+/// gone missing from its aligned path, where the padded size then wrapped.
+const MAX_BLOCK: usize = isize::MAX.cast_unsigned();
+
+/// NULL with `ENOMEM`: a request past [`MAX_BLOCK`], or one the heap could
+/// not meet.
+fn enomem() -> *mut u8 {
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    core::ptr::null_mut()
+}
+
 /// Allocate `size` bytes of uninitialised memory, 16-byte aligned.
 ///
 /// `malloc(0)` returns a unique pointer, as glibc and musl do (see the module
 /// docs). Returns NULL with `errno` set to `ENOMEM` when the memory cannot be
-/// had, including for a size too large to represent with its bookkeeping.
+/// had, including for a size above `PTRDIFF_MAX` ([`MAX_BLOCK`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn malloc(size: usize) -> *mut u8 {
+    if size > MAX_BLOCK {
+        return enomem();
+    }
     let mut guard = HeapGuard::lock();
     // SAFETY: the guard gives exclusive use of the heap.
     let ptr = unsafe { guard.heap().malloc(size) };
@@ -475,14 +493,13 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
 
 /// Allocate zeroed memory for `nmemb` elements of `size` bytes each.
 ///
-/// NULL with `ENOMEM` if the product overflows or the memory cannot be had.
-/// A block that came straight from the kernel is already zero and is not
-/// cleared again.
+/// NULL with `ENOMEM` if the product overflows, is above `PTRDIFF_MAX`, or
+/// the memory cannot be had. A block that came straight from the kernel is
+/// already zero and is not cleared again.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
-    let Some(total) = nmemb.checked_mul(size) else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
+    let Some(total) = nmemb.checked_mul(size).filter(|&t| t <= MAX_BLOCK) else {
+        return enomem();
     };
     let mut guard = HeapGuard::lock();
     let heap = guard.heap();
@@ -505,8 +522,9 @@ pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
 /// Change the size of an allocated block, moving it if it must.
 ///
 /// `realloc(NULL, n)` is `malloc(n)`; `realloc(p, 0)` frees `p` and returns
-/// NULL, as glibc does. On failure the old block is untouched and still owned
-/// by the caller, and `errno` is `ENOMEM`.
+/// NULL, as glibc does. On failure -- a size above `PTRDIFF_MAX` among them
+/// -- the old block is untouched and still owned by the caller, and `errno`
+/// is `ENOMEM`.
 ///
 /// The result is 16-byte aligned; a block that was over-aligned by
 /// `posix_memalign` keeps its bytes but not its alignment, as in C.
@@ -523,6 +541,9 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
         // SAFETY: the caller's contract.
         unsafe { free(ptr) };
         return core::ptr::null_mut();
+    }
+    if size > MAX_BLOCK {
+        return enomem();
     }
     let mut guard = HeapGuard::lock();
     // SAFETY (both blocks): the guard gives exclusive use of the heap; `ptr`
@@ -1092,8 +1113,12 @@ pub unsafe extern "C" fn malloc_info(options: i32, fp: *mut u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// A block of `size` bytes aligned to `alignment`, a power of two; NULL with
-/// `ENOMEM` on failure.
+/// `ENOMEM` on failure -- and for a size or an alignment above `PTRDIFF_MAX`
+/// ([`MAX_BLOCK`]), which glibc refuses the same way.
 fn aligned_block(alignment: usize, size: usize) -> *mut u8 {
+    if size > MAX_BLOCK || alignment > MAX_BLOCK {
+        return enomem();
+    }
     let mut guard = HeapGuard::lock();
     let heap = guard.heap();
     // SAFETY: the guard gives exclusive use of the heap. `memalign` requires a
@@ -1170,10 +1195,23 @@ pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
     aligned_block(alignment, size)
 }
 
-/// Allocate aligned memory (obsolete, still used). As [`aligned_alloc`].
+/// Allocate aligned memory (obsolete, still used), glibc's way: an alignment
+/// no larger than the natural one (0 included) is plain `malloc`, one that
+/// is not a power of two is rounded up to the next that is, and one above
+/// `SIZE_MAX / 2 + 1` -- which has no power of two to round to -- is NULL
+/// with `EINVAL`. Only [`aligned_alloc`] refuses what is not a power of two.
+/// (Until 2026-09-30 this was `aligned_alloc`, refusing 0, 3 or 24 where
+/// glibc's answers them.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
-    aligned_alloc(alignment, size)
+    if alignment <= MALLOC_ALIGN {
+        return malloc(size);
+    }
+    let Some(alignment) = alignment.checked_next_power_of_two() else {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    };
+    aligned_block(alignment, size)
 }
 
 /// Allocate page-aligned memory (obsolete, still used).
@@ -1199,16 +1237,16 @@ pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
 }
 
 /// Overflow-safe array reallocation: `realloc(ptr, nmemb * size)`, or NULL
-/// with `ENOMEM` (and `ptr` untouched) if the product overflows.
+/// with `ENOMEM` (and `ptr` untouched) if the product overflows or is above
+/// `PTRDIFF_MAX`.
 ///
 /// # Safety
 ///
 /// As [`realloc`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn reallocarray(ptr: *mut u8, nmemb: usize, size: usize) -> *mut u8 {
-    let Some(total) = nmemb.checked_mul(size) else {
-        crate::errno::set_errno(crate::errno::ENOMEM);
-        return core::ptr::null_mut();
+    let Some(total) = nmemb.checked_mul(size).filter(|&t| t <= MAX_BLOCK) else {
+        return enomem();
     };
     // SAFETY: forwarded; the product was checked above.
     unsafe { realloc(ptr, total) }
@@ -1416,6 +1454,127 @@ mod tests {
         assert!(pvalloc(usize::MAX - 100).is_null());
     }
 
+    /// Every allocator refuses `size` with `ENOMEM` -- glibc's
+    /// malloc/tst-malloc-too-large.c, the aligned forms at every power-of-two
+    /// alignment up to 2^63 as its CVE-2026-0861 fix made it ask.
+    fn refuses_everywhere(size: usize) {
+        let refused = |what: &str, p: *mut u8| {
+            assert!(p.is_null(), "{what}({size:#x}) allocated");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOMEM,
+                "{what}({size:#x})"
+            );
+            crate::errno::set_errno(0);
+        };
+        refused("malloc", malloc(size));
+        let p = malloc(16);
+        // SAFETY: `p` is a live block; a refused realloc leaves it so.
+        refused("realloc", unsafe { realloc(p, size) });
+        // SAFETY: `p` survived the refusal.
+        unsafe { free(p) };
+        for nmemb in [1usize, 2, 4, 8] {
+            if size % nmemb == 0 {
+                refused("calloc", calloc(nmemb, size / nmemb));
+                refused("calloc", calloc(size / nmemb, nmemb));
+                let p = malloc(16);
+                refused("reallocarray", reallocarray(p, nmemb, size / nmemb));
+                refused("reallocarray", reallocarray(p, size / nmemb, nmemb));
+                // SAFETY: as above.
+                unsafe { free(p) };
+            }
+        }
+        let mut align = 1usize;
+        while align != 0 {
+            refused("memalign", memalign(align, size));
+            if align % core::mem::size_of::<usize>() == 0 {
+                let mut q = core::ptr::null_mut();
+                assert_eq!(
+                    posix_memalign(&raw mut q, align, size),
+                    crate::errno::ENOMEM
+                );
+                assert!(q.is_null(), "posix_memalign({align:#x}, {size:#x}) wrote");
+            }
+            if size % align == 0 {
+                refused("aligned_alloc", aligned_alloc(align, size));
+            }
+            align <<= 1;
+        }
+        refused("valloc", valloc(size));
+        refused("pvalloc", pvalloc(size));
+    }
+
+    #[test]
+    fn sizes_past_ptrdiff_max_are_refused_by_every_allocator() {
+        // glibc's three sweeps, thinned: SIZE_MAX down 2^14, PTRDIFF_MAX up
+        // 2^14 (every 97th), and the 14 high bits over 50 low ones.
+        for i in (0..1usize << 14)
+            .step_by(97)
+            .chain([1, 2, 16, (1 << 14) - 1])
+        {
+            refuses_everywhere(usize::MAX - i);
+            refuses_everywhere(MAX_BLOCK + 1 + i);
+        }
+        for msbs in (1usize..1 << 14).step_by(331).chain([1, (1 << 14) - 1]) {
+            refuses_everywhere((msbs << 50) | ((1 << 50) - 1));
+            refuses_everywhere(msbs << 50);
+        }
+    }
+
+    /// `memalign`'s alignments as glibc 2.39 answers them (a WSL probe,
+    /// 2026-09-30): the natural alignment or less is `malloc`, a non-power
+    /// rounds up, past `SIZE_MAX / 2 + 1` is `EINVAL`, 2^62 and 2^63 are
+    /// `ENOMEM`; `aligned_alloc` refuses every non-power, 0 included.
+    #[test]
+    fn memalign_rounds_as_glibcs_and_aligned_alloc_does_not() {
+        for (align, round) in [
+            (0usize, 1usize),
+            (1, 1),
+            (2, 2),
+            (3, 4),
+            (5, 8),
+            (6, 8),
+            (24, 32),
+            (48, 64),
+            (100, 128),
+            (4096, 4096),
+            (4097, 8192),
+        ] {
+            crate::errno::set_errno(0);
+            let p = memalign(align, 10);
+            assert!(!p.is_null(), "memalign({align})");
+            assert_eq!(p as usize % round, 0, "memalign({align}) rounds to {round}");
+            assert_eq!(crate::errno::get_errno(), 0);
+            // SAFETY: a live block.
+            unsafe { free(p) };
+            if !align.is_power_of_two() {
+                assert!(aligned_alloc(align, 10).is_null(), "aligned_alloc({align})");
+                assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            }
+        }
+        for (align, e) in [
+            (1usize << 62, crate::errno::ENOMEM),
+            (1 << 63, crate::errno::ENOMEM),
+            ((1 << 63) + 1, crate::errno::EINVAL),
+            (usize::MAX, crate::errno::EINVAL),
+        ] {
+            crate::errno::set_errno(0);
+            assert!(memalign(align, 10).is_null(), "memalign({align:#x})");
+            assert_eq!(crate::errno::get_errno(), e, "memalign({align:#x})");
+            crate::errno::set_errno(0);
+            assert!(
+                aligned_alloc(align, 10).is_null(),
+                "aligned_alloc({align:#x})"
+            );
+            assert_eq!(crate::errno::get_errno(), e, "aligned_alloc({align:#x})");
+        }
+        // SAFETY: `__libc_memalign` is `memalign`.
+        let p = __libc_memalign(3, 10);
+        assert!(!p.is_null() && p as usize % 4 == 0);
+        // SAFETY: a live block.
+        unsafe { free(p) };
+    }
+
     #[test]
     fn calloc_overflow_is_enomem() {
         crate::errno::set_errno(0);
@@ -1458,13 +1617,14 @@ mod tests {
         }
     }
 
+    /// `memalign` takes these, as glibc's does:
+    /// `memalign_rounds_as_glibcs_and_aligned_alloc_does_not`.
     #[test]
     fn aligned_alloc_refuses_a_non_power_of_two() {
         for bad in [0usize, 3, 6, 100] {
             crate::errno::set_errno(0);
             assert!(aligned_alloc(bad, 100).is_null(), "{bad}");
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-            assert!(memalign(bad, 100).is_null());
         }
     }
 

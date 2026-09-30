@@ -4028,6 +4028,39 @@ mod tests {
 
     use super::*;
 
+    // -- ungetwc ------------------------------------------------------------
+
+    /// glibc's libio/bug-wgenops-bz33998.c (CVE-2026-5928): after `getwc`
+    /// reads `L'A'` from `"A\0"`, `ungetwc(L'\0')` pushes back the wide
+    /// character asked for -- read next, and once -- and leaves the bytes
+    /// still to come as they were: the stream's own NUL, then its end.
+    /// glibc's matched the character against the byte stream instead.
+    #[test]
+    fn ungetwc_pushes_back_the_character_not_a_byte_already_read() {
+        let mut bytes = *b"A\0";
+        // SAFETY: `bytes` outlives the stream, closed below.
+        let fp = unsafe {
+            crate::stdio_mem::fmemopen(bytes.as_mut_ptr().cast(), bytes.len(), c"r".as_ptr().cast())
+        };
+        assert!(!fp.is_null());
+        // SAFETY: `fp` is a live stream until the `fclose`.
+        unsafe {
+            assert_eq!(getwc(fp), WcharT::from(b'A'));
+            assert_eq!(ungetwc(0, fp), 0);
+            assert_eq!(getwc(fp), 0, "the character pushed back");
+            assert_eq!(getwc(fp), 0, "the stream's own NUL");
+            assert_eq!(getwc(fp), WEOF);
+            assert_eq!(ungetwc(WcharT::from(b'z'), fp), WcharT::from(b'z'));
+            assert_eq!(
+                getwc(fp),
+                WcharT::from(b'z'),
+                "a pushback after the end reads"
+            );
+            assert_eq!(getwc(fp), WEOF);
+            assert_eq!(crate::stdio::fclose(fp), 0);
+        }
+    }
+
     // -- wcpcpy / wcpncpy -------------------------------------------------
 
     fn w(s: &str) -> std::vec::Vec<WcharT> {

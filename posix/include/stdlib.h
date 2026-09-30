@@ -108,6 +108,14 @@ long long          strtoll_l(const char *__restrict, char **__restrict, int, str
 unsigned long long strtoull_l(const char *__restrict, char **__restrict, int, struct __locale_struct *);
 #endif
 
+#ifdef _SLATEOS_USE_BFP_EXT_C23
+/* C23's: a floating value as snprintf would give it by a format of one
+ * conversion -- %, an optional precision, and one of a A e E f F g G. */
+int strfromd(char *__restrict, size_t, const char *__restrict, double);
+int strfromf(char *__restrict, size_t, const char *__restrict, float);
+int strfroml(char *__restrict, size_t, const char *__restrict, long double);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

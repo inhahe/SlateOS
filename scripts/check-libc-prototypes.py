@@ -367,7 +367,7 @@ SHAPES = {
     "l_llp": (["x87", "x87", "i64"], "x87"), "l_p": (["i64"], "x87"), "l_pp": (["i64", "i64"], "x87"),
     "l_ppp": (["i64", "i64", "i64"], "x87"), "v_lpp": (["x87", "i64", "i64"], "void"),
     "d_dl": (["f64", "x87"], "f64"), "f_fl": (["f32", "x87"], "f32"),
-    "i_pl": (["i64", "x87"], "i32"),
+    "i_pl": (["i64", "x87"], "i32"), "i_pnpl": (["i64", "i64", "i64", "x87"], "i32"),
     "cl_cl": (["cx87"], "cx87"), "cl_clcl": (["cx87", "cx87"], "cx87"),
     # `export_l_cl!`: a long double complex argument, a long double back
     # (its thunk is `l_l`, the argument starting where a long double's would).

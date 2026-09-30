@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176269,7 +176269,7 @@ probes for one (`configure`) takes its fallback. Measured by
 | Family | Names | Header |
 |---|---|---|
 | C23 bit utilities | `stdc_leading_zeros_uc` ... `stdc_bit_ceil_ull`, 70 | `<stdbit.h>` -- **done 2026-09-29** |
-| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` |
+| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` -- `strfrom*` and `timespec_getres` **done 2026-09-29** |
 | reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` -- **done 2026-09-29** (`posix/src/prng.rs`) |
 | locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
@@ -176386,3 +176386,24 @@ launch list anywhere), so the toasts it draws are not on screen in a booted
 system at all. Whether it is meant to run beside the shell's own
 notification pane (`gui/desktop/src/notif_pane.rs`), or be folded into it,
 is the question to answer before wiring it.
+
+## D-POSIX-SNPRINTF-HID-A-FAILED-CONVERSION — `snprintf` and `sprintf` returned a length after a conversion that failed, and a negative one past `INT_MAX` (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/printf.rs`)**
+
+**In short:** when `snprintf` could not print a number -- a `long double`
+with thousands of digits and no memory for them -- it left the number out
+and reported success, with the length of the rest; a program had no way to
+know its text was missing a piece. And a result longer than about two
+thousand million characters came back as a negative length instead of an
+error. Both now fail as POSIX says: -1, with `errno` `ENOMEM` or
+`EOVERFLOW`.
+
+The bounded formatter (`format_core`, behind `snprintf`, `sprintf`,
+`vsnprintf` and now `strfromd`) never read the engine's failure flag, which
+only the stream path (`format_to_sink`) did; and `format_into` cast its
+count to `i32`. Found writing `strfromd` over the engine. The same change
+counts padding that lands nowhere -- no buffer, or a full one -- at once
+rather than a byte at a time, which is what makes a test of the overflow
+(`%2147483647d%2147483647d`) take no time.
+
+**Where:** `posix/src/printf.rs`: `format_core`, `format_into`,
+`emit_padding`, `FmtOutput::lands_nowhere`.

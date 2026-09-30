@@ -314,6 +314,28 @@ pub unsafe extern "C" fn timespec_get(ts: *mut Timespec, base: i32) -> i32 {
     base
 }
 
+/// `timespec_getres(ts, base)` (C23 7.29.2.7): the resolution of the time
+/// base `base` into `*ts`, unless `ts` is NULL, and `base` back; 0, and
+/// `*ts` untouched, for a number that is no time base. `TIME_UTC` is the only
+/// one, as in glibc 2.39, and its resolution is `CLOCK_REALTIME`'s.
+///
+/// Not in `gnu_timespec_get`'s archive member, which must define
+/// `timespec_get` alone (`scripts/check-libc-shape.py`).
+///
+/// # Safety
+///
+/// `ts` must be NULL or point to a writable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn timespec_getres(ts: *mut Timespec, base: i32) -> i32 {
+    if base != TIME_UTC {
+        return 0;
+    }
+    if !ts.is_null() && clock_getres(CLOCK_REALTIME, ts) != 0 {
+        return 0;
+    }
+    base
+}
+
 /// Check whether a clock ID reports wall-clock (Unix-epoch) time.
 ///
 /// Only `CLOCK_REALTIME` and its coarse variant track the wall clock; all
@@ -11648,5 +11670,42 @@ mod tests {
             (a.tm_min, a.tm_sec, a.tm_wday, a.tm_yday),
             (b.tm_min, b.tm_sec, b.tm_wday, b.tm_yday)
         );
+    }
+
+    /// `timespec_getres` against glibc 2.39's answers
+    /// (`posix/tools/oracle/strfrom_harness.py`): `TIME_UTC` and no other
+    /// base, with or without a `timespec` to fill -- and what it fills is
+    /// `CLOCK_REALTIME`'s resolution.
+    #[test]
+    fn timespec_getres_is_glibcs() {
+        let line = include_str!("strfrom_oracle.txt")
+            .lines()
+            .find_map(|l| l.strip_prefix("timespec_getres "))
+            .expect("the oracle's timespec_getres line");
+        let marker = Timespec {
+            tv_sec: -7,
+            tv_nsec: -7,
+        };
+        let mut got = String::new();
+        for base in 0..=5 {
+            let mut ts = marker;
+            let r = unsafe { timespec_getres(&raw mut ts, base) };
+            got.push_str(&format!("{r} "));
+            if r == 0 {
+                assert_eq!(
+                    (ts.tv_sec, ts.tv_nsec),
+                    (-7, -7),
+                    "untouched for base {base}"
+                );
+            } else {
+                let mut want = marker;
+                assert_eq!(clock_getres(CLOCK_REALTIME, &raw mut want), 0);
+                assert_eq!((ts.tv_sec, ts.tv_nsec), (want.tv_sec, want.tv_nsec));
+            }
+        }
+        got.push_str(&format!("/ {}", unsafe {
+            timespec_getres(core::ptr::null_mut(), TIME_UTC)
+        }));
+        assert_eq!(got, line);
     }
 }

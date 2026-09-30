@@ -38,6 +38,9 @@ int getdate_r(const char *__restrict, struct tm *__restrict);
 struct tm *gmtime_r(const time_t *__restrict, struct tm *__restrict);
 struct tm *localtime_r(const time_t *__restrict, struct tm *__restrict);
 time_t timegm(struct tm *);
+
+/* C23's: the resolution of a time base -- TIME_UTC, the only one. */
+int timespec_getres(struct timespec *, int);
 #endif
 
 #ifdef _GNU_SOURCE

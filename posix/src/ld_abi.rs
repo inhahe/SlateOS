@@ -53,6 +53,7 @@
 /// | `f_fl` | `F f(F, L)` | `(*const L, F) -> F` |
 /// | `n_lii` | `N f(L, I, I)` | `(*const L, I, I) -> N` |
 /// | `i_pl` | `I f(P, L)` | `(P, *const L) -> I` |
+/// | `i_pnpl` | `I f(P, N, P, L)` | `(P, N, P, *const L) -> I` |
 /// | `x_ll` | `F f(L, L)` or `D f(L, L)` | `(*const L, *const L) -> F` (or `D`) |
 /// | `x_lll` | `F f(L, L, L)` or `D f(L, L, L)` | `(*const L, *const L, *const L) -> F` (or `D`) |
 /// | `cl_cl` | `C f(C)` | `(*const C, *mut C)` |
@@ -244,6 +245,14 @@ macro_rules! ld_c {
     (i_pl $c:literal => $rust:ident) => {
         $crate::ld_c!(@thunk $c,
             "lea rsi, [rsp + 8]",
+            concat!("jmp ", stringify!($rust)),
+        );
+    };
+    // strfroml(s, n, format, x): the three integer arguments stay in rdi,
+    // rsi and rdx, x's address goes in rcx; the int comes back in eax.
+    (i_pnpl $c:literal => $rust:ident) => {
+        $crate::ld_c!(@thunk $c,
+            "lea rcx, [rsp + 8]",
             concat!("jmp ", stringify!($rust)),
         );
     };

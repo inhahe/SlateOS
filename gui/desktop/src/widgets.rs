@@ -3957,6 +3957,15 @@ mod tests {
             mgr.frame_state(id).unwrap().problem.as_deref(),
             Some("stale")
         );
+        // The next picture that does open clears what the last one said.
+        mgr.tick(u64::MAX / 2 + FRAME_INTERVAL_MS);
+        mgr.step_frames(&folder(), &listing(&["a.png", "b.png"]));
+        mgr.frame_picture_ready(id, up(picture("a.png"), 3));
+        assert_eq!(
+            mgr.frame_state(id).unwrap().problem,
+            None,
+            "a stale failure outlived a picture"
+        );
     }
 
     /// **A frame removed, or a layout read afresh, lets its picture go**:

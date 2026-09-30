@@ -4574,6 +4574,21 @@ fn photo_frame_in_turn() {
     );
 }
 
+/// **A photo frame shows the folder the start menu's Pictures place opens**
+/// -- one definition, so the two cannot come to name different folders --
+/// and, with no home to find it in, none.
+#[test]
+fn a_photo_frame_shows_the_folder_the_pictures_place_opens() {
+    let home = std::path::Path::new("/home/someone");
+    let place = crate::StartShortcut::Pictures
+        .launch(Some(home))
+        .expect("the Pictures place opens a folder");
+    let folder = DesktopShell::photo_frame_folder(Some(home)).expect("a folder");
+    assert_eq!(place.args, [std::ffi::OsString::from(&folder)]);
+    assert!(folder.starts_with(home));
+    assert_eq!(DesktopShell::photo_frame_folder(None), None);
+}
+
 /// **An idle desktop with a slideshow sleeps until its next picture, and
 /// shows it.** Nothing woke the loop for a slideshow until 2026-09-26: it
 /// moved only when something else happened to tick it, so on a desktop the

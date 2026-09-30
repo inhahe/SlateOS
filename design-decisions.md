@@ -86286,6 +86286,63 @@ reach the shell carries them.
 **Revisit if** the operator answers C-Q32 with B -- the toast code is what the
 separate program would reuse -- or if a user finds three at once too few.
 
+## 1448. Programs add to a file's right-click menu with KDE's service-menu files, on or off by the user
+
+**Date:** 2026-09-29 &middot; **Decided by:** Claude (autonomous) &middot;
+**Lane:** C
+
+**In short:** A program can add items -- "Compress", "Rotate right", "Open a
+terminal here" -- to the menu a right-click on a file opens, by installing a
+small text file that says what the item is called, which kinds of file it is
+for and what command it runs. The format is the one KDE's file manager reads,
+so a program ported from Linux that ships such a file works here unchanged.
+Items a package installed are on until the user turns them off; items dropped
+into the user's own folder are off until the user turns them on. Nothing runs
+to show the menu: the program starts only when its item is chosen.
+
+**What `design.txt` asks.** "Should apps be able to add to context menus?
+Allow it, but with controls": programs must ask to; items load lazily ("don't
+load the program just to show the menu"); a settings page lists them and
+turns each off; a handler slower than 200 ms is skipped with "loading...".
+
+**The model** (`gui/servicemenus`):
+
+| | |
+|---|---|
+| The format | a desktop-entry file, `Type=Service`, with `MimeType`, `Actions` and a `[Desktop Action <id>]` group per item (`Name`, `Icon`, `Exec`), plus KDE's keys: `X-KDE-Submenu`, `X-KDE-Priority=TopLevel`, the three `X-KDE-*NumberOfUrls`, `X-KDE-Require=Write`, `X-KDE-Protocol(s)` |
+| Where | `kio/servicemenus/` and the older `kservices5/ServiceMenus/` under each XDG data directory; the user's copy of a file name shadows the system's, and `Hidden=true` in it removes the system's menu |
+| The commands | `desktopentry`'s one reading of `Exec` -- `%f` starts the command once per file, `%F` once for all -- expanded into argument vectors, never a shell string |
+| Asking to | a menu under a system data directory -- which only installing a package writes -- is on unless turned off; one in the user's own directory, which any program the user runs can write, is off until turned on. `context-menus.yaml` holds both lists, by file name |
+| Lazily | a menu is a declaration read at scan time; no program runs to show one |
+| The settings page | every menu found, used or not, is listed by `scan` with why an unused one is not offered (`Scan::skipped`, `ServiceMenu::unusable`) -- for the Settings application's page, lane E's |
+| 200 ms | nothing to time: there is no handler, only a declaration, so no menu can be slow to open |
+| A condition this desktop cannot check | `X-KDE-ShowIfRunning`, `X-KDE-ShowIfDBusCall`, `X-KDE-AuthorizeAction`: the menu is not offered at all, and says so. An item shown where its author meant it hidden is worse than one missing |
+| Kinds of file | a MIME type, `type/*`, `all/all`, `all/allfiles`, `inode/directory`; a type is also what it inherits -- every `text/*` is `text/plain`, every non-`inode/*` is `application/octet-stream`, and the caller adds the rest (a shell script is `text/plain`) |
+
+| Alternative | For | Against |
+|---|---|---|
+| **KDE's service-menu files** (chosen) | a format ported programs already ship; declarations, so lazy and fast by construction; one file per menu, so the settings page can list and switch each | KDE's keys are a de-facto standard, written down in KDE's documentation rather than a specification; the conditions above cannot be honoured |
+| A manifest of SlateOS's own | could carry a capability field and a SlateOS icon scheme | no ported program ships one; the same information in a new spelling |
+| Programs register items at run time over IPC | items could depend on the file's contents | the program must be running to show a menu -- the opposite of "lazily" -- and the 200 ms budget exists only because of this design |
+| KDE's plugin menus (code loaded into the file manager) | items computed per file | loading a program's code into the shell to draw a menu; no |
+
+**Two copies this retires.** `gui/toolkit/src/context_ext.rs` and
+`gui/desktop/src/context_ext.rs` each modelled the run-time registration row
+above -- a registry programs would call, a handler timer -- and neither was
+reached by anything
+(`TD-C-CONTEXT-MENU-EXTENSIONS-ARE-IMPLEMENTED-TWICE-AND-REACHED-NEITHER-TIME`).
+A read of both found nothing the declaration model needs: their matching
+was by file extension or glob rather than by kind, their menu builders
+handed out item ids without a way back to what an id meant, and their
+settings panels drew state no file held. They are deleted with the shell's
+wiring.
+
+**Revisit if** a program needs items that depend on a file's contents (the
+declaration model cannot say that; a new `X-SlateOS-*` key read here is the
+place to grow it), or if the package manager gains capabilities -- a
+per-package grant to install menus is the finer form of "on unless turned
+off".
+
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 
 **Date:** 2026-09-18 &middot; **Decided by:** Claude (autonomous) &middot; **Lane:** A &middot; prompted by a red boot whose kernel delta was comment text

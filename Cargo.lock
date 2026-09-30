@@ -3321,6 +3321,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "servicemenus"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "pathcodec",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
+]
+
+[[package]]
 name = "settings"
 version = "0.1.0"
 dependencies = [

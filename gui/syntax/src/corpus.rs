@@ -421,6 +421,13 @@ fn nushell_passes_its_corpus() {
     check("Nushell", "nu", 309, &[]);
 }
 
+/// **The tree-sitter query grammar -- tables and lexers, no scanner --
+/// parses its whole corpus as upstream's does.**
+#[test]
+fn tree_sitter_query_passes_its_corpus() {
+    check("Tree-sitter query", "query", 19, &[]);
+}
+
 /// **The PowerShell grammar -- tables, lexers and its ported
 /// statement-end scanner -- parses its whole corpus as upstream's does.**
 #[test]

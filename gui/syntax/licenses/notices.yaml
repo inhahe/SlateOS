@@ -154,6 +154,12 @@ tree-sitter-python:
   texts:
     - tree-sitter-python-LICENSE
 
+tree-sitter-query:
+  version: 0.8.0 (commit 8e9e223812ff30854fbc912adbec696ba5f0e023)
+  licence: Apache-2.0
+  texts:
+    - tree-sitter-query-LICENSE
+
 tree-sitter-regex:
   version: 0.25.0
   licence: MIT

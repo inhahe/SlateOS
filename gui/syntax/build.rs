@@ -36,6 +36,7 @@ const GRAMMARS: &[&str] = &[
     "nu",
     "powershell",
     "python",
+    "query",
     "regex",
     "rust",
     "sql",

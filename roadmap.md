@@ -2018,6 +2018,16 @@ live.
   E:** the Settings picker for the axis and its applications' own fields and
   scrollbars (`requests/c-e-a-theme-can-shape-the-controls.md`).
 
+- `[C]` **A file opens in its kind's default, and "Open with" offers every
+  program that opens it** (`design-decisions.md` §1449) -- done 2026-09-29.
+  A file nobody chose a program for opens in the one SlateOS names for its
+  kind (`programs::default_for`, a kind of text falling back to plain
+  text's) instead of saying nothing is set; a file's right-click menu on the
+  desktop has **Open with**: every program whose desktop entry lists the
+  kind, the one Open would start first, each with its picture, started as
+  its own command line says. **Lane E:** the file manager's own Open With
+  list was asked for in `requests/c-e-read-the-one-list-of-programs.md`.
+
 - `[-]` `[C]` **Programs add to a file's right-click menu**
   (`design-decisions.md` §1448; `roadmap-detailed.md` → *Context menu
   extension API*) -- the shell's half done 2026-09-29: KDE's service-menu

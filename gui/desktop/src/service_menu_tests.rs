@@ -124,8 +124,8 @@ fn a_files_menu_offers_and_runs_an_installed_item() {
     let (icon, path) = s.file_icon("photo.png", 0);
     let items = s.right_click(icon);
     assert_eq!(
-        labels(&items)[..4],
-        ["Open", "-", "Rotate right", "-"],
+        labels(&items)[..5],
+        ["Open", "Open with", "-", "Rotate right", "-"],
         "{:?}",
         labels(&items)
     );

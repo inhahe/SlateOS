@@ -94,6 +94,49 @@ pub struct AppEntry {
     /// its entry says: one of the ways a window is known to be this program's
     /// (`DesktopShell::program_for_app_id`).
     pub wm_class: Option<String>,
+    /// The kinds of file it opens (`MimeType`), as its entry lists them:
+    /// what puts it in a file's "Open with" (see [`Self::opens`]).
+    pub mime_types: Vec<String>,
+}
+
+/// A kind of file, as a program's `MimeType` is matched against it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileKind {
+    /// Its MIME type: `inode/directory` for a folder.
+    pub mime: String,
+    /// Whether it is text of some kind -- a shell script or JSON as much as
+    /// `text/*` -- so a program for plain text opens it.
+    pub text: bool,
+}
+
+impl FileKind {
+    /// The kind of the file or folder at `path`: a folder is
+    /// `inode/directory`; a file's kind is the toolkit's reading of its
+    /// extension.
+    #[must_use]
+    pub fn of(path: &std::path::Path, is_dir: bool) -> Self {
+        if is_dir {
+            return Self {
+                mime: String::from("inode/directory"),
+                text: false,
+            };
+        }
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let info = guitk::filetypes::detect_from_extension(extension);
+        Self {
+            mime: info.mime_type.to_owned(),
+            text: info.is_text,
+        }
+    }
+
+    /// Whether this is a folder.
+    #[must_use]
+    pub fn is_dir(&self) -> bool {
+        self.mime == "inode/directory"
+    }
 }
 
 /// The folders of the start menu's applications tree.
@@ -127,7 +170,50 @@ impl AppEntry {
             terminal: app.terminal,
             desktop_id: Some(app.id),
             wm_class: app.startup_wm_class,
+            mime_types: app.mime_types,
         })
+    }
+
+    /// Whether it opens files of `kind`: its `MimeType` lists the kind; or
+    /// lists `text/plain` and the kind is text; or lists
+    /// `application/octet-stream`, which every file is -- the sub-classes the
+    /// shared MIME-info specification gives every type -- and the kind is a
+    /// file. Case is not asked about, as MIME types' is not.
+    #[must_use]
+    pub fn opens(&self, kind: &FileKind) -> bool {
+        self.mime_types.iter().any(|listed| {
+            listed.eq_ignore_ascii_case(&kind.mime)
+                || (kind.text && listed.eq_ignore_ascii_case("text/plain"))
+                || (!kind.is_dir() && listed.eq_ignore_ascii_case("application/octet-stream"))
+        })
+    }
+
+    /// How to start it on `files`: its desktop entry's command line with the
+    /// files put in -- one program for all of them, or one each where the
+    /// line takes one file at a time (`%f`) -- or, for an entry with no
+    /// command line, its program once per file. Inside a terminal when the
+    /// entry says it runs in one.
+    #[must_use]
+    pub fn launch_opening(&self, files: &[&std::path::Path]) -> Vec<crate::hotkeys::Launch> {
+        let Some(exec) = &self.exec else {
+            return files
+                .iter()
+                .map(|file| crate::hotkeys::Launch::opening(&self.executable_path, file))
+                .collect();
+        };
+        let targets: Vec<desktopentry::Target> = files
+            .iter()
+            .map(|file| desktopentry::Target::File(file.to_path_buf()))
+            .collect();
+        let invocation = desktopentry::Invocation {
+            icon: self.icon.as_deref(),
+            name: &self.name,
+            location: None,
+        };
+        exec.command_lines(&targets, &invocation)
+            .into_iter()
+            .map(|argv| self.launch_line(argv))
+            .collect()
     }
 
     /// How to start it with nothing to open: its desktop entry's command
@@ -162,6 +248,13 @@ impl AppEntry {
             }
             None => vec![OsString::from(&self.executable_path)],
         };
+        self.launch_line(argv)
+    }
+
+    /// Start the command line `argv`, program first -- inside a terminal
+    /// when the entry says it runs in one.
+    fn launch_line(&self, argv: Vec<std::ffi::OsString>) -> crate::hotkeys::Launch {
+        use std::ffi::OsString;
         let mut argv = argv.into_iter();
         let Some(program) = argv.next() else {
             // A parsed line always has a program; this is the built-in
@@ -447,5 +540,107 @@ mod tests {
                 "{word:?} does not find Settings"
             );
         }
+    }
+
+    // -------- what a program opens, and how it is started on files --------
+
+    /// A program whose entry says `exec`, `types` and `terminal`.
+    fn program(exec: &str, types: &[&str], terminal: bool) -> AppEntry {
+        let exec = desktopentry::Exec::parse(exec).unwrap();
+        AppEntry {
+            name: String::from("Program"),
+            executable_path: exec.program(),
+            exec: Some(exec),
+            mime_types: types.iter().map(|t| (*t).to_owned()).collect(),
+            terminal,
+            ..AppEntry::default()
+        }
+    }
+
+    fn kind(mime: &str, text: bool) -> FileKind {
+        FileKind {
+            mime: mime.to_owned(),
+            text,
+        }
+    }
+
+    /// **A program opens the kinds its entry lists** -- in any case -- and
+    /// a program for plain text opens every kind of text, one for any file
+    /// every file but not a folder.
+    #[test]
+    fn a_program_opens_what_its_entry_lists() {
+        let viewer = program("viewer %f", &["image/png", "Image/JPEG"], false);
+        assert!(viewer.opens(&kind("image/png", false)));
+        assert!(viewer.opens(&kind("image/jpeg", false)));
+        assert!(!viewer.opens(&kind("image/gif", false)));
+        let editor = program("editor %F", &["text/plain"], false);
+        assert!(editor.opens(&kind("text/x-rust", true)));
+        assert!(editor.opens(&kind("application/json", true)));
+        assert!(!editor.opens(&kind("image/png", false)));
+        let hex = program("hexeditor %F", &["application/octet-stream"], false);
+        assert!(hex.opens(&kind("image/png", false)));
+        assert!(hex.opens(&kind("text/plain", true)));
+        assert!(!hex.opens(&kind("inode/directory", false)));
+        let files = program("explorer %f", &["inode/directory"], false);
+        assert!(files.opens(&kind("inode/directory", false)));
+        assert!(!files.opens(&kind("image/png", false)));
+        assert!(!program("calculator", &[], false).opens(&kind("text/plain", true)));
+    }
+
+    /// **The kind of a path is the toolkit's reading of its extension**; a
+    /// folder is a folder whatever it is called.
+    #[test]
+    fn the_kind_of_a_path_is_its_extensions() {
+        let png = FileKind::of(std::path::Path::new("/p/photo.PNG"), false);
+        assert_eq!(png.mime, "image/png");
+        assert!(!png.text && !png.is_dir());
+        let json = FileKind::of(std::path::Path::new("/p/data.json"), false);
+        assert!(json.text, "a JSON file is text");
+        let folder = FileKind::of(std::path::Path::new("/p/photos.png"), true);
+        assert_eq!(folder.mime, "inode/directory");
+        assert!(folder.is_dir());
+    }
+
+    /// **A program is started on files as its command line says**: one for
+    /// all where it takes them all, one each where it takes one; inside a
+    /// terminal when it runs in one; with no command line, its program once
+    /// per file.
+    #[test]
+    fn a_program_is_started_on_files_as_its_line_says() {
+        use std::ffi::OsString;
+        use std::path::Path;
+        let (a, b) = (Path::new("/p/a.txt"), Path::new("/p/b.txt"));
+        let all = program("editor --new %F", &[], false).launch_opening(&[a, b]);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].program, Path::new("editor"));
+        assert_eq!(
+            all[0].args,
+            [
+                OsString::from("--new"),
+                OsString::from("/p/a.txt"),
+                OsString::from("/p/b.txt")
+            ]
+        );
+        let each = program("viewer %f", &[], false).launch_opening(&[a, b]);
+        assert_eq!(each.len(), 2);
+        assert_eq!(each[1].args, [OsString::from("/p/b.txt")]);
+        let boxed = program("vim %f", &[], true).launch_opening(&[a]);
+        assert_eq!(boxed[0].program, Path::new(TERMINAL));
+        assert_eq!(
+            boxed[0].args,
+            [
+                OsString::from("-e"),
+                OsString::from("vim"),
+                OsString::from("/p/a.txt")
+            ]
+        );
+        let bare = AppEntry {
+            executable_path: String::from("/usr/bin/tool"),
+            ..AppEntry::default()
+        };
+        let launches = bare.launch_opening(&[a, b]);
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0].program, Path::new("/usr/bin/tool"));
+        assert_eq!(launches[0].args, [OsString::from("/p/a.txt")]);
     }
 }

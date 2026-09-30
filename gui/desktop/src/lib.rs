@@ -140,6 +140,8 @@ pub mod window_rules;
 #[cfg(test)]
 mod note_tests;
 #[cfg(test)]
+mod open_with_tests;
+#[cfg(test)]
 mod pointer_tests;
 #[cfg(test)]
 mod service_menu_tests;
@@ -1598,6 +1600,18 @@ struct ServiceOffer {
     targets: Vec<servicemenus::Target>,
 }
 
+/// The "Open with" rows of the open icon menu: each row's program, by the
+/// path that is its identity in the shell's list
+/// (`launcher::AppEntry::executable_path`) -- looked up again when chosen,
+/// for the reason [`ServiceOffer`] keeps names -- and the files and folders
+/// the menu was opened on.
+#[derive(Clone, Debug, Default)]
+struct OpenWithOffer {
+    /// By `id - MENU_OPEN_WITH_BASE`.
+    programs: Vec<String>,
+    files: Vec<PathBuf>,
+}
+
 /// Something the shell wants done to a window it does not own.
 ///
 /// One type for both input paths on purpose. The pointer path produces these
@@ -2181,6 +2195,9 @@ pub struct DesktopShell {
     /// The open icon menu's service-menu items and the files it was opened
     /// on. See [`ServiceOffer`].
     service_offer: ServiceOffer,
+    /// The open icon menu's "Open with" rows and the files it was opened on.
+    /// See [`OpenWithOffer`].
+    open_with_offer: Option<OpenWithOffer>,
     /// The widget being dragged, and where inside it the pointer took hold.
     ///
     /// The offset is what stops a drag snapping the widget's corner to the
@@ -2752,6 +2769,7 @@ impl DesktopShell {
             service_choices: servicemenus::Choices::default(),
             service_watch: config::Watcher::new(servicemenus::CONFIG_NAME),
             service_offer: ServiceOffer::default(),
+            open_with_offer: None,
             widget_drag: None,
             user_name: String::new(),
             icon_registry: IconRegistry::default(),
@@ -11724,6 +11742,12 @@ impl DesktopShell {
     /// §1448): the `n`-th item or submenu is this plus `n`. A block of its
     /// own, far above every fixed id, so no number of rows reaches one.
     const MENU_SERVICE_BASE: u64 = 10_000;
+    /// An icon menu's "Open with" submenu.
+    const MENU_OPEN_WITH_SUBMENU: u64 = 4_999;
+    /// The first of its rows: the `n`-th program is this plus `n`, below
+    /// [`MENU_SERVICE_BASE`](Self::MENU_SERVICE_BASE), which bounds the
+    /// block.
+    const MENU_OPEN_WITH_BASE: u64 = 5_000;
 
     /// The View submenu's words for an icon size.
     ///
@@ -11882,8 +11906,12 @@ impl DesktopShell {
         }
         let mut offer = Vec::new();
         let built = Self::service_menu_items(&rows, &mut offer);
-        // After Open, set off by a line; the icon's own line follows them.
-        let at = items.len().min(1);
+        // After the menu's first group -- Open, and Open with -- set off by a
+        // line; the icon's own line follows them.
+        let at = items
+            .iter()
+            .take_while(|item| !matches!(item, MenuItem::Separator))
+            .count();
         items.splice(at..at, core::iter::once(MenuItem::Separator).chain(built));
         self.service_offer = ServiceOffer {
             items: offer,
@@ -11895,14 +11923,158 @@ impl DesktopShell {
     /// each as the file system says it is now. `None` when one of them is not
     /// a file or folder.
     fn service_targets(&self) -> Option<Vec<servicemenus::Target>> {
+        Some(
+            self.selected_paths()?
+                .iter()
+                .map(|path| Self::service_target(path))
+                .collect(),
+        )
+    }
+
+    /// The paths of the selected icons, when every one of them is a file or
+    /// folder -- `None` when one is This PC, the Recycle Bin or another that
+    /// names no path.
+    fn selected_paths(&self) -> Option<Vec<PathBuf>> {
         self.icons
             .selected_ids()
             .into_iter()
             .map(|id| match &self.icons.get_icon(id)?.action {
-                icons::IconAction::OpenPath(path) => Some(Self::service_target(path)),
+                icons::IconAction::OpenPath(path) => Some(path.clone()),
                 icons::IconAction::LaunchSystem(_) | icons::IconAction::Custom(_) => None,
             })
             .collect()
+    }
+
+    /// Put an "Open with" submenu into an icon's menu, after Open: every
+    /// program on this machine's list that opens each selected file or
+    /// folder (`AppEntry::opens`), the one Open would start first -- the
+    /// user's choice for the kind, else SlateOS's default for it -- then the
+    /// rest by name, each with its picture. Nothing when no program opens
+    /// them all, when the only one is Open's own -- a folder's file manager
+    /// -- or when a selected icon is not a file or folder.
+    fn offer_open_with(&mut self, items: &mut Vec<MenuItem>) {
+        let Some(files) = self.selected_paths() else {
+            return;
+        };
+        let kinds: Vec<launcher::FileKind> = files
+            .iter()
+            .map(|path| launcher::FileKind::of(path, path.is_dir()))
+            .collect();
+        let mut apps: Vec<&AppEntry> = self
+            .apps
+            .iter()
+            .filter(|app| kinds.iter().all(|kind| app.opens(kind)))
+            .collect();
+        if apps.is_empty() {
+            return;
+        }
+        apps.sort_by_key(|app| app.name.to_lowercase());
+        let opens_first = files.first().and_then(|file| self.program_opening(file));
+        if let Some(first) = &opens_first
+            && let Some(at) = apps.iter().position(|app| app.executable_path == *first)
+        {
+            let app = apps.remove(at);
+            apps.insert(0, app);
+        }
+        // A list holding only what Open already does offers nothing.
+        if let [only] = apps.as_slice()
+            && opens_first.as_deref() == Some(only.executable_path.as_str())
+        {
+            return;
+        }
+        let rows = apps
+            .iter()
+            .zip(Self::MENU_OPEN_WITH_BASE..)
+            .map(|(app, id)| MenuItem::Action {
+                id,
+                label: app.name.clone(),
+                shortcut: None,
+                icon: Some(
+                    app.icon
+                        .clone()
+                        .unwrap_or_else(|| launcher::GENERIC_PROGRAM_ICON.to_owned()),
+                ),
+                enabled: true,
+                checked: None,
+            })
+            .collect();
+        let programs = apps.iter().map(|app| app.executable_path.clone()).collect();
+        let at = items.len().min(1);
+        items.insert(
+            at,
+            MenuItem::Submenu {
+                id: Self::MENU_OPEN_WITH_SUBMENU,
+                label: "Open with".to_string(),
+                icon: None,
+                enabled: true,
+                children: rows,
+            },
+        );
+        self.open_with_offer = Some(OpenWithOffer { programs, files });
+    }
+
+    /// The program Open starts `file` with, by the path that is its
+    /// identity: the user's choice for its kind, else SlateOS's default for
+    /// it.
+    fn program_opening(&self, file: &Path) -> Option<String> {
+        let chosen = file
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| {
+                associations::program_for(&config::load(associations::CONFIG_NAME), ext)
+            });
+        chosen.or_else(|| {
+            self.default_program_for(&launcher::FileKind::of(file, file.is_dir()))
+                .map(|app| app.executable_path.clone())
+        })
+    }
+
+    /// SlateOS's default program for `kind` (`programs::default_for`), if
+    /// it is on this machine's list -- and, for a kind of text with no
+    /// default of its own, plain text's.
+    fn default_program_for(&self, kind: &launcher::FileKind) -> Option<&AppEntry> {
+        let id = programs::default_for(&kind.mime).or_else(|| {
+            kind.text
+                .then(|| programs::default_for("text/plain"))
+                .flatten()
+        })?;
+        self.apps
+            .iter()
+            .find(|app| app.desktop_id.as_deref() == Some(id))
+    }
+
+    /// Start a program an icon menu's "Open with" row names, on the files
+    /// the menu was opened on. `None` for an id that is not one of the rows.
+    fn activate_open_with_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        if !(Self::MENU_OPEN_WITH_BASE..Self::MENU_SERVICE_BASE).contains(&id) {
+            return None;
+        }
+        let index = usize::try_from(id.checked_sub(Self::MENU_OPEN_WITH_BASE)?).ok()?;
+        let offer = self.open_with_offer.take();
+        self.menu_icon = None;
+        // A menu no longer open, or a program gone from the list since.
+        let Some(offer) = offer else {
+            return Some(ShellAction::Pass);
+        };
+        let Some(program) = offer.programs.get(index) else {
+            return Some(ShellAction::Pass);
+        };
+        let Some(app) = self.apps.iter().find(|app| app.executable_path == *program) else {
+            return Some(ShellAction::Pass);
+        };
+        let files: Vec<&Path> = offer.files.iter().map(PathBuf::as_path).collect();
+        Some(Self::launch_each(app.launch_opening(&files)))
+    }
+
+    /// What starting `launches` is: nothing, one program, or several.
+    fn launch_each(mut launches: Vec<hotkeys::Launch>) -> ShellAction {
+        if launches.len() > 1 {
+            ShellAction::LaunchAll(launches)
+        } else {
+            launches
+                .pop()
+                .map_or(ShellAction::Pass, ShellAction::Launch)
+        }
     }
 
     /// `path` as a service menu sees it: its kind by its extension, and
@@ -11984,7 +12156,7 @@ impl DesktopShell {
             .map_err(|error| (action.name.clone(), menu.path.clone(), error));
         match outcome {
             Ok(runs) => {
-                let mut launches: Vec<hotkeys::Launch> = runs
+                let launches: Vec<hotkeys::Launch> = runs
                     .into_iter()
                     .filter_map(|run| {
                         let mut argv = run.argv.into_iter();
@@ -11995,13 +12167,7 @@ impl DesktopShell {
                         })
                     })
                     .collect();
-                Some(if launches.len() > 1 {
-                    ShellAction::LaunchAll(launches)
-                } else {
-                    launches
-                        .pop()
-                        .map_or(ShellAction::Pass, ShellAction::Launch)
-                })
+                Some(Self::launch_each(launches))
             }
             Err((name, path, error)) => {
                 // The id is discarded: this is a message, not something to
@@ -12380,6 +12546,7 @@ impl DesktopShell {
     pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
         self.dismiss_popups();
         self.service_offer = ServiceOffer::default();
+        self.open_with_offer = None;
         self.menu_widget = self.widgets.hit_test(x, y);
         // Widgets are drawn over the icons, so a widget under the pointer is
         // what was clicked even when an icon lies beneath it.
@@ -12399,6 +12566,7 @@ impl DesktopShell {
                 self.icons.select_single(id);
             }
             let mut items = self.icon_menu_items(id);
+            self.offer_open_with(&mut items);
             self.offer_service_menus(&mut items);
             items
         } else {
@@ -12457,6 +12625,9 @@ impl DesktopShell {
     /// [`Launch`](ShellAction::Launch) is what to start.
     /// [`ShellAction::changed`] is the old `bool`.
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
+        if let Some(action) = self.activate_open_with_item(id) {
+            return action;
+        }
         if let Some(action) = self.activate_service_item(id) {
             return action;
         }
@@ -12898,6 +13069,13 @@ impl DesktopShell {
         }
         if is_executable(&meta) {
             return ShellAction::Launch(hotkeys::Launch::program(path));
+        }
+        // Nobody chose a program for this kind: the one SlateOS opens it with
+        // until someone does -- the default `gui/associations` stands in
+        // front of (`programs`, design-decisions §1425) -- through its own
+        // command line.
+        if let Some(app) = self.default_program_for(&launcher::FileKind::of(path, false)) {
+            return Self::launch_each(app.launch_opening(&[path]));
         }
         self.say_cannot_open(
             label,

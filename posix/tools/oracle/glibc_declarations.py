@@ -9,7 +9,9 @@ For each name the overlay adds to musl's headers: the overlay header that
 declares it, the feature-macro configurations (check-libc-overlay.py's
 CONFIGS) in which glibc's header of that name declares it, and its type as
 glibc declares it, typedefs resolved -- all read out of glibc's headers by
-clang, through libclang's Python bindings, in WSL.
+clang, through libclang's Python bindings, in WSL. A declaration under a
+macro renaming it is the name it declares, in both: `__res_ninit` for
+<resolv.h>'s `#define res_ninit __res_ninit`.
 
 One line a name, tab-separated:
 
@@ -104,10 +106,17 @@ json.dump(out, open(sys.argv[3], "w"))
 '''.replace("LIBCLANG", repr(LIBCLANG))
 
 
-def declaring_header(name: str, texts: dict[str, str]) -> str:
+def declaring_header(name: str, texts: dict[str, str], renamed: dict[str, set[str]]) -> str:
     """The overlay header that declares `name` (its text, comments and
-    preprocessor lines aside, has the name as a word)."""
-    found = [h for h, t in texts.items() if re.search(r"\b" + re.escape(name) + r"\b", t)]
+    preprocessor lines aside, has the name as a word -- or, where none has,
+    a macro that expands to it: <resolv.h>'s `res_ninit` declares
+    `__res_ninit`)."""
+    def having(word: str) -> list[str]:
+        return [h for h, t in texts.items() if re.search(r"\b" + re.escape(word) + r"\b", t)]
+
+    found = having(name)
+    if not found:
+        found = sorted({h for m, to in renamed.items() if name in to for h in having(m)})
     if len(found) != 1:
         sys.exit(f"{name}: declared in {found or 'no overlay header'}; expected exactly one")
     return found[0]
@@ -122,7 +131,8 @@ def main() -> None:
     for h in overlay.overlay_headers(overlay.OVERLAY):
         t = re.sub(r"/\*.*?\*/", " ", (overlay.OVERLAY / h).read_text(encoding="utf-8"), flags=re.S)
         texts[h] = "\n".join(line for line in t.splitlines() if not line.lstrip().startswith("#"))
-    where = {n: declaring_header(n, texts) for n in names}
+    renamed = overlay.renaming_macros(overlay.OVERLAY)
+    where = {n: declaring_header(n, texts, renamed) for n in names}
     with workdir() as t:
         d = Path(t)
         (d / "names.txt").write_text("\n".join(names) + "\n", encoding="utf-8", newline="\n")

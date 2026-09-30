@@ -34,7 +34,9 @@ What it checks
    macros than glibc's, which it declares again under glibc's: nothing glibc
    2.39 does not declare (a name no glibc program expects is a name a program
    may itself be using), and nothing the reference lists that the overlay has
-   lost.
+   lost. A declaration written under a macro that renames it (<resolv.h>'s
+   `#define res_ninit __res_ninit`, as glibc's is) is of the name it
+   declares, `__res_ninit`.
 3. **Each name is declared where glibc declares it** -- after including the
    header glibc declares it in, in exactly the CONFIGS glibc's is (KNOWN
    lists where musl's own headers make the difference) -- **with glibc's
@@ -334,11 +336,31 @@ def mistyped(zig: str, header: str, entries: list[tuple[str, str]], flags: list[
     return bad
 
 
+def renaming_macros(overlay: Path) -> dict[str, set[str]]:
+    """Each object-like macro of the overlay's headers whose expansion is one
+    identifier (`#define res_ninit __res_ninit`, `#define glob64 glob`):
+    macro -> what it expands to (more than one if headers differ)."""
+    out: dict[str, set[str]] = {}
+    for p in sorted(overlay.rglob("*.h")):
+        text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
+        for macro, name in re.findall(
+                r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*$",
+                text, flags=re.M):
+            out.setdefault(macro, set()).add(name)
+    return out
+
+
 def candidates(overlay: Path) -> list[str]:
     """Every identifier the overlay's headers might declare: each written
     before a parenthesis or as the name of an extern object, less keywords,
     reserved names and the overlay's own macros -- a superset, which the
-    probe narrows to what is declared."""
+    probe narrows to what is declared.
+
+    But a declaration written under a macro that renames it -- <resolv.h>'s
+    `#define res_ninit __res_ninit` and then `int res_ninit(res_state);`, as
+    glibc's own header has it -- declares the name the macro expands to,
+    reserved or not, and that is its candidate. (Until 2026-09-30 such a
+    declaration was no candidate at all, as a macro, and went unchecked.)"""
     names: set[str] = set()
     macros: set[str] = set()
     for p in overlay.rglob("*.h"):
@@ -351,7 +373,9 @@ def candidates(overlay: Path) -> list[str]:
         # of a struct after it -- <sys/timex.h>'s `struct timeval time;` --
         # is no extern object, though a function may have its name.
         names |= set(re.findall(r"\bextern\b[^;({]*?\b([A-Za-z_]\w*)\s*;", text))
-    return sorted(n for n in names - macros - C_WORDS if not n.startswith("_"))
+    renamed = renaming_macros(overlay)
+    through = {to for n in names & set(renamed) for to in renamed[n]}
+    return sorted(({n for n in names if not n.startswith("_")} | through) - macros - C_WORDS)
 
 
 def overlay_names(zig: str, overlay: Path) -> set[str]:
@@ -644,6 +668,19 @@ def self_test() -> int:
         check("a comment's words are not", "comment" not in c)
         check("a macro is not", "M" not in c)
         check("a reserved name is not", "_r" not in c)
+        (d / "ren").mkdir()
+        (d / "ren" / "r.h").write_text(
+            "#define rn __rn\nint rn(int);\n#define alias64 alias\n#define N 1\n"
+            "#define ev __ev\nextern int ev;\n",
+            encoding="utf-8", newline="")
+        c = candidates(d / "ren")
+        check("a declaration under a renaming macro is the name it declares",
+              "__rn" in c and "rn" not in c)
+        check("an extern object's too", "__ev" in c and "ev" not in c)
+        check("and a renaming macro no declaration uses adds nothing", "alias" not in c)
+        check("the renaming macros are found, and nothing else is",
+              renaming_macros(d / "ren") == {"rn": {"__rn"}, "alias64": {"alias"},
+                                             "ev": {"__ev"}})
         (d / "cxx.h").write_text('extern "C" {\nstruct t {\n\tlong time;\n};\n}\n',
                                  encoding="utf-8", newline="")
         check("a field after extern \"C\" { is not", "time" not in candidates(d))

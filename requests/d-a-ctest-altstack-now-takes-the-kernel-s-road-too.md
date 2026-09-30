@@ -35,6 +35,15 @@ delivery happens on that call's way back. No child, no read, no sleep --
 the structural argument your comment makes for `raise()` holds for these
 too. Your bounded yield loop stays the backstop.
 
+## Also: `ctest-pgroup` has checks 80-87 now
+
+Lane D's 119 adds `tgkill`'s checks to `ctest-pgroup` -- this thread and a
+child's, named against the right process and the wrong one, and a real
+`SIGUSR1` to the child's thread, read back from `waitpid` as the child's
+death. Exit codes 80-87; `self_test_cpgroup`'s legend in `spawn.rs` names
+none of them yet. Still 42 for all-passed, and nothing waits: the child
+blocks on a pipe the fixture closes, or is ended by the signal.
+
 ## The part it still does not cover
 
 A handler recovering from a real stack overflow: a native fault here is an

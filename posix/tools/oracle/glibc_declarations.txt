@@ -452,6 +452,7 @@ strtoull_l	stdlib.h	gnu	unsigned long long (const char *, char **, int, struct _
 strtouq	stdlib.h	default,gnu,gnu23,bsd	unsigned long long (const char *, char **, int)
 stty	sgtty.h	c17,default,gnu,c23,gnu23,xopen,posix,bsd,bfp,ext,lfs64	int (int, const struct sgttyb *)
 sysv_signal	signal.h	gnu	void (*(int, void (*)(int)))(int)
+tgkill	signal.h	gnu	int (int, int, int)
 timegm	time.h	default,gnu,c23,gnu23,bsd	long (struct tm *)
 timelocal	time.h	default,gnu,gnu23,bsd	long (struct tm *)
 timespec_getres	time.h	gnu,c23,gnu23	int (struct timespec *, int)

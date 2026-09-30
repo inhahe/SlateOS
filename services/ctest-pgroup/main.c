@@ -34,11 +34,19 @@
  * bounded yield budget for the fixture expires — whereas the pipe makes the
  * child's lifetime exactly "as long as the parent still needs it".
  *
+ * Checks 80-87 are `tgkill`'s: a signal for one thread of one process.
+ * Delivery here is process-directed, so what `tgkill` adds is the check that
+ * the thread belongs to the process named -- this process's own thread, and
+ * a child's, whose thread id the parent can only learn from the child -- and
+ * `ESRCH` when it does not. The last one sends a real signal to the child's
+ * thread and reads the death it causes back from `waitpid`.
+ *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `FAIL`/`return` values below and the legend in
  * kernel/src/proc/spawn.rs::self_test_cpgroup).
  */
 
+#define _GNU_SOURCE /* gettid and tgkill, for checks 80-87 */
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
@@ -213,6 +221,56 @@ done:
     /* Our own group outlived it. */
     if (killpg(me, 0) != 0)         return 73;
     if (getpgid(0) != me)           return 74;
+
+    /* ---------------------------------------------------------------- *
+     * 80s — tgkill. This thread, named against this process, is there;
+     * a thread id that is none of ours is ESRCH. A child tells us its
+     * thread id through a pipe, and holds a second pipe's read end until
+     * we close the write end -- or a signal ends it.
+     * ---------------------------------------------------------------- */
+    {
+        const pid_t self_tid = gettid();
+        int tid_pipe[2], hold[2];
+        pid_t kid, kid_tid = 0;
+        int status = 0;
+
+        if (tgkill(me, self_tid, 0) != 0)                       return 80;
+        errno = 0;
+        if (tgkill(me, 0x3fffffff, 0) != -1 || errno != ESRCH) return 81;
+
+        if (pipe(tid_pipe) != 0 || pipe(hold) != 0)             return 82;
+        kid = fork();
+        if (kid < 0)                                            return 82;
+        if (kid == 0) {
+            char c;
+            pid_t mine = gettid();
+            close(tid_pipe[0]);
+            close(hold[1]);
+            if (write(tid_pipe[1], &mine, sizeof mine) != (ssize_t)sizeof mine)
+                _exit(1);
+            (void)read(hold[0], &c, 1);
+            _exit(0);
+        }
+        close(tid_pipe[1]);
+        close(hold[0]);
+        /* An early return below leaves the child blocked no longer than
+         * this process lives: exiting closes `hold`, and its read ends. */
+        if (read(tid_pipe[0], &kid_tid, sizeof kid_tid) != (ssize_t)sizeof kid_tid)
+            return 83;
+
+        /* 84. The child's thread, named against the child: there. */
+        if (tgkill(kid, kid_tid, 0) != 0)                       return 84;
+        /* 85. This thread, named against the child: not the child's. */
+        errno = 0;
+        if (tgkill(kid, self_tid, 0) != -1 || errno != ESRCH)  return 85;
+        /* 86. A real signal reaches it: SIGUSR1's default ends the child. */
+        if (tgkill(kid, kid_tid, SIGUSR1) != 0)                 return 86;
+        close(hold[1]);
+        if (waitpid(kid, &status, 0) != kid)                    return 86;
+        /* 87. ...and the death is SIGUSR1's -- not the exit our close allows. */
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGUSR1) return 87;
+        close(tid_pipe[0]);
+    }
 
     return 42;
 }

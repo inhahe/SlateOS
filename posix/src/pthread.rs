@@ -1379,7 +1379,7 @@ pub(crate) fn record_initial_thread() {
 /// task stays a zombie until reaped.  What it must never do is the reverse —
 /// report a live thread as absent — and it cannot, because a slot is only
 /// released after the thread is confirmed off its stack.
-fn thread_is_live(thread: PthreadT) -> bool {
+pub(crate) fn thread_is_live(thread: PthreadT) -> bool {
     if thread == SLOT_EMPTY {
         // No kernel task has id 0 — that is precisely why `SLOT_EMPTY` is
         // 0.  Rejecting it here also stops an unrecorded `INITIAL_TASK_ID`

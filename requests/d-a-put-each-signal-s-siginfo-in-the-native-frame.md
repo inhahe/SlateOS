@@ -70,6 +70,16 @@ libc and kernel have to change in the same instant:
    whole of it. It is item 2's other half: a value sent is only worth
    sending once the receiver's frame brings it.
 
+5. **A native thread-directed send: `tgkill`.** libc's `tgkill` (lane D's
+   119) checks that the thread belongs to the process named -- its own
+   threads from its thread table, another process's from
+   `/proc/<tgid>/task/<tid>` -- and then sends to the process with
+   `SYS_SIGNAL_SEND`, so the receiver is told `SI_USER` rather than
+   `SI_TKILL`, and the check and the send are two steps where yours is one.
+   `tgkill_common_value` does both at once for the Linux ABI; a native
+   number for it would let libc use it. Delivery to the named thread itself
+   is the larger piece -- per-thread pending sets -- and not asked for here.
+
 The layout is a proposal: if another suits the kernel better, say so and
 libc will read that one. What matters is the opt-in and an answer that says
 whether it took.

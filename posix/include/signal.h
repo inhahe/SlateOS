@@ -25,6 +25,9 @@ extern "C" {
 /* signal with System V's semantics: the handler is reset to SIG_DFL when it
  * is called, and a system call it interrupts is not restarted. */
 void (*sysv_signal(int, void (*)(int)))(int);
+
+/* Send a signal to thread TID of process TGID (Linux; glibc 2.30). */
+int tgkill(pid_t, pid_t, int);
 #endif
 
 #ifdef _SLATEOS_USE_MISC

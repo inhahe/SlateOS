@@ -2215,6 +2215,97 @@ pub extern "C" fn raise(sig: i32) -> i32 {
     dispatch_self_signal(sig)
 }
 
+/// Send `sig` to thread `tid` of process `tgid` (Linux; glibc's since
+/// 2.30). Returns 0, or -1 with `errno` set.
+///
+/// Signals here are process-directed, as [`crate::pthread::pthread_kill`]
+/// explains. To the calling thread, `sig` is dispatched at once, as `raise`
+/// dispatches it, and an `SA_SIGINFO` handler is told `SI_TKILL`. To any
+/// other thread -- of this process or another -- it goes to that thread's
+/// process, and whichever of its threads next dispatches runs it; the kernel
+/// has no native thread-directed send, which
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` asks for.
+///
+/// What `tgkill` is for is kept all the same: `tid` must be a thread of
+/// `tgid`, or the answer is `ESRCH`, so that a thread id reused since the
+/// caller learnt it cannot carry the signal into some other process. This
+/// process's threads are this library's own to know
+/// ([`crate::pthread::thread_is_live`]); another's are looked for in
+/// `/proc/<tgid>/task/<tid>`.
+///
+/// Errors, in Linux's order: `EINVAL` for a `tgid` or `tid` not above
+/// zero; `ESRCH` when `tid` is not a thread of `tgid`; `EINVAL` for a signal
+/// outside `0..NSIG`; then what the kernel answers the send, `EPERM` among
+/// it. Signal 0 checks, and sends nothing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig: i32) -> i32 {
+    if tgid <= 0 || tid <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let own = tgid == crate::process::getpid();
+    let calling = own && tid == crate::process::gettid();
+    let exists = if calling {
+        true
+    } else if own {
+        u64::try_from(tid).is_ok_and(crate::pthread::thread_is_live)
+    } else {
+        proc_task_exists(tgid, tid)
+    };
+    if !exists {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    if !(0..NSIG).contains(&sig) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    if calling {
+        return dispatch_self_signal(sig);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let ret = crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, tgid as u64, sig as u64);
+    if ret < 0 {
+        errno::set_errno(signal_send_errno(ret));
+        return -1;
+    }
+    0
+}
+
+/// Whether `/proc/<tgid>/task/<tid>` exists: whether `tid` is a thread of
+/// process `tgid`, as procfs sees it.
+fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> bool {
+    /// The path, NUL-terminated, in a buffer of its own.
+    struct PathBuf {
+        buf: [u8; 48],
+        len: usize,
+    }
+    impl core::fmt::Write for PathBuf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(s.len()).ok_or(core::fmt::Error)?;
+            self.buf
+                .get_mut(self.len..end)
+                .ok_or(core::fmt::Error)?
+                .copy_from_slice(s.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut path = PathBuf {
+        buf: [0; 48],
+        len: 0,
+    };
+    // Two ten-digit numbers and the rest fit in 48; a path that did not
+    // would name no thread.
+    if core::fmt::write(&mut path, format_args!("/proc/{tgid}/task/{tid}\0")).is_err() {
+        return false;
+    }
+    crate::file::access(path.buf.as_ptr(), crate::fcntl::F_OK) == 0
+}
+
 /// Examine and change blocked signals.
 ///
 /// Stores the signal mask in process-local state so that
@@ -7739,6 +7830,74 @@ mod tests {
         assert_eq!(now.bits[0], sigmask_bit(SIGUSR1) | sigmask_bit(SIGCHLD));
         assert_eq!(kernel_blocked_low(), now.bits[0]);
         apply_blocked_low(saved);
+    }
+
+    /// glibc 2.39's answers on Linux (`posix/tools/oracle/tgkill_harness.py`),
+    /// replayed: every case but the two about another process, which the host
+    /// cannot make.
+    #[test]
+    fn tgkill_answers_as_glibcs() {
+        use crate::process::{getpid, gettid};
+        const ORACLE: &str = include_str!("tgkill_oracle.txt");
+        let name = |e: i32| match e {
+            crate::errno::EINVAL => "EINVAL",
+            crate::errno::ESRCH => "ESRCH",
+            crate::errno::EPERM => "EPERM",
+            _ => "other",
+        };
+        let (me, t) = (getpid(), gettid());
+        let mut replayed = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (case, glibc) = line.split_once(" = ").expect("<case> = <answer>");
+            let (tgid, tid, sig) = match case {
+                "tgid 0" => (0, t, SIGUSR1),
+                "tid 0" => (me, 0, SIGUSR1),
+                "tgid -1" => (-1, t, SIGUSR1),
+                "tid -5" => (me, -5, SIGUSR1),
+                "no such thread here, bad signal" => (me, 0x3fff_ffff, 999),
+                "no such process, bad signal" => (0x3fff_fff0, 1, 999),
+                "this thread, signal 65" => (me, t, 65),
+                "this thread, signal -1" => (me, t, -1),
+                "this thread, signal 0" => (me, t, 0),
+                "this thread, SIGUSR1" => {
+                    install_siginfo(SIGUSR1);
+                    (me, t, SIGUSR1)
+                }
+                other if other.starts_with("another process") => continue,
+                other => panic!("a case this test does not know: {other}"),
+            };
+            crate::errno::set_errno(0);
+            let r = tgkill(tgid, tid, sig);
+            let e = crate::errno::get_errno();
+            let mut ours = format!("{r} {}", if r == 0 { "0" } else { name(e) });
+            if case == "this thread, SIGUSR1" {
+                let seen = SEEN.with(core::cell::Cell::get);
+                let when = if seen.calls == 1 {
+                    "before the return"
+                } else {
+                    "not yet"
+                };
+                let told = if seen.code == SI_TKILL {
+                    "SI_TKILL"
+                } else {
+                    "something else"
+                };
+                ours = format!("{ours}, the handler {when}, told {told}");
+                signal(SIGUSR1, SIG_DFL);
+            }
+            assert_eq!(ours, glibc, "{case}");
+            replayed += 1;
+        }
+        assert_eq!(replayed, 10, "every case the host can make");
+    }
+
+    /// The path `tgkill` asks procfs about.
+    #[test]
+    fn proc_task_exists_asks_for_the_thread_s_directory() {
+        // Nothing on the host has it; the digits are what is under test, by
+        // way of numbers whose paths cannot exist.
+        assert!(!proc_task_exists(1_234_567_890, 2_147_483_647));
+        assert!(!proc_task_exists(7, 1));
     }
 
     /// `sigsuspend` restores the mask it replaced.

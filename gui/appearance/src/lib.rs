@@ -250,6 +250,10 @@ impl PaletteSource for AppearanceSettings {
             .motion()
             .at_speed(self.animation_speed.multiplier())
     }
+
+    fn accent_titlebars(&self) -> bool {
+        self.accent_titlebars
+    }
 }
 
 // ============================================================================
@@ -2152,8 +2156,14 @@ impl DecorationColors {
     #[must_use]
     pub fn from_palette(p: &Palette) -> Self {
         Self {
-            title_focused_bg: p.surface0,
-            title_focused_fg: p.text,
+            // The palette's answer, the accent where the user asked for
+            // accented title bars: the same one a ribbon's strip, joined to
+            // the bar, is drawn from. The *unfocused* bar deliberately keeps
+            // the base palette -- an accent that marks every window marks none
+            // of them, and telling the focused window apart is the title bar's
+            // first job.
+            title_focused_bg: p.title_bar(),
+            title_focused_fg: p.title_text(),
             title_unfocused_bg: p.base,
             title_unfocused_fg: p.subtext0,
             border_focused: p.surface2,
@@ -2194,20 +2204,16 @@ impl DecorationColors {
     /// counter was put on `Palette::from_settings`: `Compositor::set_appearance`
     /// resolved one for its own cache and this resolved a second, identical,
     /// one line later.
+    ///
+    /// The settings themselves are no longer read: since 2026-09-30 the
+    /// palette carries the one thing a frame took from them beyond it --
+    /// whether the title bar is in the accent ([`Palette::title_bar`]) -- so
+    /// that a ribbon's strip, joined to the bar, is drawn from the same
+    /// answer. The parameter stays so that the window manager's call is
+    /// unchanged.
     #[must_use]
-    pub fn from_settings_with(settings: &AppearanceSettings, palette: &Palette) -> Self {
-        let mut colors = Self::from_palette(palette);
-
-        if settings.accent_titlebars {
-            let accent = settings.effective_accent();
-            colors.title_focused_bg = accent;
-            colors.title_focused_fg = readable_on(accent);
-            // The *unfocused* bar deliberately keeps the base palette: an
-            // accent that marks every window marks none of them, and telling
-            // the focused window apart is the title bar's first job.
-        }
-
-        colors
+    pub fn from_settings_with(_settings: &AppearanceSettings, palette: &Palette) -> Self {
+        Self::from_palette(palette)
     }
 
     /// Every colour a frame is drawn with, paired with its field name.
@@ -4704,6 +4710,31 @@ mod tests {
             "the setting did nothing at all — the assertions above would then \
              hold for the wrong reason"
         );
+    }
+
+    /// **The window's title bar and a ribbon's strip joined to it are one
+    /// colour, with one ink,** for every accent, mode and setting: both are
+    /// the palette's answer (`Palette::title_bar`), so they cannot part.
+    #[test]
+    fn the_title_bar_and_a_ribbons_strip_are_one_colour() {
+        for &accent in AccentColor::presets() {
+            for mode in [ThemeMode::Dark, ThemeMode::Light] {
+                for accent_titlebars in [false, true] {
+                    let settings = AppearanceSettings {
+                        theme_mode: mode,
+                        accent_color: accent,
+                        accent_titlebars,
+                        ..AppearanceSettings::default()
+                    };
+                    let palette = Palette::from_settings(&settings);
+                    let frame = DecorationColors::from_settings(&settings);
+                    let what = format!("{mode:?} {accent:?} accented={accent_titlebars}");
+                    assert_eq!(frame.title_focused_bg, palette.title_bar(), "{what}");
+                    assert_eq!(frame.title_focused_fg, palette.title_text(), "{what}");
+                    assert_eq!(palette.accent_titlebars, accent_titlebars, "{what}");
+                }
+            }
+        }
     }
 
     /// The WCAG contrast ratio between two opaque colours.

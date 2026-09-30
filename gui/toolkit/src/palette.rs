@@ -614,6 +614,15 @@ pub struct Palette {
     /// what the panel behind it does, or the desktop shows through the row and
     /// not through its own container.
     pub panel_alpha: u8,
+    /// Whether the user asked for the focused window's title bar in the
+    /// accent: `AppearanceSettings::accent_titlebars`, read through
+    /// [`title_bar`](Self::title_bar) and [`title_text`](Self::title_text).
+    ///
+    /// Carried here, not only where the window manager reads it, because a
+    /// title bar is not the only thing drawn in its colour: a ribbon's strip
+    /// is joined to it (`ribbon::draw`), and two readings of one setting are
+    /// two chances for the join to show.
+    pub accent_titlebars: bool,
     /// Whether this is the light palette.
     ///
     /// Present so a caller with a genuinely mode-dependent decision — an icon
@@ -1065,6 +1074,7 @@ impl Palette {
                 maroon: LIGHT_MAROON,
                 accent: LIGHT_BLUE,
                 panel_alpha: 255,
+                accent_titlebars: false,
                 light: true,
                 ink_sources: [LIGHT_TEXT, LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK],
                 themed: false,
@@ -1105,6 +1115,7 @@ impl Palette {
                 maroon: MAROON,
                 accent: BLUE,
                 panel_alpha: 255,
+                accent_titlebars: false,
                 light: false,
                 ink_sources: [TEXT, SUBTEXT0, SUBTEXT1, LINK],
                 themed: false,
@@ -1406,6 +1417,9 @@ impl Palette {
             // And its motion, whole: high contrast is about telling things
             // apart, and how fast they move does not change that.
             palette.motion = settings.motion();
+            // And an accented title bar, in the scheme's own accent -- the one
+            // chosen to read against its background.
+            palette.accent_titlebars = settings.accent_titlebars();
             return palette;
         }
         let mut palette = match settings.theme() {
@@ -1420,6 +1434,7 @@ impl Palette {
         palette.set_strip_style(settings.strip_style());
         palette.widget_style = settings.widget_style();
         palette.motion = settings.motion();
+        palette.accent_titlebars = settings.accent_titlebars();
         palette
     }
 
@@ -1487,6 +1502,7 @@ impl Palette {
             // lowers contrast by construction. A mode whose entire purpose is
             // contrast does not get to be see-through.
             panel_alpha: 255,
+            accent_titlebars: false,
             light,
             // The scheme's inks are where the floor starts, so a setter called
             // on this palette keeps them instead of putting the mode's back.
@@ -1582,6 +1598,7 @@ impl Palette {
             maroon,
             accent,
             panel_alpha: _,
+            accent_titlebars: _,
             light: _,
             // Not a colour, so not a role. Named and discarded rather than
             // swept up by `..`, on the same terms as the two above it.
@@ -1650,6 +1667,33 @@ impl Palette {
     #[must_use]
     pub fn on_accent(&self) -> Color {
         readable_on(self.accent)
+    }
+
+    /// The focused window's title bar: [`surface0`](Self::surface0), or the
+    /// accent where the user asked for accented title bars
+    /// ([`accent_titlebars`](Self::accent_titlebars)).
+    ///
+    /// The one answer for everything drawn in it -- the window manager's bar
+    /// (`appearance::DecorationColors`) and a ribbon's strip joined to it --
+    /// so that the join cannot show.
+    #[must_use]
+    pub fn title_bar(&self) -> Color {
+        if self.accent_titlebars {
+            self.accent
+        } else {
+            self.surface0
+        }
+    }
+
+    /// Text on [`title_bar`](Self::title_bar): the palette's own text, or
+    /// what reads on the accent.
+    #[must_use]
+    pub fn title_text(&self) -> Color {
+        if self.accent_titlebars {
+            self.on_accent()
+        } else {
+            self.text
+        }
     }
 
     /// A floating surface: a popup, a menu, the launcher.
@@ -1991,6 +2035,13 @@ pub trait PaletteSource {
     /// themes or speeds has the built-in theme's at the normal speed.
     fn motion(&self) -> Motion {
         Motion::STANDARD
+    }
+
+    /// Whether the focused window's title bar is drawn in the accent.
+    /// Defaulted to the plain bar, as a source that knows nothing of title
+    /// bars -- a test's -- has.
+    fn accent_titlebars(&self) -> bool {
+        false
     }
 }
 

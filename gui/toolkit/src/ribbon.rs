@@ -3264,7 +3264,7 @@ pub fn draw<S: CommandSink + ?Sized>(
 ) {
     // The title bar's own colour: a ribbon under a title bar reads as one
     // piece of window.
-    fill(sink, layout.strip, p.surface0, CornerRadii::ZERO);
+    fill(sink, layout.strip, p.title_bar(), CornerRadii::ZERO);
     let front = ribbon.front();
     sink.emit(RenderCommand::PushClip {
         x: layout.strip.x,
@@ -3348,7 +3348,7 @@ fn draw_qat<S: CommandSink + ?Sized>(
             p.surface1,
         );
     } else {
-        fill(sink, qat.rect, p.surface0, CornerRadii::ZERO);
+        fill(sink, qat.rect, p.title_bar(), CornerRadii::ZERO);
     }
     for &(i, r) in &qat.buttons {
         let Some(control) = ribbon
@@ -3364,7 +3364,8 @@ fn draw_qat<S: CommandSink + ?Sized>(
             fill(sink, r, p.selection_fill(), CornerRadii::all(RADIUS));
             stroke(sink, r, p.selection_border(), 1.0);
         }
-        if command.enabled && ribbon.hover == Some(Hit::Qat(i)) {
+        let lit = command.enabled && ribbon.hover == Some(Hit::Qat(i));
+        if lit {
             let pressed = ribbon.pressed == Some(Hit::Qat(i));
             fill(
                 sink,
@@ -3397,7 +3398,14 @@ fn draw_qat<S: CommandSink + ?Sized>(
                 r.x + (r.w - w) / 2.0,
                 text_top(r.y, r.h, LABEL_SIZE),
                 &initial,
-                if command.enabled { p.text } else { p.overlay0 },
+                if !command.enabled {
+                    p.overlay0
+                } else if ribbon.custom.qat_below || lit {
+                    p.text
+                } else {
+                    // On the strip's colour, over the ribbon.
+                    p.title_text()
+                },
                 LABEL_SIZE,
                 r.w,
             );
@@ -3540,17 +3548,25 @@ fn draw_tab<S: CommandSink + ?Sized>(
         return;
     };
     let r = slot.rect;
+    let lit = ribbon.hover == Some(Hit::Tab(slot.tab));
     if front {
         // The front tab is the body's colour, joined to it.
         fill(sink, r, p.base, CornerRadii::top(RADIUS));
-    } else if ribbon.hover == Some(Hit::Tab(slot.tab)) {
+    } else if lit {
         fill(sink, r, p.surface1, CornerRadii::top(RADIUS));
     }
     if tab.context.is_some() {
+        // The accent -- or, on a strip that is the accent already, the ink
+        // that reads on it, which a band of the accent would vanish into.
+        let band = if p.accent_titlebars && !front && !lit {
+            p.title_text()
+        } else {
+            p.accent
+        };
         fill(
             sink,
             Rect::new(r.x, r.y, r.w, CONTEXT_BAND),
-            p.accent,
+            band,
             CornerRadii::top(RADIUS),
         );
     }
@@ -3559,7 +3575,9 @@ fn draw_tab<S: CommandSink + ?Sized>(
         r.x + TAB_PAD,
         text_top(r.y, r.h, TAB_SIZE),
         &tab.label,
-        p.text,
+        // A tab behind is written on the strip, the title bar's colour; the
+        // front tab and a lit one on grounds of their own.
+        if front || lit { p.text } else { p.title_text() },
         TAB_SIZE,
         r.w - TAB_PAD,
     );

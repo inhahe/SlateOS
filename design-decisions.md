@@ -86914,10 +86914,19 @@ toolbar over or under the ribbon, collapsing, and undoing every change.
 | The last tab | cannot be hidden | can (and the ribbon has nowhere to show a command) |
 | Undo every change | undoes all but minimizing, which is how the ribbon is looked at | minimizing too |
 
+**The strip follows the title bar, accent and all.** The toolkit's palette
+carries whether the user asked for accented title bars
+(`Palette::accent_titlebars`), and `Palette::title_bar` / `title_text` are
+the one answer both the window manager's bar (`DecorationColors`, which
+until now applied the accent on top of the palette from the settings) and a
+ribbon's strip are drawn from -- a test holds the two equal for every accent
+and mode. One consequence, chosen: in high contrast an accented bar is the
+scheme's accent, picked to read on its background, where it was the user's
+raw accent. On an accented strip a contextual tab's band is the ink that
+reads on the accent, since a band of the accent would vanish into it.
+
 **Not yet:** a dialog for the same changes, showing every tab and group at
-once, and following accent-coloured title bars, which needs the toolkit's
-palette to carry the title bar's colours. `roadmap-detailed.md` → *Ribbon
-Widget* marks each.
+once. `roadmap-detailed.md` → *Ribbon Widget* marks it.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

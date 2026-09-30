@@ -1018,6 +1018,45 @@ fn the_strip_is_the_title_bars_colour_and_the_front_tab_the_bodys() {
     );
 }
 
+/// **With accented title bars the strip is the accent, joined to the bar
+/// above it: the tabs behind are written in what reads on it, and a
+/// contextual tab's band, which would vanish into it, in that ink too.**
+#[test]
+fn the_strip_follows_an_accented_title_bar() {
+    let mut r = ribbon();
+    r.set_context("picture", true);
+    r.pin(CUT);
+    let l = wide(&r);
+    let mut p = Palette::for_mode(false);
+    p.accent_titlebars = true;
+    assert_eq!(p.title_bar(), p.accent);
+    let cmds = drawn(&r, &l, &p);
+    let fills = fills(&cmds);
+    assert!(
+        fills.contains(&(l.strip, p.accent)),
+        "the strip is not the accent"
+    );
+    assert!(
+        fills.contains(&(l.qat.as_ref().unwrap().rect, p.accent)),
+        "the toolbar over the strip is not the accent"
+    );
+    let texts = texts(&cmds);
+    assert!(
+        texts.contains(&("View".to_owned(), p.on_accent())),
+        "a tab behind is not written in what reads on the accent: {texts:?}"
+    );
+    assert!(
+        texts.contains(&("Home".to_owned(), p.text)),
+        "the front tab left the body's ink"
+    );
+    let picture = tab_slot(&l, &r, "picture");
+    let band = Rect::new(picture.x, picture.y, picture.w, CONTEXT_BAND);
+    assert!(
+        fills.contains(&(band, p.on_accent())),
+        "the band vanished into the strip"
+    );
+}
+
 /// **A contextual tab carries a band of the accent along its top edge, and
 /// an ordinary one does not.**
 #[test]

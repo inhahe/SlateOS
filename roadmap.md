@@ -2091,8 +2091,10 @@ live.
   contextual tabs, no layered key tips. A Quick Access Toolbar over or under
   the ribbon, and the user's changes -- commands onto the toolbar, into and
   out of groups, tabs hidden and moved -- from a right-click, kept as one
-  line of text the application saves. **Next:** a dialog for the same
-  changes; accent-coloured title bars followed.
+  line of text the application saves. The strip is the title bar's colour,
+  accented title bars included, from the one answer the window manager's
+  bar is drawn from (`Palette::title_bar`). **Next:** a dialog for the same
+  changes; lane E's applications onto it.
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

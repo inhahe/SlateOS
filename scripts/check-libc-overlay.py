@@ -146,8 +146,9 @@ LAYOUT_FLAGS = ["-std=gnu2x"]
 
 # glibc's names for types whose musl names differ, in the reference's types.
 # `__sigset_t` is glibc's unnamed struct behind sigset_t; musl's has the tag
-# `struct __sigset_t` and no typedef of that name.
-TYPE_NAMES = {"__sigset_t": "sigset_t"}
+# `struct __sigset_t` and no typedef of that name. `__mbstate_t` is the same
+# for mbstate_t (<uchar.h>'s mbrtoc8 and c8rtomb).
+TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t"}
 
 # How clang says a name is not declared -- for a library function it knows
 # the type of, "undeclared library function".

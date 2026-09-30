@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176269,7 +176269,7 @@ probes for one (`configure`) takes its fallback. Measured by
 | Family | Names | Header |
 |---|---|---|
 | C23 bit utilities | `stdc_leading_zeros_uc` ... `stdc_bit_ceil_ull`, 70 | `<stdbit.h>` -- **done 2026-09-29** |
-| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` -- `strfrom*` and `timespec_getres` **done 2026-09-29** |
+| C23, the rest | `strfromd` `strfromf` `strfroml`; `c8rtomb` `mbrtoc8`; `timespec_getres` | `<stdlib.h>`, `<uchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` -- **done 2026-09-29** (`posix/src/prng.rs`) |
 | locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
@@ -176407,3 +176407,39 @@ rather than a byte at a time, which is what makes a test of the overflow
 
 **Where:** `posix/src/printf.rs`: `format_core`, `format_into`,
 `emit_padding`, `FmtOutput::lands_nowhere`.
+
+## D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED — `mbrtoc16`, `mbrtoc32` and their reverses refused every character past ASCII; asking `mbsrtowcs` how long a result would be answered 0; a character cut in two by `mbsnrtowcs`'s limit was lost (lane D, 2026-09-29) — **Status: FIXED 2026-09-29**
+
+**In short:** the functions that turn text from bytes into Unicode
+characters and back disagreed with each other. `mbrtowc` reads UTF-8, but
+its siblings for 16- and 32-bit characters (`<uchar.h>`) refused any byte
+past plain ASCII, so a program converting "é" with them got an error. The
+functions that convert a whole string answered 0 when asked only how long
+the result would be -- the usual way to size a buffer for it -- and one
+stopped by a byte limit in the middle of a character lost that character on
+the next call.
+
+| What | Was | Is |
+|---|---|---|
+| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | ASCII only: every byte above 0x7F `EILSEQ` | UTF-8, as `mbrtowc`: UTF-16 surrogate pairs across two calls |
+| `mbrtoc8`, `c8rtomb` (C23) | missing | UTF-8 code units, one a call |
+| `mbsrtowcs`, `mbsnrtowcs`, `wcsrtombs`, `wcsnrtombs` with a NULL `dst` (counting only) | `len` limited the count, so `len` 0 answered 0; and `*src` moved | `len` ignored; `*src` and the state left as they were (POSIX, glibc) |
+| `mbsnrtowcs`, `nms` ending inside a character | stopped before the character, its bytes already in the state: the next call read them twice, as an encoding error | `*src` past them, the character carried in the state |
+| `wcsnrtombs` at an unencodable character | `*src` moved on | `*src` at it |
+| an invalid sequence | refused at its last byte (`E0 80 AF`: -2, -2, -1) | at the first byte no completion could make valid (-2, -1): C's -2 is for an incomplete "but potentially valid" character |
+| a NULL `ps` | one process-wide state of `mbrtowc`'s, borrowed by `mbrlen` and the string forms; `<uchar.h>`'s none | each function its own, as C requires, and each thread's own |
+| `<uchar.h>`'s six | safe Rust functions dereferencing a caller's pointer | `unsafe`, their contracts stated |
+
+Found writing `mbrtoc8` and `c8rtomb`, which need a real decoder under them.
+Replayed against glibc 2.39 in its C.UTF-8 locale
+(`posix/tools/oracle/multibyte_harness.py`, `multibyte_oracle.txt`), through
+a model of C's rules and strict UTF-8 written in the test from Unicode's
+table alone: the library gives what the model gives, and the model gives
+glibc's answer wherever glibc's decoder is strict. Where glibc's differs --
+a laxer decoder, `c32rtomb` past U+10FFFF, `c16rtomb(NULL, ...)` after a
+lone high surrogate, a crash in `mbrtoc16(NULL, NULL, 0, ps)` -- is
+`posix/src/uchar.rs`'s module documentation and design-decisions §1143.
+
+**Where:** `posix/src/wchar.rs` (`decode`, `MbstateT`, `internal`,
+`mbs_to_wcs`, `wcs_to_mbs`), `posix/src/uchar.rs`, `posix/src/perthread.rs`
+(the states), `posix/include/uchar.h` (`char8_t`, the two new functions).

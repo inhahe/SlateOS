@@ -915,7 +915,7 @@ pub(crate) fn abi_asserts() -> String {
         "wordexp_t",
         "wordexp.h"
     );
-    abi!(out, hdrs, crate::uchar::MbstateT, "mbstate_t", "wchar.h");
+    abi!(out, hdrs, crate::wchar::MbstateT, "mbstate_t", "wchar.h");
     abi!(
         out,
         hdrs,

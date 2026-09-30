@@ -194,6 +194,11 @@ pub struct PerThread {
     /// to: the calling thread's own, so that another thread's `seed48` cannot
     /// overwrite it while it is read.
     pub seed48: [u16; 3],
+
+    /// The restartable multibyte conversions' internal states, for a NULL
+    /// `ps`: one a function, as C requires, and the thread's own
+    /// ([`crate::wchar::internal`]).
+    pub mbstate: [crate::wchar::MbstateT; crate::wchar::internal::COUNT],
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -259,6 +264,7 @@ impl PerThread {
         strerror: [0; 32],
         strsignal: [0; 32],
         seed48: [0; 3],
+        mbstate: [crate::wchar::MbstateT::new(); crate::wchar::internal::COUNT],
     };
 }
 

@@ -65,6 +65,12 @@
  *  12x  poll, a handler with SA_RESTART           -- EINTR at once
  *  13x  waitpid, a handler with SA_RESTART        -- waits on, EINTR at SIGALRM
  *  14x  pause, SIGUSR1 set to SIG_IGN             -- waits on, EINTR at SIGALRM
+ *
+ * and taking a signal:
+ *
+ *  15x  sigwait for SIGUSR2, blocked              -- takes it, no handler run
+ *       (x3: its handler ran instead; x4: SIGUSR2 not blocked afterwards)
+ *  16x  sigtimedwait, a SIGUSR1 handler with SA_RESTART -- EINTR at once
  */
 
 #define _GNU_SOURCE
@@ -443,6 +449,71 @@ static int check_pause_ignored(void)
     return alrm == 1 ? 0 : 143;
 }
 
+/* ---- Taking a signal: sigwait and sigtimedwait ---- */
+
+static volatile sig_atomic_t usr2_runs;
+
+static void on_usr2(int sig)
+{
+    (void)sig;
+    usr2_runs++;
+}
+
+/* sigwait takes a blocked SIGUSR2 the child sends: no handler runs, and
+ * the signal is blocked again afterwards. */
+static int check_sigwait(void)
+{
+    if (arrange(on_usr1, 0) != 0 || install(SIGUSR2, on_usr2, 0) != 0)
+        return 150;
+    usr2_runs = 0;
+    sigset_t set, old, now;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &set, &old) != 0)
+        return 150;
+    pid_t child = signaller(SIGUSR2, 0);
+    if (child < 0)
+        return 151;
+    int sig = 0;
+    int rc = sigwait(&set, &sig);
+    done_with(child);
+    sigprocmask(SIG_BLOCK, NULL, &now);
+    int still = sigismember(&now, SIGUSR2);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    defaults();
+    install(SIGUSR2, SIG_DFL, 0);
+    if (rc != 0 || sig != SIGUSR2)
+        return 152;
+    if (usr2_runs != 0)
+        return 153;
+    return still == 1 ? 0 : 154;
+}
+
+/* sigtimedwait ends for a handler of another signal, SA_RESTART or not. */
+static int check_sigtimedwait_restart(void)
+{
+    if (arrange(on_usr1, SA_RESTART) != 0)
+        return 160;
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &set, &old) != 0)
+        return 160;
+    pid_t child = signaller(SIGUSR1, 1);
+    if (child < 0)
+        return 161;
+    struct timespec t = { 5, 0 };
+    int rc = sigtimedwait(&set, NULL, &t);
+    int e = errno;
+    int usr1 = usr1_runs, alrm = alrm_runs;
+    done_with(child);
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    defaults();
+    if (rc != -1 || e != EINTR)
+        return 162;
+    return usr1 == 1 && alrm == 0 ? 0 : 163;
+}
+
 static int check_msgrcv_restart(void)
 {
     if (arrange(on_usr1, SA_RESTART) != 0)
@@ -494,6 +565,8 @@ int main(void)
         {"poll, a handler with SA_RESTART", check_poll_restart},
         {"waitpid, a handler with SA_RESTART", check_waitpid_restart},
         {"pause, an ignored signal", check_pause_ignored},
+        {"sigwait, a blocked signal", check_sigwait},
+        {"sigtimedwait, a handler with SA_RESTART", check_sigtimedwait_restart},
     };
     setvbuf(stdout, NULL, _IONBF, 0);
     for (unsigned i = 0; i < sizeof checks / sizeof checks[0]; i++) {

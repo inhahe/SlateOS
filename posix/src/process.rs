@@ -994,6 +994,9 @@ fn fork_raw() -> PidT {
         unsafe { (*crate::perthread::current()).tid = 0 };
         // One thread: this one.  Its `pthread_exit` is the last.
         crate::pthread::reset_live_threads_after_fork();
+        // No thread of the parent's waits here for a signal, and the
+        // kernel's mask, copied from the parent's, let their sets through.
+        crate::signal::forget_waiters_after_fork();
     }
     pid
 }

@@ -915,6 +915,25 @@ mod tests {
         line
     }
 
+    /// `sigtimedwait`, as the harness waits: for `SIGUSR2`, blocked, which
+    /// the release sends -- to another thread, whose dispatch hands it over.
+    fn signal_wait(way: Way) -> String {
+        use crate::signal::{
+            SIG_BLOCK, SIG_SETMASK, SIGUSR2, dispatch_delivered, sigprocmask, sigtimedwait,
+        };
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 1u64 << (SIGUSR2 - 1);
+        let mut old = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, &set, &mut old), 0);
+        let line = replay_with(
+            way,
+            || said(sigtimedwait(&set, null_mut(), &TEN) as isize),
+            Step::SignalElsewhere(Box::new(|| dispatch_delivered(SIGUSR2))),
+        );
+        assert_eq!(sigprocmask(SIG_SETMASK, &old, null_mut()), 0);
+        line
+    }
+
     /// The calls the kernel itself sleeps in, which the host cannot make, and
     /// the rule each follows here -- `None` for one this library does not
     /// make wait at all.  [`every_interruption_is_glibcs`] holds each rule to
@@ -942,12 +961,11 @@ mod tests {
         ("pselect", Some(Restart::Never)),
         ("epoll_wait", Some(Restart::Never)),
         // A FIFO cannot be made here (`mknod` of one answers ENOSYS), nor a
-        // signalfd; a record lock is granted at once, so nothing waits in
-        // `F_SETLKW`; and `sigtimedwait` is a stub.
+        // signalfd; and a record lock is granted at once, so nothing waits
+        // in `F_SETLKW`.
         ("open, a FIFO", None),
         ("read, a signalfd", None),
         ("fcntl F_SETLKW", None),
-        ("sigtimedwait", None),
     ];
 
     /// Whether `rule` gives glibc's line for `way`: a handler without
@@ -989,6 +1007,7 @@ mod tests {
                     sleeping(call, way, glibc.starts_with("waits on"))
                 }
                 "pause" | "sigsuspend" => waiting_for_a_signal(call, way),
+                "sigtimedwait" => signal_wait(way),
                 // glibc's `lio_listio(LIO_WAIT)` sleeps until its requests
                 // are done; this library performs them on the calling thread
                 // as the call is made (`crate::aio`), so it never sleeps in a
@@ -1013,7 +1032,7 @@ mod tests {
             replayed += 1;
         }
         assert_eq!(
-            replayed, 140,
+            replayed, 145,
             "every line the host can make but lio_listio's five"
         );
         assert_eq!(

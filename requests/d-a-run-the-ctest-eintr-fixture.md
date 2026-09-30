@@ -29,7 +29,7 @@ needs no kernel change.
 ## The fixture
 
 `services/ctest-eintr/` (`main.c`, `build.py`), staged at
-`/tests/ctest-eintr.elf` like every `ctest-*`. Fourteen checks, in order, each
+`/tests/ctest-eintr.elf` like every `ctest-*`. Sixteen checks, in order, each
 printing `[eintr] ok <name>` or `[eintr] FAIL <name>: <code>`. In each the
 fixture -- single-threaded, since delivery is process-directed -- waits,
 and a child it forks sends it the signal under test after 200 ms and, where
@@ -59,6 +59,10 @@ in and the library's loops around its non-blocking ones:
 13. `waitpid` for the child, a handler with `SA_RESTART` -- waits on;
     `EINTR` at `SIGALRM`.
 14. `pause`, the signal set to `SIG_IGN` -- waits on; `EINTR` at `SIGALRM`.
+15. `sigwait` for `SIGUSR2`, blocked, which the child sends -- takes it, with
+    no handler run, and `SIGUSR2` is blocked again afterwards.
+16. `sigtimedwait`, a `SIGUSR1` handler with `SA_RESTART` -- `EINTR` at the
+    signal.
 
 ## The rung I am asking for
 
@@ -71,7 +75,7 @@ Shaped like `ctest-altstack`'s:
   about half a second. It cannot hang: the child that sends the signals
   SIGKILLs the fixture three seconds after its last one unless it has been
   killed first, which the fixture does as soon as its wait is over -- so
-  the worst case is fourteen checks at 3.5 seconds, and a death by SIGKILL
+  the worst case is sixteen checks at 3.5 seconds, and a death by SIGKILL
   rather than a stuck boot.
 
 **The legend** (also at the top of `main.c`): the tens digit names the

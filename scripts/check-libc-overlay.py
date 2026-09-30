@@ -170,6 +170,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct rpcent": "rpc/netdb.h",
     "struct ntptimeval": "sys/timex.h",
     "struct aliasent": "aliases.h",
+    "struct gaicb": "netdb.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -178,10 +179,12 @@ FIELD_NAMES: dict[tuple[str, str], str] = {("femode_t", "__glibc_reserved"): "__
 # Where the layouts are read, both sides: C23, for femode_t; not _GNU_SOURCE,
 # so that <stdio.h>'s cookie types are the overlay's own and not musl's.
 LAYOUT_FLAGS = ["-std=gnu2x"]
-# ... and what a header's types need besides: <dlfcn.h>'s and <aio.h>'s are
-# _GNU_SOURCE's alone, in glibc's header and the overlay's alike.
+# ... and what a header's types need besides: <dlfcn.h>'s, <aio.h>'s and
+# <netdb.h>'s struct gaicb are _GNU_SOURCE's alone, in glibc's header and the
+# overlay's alike.
 LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"],
-                                            "aio.h": ["-D_GNU_SOURCE"]}
+                                            "aio.h": ["-D_GNU_SOURCE"],
+                                            "netdb.h": ["-D_GNU_SOURCE"]}
 
 
 def layout_flags(header: str) -> list[str]:

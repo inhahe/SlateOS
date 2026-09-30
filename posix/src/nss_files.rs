@@ -1265,6 +1265,34 @@ process_global! {
     fn test_files() -> [Option<(&'static [u8], &'static [u8])>; 4] = [None; 4];
 }
 
+/// A host test thread's databases and files, as [`set_test_text`],
+/// [`set_test_error`] and [`set_test_file`] left them: for a thread the
+/// library starts on a test's behalf -- an asynchronous lookup's -- to read
+/// what the test set ([`test_adopt`]).
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct TestDbs(
+    [TestDb; Which::COUNT],
+    [Option<(&'static [u8], &'static [u8])>; 4],
+);
+
+/// This host test thread's databases and files.
+#[cfg(test)]
+pub(crate) fn test_snapshot() -> TestDbs {
+    // SAFETY: this thread's slots and table, only read.
+    unsafe { TestDbs(*test_dbs(), *test_files()) }
+}
+
+/// Make this host thread read `dbs`.
+#[cfg(test)]
+pub(crate) fn test_adopt(dbs: &TestDbs) {
+    // SAFETY: this thread's slots and table, not borrowed elsewhere.
+    unsafe {
+        *test_dbs() = dbs.0;
+        *test_files() = dbs.1;
+    }
+}
+
 /// Make the file at `path` (no NUL) read as `text` through [`read_path`] on
 /// this host test thread; `None`, as missing.
 #[cfg(test)]

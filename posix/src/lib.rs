@@ -388,6 +388,7 @@ pub mod fstab;
 pub mod fts;
 pub mod ftw;
 pub mod gai;
+pub mod gai_a;
 pub mod getopt;
 pub mod getpass;
 pub mod glob;

@@ -13,6 +13,7 @@ struct aliasent	aliases.h	32	alias_name=0,alias_members_len=8,alias_members=16,a
 struct dl_find_object	dlfcn.h	96	dlfo_flags=0,dlfo_map_start=8,dlfo_map_end=16,dlfo_link_map=24,dlfo_eh_frame=32,__dflo_reserved=40
 struct drand48_data	stdlib.h	24	__x=0,__old_x=6,__c=12,__init=14,__a=16
 struct fstab	fstab.h	48	fs_spec=0,fs_file=8,fs_vfstype=16,fs_mntops=24,fs_type=32,fs_freq=40,fs_passno=44
+struct gaicb	netdb.h	56	ar_name=0,ar_service=8,ar_request=16,ar_result=24,__return=32,__glibc_reserved=36
 struct mallinfo	malloc.h	40	arena=0,ordblks=4,smblks=8,hblks=12,hblkhd=16,usmblks=20,fsmblks=24,uordblks=28,fordblks=32,keepcost=36
 struct mallinfo2	malloc.h	80	arena=0,ordblks=8,smblks=16,hblks=24,hblkhd=32,usmblks=40,fsmblks=48,uordblks=56,fordblks=64,keepcost=72
 struct ntptimeval	sys/timex.h	72	time=0,maxerror=16,esterror=24,tai=32,__glibc_reserved1=40,__glibc_reserved2=48,__glibc_reserved3=56,__glibc_reserved4=64

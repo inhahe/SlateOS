@@ -58,6 +58,40 @@ int getnetgrent_r(char **__restrict, char **__restrict, char **__restrict, char 
 int innetgr(const char *, const char *, const char *, const char *);
 #endif
 
+#ifdef _GNU_SOURCE
+/* An asynchronous lookup's control block: the request, and its answer.
+ * glibc's <netdb.h> makes struct timespec whole, as musl's types header does
+ * here; struct sigevent is <signal.h>'s, whose SIGEV_ constants a caller
+ * needs anyway. */
+#define __NEED_time_t
+#define __NEED_struct_timespec
+#include <bits/alltypes.h>
+struct sigevent;
+
+struct gaicb {
+	const char *ar_name;               /* the name to look up */
+	const char *ar_service;            /* the service */
+	const struct addrinfo *ar_request; /* the hints, or NULL */
+	struct addrinfo *ar_result;        /* the answer, once there is one */
+	int __return;                      /* what gai_error answers */
+	int __glibc_reserved[5];
+};
+
+/* getaddrinfo_a's modes: return once every request has its answer, or at
+ * once. */
+#define GAI_WAIT 0
+#define GAI_NOWAIT 1
+
+/* Look the requests up on the library's threads (0, or an EAI_ code); wait
+ * until one of them has its answer (0, EAI_AGAIN at the timeout, EAI_ALLDONE
+ * when none is still being looked up); a request's answer, or
+ * EAI_INPROGRESS; cancel one (EAI_CANCELED, EAI_NOTCANCELED, EAI_ALLDONE). */
+int getaddrinfo_a(int, struct gaicb *[], int, struct sigevent *);
+int gai_suspend(const struct gaicb *const[], int, const struct timespec *);
+int gai_error(struct gaicb *);
+int gai_cancel(struct gaicb *);
+#endif
+
 /* The obsolete lookups, which POSIX.1-2008 dropped: glibc declares them
  * whatever the feature macros ask for, musl's header not for POSIX.1-2008
  * alone or strict ISO C. */

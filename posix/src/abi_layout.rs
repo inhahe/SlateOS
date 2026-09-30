@@ -1171,6 +1171,19 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::gai_a::Gaicb,
+        "struct gaicb",
+        "netdb.h",
+        ar_name,
+        ar_service,
+        ar_request,
+        ar_result,
+        ret as "__return",
+        reserved as "__glibc_reserved"
+    );
+    abi!(
+        out,
+        hdrs,
         crate::netdb::Rpcent,
         "struct rpcent",
         "rpc/netdb.h",

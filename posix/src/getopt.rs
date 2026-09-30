@@ -1,235 +1,725 @@
-//! POSIX and GNU command-line option parsing.
+// Every index and sum is of positions within `argv` (below `argc`, which the
+// caller vouches for) or within one of its NUL-terminated strings, walked no
+// further than its NUL. Clippy cannot see the bounds.
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
+//! POSIX and GNU command-line option parsing: `getopt`, `getopt_long` and
+//! `getopt_long_only`, glibc 2.39's behaviour throughout -- its answers to
+//! 2,571 parses are replayed by the tests (posix/tools/oracle/getopt_harness.py,
+//! posix/src/getopt_oracle.txt).
 //!
-//! Implements `getopt()` for parsing short command-line options per
-//! POSIX.1-2024, and `getopt_long()`/`getopt_long_only()` for GNU-style
-//! long options.
+//! What that means beyond POSIX's `getopt`:
 //!
-//! ## Global State
+//! - **Order.** By default the arguments that are not options may come
+//!   between the options: they are stepped over, and moved after the
+//!   options as the parse goes (argv is *permuted*), so that when -1 comes
+//!   back `optind` is the first of them. A `+` first in `optstring`, or
+//!   `POSIXLY_CORRECT` in the environment when the parse starts, stops at the
+//!   first one instead, as POSIX asks; a `-` first returns each as the
+//!   option 1, `optarg` pointing at it. `--` ends the options either way.
+//! - **Restart.** `optind = 0` starts a new parse, reading the order again.
+//! - **Short options.** `x::` takes an optional argument, which must be
+//!   attached (`-xval`). With `W;` in `optstring`, `-W foo` is `--foo`.
+//! - **Long options.** `--name`, `--name=value` and `--name value` (for a
+//!   required argument); a name may be cut short to any prefix that is not
+//!   ambiguous -- one only several entries' names begin with is ambiguous
+//!   unless they all take the same argument and answer the same way.
+//!   `getopt_long_only` takes `-name` too, falling back to the short
+//!   options when no long one matches and the first letter is one.
+//! - **Complaints.** Unless `opterr` is 0 or `optstring` starts with `:`
+//!   (after any `+` or `-`), each error is written to `stderr` as glibc
+//!   words it, with `argv[0]`: `invalid option -- 'x'`, `option requires an
+//!   argument -- 'x'`, `unrecognized option '--x'`, `option '--x' is
+//!   ambiguous; possibilities: '--xa' '--xb'`, `option '--x' doesn't allow
+//!   an argument`, `option '--x' requires an argument`. `optopt` is the
+//!   character (or the long option's `val`, or 0) the error was about.
 //!
-//! Per POSIX, the following globals control getopt behavior:
+//! Until 2026-09-30 this was POSIX's `getopt` alone: it never permuted,
+//! never complained, and matched long options only whole.
 //!
-//! - `optarg`: pointer to option argument (for options with `:`)
-//! - `optind`: index of the next argv element to process (starts at 1)
-//! - `opterr`: if non-zero, print error messages to stderr
-//! - `optopt`: the unrecognized option character on error
-//!
-//! ## Limitations
-//!
-//! - Not thread-safe (uses global state, matching POSIX spec).
-//! - Long option matching is exact only (no unambiguous prefix
-//!   matching like GNU getopt).
+//! One deviation: a NULL `argv` or `optstring` answers -1 here, where
+//! glibc's would fault.
+
+use crate::stdio;
 
 /// Pointer to the argument of the current option.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut optarg: *const u8 = core::ptr::null();
 
-/// Index of the next element of argv to be processed.
+/// Index of the next element of argv to be processed; 0 restarts the parse.
 ///
 /// Initialized to 1 (skip argv[0] which is the program name).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut optind: i32 = 1;
 
-/// If non-zero, print error messages to stderr.
+/// If non-zero, errors are written to `stderr`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut opterr: i32 = 1;
 
-/// The unrecognized option character (set on '?' return).
+/// The option character (or long option's `val`) the last error was about:
+/// `'?'` before any, as glibc's starts.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static mut optopt: i32 = 0;
+pub static mut optopt: i32 = b'?' as i32;
 
-/// Position within the current argv element (for grouped options like `-abc`).
-static mut OPTPOS: usize = 0;
+/// How the options and the other arguments may be mixed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ordering {
+    /// Stop at the first argument that is not an option (`+`, or
+    /// `POSIXLY_CORRECT`).
+    RequireOrder,
+    /// Options may follow the other arguments, which are moved after them.
+    Permute,
+    /// Each other argument is returned as the option 1 (`-`).
+    ReturnInOrder,
+}
 
-/// Parse command-line options.
-///
-/// `optstring` is a null-terminated string of valid option characters.
-/// A character followed by `:` takes a required argument.
-///
-/// Returns the option character, `'?'` on error, or -1 when done.
+/// The parser's own state (glibc's `_getopt_data`): its copies of the
+/// globals -- `optind` read from the program's at each call, the others
+/// written back to the program's after it -- where it is within an argument
+/// of grouped short options, and the run of other arguments it has stepped
+/// over and not yet moved.
+struct State {
+    optind: i32,
+    optarg: *const u8,
+    optopt: i32,
+    initialized: bool,
+    /// The next short option character, within `argv[optind]`; NULL when a
+    /// new argument is to be read.
+    nextchar: *const u8,
+    ordering: Ordering,
+    /// The other arguments stepped over are `argv[first_nonopt..last_nonopt]`.
+    first_nonopt: i32,
+    last_nonopt: i32,
+}
+
+/// The one parse state, as glibc's: getopt is not reentrant, by POSIX.
+static mut STATE: State = State {
+    optind: 1,
+    optarg: core::ptr::null(),
+    optopt: 0,
+    initialized: false,
+    nextchar: core::ptr::null(),
+    ordering: Ordering::Permute,
+    first_nonopt: 1,
+    last_nonopt: 1,
+};
+
+/// Where a parse reads `POSIXLY_CORRECT` and writes its complaints: the
+/// environment and `stderr` -- other ones for the tests.
+struct Io {
+    posixly_correct: fn() -> bool,
+    messages: *mut u8,
+}
+
+impl Io {
+    fn process() -> Self {
+        Self {
+            // SAFETY: a NUL-terminated name.
+            posixly_correct: || unsafe {
+                !crate::environ::getenv(c"POSIXLY_CORRECT".as_ptr().cast()).is_null()
+            },
+            messages: stdio::stderr_stream(),
+        }
+    }
+}
+
+/// A C string's bytes; `(null)` for NULL, as glibc's `%s` prints it.
 ///
 /// # Safety
 ///
-/// `argv` must be a valid array of at least `argc` pointers to
-/// null-terminated strings.  `optstring` must be null-terminated.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+/// `s` is NULL or a NUL-terminated string.
+unsafe fn text<'a>(s: *const u8) -> &'a [u8] {
+    if s.is_null() {
+        return b"(null)";
+    }
+    // SAFETY: the caller's contract.
+    unsafe { core::slice::from_raw_parts(s, crate::string::strlen(s)) }
+}
+
+/// `argv[i]`.
+///
+/// # Safety
+///
+/// `i` is below the caller's `argc`.
+unsafe fn arg(argv: *mut *const u8, i: i32) -> *const u8 {
+    // SAFETY: the caller's contract.
+    unsafe { *argv.add(usize::try_from(i).unwrap_or(0)) }
+}
+
+/// Whether `a` is not an option: it does not start with `-`, or is `-`.
+///
+/// # Safety
+///
+/// `a` is a NUL-terminated string.
+unsafe fn is_nonoption(a: *const u8) -> bool {
+    // SAFETY: the caller's contract; the second byte is read only when the
+    // first is not the NUL.
+    unsafe { *a != b'-' || *a.add(1) == 0 }
+}
+
+/// Where `c` is in `optstring` -- `strchr`'s answer -- as long as it is a
+/// character an option can be (not `:` or `;`, and not the NUL).
+///
+/// # Safety
+///
+/// `optstring` is a NUL-terminated string.
+unsafe fn spec_of(optstring: *const u8, c: u8) -> core::option::Option<*const u8> {
+    if c == 0 || c == b':' || c == b';' {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let s = unsafe { text(optstring) };
+    let at = s.iter().position(|&b| b == c)?;
+    // SAFETY: `at` is within the string.
+    Some(unsafe { optstring.add(at) })
+}
+
+/// The complaint made of `parts`, after `argv[0]` and `": "`, written to the
+/// messages stream in one piece -- or, without memory to put it together,
+/// piece by piece with the stream held, as glibc's `fprintf`s write it.
+fn complain(io: &Io, argv0: &[u8], parts: &[&[u8]]) {
+    let head: [&[u8]; 2] = [argv0, b": "];
+    let all = || head.iter().chain(parts.iter());
+    let total = all().fold(0usize, |n, p| n.saturating_add(p.len()));
+    let buf = crate::malloc::malloc(total);
+    // SAFETY (both branches): `buf`, when not NULL, holds `total` bytes, the
+    // parts' lengths summed; the stream is a live one. A failed write loses
+    // only the message: the parse's answer is the same either way.
+    unsafe {
+        if buf.is_null() {
+            stdio::flockfile(io.messages.cast());
+            for p in all() {
+                let _ = stdio::fwrite(p.as_ptr(), 1, p.len(), io.messages);
+            }
+            stdio::funlockfile(io.messages.cast());
+            return;
+        }
+        let mut at = 0usize;
+        for p in all() {
+            core::ptr::copy_nonoverlapping(p.as_ptr(), buf.add(at), p.len());
+            at += p.len();
+        }
+        let _ = stdio::fwrite(buf, 1, total, io.messages);
+        crate::malloc::free(buf);
+    }
+}
+
+/// Move the other arguments stepped over, `argv[first_nonopt..last_nonopt]`,
+/// after the options that followed them, `argv[last_nonopt..optind]`, each
+/// run keeping its order -- glibc's `exchange`.
+///
+/// # Safety
+///
+/// `argv` holds at least `d.optind` pointers.
+unsafe fn exchange(argv: *mut *const u8, d: &mut State) {
+    let (bottom, middle, top) = (d.first_nonopt, d.last_nonopt, d.optind);
+    let (Ok(b), Ok(m), Ok(t)) = (
+        usize::try_from(bottom),
+        usize::try_from(middle),
+        usize::try_from(top),
+    ) else {
+        return;
+    };
+    if b < m && m < t {
+        // SAFETY: the caller's contract; `b < t <= argc`.
+        let run = unsafe { core::slice::from_raw_parts_mut(argv.add(b), t - b) };
+        run.rotate_left(m - b);
+    }
+    d.first_nonopt += top - middle;
+    d.last_nonopt = top;
+}
+
+/// A new parse: `optind` 0 becomes 1, nothing is stepped over yet, and the
+/// order is read from `optstring`'s first character or the environment;
+/// `optstring` past that `+` or `-`.
+///
+/// # Safety
+///
+/// `optstring` is a NUL-terminated string.
+unsafe fn initialize(d: &mut State, optstring: *const u8, io: &Io) -> *const u8 {
+    if d.optind == 0 {
+        d.optind = 1;
+    }
+    d.first_nonopt = d.optind;
+    d.last_nonopt = d.optind;
+    d.nextchar = core::ptr::null();
+    // SAFETY: the caller's contract; a first byte past the NUL is not read.
+    let first = unsafe { *optstring };
+    let rest = if first == b'-' || first == b'+' {
+        // SAFETY: as above: the first byte is not the NUL.
+        unsafe { optstring.add(1) }
+    } else {
+        optstring
+    };
+    d.ordering = match first {
+        b'-' => Ordering::ReturnInOrder,
+        b'+' => Ordering::RequireOrder,
+        _ if (io.posixly_correct)() => Ordering::RequireOrder,
+        _ => Ordering::Permute,
+    };
+    d.initialized = true;
+    rest
+}
+
+/// One call's parse (glibc's `_getopt_internal_r`), on the state.
+///
+/// # Safety
+///
+/// `argv` holds `argc` pointers to NUL-terminated strings; `optstring` is a
+/// NUL-terminated string; `longopts` is NULL or an array ended by an entry
+/// whose name is NULL; `longind` is NULL or writable.
+#[allow(clippy::too_many_arguments)] // glibc's own parameters, and the I/O
+#[allow(clippy::too_many_lines)] // glibc's one function, step by step
+unsafe fn parse_one(
+    d: &mut State,
+    argc: i32,
+    argv: *mut *const u8,
+    mut optstring: *const u8,
+    longopts: *const Option,
+    longind: *mut i32,
+    long_only: bool,
+    mut print_errors: bool,
+    io: &Io,
+) -> i32 {
+    if argc < 1 {
+        return -1;
+    }
+    d.optarg = core::ptr::null();
+    // SAFETY (the whole body): the caller's contract. Every `argv[i]` read
+    // has `i < argc`; every string is walked no further than its NUL.
+    unsafe {
+        if d.optind == 0 || !d.initialized {
+            optstring = initialize(d, optstring, io);
+        } else if *optstring == b'-' || *optstring == b'+' {
+            optstring = optstring.add(1);
+        }
+        let colon = *optstring == b':';
+        if colon {
+            print_errors = false;
+        }
+        let argv0 = text(arg(argv, 0));
+
+        if d.nextchar.is_null() || *d.nextchar == 0 {
+            // The next argument. The program may have moved `optind` back.
+            d.last_nonopt = d.last_nonopt.min(d.optind);
+            d.first_nonopt = d.first_nonopt.min(d.optind);
+            if d.ordering == Ordering::Permute {
+                if d.first_nonopt != d.last_nonopt && d.last_nonopt != d.optind {
+                    exchange(argv, d);
+                } else if d.last_nonopt != d.optind {
+                    d.first_nonopt = d.optind;
+                }
+                while d.optind < argc && is_nonoption(arg(argv, d.optind)) {
+                    d.optind += 1;
+                }
+                d.last_nonopt = d.optind;
+            }
+            // `--` ends the options: what was stepped over goes after the
+            // options before it, and `optind` to the first of it.
+            if d.optind != argc && text(arg(argv, d.optind)) == b"--" {
+                d.optind += 1;
+                if d.first_nonopt != d.last_nonopt && d.last_nonopt != d.optind {
+                    exchange(argv, d);
+                } else if d.first_nonopt == d.last_nonopt {
+                    d.first_nonopt = d.optind;
+                }
+                d.last_nonopt = argc;
+                d.optind = argc;
+            }
+            if d.optind == argc {
+                if d.first_nonopt != d.last_nonopt {
+                    d.optind = d.first_nonopt;
+                }
+                return -1;
+            }
+            let a = arg(argv, d.optind);
+            if is_nonoption(a) {
+                if d.ordering == Ordering::RequireOrder {
+                    return -1;
+                }
+                d.optarg = a;
+                d.optind += 1;
+                return 1;
+            }
+            if !longopts.is_null() {
+                if *a.add(1) == b'-' {
+                    d.nextchar = a.add(2);
+                    return long_option(
+                        d,
+                        argc,
+                        argv,
+                        optstring,
+                        longopts,
+                        longind,
+                        long_only,
+                        print_errors,
+                        io,
+                        b"--",
+                    );
+                }
+                // `getopt_long_only`: `-name` is tried as a long option
+                // unless it is one letter that is a short option.
+                if long_only && (*a.add(2) != 0 || spec_of(optstring, *a.add(1)).is_none()) {
+                    d.nextchar = a.add(1);
+                    let code = long_option(
+                        d,
+                        argc,
+                        argv,
+                        optstring,
+                        longopts,
+                        longind,
+                        long_only,
+                        print_errors,
+                        io,
+                        b"-",
+                    );
+                    if code != -1 {
+                        return code;
+                    }
+                }
+            }
+            d.nextchar = a.add(1);
+        }
+
+        // A short option: `optind` moves on as the argument's last
+        // character is taken.
+        let c = *d.nextchar;
+        d.nextchar = d.nextchar.add(1);
+        let spec = spec_of(optstring, c);
+        if *d.nextchar == 0 {
+            d.optind += 1;
+        }
+        let Some(spec) = spec else {
+            if print_errors {
+                complain(io, argv0, &[b"invalid option -- '", &[c], b"'\n"]);
+            }
+            d.optopt = i32::from(c);
+            return i32::from(b'?');
+        };
+        let after = *spec.add(1);
+        if c == b'W' && after == b';' && !longopts.is_null() {
+            // `-W foo` (or `-Wfoo`) is `--foo`.
+            if *d.nextchar != 0 {
+                d.optarg = d.nextchar;
+            } else if d.optind == argc {
+                if print_errors {
+                    complain(
+                        io,
+                        argv0,
+                        &[b"option requires an argument -- '", &[c], b"'\n"],
+                    );
+                }
+                d.optopt = i32::from(c);
+                return i32::from(if colon { b':' } else { b'?' });
+            } else {
+                d.optarg = arg(argv, d.optind);
+            }
+            d.nextchar = d.optarg;
+            d.optarg = core::ptr::null();
+            return long_option(
+                d,
+                argc,
+                argv,
+                optstring,
+                longopts,
+                longind,
+                false,
+                print_errors,
+                io,
+                b"-W ",
+            );
+        }
+        if after == b':' {
+            if *spec.add(2) == b':' {
+                // An optional argument: only one attached to the option.
+                if *d.nextchar != 0 {
+                    d.optarg = d.nextchar;
+                    d.optind += 1;
+                } else {
+                    d.optarg = core::ptr::null();
+                }
+            } else if *d.nextchar != 0 {
+                d.optarg = d.nextchar;
+                d.optind += 1;
+            } else if d.optind == argc {
+                if print_errors {
+                    complain(
+                        io,
+                        argv0,
+                        &[b"option requires an argument -- '", &[c], b"'\n"],
+                    );
+                }
+                d.optopt = i32::from(c);
+                d.nextchar = core::ptr::null();
+                return i32::from(if colon { b':' } else { b'?' });
+            } else {
+                d.optarg = arg(argv, d.optind);
+                d.optind += 1;
+            }
+            d.nextchar = core::ptr::null();
+        }
+        i32::from(c)
+    }
+}
+
+/// Whether two long options mean the same: the same argument, flag and
+/// answer. A prefix of several such names is not ambiguous.
+fn same_meaning(a: &Option, b: &Option) -> bool {
+    a.has_arg == b.has_arg && a.flag == b.flag && a.val == b.val
+}
+
+/// An ambiguous option's candidates as glibc lists them, ` '<prefix><name>'`
+/// each, into `buf` when it is not NULL: their length.
+///
+/// # Safety
+///
+/// Each candidate's name is a NUL-terminated string; `buf` is NULL or holds
+/// the length a call with NULL answered.
+unsafe fn candidate_list<'a>(
+    candidates: impl Iterator<Item = &'a Option>,
+    prefix: &[u8],
+    buf: *mut u8,
+) -> usize {
+    let mut n = 0usize;
+    for p in candidates {
+        // SAFETY: the caller's contract.
+        let name = unsafe { text(p.name) };
+        for part in [&b" '"[..], prefix, name, b"'"] {
+            if !buf.is_null() {
+                // SAFETY: `buf` holds the whole list, the caller's contract.
+                unsafe { core::ptr::copy_nonoverlapping(part.as_ptr(), buf.add(n), part.len()) };
+            }
+            n += part.len();
+        }
+    }
+    n
+}
+
+/// The long option at `d.nextchar` (the name, then any `=value`), `prefix`
+/// being what came before it (`--`, `-`, or `-W `): its answer, or -1 for
+/// `getopt_long_only` to take the argument as short options instead.
+///
+/// # Safety
+///
+/// As [`parse_one`]; `d.nextchar` points into `argv[d.optind]`.
+#[allow(clippy::too_many_arguments)] // glibc's own parameters, and the I/O
+#[allow(clippy::too_many_lines)] // glibc's one function, step by step
+unsafe fn long_option(
+    d: &mut State,
+    argc: i32,
+    argv: *mut *const u8,
+    optstring: *const u8,
+    longopts: *const Option,
+    longind: *mut i32,
+    long_only: bool,
+    print_errors: bool,
+    io: &Io,
+    prefix: &[u8],
+) -> i32 {
+    // SAFETY (the whole body): the caller's contract; the options are read
+    // up to the entry whose name is NULL.
+    unsafe {
+        let argv0 = text(arg(argv, 0));
+        let rest = text(d.nextchar);
+        let namelen = rest.iter().position(|&b| b == b'=').unwrap_or(rest.len());
+        let name = &rest[..namelen];
+        // The entries up to the one whose name is NULL.
+        let mut n_options = 0usize;
+        while !(*longopts.add(n_options)).name.is_null() {
+            n_options += 1;
+        }
+        let opts = core::slice::from_raw_parts(longopts, n_options);
+
+        // A whole name first; else the first name it begins, unless another
+        // that means something else begins with it too.
+        let mut found = opts.iter().position(|p| text(p.name) == name);
+        if found.is_none() {
+            let prefixed = |p: &Option| text(p.name).starts_with(name);
+            let first = opts.iter().position(prefixed);
+            if let Some(f) = first {
+                let pf = &opts[f];
+                let conflicts = |p: &Option| long_only || !same_meaning(pf, p);
+                if opts[f + 1..].iter().any(|p| prefixed(p) && conflicts(p)) {
+                    if print_errors {
+                        // The candidates: the first, and each later one that
+                        // conflicts with it -- measured, then written.
+                        let candidates = || {
+                            core::iter::once(pf).chain(
+                                opts[f + 1..]
+                                    .iter()
+                                    .filter(|&p| prefixed(p) && conflicts(p)),
+                            )
+                        };
+                        let len = candidate_list(candidates(), prefix, core::ptr::null_mut());
+                        let buf = crate::malloc::malloc(len);
+                        if buf.is_null() {
+                            // glibc's word for it without memory for the list.
+                            complain(io, argv0, &[b"option '", prefix, rest, b"' is ambiguous\n"]);
+                        } else {
+                            candidate_list(candidates(), prefix, buf);
+                            let listed = core::slice::from_raw_parts(buf, len);
+                            complain(
+                                io,
+                                argv0,
+                                &[
+                                    b"option '",
+                                    prefix,
+                                    rest,
+                                    b"' is ambiguous; possibilities:",
+                                    listed,
+                                    b"\n",
+                                ],
+                            );
+                            crate::malloc::free(buf);
+                        }
+                    }
+                    d.nextchar = d.nextchar.add(rest.len());
+                    d.optind += 1;
+                    d.optopt = 0;
+                    return i32::from(b'?');
+                }
+            }
+            found = first;
+        }
+
+        let Some(i) = found else {
+            // No such long option: an error, unless `getopt_long_only` may
+            // take it as short options.
+            let a = arg(argv, d.optind);
+            if !long_only || *a.add(1) == b'-' || spec_of(optstring, *d.nextchar).is_none() {
+                if print_errors {
+                    complain(io, argv0, &[b"unrecognized option '", prefix, rest, b"'\n"]);
+                }
+                d.nextchar = core::ptr::null();
+                d.optind += 1;
+                d.optopt = 0;
+                return i32::from(b'?');
+            }
+            return -1;
+        };
+
+        let p = &opts[i];
+        d.optind += 1;
+        d.nextchar = core::ptr::null();
+        if namelen < rest.len() {
+            if p.has_arg != NO_ARGUMENT {
+                d.optarg = rest.as_ptr().add(namelen + 1);
+            } else {
+                if print_errors {
+                    complain(
+                        io,
+                        argv0,
+                        &[
+                            b"option '",
+                            prefix,
+                            text(p.name),
+                            b"' doesn't allow an argument\n",
+                        ],
+                    );
+                }
+                d.optopt = p.val;
+                return i32::from(b'?');
+            }
+        } else if p.has_arg == REQUIRED_ARGUMENT {
+            if d.optind < argc {
+                d.optarg = arg(argv, d.optind);
+                d.optind += 1;
+            } else {
+                if print_errors {
+                    complain(
+                        io,
+                        argv0,
+                        &[
+                            b"option '",
+                            prefix,
+                            text(p.name),
+                            b"' requires an argument\n",
+                        ],
+                    );
+                }
+                d.optopt = p.val;
+                return i32::from(if *optstring == b':' { b':' } else { b'?' });
+            }
+        }
+        if !longind.is_null() {
+            *longind = i32::try_from(i).unwrap_or(i32::MAX);
+        }
+        if !p.flag.is_null() {
+            *p.flag = p.val;
+            return 0;
+        }
+        p.val
+    }
+}
+
+/// One call, through the globals: `optind` and `opterr` read from the
+/// program's, `optind`, `optarg` and `optopt` written back to them after.
+///
+/// # Safety
+///
+/// As [`parse_one`], `argv` and `optstring` may be NULL (-1).
 #[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
-pub unsafe extern "C" fn getopt(argc: i32, argv: *const *const u8, optstring: *const u8) -> i32 {
+unsafe fn call(
+    argc: i32,
+    argv: *const *const u8,
+    optstring: *const u8,
+    longopts: *const Option,
+    longind: *mut i32,
+    long_only: bool,
+    io: &Io,
+) -> i32 {
     if argv.is_null() || optstring.is_null() {
         return -1;
     }
-
-    // SAFETY: We use raw pointers to access the global mutable statics.
-    // getopt is inherently not thread-safe (POSIX spec).
-    let ind = unsafe { *core::ptr::addr_of!(optind) };
-    let pos = unsafe { *core::ptr::addr_of!(OPTPOS) };
-
-    // Reset optarg.
+    // SAFETY: the parse state is the process's, as getopt's is by POSIX
+    // (not reentrant); the globals are plain words.
     unsafe {
-        core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+        let d = &mut *core::ptr::addr_of_mut!(STATE);
+        d.optind = core::ptr::addr_of!(optind).read();
+        let print_errors = core::ptr::addr_of!(opterr).read() != 0;
+        // glibc's argv is `char *const []`, and it permutes it anyway.
+        let r = parse_one(
+            d,
+            argc,
+            argv.cast_mut(),
+            optstring,
+            longopts,
+            longind,
+            long_only,
+            print_errors,
+            io,
+        );
+        core::ptr::addr_of_mut!(optind).write(d.optind);
+        core::ptr::addr_of_mut!(optarg).write(d.optarg);
+        core::ptr::addr_of_mut!(optopt).write(d.optopt);
+        r
     }
-
-    if ind >= argc || ind < 1 {
-        return -1;
-    }
-
-    // SAFETY: ind < argc, so argv.add(ind as usize) is valid.
-    let arg = unsafe { *argv.add(ind as usize) };
-    if arg.is_null() {
-        return -1;
-    }
-
-    // If we're not in the middle of an arg, check if this is an option.
-    if pos == 0 {
-        // Must start with '-'.
-        if unsafe { *arg } != b'-' {
-            return -1;
-        }
-
-        // "--" or "-" ends option processing.
-        let second = unsafe { *arg.add(1) };
-        if second == 0 {
-            return -1; // Bare "-".
-        }
-        if second == b'-' && unsafe { *arg.add(2) } == 0 {
-            // "--" — skip it and stop.
-            unsafe {
-                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(OPTPOS).write(0);
-            }
-            return -1;
-        }
-
-        // Start scanning at position 1 (after '-').
-        unsafe {
-            core::ptr::addr_of_mut!(OPTPOS).write(1);
-        }
-    }
-
-    let cur_pos = unsafe { *core::ptr::addr_of!(OPTPOS) };
-    // SAFETY: arg is valid, cur_pos >= 1.
-    let opt_char = unsafe { *arg.add(cur_pos) };
-
-    if opt_char == 0 {
-        // End of this argument — move to next.
-        unsafe {
-            core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-        }
-        unsafe {
-            core::ptr::addr_of_mut!(OPTPOS).write(0);
-        }
-        // Recursively try the next argument.
-        return unsafe { getopt(argc, argv, optstring) };
-    }
-
-    // Look up opt_char in optstring.
-    let found_pos = find_in_optstring(optstring, opt_char);
-
-    if found_pos < 0 {
-        // Unknown option.
-        unsafe {
-            core::ptr::addr_of_mut!(optopt).write(i32::from(opt_char));
-        }
-
-        // Advance past this character.
-        unsafe {
-            core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1));
-        }
-        if unsafe { *arg.add(cur_pos.wrapping_add(1)) } == 0 {
-            unsafe {
-                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(OPTPOS).write(0);
-            }
-        }
-
-        return i32::from(b'?');
-    }
-
-    // Check if this option takes an argument.
-    let takes_arg = unsafe { *optstring.add((found_pos as usize).wrapping_add(1)) } == b':';
-
-    if takes_arg {
-        // Check if argument is in the rest of this argv element.
-        let next_pos = cur_pos.wrapping_add(1);
-        if unsafe { *arg.add(next_pos) } != 0 {
-            // Argument is the rest of this element.
-            unsafe {
-                core::ptr::addr_of_mut!(optarg).write(arg.add(next_pos));
-                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-                core::ptr::addr_of_mut!(OPTPOS).write(0);
-            }
-        } else {
-            // Argument is the next argv element.
-            let next_ind = ind.wrapping_add(1);
-            if next_ind >= argc {
-                // Missing argument.
-                unsafe {
-                    core::ptr::addr_of_mut!(optopt).write(i32::from(opt_char));
-                    core::ptr::addr_of_mut!(optind).write(next_ind);
-                    core::ptr::addr_of_mut!(OPTPOS).write(0);
-                }
-                // If optstring starts with ':', return ':'.
-                if unsafe { *optstring } == b':' {
-                    return i32::from(b':');
-                }
-                return i32::from(b'?');
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(optarg).write(*argv.add(next_ind as usize));
-                core::ptr::addr_of_mut!(optind).write(next_ind.wrapping_add(1));
-                core::ptr::addr_of_mut!(OPTPOS).write(0);
-            }
-        }
-    } else {
-        // No argument — advance within the current argv element.
-        unsafe {
-            core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1));
-        }
-        if unsafe { *arg.add(cur_pos.wrapping_add(1)) } == 0 {
-            unsafe {
-                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-            }
-            unsafe {
-                core::ptr::addr_of_mut!(OPTPOS).write(0);
-            }
-        }
-    }
-
-    i32::from(opt_char)
 }
 
-/// Find a character in the optstring.
+/// Parse command-line options: the next option character from `argv`, as
+/// `optstring` describes them -- `'?'` for an error, `':'` for a missing
+/// argument when `optstring` starts with `:`, 1 for another argument when
+/// it starts with `-`, and -1 when the options are done. See the module
+/// documentation for the order, the complaints and the rest.
 ///
-/// Returns the index of the character, or -1 if not found.
-/// Skips a leading ':' in optstring (it controls error behavior).
-fn find_in_optstring(optstring: *const u8, ch: u8) -> i32 {
-    if ch == b':' || ch == b'-' {
-        // These are never valid option characters.
-        return -1;
-    }
-
-    let mut i: usize = 0;
-    // Skip leading ':' (it means "return ':' on missing arg").
-    if unsafe { *optstring } == b':' {
-        i = 1;
-    }
-
-    loop {
-        let c = unsafe { *optstring.add(i) };
-        if c == 0 {
-            return -1;
-        }
-        if c == ch {
-            return i as i32;
-        }
-        i = i.wrapping_add(1);
-        // Skip ':' argument specifier.
-        if unsafe { *optstring.add(i) } == b':' {
-            i = i.wrapping_add(1);
-        }
+/// # Safety
+///
+/// `argv` must be NULL or an array of at least `argc` pointers to
+/// NUL-terminated strings, which the parse may reorder; `optstring` must be
+/// NULL or NUL-terminated.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
+pub unsafe extern "C" fn getopt(argc: i32, argv: *const *const u8, optstring: *const u8) -> i32 {
+    // SAFETY: the caller's contract.
+    unsafe {
+        call(
+            argc,
+            argv,
+            optstring,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            false,
+            &Io::process(),
+        )
     }
 }
 
@@ -260,14 +750,10 @@ pub const REQUIRED_ARGUMENT: i32 = 1;
 /// `has_arg` value: option takes an optional argument.
 pub const OPTIONAL_ARGUMENT: i32 = 2;
 
-/// Parse long (and short) command-line options.
-///
-/// Processes `argv` looking for both short options (from `optstring`)
-/// and long options (from `longopts`).  When a long option is matched,
-/// `*longindex` (if non-null) is set to the index in `longopts`.
-///
-/// Returns the option character (short) or `val`/0 (long), '?' on error,
-/// or -1 when all options are consumed.
+/// Parse long (and short) command-line options: as [`getopt`], and
+/// `--name` from `longopts` -- whose `val` is the answer, or 0 with `*flag`
+/// set to it when `flag` is not NULL -- with `*longindex` (when not NULL)
+/// the entry's index.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
 pub extern "C" fn getopt_long(
@@ -277,11 +763,23 @@ pub extern "C" fn getopt_long(
     longopts: *const Option,
     longindex: *mut i32,
 ) -> i32 {
-    getopt_long_impl(argc, argv, optstring, longopts, longindex, false)
+    // SAFETY: the caller's contract, as `getopt`'s; `longopts` is NULL or
+    // ended by an entry whose name is NULL.
+    unsafe {
+        call(
+            argc,
+            argv,
+            optstring,
+            longopts,
+            longindex,
+            false,
+            &Io::process(),
+        )
+    }
 }
 
-/// Like `getopt_long` but also tries to match long options for
-/// `-option` (single dash), not just `--option`.
+/// As [`getopt_long`], and `-name` as a long option too, unless it is one
+/// letter that is a short option or no long option matches.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
 pub extern "C" fn getopt_long_only(
@@ -291,203 +789,38 @@ pub extern "C" fn getopt_long_only(
     longopts: *const Option,
     longindex: *mut i32,
 ) -> i32 {
-    getopt_long_impl(argc, argv, optstring, longopts, longindex, true)
+    // SAFETY: as `getopt_long`.
+    unsafe {
+        call(
+            argc,
+            argv,
+            optstring,
+            longopts,
+            longindex,
+            true,
+            &Io::process(),
+        )
+    }
 }
 
-/// Shared implementation for `getopt_long` and `getopt_long_only`.
-#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
-fn getopt_long_impl(
-    argc: i32,
-    argv: *const *const u8,
-    optstring: *const u8,
-    longopts: *const Option,
-    longindex: *mut i32,
-    long_only: bool,
-) -> i32 {
-    let ind = unsafe { core::ptr::addr_of!(optind).read() };
-    let pos = unsafe { core::ptr::addr_of!(OPTPOS).read() };
-    if ind >= argc || argv.is_null() || optstring.is_null() {
-        return -1;
-    }
-
-    // SAFETY: ind is in [0, argc), argv is non-null.
-    let arg = unsafe { *argv.add(ind as usize) };
-    if arg.is_null() {
-        return -1;
-    }
-
-    let c0 = unsafe { *arg };
-    if c0 != b'-' || unsafe { *arg.add(1) } == 0 {
-        // Not an option — stop.
-        return -1;
-    }
-
-    // Check for "--" (end of options).
-    if unsafe { *arg.add(1) } == b'-' && unsafe { *arg.add(2) } == 0 {
-        unsafe {
-            core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-            core::ptr::addr_of_mut!(OPTPOS).write(0);
-        }
-        return -1;
-    }
-
-    // Only try long option matching when we're NOT in the middle of
-    // grouped short options (pos == 0). If OPTPOS > 0, we're mid-scan
-    // on a grouped arg like "-abc" and must continue with short options.
-    if pos == 0 {
-        // Check for long option: "--something" or (with long_only) "-something".
-        let is_long = unsafe { *arg.add(1) } == b'-';
-        if is_long || (long_only && !longopts.is_null()) {
-            let name_start = if is_long { 2usize } else { 1usize };
-            let result = try_match_long(arg, name_start, longopts, longindex);
-            if let Some(ret) = result {
-                // Consume the argument.
-                let mut next_ind = ind.wrapping_add(1);
-
-                // Handle required/optional argument.
-                let matched_idx = if longindex.is_null() {
-                    -1
-                } else {
-                    unsafe { *longindex }
-                };
-
-                if matched_idx >= 0 {
-                    let opt = unsafe { &*longopts.add(matched_idx as usize) };
-                    let arg_result =
-                        handle_long_opt_arg(arg, name_start, opt, argc, argv, &mut next_ind);
-                    if arg_result < 0 {
-                        // Error: either unwanted "=val" or missing required arg.
-                        unsafe {
-                            core::ptr::addr_of_mut!(optind).write(next_ind);
-                            core::ptr::addr_of_mut!(OPTPOS).write(0);
-                        }
-                        return i32::from(b'?');
-                    }
-                }
-
-                unsafe {
-                    core::ptr::addr_of_mut!(optind).write(next_ind);
-                    core::ptr::addr_of_mut!(OPTPOS).write(0);
-                }
-                return ret;
-            }
-
-            // If this was "--something" (double dash) and no match, it's an error.
-            if is_long {
-                unsafe {
-                    core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
-                    core::ptr::addr_of_mut!(OPTPOS).write(0);
-                }
-                return i32::from(b'?');
-            }
-            // For long_only with single dash, fall through to short option handling.
-        }
-    }
-
-    // Delegate to short-option getopt.
-    // SAFETY: argc/argv/optstring are forwarded from our caller, which
-    // has the same safety requirements as getopt.
-    unsafe { getopt(argc, argv, optstring) }
-}
-
-/// Try to match a long option from the argv element.
-///
-/// Returns `Some(val_or_0)` if matched, `None` if no match.
-fn try_match_long(
-    arg: *const u8,
-    name_start: usize,
-    longopts: *const Option,
-    longindex: *mut i32,
-) -> core::option::Option<i32> {
-    if longopts.is_null() {
-        return None;
-    }
-
-    // Extract the option name (up to '=' or NUL).
-    let mut name_len: usize = 0;
-    loop {
-        let c = unsafe { *arg.add(name_start.wrapping_add(name_len)) };
-        if c == 0 || c == b'=' {
-            break;
-        }
-        name_len = name_len.wrapping_add(1);
-    }
-
-    if name_len == 0 {
-        return None;
-    }
-
-    // Search longopts for a match.
-    let mut idx: usize = 0;
-    loop {
-        let opt = unsafe { &*longopts.add(idx) };
-        if opt.name.is_null() {
-            break; // End of longopts array.
-        }
-
-        // Compare names.
-        if names_match(arg, name_start, name_len, opt.name) {
-            if !longindex.is_null() {
-                unsafe {
-                    *longindex = idx as i32;
-                }
-            }
-
-            // Return value based on flag.
-            if opt.flag.is_null() {
-                return Some(opt.val);
-            }
-            unsafe {
-                *opt.flag = opt.val;
-            }
-            return Some(0);
-        }
-
-        idx = idx.wrapping_add(1);
-    }
-
-    None
-}
-
-/// Check if the name in argv matches a long option name.
-fn names_match(arg: *const u8, name_start: usize, name_len: usize, opt_name: *const u8) -> bool {
-    let opt_len = unsafe { crate::string::strlen(opt_name) };
-    if name_len != opt_len {
-        return false;
-    }
-    let mut i: usize = 0;
-    while i < name_len {
-        let a = unsafe { *arg.add(name_start.wrapping_add(i)) };
-        let b = unsafe { *opt_name.add(i) };
-        if a != b {
-            return false;
-        }
-        i = i.wrapping_add(1);
-    }
-    true
-}
+// ---------------------------------------------------------------------------
+// Test support
+// ---------------------------------------------------------------------------
 
 /// Cross-test serialisation for getopt's process-global parser state.
 ///
-/// `optarg`/`optind`/`opterr`/`optopt`/`OPTPOS` are mutable statics by
-/// POSIX requirement, so every getopt test (and every test of code
-/// that calls getopt) races against every other under cargo's default
+/// `optarg`/`optind`/`opterr`/`optopt` and the parse state are mutable
+/// statics by POSIX requirement, so every getopt test (and every test of
+/// code that calls getopt) races against every other under cargo's default
 /// parallel runner. Holding this mutex for the duration of a test
-/// guarantees the globals reflect that test's call sequence end-to-
-/// end, eliminating the spurious `optind`-corruption failures
-/// previously documented in todo.txt
-/// (test_long_only_double_dash_still_works flake, 2026-05-27).
-///
-/// Only compiled on host builds (`std::sync::Mutex` is unavailable in
-/// the no_std `target_os = "none"` build).
+/// guarantees the globals reflect that test's call sequence end-to-end.
 #[cfg(all(test, not(target_os = "none")))]
 static GETOPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Zero the getopt globals back to their post-init values.
+/// The globals and the parse state back to their values at program start.
 ///
-/// Internal helper: assumes the caller already holds
-/// `GETOPT_TEST_LOCK` (typically via `reset_getopt_state`) or runs in
-/// a context where parallel access is impossible.
+/// Internal helper: assumes the caller already holds `GETOPT_TEST_LOCK`
+/// (typically via `reset_getopt_state`).
 #[cfg(test)]
 unsafe fn zero_getopt_globals() {
     // SAFETY: caller guarantees serialised access to the globals.
@@ -495,98 +828,37 @@ unsafe fn zero_getopt_globals() {
         core::ptr::addr_of_mut!(optind).write(1);
         core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
         core::ptr::addr_of_mut!(opterr).write(1);
-        core::ptr::addr_of_mut!(optopt).write(0);
-        core::ptr::addr_of_mut!(OPTPOS).write(0);
+        core::ptr::addr_of_mut!(optopt).write(i32::from(b'?'));
+        core::ptr::addr_of_mut!(STATE).write(State {
+            optind: 1,
+            optarg: core::ptr::null(),
+            optopt: 0,
+            initialized: false,
+            nextchar: core::ptr::null(),
+            ordering: Ordering::Permute,
+            first_nonopt: 1,
+            last_nonopt: 1,
+        });
     }
 }
 
-/// Reset all getopt global state AND acquire the cross-test
-/// serialisation lock.
+/// Reset all getopt global state AND acquire the cross-test serialisation
+/// lock. Returns a `MutexGuard` that the caller must keep alive for the
+/// test; a poisoned one is recovered.
 ///
-/// Returns a `MutexGuard` that the caller must keep alive for the
-/// duration of the test. Poisoned guards are recovered so a prior
-/// panicking test doesn't wedge subsequent ones.
-///
-/// Must be called as `let _g = unsafe { reset_getopt_state() };`
-/// at the top of every getopt-touching test. Tests that need a
-/// mid-test reset (e.g. re-parse the same argv) should use
-/// `zero_getopt_globals()` instead of re-acquiring the lock — calling
-/// `reset_getopt_state` a second time would deadlock because Rust
-/// shadowing keeps the prior guard alive.
+/// Must be called as `let _g = unsafe { reset_getopt_state() };` at the top
+/// of every getopt-touching test; a mid-test reset uses
+/// `zero_getopt_globals()`, since taking the lock again would deadlock.
 #[cfg(test)]
 #[must_use = "the returned guard serialises getopt tests; bind it to `_g`"]
 unsafe fn reset_getopt_state() -> std::sync::MutexGuard<'static, ()> {
     let guard = GETOPT_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // SAFETY: we now hold the cross-test lock; no other thread can
-    // touch the globals concurrently.
+    // SAFETY: we now hold the cross-test lock; no other thread can touch
+    // the globals concurrently.
     unsafe { zero_getopt_globals() };
     guard
-}
-
-/// Handle the argument for a matched long option.
-///
-/// Returns 0 on success, -1 on error (unwanted `=value` for no_argument
-/// options, or missing required argument).
-#[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
-fn handle_long_opt_arg(
-    arg: *const u8,
-    name_start: usize,
-    opt: &Option,
-    argc: i32,
-    argv: *const *const u8,
-    next_ind: &mut i32,
-) -> i32 {
-    // Find the '=' if present (inline argument).
-    let mut i = name_start;
-    let mut has_eq = false;
-    loop {
-        let c = unsafe { *arg.add(i) };
-        if c == 0 {
-            break;
-        }
-        if c == b'=' {
-            has_eq = true;
-            break;
-        }
-        i = i.wrapping_add(1);
-    }
-
-    if has_eq {
-        if opt.has_arg == NO_ARGUMENT {
-            // "--foo=bar" when foo takes no argument — error.
-            unsafe {
-                core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
-            }
-            return -1;
-        }
-        // Argument is after the '='.
-        let arg_ptr = unsafe { arg.add(i.wrapping_add(1)) };
-        unsafe {
-            core::ptr::addr_of_mut!(optarg).write(arg_ptr);
-        }
-    } else if opt.has_arg == REQUIRED_ARGUMENT {
-        // Argument is the next argv element.
-        if *next_ind < argc {
-            let next_arg = unsafe { *argv.add(*next_ind as usize) };
-            unsafe {
-                core::ptr::addr_of_mut!(optarg).write(next_arg);
-            }
-            *next_ind = next_ind.wrapping_add(1);
-        } else {
-            // Missing required argument.
-            unsafe {
-                core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
-            }
-            return -1;
-        }
-    } else {
-        unsafe {
-            core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
-        }
-    }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -595,15 +867,20 @@ fn handle_long_opt_arg(
 
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks)]
-// NOTE: these tests use global state (optind, optarg, etc.) and MUST be
-// run single-threaded: `cargo test -- --test-threads=1`
+// These tests use the global state (optind, optarg, ...): each holds
+// `GETOPT_TEST_LOCK` through `reset_getopt_state`.
 mod tests {
     use super::*;
 
     /// Build a null-terminated C string on the stack and return its pointer.
     /// The returned pointer is valid for the lifetime of the `Vec`.
     fn cstr(s: &str) -> Vec<u8> {
-        let mut v = s.as_bytes().to_vec();
+        cstr_bytes(s.as_bytes())
+    }
+
+    /// `b` and a NUL.
+    fn cstr_bytes(b: &[u8]) -> Vec<u8> {
+        let mut v = b.to_vec();
         v.push(0);
         v
     }
@@ -1166,27 +1443,29 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // find_in_optstring edge cases
+    // Option characters
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_colon_and_dash_never_match() {
-        let opts = cstr("a:b-c");
-        // ':' and '-' should never be recognized as option characters.
-        assert_eq!(find_in_optstring(opts.as_ptr(), b':'), -1);
-        assert_eq!(find_in_optstring(opts.as_ptr(), b'-'), -1);
-        // But 'a', 'b', 'c' should match.
-        assert!(find_in_optstring(opts.as_ptr(), b'a') >= 0);
-        assert!(find_in_optstring(opts.as_ptr(), b'b') >= 0);
-    }
-
-    #[test]
-    fn test_find_in_optstring_leading_colon() {
-        // Leading ':' should be skipped.
-        let opts = cstr(":ab");
-        assert!(find_in_optstring(opts.as_ptr(), b'a') >= 0);
-        assert!(find_in_optstring(opts.as_ptr(), b'b') >= 0);
-        assert_eq!(find_in_optstring(opts.as_ptr(), b'z'), -1);
+    fn colon_and_semicolon_are_never_options() {
+        let opts = cstr("a:b;c-");
+        // SAFETY: a NUL-terminated optstring.
+        unsafe {
+            assert!(spec_of(opts.as_ptr(), b':').is_none());
+            assert!(spec_of(opts.as_ptr(), b';').is_none());
+            assert!(spec_of(opts.as_ptr(), 0).is_none());
+            // glibc's strchr: `-` is an option character like any other.
+            assert!(spec_of(opts.as_ptr(), b'-').is_some());
+            assert!(spec_of(opts.as_ptr(), b'a').is_some());
+            assert!(spec_of(opts.as_ptr(), b'c').is_some());
+            assert!(spec_of(opts.as_ptr(), b'z').is_none());
+        }
+        let colon = cstr(":ab");
+        // SAFETY: as above.
+        unsafe {
+            assert!(spec_of(colon.as_ptr(), b'a').is_some());
+            assert!(spec_of(colon.as_ptr(), b'z').is_none());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1294,5 +1573,240 @@ mod tests {
         );
         // Should return '?' for unrecognized option.
         assert_eq!(r, i32::from(b'?'));
+    }
+
+    // -----------------------------------------------------------------------
+    // glibc's answers
+    // -----------------------------------------------------------------------
+
+    /// glibc 2.39's answers, one line a parse (`getopt_harness.py`).
+    const ORACLE: &str = include_str!("getopt_oracle.txt");
+
+    /// The harness's flag variable, which its tables' `flag` entries set.
+    static mut FLAGVAR: i32 = 0;
+
+    /// A long-option table of the harness's, and the names it points at.
+    struct Table {
+        opts: Vec<Option>,
+        _names: Vec<Vec<u8>>,
+    }
+
+    /// The harness's tables, by name: (name, has_arg, sets the flag, val).
+    fn table(which: &str) -> std::option::Option<Table> {
+        let entries: &[(&str, i32, bool, i32)] = match which {
+            "t1" => &[
+                ("verbose", 0, false, b'v' as i32),
+                ("version", 0, false, b'V' as i32),
+                ("file", 1, false, b'f' as i32),
+                ("opt", 2, false, b'o' as i32),
+                ("flag", 0, true, 42),
+                ("nofile", 0, false, b'n' as i32),
+                ("verbatim", 0, false, b'v' as i32),
+                ("color", 2, false, 300),
+                ("colour", 2, false, 300),
+                ("x", 0, false, b'x' as i32),
+            ],
+            "t2" => &[
+                ("aa", 0, false, b'1' as i32),
+                ("aab", 1, false, b'2' as i32),
+                ("ab", 2, false, b'3' as i32),
+                ("b", 1, false, b'4' as i32),
+                ("bee", 0, true, 7),
+                ("a", 0, false, b'5' as i32),
+            ],
+            _ => return None,
+        };
+        let names: Vec<Vec<u8>> = entries.iter().map(|e| cstr(e.0)).collect();
+        let mut opts: Vec<Option> = entries
+            .iter()
+            .zip(&names)
+            .map(|(e, n)| Option {
+                name: n.as_ptr(),
+                has_arg: e.1,
+                flag: if e.2 {
+                    core::ptr::addr_of_mut!(FLAGVAR)
+                } else {
+                    core::ptr::null_mut()
+                },
+                val: e.3,
+            })
+            .collect();
+        opts.push(Option {
+            name: core::ptr::null(),
+            has_arg: 0,
+            flag: core::ptr::null_mut(),
+            val: 0,
+        });
+        Some(Table {
+            opts,
+            _names: names,
+        })
+    }
+
+    /// A text as the harness writes it: `\xHH` for a byte outside `!`..`~`
+    /// and for `\`, `\x` for none.
+    fn token(b: &[u8]) -> String {
+        use core::fmt::Write;
+        if b.is_empty() {
+            return "\\x".into();
+        }
+        b.iter().fold(String::new(), |mut s, &c| {
+            if (0x21..=0x7e).contains(&c) && c != b'\\' {
+                s.push(c as char);
+            } else {
+                // Writing into a String cannot fail.
+                let _ = write!(s, "\\x{c:02x}");
+            }
+            s
+        })
+    }
+
+    /// The harness's text form, back to bytes.
+    fn untoken(t: &str) -> Vec<u8> {
+        if t == "\\x" {
+            return Vec::new();
+        }
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).unwrap());
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn posixly_on() -> bool {
+        true
+    }
+
+    fn posixly_off() -> bool {
+        false
+    }
+
+    /// What the harness prints after ` = ` for `case`.
+    fn replay(case: &str) -> String {
+        use core::fmt::Write;
+        let f: Vec<&str> = case.split(' ').collect();
+        let (how, which, posixly, err) = (f[0], f[1], f[2] == "1", f[3].parse::<i32>().unwrap());
+        let optstring = cstr_bytes(&untoken(f[4]));
+        let mut strings: Vec<Vec<u8>> = std::vec![cstr("prog")];
+        strings.extend(f[5..].iter().map(|a| cstr_bytes(&untoken(a))));
+        let orig: Vec<*const u8> = strings.iter().map(|s| s.as_ptr()).collect();
+        let mut argv = orig.clone();
+        argv.push(core::ptr::null());
+        let argc = i32::try_from(orig.len()).unwrap();
+        let tab = table(which);
+        let longopts = tab.as_ref().map_or(core::ptr::null(), |t| t.opts.as_ptr());
+        let pair = crate::error::capture::Pair::new();
+        let io = Io {
+            posixly_correct: if posixly { posixly_on } else { posixly_off },
+            messages: pair.stderr,
+        };
+        // SAFETY: the test holds the getopt lock; the globals are plain words.
+        unsafe {
+            core::ptr::addr_of_mut!(optind).write(0);
+            core::ptr::addr_of_mut!(opterr).write(err);
+            core::ptr::addr_of_mut!(optopt).write(1234);
+            core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+            core::ptr::addr_of_mut!(FLAGVAR).write(0);
+        }
+        let mut out = String::new();
+        for _ in 0..40 {
+            let mut li = -1;
+            // SAFETY: `argv` holds `argc` strings and a NULL; the table is
+            // ended by a NULL name; `li` is writable.
+            let rc = unsafe {
+                call(
+                    argc,
+                    argv.as_ptr(),
+                    optstring.as_ptr(),
+                    longopts,
+                    &raw mut li,
+                    how == "o",
+                    &io,
+                )
+            };
+            // SAFETY: as above.
+            let (ind, opt, arg, flag) = unsafe {
+                (
+                    core::ptr::addr_of!(optind).read(),
+                    core::ptr::addr_of!(optopt).read(),
+                    core::ptr::addr_of!(optarg).read(),
+                    core::ptr::addr_of!(FLAGVAR).read(),
+                )
+            };
+            let _ = write!(out, " {rc},{ind},{opt},");
+            if arg.is_null() {
+                out.push('-');
+            } else {
+                // SAFETY: `optarg` points into one of the strings.
+                let s = unsafe { core::ffi::CStr::from_ptr(arg.cast()) }.to_bytes();
+                out.push_str(&token(s));
+                let at = orig.iter().enumerate().rev().find(|&(_, &o)| {
+                    // SAFETY: each `o` is one of the strings.
+                    let len = unsafe { core::ffi::CStr::from_ptr(o.cast()) }
+                        .to_bytes()
+                        .len();
+                    arg as usize >= o as usize && arg as usize <= o as usize + len
+                });
+                match at {
+                    Some((i, _)) => {
+                        let _ = write!(out, "@{i}");
+                    }
+                    None => out.push_str("@?"),
+                }
+            }
+            let _ = write!(out, ",{li},{flag}");
+            if rc == -1 {
+                break;
+            }
+        }
+        out.push_str(" |");
+        for &p in &argv[..orig.len()] {
+            // SAFETY: argv holds the strings, reordered.
+            let s = unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes();
+            let _ = write!(out, " {}", token(s));
+        }
+        let _ = write!(out, " | {}", token(&pair.sink));
+        out.trim_start().to_string()
+    }
+
+    /// Every parse `getopt_harness.py` ran against glibc 2.39, replayed in
+    /// its order, the parse state carried from one to the next as glibc's
+    /// is (its `optopt` is only reset by an error).
+    #[test]
+    fn every_parse_is_glibcs() {
+        let _g = unsafe { reset_getopt_state() };
+        let mut wrong = Vec::new();
+        let mut n = 0;
+        for line in ORACLE
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let (case, want) = line.split_once(" = ").unwrap();
+            n += 1;
+            let got = replay(case);
+            if got != want {
+                wrong.push(format!("{case}\n  glibc: {want}\n  ours:  {got}"));
+            }
+        }
+        assert!(n > 2500, "the oracle has {n} lines");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

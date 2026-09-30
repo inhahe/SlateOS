@@ -177230,7 +177230,7 @@ now with this case.
 **Where:** `posix/src/signal.rs` (`tgkill`, `proc_task_exists`);
 `services/ctest-pgroup/main.c` (checks 84-88).
 
-## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (getopt, regcomp, wordexp and strfmon below; memalign's FIXED 2026-09-30)**
+## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp, wordexp and strfmon below; memalign's and getopt's FIXED 2026-09-30)**
 
 **In short:** glibc fixed a run of security bugs in 2024-2026, and the
 oracle's glibc -- Ubuntu's 2.39, `2.39-0ubuntu8.9` -- carries the fixes.
@@ -177269,6 +177269,8 @@ standard with glibc as the oracle, as the rest of this library is:
   argument, no `-W`, no `optind = 0` restart; long options match only
   whole, never by an unambiguous prefix, and there is no "ambiguous"
   error. Nearly every C command-line program leans on some of this.
+  **Fixed 2026-09-30**: glibc's, all 2,571 of its parses in
+  `posix/src/getopt_oracle.txt` answered alike.
 - **`regcomp`** (`posix/src/regex.rs`): no interval expressions (`\{m,n\}`,
   `{m,n}`) and no back-references (`\1`), both of which POSIX requires;
   patterns past 1024 bytes, programs past 512 instructions and more than 9

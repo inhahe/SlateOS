@@ -397,6 +397,7 @@ pub mod inttypes;
 pub mod ioctl;
 pub mod langinfo;
 pub mod ld80;
+pub mod legacy;
 /// The C calling convention for `long double` (`ld_c!`).
 mod ld_abi;
 pub(crate) mod lgamma;

@@ -176254,7 +176254,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176273,8 +176273,8 @@ probes for one (`configure`) takes its fallback. Measured by
 | reentrant random numbers | `drand48_r` `erand48_r` `lrand48_r` `nrand48_r` `mrand48_r` `jrand48_r` `srand48_r` `seed48_r` `lcong48_r` `random_r` `srandom_r` `initstate_r` `setstate_r` | `<stdlib.h>` -- **done 2026-09-29** (`posix/src/prng.rs`) |
 | locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
-| old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... |
-| Linux calls | `execveat` `tgkill` `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
+| old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... -- **done 2026-09-29** (`posix/src/legacy.rs`) |
+| Linux calls | `execveat` (**done 2026-09-29**) `tgkill` `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
 | threads | `pthread_attr_{get,set}affinity_np` `pthread_attr_{get,set}sigmask_np` `pthread_clockjoin_np` `pthread_rwlockattr_{get,set}kind_np` `pthread_yield` `pthread_attr_{get,set}stackaddr` | `<pthread.h>` |
 | name services | `getaddrinfo_a` `gai_suspend` `gai_error` `gai_cancel`; netgroups; the RPC database; `rcmd` `rexec` `ruserok` and their `_af` forms; `res_nquery` and the reentrant resolver; `ns_name_*`; mail aliases (`<aliases.h>`) | `<netdb.h>`, `<resolv.h>` ... |
 | IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` |
@@ -176443,3 +176443,25 @@ lone high surrogate, a crash in `mbrtoc16(NULL, NULL, 0, ps)` -- is
 **Where:** `posix/src/wchar.rs` (`decode`, `MbstateT`, `internal`,
 `mbs_to_wcs`, `wcs_to_mbs`), `posix/src/uchar.rs`, `posix/src/perthread.rs`
 (the states), `posix/include/uchar.h` (`char8_t`, the two new functions).
+
+## D-POSIX-SIGPROCMASK-KEPT-SIGKILL-AND-RAISE-0-FAILED — `sigprocmask` put `SIGKILL` and `SIGSTOP` in the blocked mask and reported them blocked; `raise(0)` was an error (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/signal.rs`)**
+
+**In short:** two small ways the signal functions answered differently
+from what POSIX requires, found replaying glibc's answers for the old BSD
+calls built on them. A program asking to block every signal was told that
+`SIGKILL` and `SIGSTOP` -- which can never be blocked -- were blocked; and
+`raise(0)`, which a program may use to check that it can signal itself,
+failed where it should succeed.
+
+- `sigprocmask`: POSIX -- "It is not possible to block those signals which
+  cannot be ignored. This shall be enforced by the system without causing
+  an error to be indicated." Both were kept in the mask this library
+  stores and reports back (the kernel ignored them). Now dropped, by every
+  `how`; `sigblock(sigmask(SIGKILL) | sigmask(SIGUSR1))` reports `SIGUSR1`
+  alone, as glibc's does.
+- `raise(0)`: POSIX makes `raise(sig)` `pthread_kill(pthread_self(), sig)`,
+  and for that "if sig is zero, error checking shall be performed but no
+  signal shall actually be sent". It was `EINVAL` -- two tests pinned
+  that, on the premise that 0 is out of range -- and is 0 now, as glibc's.
+
+**Where:** `posix/src/signal.rs`: `sigprocmask`, `raise`, and their tests.

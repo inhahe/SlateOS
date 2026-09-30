@@ -36,6 +36,11 @@ struct passwd *fgetpwent(FILE *);
 int putpwent(const struct passwd *, FILE *);
 #endif
 
+#ifdef _GNU_SOURCE
+/* A user's /etc/passwd line, into a buffer with room for it. */
+int getpw(uid_t, char *);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

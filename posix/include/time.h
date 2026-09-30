@@ -54,6 +54,11 @@ int clock_adjtime(clockid_t, struct timex *);
 char *strptime_l(const char *__restrict, const char *__restrict, struct tm *, locale_t);
 #endif
 
+#ifdef _SLATEOS_USE_MISC
+/* The days in a year. */
+int dysize(int);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

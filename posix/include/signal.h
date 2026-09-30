@@ -15,6 +15,7 @@
 #ifndef _SLATEOS_SIGNAL_H
 #define _SLATEOS_SIGNAL_H
 
+#include <bits/slateos-features.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,6 +25,28 @@ extern "C" {
 /* signal with System V's semantics: the handler is reset to SIG_DFL when it
  * is called, and a system call it interrupts is not restarted. */
 void (*sysv_signal(int, void (*)(int)))(int);
+#endif
+
+#ifdef _SLATEOS_USE_MISC
+/* 4.2BSD's signal masks: signal n as bit n-1, signals 1 to 32. */
+#define sigmask(sig) ((int)(1u << ((sig) - 1)))
+_SLATEOS_DEPRECATED("use sigprocmask") int sigblock(int);
+_SLATEOS_DEPRECATED("use sigprocmask") int sigsetmask(int);
+_SLATEOS_DEPRECATED("use sigprocmask") int siggetmask(void);
+
+/* 4.2BSD's signal stack, refused here (ENOSYS): it has no size. */
+struct sigstack {
+	void *ss_sp;
+	int ss_onstack;
+};
+_SLATEOS_DEPRECATED("use sigaltstack") int sigstack(struct sigstack *, struct sigstack *);
+
+struct sigcontext;
+int sigreturn(struct sigcontext *);
+
+/* System V's raise and signal. */
+int gsignal(int);
+void (*ssignal(int, void (*)(int)))(int);
 #endif
 
 #ifdef __cplusplus

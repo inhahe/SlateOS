@@ -135,6 +135,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "cookie_io_functions_t": "stdio.h",
     "struct random_data": "stdlib.h",
     "struct drand48_data": "stdlib.h",
+    "struct sigstack": "signal.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.

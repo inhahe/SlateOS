@@ -1554,10 +1554,19 @@ pub extern "C" fn killpg(pgrp: i32, sig: i32) -> i32 {
 /// * Dispatches via `dispatch_self_signal()`, which checks the
 ///   registered handler table and applies the appropriate action.
 ///
+/// Signal 0 sends nothing and succeeds: POSIX makes `raise(sig)`
+/// `pthread_kill(pthread_self(), sig)`, and for that "if sig is zero, error
+/// checking shall be performed but no signal shall actually be sent" -- the
+/// calling thread always exists. (It was `EINVAL` until 2026-09-29; glibc's
+/// answers 0.)
+///
 /// Errors (Linux-matching):
 /// * `EINVAL` — `sig` is not a valid signal number.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn raise(sig: i32) -> i32 {
+    if sig == 0 {
+        return 0;
+    }
     if !(1..NSIG).contains(&sig) {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1596,7 +1605,7 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
     if !set.is_null() {
         // SAFETY: set verified non-null.
         let new_set = unsafe { *set };
-        let new_mask = match how {
+        let mut new_mask = match how {
             SIG_BLOCK => {
                 // Add signals in `set` to the blocked set.
                 let mut result = current;
@@ -1626,6 +1635,11 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
                 return -1;
             }
         };
+        // POSIX: "It is not possible to block those signals which cannot be
+        // ignored. This shall be enforced by the system without causing an
+        // error to be indicated." Until 2026-09-29 SIGKILL and SIGSTOP were
+        // kept, and reported back as blocked.
+        new_mask.bits[0] &= !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
         // SAFETY: single-threaded access.
         unsafe {
             blocked_mask_ptr().write(new_mask);
@@ -5009,11 +5023,12 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_zero_returns_einval() {
-        // sig == 0 is out of the valid signal range (1..NSIG).
+    fn test_raise_zero_checks_and_sends_nothing() {
+        // POSIX: raise(0) is pthread_kill(pthread_self(), 0) -- error
+        // checking only, and the calling thread exists.
         errno::set_errno(0);
-        assert_eq!(raise(0), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(raise(0), 0);
+        assert_eq!(errno::get_errno(), 0);
     }
 
     // -- pthread_sigmask --
@@ -5248,11 +5263,31 @@ mod tests {
 
     // ---- raise() ----
 
+    /// SIGKILL and SIGSTOP cannot be blocked: they are dropped from the mask
+    /// without an error, whichever way the mask is set.
     #[test]
-    fn test_raise_zero_einval() {
+    fn sigkill_and_sigstop_are_never_blocked() {
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP) | sigmask_bit(SIGUSR1);
+        for how in [SIG_BLOCK, SIG_SETMASK] {
+            let mut clear = SigsetT::EMPTY;
+            assert_eq!(
+                sigprocmask(SIG_SETMASK, &raw const clear, core::ptr::null_mut()),
+                0
+            );
+            assert_eq!(sigprocmask(how, &raw const set, core::ptr::null_mut()), 0);
+            assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut clear), 0);
+            assert_eq!(clear.bits[0], sigmask_bit(SIGUSR1), "how {how}");
+        }
+        let clear = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, &raw const clear, core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_raise_zero_is_zero() {
         crate::errno::set_errno(0);
-        assert_eq!(raise(0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(raise(0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 
     #[test]

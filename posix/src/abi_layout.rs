@@ -590,6 +590,15 @@ pub(crate) fn abi_asserts() -> String {
     abi!(
         out,
         hdrs,
+        crate::legacy::Sigstack,
+        "struct sigstack",
+        "signal.h",
+        ss_sp,
+        ss_onstack
+    );
+    abi!(
+        out,
+        hdrs,
         crate::prng::RandomData,
         "struct random_data",
         "stdlib.h",

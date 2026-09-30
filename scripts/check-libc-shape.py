@@ -261,6 +261,10 @@ REPLACEABLE = frozenset(
         # four under their own names where the libc lacks them, as musl
         # does; they are `posix::prng::gnu_random_r`'s member
         "random_r", "srandom_r", "initstate_r", "setstate_r",
+        # added 2026-09-29 (lane D): gnulib's group-member module defines it
+        # where the libc lacks it, as musl does -- posix::legacy's
+        # gnu_group_member member
+        "group_member",
         # stdio-ish
         "getline", "getdelim", "fseeko", "ftello", "vasprintf", "asprintf",
         # stdio_ext.h: gnulib's freadahead/freadptr/fpending/fpurge/fseterr

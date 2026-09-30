@@ -2756,6 +2756,7 @@ fn the_recycle_bin_opens_the_file_managers_view_of_it() {
             ShellAction::Launch(crate::hotkeys::Launch {
                 program: std::path::PathBuf::from(launcher::FILE_MANAGER),
                 args: vec![std::ffi::OsString::from("--recycle-bin")],
+                dir: None,
             })
         );
         assert!(

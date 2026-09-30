@@ -171,6 +171,49 @@ fn app_dir_stamps(dirs: &desktopentry::scan::DataDirs) -> Vec<AppStamp> {
 /// One desktop entry file as last seen: where, how big, when written.
 type AppStamp = (PathBuf, u64, Option<std::time::SystemTime>);
 
+/// Where service menus are looked for: the XDG data directories -- and in
+/// this crate's own tests none, for [`default_app_dirs`]' reason.
+fn default_service_dirs() -> servicemenus::Dirs {
+    if cfg!(test) {
+        servicemenus::Dirs {
+            user: None,
+            system: Vec::new(),
+        }
+    } else {
+        servicemenus::Dirs::standard()
+    }
+}
+
+/// Every service-menu file where they are read from, with its size and when
+/// it was last written, in order: what changes when a menu is installed,
+/// removed or edited (design-decisions §1448). The directories' own files
+/// only, as the scan reads them.
+fn service_menu_stamps(dirs: &servicemenus::Dirs) -> Vec<AppStamp> {
+    let mut stamps = Vec::new();
+    for dir in dirs.searched() {
+        // A directory that is not there has no menus -- the ordinary state
+        // of most of them.
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        // An entry the listing cannot give is one the scan cannot read
+        // either.
+        for path in listing.filter_map(Result::ok).map(|item| item.path()) {
+            if path.extension() != Some(std::ffi::OsStr::new("desktop")) {
+                continue;
+            }
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_file() {
+                stamps.push((path, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    stamps.sort();
+    stamps
+}
+
 /// What became of an attempt to put a picture on a surface.
 ///
 /// Distinguishes the two kinds of failure that must not be confused: one
@@ -426,6 +469,18 @@ pub struct ShellSession<T: Transport> {
     /// report (`take_app_problems`): the answer to "my program is not in the
     /// menu".
     app_problems: Vec<desktopentry::scan::Skipped>,
+    /// Where service menus -- what programs add to a file's right-click
+    /// menu (design-decisions §1448) -- are looked for.
+    service_dirs: servicemenus::Dirs,
+    /// Every service-menu file as it was at the last read
+    /// (`service_menu_stamps`) -- `None` before the first. Compared on each
+    /// right-click, so a menu installed while the desktop is up is offered
+    /// at the next one, without every file read at every click.
+    service_dirs_seen: Option<Vec<AppStamp>>,
+    /// Service-menu files, and items in them, the last read could not use,
+    /// each with why, for the binary to report
+    /// (`take_service_menu_problems`).
+    service_problems: Vec<(PathBuf, String)>,
     /// The login screen, while the machine has not let anyone in yet.
     ///
     /// `None` is a session in use. It is *not* "login is disabled": a machine
@@ -826,6 +881,9 @@ impl<T: Transport> ShellSession<T> {
             app_dirs_seen: None,
             start_menu_was_open: false,
             app_problems: Vec::new(),
+            service_dirs: default_service_dirs(),
+            service_dirs_seen: None,
+            service_problems: Vec::new(),
             wallpaper_error: None,
             save_errors: BTreeMap::new(),
             focus_left_shell: false,
@@ -863,6 +921,11 @@ impl<T: Transport> ShellSession<T> {
         // screen at all.
         session.sign_in_automatically(start);
         session.refresh_installed_apps();
+        session.refresh_service_menus();
+        // The user's choices of them: read the first time here, and again
+        // whenever the Settings application writes them. Whether they
+        // changed matters to nothing yet -- no menu is open.
+        let _ = session.shell.poll_service_choices();
         session.repaint()?;
         Ok(session)
     }
@@ -1510,6 +1573,47 @@ impl<T: Transport> ShellSession<T> {
     /// each with why, taken so each is reported once.
     pub fn take_app_problems(&mut self) -> Vec<desktopentry::scan::Skipped> {
         core::mem::take(&mut self.app_problems)
+    }
+
+    /// Read the service menus into the shell, if any file of one has been
+    /// added, removed or rewritten since the last read -- or always, the
+    /// first time. Menus that cannot be used, and items of usable ones that
+    /// cannot, are kept for [`Self::take_service_menu_problems`].
+    fn refresh_service_menus(&mut self) {
+        let stamps = service_menu_stamps(&self.service_dirs);
+        if self.service_dirs_seen.as_ref() == Some(&stamps) {
+            return;
+        }
+        self.service_dirs_seen = Some(stamps);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        let scan = servicemenus::scan(&self.service_dirs, locale.as_ref());
+        self.service_problems = scan
+            .skipped
+            .iter()
+            .map(|skipped| (skipped.path.clone(), skipped.why.clone()))
+            .chain(scan.menus.iter().flat_map(|menu| {
+                menu.unusable
+                    .iter()
+                    .map(|why| (menu.path.clone(), format!("item {why}")))
+            }))
+            .collect();
+        self.shell.set_service_menus(scan);
+    }
+
+    /// The service-menu files -- and items of them -- the last read could
+    /// not use, each with why, taken so each is reported once.
+    pub fn take_service_menu_problems(&mut self) -> Vec<(PathBuf, String)> {
+        core::mem::take(&mut self.service_problems)
+    }
+
+    /// Look for service menus in `dirs` from now on, reading them at once --
+    /// a test's own directories, where the session's default in this
+    /// crate's tests is none.
+    #[cfg(test)]
+    pub(crate) fn set_service_dirs(&mut self, dirs: servicemenus::Dirs) {
+        self.service_dirs = dirs;
+        self.service_dirs_seen = None;
+        self.refresh_service_menus();
     }
 
     /// Look for installed programs in `dirs` from now on, reading them at
@@ -3013,10 +3117,9 @@ impl<T: Transport> ShellSession<T> {
             // account with no password, so an idle session that cannot be
             // locked simply is not.
             Event::SessionIdle => {
-                self.queue_launches(vec![crate::hotkeys::Launch {
-                    program: std::path::PathBuf::from(crate::hotkeys::LOCK_COMMAND),
-                    args: Vec::new(),
-                }]);
+                self.queue_launches(vec![crate::hotkeys::Launch::program(
+                    crate::hotkeys::LOCK_COMMAND,
+                )]);
             }
             Event::ModifierChord { modifiers } => {
                 let outcome = self.shell.handle_modifier_chord(modifiers);
@@ -3091,6 +3194,15 @@ impl<T: Transport> ShellSession<T> {
                 group: SettingsGroup::Appearance,
             } => {
                 self.adopt_appearance_change();
+            }
+            // A file-menu extension turned on or off: the Settings
+            // application's page wrote `context-menus.yaml`. The next
+            // right-click offers what is on; nothing on screen changes now,
+            // which is why whether it changed is not asked.
+            Event::SettingsChanged {
+                group: SettingsGroup::Program(name),
+            } if name.as_str() == servicemenus::CONFIG_NAME => {
+                let _ = self.shell.poll_service_choices();
             }
             _ => {}
         }
@@ -3533,6 +3645,15 @@ impl<T: Transport> ShellSession<T> {
     /// One pointer event, already in screen coordinates.
     fn pointer(&mut self, event: &MouseEvent) -> Result<(), Error<T>> {
         self.autohide_pointer(event);
+        // A right-click may open a file's menu, which offers what programs
+        // added to it: a service menu installed or changed since the last
+        // one is read first, so the menu about to open has it.
+        if matches!(
+            event.kind,
+            guitk::event::MouseEventKind::Press(guitk::event::MouseButton::Right)
+        ) {
+            self.refresh_service_menus();
+        }
         let action = self.shell.handle_mouse(event);
         self.act(action)?;
         // A tooltip came, went or began waiting to appear, or another tile lit
@@ -3566,6 +3687,11 @@ impl<T: Transport> ShellSession<T> {
             // path*, and why the action carries arguments.
             ShellAction::Launch(launch) => {
                 self.queue_launches(vec![launch]);
+                self.dirty = true;
+            }
+            // An item of a file's right-click menu, one program per file.
+            ShellAction::LaunchAll(launches) => {
+                self.queue_launches(launches);
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,

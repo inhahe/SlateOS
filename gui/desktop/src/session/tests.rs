@@ -3692,6 +3692,7 @@ fn installed_programs_are_in_the_start_menu() {
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from("sketch"),
             args: vec![std::ffi::OsString::from("--new")],
+            dir: None,
         }
     );
 }
@@ -6226,6 +6227,7 @@ fn a_power_choice_is_launched_like_any_program() {
         [crate::hotkeys::Launch {
             program: crate::power::POWERCTL.into(),
             args: vec!["shutdown".into()],
+            dir: None,
         }]
     );
     assert!(session.take_launches().is_empty(), "draining it empties it");
@@ -7826,4 +7828,156 @@ fn nothing_pops_up_on_the_login_screen() {
     session.finish_batch().expect("paint");
     assert!(!session.toasts_shown, "a toast over the login screen");
     assert_eq!(posted(&session).len(), 1);
+}
+
+// ---- what programs add to a file's right-click menu (design-decisions §1448) ----
+
+/// A service menu for PNG pictures, one item.
+const ROTATE_MENU: &str = "[Desktop Entry]\nMimeType=image/png;\nActions=rotate;\n\n\
+                           [Desktop Action rotate]\nName=Rotate right\nExec=mogrify -rotate 90 %f\n";
+
+/// A file on disk with an icon for it at the desktop's first cell, and where
+/// a press lands on it, in screen coordinates.
+fn file_icon(session: &mut Session, path: &std::path::Path) -> (f32, f32) {
+    std::fs::write(path, b"x").expect("write");
+    let (x, y) = session.shell.icons.cell_origin(0, 0);
+    let id = session.shell.icons.add_icon(
+        "photo.png",
+        crate::icons::IconType::File,
+        crate::icons::IconAction::OpenPath(path.to_path_buf()),
+        x,
+        y,
+    );
+    let icon = session.shell.icons.get_icon(id).expect("added");
+    let grid = session.shell.icons.grid();
+    #[allow(clippy::cast_precision_loss, reason = "a test's small cell sizes")]
+    let centre = (
+        icon.x as f32 + grid.cell_width() as f32 / 2.0,
+        icon.y as f32 + grid.cell_height() as f32 / 2.0,
+    );
+    centre
+}
+
+/// The open desktop menu's labels, submenus' included.
+fn open_menu_labels(session: &Session) -> Vec<String> {
+    fn walk(items: &[guitk::menu::MenuItem], out: &mut Vec<String>) {
+        for item in items {
+            match item {
+                guitk::menu::MenuItem::Action { label, .. } => out.push(label.clone()),
+                guitk::menu::MenuItem::Submenu {
+                    label, children, ..
+                } => {
+                    out.push(label.clone());
+                    walk(children, out);
+                }
+                guitk::menu::MenuItem::Separator => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(session.shell().desktop_menu.items(), &mut out);
+    out
+}
+
+/// **A service menu installed while the desktop is up is offered at the
+/// next right-click on a file**, without a login -- and one that cannot be
+/// used is reported, with why.
+#[test]
+fn a_service_menu_installed_while_the_desktop_is_up_is_offered() {
+    let (mut session, desktop, _turn) = session();
+    let scratch = scratchdir::ScratchDir::new("session-service-menus");
+    let data = scratch.dir().join("share");
+    let menus = data.join("kio").join("servicemenus");
+    std::fs::create_dir_all(&menus).expect("mkdir");
+    session.set_service_dirs(servicemenus::Dirs {
+        user: None,
+        system: vec![data],
+    });
+    assert!(session.take_service_menu_problems().is_empty());
+    let (x, y) = file_icon(&mut session, &scratch.dir().join("photo.png"));
+
+    // Installed now, after the session read the directory.
+    std::fs::write(menus.join("rotate.desktop"), ROTATE_MENU).expect("write");
+    std::fs::write(
+        menus.join("broken.desktop"),
+        "[Desktop Entry]\nMimeType=all/all;\n",
+    )
+    .expect("write");
+
+    right_click_at(&desktop, session.background(), x, y);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().desktop_menu.is_visible(),
+        "the premise: the menu opened"
+    );
+    assert!(
+        open_menu_labels(&session).contains(&String::from("Rotate right")),
+        "the menu opened without the service menu installed since the last read: {:?}",
+        open_menu_labels(&session)
+    );
+    let problems = session.take_service_menu_problems();
+    assert!(
+        problems
+            .iter()
+            .any(|(path, why)| path.ends_with("broken.desktop") && why.contains("lists no actions")),
+        "{problems:?}"
+    );
+    assert!(
+        session.take_service_menu_problems().is_empty(),
+        "taken, so each is said once"
+    );
+}
+
+/// **Turning a menu on in the Settings application reaches the next
+/// right-click**: `context-menus.yaml` is read again when its change is
+/// announced.
+#[test]
+fn a_menu_turned_on_elsewhere_is_offered_at_the_next_right_click() {
+    // Writes the settings file, so in a scratch configuration of its own --
+    // the session started inside it, so its first read is of that one too.
+    settingsfile::testing::with_scratch_config("session-service-choices", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let scratch = scratchdir::ScratchDir::new("session-service-choices");
+        let data = scratch.dir().join("share");
+        let menus = data.join("kio").join("servicemenus");
+        std::fs::create_dir_all(&menus).expect("mkdir");
+        std::fs::write(menus.join("mine.desktop"), ROTATE_MENU).expect("write");
+        let dirs = servicemenus::Dirs {
+            user: Some(data),
+            system: Vec::new(),
+        };
+        session.set_service_dirs(dirs.clone());
+        let (x, y) = file_icon(&mut session, &scratch.dir().join("photo.png"));
+
+        right_click_at(&desktop, session.background(), x, y);
+        session.pump().expect("pump");
+        assert!(
+            !open_menu_labels(&session).contains(&String::from("Rotate right")),
+            "a menu of the user's own is off until turned on"
+        );
+        session.shell.desktop_menu.hide();
+
+        // The Settings application turns it on, and the change is announced.
+        let found = servicemenus::scan(&dirs, None);
+        let mut file = servicemenus::ChoicesFile::load();
+        file.choices.set(&found.menus[0], true);
+        file.save().expect("save");
+        let name = guitk::event::SettingsName::new(servicemenus::CONFIG_NAME.as_bytes())
+            .expect("a settings name");
+        desktop.borrow_mut().send_input(&[InputEvent::new(
+            session.background().window(),
+            guitk::event::Event::SettingsChanged {
+                group: SettingsGroup::Program(name),
+            },
+        )]);
+        session.pump().expect("pump");
+
+        right_click_at(&desktop, session.background(), x, y);
+        session.pump().expect("pump");
+        assert!(
+            open_menu_labels(&session).contains(&String::from("Rotate right")),
+            "{:?}",
+            open_menu_labels(&session)
+        );
+    });
 }

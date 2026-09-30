@@ -110,6 +110,10 @@ desktopentry = { path = "../desktopentry" }
 # SlateOS's own programs, as desktop entries: the one list of programs
 # (design-decisions 1425), which replaced the table the shell kept itself.
 programs = { path = "../programs" }
+# What programs add to a file's right-click menu: KDE's service-menu files,
+# how KDE runs their commands, and the user's choices of them
+# (design-decisions 1448).
+servicemenus = { path = "../servicemenus" }
 
 # The input settings model, on the same terms as `appearance` above: the
 # compositor applies these values, the Settings application edits them, and the

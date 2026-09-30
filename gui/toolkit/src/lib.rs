@@ -30,7 +30,6 @@ pub mod codeedit;
 pub mod codeview;
 pub mod color;
 pub mod colorpicker;
-pub mod context_ext;
 pub mod date;
 pub mod datetime;
 pub mod dialog;

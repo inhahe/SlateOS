@@ -177,11 +177,13 @@ impl AppEntry {
             return crate::hotkeys::Launch {
                 program: std::path::PathBuf::from(TERMINAL),
                 args,
+                dir: None,
             };
         }
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from(program),
             args: argv.collect(),
+            dir: None,
         }
     }
 }

@@ -273,6 +273,13 @@ impl ContextMenu {
         self.open_submenu = None;
     }
 
+    /// The rows the menu was built with, in order -- for a caller that
+    /// built them from state it has since let go of, and for tests.
+    #[must_use]
+    pub fn items(&self) -> &[MenuItem] {
+        &self.items
+    }
+
     /// Whether the menu is currently visible.
     pub fn is_visible(&self) -> bool {
         self.visible

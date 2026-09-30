@@ -57,8 +57,8 @@ use yamldoc::Document;
 //
 // *The picker joins the shared popup shadow; a widget's own shadow does not.*
 // The picker is a panel that sits on top of everything else, so its
-// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move
-// `context_ext` made, for the same reason.  The per-widget shadow keeps
+// `rgba(0, 0, 0, 100)` became `Palette::shadow()` -- the same move the
+// shell's other menus made, for the same reason.  The per-widget shadow keeps
 // `rgba(0, 0, 0, bg_opacity / 3)` deliberately: its depth is a function of the
 // widget's own translucency, so a widget you can see through casts a shadow you
 // can see through, and pinning it to one shared depth would make a nearly

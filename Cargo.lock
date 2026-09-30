@@ -828,6 +828,7 @@ dependencies = [
  "procinfo",
  "programs",
  "scratchdir",
+ "servicemenus",
  "settingsfile",
  "settingswatch",
  "tzrules",

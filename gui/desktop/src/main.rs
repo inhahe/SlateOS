@@ -207,7 +207,14 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
         // The whole command line, arguments and all: "cannot start
         // /bin/powerctl suspend" says which button failed, where the program
         // alone would read the same for four of them.
-        if let Err(e) = Command::new(&launch.program).args(&launch.args).spawn() {
+        let mut command = Command::new(&launch.program);
+        command.args(&launch.args);
+        // Where the launch says -- a file's folder, for an item of its
+        // right-click menu -- and otherwise where the desktop is.
+        if let Some(dir) = &launch.dir {
+            command.current_dir(dir);
+        }
+        if let Err(e) = command.spawn() {
             eprintln!("desktop: cannot start {}: {e}", launch.display_line());
             // And on the screen, which is where the person who asked is
             // looking: the Run box comes back on the line, anything else is
@@ -222,6 +229,14 @@ fn drain<T: guiremote::client::Transport>(session: &mut ShellSession<T>) {
             "desktop: {}: not in the menu: {}",
             pathcodec::display_os(problem.path.as_os_str()),
             problem.why
+        );
+    }
+    // And a service menu, or an item of one, missing from a file's
+    // right-click menu (design-decisions 1448).
+    for (path, why) in session.take_service_menu_problems() {
+        eprintln!(
+            "desktop: {}: not offered in file menus: {why}",
+            pathcodec::display_os(path.as_os_str())
         );
     }
 }

@@ -87,7 +87,6 @@ pub mod autologin;
 pub mod bluetooth;
 pub mod calendar;
 pub mod clipboard_viewer;
-pub mod context_ext;
 pub mod datetime_settings;
 pub mod device_settings;
 /// The sweep that proves a module draws nothing that is immediately erased.
@@ -142,6 +141,8 @@ pub mod window_rules;
 mod note_tests;
 #[cfg(test)]
 mod pointer_tests;
+#[cfg(test)]
+mod service_menu_tests;
 
 use appearance::config;
 use guitk::menu::{ContextMenu, MenuAction, MenuItem, MenuItemId};
@@ -1531,6 +1532,10 @@ pub enum ShellAction {
     /// `Launch`: a program the user *pointed at* may have no UTF-8 spelling,
     /// and a lossy one would name a different program or none.
     Launch(hotkeys::Launch),
+    /// Start several programs, in this order -- an item of a file's
+    /// right-click menu chosen for three files, whose command takes one file
+    /// at a time. Implies [`Consumed`](Self::Consumed).
+    LaunchAll(Vec<hotkeys::Launch>),
     /// Ask the compositor to act on a window the shell does not own. Implies
     /// [`Consumed`](Self::Consumed).
     ///
@@ -1576,6 +1581,21 @@ impl ShellAction {
     pub const fn changed(&self) -> bool {
         !matches!(self, Self::Pass)
     }
+}
+
+/// The service-menu items of the open icon menu (design-decisions §1448).
+///
+/// Each item is kept by name -- its menu's file name and its own id -- not by
+/// reference: the menus may be read again while the menu is open, and a name
+/// looked up when the item is chosen finds the menu as it is then, or
+/// nothing.
+#[derive(Clone, Debug, Default)]
+struct ServiceOffer {
+    /// By `id - MENU_SERVICE_BASE`: the menu and item an id runs, or `None`
+    /// for a submenu's own row.
+    items: Vec<Option<(std::ffi::OsString, String)>>,
+    /// The files and folders the menu was opened on.
+    targets: Vec<servicemenus::Target>,
 }
 
 /// Something the shell wants done to a window it does not own.
@@ -2149,6 +2169,18 @@ pub struct DesktopShell {
     /// the reason `menu_widget` is: by the time an item is chosen the pointer
     /// is over the menu, not the icon.
     menu_icon: Option<icons::IconId>,
+    /// What programs add to a file's right-click menu (`servicemenus`,
+    /// design-decisions §1448): every service menu found, as the session
+    /// last read the directories they are installed in.
+    service_menus: servicemenus::Scan,
+    /// Which of them the user turned on or off: `context-menus.yaml`, read
+    /// through [`service_watch`](Self::service_watch).
+    service_choices: servicemenus::Choices,
+    /// `context-menus.yaml`, which the Settings application's page writes.
+    service_watch: config::Watcher,
+    /// The open icon menu's service-menu items and the files it was opened
+    /// on. See [`ServiceOffer`].
+    service_offer: ServiceOffer,
     /// The widget being dragged, and where inside it the pointer took hold.
     ///
     /// The offset is what stops a drag snapping the widget's corner to the
@@ -2716,6 +2748,10 @@ impl DesktopShell {
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
             menu_icon: None,
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::Choices::default(),
+            service_watch: config::Watcher::new(servicemenus::CONFIG_NAME),
+            service_offer: ServiceOffer::default(),
             widget_drag: None,
             user_name: String::new(),
             icon_registry: IconRegistry::default(),
@@ -4773,9 +4809,10 @@ impl DesktopShell {
                             self.desktop_menu.hide();
                             // An icon's Open starts a program; every other
                             // item has already done its work.
-                            if let ShellAction::Launch(launch) = self.activate_desktop_menu_item(id)
+                            let action = self.activate_desktop_menu_item(id);
+                            if matches!(action, ShellAction::Launch(_) | ShellAction::LaunchAll(_))
                             {
-                                return ShellAction::Launch(launch);
+                                return action;
                             }
                         }
                         // A press that named no item: on the panel's own
@@ -6885,6 +6922,7 @@ impl DesktopShell {
                     self.desktop_menu.hide();
                     match self.activate_desktop_menu_item(id) {
                         ShellAction::Launch(launch) => HotkeyOutcome::start(vec![launch]),
+                        ShellAction::LaunchAll(launches) => HotkeyOutcome::start(launches),
                         _ => HotkeyOutcome::consumed(),
                     }
                 }
@@ -7658,6 +7696,7 @@ impl DesktopShell {
         Some(hotkeys::Launch {
             program: PathBuf::from(program),
             args: words.collect(),
+            dir: None,
         })
     }
 
@@ -11664,6 +11703,10 @@ impl DesktopShell {
     /// own, far from the rest, so a size added to the setting cannot land on
     /// an id something else already has.
     const MENU_ICON_SIZE_BASE: u64 = 200;
+    /// The first of an icon menu's service-menu rows (design-decisions
+    /// §1448): the `n`-th item or submenu is this plus `n`. A block of its
+    /// own, far above every fixed id, so no number of rows reaches one.
+    const MENU_SERVICE_BASE: u64 = 10_000;
 
     /// The View submenu's words for an icon size.
     ///
@@ -11804,6 +11847,186 @@ impl DesktopShell {
             items.extend(more);
         }
         items
+    }
+
+    /// Put what programs add to a file's right-click menu into an icon's
+    /// menu, after Open (design-decisions §1448): the service menus on for
+    /// the selected files and folders, laid out as KDE's file manager lays
+    /// them out (`servicemenus::Scan::rows`). Nothing when a selected icon is
+    /// not a file or folder -- This PC, the Recycle Bin -- since no service
+    /// menu is for those.
+    fn offer_service_menus(&mut self, items: &mut Vec<MenuItem>) {
+        let Some(targets) = self.service_targets() else {
+            return;
+        };
+        let rows = self.service_menus.rows(&self.service_choices, &targets);
+        if rows.is_empty() {
+            return;
+        }
+        let mut offer = Vec::new();
+        let built = Self::service_menu_items(&rows, &mut offer);
+        // After Open, set off by a line; the icon's own line follows them.
+        let at = items.len().min(1);
+        items.splice(at..at, core::iter::once(MenuItem::Separator).chain(built));
+        self.service_offer = ServiceOffer {
+            items: offer,
+            targets,
+        };
+    }
+
+    /// The files and folders an icon menu is about: every selected icon's,
+    /// each as the file system says it is now. `None` when one of them is not
+    /// a file or folder.
+    fn service_targets(&self) -> Option<Vec<servicemenus::Target>> {
+        self.icons
+            .selected_ids()
+            .into_iter()
+            .map(|id| match &self.icons.get_icon(id)?.action {
+                icons::IconAction::OpenPath(path) => Some(Self::service_target(path)),
+                icons::IconAction::LaunchSystem(_) | icons::IconAction::Custom(_) => None,
+            })
+            .collect()
+    }
+
+    /// `path` as a service menu sees it: its kind by its extension, and
+    /// `text/plain` too when that kind is text -- a shell script is offered
+    /// what a text file is.
+    fn service_target(path: &Path) -> servicemenus::Target {
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let kind = guitk::filetypes::detect_from_extension(extension);
+        let mut target = servicemenus::Target::at(path, kind.mime_type);
+        if kind.is_text && !target.is_dir && target.mime != "text/plain" {
+            target.inherits.push(String::from("text/plain"));
+        }
+        target
+    }
+
+    /// The menu rows for `rows`, numbered from [`MENU_SERVICE_BASE`] in
+    /// order, each item's menu and id recorded in `offer` at its number.
+    ///
+    /// [`MENU_SERVICE_BASE`]: Self::MENU_SERVICE_BASE
+    fn service_menu_items(
+        rows: &[servicemenus::Row<'_>],
+        offer: &mut Vec<Option<(std::ffi::OsString, String)>>,
+    ) -> Vec<MenuItem> {
+        let mut built = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = Self::MENU_SERVICE_BASE
+                .saturating_add(u64::try_from(offer.len()).unwrap_or(u64::MAX));
+            built.push(match row {
+                servicemenus::Row::Separator => MenuItem::Separator,
+                servicemenus::Row::Item { menu, action } => {
+                    offer.push(Some((menu.id.clone(), action.id.clone())));
+                    MenuItem::Action {
+                        id,
+                        label: action.name.clone(),
+                        shortcut: None,
+                        // The toolkit's menus draw no pictures yet; the scan
+                        // keeps each item's for when they do.
+                        icon: None,
+                        enabled: true,
+                        checked: None,
+                    }
+                }
+                servicemenus::Row::Submenu { label, rows, .. } => {
+                    offer.push(None);
+                    MenuItem::Submenu {
+                        id,
+                        label: label.clone(),
+                        icon: None,
+                        enabled: true,
+                        children: Self::service_menu_items(rows, offer),
+                    }
+                }
+            });
+        }
+        built
+    }
+
+    /// Run an icon menu's service-menu item, if `id` is one: its command for
+    /// the files the menu was opened on, one program per file where the
+    /// command takes one at a time, each started in its file's folder.
+    /// `None` for an id that is not one of them.
+    fn activate_service_item(&mut self, id: MenuItemId) -> Option<ShellAction> {
+        let index = usize::try_from(id.checked_sub(Self::MENU_SERVICE_BASE)?).ok()?;
+        let offer = core::mem::take(&mut self.service_offer);
+        self.menu_icon = None;
+        // A submenu's own row, or an id from a menu no longer open.
+        let Some(Some((menu_id, action_id))) = offer.items.get(index) else {
+            return Some(ShellAction::Pass);
+        };
+        // Looked up by name: the menus may have been read again since this
+        // one opened, and a menu gone since has nothing left to run.
+        let Some((menu, action)) = self.service_menus.find(menu_id, action_id) else {
+            return Some(ShellAction::Pass);
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let outcome = action
+            .runs(&offer.targets, menu, home.as_deref())
+            .map_err(|error| (action.name.clone(), menu.path.clone(), error));
+        match outcome {
+            Ok(runs) => {
+                let mut launches: Vec<hotkeys::Launch> = runs
+                    .into_iter()
+                    .filter_map(|run| {
+                        let mut argv = run.argv.into_iter();
+                        Some(hotkeys::Launch {
+                            program: PathBuf::from(argv.next()?),
+                            args: argv.collect(),
+                            dir: run.dir,
+                        })
+                    })
+                    .collect();
+                Some(if launches.len() > 1 {
+                    ShellAction::LaunchAll(launches)
+                } else {
+                    launches
+                        .pop()
+                        .map_or(ShellAction::Pass, ShellAction::Launch)
+                })
+            }
+            Err((name, path, error)) => {
+                // The id is discarded: this is a message, not something to
+                // update.
+                let _ = self.notify(notif_pane::Notification {
+                    id: 0,
+                    app_name: "Desktop".to_string(),
+                    title: format!("Cannot run {name}"),
+                    body: format!("{}: {error}", pathcodec::display_os(path.as_os_str())),
+                    timestamp: Self::unix_now(),
+                    priority: notif_pane::NotifPriority::Normal,
+                    read: false,
+                    action: None,
+                    silent: false,
+                });
+                Some(ShellAction::Consumed)
+            }
+        }
+    }
+
+    /// Adopt the service menus the session read (design-decisions §1448):
+    /// what an icon's right-click menu offers from its next opening.
+    pub fn set_service_menus(&mut self, scan: servicemenus::Scan) {
+        self.service_menus = scan;
+    }
+
+    /// Read `context-menus.yaml` if it changed since the last look -- or for
+    /// the first time -- and say whether the choices in it did.
+    ///
+    /// Answers on the choices, not on the file, as
+    /// [`poll_notification_rules`](Self::poll_notification_rules) does: a
+    /// comment added changes nothing a menu shows.
+    pub fn poll_service_choices(&mut self) -> bool {
+        let Some(doc) = self.service_watch.poll() else {
+            return false;
+        };
+        let choices = servicemenus::Choices::read_from(&doc);
+        let changed = choices != self.service_choices;
+        self.service_choices = choices;
+        changed
     }
 
     /// The program an icon starts, as the taskbar spells one, if it is a
@@ -12141,6 +12364,7 @@ impl DesktopShell {
     /// on screen at once have no rule about which the next click belongs to.
     pub fn open_desktop_menu(&mut self, x: f32, y: f32) {
         self.dismiss_popups();
+        self.service_offer = ServiceOffer::default();
         self.menu_widget = self.widgets.hit_test(x, y);
         // Widgets are drawn over the icons, so a widget under the pointer is
         // what was clicked even when an icon lies beneath it.
@@ -12159,7 +12383,9 @@ impl DesktopShell {
             if !self.icons.selected_ids().contains(&id) {
                 self.icons.select_single(id);
             }
-            self.icon_menu_items(id)
+            let mut items = self.icon_menu_items(id);
+            self.offer_service_menus(&mut items);
+            items
         } else {
             Self::desktop_menu_items(self.appearance.icon_size, self.icons.arrangement())
         };
@@ -12216,6 +12442,9 @@ impl DesktopShell {
     /// [`Launch`](ShellAction::Launch) is what to start.
     /// [`ShellAction::changed`] is the old `bool`.
     pub fn activate_desktop_menu_item(&mut self, id: MenuItemId) -> ShellAction {
+        if let Some(action) = self.activate_service_item(id) {
+            return action;
+        }
         if let Some(action) = self.activate_icon_context_item(id) {
             return action;
         }
@@ -12594,6 +12823,7 @@ impl DesktopShell {
                 ShellAction::Launch(hotkeys::Launch {
                     program: PathBuf::from(launcher::FILE_MANAGER),
                     args: vec![std::ffi::OsString::from(launcher::RECYCLE_BIN_VIEW_ARG)],
+                    dir: None,
                 })
             }
             // A destination this build does not know -- a layout written by a
@@ -19011,6 +19241,7 @@ mod run_box_wiring_tests {
             [crate::hotkeys::Launch {
                 program: PathBuf::from("terminal"),
                 args: vec!["--title".into(), "two words".into()],
+                dir: None,
             }]
         );
     }
@@ -26538,6 +26769,7 @@ mod start_search_tests {
         crate::hotkeys::Launch {
             program: std::path::PathBuf::from(program),
             args: args.iter().map(std::ffi::OsString::from).collect(),
+            dir: None,
         }
     }
 

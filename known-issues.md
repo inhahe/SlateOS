@@ -83582,7 +83582,13 @@ having applied. It is the most visible remaining instance of
 
 ---
 
-### TD-C-THREE-TEST-MODULES-HAND-ROLL-THE-ACCENT-LIST-THAT-A-HELPER-ALREADY-RETURNS — 2026-08-24 — OPEN
+### TD-C-THREE-TEST-MODULES-HAND-ROLL-THE-ACCENT-LIST-THAT-A-HELPER-ALREADY-RETURNS — 2026-08-24 — FIXED 2026-08-25
+
+**FIXED 2026-08-25** by 7a6ad0ac0 ("desktop: walk the real accent palette,
+not three copies of it"): all three constants are gone and the loops walk
+`AccentColor::presets()`. The entry stayed marked OPEN until 2026-09-29, when
+a sweep of lane C's open entries found the constants missing; two of the three
+files have since been removed altogether, and `snap.rs` walks the helper.
 
 **In short.** Small duplication, no user-visible symptom, but it is the exact
 shape of defect that produced the two switch/slider bugs above: a correct

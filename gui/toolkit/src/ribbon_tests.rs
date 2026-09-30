@@ -472,8 +472,19 @@ fn a_dropdown_lists_its_choices_and_reports_the_one_chosen() {
     assert_eq!(font.rect.w, 110.0);
     assert_eq!(press(&mut r, &l, centre(font.rect)), RibbonEvent::Handled);
     assert_eq!(menu_labels(&r), ["Sans", "Serif", "Mono"]);
+    // A box far wider than a list of short names: the list is still as wide.
+    let mut wide_box = Ribbon::new(vec![RibbonTab::new("t", "T").with(
+        Group::new("g", "G").with(Control::dropdown(
+            Command::new(7, "Size"),
+            vec![Choice::new("S"), Choice::new("M")],
+            400.0,
+        )),
+    )]);
+    let lw = wide(&wide_box);
+    let size = centre(slot(&wide_box, &lw, 7).rect);
+    press(&mut wide_box, &lw, size);
     assert!(
-        r.menu.as_ref().unwrap().menu.width() >= font.rect.w,
+        wide_box.menu.as_ref().unwrap().menu.width() >= 400.0,
         "the list is narrower than the box it drops from"
     );
     assert_eq!(
@@ -1850,6 +1861,7 @@ fn a_right_click_on_a_command_pins_it_or_takes_it_out() {
             "Add a command to this group",
             "Show the Quick Access Toolbar under the ribbon",
             "Collapse the ribbon",
+            "Customize the ribbon\u{2026}",
         ]
     );
     assert_eq!(
@@ -2148,4 +2160,372 @@ fn a_press_on_the_empty_strip_closes_a_panel() {
         !r.panel_open(),
         "a press on the empty strip left the panel open"
     );
+}
+
+// ---- the dialog ----
+
+use super::customize::{Button, Focus, TreeRow};
+
+/// A ribbon with its dialog open, and where everything is.
+fn with_dialog() -> (Ribbon, RibbonLayout) {
+    let mut r = ribbon();
+    r.open_customize();
+    let l = wide(&r);
+    (r, l)
+}
+
+fn dialog_button(l: &RibbonLayout, button: Button) -> (f32, f32) {
+    centre(
+        l.dialog
+            .as_ref()
+            .unwrap()
+            .buttons
+            .iter()
+            .find(|(b, _)| *b == button)
+            .unwrap()
+            .1,
+    )
+}
+
+/// Press and release a dialog button, answering the release's event.
+fn push(r: &mut Ribbon, l: &RibbonLayout, button: Button) -> RibbonEvent {
+    let at = dialog_button(l, button);
+    press(r, l, at);
+    release(r, l, at)
+}
+
+fn command_row(l: &RibbonLayout, id: CommandId) -> (f32, f32) {
+    centre(
+        l.dialog
+            .as_ref()
+            .unwrap()
+            .command_rows
+            .iter()
+            .find(|(c, _)| *c == id)
+            .unwrap_or_else(|| panic!("command {id} is not in the list"))
+            .1,
+    )
+}
+
+fn tree_row(l: &RibbonLayout, row: &TreeRow) -> (Rect, Option<Rect>) {
+    l.dialog
+        .as_ref()
+        .unwrap()
+        .tree_rows
+        .iter()
+        .find(|(t, _, _)| t == row)
+        .map(|(_, r, check)| (*r, *check))
+        .unwrap_or_else(|| panic!("{row:?} is not in the tree"))
+}
+
+fn group_ids(r: &Ribbon, tab: &str, group: &str) -> Vec<CommandId> {
+    r.shown_group(tab, group)
+        .unwrap()
+        .controls
+        .iter()
+        .map(|c| c.command().id)
+        .collect()
+}
+
+/// **"Customize the ribbon…" opens the dialog over the whole window, and
+/// while it is open nothing else is pressed; Escape closes it.**
+#[test]
+fn the_dialog_opens_from_the_menu_and_is_modal() {
+    let mut r = ribbon();
+    let l = wide(&r);
+    let cut = centre(slot(&r, &l, CUT).rect);
+    right_press(&mut r, &l, cut);
+    assert_eq!(
+        choose(&mut r, &["Customize the ribbon\u{2026}"]),
+        RibbonEvent::Handled
+    );
+    assert!(r.customize_open());
+    let l = wide(&r);
+    let dialog = l.dialog.as_ref().expect("the dialog is not laid out");
+    assert_eq!(dialog.scrim, Rect::new(0.0, 0.0, VIEWPORT.0, VIEWPORT.1));
+    assert!(
+        dialog.rect.x > 0.0 && dialog.rect.right() < VIEWPORT.0,
+        "not centred"
+    );
+    // Cut is under the dialog's scrim: a press there does nothing.
+    press(&mut r, &l, cut);
+    assert_eq!(release(&mut r, &l, cut), RibbonEvent::Handled);
+    assert_eq!(
+        r.handle_key(&l, &key(Key::F10, false)),
+        RibbonEvent::Handled
+    );
+    assert!(!r.tips_shown(), "the ribbon under the dialog took a key");
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Escape, false)),
+        RibbonEvent::Handled
+    );
+    assert!(!r.customize_open());
+    assert!(wide(&r).dialog.is_none());
+}
+
+/// **The dialog lists every command on the left, and every tab -- its
+/// groups and their commands under it -- on the right.**
+#[test]
+fn the_dialog_lists_every_command_and_every_tab() {
+    let (r, l) = with_dialog();
+    let dialog = l.dialog.as_ref().unwrap();
+    let listed: Vec<CommandId> = dialog.command_rows.iter().map(|(id, _)| *id).collect();
+    let catalog: Vec<CommandId> = r.catalog().iter().map(|c| c.id).collect();
+    assert_eq!(listed, catalog);
+    let tree = super::customize::tree_for_tests(&r);
+    assert_eq!(
+        tree[..5],
+        [
+            TreeRow::Tab("home".into()),
+            TreeRow::Group("home".into(), "clipboard".into()),
+            TreeRow::Command("home".into(), "clipboard".into(), PASTE),
+            TreeRow::Command("home".into(), "clipboard".into(), CUT),
+            TreeRow::Command("home".into(), "clipboard".into(), COPY),
+        ]
+    );
+    assert!(
+        tree.contains(&TreeRow::Tab("picture".into())),
+        "a contextual tab is missing"
+    );
+    assert_eq!(dialog.buttons.len(), Button::ALL.len());
+}
+
+/// **A command chosen on the left goes into the group chosen on the right
+/// with Add, and comes out with Remove; Add is dimmed while the group has it
+/// already.**
+#[test]
+fn add_and_remove_from_the_dialog() {
+    let (mut r, l) = with_dialog();
+    press(&mut r, &l, command_row(&l, ZOOM));
+    let font = TreeRow::Group("home".into(), "font".into());
+    press(&mut r, &l, centre(tree_row(&l, &font).0));
+    assert_eq!(push(&mut r, &l, Button::Add), RibbonEvent::Customized);
+    assert!(group_ids(&r, "home", "font").contains(&ZOOM));
+    assert!(r.customize_open(), "a change closed the dialog");
+    assert_eq!(
+        r.customize.as_ref().unwrap().chosen,
+        Some(TreeRow::Command("home".into(), "font".into(), ZOOM)),
+        "the command put in is not the one chosen"
+    );
+    assert_eq!(
+        push(&mut r, &l, Button::Add),
+        RibbonEvent::Handled,
+        "put in twice"
+    );
+
+    let l = wide(&r);
+    assert_eq!(push(&mut r, &l, Button::Remove), RibbonEvent::Customized);
+    assert!(!group_ids(&r, "home", "font").contains(&ZOOM));
+    assert_eq!(r.customize.as_ref().unwrap().chosen, Some(font));
+    assert_eq!(
+        push(&mut r, &l, Button::Remove),
+        RibbonEvent::Handled,
+        "a group was removed"
+    );
+    assert!(!r.customized());
+}
+
+/// **A double click on a command adds it, on the left, and takes it out of
+/// its group, on the right.**
+#[test]
+fn a_double_click_adds_and_removes() {
+    let (mut r, l) = with_dialog();
+    let clipboard = TreeRow::Group("home".into(), "clipboard".into());
+    press(&mut r, &l, centre(tree_row(&l, &clipboard).0));
+    let (x, y) = command_row(&l, ZOOM);
+    press(&mut r, &l, (x, y));
+    let double = |x, y| mouse(x, y, MouseEventKind::DoubleClick(MouseButton::Left));
+    assert_eq!(r.handle_mouse(&l, &double(x, y)), RibbonEvent::Customized);
+    assert!(group_ids(&r, "home", "clipboard").contains(&ZOOM));
+
+    let l = wide(&r);
+    let cut = TreeRow::Command("home".into(), "clipboard".into(), CUT);
+    let (x, y) = centre(tree_row(&l, &cut).0);
+    press(&mut r, &l, (x, y));
+    assert_eq!(r.handle_mouse(&l, &double(x, y)), RibbonEvent::Customized);
+    assert!(!group_ids(&r, "home", "clipboard").contains(&CUT));
+}
+
+/// **A tab's check box hides it and shows it again; Move up and Move down
+/// move the tab chosen.**
+#[test]
+fn a_tabs_check_box_hides_it_and_the_buttons_move_it() {
+    let (mut r, l) = with_dialog();
+    let view = TreeRow::Tab("view".into());
+    let (_, check) = tree_row(&l, &view);
+    assert_eq!(
+        press(&mut r, &l, centre(check.unwrap())),
+        RibbonEvent::Customized
+    );
+    assert_eq!(r.hidden_tabs(), ["view"]);
+    let l = wide(&r);
+    let (_, check) = tree_row(&l, &view);
+    press(&mut r, &l, centre(check.unwrap()));
+    assert!(r.hidden_tabs().is_empty());
+
+    let l = wide(&r);
+    press(&mut r, &l, centre(tree_row(&l, &view).0));
+    assert_eq!(
+        push(&mut r, &l, Button::Down),
+        RibbonEvent::Handled,
+        "the last tab moved down"
+    );
+    assert_eq!(push(&mut r, &l, Button::Up), RibbonEvent::Customized);
+    let order: Vec<&str> = r
+        .visible_tabs()
+        .iter()
+        .map(|&i| r.tabs()[i].id.as_str())
+        .collect();
+    assert_eq!(order, ["view", "home"]);
+    let l = wide(&r);
+    assert_eq!(push(&mut r, &l, Button::Down), RibbonEvent::Customized);
+    assert!(!r.customized());
+}
+
+/// **The arrows move in the list that has the keys, Tab moves between the
+/// two, Space shows or hides the tab chosen, Enter adds or takes out.**
+#[test]
+fn the_keys_work_the_dialog() {
+    let (mut r, l) = with_dialog();
+    let down = key(Key::Down, false);
+    r.handle_key(&l, &down);
+    let catalog: Vec<CommandId> = r.catalog().iter().map(|c| c.id).collect();
+    assert_eq!(r.customize.as_ref().unwrap().command, Some(catalog[0]));
+    r.handle_key(&l, &down);
+    assert_eq!(r.customize.as_ref().unwrap().command, Some(catalog[1]));
+    r.handle_key(&l, &key(Key::Up, false));
+    r.handle_key(&l, &key(Key::Up, false));
+    assert_eq!(
+        r.customize.as_ref().unwrap().command,
+        Some(catalog[0]),
+        "Up went past the top"
+    );
+
+    r.handle_key(&l, &key(Key::Tab, false));
+    assert_eq!(r.customize.as_ref().unwrap().focus, Focus::Tabs);
+    r.handle_key(&l, &down);
+    assert_eq!(
+        r.customize.as_ref().unwrap().chosen,
+        Some(TreeRow::Tab("home".into()))
+    );
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Space, false)),
+        RibbonEvent::Customized
+    );
+    assert_eq!(r.hidden_tabs(), ["home"]);
+    r.handle_key(&l, &key(Key::Space, false));
+    assert!(r.hidden_tabs().is_empty());
+
+    // Down to Paste, in the clipboard: Enter takes it out.
+    let l = wide(&r);
+    r.handle_key(&l, &down);
+    r.handle_key(&l, &down);
+    assert_eq!(
+        r.customize.as_ref().unwrap().chosen,
+        Some(TreeRow::Command("home".into(), "clipboard".into(), PASTE))
+    );
+    assert_eq!(
+        r.handle_key(&l, &key(Key::Enter, false)),
+        RibbonEvent::Customized
+    );
+    assert!(!group_ids(&r, "home", "clipboard").contains(&PASTE));
+}
+
+/// **Undo all changes, from the dialog, is dimmed until there is something
+/// to undo.**
+#[test]
+fn undo_all_changes_from_the_dialog() {
+    let (mut r, l) = with_dialog();
+    assert_eq!(push(&mut r, &l, Button::Reset), RibbonEvent::Handled);
+    r.remove_from_group("home", "clipboard", CUT);
+    let l = wide(&r);
+    assert_eq!(push(&mut r, &l, Button::Reset), RibbonEvent::Customized);
+    assert!(!r.customized());
+    assert_eq!(push(&mut r, &l, Button::Close), RibbonEvent::Handled);
+    assert!(!r.customize_open());
+}
+
+/// **A list longer than its box scrolls with the wheel, and follows the
+/// arrow keys.**
+#[test]
+fn a_long_list_scrolls_and_follows_the_keys() {
+    let mut r = crowded(60);
+    r.open_customize();
+    let l = layout_at(&r, 4000.0);
+    let rows = l.dialog.as_ref().unwrap().command_rows.clone();
+    assert!(rows.len() < 60, "the fixture's list fits its box");
+    assert_eq!(rows[0].0, 100);
+    let (x, y) = centre(l.dialog.as_ref().unwrap().commands);
+    r.handle_mouse(
+        &l,
+        &mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }),
+    );
+    let l = layout_at(&r, 4000.0);
+    assert_eq!(
+        l.dialog.as_ref().unwrap().command_rows[0].0,
+        103,
+        "the wheel did not scroll"
+    );
+    r.handle_mouse(
+        &l,
+        &mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: 1.0 }),
+    );
+    let l = layout_at(&r, 4000.0);
+    assert_eq!(l.dialog.as_ref().unwrap().command_rows[0].0, 100);
+
+    // Down past the last row shown brings the next one into view.
+    for _ in 0..=rows.len() {
+        r.handle_key(&l, &key(Key::Down, false));
+    }
+    let chosen = r.customize.as_ref().unwrap().command.unwrap();
+    let l = layout_at(&r, 4000.0);
+    assert!(
+        l.dialog
+            .as_ref()
+            .unwrap()
+            .command_rows
+            .iter()
+            .any(|(id, _)| *id == chosen),
+        "the command chosen is out of view"
+    );
+}
+
+/// **The dialog is drawn over everything: the window dimmed, a hidden tab
+/// named faintly, the row chosen in the selection's colour, a button that
+/// cannot be pressed dimmed.**
+#[test]
+fn the_dialog_is_drawn_over_everything() {
+    let (mut r, _) = with_dialog();
+    r.hide_tab("view", true);
+    let l = wide(&r);
+    let p = Palette::for_mode(false);
+    press(&mut r, &l, command_row(&l, CUT));
+    let cmds = drawn(&r, &l, &p);
+    let texts = texts(&cmds);
+    let fills = fills(&cmds);
+    let dialog = l.dialog.as_ref().unwrap();
+    assert!(fills.contains(&(dialog.scrim, p.scrim())));
+    let scrim_at = fills
+        .iter()
+        .position(|f| *f == (dialog.scrim, p.scrim()))
+        .unwrap();
+    let strip_at = fills.iter().position(|(rect, _)| *rect == l.strip).unwrap();
+    assert!(scrim_at > strip_at, "the ribbon is drawn over the dialog");
+    assert!(texts.contains(&("Customize the ribbon".to_owned(), p.text)));
+    assert!(
+        texts.contains(&("View".to_owned(), p.subtext0)),
+        "the hidden tab is not faint"
+    );
+    let cut_row = dialog
+        .command_rows
+        .iter()
+        .find(|(id, _)| *id == CUT)
+        .unwrap()
+        .1;
+    assert!(fills.contains(&(cut_row, p.selection_fill())));
+    assert!(
+        texts.contains(&("\u{2039} Remove".to_owned(), p.overlay0)),
+        "Remove, with nothing to remove, is not dimmed"
+    );
+    assert!(texts.contains(&("Close".to_owned(), p.text)));
 }

@@ -86925,8 +86925,17 @@ scheme's accent, picked to read on its background, where it was the user's
 raw accent. On an accented strip a contextual tab's band is the ink that
 reads on the accent, since a band of the accent would vanish into it.
 
-**Not yet:** a dialog for the same changes, showing every tab and group at
-once. `roadmap-detailed.md` → *Ribbon Widget* marks it.
+**The dialog** ("Customize the ribbon…", the last row of the right-click
+menu) shows the same changes all at once: every command on the left; every
+tab on the right -- a check box to show or hide it, and under a shown tab
+its groups and their commands; Add and Remove between them, Move up and
+Move down for a tab, Undo all changes, Close. A double click adds or takes
+out, and the keyboard works it (the arrows in the list that has the keys,
+Tab between the two, Space for a tab's check box, Enter to add or take
+out). Modal over the window while it is open. It holds nothing but what is
+chosen in it: every change is the ribbon's own method, so the dialog and
+the right-click menus cannot disagree. A tab moved and moved back leaves no
+trace -- an order equal to the application's is not kept.
 
 ## 952. A measurement the host can distort needs a repeat, not a wider bound
 

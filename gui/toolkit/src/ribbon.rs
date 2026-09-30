@@ -30,9 +30,9 @@
 //!   rests on it, and why it cannot be used when it cannot;
 //! - **the user's changes**: commands put on a Quick Access Toolbar over or
 //!   under the ribbon ([`Ribbon::pin`]), tabs hidden and moved, commands
-//!   taken out of groups and put into them -- all from a right-click -- and
-//!   kept as one line of text ([`Ribbon::customization_text`],
-//!   [`Ribbon::apply_customization`]);
+//!   taken out of groups and put into them -- from a right-click, or all at
+//!   once in a dialog ([`customize`]) -- and kept as one line of text
+//!   ([`Ribbon::customization_text`], [`Ribbon::apply_customization`]);
 //! - **drawing** ([`draw`]), the strip in the title bar's colour, so that a
 //!   ribbon under a title bar reads as one piece of window.
 //!
@@ -695,6 +695,8 @@ enum Act {
     Add(String, String, CommandId),
     /// Undo every change the user made but minimizing.
     Reset,
+    /// Open the dialog for the user's changes.
+    Customize,
 }
 
 /// What a press on a part of a control does to its command.
@@ -843,6 +845,8 @@ pub struct Ribbon {
     /// Where the pointer came to rest, and in what window, until the next
     /// [`tick`](Self::tick) starts timing it: a pointer event carries no time.
     resting: Option<(f32, f32, (f32, f32))>,
+    /// The dialog for the user's changes, while it is open.
+    customize: Option<customize::Customize>,
 }
 
 impl Ribbon {
@@ -863,6 +867,7 @@ impl Ribbon {
             tips: None,
             tooltip: None,
             resting: None,
+            customize: None,
         };
         ribbon.rebuild();
         ribbon
@@ -1200,7 +1205,19 @@ impl Ribbon {
             return false;
         };
         ids.swap(at, other);
-        self.custom.order = ids;
+        // Moved back to the application's own order, it is no change at all:
+        // nothing to undo, and nothing to save.
+        let natural: Vec<&str> = self
+            .tabs
+            .iter()
+            .filter(|t| t.context.is_none())
+            .map(|t| t.id.as_str())
+            .collect();
+        self.custom.order = if ids.iter().map(String::as_str).eq(natural) {
+            Vec::new()
+        } else {
+            ids
+        };
         self.close();
         true
     }
@@ -1641,6 +1658,9 @@ pub struct RibbonLayout {
     /// A panel over the page: a folded group whole, or a minimized ribbon's
     /// front tab.
     pub panel: Option<BodySlots>,
+    /// The dialog for the user's changes, over the whole window, while it
+    /// is open.
+    pub dialog: Option<customize::DialogSlots>,
 }
 
 /// Where the Quick Access Toolbar is.
@@ -1766,6 +1786,10 @@ impl Ribbon {
             Some(Panel::Group { group, anchor }) => self.lay_group_panel(group, anchor, rect),
             _ => None,
         };
+        let dialog = self
+            .customize
+            .as_ref()
+            .map(|dialog| customize::lay(self, dialog, viewport));
         RibbonLayout {
             rect,
             viewport,
@@ -1774,6 +1798,7 @@ impl Ribbon {
             tabs,
             body,
             panel,
+            dialog,
         }
     }
 
@@ -2331,6 +2356,10 @@ impl Ribbon {
     /// Handle a pointer event, `layout` being where everything was drawn.
     pub fn handle_mouse(&mut self, layout: &RibbonLayout, event: &MouseEvent) -> RibbonEvent {
         let (x, y) = (event.x, event.y);
+        // The dialog is modal: while it is open, the pointer is its.
+        if self.customize.is_some() {
+            return self.customize_mouse(layout, event);
+        }
         if self.menu.is_some() {
             return self.menu_mouse(event);
         }
@@ -2758,6 +2787,7 @@ impl Ribbon {
         if self.customized() {
             m.row("Undo all changes to the ribbon", Act::Reset, true);
         }
+        m.row("Customize the ribbon\u{2026}", Act::Customize, true);
         let mut menu = ContextMenu::new(m.items);
         menu.show(x, y, viewport);
         self.menu = Some(OpenMenu { menu, acts: m.acts });
@@ -2920,6 +2950,10 @@ impl Ribbon {
                 self.reset_customization();
                 RibbonEvent::Customized
             }
+            Act::Customize => {
+                self.open_customize();
+                RibbonEvent::Handled
+            }
         };
         // A command given is the end of the panel it was given from.
         if event != RibbonEvent::Handled {
@@ -2935,6 +2969,10 @@ impl Ribbon {
     pub fn handle_key(&mut self, layout: &RibbonLayout, key: &KeyEvent) -> RibbonEvent {
         if !key.pressed {
             return RibbonEvent::Ignored;
+        }
+        // The dialog is modal: while it is open, every key is its.
+        if self.customize.is_some() {
+            return self.customize_key(layout, key);
         }
         if let Some(open) = self.menu.as_mut() {
             // The menu has the keyboard while it is open: a key it has no use
@@ -3318,6 +3356,9 @@ pub fn draw<S: CommandSink + ?Sized>(
         for command in open.menu.render_with_icons(p, icons) {
             sink.emit(command);
         }
+    }
+    if let (Some(dialog), Some(slots)) = (&ribbon.customize, &layout.dialog) {
+        customize::draw(sink, p, ribbon, dialog, slots);
     }
     if let Some(tip) = ribbon.tooltip() {
         for command in tip.render(p) {
@@ -3927,6 +3968,9 @@ fn draw_control<S: CommandSink + ?Sized>(
         }
     }
 }
+
+#[path = "ribbon_customize.rs"]
+pub mod customize;
 
 #[cfg(test)]
 #[path = "ribbon_tests.rs"]

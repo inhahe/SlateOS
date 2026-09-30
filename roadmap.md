@@ -2077,8 +2077,8 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
-- `[-]` `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
-  Widget*; `design-decisions.md` §1453) -- begun 2026-09-30. `guitk::ribbon`:
+- `[C]` **A ribbon in the toolkit** (`roadmap-detailed.md` → *Ribbon
+  Widget*; `design-decisions.md` §1453) -- done 2026-09-30. `guitk::ribbon`:
   tabs of named groups of controls -- large, medium and small buttons,
   toggles, split buttons, dropdowns, galleries -- with contextual tabs
   shown while the application's context is active, groups folding into one
@@ -2090,11 +2090,12 @@ live.
   arrangement: no staged shrinking, no gallery preview, no set header above
   contextual tabs, no layered key tips. A Quick Access Toolbar over or under
   the ribbon, and the user's changes -- commands onto the toolbar, into and
-  out of groups, tabs hidden and moved -- from a right-click, kept as one
-  line of text the application saves. The strip is the title bar's colour,
-  accented title bars included, from the one answer the window manager's
-  bar is drawn from (`Palette::title_bar`). **Next:** a dialog for the same
-  changes; lane E's applications onto it.
+  out of groups, tabs hidden and moved -- from a right-click or the
+  "Customize the ribbon…" dialog, kept as one line of text the application
+  saves. The strip is the title bar's colour, accented title bars included,
+  from the one answer the window manager's bar is drawn from
+  (`Palette::title_bar`). **Lane E:** its applications onto it
+  (`requests/c-e-the-toolkit-has-a-ribbon.md`).
 
 - `[x]` `[C]` **A notification's right-click menu turns its program off**
   (`design.txt`: "option for any notification to not show notifications from

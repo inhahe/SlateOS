@@ -168,6 +168,7 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct fstab": "fstab.h",
     "struct ttyent": "ttyent.h",
     "struct rpcent": "rpc/netdb.h",
+    "struct ntptimeval": "sys/timex.h",
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -342,7 +343,10 @@ def candidates(overlay: Path) -> list[str]:
         text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
         names |= set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))
         names |= set(re.findall(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(", text))
-        names |= set(re.findall(r"\bextern\b[^;(]*?\b([A-Za-z_]\w*)\s*;", text))
+        # Not past a `{`: `extern "C" {` opens a block, and the first field
+        # of a struct after it -- <sys/timex.h>'s `struct timeval time;` --
+        # is no extern object, though a function may have its name.
+        names |= set(re.findall(r"\bextern\b[^;({]*?\b([A-Za-z_]\w*)\s*;", text))
     return sorted(n for n in names - macros - C_WORDS if not n.startswith("_"))
 
 
@@ -636,6 +640,10 @@ def self_test() -> int:
         check("a comment's words are not", "comment" not in c)
         check("a macro is not", "M" not in c)
         check("a reserved name is not", "_r" not in c)
+        (d / "cxx.h").write_text('extern "C" {\nstruct t {\n\tlong time;\n};\n}\n',
+                                 encoding="utf-8", newline="")
+        check("a field after extern \"C\" { is not", "time" not in candidates(d))
+        (d / "cxx.h").unlink()
         (d / "r.txt").write_text("# x\nf\ta.h\tgnu,c17\tint (int)\n", encoding="utf-8", newline="")
         ref = read_reference(d / "r.txt")
         check("the reference is read", ref == {"f": ("a.h", frozenset({"gnu", "c17"}), "int (int)")})

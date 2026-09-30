@@ -1378,6 +1378,19 @@ pub(crate) fn abi_asserts() -> String {
         "struct timex",
         "sys/timex.h"
     );
+    // glibc's, which the overlay defines in place of musl's shorter one.
+    abi!(
+        out,
+        hdrs,
+        crate::sys_timex::NtpTimeval,
+        "struct ntptimeval",
+        "sys/timex.h",
+        time,
+        maxerror,
+        esterror,
+        tai,
+        reserved as "__glibc_reserved1"
+    );
 
     // --- the kernel-ABI structs, checked against the kernel's own uapi -------
     //

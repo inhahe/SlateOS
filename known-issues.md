@@ -133343,7 +133343,14 @@ mind. The constant now comes from `appearance::CONFIG_NAME`, which owns it.
 
 ---
 
-## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED -- ONE LEFT 2026-09-13
+## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED -- ALL FOUR CONSTRUCTED 2026-09-13; tray hiding, pinning and a lasting order left
+
+**Status, 2026-09-29.** The title said "one left" from 2026-09-13 on; the
+one, `tray_dnd.rs`, was constructed the same day (43a651a25 "tray icons can
+be dragged", e780ed228, 1d4f23f02 -- 25 references in `lib.rs` now). What the
+entry still tracks is under **What is left** below: hiding and pinning a tray
+icon have no way in, and the icons' order cannot outlive the programs'
+process ids.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `gui/desktop/src/` — `login_screen.rs` (2 417 lines), `blur.rs`

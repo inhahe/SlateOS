@@ -428,6 +428,19 @@ pub enum NotifPaneEvent {
     NotificationClicked(u64),
     /// User dismissed a single notification.
     NotificationDismissed(u64),
+    /// A notification's card was pressed with the secondary button, at
+    /// `(x, y)` on the screen: the shell offers what can be done about the
+    /// program it came from -- `design.txt`'s "option for any notification to
+    /// not show notifications from that application again". The card is left
+    /// as it was, unread if it was.
+    MenuAsked {
+        /// The program the notification came from.
+        app: String,
+        /// Where the press was, in screen coordinates.
+        x: f32,
+        /// Where the press was, in screen coordinates.
+        y: f32,
+    },
     /// User clicked "Clear all".
     ClearAll,
     /// Per-app setting changed.
@@ -896,6 +909,19 @@ impl NotificationPane {
         match &event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
                 self.handle_click(rx, ry, screen_height);
+                EventResult::Consumed
+            }
+            // On a notification's card, its program's menu; anywhere else in
+            // the pane, nothing -- the header, the switches and the program
+            // list have no menu of their own.
+            MouseEventKind::Press(MouseButton::Right) => {
+                if let Some(app) = self.card_app_at(ry) {
+                    self.events.push(NotifPaneEvent::MenuAsked {
+                        app,
+                        x: event.x,
+                        y: event.y,
+                    });
+                }
                 EventResult::Consumed
             }
             MouseEventKind::Scroll { dy, .. } => {
@@ -2156,6 +2182,19 @@ impl NotificationPane {
         }
     }
 
+    /// The program whose notification's card is at `ry` in the pane, or
+    /// `None` where there is no card: above the list (the header, the quick
+    /// settings), between cards, past the last, and anywhere while the pane
+    /// shows its per-program settings instead of the notifications.
+    fn card_app_at(&self, ry: f32) -> Option<String> {
+        let list_top = Self::list_start_y();
+        if self.show_settings || ry < list_top {
+            return None;
+        }
+        let idx = self.card_at(ry - list_top + self.scroll_offset)?;
+        self.notifications.get(idx).map(|n| n.app_name.clone())
+    }
+
     fn handle_notification_click(
         &mut self,
         rx: f32,
@@ -2451,6 +2490,83 @@ mod tests {
                 "click at y={y} should select card {idx}"
             );
         }
+    }
+
+    /// What a secondary press at `y` inside the pane asks for, and where.
+    fn secondary_press_at(pane: &mut NotificationPane, y: f32) -> Vec<NotifPaneEvent> {
+        pane.events.clear();
+        let event = MouseEvent {
+            x: SCREEN_W - PANE_WIDTH + PANE_PADDING + 10.0,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        };
+        assert_eq!(
+            pane.handle_mouse_event(&event, SCREEN_W, TEST_SCREEN_H),
+            EventResult::Consumed
+        );
+        pane.drain_events()
+    }
+
+    /// **A secondary press on a card asks for its program's menu, where it
+    /// is drawn** -- scrolled, so the offset is applied as a click's is --
+    /// and leaves the card unread. Off the cards, and on the program list,
+    /// it asks for nothing.
+    #[test]
+    fn a_secondary_press_on_a_card_asks_for_its_programs_menu() {
+        let mut pane = scrollable_pane(0);
+        for i in 0..12 {
+            pane.push_notification(make_notif(&format!("App{i}"), "N", 1000));
+        }
+        wheel_at(&mut pane, -1.0);
+        assert!(pane.scroll_offset > 0.0);
+        let apps: Vec<String> = pane
+            .notifications
+            .iter()
+            .map(|n| n.app_name.clone())
+            .collect();
+        let list_top = NotificationPane::list_start_y();
+        let x = SCREEN_W - PANE_WIDTH + PANE_PADDING + 10.0;
+
+        let mut asked = 0;
+        for top in painted_card_tops(&pane) {
+            if top < list_top || top + NOTIF_CARD_HEIGHT > TEST_SCREEN_H {
+                continue;
+            }
+            let y = top + NOTIF_CARD_HEIGHT / 2.0;
+            let idx = click_index(&pane, top);
+            assert_eq!(
+                secondary_press_at(&mut pane, y),
+                [NotifPaneEvent::MenuAsked {
+                    app: apps[idx].clone(),
+                    x,
+                    y
+                }],
+                "a secondary press at y={y}"
+            );
+            asked += 1;
+        }
+        assert!(asked >= 3, "only {asked} cards were pressed");
+        assert!(
+            pane.notifications.iter().all(|n| !n.read),
+            "a secondary press marked a card read"
+        );
+
+        // The header and the quick settings are above the list.
+        assert!(secondary_press_at(&mut pane, PANE_PADDING + 5.0).is_empty());
+        assert!(secondary_press_at(&mut pane, list_top - 5.0).is_empty());
+        // The per-program settings list has no menu.
+        pane.show_settings = true;
+        assert!(secondary_press_at(&mut pane, list_top + NOTIF_CARD_HEIGHT / 2.0).is_empty());
+    }
+
+    /// The index of the card painted at `top`, from where the list says its
+    /// cards are -- scrolled as the renderer scrolls them.
+    fn click_index(pane: &NotificationPane, top: f32) -> usize {
+        let content_y = top - NotificationPane::list_start_y() + pane.scroll_offset;
+        pane.card_tops()
+            .iter()
+            .position(|&t| (t - content_y).abs() < 0.5)
+            .expect("a painted card is one of the list's")
     }
 
     /// The hit rectangle must be the *painted* rectangle — the whole of it and

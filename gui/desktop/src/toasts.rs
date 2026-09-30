@@ -125,7 +125,7 @@ pub const fn stays_for(priority: NotifPriority) -> Option<u64> {
 }
 
 /// What a press on a toast asked for, for the shell to act on.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ToastEvent {
     /// The toast itself was pressed: open what the notification is about, as
     /// a press on its card in the pane does.
@@ -133,6 +133,17 @@ pub enum ToastEvent {
     /// Its close button was pressed: the toast goes, and the notification
     /// stays in the pane, unread.
     Closed(u64),
+    /// The toast was pressed with the secondary button, at `(x, y)` on the
+    /// screen: offer what can be done about the program it came from, as a
+    /// secondary press on its card in the pane does. The toast stays.
+    MenuAsked {
+        /// The program the notification came from.
+        app: String,
+        /// Where the press was, in screen coordinates.
+        x: f32,
+        /// Where the press was, in screen coordinates.
+        y: f32,
+    },
 }
 
 /// Where a toast is in its life.
@@ -226,6 +237,11 @@ pub struct ToastStack {
     motion: Motion,
     /// Whether the pointer is over the stack, holding every toast in it.
     held: bool,
+    /// Whether a menu opened from a toast is up, holding every toast as the
+    /// pointer does: the pointer goes from the toast to the menu, off the
+    /// stack, and the toast the menu is about must not leave while its menu
+    /// is being read. See [`hold_for_menu`](Self::hold_for_menu).
+    held_for_menu: bool,
     /// What presses asked for since [`take_events`](Self::take_events).
     events: Vec<ToastEvent>,
     /// The screen's width, which the stack is placed against.
@@ -250,6 +266,7 @@ impl ToastStack {
             waiting: VecDeque::new(),
             motion: Motion::STANDARD,
             held: false,
+            held_for_menu: false,
             events: Vec::new(),
             screen_width: 1920.0,
             bottom: 1080.0 - MARGIN,
@@ -316,6 +333,31 @@ impl ToastStack {
         }
     }
 
+    /// Stop showing everything from `app`: the user has just said not to
+    /// show them notifications from it. What is on screen slides out, what
+    /// was waiting for room is dropped; the pane keeps them all.
+    pub fn forget_app(&mut self, app: &str) {
+        self.waiting.retain(|t| t.app_name != app);
+        let motion = self.motion;
+        for t in self.shown.iter_mut().filter(|t| t.app_name == app) {
+            t.leave(motion);
+        }
+    }
+
+    /// Hold every toast where it is while a menu opened from one is up, or
+    /// let them go on when it closes -- the pointer's hold, for the time the
+    /// pointer is on the menu instead. The shell's, to set and to clear: the
+    /// stack cannot see its menu close.
+    pub fn hold_for_menu(&mut self, held: bool) {
+        self.held_for_menu = held;
+    }
+
+    /// Whether anything holds the toasts where they are: the pointer over
+    /// them, or a menu opened from one.
+    const fn is_held(&self) -> bool {
+        self.held || self.held_for_menu
+    }
+
     /// How many toasts are on screen and not leaving.
     fn staying_count(&self) -> usize {
         self.shown
@@ -344,10 +386,10 @@ impl ToastStack {
     }
 
     /// Advance every toast by `dt_ms` of wall time: slides, settling, and --
-    /// unless the pointer holds them -- their time on screen.
+    /// unless the pointer or a menu holds them -- their time on screen.
     pub fn tick(&mut self, dt_ms: u64) {
         let motion = self.motion;
-        let held = self.held;
+        let held = self.is_held();
         let mut gone = false;
         for toast in &mut self.shown {
             toast.phase = match toast.phase {
@@ -403,10 +445,10 @@ impl ToastStack {
     /// When the next toast's time is up, in milliseconds from now -- for a
     /// wake-up at that moment rather than a frame every sixtieth of a second
     /// while toasts sit still. `None` when nothing is waiting to go: no
-    /// toasts, only urgent ones, or the pointer holding them.
+    /// toasts, only urgent ones, or the pointer or a menu holding them.
     #[must_use]
     pub fn next_due_in(&self) -> Option<u64> {
-        if self.held {
+        if self.is_held() {
             return None;
         }
         self.shown
@@ -520,6 +562,28 @@ impl ToastStack {
                     t.leave(motion);
                 }
                 self.events.push(event);
+                true
+            }
+            // The secondary button asks what can be done about the toast's
+            // program -- on the close button too, which is still the toast --
+            // and the toast stays: the menu is about it.
+            MouseEventKind::Press(MouseButton::Right) => {
+                let Some(hit) = under else {
+                    return false;
+                };
+                let Some(app) = self
+                    .shown
+                    .iter()
+                    .find(|t| t.id == hit.id)
+                    .map(|t| t.app_name.clone())
+                else {
+                    return false;
+                };
+                self.events.push(ToastEvent::MenuAsked {
+                    app,
+                    x: event.x,
+                    y: event.y,
+                });
                 true
             }
             _ => {
@@ -1055,6 +1119,100 @@ mod tests {
         s.clear();
         assert!(!s.is_showing());
         assert!(!s.is_moving());
+    }
+
+    fn from(id: u64, app: &str, priority: NotifPriority) -> Notification {
+        Notification {
+            app_name: app.to_owned(),
+            ..notif(id, priority)
+        }
+    }
+
+    /// **The secondary button asks for the toast's program's menu, and the
+    /// toast stays** -- on its body and on its close button alike, since
+    /// both are the toast. Beside the stack it asks for nothing.
+    #[test]
+    fn a_secondary_press_asks_for_the_menu_and_the_toast_stays() {
+        let mut s = stack();
+        s.show(&from(1, "Mail", NotifPriority::Normal));
+        s.show(&from(2, "Calendar", NotifPriority::Normal));
+        s.tick(SETTLED);
+        let placed = s.placed();
+        let right = |x: f32, y: f32| at(x, y, MouseEventKind::Press(MouseButton::Right));
+
+        let (x, y) = centre(placed[0].rect);
+        assert!(s.handle_mouse(&right(x, y)));
+        assert_eq!(
+            s.take_events(),
+            [ToastEvent::MenuAsked {
+                app: "Mail".to_owned(),
+                x,
+                y
+            }]
+        );
+        let close = placed[1].close;
+        assert!(s.handle_mouse(&right(close.x + 2.0, close.y + 2.0)));
+        assert_eq!(
+            s.take_events(),
+            [ToastEvent::MenuAsked {
+                app: "Calendar".to_owned(),
+                x: close.x + 2.0,
+                y: close.y + 2.0
+            }]
+        );
+        assert!(!s.is_moving(), "a toast started to leave");
+        assert_eq!(s.ids(), [1, 2]);
+
+        assert!(!s.handle_mouse(&right(placed[0].rect.x - 5.0, y)));
+        assert!(s.take_events().is_empty());
+    }
+
+    /// **A menu opened from a toast holds the stack as the pointer does**,
+    /// with the pointer gone from the stack to the menu, and letting go
+    /// lets them go on from where they were.
+    #[test]
+    fn a_menu_holds_them_with_the_pointer_gone() {
+        let mut s = stack();
+        s.show(&notif(1, NotifPriority::Low));
+        s.tick(SETTLED);
+        let (x, y) = centre(s.placed()[0].rect);
+        s.handle_mouse(&at(x, y, MouseEventKind::Move));
+        s.hold_for_menu(true);
+        s.handle_mouse(&at(x, y, MouseEventKind::Leave));
+        assert_eq!(s.next_due_in(), None, "held, nothing is due");
+        s.tick(60_000);
+        assert_eq!(s.ids(), [1], "a toast left under its menu");
+        assert!(!s.is_moving());
+        s.hold_for_menu(false);
+        assert_eq!(s.next_due_in(), Some(4_000));
+        s.tick(4_000);
+        s.tick(SETTLED);
+        assert!(!s.is_showing());
+    }
+
+    /// **Forgetting a program takes away its toasts and only its**: the
+    /// ones on screen slide out, one waiting for room is dropped, and the
+    /// rest stay where they are.
+    #[test]
+    fn forgetting_a_program_takes_its_toasts_only() {
+        let mut s = stack();
+        s.show(&from(1, "Mail", NotifPriority::Urgent));
+        s.show(&from(2, "Calendar", NotifPriority::Urgent));
+        s.show(&from(3, "Mail", NotifPriority::Urgent));
+        // Every toast shown is urgent, so these two wait for room.
+        s.show(&from(4, "Mail", NotifPriority::Normal));
+        s.show(&from(5, "Calendar", NotifPriority::Normal));
+        s.tick(SETTLED);
+        assert_eq!(s.ids(), [1, 2, 3]);
+
+        s.forget_app("Mail");
+        assert!(s.is_moving(), "nothing started to leave");
+        s.tick(SETTLED);
+        // Mail's two went, making room for the one waiting that is not
+        // Mail's; Mail's waiting one never came.
+        assert_eq!(s.ids(), [2, 5]);
+        s.tick(SETTLED);
+        assert_eq!(s.ids(), [2, 5]);
     }
 
     /// **A long body is wrapped and cut at three lines**, with a mark; an

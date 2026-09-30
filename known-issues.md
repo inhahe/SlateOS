@@ -151725,6 +151725,20 @@ builds the behaviour rather than a second copy of the settings for it.
 
 **Date:** 2026-09-15. **Lane:** C.
 
+**Narrowed 2026-09-29 -- two of the four behaviours exist now, neither as a
+setting.** Notifications pop up and go by themselves (design-decisions §1447,
+`gui/desktop/src/toasts.rs`): after 4, 6 or 10 seconds by priority, an urgent
+one when closed -- the `AutoDismissDelay` this entry called the one a user
+would miss first, with the time fixed by priority rather than chosen. They
+appear in one place, the bottom-right corner above the taskbar -- a
+`BannerPosition` with one value. And a notification's right-click menu
+(§1450) turns its program off, which is `AppNotificationPrefs`' "enabled".
+Still not built: `GroupingMode` (the pane groups by time, never by program)
+and `HistoryRetention` (the pane keeps a notification until it is dismissed,
+and forgets them all when the desktop restarts, so there is as yet no
+history old enough to retire). The order below still holds for either:
+behaviour first, then the field in `gui/notifsettings`, then the control.
+
 **What was deleted.** `gui/desktop/src/notification_settings.rs` -- an island
 under `scripts/orphan-modules-baseline.txt`, referenced by nothing but its own
 `pub mod` line. It defined `BannerStyle`, `BannerPosition`, `GroupingMode`,

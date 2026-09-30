@@ -140,6 +140,8 @@ pub mod window_rules;
 #[cfg(test)]
 mod note_tests;
 #[cfg(test)]
+mod notification_menu_tests;
+#[cfg(test)]
 mod open_with_tests;
 #[cfg(test)]
 mod pointer_tests;
@@ -2024,6 +2026,12 @@ pub struct DesktopShell {
     /// The taskbar's own menu -- a right-click on the bar between its tiles
     /// and its tray -- when it is open: the bar's options.
     taskbar_menu: Option<guitk::menu::ContextMenu>,
+    /// A notification's menu -- a right-click on its card in the pane, or on
+    /// its toast -- when it is open, and the program it was opened for.
+    ///
+    /// The program is captured with the menu, as the pin menu captures its
+    /// row: what the menu said it was about is what its rows act on.
+    notification_menu: Option<(guitk::menu::ContextMenu, String)>,
     /// A pinned button being dragged along the bar.
     ///
     /// Keyed on the executable path rather than the slot, for the reason the
@@ -2721,6 +2729,7 @@ impl DesktopShell {
             tray_overflow_menu: None,
             pin_menu: None,
             taskbar_menu: None,
+            notification_menu: None,
             pin_drag: None,
             pin_drag_off_bar: false,
             start_drag: None,
@@ -4870,6 +4879,21 @@ impl DesktopShell {
                 _ => return ShellAction::Consumed,
             }
         }
+        // A notification's menu, on the pin menu's terms below -- and ahead of
+        // the pane's scrim further down, which would otherwise take every
+        // press meant for a menu opened over the pane.
+        if self.notification_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.notification_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_notification_menu(event.x, event.y),
+                _ => return ShellAction::Consumed,
+            }
+        }
         // The taskbar's menu, on the pin menu's terms just below.
         if self.taskbar_menu.is_some() {
             match event.kind {
@@ -6866,6 +6890,28 @@ impl DesktopShell {
             }
         }
 
+        // A notification's menu, on the pin menu's terms below. Ahead of the
+        // pane, which it may be open over: Escape closes the menu and leaves
+        // the pane, as a press outside the menu does.
+        if self.notification_menu.is_some() {
+            let chosen = self
+                .notification_menu
+                .as_mut()
+                .map(|(menu, app)| (menu.handle_key(key), app.clone()));
+            match chosen {
+                Some((Some(MenuAction::Selected(id)), app)) => {
+                    self.close_notification_menu();
+                    if let ShellAction::Launch(launch) =
+                        self.activate_notification_menu_item(id, &app)
+                    {
+                        return HotkeyOutcome::start(vec![launch]);
+                    }
+                }
+                Some((Some(MenuAction::Closed), _)) => self.close_notification_menu(),
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
         // The taskbar's menu, on the pin menu's terms just below.
         if self.taskbar_menu.is_some() {
             match self.taskbar_menu.as_mut().map(|menu| menu.handle_key(key)) {
@@ -10451,6 +10497,138 @@ impl DesktopShell {
         Some(tree)
     }
 
+    /// A notification's menu's switch: turn its program's notifications
+    /// off, or back on.
+    const MENU_NOTIFY_SWITCH: MenuItemId = 1;
+
+    /// A notification's menu's way to the Settings app's Notifications page.
+    const MENU_NOTIFY_SETTINGS: MenuItemId = 2;
+
+    /// Whether the user has turned off notifications from `app`: its rule is
+    /// `Silent`, which is what the Settings app's switch for a program writes
+    /// and what [`focus_assist`] reads.
+    fn notifications_off_for(&self, app: &str) -> bool {
+        self.notif.settings.rule_for(app).importance == notifsettings::Importance::Silent
+    }
+
+    /// Open a notification's menu at `(x, y)`: what can be done about `app`,
+    /// the program it came from -- `design.txt`'s "option for any
+    /// notification to not show notifications from that application again".
+    ///
+    /// Two rows. The first turns the program's notifications off -- makes it
+    /// `Silent`, as the Settings app's switch for it does -- or, for a
+    /// program already off, back on: a silenced program's notifications are
+    /// still filed in the pane, so there is a card to ask from, and the row
+    /// says what choosing it will do. The second opens the Settings app on
+    /// its Notifications page, where the rest of the program's rule is.
+    ///
+    /// **From the pane** the menu opens over it and the pane stays: turning
+    /// one program off is part of going through the list, not the end of it.
+    /// Nothing else can be open then -- the pane takes every press but the
+    /// bar's, and a press on the bar closes it -- so nothing is dismissed.
+    ///
+    /// **From a toast** it closes whatever else was open, as every menu
+    /// does, and opens *beside* the stack: ending where the toasts' surface
+    /// begins, at the pointer's height. That surface is above the menus'
+    /// (§1447, "a toast pops up over an open menu"), so a menu opened under
+    /// the pointer would be drawn under the toast it was opened from. And
+    /// the toasts hold while it is up, as they do under the pointer: the
+    /// pointer has gone from the toast to its menu, and the toast the menu is
+    /// about must not leave while the menu is read.
+    fn open_notification_menu(&mut self, app: String, x: f32, y: f32, from_toast: bool) {
+        let switch = if self.notifications_off_for(&app) {
+            format!("Turn on notifications from {app}")
+        } else {
+            format!("Turn off notifications from {app}")
+        };
+        let row = |id, label: String| guitk::menu::MenuItem::Action {
+            id,
+            label,
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        };
+        let mut menu = guitk::menu::ContextMenu::new(vec![
+            row(Self::MENU_NOTIFY_SWITCH, switch),
+            row(
+                Self::MENU_NOTIFY_SETTINGS,
+                "Notification settings".to_owned(),
+            ),
+        ]);
+        let x = if from_toast {
+            self.dismiss_popups();
+            let beside = self.toast_extent().map_or(x, |stack| stack.x);
+            (beside - menu.width()).max(0.0)
+        } else {
+            x
+        };
+        menu.show(x, y, self.viewport());
+        self.notification_menu = Some((menu, app));
+        self.toasts.hold_for_menu(from_toast);
+    }
+
+    /// Close a notification's menu, letting go of the toasts it held. The one
+    /// way it closes -- a row chosen, a press elsewhere, Escape, another
+    /// popup opening -- so that none of them can leave the toasts held with
+    /// no menu up, which would keep them on screen until the next menu.
+    fn close_notification_menu(&mut self) {
+        self.notification_menu = None;
+        self.toasts.hold_for_menu(false);
+    }
+
+    /// A press while a notification's menu is open: a row takes its action,
+    /// and a press anywhere else closes the menu, as every menu's does.
+    fn click_notification_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let chosen = self
+            .notification_menu
+            .as_mut()
+            .and_then(|(menu, app)| menu.handle_click(x, y).map(|id| (id, app.clone())));
+        self.close_notification_menu();
+        match chosen {
+            Some((id, app)) => self.activate_notification_menu_item(id, &app),
+            None => ShellAction::Consumed,
+        }
+    }
+
+    /// One row of a notification's menu, chosen by click or by key.
+    ///
+    /// Turning a program off takes its toasts away at once -- the user has
+    /// just said not to be shown them -- and leaves its cards in the pane,
+    /// which is where they are turned back on from. Opening Settings closes
+    /// the pane: the window it opens is what the user asked to see, and the
+    /// pane's scrim would dim it.
+    fn activate_notification_menu_item(&mut self, id: MenuItemId, app: &str) -> ShellAction {
+        match id {
+            Self::MENU_NOTIFY_SWITCH => {
+                let turning_off = !self.notifications_off_for(app);
+                self.apply_app_notification_setting(
+                    app,
+                    notif_pane::AppSettingKind::Enabled,
+                    notif_pane::SettingValue::Bool(!turning_off),
+                );
+                if turning_off {
+                    self.toasts.forget_app(app);
+                }
+                ShellAction::Consumed
+            }
+            Self::MENU_NOTIFY_SETTINGS => {
+                self.notifications.hide();
+                ShellAction::Launch(launcher::settings_page(launcher::NOTIFICATIONS_PAGE))
+            }
+            _ => ShellAction::Consumed,
+        }
+    }
+
+    /// A notification's menu's draw commands, `None` when it is closed.
+    #[must_use]
+    pub fn render_notification_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.notification_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.render_menu(menu));
+        Some(tree)
+    }
+
     /// `menu`'s draw commands, each row's picture found in the icon theme
     /// and drawn in the menu's text colour (`TD-C-MENU-ROWS-DRAW-NO-ICONS`,
     /// fixed): a jump list's action, an item a program added to a file's
@@ -11465,10 +11643,25 @@ impl DesktopShell {
     /// and, when it names a program, asks for that program, as a press on its
     /// card in the pane does -- and a press on its close button just closes
     /// it, leaving the notification unread in the pane. Either way the toast
-    /// goes. A press between toasts is the stack's surface and nothing
-    /// else's, and is consumed.
+    /// goes. A right-click on a toast opens its program's menu beside the
+    /// stack (`open_notification_menu`), and the toast stays. A press
+    /// between toasts is the stack's surface and nothing else's, and is
+    /// consumed.
     pub fn handle_toast_mouse(&mut self, event: &MouseEvent) -> ShellAction {
         self.sync_toast_place();
+        // A press while a toast's menu is up is a press outside the menu --
+        // the menu is beside the stack, never on it -- and closes it, as a
+        // press outside any menu does, doing nothing else: the toast under
+        // it is not opened by the press that dismissed its menu.
+        if self.notification_menu.is_some()
+            && matches!(
+                event.kind,
+                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_)
+            )
+        {
+            self.close_notification_menu();
+            return ShellAction::Consumed;
+        }
         self.toasts.handle_mouse(event);
         let mut launch = None;
         for event in self.toasts.take_events() {
@@ -11484,6 +11677,9 @@ impl DesktopShell {
                         .or(launch);
                 }
                 toasts::ToastEvent::Closed(_) => {}
+                toasts::ToastEvent::MenuAsked { app, x, y } => {
+                    self.open_notification_menu(app, x, y, true);
+                }
             }
         }
         match launch {
@@ -11594,6 +11790,10 @@ impl DesktopShell {
                     setting,
                     value,
                 } => self.apply_app_notification_setting(&app, setting, value),
+                // A right-click on a card: its program's menu, over the pane.
+                NotifPaneEvent::MenuAsked { app, x, y } => {
+                    self.open_notification_menu(app, x, y, false);
+                }
                 // The other three are already done by the time they are
                 // reported: the card is gone, the list is empty, the pane is
                 // closing. They are drained so the buffer stays bounded, and
@@ -13125,6 +13325,7 @@ impl DesktopShell {
             || self.tray_overflow_menu.is_some()
             || self.pin_menu.is_some()
             || self.taskbar_menu.is_some()
+            || self.notification_menu.is_some()
             || self.ending_listing()
             || self.start_menu_open
             || self.power_menu_open
@@ -13147,6 +13348,7 @@ impl DesktopShell {
         self.tray_overflow_menu = None;
         self.pin_menu = None;
         self.taskbar_menu = None;
+        self.close_notification_menu();
         // The list, not the wait: dismissing the popups -- opening a menu,
         // say -- is not the user changing their mind about shutting down.
         if self.ending_listing() {

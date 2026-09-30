@@ -294,6 +294,18 @@ impl ContextMenu {
         self.visible
     }
 
+    /// How wide the menu is drawn: its longest row, or the least width it
+    /// was given ([`set_min_width`](Self::set_min_width)).
+    ///
+    /// Known before the menu is shown, for a caller that must put it beside
+    /// something it may not cover rather than at the pointer --
+    /// [`show`](Self::show) puts the top-left corner where it is told, so
+    /// opening a menu that *ends* at an edge needs this width first.
+    #[must_use]
+    pub fn width(&self) -> f32 {
+        self.width
+    }
+
     /// Never be narrower than `width`.
     ///
     /// A drop-down's list is at least as wide as the field it drops from
@@ -2454,6 +2466,26 @@ mod tests {
         // Show near bottom edge — should flip upward.
         menu.show(100.0, SCREEN.1 - 10.0, SCREEN);
         assert!(menu.y < SCREEN.1 - 10.0);
+    }
+
+    /// **The width a menu reports before it is shown is the width it is
+    /// drawn at** -- so a menu opened to end at `right` ends there, with no
+    /// flip and no gap, and a least width counts.
+    #[test]
+    fn a_menu_opened_to_end_at_an_edge_ends_there() {
+        let mut menu = ContextMenu::new(sample_items());
+        let right = 700.0;
+        menu.show(right - menu.width(), 100.0, SCREEN);
+        let panel = menu.panel_rect().expect("shown");
+        assert!((panel.x + panel.w - right).abs() < 0.001, "{panel:?}");
+        assert!((panel.w - menu.width()).abs() < 0.001);
+
+        let natural = menu.width();
+        menu.set_min_width(natural + 50.0);
+        assert!((menu.width() - (natural + 50.0)).abs() < 0.001);
+        menu.show(right - menu.width(), 100.0, SCREEN);
+        let panel = menu.panel_rect().expect("shown");
+        assert!((panel.x + panel.w - right).abs() < 0.001, "{panel:?}");
     }
 
     // ─── Tooltip tests ──────────────────────────────────────────────────────

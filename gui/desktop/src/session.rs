@@ -2113,6 +2113,11 @@ impl<T: Transport> ShellSession<T> {
             // showing. Drawn earlier it would be the thing dimmed, by its
             // own scrim, under a switcher it is supposed to be in front of.
             self.shell.render_notifications(),
+            // A notification's menu, over the pane it may be opened from --
+            // the pane stays open under it. Opened from a toast it is drawn
+            // beside the toasts' surface, never under it, so the surfaces'
+            // order does not hide it.
+            self.shell.render_notification_menu(),
             // Last of all. The Run box is the shell's only modal dialog:
             // while it is up it owns the keyboard
             // (`DesktopShell::handle_hotkey`) and every press

@@ -34,6 +34,30 @@ pub const RECYCLE_BIN_VIEW_ARG: &str = "--recycle-bin";
 /// Settings shortcut start, and this database's entry for it.
 pub const SETTINGS: &str = "/usr/bin/settings";
 
+/// How Settings is asked to open on one of its pages: `settings --page
+/// <name>`, with the name `SettingsPage::name` gives the page (lane E,
+/// 3fc93a617, `requests/c-e-settings-opens-on-the-page-it-is-asked-for.md`).
+pub const SETTINGS_PAGE_OPTION: &str = "--page";
+
+/// Settings' Notifications page, by the name it answers to: what a
+/// notification's menu opens.
+pub const NOTIFICATIONS_PAGE: &str = "notifications";
+
+/// Settings, asked to open on `page`.
+///
+/// The option and the name are two arguments, never one string: a program
+/// path with the option inside it names a file that cannot exist -- the
+/// defect `every_program_the_menus_start_is_one_this_workspace_builds`
+/// exists to catch.
+#[must_use]
+pub fn settings_page(page: &str) -> crate::hotkeys::Launch {
+    crate::hotkeys::Launch {
+        program: std::path::PathBuf::from(SETTINGS),
+        args: vec![SETTINGS_PAGE_OPTION.into(), page.into()],
+        dir: None,
+    }
+}
+
 /// The terminal: what the start menu's Terminal button starts, and this
 /// database's entry for it.
 pub const TERMINAL: &str = "/usr/bin/terminal";
@@ -522,6 +546,74 @@ mod tests {
                 bins.contains(name),
                 "{what} starts {program:?}, and nothing in this workspace builds a program \
                  called {name:?}"
+            );
+        }
+    }
+
+    /// **Every Settings page the desktop asks for is one Settings answers
+    /// to**: a notification's menu's, and each `settings --page` line in
+    /// SlateOS's own programs' entries -- Settings' jump list of Display,
+    /// Network and Sound. And the desktop's own asks with two arguments.
+    ///
+    /// Settings refuses a page it does not know -- a message on its terminal
+    /// and no window -- so a misspelt name is a row that opens nothing, with
+    /// every other test green. Settings is another lane's program, a binary
+    /// this crate cannot link, so its source is read: the names are the
+    /// string arms of `SettingsPage::name`.
+    #[test]
+    fn every_settings_page_the_desktop_asks_for_is_one_settings_has() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = std::fs::read_to_string(root.join("apps/settings/src/main.rs"))
+            .expect("Settings' source")
+            .replace("\r\n", "\n");
+        let body = source
+            .split("fn name(self) -> &'static str {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("SettingsPage::name, which gives each page its name");
+        let names: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.split("=> \"").nth(1)?.split('"').next())
+            .collect();
+        // A floor, so a moved function fails as itself and not as a missing
+        // page.
+        assert!(
+            names.len() > 20,
+            "found {} page names: {names:?}",
+            names.len()
+        );
+
+        let notifications = settings_page(NOTIFICATIONS_PAGE);
+        assert_eq!(notifications.program, std::path::PathBuf::from(SETTINGS));
+        assert_eq!(
+            notifications.args,
+            [SETTINGS_PAGE_OPTION, NOTIFICATIONS_PAGE]
+        );
+
+        let mut asked = vec![notifications];
+        for entry in builtin_app_database() {
+            asked.push(entry.launch());
+            for action in &entry.actions {
+                asked.extend(entry.launch_action(&action.id));
+            }
+        }
+        let pages: Vec<String> = asked
+            .iter()
+            .filter(|launch| launch.program == std::path::Path::new(SETTINGS))
+            .filter_map(|launch| match launch.args.as_slice() {
+                [option, page] if option == SETTINGS_PAGE_OPTION => {
+                    Some(page.to_str().expect("a page's name is text").to_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        // The notifications page and Settings' three actions, at least: a
+        // floor, so an entry that stopped naming pages fails here.
+        assert!(pages.len() >= 4, "found {pages:?}");
+        for page in &pages {
+            assert!(
+                names.contains(&page.as_str()),
+                "Settings has no page called {page:?}"
             );
         }
     }

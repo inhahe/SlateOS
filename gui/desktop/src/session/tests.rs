@@ -893,6 +893,37 @@ fn right_clicking_the_bare_bar_draws_its_menu() {
     });
 }
 
+/// **A notification's menu is put on the screen** -- the popup surface's
+/// part list has it, as the bar's menu's must
+/// (`right_clicking_the_bare_bar_draws_its_menu`): a menu opened in the
+/// shell's model and missing from that list is a right-click that does
+/// nothing anyone can see.
+#[test]
+fn a_notifications_menu_is_put_on_the_screen() {
+    settingsfile::testing::with_scratch_config("session-notification-menu-drawn", |_root| {
+        let (mut session, desktop, _turn) = session();
+        let popups = session.popups().window();
+        let before = desktop.borrow().seen.len();
+
+        session
+            .shell_mut()
+            .open_notification_menu("Chat".to_owned(), 300.0, 300.0, false);
+        // Opened by a call rather than an event, so nothing marked the
+        // screen as needing a paint; an event would have.
+        session.dirty = true;
+        session.pump().expect("pump");
+
+        assert!(
+            desktop.borrow().seen[before..].iter().any(|r| r.body
+                == RequestBody::SetVisible {
+                    window: popups,
+                    visible: true
+                }),
+            "a notification's menu opened with nothing to draw it on"
+        );
+    });
+}
+
 /// **The tray's overflow list is seen.** It was drawn -- onto the popup
 /// surface, which was mapped only for the things on a second list, and the
 /// list was not on it. So the chevron opened a list nobody could see.

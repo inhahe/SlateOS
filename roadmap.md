@@ -2061,6 +2061,16 @@ live.
   for once C-Q32 settles which of the two notification systems stays (the
   separate `gui/notifications` program is started by nothing).
 
+- `[x]` `[C]` **A notification's right-click menu turns its program off**
+  (`design.txt`: "option for any notification to not show notifications from
+  that application again"; `design-decisions.md` §1450) -- done 2026-09-29.
+  A right-click on a card in the pane, or on a pop-up, offers "Turn off
+  notifications from *program*" (the program's rule becomes `Silent`, as the
+  Settings switch makes it; its pop-ups go, its cards stay) -- "Turn on ..."
+  for a program already off -- and "Notification settings" (`settings --page
+  notifications`). Over the pane, which stays open; beside the pop-ups, which
+  it holds while it is up.
+
 - `[-]` `[C]` **A theme sets how the desktop moves, and every moving thing
   follows it** (`roadmap-detailed.md` → *Tier 3 — Animation Tuning*,
   `design-decisions.md` §1446) -- the axis done 2026-09-29: a theme's

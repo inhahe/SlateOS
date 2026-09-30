@@ -1,320 +1,875 @@
-//! POSIX filename pattern matching.
+//! POSIX pattern matching: `fnmatch()` (XSH `fnmatch`, XCU 2.13 "Pattern
+//! Matching Notation"), with glibc's GNU flags.
 //!
-//! Implements `fnmatch()` for shell-style wildcard matching per
-//! POSIX.1-2024.
+//! ## What it matches
 //!
-//! ## Supported Patterns
+//! - `?` any one byte, `*` any string, `[...]` a bracket expression (XBD 9.3.5,
+//!   with `!` for negation and `^` as well, as glibc and musl take it): single
+//!   bytes, ranges, `[:class:]`, `[=c=]` and `[.c.]` -- the C locale's
+//!   equivalence classes and collating symbols, which are single bytes. A `[`
+//!   with no closing `]` is an ordinary character, as POSIX says.
+//! - `\c`, unless `FNM_NOESCAPE`: `c` itself; a pattern ending in an
+//!   unescaped `\` matches nothing.
+//! - `FNM_PATHNAME`: a `/` is matched only by a `/` in the pattern -- never by
+//!   `*`, `?` or a bracket expression.
+//! - `FNM_PERIOD`: a leading `.` (the string's first byte, or with
+//!   `FNM_PATHNAME` one after a `/`) only by a `.` in the pattern.
+//! - glibc's: `FNM_LEADING_DIR`, a match of the pattern followed by `/` and
+//!   anything; `FNM_CASEFOLD`, letters without their case; `FNM_EXTMATCH`,
+//!   ksh's `?(a|b)` `*(a|b)` `+(a|b)` `@(a|b)` `!(a|b)`.
 //!
-//! - `*` — matches any string (including empty)
-//! - `?` — matches any single character
-//! - `[...]` — matches any character in the set
-//! - `[!...]` or `[^...]` — matches any character NOT in the set
-//! - `\c` — matches literal character `c` (when `FNM_NOESCAPE` not set)
+//! Bytes, not characters: glibc's C locale's matching, and the locale this
+//! library reports (known-issues.md -> open-questions D-Q7 is whether it
+//! should report UTF-8's).
 //!
-//! ## Flags
+//! glibc 2.39's answers are the oracle (`posix/tools/oracle/fnmatch_harness.py`,
+//! `fnmatch_oracle.txt`: 42,828 patterns and flag sets against 50 strings each)
+//! for everything POSIX and glibc's manual leave open -- what a bracket
+//! expression with an unknown class, or an unterminated `[.`, or a range
+//! whose ends are reversed, matches (nothing). Where glibc's answer
+//! contradicts the standard or its own manual this follows the text, in three
+//! places (design-decisions §1148; `fnmatch_deviations.txt` lists every case):
 //!
-//! - `FNM_PATHNAME` (1): `*` and `?` don't match `/`
-//! - `FNM_NOESCAPE` (2): treat `\` as ordinary character
-//! - `FNM_PERIOD` (4): leading `.` must be matched explicitly
+//! | Pattern | Here | glibc 2.39 |
+//! |---|---|---|
+//! | `*\/`, `FNM_PATHNAME` | matches `a/`, as POSIX's escaped slash is a slash in the pattern | matches nothing |
+//! | `*` then an extended group, `*@(a\|)` | matches all it can | misses every match whose group falls at the string's end, and reads `**(x)` as `*` |
+//! | `FNM_LEADING_DIR` in an extended group | a directory the whole pattern matches, as the manual defines it | the flag applied inside some groups' alternatives and not others' |
+//!
+//! Until 2026-09-29 this knew three of the six flags, took an unterminated
+//! `[` for a failed match, and read `[=a=]` and `[.a.]` as bracket
+//! expressions of `=`, `a` and `.`: 16,603 of 2,017,500 answers were not
+//! glibc's (known-issues.md ->
+//! D-POSIX-FNMATCH-KNEW-HALF-ITS-FLAGS-AND-NO-EQUIVALENCE-CLASSES).
+//!
+//! ## How
+//!
+//! [`Matcher::run`] walks the pattern once, remembering only the last `*`:
+//! when a later part fails, that star takes one more byte and the walk
+//! resumes after it. That is enough -- a later `*` can absorb whatever an
+//! earlier one would, and under `FNM_PATHNAME` neither crosses a `/` -- so a
+//! pattern of many stars is linear in the string for each star, not
+//! exponential. An extended group is matched by trying each end of the part
+//! of the string it takes; the repeating ones (`*(...)`, `+(...)`) keep a
+//! table of the ends reachable so far rather than recursing once per
+//! repetition, so a long string cannot exhaust a thread's stack.
+
+use crate::decfloat::MallocBuf;
 
 /// Returned when the pattern does not match.
 pub const FNM_NOMATCH: i32 = 1;
-/// Wildcards don't match `/` (glibc/musl value: 1).
+/// Wildcards and bracket expressions don't match `/`.
 pub const FNM_PATHNAME: i32 = 1;
-/// Treat backslash as ordinary character (glibc/musl value: 2).
+/// Backslash is an ordinary character.
 pub const FNM_NOESCAPE: i32 = 2;
-/// Leading `.` must be matched explicitly.
+/// A leading `.` must be matched by a `.` in the pattern.
 pub const FNM_PERIOD: i32 = 4;
+/// Match a leading directory: the pattern, then `/` and anything (glibc).
+pub const FNM_LEADING_DIR: i32 = 8;
+/// Ignore the case of letters (glibc).
+pub const FNM_CASEFOLD: i32 = 16;
+/// ksh's extended patterns (glibc).
+pub const FNM_EXTMATCH: i32 = 32;
 
-/// Match a filename against a pattern.
-///
-/// Returns 0 if `string` matches `pattern`, `FNM_NOMATCH` otherwise.
+/// No memory for an extended group's table of positions: `fnmatch`'s -1.
+pub(crate) struct NoMemory;
+
+/// Match `string` against `pattern`: 0 if it matches, [`FNM_NOMATCH`] if
+/// not, -1 (with `errno` `ENOMEM`) if an extended pattern needed memory there
+/// was none of.
 ///
 /// # Safety
 ///
-/// Both `pattern` and `string` must be valid null-terminated C strings.
+/// Both must be NUL-terminated C strings (NULL is taken for no match).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fnmatch(pattern: *const u8, string: *const u8, flags: i32) -> i32 {
     if pattern.is_null() || string.is_null() {
         return FNM_NOMATCH;
     }
-
-    if do_match(pattern, 0, string, 0, flags, true) {
-        0
-    } else {
-        FNM_NOMATCH
+    // SAFETY: C strings, the caller's.
+    let (p, s) = unsafe {
+        (
+            core::slice::from_raw_parts(pattern, crate::string::strlen(pattern)),
+            core::slice::from_raw_parts(string, crate::string::strlen(string)),
+        )
+    };
+    match matches(p, s, flags) {
+        Ok(true) => 0,
+        Ok(false) => FNM_NOMATCH,
+        Err(NoMemory) => {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            -1
+        }
     }
 }
 
-/// Match a bracket expression `[...]` against a character.
-///
-/// `ppos` should point to the character after `[`.
-/// Returns `Some(new_ppos)` (pointing past `]`) on match, `None` on
-/// no-match or malformed bracket.
-fn match_bracket(pat: *const u8, mut ppos: usize, sc: u8, flags: i32) -> Option<usize> {
-    let negate = unsafe { *pat.add(ppos) } == b'!' || unsafe { *pat.add(ppos) } == b'^';
-    if negate {
-        ppos = ppos.wrapping_add(1);
+/// [`fnmatch`] over byte slices.
+pub(crate) fn matches(pattern: &[u8], string: &[u8], flags: i32) -> Result<bool, NoMemory> {
+    Matcher { s: string }.run(pattern, 0, 0, string.len(), flags)
+}
+
+/// The string being matched, which every part of the pattern -- an
+/// alternative of an extended group too -- is matched against a part of.
+struct Matcher<'a> {
+    s: &'a [u8],
+}
+
+/// What a bracket expression did with a byte.
+enum Bracket {
+    /// It took the byte; the pattern continues at this index.
+    Took(usize),
+    /// It did not.
+    Refused,
+    /// It has no closing `]`: its `[` is an ordinary character.
+    Unterminated,
+    /// It reached an element that matches nothing -- an unknown class, a
+    /// collating symbol of no one byte, a `[.` or `[=` unclosed -- before
+    /// any element took the byte: this attempt fails.
+    Invalid,
+}
+
+const fn fold(b: u8, flags: i32) -> u8 {
+    if flags & FNM_CASEFOLD != 0 {
+        b.to_ascii_lowercase()
+    } else {
+        b
     }
+}
 
-    let mut matched = false;
-    let mut first = true;
+/// The named class's test, for the C locale; `None` for no such class.
+fn class(name: &[u8]) -> Option<fn(&u8) -> bool> {
+    Some(match name {
+        b"alpha" => u8::is_ascii_alphabetic,
+        b"digit" => u8::is_ascii_digit,
+        b"alnum" => u8::is_ascii_alphanumeric,
+        b"upper" => u8::is_ascii_uppercase,
+        b"lower" => u8::is_ascii_lowercase,
+        b"space" => |b: &u8| matches!(*b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'),
+        b"blank" => |b: &u8| matches!(*b, b' ' | b'\t'),
+        b"punct" => u8::is_ascii_punctuation,
+        b"print" => |b: &u8| (0x20..=0x7e).contains(b),
+        b"graph" => u8::is_ascii_graphic,
+        b"cntrl" => u8::is_ascii_control,
+        b"xdigit" => u8::is_ascii_hexdigit,
+        _ => return None,
+    })
+}
 
+/// A class name's bytes: `a` to `y`, as glibc reads them -- a `z`, or
+/// anything else, makes `[:` an ordinary `[` and `:`.
+const fn class_name_byte(b: u8) -> bool {
+    b >= b'a' && b < b'z'
+}
+
+/// Where the `x]` closing a `[x` element that starts at `from` is: the index
+/// of its `x`.
+fn find_close(p: &[u8], from: usize, kind: u8) -> Option<usize> {
+    let rest = p.get(from..)?;
+    rest.windows(2)
+        .position(|w| w == [kind, b']'])
+        .map(|i| from.saturating_add(i))
+}
+
+/// After an element took the byte: the index past the bracket expression's
+/// `]`, stepping over what is left of it without judging it; `None` if it
+/// has no `]`, or an element it steps over has no end.
+fn skip_rest(p: &[u8], mut i: usize, flags: i32) -> Option<usize> {
     loop {
-        let ch = unsafe { *pat.add(ppos) };
-        if ch == 0 {
-            return None; // Unclosed bracket.
-        }
-        if ch == b']' && !first {
-            break;
-        }
-        first = false;
-
-        // Check for POSIX character class [:classname:].
-        if ch == b'[' && unsafe { *pat.add(ppos.wrapping_add(1)) } == b':' {
-            let name_start = ppos.wrapping_add(2);
-            let mut end = name_start;
-            while unsafe { *pat.add(end) } != 0 {
-                if unsafe { *pat.add(end) } == b':'
-                    && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
-                {
-                    break;
+        let c = *p.get(i)?;
+        i = i.saturating_add(1);
+        match c {
+            b'\\' if flags & FNM_NOESCAPE == 0 => {
+                p.get(i)?;
+                i = i.saturating_add(1);
+            }
+            b'[' if p.get(i) == Some(&b':') => {
+                let mut j = i.saturating_add(1);
+                while p.get(j).is_some_and(|&b| class_name_byte(b)) {
+                    j = j.saturating_add(1);
                 }
-                end = end.wrapping_add(1);
-            }
-            if unsafe { *pat.add(end) } == b':' && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
-            {
-                if posix_class_matches(pat, name_start, end.wrapping_sub(name_start), sc) {
-                    matched = true;
+                if p.get(j..j.saturating_add(2)) == Some(b":]") {
+                    i = j.saturating_add(2);
                 }
-                ppos = end.wrapping_add(2); // Skip past ":]"
-                continue;
             }
-            // Not a valid class — treat '[' as literal and fall through.
-        }
-
-        let mut low = ch;
-        ppos = ppos.wrapping_add(1);
-
-        // Handle escape.
-        if low == b'\\' && flags & FNM_NOESCAPE == 0 {
-            low = unsafe { *pat.add(ppos) };
-            if low == 0 {
-                return None;
-            }
-            ppos = ppos.wrapping_add(1);
-        }
-
-        // Check for range: a-z.
-        if unsafe { *pat.add(ppos) } == b'-'
-            && unsafe { *pat.add(ppos.wrapping_add(1)) } != b']'
-            && unsafe { *pat.add(ppos.wrapping_add(1)) } != 0
-        {
-            ppos = ppos.wrapping_add(1); // skip '-'
-            let mut high = unsafe { *pat.add(ppos) };
-            if high == b'\\' && flags & FNM_NOESCAPE == 0 {
-                ppos = ppos.wrapping_add(1);
-                high = unsafe { *pat.add(ppos) };
-                if high == 0 {
+            b'[' if p.get(i) == Some(&b'=') => {
+                if p.get(i.saturating_add(2)..i.saturating_add(4)) != Some(b"=]") {
                     return None;
                 }
+                i = i.saturating_add(4);
             }
-            ppos = ppos.wrapping_add(1);
-
-            if sc >= low && sc <= high {
-                matched = true;
+            b'[' if p.get(i) == Some(&b'.') => {
+                i = find_close(p, i.saturating_add(1), b'.')?.saturating_add(2);
             }
-        } else if sc == low {
-            matched = true;
-        }
-    }
-
-    ppos = ppos.wrapping_add(1); // skip ']'
-
-    if matched == negate { None } else { Some(ppos) }
-}
-
-/// Handle `*` wildcard matching.
-///
-/// `ppos` points past all consecutive `*` characters.
-/// Returns true if the rest of the pattern matches.
-fn match_star(pat: *const u8, ppos: usize, str: *const u8, spos: usize, flags: i32) -> bool {
-    // If pattern is exhausted after *, match rest of string.
-    if unsafe { *pat.add(ppos) } == 0 {
-        // If FNM_PATHNAME, rest must not contain '/'.
-        if flags & FNM_PATHNAME != 0 {
-            let mut check = spos;
-            while unsafe { *str.add(check) } != 0 {
-                if unsafe { *str.add(check) } == b'/' {
-                    return false;
-                }
-                check = check.wrapping_add(1);
-            }
-        }
-        return true;
-    }
-
-    // Try matching * against 0, 1, 2, ... characters.
-    let mut try_pos = spos;
-    while unsafe { *str.add(try_pos) } != 0 {
-        if flags & FNM_PATHNAME != 0 && unsafe { *str.add(try_pos) } == b'/' {
-            break; // * stops at /.
-        }
-        if do_match(pat, ppos, str, try_pos, flags, false) {
-            return true;
-        }
-        try_pos = try_pos.wrapping_add(1);
-    }
-    // Also try matching with * consuming everything up to here.
-    do_match(pat, ppos, str, try_pos, flags, false)
-}
-
-/// Recursive pattern matching engine.
-///
-/// `at_start` indicates whether `spos` is at the start of the string
-/// (or the start of a path component, for `FNM_PATHNAME` + `FNM_PERIOD`).
-fn do_match(
-    pat: *const u8,
-    mut ppos: usize,
-    str: *const u8,
-    mut spos: usize,
-    flags: i32,
-    mut at_start: bool,
-) -> bool {
-    loop {
-        let pc = unsafe { *pat.add(ppos) };
-        let sc = unsafe { *str.add(spos) };
-
-        match pc {
-            0 => return sc == 0,
-
-            b'?' => {
-                if sc == 0
-                    || (flags & FNM_PATHNAME != 0 && sc == b'/')
-                    || (flags & FNM_PERIOD != 0 && sc == b'.' && at_start)
-                {
-                    return false;
-                }
-                ppos = ppos.wrapping_add(1);
-                spos = spos.wrapping_add(1);
-                // Matched a non-'/' char; no longer at start of component.
-                at_start = false;
-            }
-
-            b'*' => {
-                // Skip consecutive stars.
-                while unsafe { *pat.add(ppos) } == b'*' {
-                    ppos = ppos.wrapping_add(1);
-                }
-                if flags & FNM_PERIOD != 0 && sc == b'.' && at_start {
-                    return false;
-                }
-                return match_star(pat, ppos, str, spos, flags);
-            }
-
-            b'[' => {
-                if sc == 0
-                    || (flags & FNM_PERIOD != 0 && sc == b'.' && at_start)
-                    || (flags & FNM_PATHNAME != 0 && sc == b'/')
-                {
-                    return false;
-                }
-                let Some(new_ppos) = match_bracket(pat, ppos.wrapping_add(1), sc, flags) else {
-                    return false;
-                };
-                ppos = new_ppos;
-                spos = spos.wrapping_add(1);
-                at_start = false;
-            }
-
-            b'\\' if flags & FNM_NOESCAPE == 0 => {
-                ppos = ppos.wrapping_add(1);
-                let escaped = unsafe { *pat.add(ppos) };
-                if escaped == 0 || sc != escaped {
-                    return false;
-                }
-                ppos = ppos.wrapping_add(1);
-                spos = spos.wrapping_add(1);
-                // After '\/' the next char is at component start.
-                at_start = sc == b'/';
-            }
-
-            _ => {
-                if pc != sc {
-                    return false;
-                }
-                ppos = ppos.wrapping_add(1);
-                spos = spos.wrapping_add(1);
-                // After passing a '/', next char is "at start" of component.
-                // Otherwise we're no longer at start.
-                at_start = pc == b'/';
-            }
+            b']' => return Some(i),
+            _ => {}
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// POSIX character class matching for bracket expressions
-// ---------------------------------------------------------------------------
+/// A single byte of a bracket expression, at `i`, as a range's end or an
+/// element: `(byte, index after, is it a collating symbol)`; `None` for an
+/// element that matches nothing.
+fn bracket_byte(p: &[u8], i: usize, flags: i32) -> Option<(u8, usize, bool)> {
+    let c = *p.get(i)?;
+    if c == b'[' && p.get(i.saturating_add(1)) == Some(&b'.') {
+        let end = find_close(p, i.saturating_add(2), b'.')?;
+        let sym = p.get(i.saturating_add(2)..end)?;
+        let [b] = *sym else { return None };
+        return Some((b, end.saturating_add(2), true));
+    }
+    if c == b'\\' && flags & FNM_NOESCAPE == 0 {
+        return Some((*p.get(i.saturating_add(1))?, i.saturating_add(2), false));
+    }
+    Some((c, i.saturating_add(1), false))
+}
 
-/// Check if character `c` matches a POSIX character class by name.
-///
-/// `name_start` is the offset into `pat` where the class name begins,
-/// `name_len` is the length of the name (between `[:` and `:]`).
-fn posix_class_matches(pat: *const u8, name_start: usize, name_len: usize, c: u8) -> bool {
-    let name_eq = |expected: &[u8]| -> bool {
-        if name_len != expected.len() {
-            return false;
-        }
-        let mut k = 0;
-        while k < name_len {
-            let exp_byte = expected.get(k).copied().unwrap_or(0);
-            if unsafe { *pat.add(name_start.wrapping_add(k)) } != exp_byte {
-                return false;
-            }
-            k = k.wrapping_add(1);
-        }
-        true
+/// The bracket expression whose `[` is just before `pi`, against `byte`.
+fn bracket(p: &[u8], pi: usize, byte: u8, flags: i32) -> Bracket {
+    let ch = fold(byte, flags);
+    let mut i = pi;
+    let negate = matches!(p.get(i), Some(b'!' | b'^'));
+    if negate {
+        i = i.saturating_add(1);
+    }
+    let mut first = true;
+    let took = |at: usize| match skip_rest(p, at, flags) {
+        None => Bracket::Invalid,
+        Some(_) if negate => Bracket::Refused,
+        Some(after) => Bracket::Took(after),
     };
+    loop {
+        let Some(&c) = p.get(i) else {
+            return Bracket::Unterminated;
+        };
+        if c == b']' && !first {
+            return if negate {
+                Bracket::Took(i.saturating_add(1))
+            } else {
+                Bracket::Refused
+            };
+        }
+        first = false;
+        let next = p.get(i.saturating_add(1)).copied();
+        if c == b'[' && next == Some(b':') {
+            let mut j = i.saturating_add(2);
+            while p.get(j).is_some_and(|&b| class_name_byte(b)) {
+                j = j.saturating_add(1);
+            }
+            if p.get(j..j.saturating_add(2)) == Some(b":]") {
+                let Some(test) = p.get(i.saturating_add(2)..j).and_then(class) else {
+                    return Bracket::Invalid;
+                };
+                i = j.saturating_add(2);
+                // The byte as the string has it: glibc tests a class
+                // unfolded.
+                if test(&byte) {
+                    return took(i);
+                }
+                continue;
+            }
+            // Not a class: this `[` is an ordinary byte of the expression.
+        }
+        if c == b'[' && next == Some(b'=') {
+            let Some(end) = find_close(p, i.saturating_add(2), b'=') else {
+                return Bracket::Invalid;
+            };
+            let Some(&[sym]) = p.get(i.saturating_add(2)..end) else {
+                return Bracket::Invalid;
+            };
+            i = end.saturating_add(2);
+            // Unfolded, as glibc compares an equivalence class.
+            if sym == byte {
+                return took(i);
+            }
+            continue;
+        }
+        let (lo, after, coll) = if c == b'[' && next == Some(b':') {
+            (b'[', i.saturating_add(1), false)
+        } else {
+            match bracket_byte(p, i, flags) {
+                Some(e) => e,
+                None => return Bracket::Invalid,
+            }
+        };
+        i = after;
+        let hit =
+            if p.get(i) == Some(&b'-') && p.get(i.saturating_add(1)).is_some_and(|&b| b != b']') {
+                let Some((hi, after_hi, _)) = bracket_byte(p, i.saturating_add(1), flags) else {
+                    return Bracket::Invalid;
+                };
+                i = after_hi;
+                (fold(lo, flags) <= ch && ch <= fold(hi, flags))
+                    || (flags & FNM_CASEFOLD != 0
+                        && lo <= ch.to_ascii_uppercase()
+                        && ch.to_ascii_uppercase() <= hi)
+            } else if coll {
+                // A collating symbol alone is compared unfolded, as glibc does.
+                lo == byte
+            } else {
+                fold(lo, flags) == ch
+            };
+        if hit {
+            return took(i);
+        }
+    }
+}
 
-    if name_eq(b"alpha") {
-        c.is_ascii_alphabetic()
-    } else if name_eq(b"digit") {
-        c.is_ascii_digit()
-    } else if name_eq(b"alnum") {
-        c.is_ascii_alphanumeric()
-    } else if name_eq(b"space") {
-        c.is_ascii_whitespace()
-    } else if name_eq(b"upper") {
-        c.is_ascii_uppercase()
-    } else if name_eq(b"lower") {
-        c.is_ascii_lowercase()
-    } else if name_eq(b"punct") {
-        c.is_ascii_punctuation()
-    } else if name_eq(b"cntrl") {
-        c.is_ascii_control()
-    } else if name_eq(b"print") {
-        (0x20..=0x7E).contains(&c)
-    } else if name_eq(b"graph") {
-        (0x21..=0x7E).contains(&c)
-    } else if name_eq(b"xdigit") {
-        c.is_ascii_hexdigit()
-    } else if name_eq(b"blank") {
-        c == b' ' || c == b'\t'
-    } else {
-        false // Unknown class — no match.
+/// Where the `)` closing the extended group whose `(` is at `open` is; `None`
+/// if it has none. Bracket expressions and nested groups inside are stepped
+/// over whole.
+fn group_end(p: &[u8], open: usize) -> Option<usize> {
+    let mut j = open.saturating_add(1);
+    loop {
+        let c = *p.get(j)?;
+        if c == b'[' {
+            j = skip_bracket(p, j)?;
+            continue;
+        }
+        if matches!(c, b'?' | b'*' | b'+' | b'@' | b'!')
+            && p.get(j.saturating_add(1)) == Some(&b'(')
+        {
+            j = group_end(p, j.saturating_add(1))?.saturating_add(1);
+            continue;
+        }
+        if c == b')' {
+            return Some(j);
+        }
+        j = j.saturating_add(1);
+    }
+}
+
+/// `p[j]` is a `[` inside a group: the index past its `]`, as the group's
+/// end is found -- the first `]` after the one a leading `]` may be.
+fn skip_bracket(p: &[u8], j: usize) -> Option<usize> {
+    let mut k = j.saturating_add(1);
+    if matches!(p.get(k), Some(b'!' | b'^')) {
+        k = k.saturating_add(1);
+    }
+    if p.get(k) == Some(&b']') {
+        k = k.saturating_add(1);
+    }
+    while *p.get(k)? != b']' {
+        k = k.saturating_add(1);
+    }
+    Some(k.saturating_add(1))
+}
+
+/// The `|`-separated alternatives of the group between `open` and `close`,
+/// each as a range of `p`.
+fn alternatives(p: &[u8], open: usize, close: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let mut start = open.saturating_add(1);
+    let mut j = start;
+    let mut done = false;
+    core::iter::from_fn(move || {
+        if done {
+            return None;
+        }
+        while j < close {
+            let c = *p.get(j)?;
+            if c == b'[' {
+                j = skip_bracket(p, j)?;
+                continue;
+            }
+            if matches!(c, b'?' | b'*' | b'+' | b'@' | b'!')
+                && p.get(j.saturating_add(1)) == Some(&b'(')
+            {
+                j = group_end(p, j.saturating_add(1))?.saturating_add(1);
+                continue;
+            }
+            if c == b'|' {
+                let alt = (start, j);
+                j = j.saturating_add(1);
+                start = j;
+                return Some(alt);
+            }
+            j = j.saturating_add(1);
+        }
+        done = true;
+        Some((start, close))
+    })
+}
+
+impl Matcher<'_> {
+    /// Is `s[i]` a leading period, which only a `.` in the pattern matches?
+    fn leading_period(&self, i: usize, flags: i32) -> bool {
+        flags & FNM_PERIOD != 0
+            && self.s.get(i) == Some(&b'.')
+            && (i == 0
+                || (flags & FNM_PATHNAME != 0
+                    && i.checked_sub(1).and_then(|j| self.s.get(j)) == Some(&b'/')))
+    }
+
+    /// The single-byte part of the pattern at `pi` -- `?`, a bracket
+    /// expression, an escaped byte or a plain one -- against `s[si]`, which
+    /// is before `se`: the index after it if it takes the byte.
+    fn one_byte(&self, p: &[u8], pi: usize, si: usize, se: usize, flags: i32) -> Option<usize> {
+        if si >= se {
+            return None;
+        }
+        let byte = *self.s.get(si)?;
+        let c = *p.get(pi)?;
+        let slash_barred = flags & FNM_PATHNAME != 0 && byte == b'/';
+        match c {
+            b'?' => {
+                (!slash_barred && !self.leading_period(si, flags)).then(|| pi.saturating_add(1))
+            }
+            b'[' => {
+                if self.leading_period(si, flags) || slash_barred {
+                    return None;
+                }
+                match bracket(p, pi.saturating_add(1), byte, flags) {
+                    Bracket::Took(after) => Some(after),
+                    Bracket::Refused | Bracket::Invalid => None,
+                    Bracket::Unterminated => {
+                        (fold(b'[', flags) == fold(byte, flags)).then(|| pi.saturating_add(1))
+                    }
+                }
+            }
+            b'\\' if flags & FNM_NOESCAPE == 0 => {
+                let lit = *p.get(pi.saturating_add(1))?;
+                (fold(lit, flags) == fold(byte, flags)).then(|| pi.saturating_add(2))
+            }
+            _ => (fold(c, flags) == fold(byte, flags)).then(|| pi.saturating_add(1)),
+        }
+    }
+
+    /// Does `p[pi..]` match `s[si..se]`?
+    fn run(
+        &self,
+        p: &[u8],
+        mut pi: usize,
+        mut si: usize,
+        se: usize,
+        flags: i32,
+    ) -> Result<bool, NoMemory> {
+        let ext = flags & FNM_EXTMATCH != 0;
+        let opens_group = |i: usize| {
+            ext && matches!(p.get(i), Some(b'?' | b'*' | b'+' | b'@' | b'!'))
+                && p.get(i.saturating_add(1)) == Some(&b'(')
+        };
+        // The last star: where the pattern resumes after it, and where in
+        // the string its match ends so far.
+        let mut star: Option<(usize, usize)> = None;
+        loop {
+            let advanced = if pi >= p.len() {
+                if si == se
+                    || (flags & FNM_LEADING_DIR != 0 && si < se && self.s.get(si) == Some(&b'/'))
+                {
+                    return Ok(true);
+                }
+                None
+            } else if opens_group(pi) && group_end(p, pi.saturating_add(1)).is_some() {
+                // The group and everything after it, at this place.
+                if self.group(p, pi, si, se, flags)? {
+                    return Ok(true);
+                }
+                None
+            } else if p.get(pi) == Some(&b'*') {
+                pi = pi.saturating_add(1);
+                while p.get(pi) == Some(&b'*') && !opens_group(pi) {
+                    pi = pi.saturating_add(1);
+                }
+                if self.leading_period(si, flags) {
+                    None
+                } else if pi >= p.len() {
+                    // The pattern ends with the star: it takes the rest, which
+                    // under FNM_PATHNAME must hold no `/` -- unless
+                    // FNM_LEADING_DIR leaves what follows one aside.
+                    let rest = self.s.get(si..se).unwrap_or(&[]);
+                    return Ok(flags & FNM_PATHNAME == 0
+                        || flags & FNM_LEADING_DIR != 0
+                        || !rest.contains(&b'/'));
+                } else {
+                    star = Some((pi, si));
+                    continue;
+                }
+            } else {
+                self.one_byte(p, pi, si, se, flags)
+            };
+            match advanced {
+                Some(next) => {
+                    pi = next;
+                    si = si.saturating_add(1);
+                }
+                None => {
+                    // Back to the last star: it takes one more byte.
+                    let Some((spi, ssi)) = star else {
+                        return Ok(false);
+                    };
+                    if ssi >= se || (flags & FNM_PATHNAME != 0 && self.s.get(ssi) == Some(&b'/')) {
+                        return Ok(false);
+                    }
+                    let ssi = ssi.saturating_add(1);
+                    star = Some((spi, ssi));
+                    pi = spi;
+                    si = ssi;
+                }
+            }
+        }
+    }
+
+    /// Does one of the group's alternatives match `s[from..to]`?
+    fn any_alternative(
+        &self,
+        p: &[u8],
+        open: usize,
+        close: usize,
+        from: usize,
+        to: usize,
+        flags: i32,
+    ) -> Result<bool, NoMemory> {
+        // An alternative matches a part of the string, whose tail
+        // FNM_LEADING_DIR does not concern.
+        let sub = flags & !FNM_LEADING_DIR;
+        for (a0, a1) in alternatives(p, open, close) {
+            let alt = p.get(a0..a1).unwrap_or(&[]);
+            if self.run(alt, 0, from, to, sub)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The extended group at `p[pi]` (`?*+@!` and its `(`), and the pattern
+    /// after it, against `s[si..se]`.
+    fn group(
+        &self,
+        p: &[u8],
+        pi: usize,
+        si: usize,
+        se: usize,
+        flags: i32,
+    ) -> Result<bool, NoMemory> {
+        let open = pi.saturating_add(1);
+        let Some(close) = group_end(p, open) else {
+            return Ok(false);
+        };
+        let rest = close.saturating_add(1);
+        let kind = p.get(pi).copied().unwrap_or(b'@');
+        match kind {
+            b'@' | b'?' => {
+                if kind == b'?' && self.run(p, rest, si, se, flags)? {
+                    return Ok(true);
+                }
+                for k in si..=se {
+                    if self.any_alternative(p, open, close, si, k, flags)?
+                        && self.run(p, rest, k, se, flags)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            b'!' => {
+                for k in si..=se {
+                    if !self.any_alternative(p, open, close, si, k, flags)?
+                        && self.run(p, rest, k, se, flags)?
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            // `*` and `+`: the ends one or more matches in a row can reach,
+            // a table of them, so no repetition costs a stack frame.
+            _ => {
+                let n = se.saturating_sub(si).saturating_add(1);
+                let mut reach = MallocBuf::<u8>::zeroed(n).ok_or(NoMemory)?;
+                let table = reach.as_mut();
+                if kind == b'*' {
+                    if let Some(first) = table.first_mut() {
+                        *first = 1;
+                    }
+                } else {
+                    for k in si..=se {
+                        if self.any_alternative(p, open, close, si, k, flags)? {
+                            if let Some(t) = table.get_mut(k.saturating_sub(si)) {
+                                *t = 1;
+                            }
+                        }
+                    }
+                }
+                for i in si..=se {
+                    if table.get(i.saturating_sub(si)) != Some(&1) {
+                        continue;
+                    }
+                    if self.run(p, rest, i, se, flags)? {
+                        return Ok(true);
+                    }
+                    for k in i.saturating_add(1)..=se {
+                        if table.get(k.saturating_sub(si)) != Some(&1)
+                            && self.any_alternative(p, open, close, i, k, flags)?
+                        {
+                            if let Some(t) = table.get_mut(k.saturating_sub(si)) {
+                                *t = 1;
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::string::String;
+    use std::vec::Vec;
 
     /// Helper: call `fnmatch` with byte slices (must be null-terminated).
     fn matches(pat: &[u8], s: &[u8], flags: i32) -> bool {
         let result = unsafe { fnmatch(pat.as_ptr(), s.as_ptr(), flags) };
         result == 0
     }
+
+    /// `m("pattern", "string", flags)` over `str`s.
+    fn m(p: &str, s: &str, flags: i32) -> bool {
+        super::matches(p.as_bytes(), s.as_bytes(), flags).unwrap_or(false)
+    }
+
+    // -- glibc 2.39's answers, and where they are not these ---------------
+
+    /// `\xNN` escapes back to bytes, as `fnmatch_harness.py` writes them;
+    /// `\x` alone is the empty string.
+    fn unescape(t: &str) -> Vec<u8> {
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                if i + 4 <= b.len() {
+                    out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).unwrap());
+                    i += 4;
+                } else {
+                    i += 2;
+                }
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn flag_set(names: &str) -> i32 {
+        names.split('|').fold(0, |f, name| {
+            f | match name {
+                "0" => 0,
+                "PATHNAME" => FNM_PATHNAME,
+                "NOESCAPE" => FNM_NOESCAPE,
+                "PERIOD" => FNM_PERIOD,
+                "LEADING_DIR" => FNM_LEADING_DIR,
+                "CASEFOLD" => FNM_CASEFOLD,
+                "EXTMATCH" => FNM_EXTMATCH,
+                other => panic!("{other}"),
+            }
+        })
+    }
+
+    /// Every case of `fnmatch_oracle.txt` answered as glibc 2.39 answers
+    /// it -- except those `fnmatch_deviations.txt` lists, answered as it
+    /// says (design-decisions §1148).
+    #[test]
+    fn fnmatch_is_glibcs_but_where_glibc_is_not_its_standard() {
+        let mut deviations = std::collections::HashMap::new();
+        for line in include_str!("fnmatch_deviations.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+        {
+            let f: Vec<&str> = line.split(' ').collect();
+            let [flags, pat, s, glibc, here] = f[..] else {
+                panic!("{line}")
+            };
+            deviations.insert(
+                (flags.to_string(), unescape(pat), unescape(s)),
+                (glibc.chars().next().unwrap(), here.chars().next().unwrap()),
+            );
+        }
+        let mut lines = include_str!("fnmatch_oracle.txt").lines();
+        let strings: Vec<Vec<u8>> = loop {
+            if let Some(rest) = lines.next().unwrap().strip_prefix("# strings: ") {
+                break rest.split(' ').map(unescape).collect();
+            }
+        };
+        let (mut n, mut used) = (0usize, 0usize);
+        let mut bad = Vec::new();
+        for line in lines {
+            let mut parts = line.split(' ');
+            let (flags, pat, answers) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            let p = unescape(pat);
+            let f = flag_set(flags);
+            for (s, glibc) in strings.iter().zip(answers.chars()) {
+                let want = match deviations.get(&(flags.to_string(), p.clone(), s.clone())) {
+                    Some(&(g, here)) => {
+                        assert_eq!(g, glibc, "the deviation list is stale for {flags} {pat}");
+                        used += 1;
+                        here
+                    }
+                    None => glibc,
+                };
+                let got = match super::matches(&p, s, f) {
+                    Ok(true) => '0',
+                    Ok(false) => '1',
+                    Err(NoMemory) => 'e',
+                };
+                n += 1;
+                if got != want {
+                    bad.push(std::format!(
+                        "{flags} {:?} {:?}: want {want}, got {got}",
+                        String::from_utf8_lossy(&p),
+                        String::from_utf8_lossy(s)
+                    ));
+                }
+            }
+        }
+        assert_eq!(
+            used,
+            deviations.len(),
+            "every listed deviation is a case of the oracle"
+        );
+        assert!(n > 2_000_000, "{n} cases");
+        assert!(
+            bad.is_empty(),
+            "{} of {n} cases wrong, the first:\n{}",
+            bad.len(),
+            bad.iter().take(40).cloned().collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// The three departures, each by the text it follows (the deviation list
+    /// is `fnmatch_model.py`'s; these are reasoned, not generated).
+    #[test]
+    fn where_glibc_departs_this_follows_the_text() {
+        // POSIX: "a <backslash> character in pattern followed by any other
+        // character shall match that second character in string", and under
+        // FNM_PATHNAME "a <slash> ... shall be explicitly matched by a
+        // <slash> in pattern" -- which an escaped one is.
+        assert!(m("*\\/", "a/", FNM_PATHNAME));
+        assert!(m("*\\/", "/", FNM_PATHNAME));
+        assert!(!m("*\\/", "a/b", FNM_PATHNAME));
+        // An extended group: "the pattern matches if ... any of the patterns
+        // in the pattern-list allow matching the input string". `*` takes
+        // `b`, `@(a|)` the empty rest.
+        assert!(m("*@(a|)", "b", FNM_EXTMATCH));
+        assert!(m("*!(a)", "", FNM_EXTMATCH));
+        assert!(m("*!(a)", "a", FNM_EXTMATCH));
+        // `*`, then a group whose slash is the pattern's own.
+        assert!(m("**(a/b)", "a/b", FNM_EXTMATCH | FNM_PATHNAME));
+        // FNM_LEADING_DIR: "whether string starts with a directory name that
+        // pattern matches" -- `a/b` is one `!(a)` matches, and neither `a`
+        // nor `a/b` is one `*(a)b` does.
+        assert!(m("!(a)", "a/b", FNM_EXTMATCH | FNM_LEADING_DIR));
+        assert!(!m("*(a)b", "a/b", FNM_EXTMATCH | FNM_LEADING_DIR));
+        assert!(!m("@(a)b", "a/b", FNM_EXTMATCH | FNM_LEADING_DIR));
+    }
+
+    // -- what glibc's leaves open, glibc's way --------------------------------
+
+    #[test]
+    fn an_unterminated_bracket_is_an_ordinary_character() {
+        assert!(m("[", "[", 0));
+        assert!(m("[*", "[x", 0));
+        assert!(m("a[b", "a[b", 0));
+        assert!(!m("[", "a", 0));
+    }
+
+    /// An element no byte can be -- an unknown class, a collating symbol of
+    /// more than one byte -- fails the match where it is reached, but not
+    /// after an earlier element took the byte.
+    #[test]
+    fn an_invalid_element_fails_only_when_reached() {
+        assert!(!m("[[:foo:]]", "a", 0));
+        assert!(!m("[[.hyphen.]]", "-", 0));
+        assert!(m("[[[:foo:]]", "[", 0));
+        assert!(!m("[[[:foo:]]", "a", 0));
+        assert!(!m("[[.]", ".", 0));
+    }
+
+    #[test]
+    fn equivalence_classes_and_collating_symbols_are_bytes_here() {
+        assert!(m("[[=a=]]", "a", 0));
+        assert!(!m("[[=a=]]", "b", 0));
+        assert!(m("[[.-.]]", "-", 0));
+        assert!(m("[a-[.c.]]", "b", 0));
+        assert!(!m("[c-a]", "b", 0), "a reversed range is empty");
+    }
+
+    /// FNM_CASEFOLD folds bytes and ranges, and not classes, equivalence
+    /// classes or collating symbols, which see the byte as it is.
+    #[test]
+    fn casefold_is_glibcs() {
+        assert!(m("a", "A", FNM_CASEFOLD));
+        assert!(m("[a-c]", "B", FNM_CASEFOLD));
+        assert!(m("[[:upper:]]", "A", FNM_CASEFOLD));
+        assert!(!m("[[:lower:]]", "A", FNM_CASEFOLD));
+        assert!(!m("[[=a=]]", "A", FNM_CASEFOLD));
+    }
+
+    #[test]
+    fn leading_dir_ignores_a_slash_and_what_follows() {
+        assert!(m("a", "a/b/c", FNM_LEADING_DIR));
+        assert!(m("a*", "ab/c", FNM_PATHNAME | FNM_LEADING_DIR));
+        assert!(!m("a", "ab/c", FNM_LEADING_DIR));
+    }
+
+    #[test]
+    fn extended_groups_are_kshs() {
+        let e = FNM_EXTMATCH;
+        assert!(m("?(a)", "", e) && m("?(a)", "a", e) && !m("?(a)", "aa", e));
+        assert!(m("*(a|b)", "abba", e) && m("*(a|b)", "", e) && !m("*(a|b)", "abc", e));
+        assert!(m("+(a|b)", "abba", e) && !m("+(a|b)", "", e));
+        assert!(m("@(ab|a)", "ab", e) && !m("@(ab|a)", "aab", e));
+        assert!(m("!(a)", "b", e) && !m("!(a)", "a", e) && m("!(a)", "", e));
+        assert!(m("a!(b)c", "axc", e) && !m("a!(b)c", "abc", e));
+        assert!(m("@(@(a)|b)", "b", e));
+        // Without the flag they are ordinary characters, and an unclosed
+        // group is too.
+        assert!(m("@(a)", "@(a)", 0));
+        assert!(m("@(a", "@(a", e));
+    }
+
+    // -- it does not blow up ----------------------------------------------------
+
+    /// Many stars against a long string that almost matches: every star but
+    /// the last settles, so this is linear-ish, not exponential.
+    #[test]
+    fn many_stars_do_not_backtrack_exponentially() {
+        let s = "a".repeat(5000);
+        let p = "*a".repeat(40) + "b";
+        let t = std::time::Instant::now();
+        assert!(!m(&p, &s, 0));
+        assert!(!m(&p, &s, FNM_PATHNAME));
+        assert!(m(&("*a".repeat(40) + "*"), &s, 0));
+        assert!(t.elapsed().as_secs() < 5, "{:?}", t.elapsed());
+    }
+
+    /// A repeating group over a long string keeps a table, not a stack of
+    /// frames, so a small thread stack is enough.
+    #[test]
+    fn a_repeating_group_over_a_long_string_needs_no_deep_stack() {
+        let s = "ab".repeat(1500);
+        let r = std::thread::Builder::new()
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                (
+                    m("*(ab)", &s, FNM_EXTMATCH),
+                    m("+(a|b)", &s, FNM_EXTMATCH),
+                    m("*(ab)c", &s, FNM_EXTMATCH),
+                )
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(r, (true, true, false));
+    }
+
+    // -- the unit tests this module had before 2026-09-29 --------------
 
     // -----------------------------------------------------------------------
     // 1. Basic wildcard matching (* and ?)

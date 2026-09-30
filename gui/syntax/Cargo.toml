@@ -26,5 +26,10 @@ tsgrammar = { path = "../tsgrammar" }
 # Deflates each grammar's tables as the build writes them.
 deflate = { path = "../../deflate" }
 
+[dev-dependencies]
+# The tests of `luapat` run its translations as the runtime runs a
+# `#match?`: through the regular-expression crate tree-sitter uses.
+regex = "1.13.1"
+
 [lints]
 workspace = true

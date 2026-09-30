@@ -176328,3 +176328,61 @@ which functions lock -- are design-decisions §1142.
 **Where:** `posix/src/prng.rs`, moved out of `stdlib.rs`;
 `posix/src/process.rs` (`fork` holds the two generators' locks across the
 system call).
+
+### [C] The linker-script grammar does not know all of ld's language -- 2026-09-29
+
+**Status:** OPEN -- a limitation, not a failure: the file is coloured, and
+the parts the grammar does not know are coloured by error recovery.
+
+**In short:** the code editor colours linker scripts (`.ld`) with
+tree-sitter-linkerscript 1.0.0, the grammar every editor uses for them. It
+has no rule for several things real scripts write -- the kernel's own
+among them -- so those parse as errors: a program header's `FLAGS(...)`,
+an output section's `ALIGN(...)` (or any attribute) after its colon, a
+second `:phdr` after a section, and the commands `INCLUDE`,
+`OUTPUT_FORMAT` and `OUTPUT_ARCH` (and, by the look of the grammar,
+`SEARCH_DIR`, `INPUT`, `GROUP`, `TARGET` and the like too). What is around
+them is read correctly.
+
+**Where:** `gui/syntax/grammars/linkerscript/parser.c` (generated, as
+published). `gui/syntax/src/grammars/linkerscript.rs`'s test pins exactly
+the gaps the tree's scripts and one example hit, so a grammar that learns
+one shows at once.
+
+**The proper fix:** add the missing rules to the grammar's `grammar.js`
+(tree-sitter-grammars/tree-sitter-linkerscript), regenerate `parser.c`
+with the tree-sitter CLI, and vendor that as a fork of our own, named so
+beside the published one -- then offer the rules upstream, and go back to
+the published grammar when it has them. The converter reads a newer
+generator's output as well as this older one's (`gui/tsgrammar`).
+
+### [C] TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS -- 2026-09-29
+
+**Status:** OPEN -- lane C's next task after the motion policy
+(design-decisions §1446).
+
+**In short:** the notification daemon -- the pop-up toasts and the
+notification centre, `gui/notifications` -- draws in a fixed copy of the dark
+palette and never reads the user's theme: not light mode, not the accent, not
+a colour theme, not high contrast. Its window is handed the palette like
+every application's (`App::theme_changed`); until 2026-09-29 it ignored it,
+and now it takes only the palette's motion from it.
+
+**Where:** `gui/notifications/src/main.rs` -- the seventeen `const NAME:
+Color` at the top of the file (`BASE`, `MANTLE`, `CRUST`, `SURFACE0`..`2`,
+`TEXT`, `SUBTEXT0`/`1`, `BLUE` and the rest) and every draw site that uses
+them.
+
+**The proper fix:** keep the palette `theme_changed` hands over and draw from
+its roles, as the shell's modules were converted
+(`TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`), with a
+test that every colour drawn comes from the palette (`assert_drawn_from`'s
+shape), so a constant cannot creep back.
+
+**Also found, not yet looked into:** nothing in the tree starts the daemon.
+It is not staged into the image by the rootfs recipe, and neither the
+session nor init launches it (searched 2026-09-29: no `notifications` in a
+launch list anywhere), so the toasts it draws are not on screen in a booted
+system at all. Whether it is meant to run beside the shell's own
+notification pane (`gui/desktop/src/notif_pane.rs`), or be folded into it,
+is the question to answer before wiring it.

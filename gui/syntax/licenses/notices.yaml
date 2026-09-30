@@ -112,6 +112,12 @@ tree-sitter-json:
   texts:
     - tree-sitter-json-LICENSE
 
+tree-sitter-linkerscript:
+  version: 1.0.0
+  licence: MIT
+  texts:
+    - tree-sitter-linkerscript-LICENSE
+
 tree-sitter-lua:
   version: 0.5.0
   licence: MIT
@@ -130,6 +136,12 @@ tree-sitter-markdown:
   texts:
     - tree-sitter-markdown-LICENSE
 
+tree-sitter-powershell:
+  version: 0.26.4
+  licence: MIT
+  texts:
+    - tree-sitter-powershell-LICENSE
+
 tree-sitter-python:
   version: 0.25.0
   licence: MIT
@@ -147,6 +159,12 @@ tree-sitter-rust:
   licence: MIT
   texts:
     - tree-sitter-rust-LICENSE
+
+tree-sitter-sql:
+  version: 0.3.11
+  licence: MIT
+  texts:
+    - tree-sitter-sql-LICENSE
 
 tree-sitter-toml:
   version: 0.7.0

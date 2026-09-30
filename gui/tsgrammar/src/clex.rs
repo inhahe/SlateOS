@@ -66,6 +66,19 @@ enum Stmt {
     Block(Vec<Stmt>),
 }
 
+impl LexFn {
+    /// Whether it reads `eof` at each character.
+    pub(crate) fn reads_eof(&self) -> bool {
+        self.reads_eof
+    }
+
+    /// Read `eof` at each character, as an older generator's `START_LEXER`
+    /// does of itself (see `build` in the crate's root).
+    pub(crate) fn read_eof(&mut self) {
+        self.reads_eof = true;
+    }
+}
+
 /// A lexer function, read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LexFn {
@@ -232,10 +245,11 @@ fn condition(
     let mut depth = 0usize;
     loop {
         let line = p.line();
-        let Some(tok) = p.next() else {
+        // Owned, so a guard below may look past it.
+        let Some(tok) = p.next().cloned() else {
             return Err(Error::at(line, "a condition never ends"));
         };
-        match tok {
+        match &tok {
             Tok::Punct(")") if depth == 0 => return Ok(out),
             Tok::Punct(")") => {
                 depth -= 1;
@@ -283,6 +297,17 @@ fn condition(
                         format!("{name} is used as {len} ranges but declared with {size}"),
                     ));
                 }
+                let _ = write!(out, "set_contains({}, lookahead)", set_name(&name));
+            }
+            // An older generator's set, a predicate: `NAME(lookahead)`.
+            Tok::Ident(name)
+                if matches!(p.peek(), Some(Tok::Punct("(")))
+                    && sets.iter().any(|(n, _)| n == name) =>
+            {
+                let name = (*name).to_owned();
+                p.expect("(")?;
+                p.expect_word("lookahead")?;
+                p.expect(")")?;
                 let _ = write!(out, "set_contains({}, lookahead)", set_name(&name));
             }
             Tok::Ident(name) => {

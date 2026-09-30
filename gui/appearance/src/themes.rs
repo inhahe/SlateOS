@@ -11,7 +11,9 @@
 //! colours axis, together with the parts every axis will share: where themes
 //! are installed, how one is named, and how its file is read. The icons axis is
 //! [`crate::icons`]; the widget-style axis, the shapes of the toolkit's
-//! controls, is [`WidgetTheme`] and its `widget-style` section.
+//! controls, is [`WidgetTheme`] and its `widget-style` section; the
+//! animation axis, how the desktop's transitions move, is
+//! [`AnimationTheme`] and its `animation` section.
 //!
 //! # A theme on disk
 //!
@@ -106,6 +108,7 @@
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
 use guitk::color::Color;
+use guitk::motion::Motion;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
 use guitk::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
@@ -118,8 +121,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use yamldoc::Document;
 
+mod animation;
+mod values;
 mod widgets;
 
+pub use animation::AnimationTheme;
 pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
@@ -166,6 +172,11 @@ pub const SYNTAX_LIGHT_SECTION: &str = "syntax-light";
 /// The section holding a theme's widget style: the shapes of the toolkit's
 /// controls ([`WidgetTheme`]). Named as the axis is in `meta.supports`.
 pub const WIDGET_SECTION: &str = "widget-style";
+
+/// The section holding a theme's animation: how long the desktop's
+/// transitions take and the curve they follow, or that nothing moves
+/// ([`AnimationTheme`]). Named as the axis is in `meta.supports`.
+pub const ANIMATION_SECTION: &str = "animation";
 
 /// The largest theme file that is read.
 ///
@@ -308,6 +319,8 @@ pub enum ThemeError {
     NoColors,
     /// The file was read but has no usable `widget-style` section.
     NoWidgetStyle,
+    /// The file was read but has no usable `animation` section.
+    NoAnimation,
 }
 
 impl fmt::Display for ThemeError {
@@ -324,6 +337,7 @@ impl fmt::Display for ThemeError {
             Self::Unreadable(why) => write!(f, "could not be read ({why})"),
             Self::NoColors => f.write_str("sets no colours"),
             Self::NoWidgetStyle => f.write_str("sets no widget style"),
+            Self::NoAnimation => f.write_str("sets no animation"),
         }
     }
 }
@@ -366,6 +380,10 @@ pub struct ThemeFile {
     /// built-in ones; `None` when it has no such section, or one that sets
     /// nothing usable.
     pub widget_style: Option<WidgetStyle>,
+    /// The motion its `animation` section sets, over the built-in one --
+    /// [`Motion::STILL`] where it says `enabled: false`; `None` when it has no
+    /// such section, or one that sets nothing usable.
+    pub motion: Option<Motion>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -399,10 +417,12 @@ pub fn parse(text: &str) -> ThemeFile {
         syntax_light: read_syntax(&doc, SYNTAX_LIGHT_SECTION, &mut warnings),
     };
     let widget_style = widgets::read(&doc, &mut warnings);
+    let motion = animation::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
         widget_style,
+        motion,
         warnings: warnings.finish(),
     }
 }
@@ -631,17 +651,21 @@ fn read_theme_bytes(path: &Path) -> Result<Vec<u8>, ThemeError> {
 }
 
 /// What the settings read from `doc` depend on besides the document itself:
-/// the files of the themes chosen for the axes read with them -- the colours
-/// and the widget style -- where each was found, and what it holds. The
-/// dependency fingerprint of [`crate::watcher`].
+/// the files of the themes chosen for the axes read with them -- the colours,
+/// the widget style and the animation -- where each was found, and what it
+/// holds. The dependency fingerprint of [`crate::watcher`].
 ///
-/// A theme chosen for both axes is one file, and is counted once.
+/// A theme chosen for several axes is one file, and is counted once.
 pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
     let mut out = Vec::new();
     let mut seen: Vec<OsString> = Vec::new();
-    for id in [crate::color_theme_name(doc), crate::widget_theme_name(doc)]
-        .into_iter()
-        .flatten()
+    for id in [
+        crate::color_theme_name(doc),
+        crate::widget_theme_name(doc),
+        crate::animation_theme_name(doc),
+    ]
+    .into_iter()
+    .flatten()
     {
         if seen.contains(&id) {
             continue;
@@ -847,6 +871,9 @@ pub struct ThemeInfo {
     /// Whether it has a usable `widget-style` section: the shapes of the
     /// toolkit's controls.
     pub has_widget_style: bool,
+    /// Whether it has a usable `animation` section: how the desktop's
+    /// transitions move.
+    pub has_animation: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -869,6 +896,14 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_widget_style(&self) -> bool {
         self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_widget_style)
+    }
+
+    /// Whether it can be chosen for the animation axis: it was read, and its
+    /// `animation` section sets something -- `enabled: false` included -- or
+    /// it is the built-in theme, whose motion is compiled in.
+    #[must_use]
+    pub fn provides_animation(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_animation)
     }
 
     /// Whether it can be chosen for the icons axis: its folder holds an
@@ -972,16 +1007,18 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_dark: true,
             has_light: true,
             has_widget_style: true,
+            has_animation: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours, icons and controls
-    // are compiled in: it covers both modes, draws every icon and every
-    // control, and cannot fail to load.
+    // Whatever its file says, the built-in theme's colours, icons, controls
+    // and motion are compiled in: it covers both modes, draws every icon and
+    // every control, moves everything, and cannot fail to load.
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
+    info.has_animation = true;
     info.problem = None;
     info
 }
@@ -1015,6 +1052,7 @@ fn describe(
                 has_dark: !file.colors.dark.is_empty(),
                 has_light: !file.colors.light.is_empty(),
                 has_widget_style: file.widget_style.is_some(),
+                has_animation: file.motion.is_some(),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -1031,6 +1069,7 @@ fn describe(
             has_dark: false,
             has_light: false,
             has_widget_style: false,
+            has_animation: false,
             warnings: Vec::new(),
             problem: Some(err),
         },

@@ -36,6 +36,7 @@
 mod ffi;
 mod grammars;
 mod highlighter;
+mod luapat;
 
 #[cfg(test)]
 #[allow(
@@ -146,11 +147,11 @@ impl Eq for Language {}
 
 /// How many of [`LANGUAGES`] a person chooses between; the rest are parts
 /// of another language that only it injects (Markdown's inline grammar).
-const VISIBLE: usize = 24;
+const VISIBLE: usize = 27;
 
 /// Every language: the ones a person chooses between by name, then the
 /// hidden ones.
-static LANGUAGES: [Language; 27] = [
+static LANGUAGES: [Language; 30] = [
     Language {
         name: "Ada",
         extensions: &["ads", "adb", "ada"],
@@ -356,6 +357,18 @@ static LANGUAGES: [Language; 27] = [
         index: 13,
     },
     Language {
+        name: "Linker script",
+        extensions: &["ld", "lds"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["ld", "linkerscript"],
+        grammar: grammars::linkerscript::generated::language_fn,
+        highlights: grammars::linkerscript::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 14,
+    },
+    Language {
         name: "Lua",
         extensions: &["lua"],
         file_names: &[],
@@ -365,7 +378,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::lua::HIGHLIGHTS,
         injections: grammars::lua::INJECTIONS,
         locals: grammars::lua::LOCALS,
-        index: 14,
+        index: 15,
     },
     Language {
         name: "Make",
@@ -377,7 +390,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::make::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 15,
+        index: 16,
     },
     Language {
         name: "Markdown",
@@ -389,7 +402,19 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::markdown::HIGHLIGHTS,
         injections: grammars::markdown::INJECTIONS,
         locals: "",
-        index: 16,
+        index: 17,
+    },
+    Language {
+        name: "PowerShell",
+        extensions: &["ps1", "psm1", "psd1"],
+        file_names: &[],
+        interpreters: &["pwsh", "powershell"],
+        aliases: &["ps1", "pwsh", "posh"],
+        grammar: grammars::powershell::generated::language_fn,
+        highlights: grammars::powershell::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 18,
     },
     Language {
         name: "Python",
@@ -401,7 +426,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::python::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 17,
+        index: 19,
     },
     Language {
         name: "Rust",
@@ -413,7 +438,19 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::rust::HIGHLIGHTS,
         injections: grammars::rust::INJECTIONS,
         locals: "",
-        index: 18,
+        index: 20,
+    },
+    Language {
+        name: "SQL",
+        extensions: &["sql", "psql", "pgsql", "mysql"],
+        file_names: &[],
+        interpreters: &[],
+        aliases: &["postgres", "postgresql", "sqlite", "plpgsql"],
+        grammar: grammars::sql::generated::language_fn,
+        highlights: grammars::sql::HIGHLIGHTS,
+        injections: "",
+        locals: "",
+        index: 21,
     },
     Language {
         name: "TOML",
@@ -426,7 +463,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::toml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 19,
+        index: 22,
     },
     Language {
         name: "TSX",
@@ -438,7 +475,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::tsx::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::tsx::LOCALS,
-        index: 20,
+        index: 23,
     },
     Language {
         name: "TypeScript",
@@ -450,7 +487,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::typescript::HIGHLIGHTS,
         injections: grammars::javascript::INJECTIONS,
         locals: grammars::typescript::LOCALS,
-        index: 21,
+        index: 24,
     },
     Language {
         name: "XML",
@@ -466,7 +503,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::xml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 22,
+        index: 25,
     },
     Language {
         name: "YAML",
@@ -478,7 +515,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::yaml::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 23,
+        index: 26,
     },
     // Hidden: injected by Markdown into its paragraphs and headings.
     Language {
@@ -491,7 +528,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::markdown_inline::HIGHLIGHTS,
         injections: grammars::markdown_inline::INJECTIONS,
         locals: "",
-        index: 24,
+        index: 27,
     },
     // Hidden: injected by JavaScript and TypeScript into their comments.
     Language {
@@ -504,7 +541,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::jsdoc::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 25,
+        index: 28,
     },
     // Hidden: injected by JavaScript and TypeScript into their regular
     // expressions.
@@ -518,7 +555,7 @@ static LANGUAGES: [Language; 27] = [
         highlights: grammars::regex::HIGHLIGHTS,
         injections: "",
         locals: "",
-        index: 26,
+        index: 29,
     },
 ];
 
@@ -719,7 +756,7 @@ impl Paint {
 }
 
 /// Each language's compiled queries, made the first time they are asked for.
-static COMPILED: [OnceLock<Result<Compiled, Error>>; 27] = [const { OnceLock::new() }; 27];
+static COMPILED: [OnceLock<Result<Compiled, Error>>; 30] = [const { OnceLock::new() }; 30];
 
 impl Language {
     /// Every language a person chooses between, by name.
@@ -825,7 +862,12 @@ impl Language {
     /// A query compiled against the grammar, its error said in lines and
     /// columns.
     fn compile(&self, source: &str, which: &str) -> Result<tree_sitter::Query, Error> {
-        tree_sitter::Query::new(&self.ts_language(), source).map_err(|e| Error::Query {
+        // Neovim's `#lua-match?`, as the runtime's `#match?` (`luapat`).
+        let source = luapat::rewrite(source).map_err(|message| Error::Query {
+            language: self.name,
+            message: format!("{which}: {message}"),
+        })?;
+        tree_sitter::Query::new(&self.ts_language(), &source).map_err(|e| Error::Query {
             language: self.name,
             message: format!(
                 "{which}, line {}, column {}: {}",
@@ -1029,6 +1071,9 @@ mod tests {
         assert_eq!(found("xhtml1-strict.dtd"), Some("DTD"));
         assert_eq!(found("Dockerfile"), Some("Dockerfile"));
         assert_eq!(found("init.lua"), Some("Lua"));
+        assert_eq!(found("schema.SQL"), Some("SQL"));
+        assert_eq!(found("toolchain/build-sysroot.ps1"), Some("PowerShell"));
+        assert_eq!(found("kernel/linker.ld"), Some("Linker script"));
         assert_eq!(found("images/base/Containerfile"), Some("Dockerfile"));
         assert_eq!(found("Dockerfile.dev"), Some("Dockerfile"));
         assert_eq!(found("web.Dockerfile"), Some("Dockerfile"));

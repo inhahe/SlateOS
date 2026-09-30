@@ -22,6 +22,7 @@
 
 use crate::color::Color;
 use crate::highlight::Highlight;
+use crate::motion::Motion;
 use crate::theme::{contrast_ratio, perceptual_difference, relative_luminance, with_alpha};
 use crate::widget_style::WidgetStyle;
 use std::collections::BTreeMap;
@@ -545,6 +546,14 @@ pub struct Palette {
     /// honour the theme. Public where `surface_style` is not, because nothing
     /// here depends on it: it changes shapes, never which grounds carry text.
     pub widget_style: WidgetStyle,
+    /// How the desktop's transitions move: the theme's animation settings at
+    /// the user's speed (`crate::motion`, design-decisions 1446).
+    ///
+    /// Carried on the palette for the widget style's reason: a palette
+    /// already reaches everything that draws -- every application through
+    /// `oswindow` -- so an animator needs no new argument to follow it. Not a
+    /// colour and not a shape; nothing here depends on it.
+    pub motion: Motion,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -1039,6 +1048,7 @@ impl Palette {
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
                 widget_style: WidgetStyle::AERO,
+                motion: Motion::STANDARD,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -1078,6 +1088,7 @@ impl Palette {
                 surface_style: SurfaceStyle::Borders,
                 strip_style: StripStyle::Filled,
                 widget_style: WidgetStyle::AERO,
+                motion: Motion::STANDARD,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -1392,6 +1403,9 @@ impl Palette {
             // The theme's shapes survive too, less the choices that trade how
             // plainly a control shows for how it looks.
             palette.widget_style = settings.widget_style().for_high_contrast();
+            // And its motion, whole: high contrast is about telling things
+            // apart, and how fast they move does not change that.
+            palette.motion = settings.motion();
             return palette;
         }
         let mut palette = match settings.theme() {
@@ -1405,6 +1419,7 @@ impl Palette {
         palette.set_surface_style(settings.surface_style());
         palette.set_strip_style(settings.strip_style());
         palette.widget_style = settings.widget_style();
+        palette.motion = settings.motion();
         palette
     }
 
@@ -1487,6 +1502,7 @@ impl Palette {
             // `WidgetStyle::for_high_contrast`. `from_settings` puts the
             // user's theme's back, adjusted the same way.
             widget_style: WidgetStyle::AERO.for_high_contrast(),
+            motion: Motion::STANDARD,
             // The categorical hues, from the mode that suits this background.
             ..ordinary
         }
@@ -1583,6 +1599,8 @@ impl Palette {
             terminal: _,
             // Not a colour: the shapes of the controls.
             widget_style: _,
+            // Not a colour: how things move.
+            motion: _,
             // Colours, but code's rather than roles, on the terms of
             // `terminal` above: the roles in the places code editors put
             // them, which a theme's `syntax` section sets apart.
@@ -1965,6 +1983,14 @@ pub trait PaletteSource {
     /// the built-in theme's.
     fn widget_style(&self) -> WidgetStyle {
         WidgetStyle::AERO
+    }
+
+    /// How the desktop's transitions move: the animation theme the user
+    /// chose, at their speed. Already read, for [`theme`](Self::theme)'s
+    /// reason, and defaulted for the same one: a source that knows nothing of
+    /// themes or speeds has the built-in theme's at the normal speed.
+    fn motion(&self) -> Motion {
+        Motion::STANDARD
     }
 }
 

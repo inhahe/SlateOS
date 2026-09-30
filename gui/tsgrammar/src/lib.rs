@@ -51,6 +51,7 @@
 
 mod cinit;
 mod clex;
+mod cset;
 mod ctoken;
 
 use core::fmt;
@@ -652,6 +653,16 @@ fn build(
             ));
         }
     }
+    // An older generator's sets are predicates, `static inline bool
+    // NAME(int32_t c) { return ...; }`: read as the ranges they hold for.
+    for (name, body) in lexers {
+        if name == "ts_lex" || name == "ts_lex_keywords" {
+            continue;
+        }
+        if let Some(ranges) = cset::ranges(toks.get(body.clone()).unwrap_or_default())? {
+            char_sets.push((name.clone(), ranges));
+        }
+    }
     let set_sizes: Vec<(String, usize)> = char_sets
         .iter()
         .map(|(n, r)| (n.clone(), r.len()))
@@ -663,12 +674,12 @@ fn build(
             .map(|(_, r)| r.clone())
     };
     let lex_range = body("ts_lex").ok_or_else(|| Error::whole("`ts_lex` is missing"))?;
-    let lex = clex::read(
+    let mut lex = clex::read(
         toks.get(lex_range).unwrap_or_default(),
         constants,
         &set_sizes,
     )?;
-    let keyword_lex = match (body("ts_lex_keywords"), has_keyword_lexer) {
+    let mut keyword_lex = match (body("ts_lex_keywords"), has_keyword_lexer) {
         (Some(r), true) => Some(clex::read(
             toks.get(r).unwrap_or_default(),
             constants,
@@ -677,6 +688,17 @@ fn build(
         (None, true) => return Err(Error::whole("`ts_lex_keywords` is named but missing")),
         (_, false) => None,
     };
+    // A newer generator reads `eof` in `ts_lex` itself, after its
+    // `START_LEXER()`, whose macro leaves it false; an older one's macro
+    // reads it at every character (tree-sitter-linkerscript's `parser.h`).
+    // A main lexer that does not read it is an older generator's, and so
+    // are all of its lexers: without it, none would ever see the end.
+    if !lex.reads_eof() {
+        lex.read_eof();
+        if let Some(k) = keyword_lex.as_mut() {
+            k.read_eof();
+        }
+    }
 
     Ok(Grammar {
         name,
@@ -844,10 +866,39 @@ fn parse_actions(d: &Declared, constants: &Constants) -> Result<Vec<u8>, Error> 
                 e[1] = u8::from(v.get(1).copied().unwrap_or(0) != 0);
             }
             Init::Expr(Expr::Call(name, args)) => {
-                let nums: Vec<i64> = args
-                    .iter()
-                    .map(|a| constants.eval(a, d.line))
-                    .collect::<Result<_, _>>()?;
+                // An older generator names a reduction's last two values
+                // (`REDUCE(sym, 2, .production_id = 3)`), each defaulting
+                // to 0; a newer one gives all four in order.
+                let mut named = [None::<i64>; 2];
+                let mut nums: Vec<i64> = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Expr::Named(field, v) => {
+                            let slot = match field.as_str() {
+                                "dynamic_precedence" => 0,
+                                "production_id" => 1,
+                                _ => {
+                                    return Err(Error::at(
+                                        d.line,
+                                        format!("an action's field this does not know: .{field}"),
+                                    ));
+                                }
+                            };
+                            if let Some(s) = named.get_mut(slot) {
+                                *s = Some(constants.eval(v, d.line)?);
+                            }
+                        }
+                        _ => nums.push(constants.eval(a, d.line)?),
+                    }
+                }
+                if name == "REDUCE" && nums.len() == 2 {
+                    nums.extend(named.iter().map(|v| v.unwrap_or(0)));
+                } else if named.iter().any(Option::is_some) {
+                    return Err(Error::at(
+                        d.line,
+                        format!("named values where {name} takes none"),
+                    ));
+                }
                 match (name.as_str(), nums.as_slice()) {
                     ("SHIFT", [state]) => {
                         e[0] = SHIFT;

@@ -54,6 +54,7 @@ pub mod listview;
 pub mod menu;
 pub mod menubar;
 pub mod modal;
+pub mod motion;
 mod osbytes;
 pub mod palette;
 pub mod pathbar;

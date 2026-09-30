@@ -9,6 +9,7 @@ use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
+use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -178,10 +179,16 @@ impl OsdPosition {
 pub struct OsdConfig {
     /// How long (in milliseconds) before the OSD auto-dismisses.
     pub timeout_ms: u64,
-    /// Fade-in duration in milliseconds.
+    /// Fade-in duration in milliseconds, as designed: against the standard
+    /// transition, so [`motion`](Self::motion) scales it.
     pub fade_in_ms: u64,
-    /// Fade-out duration in milliseconds.
+    /// Fade-out duration in milliseconds, as designed; scaled the same way.
     pub fade_out_ms: u64,
+    /// How the fades move: the desktop's motion (design-decisions §1446) --
+    /// their length, their curve, or that they do not happen. Not a setting
+    /// of the OSD's own: the shell hands it over with the rest of the
+    /// appearance ([`OsdManager::set_motion`]).
+    pub motion: Motion,
     /// Position on screen.
     pub position: OsdPosition,
     /// Margin from screen edge in pixels.
@@ -210,6 +217,7 @@ impl Default for OsdConfig {
             timeout_ms: 2000,
             fade_in_ms: 150,
             fade_out_ms: 300,
+            motion: Motion::STANDARD,
             position: OsdPosition::BottomCenter,
             margin: 80.0,
             width: 320.0,
@@ -288,19 +296,28 @@ impl OsdOverlay {
     /// `elapsed == 0`, so a single ten-second tick advances by exactly one
     /// phase and an overlay takes three frames to retire no matter how much time
     /// has passed.
+    ///
+    /// The fades are as long as the motion makes their stated lengths, and
+    /// their opacity follows its curves: arriving for the fade in, leaving
+    /// for the fade out. A still motion makes both zero, which is the
+    /// "no fade" each phase already knows.
     pub fn tick(&mut self, now_ms: u64, config: &OsdConfig) -> bool {
+        let motion = config.motion;
+        let fade_in_ms = scaled(motion, config.fade_in_ms);
+        let fade_out_ms = scaled(motion, config.fade_out_ms);
         loop {
             let elapsed = now_ms.saturating_sub(self.phase_start);
             let prev_phase = self.phase;
 
             match self.phase {
                 OsdPhase::FadingIn => {
-                    if config.fade_in_ms == 0 || elapsed >= config.fade_in_ms {
+                    if fade_in_ms == 0 || elapsed >= fade_in_ms {
                         self.opacity = 1.0;
                         self.phase = OsdPhase::Visible;
-                        self.phase_start = self.phase_start.saturating_add(config.fade_in_ms);
+                        self.phase_start = self.phase_start.saturating_add(fade_in_ms);
                     } else {
-                        self.opacity = elapsed as f32 / config.fade_in_ms as f32;
+                        // Never past opaque, where a spring would carry it.
+                        self.opacity = motion.arriving(fraction(elapsed, fade_in_ms)).min(1.0);
                     }
                 }
                 OsdPhase::Visible => {
@@ -311,11 +328,11 @@ impl OsdOverlay {
                     }
                 }
                 OsdPhase::FadingOut => {
-                    if config.fade_out_ms == 0 || elapsed >= config.fade_out_ms {
+                    if fade_out_ms == 0 || elapsed >= fade_out_ms {
                         self.opacity = 0.0;
                         self.phase = OsdPhase::Dismissed;
                     } else {
-                        self.opacity = 1.0 - (elapsed as f32 / config.fade_out_ms as f32);
+                        self.opacity = 1.0 - motion.leaving(fraction(elapsed, fade_out_ms));
                     }
                 }
                 OsdPhase::Dismissed => {}
@@ -343,6 +360,22 @@ impl OsdOverlay {
         self.phase_start = now_ms;
         self.opacity = 1.0;
     }
+}
+
+/// `stated_ms` under `motion`: as long as the motion makes a transition
+/// designed at that length. A length past a `u32` of milliseconds -- 49
+/// days -- is taken as the longest there is.
+fn scaled(motion: Motion, stated_ms: u64) -> u64 {
+    u64::from(motion.duration_ms(u32::try_from(stated_ms).unwrap_or(u32::MAX)))
+}
+
+/// How far `elapsed_ms` is through `duration_ms`, as a fraction.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a fade's milliseconds are far inside f32's exact range"
+)]
+fn fraction(elapsed_ms: u64, duration_ms: u64) -> f32 {
+    elapsed_ms as f32 / duration_ms as f32
 }
 
 // ============================================================================
@@ -473,6 +506,13 @@ impl OsdManager {
             overlay.tick(now_ms, &self.config);
         }
         self.overlays.retain(|o| o.phase != OsdPhase::Dismissed);
+    }
+
+    /// Fade as `motion` says from now on (design-decisions §1446). Under a
+    /// still motion an overlay mid-fade is where the fade was going at its
+    /// next tick: the phases treat a fade of no length as already done.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.config.motion = motion;
     }
 
     /// Whether any overlay is currently visible.
@@ -1414,7 +1454,58 @@ mod tests {
         );
         o.tick(75, &config); // halfway through 150ms fade-in
         assert_eq!(o.phase, OsdPhase::FadingIn);
+        // Along the built-in ease-out: seven-eighths there half-way.
+        assert!((o.opacity - 0.875).abs() < 0.01);
+    }
+
+    /// **The fades follow the desktop's motion**: their lengths scale with
+    /// the standard transition, their opacity is the motion's curve, and a
+    /// still motion fades nothing -- an overlay is there at once and gone at
+    /// its timeout.
+    #[test]
+    fn the_fades_follow_the_desktops_motion() {
+        use guitk::motion::Curve;
+        let volume = OsdKind::Volume {
+            level: 50,
+            muted: false,
+        };
+        let linear_slow = OsdConfig {
+            motion: Motion::new(400, Curve::Linear),
+            ..OsdConfig::default()
+        };
+        let mut o = OsdOverlay::new(volume.clone(), 0, 1);
+        o.tick(150, &linear_slow); // half of a 300 ms fade in
+        assert_eq!(o.phase, OsdPhase::FadingIn);
         assert!((o.opacity - 0.5).abs() < 0.01);
+        o.tick(300, &linear_slow);
+        assert_eq!(o.phase, OsdPhase::Visible);
+        o.tick(300 + 2000 + 300, &linear_slow); // half of a 600 ms fade out
+        assert_eq!(o.phase, OsdPhase::FadingOut);
+        assert!((o.opacity - 0.5).abs() < 0.01);
+
+        let still = OsdConfig {
+            motion: Motion::STILL,
+            ..OsdConfig::default()
+        };
+        let mut o = OsdOverlay::new(volume.clone(), 0, 1);
+        assert!(o.tick(0, &still));
+        assert_eq!(o.phase, OsdPhase::Visible);
+        assert!((o.opacity - 1.0).abs() < f32::EPSILON);
+        assert!(!o.tick(2000, &still), "gone at its timeout, not faded");
+
+        let spring = OsdConfig {
+            motion: Motion::new(200, Curve::Spring),
+            ..OsdConfig::default()
+        };
+        let mut o = OsdOverlay::new(volume, 0, 1);
+        for now in 0..150 {
+            o.tick(now, &spring);
+            assert!(o.opacity <= 1.0, "{now}: {}", o.opacity);
+        }
+
+        let mut mgr = OsdManager::new(1920.0, 1080.0);
+        mgr.set_motion(Motion::STILL);
+        assert_eq!(mgr.config.motion, Motion::STILL);
     }
 
     #[test]

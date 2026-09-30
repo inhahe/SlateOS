@@ -3592,4 +3592,23 @@ mod tests {
         while h.work(&buffer, Duration::from_secs(5)) {}
         assert_eq!(h.brackets(&buffer, 2), Brackets::Pair(2, 4));
     }
+
+    /// **A linker script is coloured as its query says**: the commands'
+    /// keywords, ld's own words, a label, a constant and a variable -- the
+    /// query's `#lua-match?` patterns among them.
+    #[test]
+    fn a_linker_script_is_coloured_as_its_query_says() {
+        let text = "ENTRY(kmain)\nSECTIONS\n{\n    .text : {\n        . = ALIGN(4K);\n        __text_start = .;\n        KEEP(*(.text))\n    }\n}\n";
+        let spans = highlighted(text, "linker script");
+        let at = |needle, nth| colour_at(&spans, text, needle, nth);
+        assert_eq!(at("ENTRY", 0), Some(Highlight::Keyword), "{spans:?}");
+        assert_eq!(at("SECTIONS", 0), Some(Highlight::Keyword));
+        // An all-capitals name is a constant, the query's last word on it
+        // (its `#lua-match?`, read as a `#match?`) -- a call's included.
+        assert_eq!(at("ALIGN", 0), Some(Highlight::Constant));
+        assert_eq!(at("KEEP", 0), Some(Highlight::Builtin));
+        // A name starting with a dot is a label; others are variables.
+        assert_eq!(at(".text :", 0), Some(Highlight::Label));
+        assert_eq!(at("__text_start", 0), Some(Highlight::Variable));
+    }
 }

@@ -22,13 +22,16 @@ pub(crate) mod java;
 pub(crate) mod javascript;
 pub(crate) mod jsdoc;
 pub(crate) mod json;
+pub(crate) mod linkerscript;
 pub(crate) mod lua;
 pub(crate) mod make;
 pub(crate) mod markdown;
 pub(crate) mod markdown_inline;
+pub(crate) mod powershell;
 pub(crate) mod python;
 pub(crate) mod regex;
 pub(crate) mod rust;
+pub(crate) mod sql;
 pub(crate) mod toml;
 pub(crate) mod tsx;
 pub(crate) mod typescript;
@@ -93,7 +96,7 @@ mod tests {
     /// that reads nothing.
     #[test]
     fn every_table_inflates_to_its_length() {
-        let grammars: [(&str, &[&crate::ffi::Deflated]); 27] = [
+        let grammars: [(&str, &[&crate::ffi::Deflated]); 30] = [
             ("ada", &super::ada::generated::TABLES),
             ("bash", &super::bash::generated::TABLES),
             ("c", &super::c::generated::TABLES),
@@ -109,6 +112,7 @@ mod tests {
             ("javascript", &super::javascript::generated::TABLES),
             ("jsdoc", &super::jsdoc::generated::TABLES),
             ("json", &super::json::generated::TABLES),
+            ("linkerscript", &super::linkerscript::generated::TABLES),
             ("lua", &super::lua::generated::TABLES),
             ("make", &super::make::generated::TABLES),
             ("markdown", &super::markdown::generated::TABLES),
@@ -116,9 +120,11 @@ mod tests {
                 "markdown_inline",
                 &super::markdown_inline::generated::TABLES,
             ),
+            ("powershell", &super::powershell::generated::TABLES),
             ("python", &super::python::generated::TABLES),
             ("regex", &super::regex::generated::TABLES),
             ("rust", &super::rust::generated::TABLES),
+            ("sql", &super::sql::generated::TABLES),
             ("toml", &super::toml::generated::TABLES),
             ("tsx", &super::tsx::generated::TABLES),
             ("typescript", &super::typescript::generated::TABLES),

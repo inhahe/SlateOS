@@ -61,7 +61,11 @@ Everything is in `gui/servicemenus`; nothing needs writing twice:
 - The desktop reads the file again when the save is announced, so a switch
   takes effect at the next right-click with no restart.
 
-## What lane C still owes
+## Pictures
 
-- Menu rows draw no icons (`known-issues.md`,
-  `TD-C-MENU-ROWS-DRAW-NO-ICONS`): the names are kept for when they do.
+Menu rows draw their pictures (2026-09-29): put the item's
+`action.icon` -- and a `Row::Submenu`'s `icon` -- in the row's `icon`, and
+draw the menu with `ContextMenu::render_with_icons(palette, &resolver)`,
+where `resolver(name, px)` answers the image id of the icon `name` drawn
+`px` square (the shell's is `DesktopShell::render_menu`, through
+`appearance::icons::IconRegistry`). `render` alone draws no pictures.

@@ -10142,12 +10142,16 @@ impl DesktopShell {
                     .iter()
                     .enumerate()
                     .filter(|(_, a)| a.exec.is_some())
-                    .map(|(index, a)| {
-                        action(
-                            Self::MENU_JUMP_LIST_BASE
-                                .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-                            a.name.clone(),
-                        )
+                    .map(|(index, a)| guitk::menu::MenuItem::Action {
+                        id: Self::MENU_JUMP_LIST_BASE
+                            .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                        label: a.name.clone(),
+                        shortcut: None,
+                        // The action's own picture, as its desktop entry names
+                        // it.
+                        icon: a.icon.clone(),
+                        enabled: true,
+                        checked: None,
                     })
                     .collect()
             })
@@ -10425,9 +10429,23 @@ impl DesktopShell {
     pub fn render_taskbar_menu(&self) -> Option<RenderTree> {
         let menu = self.taskbar_menu.as_ref()?;
         let mut tree = RenderTree::new();
-        tree.commands
-            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        tree.commands.extend(self.render_menu(menu));
         Some(tree)
+    }
+
+    /// `menu`'s draw commands, each row's picture found in the icon theme
+    /// and drawn in the menu's text colour (`TD-C-MENU-ROWS-DRAW-NO-ICONS`,
+    /// fixed): a jump list's action, an item a program added to a file's
+    /// menu.
+    ///
+    /// A name the theme does not have is asked for all the same and drawn
+    /// as nothing -- the upload finds nothing to send, once -- which leaves
+    /// the row's picture column empty and its label in line.
+    fn render_menu(&self, menu: &ContextMenu) -> Vec<guitk::render::RenderCommand> {
+        let palette = Palette::from_settings(&self.appearance);
+        menu.render_with_icons(&palette, &|name, px| {
+            Some(self.icon_registry.icon(name.to_owned(), px, palette.text))
+        })
     }
 
     /// The pin menu's draw commands, empty when it is closed.
@@ -10435,8 +10453,7 @@ impl DesktopShell {
     pub fn render_pin_menu(&self) -> Option<RenderTree> {
         let (menu, _) = self.pin_menu.as_ref()?;
         let mut tree = RenderTree::new();
-        tree.commands
-            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        tree.commands.extend(self.render_menu(menu));
         Some(tree)
     }
 
@@ -11924,19 +11941,17 @@ impl DesktopShell {
                         id,
                         label: action.name.clone(),
                         shortcut: None,
-                        // The toolkit's menus draw no pictures yet; the scan
-                        // keeps each item's for when they do.
-                        icon: None,
+                        icon: action.icon.clone(),
                         enabled: true,
                         checked: None,
                     }
                 }
-                servicemenus::Row::Submenu { label, rows, .. } => {
+                servicemenus::Row::Submenu { label, icon, rows } => {
                     offer.push(None);
                     MenuItem::Submenu {
                         id,
                         label: label.clone(),
-                        icon: None,
+                        icon: icon.clone(),
                         enabled: true,
                         children: Self::service_menu_items(rows, offer),
                     }
@@ -12614,10 +12629,7 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands.extend(
-            self.desktop_menu
-                .render(&Palette::from_settings(&self.appearance)),
-        );
+        tree.commands.extend(self.render_menu(&self.desktop_menu));
         Some(tree)
     }
 
@@ -26512,6 +26524,32 @@ mod start_search_tests {
         shell.pin_menu = None;
         shell.open_pin_menu(super::PinTarget::StartMenuRow(terminal), 100.0, 100.0);
         assert_eq!(pin_menu_labels(&shell)[0], "Pin to taskbar");
+    }
+
+    /// **A jump list row shows its action's picture**, as the action's
+    /// desktop entry names it, found in the icon theme like every other.
+    #[test]
+    fn a_jump_list_row_shows_its_actions_picture() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch %U\n\
+             Actions=new;\n[Desktop Action new]\nName=New Drawing\nIcon=document-new\n\
+             Exec=sketch --new\n",
+        )]));
+        let row = row_named(&shell, "Sketchpad");
+        shell.open_pin_menu(super::PinTarget::StartMenuRow(row), 100.0, 100.0);
+        let tree = shell.render_pin_menu().expect("the menu is open");
+        let pictured: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Image { image_id, .. } => shell
+                    .icon_request(*image_id)
+                    .map(|request| request.name.into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pictured, ["document-new"]);
     }
 
     /// **A row of the jump list starts the program as that action says**, and

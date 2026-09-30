@@ -175,6 +175,59 @@ fn a_kind_of_text_is_offered_what_plain_text_is() {
     assert_eq!(id_of(&s.right_click(png), "Edit as text"), None);
 }
 
+/// **An item shows its picture**, as its menu names it, found in the icon
+/// theme like every other picture the shell draws.
+#[test]
+fn an_item_shows_its_picture() {
+    let mut s = Setup::new("picture");
+    s.install(
+        false,
+        "rotate.desktop",
+        "[Desktop Entry]\nMimeType=image/png;\nActions=rotate;\n\n\
+         [Desktop Action rotate]\nName=Rotate right\nIcon=object-rotate-right\n\
+         Exec=mogrify -rotate 90 %f\n",
+    );
+    let (icon, _) = s.file_icon("photo.png", 0);
+    drop(s.right_click(icon));
+    let tree = s.shell.render_desktop_menu().expect("the menu is open");
+    let pictured: Vec<String> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            guitk::render::RenderCommand::Image { image_id, .. } => s
+                .shell
+                .icon_request(*image_id)
+                .map(|request| request.name.into_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pictured, ["object-rotate-right"]);
+
+    // A submenu's row shows its picture too: its first item's.
+    let mut s = Setup::new("submenu-picture");
+    s.install(
+        false,
+        "tools.desktop",
+        "[Desktop Entry]\nMimeType=all/all;\nX-KDE-Submenu=Tools\nActions=fix;\n\n\
+         [Desktop Action fix]\nName=Fix\nIcon=wrench\nExec=fix %f\n",
+    );
+    let (icon, _) = s.file_icon("notes.txt", 0);
+    drop(s.right_click(icon));
+    let tree = s.shell.render_desktop_menu().expect("the menu is open");
+    let pictured: Vec<String> = tree
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            guitk::render::RenderCommand::Image { image_id, .. } => s
+                .shell
+                .icon_request(*image_id)
+                .map(|request| request.name.into_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pictured, ["wrench"]);
+}
+
 /// **Two files, a command that takes one at a time: a program each.**
 #[test]
 fn two_files_start_one_program_each() {

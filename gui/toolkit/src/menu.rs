@@ -40,7 +40,10 @@ const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
 
 const ITEM_HEIGHT: f32 = 28.0;
 const SEPARATOR_HEIGHT: f32 = 9.0;
+/// The column at a row's start that holds its check mark or its picture.
 const ICON_COLUMN_WIDTH: f32 = 28.0;
+/// A row's picture, square, centred in [`ICON_COLUMN_WIDTH`].
+const ICON_SIZE: u32 = 16;
 const SHORTCUT_PADDING: f32 = 40.0;
 const HORIZONTAL_PADDING: f32 = 8.0;
 const VERTICAL_PADDING: f32 = 4.0;
@@ -91,6 +94,12 @@ const FALLBACK_VIEWPORT: (f32, f32) = (1920.0, 1080.0);
 pub type MenuItemId = u64;
 
 /// A single item in a context menu.
+///
+/// A row's `icon` is its picture: an icon-theme name or an absolute path, as
+/// a desktop entry's `Icon` is. It is drawn in the column before the label
+/// by a menu rendered with a way to find pictures
+/// ([`ContextMenu::render_with_icons`]); a check mark, where a row has one,
+/// is drawn there instead.
 #[derive(Clone, Debug)]
 pub enum MenuItem {
     /// Regular clickable item.
@@ -544,8 +553,25 @@ impl ContextMenu {
         }
     }
 
-    /// Produce render commands for this menu and any open submenus.
+    /// Produce render commands for this menu and any open submenus, with no
+    /// pictures: see [`render_with_icons`](Self::render_with_icons).
     pub fn render(&self, palette: &Palette) -> Vec<RenderCommand> {
+        self.render_with_icons(palette, &|_, _| None)
+    }
+
+    /// [`render`](Self::render), drawing each row's picture: `icons(name,
+    /// px)` answers the image id of the picture `name` drawn `px` square, or
+    /// `None` for one it cannot draw -- the row keeps its column empty, its
+    /// label where every other row's is.
+    ///
+    /// A resolver rather than image ids in the rows, because what a picture
+    /// is -- a theme's icon uploaded under an id, in the reader's colours --
+    /// is the owner's to know: the toolkit draws what it is given.
+    pub fn render_with_icons(
+        &self,
+        palette: &Palette,
+        icons: &dyn Fn(&str, u32) -> Option<u64>,
+    ) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -631,6 +657,7 @@ impl ContextMenu {
                     shortcut,
                     enabled,
                     checked,
+                    icon,
                     ..
                 } => {
                     // Hover highlight, which is a *selection*: the row under
@@ -657,7 +684,7 @@ impl ContextMenu {
                     };
                     let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
 
-                    // Check mark.
+                    // Check mark, or else the row's picture.
                     if let Some(true) = checked {
                         cmds.push(RenderCommand::Text {
                             x: self.x + HORIZONTAL_PADDING + 4.0,
@@ -669,6 +696,8 @@ impl ContextMenu {
                             max_width: None,
                             overflow: TextOverflow::Clip,
                         });
+                    } else {
+                        self.push_icon(&mut cmds, icon.as_deref(), current_y, icons);
                     }
 
                     // Label.
@@ -699,7 +728,12 @@ impl ContextMenu {
                         });
                     }
                 }
-                MenuItem::Submenu { label, enabled, .. } => {
+                MenuItem::Submenu {
+                    label,
+                    enabled,
+                    icon,
+                    ..
+                } => {
                     // Hover highlight, which is a *selection*: the row under
                     // the pointer is the one Enter would take. 834 settles
                     // that every selection is an accent outline, so this is
@@ -723,6 +757,7 @@ impl ContextMenu {
                         palette.overlay0
                     };
                     let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
+                    self.push_icon(&mut cmds, icon.as_deref(), current_y, icons);
 
                     // Label.
                     cmds.push(RenderCommand::Text {
@@ -799,15 +834,41 @@ impl ContextMenu {
             });
         }
 
-        // Render open submenu on top.
+        // Render open submenu on top, its pictures found the same way.
         if let Some((_, ref submenu)) = self.open_submenu {
-            cmds.extend(submenu.render(palette));
+            cmds.extend(submenu.render_with_icons(palette, icons));
         }
 
         cmds
     }
 
     // ─── Private helpers ────────────────────────────────────────────────────
+
+    /// Draw the picture `icon` names, if `icons` can, in the row at `row_y`'s
+    /// picture column.
+    fn push_icon(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        icon: Option<&str>,
+        row_y: f32,
+        icons: &dyn Fn(&str, u32) -> Option<u64>,
+    ) {
+        let Some(image_id) = icon.and_then(|name| icons(name, ICON_SIZE)) else {
+            return;
+        };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "a sixteen-pixel side is exact in an f32"
+        )]
+        let side = ICON_SIZE as f32;
+        cmds.push(RenderCommand::Image {
+            x: self.x + HORIZONTAL_PADDING + (ICON_COLUMN_WIDTH - side) / 2.0,
+            y: row_y + (ITEM_HEIGHT - side) / 2.0,
+            width: side,
+            height: side,
+            image_id,
+        });
+    }
 
     fn calculate_width(items: &[MenuItem]) -> f32 {
         let mut max_label_w: f32 = 0.0;
@@ -2515,5 +2576,146 @@ mod tests {
             joined.split_whitespace().collect::<Vec<_>>(),
             text.split_whitespace().collect::<Vec<_>>()
         );
+    }
+
+    // ─── Pictures ────────────────────────────────────────────────────────────
+
+    /// A row with a picture, a row without, a submenu with one.
+    fn pictured_items() -> Vec<MenuItem> {
+        vec![
+            MenuItem::Action {
+                id: 1,
+                label: "Copy".to_string(),
+                shortcut: None,
+                icon: Some("edit-copy".to_string()),
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Action {
+                id: 2,
+                label: "Plain".to_string(),
+                shortcut: None,
+                icon: None,
+                enabled: true,
+                checked: None,
+            },
+            MenuItem::Submenu {
+                id: 3,
+                label: "Open with".to_string(),
+                icon: Some("folder".to_string()),
+                enabled: true,
+                children: vec![MenuItem::Action {
+                    id: 4,
+                    label: "Viewer".to_string(),
+                    shortcut: None,
+                    icon: Some("image-viewer".to_string()),
+                    enabled: true,
+                    checked: None,
+                }],
+            },
+        ]
+    }
+
+    /// Pictures the owner can draw: a name's id is its length, sized 16.
+    fn owner(name: &str, px: u32) -> Option<u64> {
+        assert_eq!(px, ICON_SIZE, "asked for the row's picture size");
+        (name != "unknown").then(|| u64::try_from(name.len()).unwrap())
+    }
+
+    /// Every picture drawn: id, and where.
+    fn pictures(cmds: &[RenderCommand]) -> Vec<(u64, f32, f32, f32)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Image {
+                    image_id,
+                    x,
+                    y,
+                    width,
+                    ..
+                } => Some((*image_id, *x, *y, *width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `x` of the label `label`.
+    fn label_x(cmds: &[RenderCommand], label: &str) -> f32 {
+        cmds.iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, x, .. } if text == label => Some(*x),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// **A row's picture is drawn in the column before its label** when the
+    /// menu's owner can draw it -- a submenu's row too -- and a plain render
+    /// draws none.
+    #[test]
+    fn a_rows_picture_is_drawn_before_its_label() {
+        let mut menu = ContextMenu::new(pictured_items());
+        menu.show(100.0, 50.0, SCREEN);
+        let palette = Palette::for_mode(false);
+        let cmds = menu.render_with_icons(&palette, &owner);
+        let side = 16.0;
+        let x = 100.0 + HORIZONTAL_PADDING + (ICON_COLUMN_WIDTH - side) / 2.0;
+        let row = |i: f32| 50.0 + VERTICAL_PADDING + i * ITEM_HEIGHT + (ITEM_HEIGHT - side) / 2.0;
+        assert_eq!(
+            pictures(&cmds),
+            [(9, x, row(0.0), side), (6, x, row(2.0), side)],
+            "edit-copy's and folder's, in their rows"
+        );
+        // Before the label, which stays where every row's is.
+        assert!(x + side <= label_x(&cmds, "Copy"));
+        assert_eq!(label_x(&cmds, "Copy"), label_x(&cmds, "Plain"));
+        assert!(pictures(&menu.render(&palette)).is_empty());
+    }
+
+    /// **A picture the owner cannot draw leaves the column empty**, the
+    /// label where it would be.
+    #[test]
+    fn a_picture_the_owner_cannot_draw_leaves_the_column_empty() {
+        let mut items = pictured_items();
+        if let MenuItem::Action { icon, .. } = &mut items[0] {
+            *icon = Some("unknown".to_string());
+        }
+        let mut menu = ContextMenu::new(items);
+        menu.show(0.0, 0.0, SCREEN);
+        let palette = Palette::for_mode(false);
+        let cmds = menu.render_with_icons(&palette, &owner);
+        assert_eq!(pictures(&cmds).iter().map(|p| p.0).collect::<Vec<_>>(), [6]);
+        assert_eq!(label_x(&cmds, "Copy"), label_x(&cmds, "Plain"));
+    }
+
+    /// **A checked row shows its check, not its picture**: the one column
+    /// holds one of them.
+    #[test]
+    fn a_checked_row_shows_its_check_not_its_picture() {
+        let mut items = pictured_items();
+        if let MenuItem::Action { checked, .. } = &mut items[0] {
+            *checked = Some(true);
+        }
+        let mut menu = ContextMenu::new(items);
+        menu.show(0.0, 0.0, SCREEN);
+        let cmds = menu.render_with_icons(&Palette::for_mode(false), &owner);
+        assert_eq!(pictures(&cmds).iter().map(|p| p.0).collect::<Vec<_>>(), [6]);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "\u{2713}"))
+        );
+    }
+
+    /// **An open submenu's rows are drawn with their pictures too**, found
+    /// the same way.
+    #[test]
+    fn an_open_submenus_rows_have_their_pictures() {
+        let mut menu = ContextMenu::new(pictured_items());
+        menu.show(0.0, 0.0, SCREEN);
+        // Onto the submenu's row, which opens it.
+        menu.handle_mouse_move(50.0, VERTICAL_PADDING + 2.5 * ITEM_HEIGHT);
+        assert!(menu.open_submenu.is_some(), "the premise: it opened");
+        let cmds = menu.render_with_icons(&Palette::for_mode(false), &owner);
+        let ids: Vec<u64> = pictures(&cmds).iter().map(|p| p.0).collect();
+        assert_eq!(ids, [9, 6, 12], "the viewer's picture in the submenu");
     }
 }

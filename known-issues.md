@@ -176158,6 +176158,18 @@ is the question to answer before wiring it.
 
 ### [C] TD-C-MENU-ROWS-DRAW-NO-ICONS -- 2026-09-29
 
+**Status:** FIXED 2026-09-29 (lane C). `icon` is documented as an
+icon-theme name or an absolute path, as a desktop entry's `Icon` is;
+`ContextMenu::render_with_icons` draws it in the column before the label
+(a check mark wins that column), finding each picture through a resolver
+its owner passes -- the toolkit cannot know the theme or the uploads --
+and hands the same resolver to an open submenu; `render` stays
+picture-free. The desktop's menus resolve through its icon registry in the
+menu's text colour (`DesktopShell::render_menu`): a jump list row shows its
+action's picture, an item a program added to a file's menu its own, a
+submenu its first item's. A name the theme lacks draws nothing and leaves
+the label in line.
+
 **In short:** a menu row has a field for its picture, and nothing draws it.
 Every menu in the desktop and the applications is text only -- which is
 fine while nothing asks for a picture, and now something does: an item a

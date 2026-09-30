@@ -2032,9 +2032,9 @@ live.
   turned on (`context-menus.yaml`); a menu that cannot be used is reported
   with why. **Lane E:** the file manager's menus and the Settings page that
   lists and switches them
-  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). **Lane C
-  next:** menu rows draw no icons yet
-  (`TD-C-MENU-ROWS-DRAW-NO-ICONS`).
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  draw their pictures since the same day -- an item's, a submenu's, a jump
+  list action's (`ContextMenu::render_with_icons`).
 
 - `[-]` `[C]` **Notifications pop up** (`design-decisions.md` §1447,
   open question C-Q32) -- the shell's half done 2026-09-29: every

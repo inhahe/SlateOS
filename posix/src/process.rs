@@ -2683,6 +2683,68 @@ pub extern "C" fn pidfd_send_signal(
     -1
 }
 
+/// The pid of the process a pidfd refers to (glibc 2.39).
+///
+/// `EBADF` for every descriptor: a native program has no pidfds to ask about,
+/// [`pidfd_open`] having no native system call to reach. glibc's reads the
+/// `Pid:` line of `/proc/self/fdinfo/<fd>`, and answers `EBADF` for a
+/// descriptor that is not a pidfd, or is not open (`pidfd_oracle.txt`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_getpid(_fd: i32) -> PidT {
+    errno::set_errno(errno::EBADF);
+    -1
+}
+
+/// Give advice about another process's memory, through a pidfd (Linux 5.10;
+/// glibc 2.36).
+///
+/// Linux checks, in order: `flags` not zero -- `EINVAL`; the vector, as every
+/// vectored call's is checked ([`crate::uio::import_iovec`]: more than
+/// `UIO_MAXIOV` segments is `EINVAL`, an array or a segment no mapping could
+/// hold `EFAULT`); and then the pidfd. A native program has none, so what
+/// gets past the first two is `EBADF` (`pidfd_oracle.txt`); the advice is not
+/// looked at before the pidfd, there as here.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn process_madvise(
+    _pidfd: i32,
+    iov: *const crate::file::Iovec,
+    vlen: usize,
+    _advice: i32,
+    flags: u32,
+) -> isize {
+    let e = if flags != 0 {
+        errno::EINVAL
+    } else {
+        // `vlen` is Linux's `size_t`, which `import_iovec` takes as an
+        // `unsigned`: a wider count is truncated, as the kernel's call is.
+        #[allow(clippy::cast_possible_truncation)]
+        let segs = vlen as u32;
+        // SAFETY: `import_iovec`'s contract, the caller's vector, as for
+        // `readv`: it reads the array only when it could be mapped.
+        match unsafe { crate::uio::import_iovec(iov, segs) } {
+            Err(e) => e,
+            Ok(_) => errno::EBADF,
+        }
+    };
+    errno::set_errno(e);
+    -1
+}
+
+/// Free the memory of a process being killed, through a pidfd (Linux 5.15;
+/// glibc 2.36).
+///
+/// `EINVAL` for `flags` not zero, as Linux checks first, and then `EBADF`: a
+/// native program has no pidfds (`pidfd_oracle.txt`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn process_mrelease(_pidfd: i32, flags: u32) -> i32 {
+    errno::set_errno(if flags != 0 {
+        errno::EINVAL
+    } else {
+        errno::EBADF
+    });
+    -1
+}
+
 /// Retrieve a duplicate of another process's file descriptor via pidfd.
 ///
 /// # Linux behaviour
@@ -4005,6 +4067,66 @@ pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -
 
 #[cfg(test)]
 mod tests {
+    /// glibc 2.39's refusals on Linux (`posix/tools/oracle/pidfd_harness.py`),
+    /// replayed: every call on a descriptor that is not a pidfd. The calls on
+    /// a real one, and the spawns, are what the native side cannot do.
+    #[test]
+    fn pidfd_calls_refuse_as_glibcs() {
+        const ORACLE: &str = include_str!("pidfd_oracle.txt");
+        let mut buf = [0u8; 64];
+        let iov = crate::file::Iovec {
+            iov_base: buf.as_mut_ptr(),
+            iov_len: buf.len(),
+        };
+        let name = |e: i32| match e {
+            crate::errno::EBADF => "EBADF",
+            crate::errno::EINVAL => "EINVAL",
+            crate::errno::EFAULT => "EFAULT",
+            _ => "other",
+        };
+        let mut replayed = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (call, glibc) = line.split_once(" = ").expect("<call> = <answer>");
+            crate::errno::set_errno(0);
+            let r: isize = match call {
+                "pidfd_getpid(-1)" => pidfd_getpid(-1) as isize,
+                "pidfd_getpid(0)" => pidfd_getpid(0) as isize,
+                "pidfd_getpid(900)" => pidfd_getpid(900) as isize,
+                "process_madvise(-1, &iov, 1, MADV_COLD, 0)" => process_madvise(-1, &iov, 1, 20, 0),
+                "process_madvise(-1, &iov, 1, MADV_COLD, 1)" => process_madvise(-1, &iov, 1, 20, 1),
+                "process_madvise(0, &iov, 1, MADV_COLD, 0)" => process_madvise(0, &iov, 1, 20, 0),
+                "process_madvise(-1, &iov, 1025, MADV_COLD, 0)" => {
+                    process_madvise(-1, &iov, 1025, 20, 0)
+                }
+                "process_madvise(-1, &iov, 1024, MADV_COLD, 1)" => {
+                    process_madvise(-1, &iov, 1024, 20, 1)
+                }
+                "process_madvise(-1, NULL, 1, MADV_COLD, 0)" => {
+                    process_madvise(-1, core::ptr::null(), 1, 20, 0)
+                }
+                "process_madvise(-1, NULL, 0, MADV_COLD, 0)" => {
+                    process_madvise(-1, core::ptr::null(), 0, 20, 0)
+                }
+                "process_madvise(-1, NULL, 0, 12345, 0)" => {
+                    process_madvise(-1, core::ptr::null(), 0, 12345, 0)
+                }
+                "process_mrelease(-1, 0)" => process_mrelease(-1, 0) as isize,
+                "process_mrelease(-1, 1)" => process_mrelease(-1, 1) as isize,
+                "process_mrelease(0, 0)" => process_mrelease(0, 0) as isize,
+                c if c.contains("child's pidfd") || c.starts_with("pidfd_spawn") => continue,
+                other => panic!("a call this test does not know: {other}"),
+            };
+            let (ret, e) = glibc.split_once(' ').expect("<ret> <errno>");
+            assert_eq!((r, name(crate::errno::get_errno())), (-1, e), "{call}");
+            assert_eq!(ret, "-1", "{call}: glibc refused it too");
+            replayed += 1;
+        }
+        assert_eq!(
+            replayed, 14,
+            "every call on a descriptor that is not a pidfd"
+        );
+    }
+
     #[test]
     fn acct_is_enosys() {
         errno::set_errno(0);

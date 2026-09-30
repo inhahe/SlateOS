@@ -24,6 +24,15 @@ extern "C" {
 #ifdef _SLATEOS_USE_MISC
 /* A file action closing every descriptor from the argument up. */
 int posix_spawn_file_actions_addclosefrom_np(posix_spawn_file_actions_t *, int);
+
+/* posix_spawn and posix_spawnp answering a pidfd for the child (glibc 2.39).
+ * A native program has no pidfds: ENOSYS, and no child. */
+int pidfd_spawn(int *__restrict, const char *__restrict,
+                const posix_spawn_file_actions_t *, const posix_spawnattr_t *__restrict,
+                char *const *__restrict, char *const *__restrict);
+int pidfd_spawnp(int *__restrict, const char *__restrict,
+                 const posix_spawn_file_actions_t *, const posix_spawnattr_t *__restrict,
+                 char *const *__restrict, char *const *__restrict);
 #endif
 
 #ifdef __cplusplus

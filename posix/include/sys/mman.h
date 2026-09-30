@@ -34,6 +34,13 @@ int pkey_set(int, unsigned int);
 int pkey_get(int);
 int pkey_free(int);
 int pkey_mprotect(void *, size_t, int, int);
+
+/* Advice about another process's memory, and the release of a dying one's,
+ * through a pidfd (Linux; glibc 2.36). A native program has no pidfds: once
+ * the flags and the vector pass, EBADF. */
+struct iovec;
+ssize_t process_madvise(int, const struct iovec *, size_t, int, unsigned int);
+int process_mrelease(int, unsigned int);
 #endif
 
 #ifdef __cplusplus

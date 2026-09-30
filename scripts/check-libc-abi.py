@@ -210,6 +210,13 @@ NO_ORACLE: dict[str, tuple[str, tuple[str, str] | None]] = {
         "no counterpart in any C library or in the Linux uapi.",
         None,
     ),
+    "SignalContext": (
+        "SlateOS's own: the native signal frame the kernel builds on the user "
+        "stack (kernel/src/proc/signal.rs), passed only to libc's own "
+        "trampoline entry, __signal_dispatch, never to a C caller. A handler "
+        "sees its registers in ucontext_t's gregs (gregs_from_frame).",
+        None,
+    ),
 }
 
 

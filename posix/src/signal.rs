@@ -1169,8 +1169,10 @@ fn set_altstack_on(on: bool) {
 
 // The thunk that runs a handler on a different stack.
 //
-// On entry: RDI = handler, ESI = signal number, RDX = the address to start
-// the stack at (one past its end -- x86 stacks grow down).
+// On entry: RDI = handler, ESI = signal number, RDX = the `siginfo_t *` and
+// RCX = the `ucontext_t *` for its second and third arguments (null for a
+// one-argument handler, which does not read them), R8 = the address to
+// start the stack at (one past its end -- x86 stacks grow down).
 //
 // RBP is callee-saved, so the handler is obliged to give it back, which is
 // what makes it a safe place to keep the interrupted stack pointer across a
@@ -1184,9 +1186,11 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp", // the interrupted stack, in a register the handler must preserve
     "mov rax, rdi", // handler
-    "mov rsp, rdx", // switch
+    "mov rsp, r8",  // switch
     "and rsp, -16", // …and align, whatever the caller's ss_sp+ss_size was
     "mov edi, esi", // signum becomes arg0
+    "mov rsi, rdx", // siginfo_t * becomes arg1
+    "mov rdx, rcx", // ucontext_t * becomes arg2
     "call rax",
     "mov rsp, rbp", // back to the interrupted stack
     "pop rbp",
@@ -1196,30 +1200,53 @@ core::arch::global_asm!(
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     /// See the `global_asm!` above.
-    fn __call_on_alt_stack(handler: extern "C" fn(i32), signum: i32, top: usize);
+    fn __call_on_alt_stack(
+        handler: usize,
+        signum: i32,
+        info: *mut SiginfoT,
+        uc: *mut crate::ucontext::UcontextT,
+        top: usize,
+    );
 }
 
-/// Run `func(sig)`, on the alternate signal stack when `top` says so.
+/// What a handler is called with besides the signal's number: nothing, or
+/// -- for one installed with `SA_SIGINFO` -- its `siginfo_t` and its
+/// `ucontext_t`.
+#[derive(Clone, Copy)]
+enum HandlerArgs {
+    One,
+    Three(*mut SiginfoT, *mut crate::ucontext::UcontextT),
+}
+
+/// Run `handler` with `args`, on the alternate signal stack when `top` says
+/// so.
 ///
 /// The switch is around the *handler* and nothing else. Everything the
 /// dispatcher does either side of it -- the mask bookkeeping, the disposition
 /// lookup -- stays on the interrupted stack, because the point of an
 /// alternate stack is to give the caller's code room, not to relocate ours.
-fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
+fn run_handler(handler: usize, sig: i32, args: HandlerArgs, top: Option<usize>) {
     let Some(top) = top else {
-        func(sig);
+        call_handler(handler, sig, args);
         return;
     };
     set_altstack_on(true);
     #[cfg(target_os = "none")]
-    // SAFETY: `func` was registered through `signal`/`sigaction`, which is the
-    // same trust the direct call above extends it. `top` is `ss_sp + ss_size`
-    // for a stack the caller registered and `sigaltstack` accepted, so it is
-    // one past a region of at least `MINSIGSTKSZ` writable bytes. The thunk
-    // restores RSP from RBP before returning, so the interrupted stack is
-    // exactly as it was.
-    unsafe {
-        __call_on_alt_stack(func, sig, top);
+    {
+        let (info, uc) = match args {
+            HandlerArgs::One => (core::ptr::null_mut(), core::ptr::null_mut()),
+            HandlerArgs::Three(info, uc) => (info, uc),
+        };
+        // SAFETY: `handler` was registered through `signal`/`sigaction`, which
+        // is the same trust `call_handler` extends it; `info` and `uc` are
+        // null or the caller's live locals. `top` is `ss_sp + ss_size` for a
+        // stack the caller registered and `sigaltstack` accepted, so it is one
+        // past a region of at least `MINSIGSTKSZ` writable bytes. The thunk
+        // restores RSP from RBP before returning, so the interrupted stack is
+        // exactly as it was.
+        unsafe {
+            __call_on_alt_stack(handler, sig, info, uc, top);
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -1229,9 +1256,241 @@ fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
         // the bookkeeping every test here asserts on is the same code the
         // target runs.
         let _ = top;
-        func(sig);
+        call_handler(handler, sig, args);
     }
     set_altstack_on(false);
+}
+
+/// Call `handler` on the stack in use: `handler(sig)`, or for `SA_SIGINFO`
+/// `handler(sig, info, uc)`.
+fn call_handler(handler: usize, sig: i32, args: HandlerArgs) {
+    match args {
+        HandlerArgs::One => {
+            // SAFETY: registered through `signal`/`sigaction` as a
+            // `void (*)(int)`; we trust the caller's pointer as C does.
+            let func: extern "C" fn(i32) =
+                unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
+            func(sig);
+        }
+        HandlerArgs::Three(info, uc) => {
+            // SAFETY: registered with `SA_SIGINFO`, so as the
+            // `void (*)(int, siginfo_t *, void *)` that flag says it is.
+            let func: extern "C" fn(i32, *mut SiginfoT, *mut core::ffi::c_void) = unsafe {
+                core::mem::transmute::<
+                    usize,
+                    extern "C" fn(i32, *mut SiginfoT, *mut core::ffi::c_void),
+                >(handler)
+            };
+            func(sig, info, uc.cast());
+        }
+    }
+}
+
+/// Where a signal being dispatched came from, as far as its handler's
+/// `siginfo_t` and `ucontext_t` can say.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// Delivered by the kernel through the trampoline, with its frame of the
+    /// interrupted registers -- null where there is none (the host tests'
+    /// stand-in for the kernel).
+    Kernel(*mut SignalContext),
+    /// Raised on the calling thread: `raise`, `abort`, `pthread_kill` of
+    /// itself. glibc sends these with `tgkill`, which Linux reports as
+    /// `SI_TKILL`.
+    Raised,
+    /// Sent by `kill` to the process's own pid: `SI_USER`.
+    Killed,
+}
+
+/// The `siginfo_t` a handler is given: the signal, and who sent it as far as
+/// `origin` tells.
+///
+/// Raised here (`SI_TKILL`) or sent by `kill` to this process's own pid
+/// (`SI_USER`), the sender is this process: its pid and real uid. Delivered
+/// by the kernel, `SI_USER` and no more: the native frame carries the
+/// signal's number alone, and the kernel's record of the rest -- its code,
+/// its sender, `sigqueue`'s value -- does not reach the trampoline (known-issues
+/// `D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE`).
+fn siginfo_for(sig: i32, origin: Origin) -> SiginfoT {
+    let mut info = SiginfoT {
+        si_signo: sig,
+        ..SiginfoT::default()
+    };
+    match origin {
+        Origin::Kernel(_) => info.si_code = SI_USER,
+        Origin::Raised | Origin::Killed => {
+            info.si_code = if matches!(origin, Origin::Raised) {
+                SI_TKILL
+            } else {
+                SI_USER
+            };
+            info.si_pid = crate::process::getpid();
+            info.si_uid = crate::unistd::getuid();
+        }
+    }
+    info
+}
+
+/// The alternate stack for a handler's `ucontext_t` (`uc_stack`), filled as
+/// Linux's `__save_altstack` fills it: the stack as registered, with the
+/// flags it was registered with -- `SS_DISABLE` for none, `SS_AUTODISARM`
+/// when asked for. Not `SS_ONSTACK`: that is `sigaltstack`'s answer about
+/// the stack pointer at the moment it is asked, which a handler can ask for
+/// itself.
+fn altstack_for_ucontext() -> StackT {
+    let alt = altstack();
+    let mut flags = if alt.sp == 0 { SS_DISABLE } else { 0 };
+    if alt.autodisarm {
+        flags |= SS_AUTODISARM;
+    }
+    StackT {
+        ss_sp: alt.sp as *mut u8,
+        ss_flags: flags,
+        ss_size: alt.size,
+    }
+}
+
+/// The interrupted registers, from the kernel's frame into a `ucontext_t`'s
+/// `gregs`. The frame is taken as a system call returns, when `rcx` and `r11`
+/// hold what `syscall` put there -- where to resume, and the flags -- so they
+/// are filled with those.
+fn gregs_from_frame(c: &SignalContext, g: &mut [i64; crate::ucontext::NGREG]) {
+    use crate::ucontext::{
+        REG_EFL, REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX,
+        REG_RBP, REG_RBX, REG_RCX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+    };
+    for (reg, value) in [
+        (REG_R8, c.r8),
+        (REG_R9, c.r9),
+        (REG_R10, c.r10),
+        (REG_R11, c.rflags),
+        (REG_R12, c.r12),
+        (REG_R13, c.r13),
+        (REG_R14, c.r14),
+        (REG_R15, c.r15),
+        (REG_RDI, c.rdi),
+        (REG_RSI, c.rsi),
+        (REG_RBP, c.rbp),
+        (REG_RBX, c.rbx),
+        (REG_RDX, c.rdx),
+        (REG_RAX, c.rax),
+        (REG_RCX, c.rip),
+        (REG_RSP, c.rsp),
+        (REG_RIP, c.rip),
+        (REG_EFL, c.rflags),
+    ] {
+        if let Some(slot) = g.get_mut(reg) {
+            *slot = value.cast_signed();
+        }
+    }
+}
+
+/// A handler's `gregs`, back into the kernel's frame, which the trampoline
+/// then resumes -- as Linux's `rt_sigreturn` resumes a `ucontext_t`'s. The
+/// frame holds no `rcx` or `r11`, which `sysret` overwrites in any case, so a
+/// change to those two is not kept.
+fn frame_from_gregs(g: &[i64; crate::ucontext::NGREG], c: &mut SignalContext) {
+    use crate::ucontext::{
+        REG_EFL, REG_R8, REG_R9, REG_R10, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP,
+        REG_RBX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+    };
+    let get = |reg: usize| g.get(reg).copied().unwrap_or(0).cast_unsigned();
+    c.r8 = get(REG_R8);
+    c.r9 = get(REG_R9);
+    c.r10 = get(REG_R10);
+    c.r12 = get(REG_R12);
+    c.r13 = get(REG_R13);
+    c.r14 = get(REG_R14);
+    c.r15 = get(REG_R15);
+    c.rdi = get(REG_RDI);
+    c.rsi = get(REG_RSI);
+    c.rbp = get(REG_RBP);
+    c.rbx = get(REG_RBX);
+    c.rdx = get(REG_RDX);
+    c.rax = get(REG_RAX);
+    c.rsp = get(REG_RSP);
+    c.rip = get(REG_RIP);
+    c.rflags = get(REG_EFL);
+}
+
+/// The floating-point control state into a `ucontext_t`'s `fpregs_mem`, in
+/// `_fpstate`'s layout, with `uc_mcontext.fpregs` pointing at it: the x87
+/// control word and `mxcsr`. They are callee-saved, and nothing between the
+/// interrupted code and here changes them, so they are the interrupted
+/// code's. The data registers are not: the frame is taken at a system call's
+/// return, across which the SSE registers are the caller's to lose, and the
+/// x87 stack is empty at every call.
+fn fill_fp_control(uc: &mut crate::ucontext::UcontextT) {
+    let mut mxcsr: u32 = 0;
+    let mut cw: u16 = 0;
+    // SAFETY: each stores into its local and changes no state.
+    unsafe {
+        core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut mxcsr, options(nostack, preserves_flags));
+        core::arch::asm!("fnstcw [{}]", in(reg) &raw mut cw, options(nostack, preserves_flags));
+    }
+    let fp = uc
+        .fpregs_mem
+        .as_mut_ptr()
+        .cast::<crate::ucontext::Fpstate>();
+    // SAFETY: `fpregs_mem` is 512 bytes, 8-aligned, the size and alignment of
+    // `Fpstate`, whose fields are all integers.
+    unsafe {
+        (*fp).cwd = cw;
+        (*fp).mxcsr = mxcsr;
+    }
+    uc.uc_mcontext.fpregs = fp;
+}
+
+/// Run an `SA_SIGINFO` handler: `handler(sig, &info, &uc)`, on the stack
+/// `top` says, and return the mask to restore -- `uc_sigmask` as the handler
+/// left it.
+///
+/// `info` is what `origin` can tell ([`siginfo_for`]). `uc` holds the mask as
+/// the signal came (`blocked`), the alternate stack as registered, the
+/// floating-point control state, and -- for a signal the
+/// kernel delivered -- the interrupted registers from its frame, which the
+/// handler may change: they are written back and resumed as it left them, as
+/// Linux's `rt_sigreturn` resumes a `ucontext_t`'s. For a signal raised here
+/// there is no frame, and `gregs` is zero.
+///
+/// Until 2026-09-30 every handler was called as `handler(sig)`, so one
+/// installed with `SA_SIGINFO` found in its second and third arguments
+/// whatever the dispatch had left in `rsi` and `rdx`.
+fn run_siginfo_handler(
+    handler: usize,
+    sig: i32,
+    origin: Origin,
+    blocked: u64,
+    top: Option<usize>,
+) -> u64 {
+    let mut info = siginfo_for(sig, origin);
+    let mut uc = crate::ucontext::UcontextT::ZERO;
+    uc.uc_sigmask.bits[0] = blocked;
+    uc.uc_stack = altstack_for_ucontext();
+    if let Some(slot) = uc.uc_mcontext.gregs.get_mut(crate::ucontext::REG_OLDMASK) {
+        *slot = blocked.cast_signed();
+    }
+    fill_fp_control(&mut uc);
+    let frame = match origin {
+        Origin::Kernel(ctx) if !ctx.is_null() => Some(ctx),
+        _ => None,
+    };
+    if let Some(ctx) = frame {
+        // SAFETY: the kernel's frame for this delivery, on this thread's
+        // stack; nothing else touches it until the trampoline returns it.
+        gregs_from_frame(unsafe { &*ctx }, &mut uc.uc_mcontext.gregs);
+    }
+    run_handler(
+        handler,
+        sig,
+        HandlerArgs::Three(&raw mut info, &raw mut uc),
+        top,
+    );
+    if let Some(ctx) = frame {
+        // SAFETY: as above.
+        frame_from_gregs(&uc.uc_mcontext.gregs, unsafe { &mut *ctx });
+    }
+    uc.uc_sigmask.bits[0]
 }
 
 /// Read the registered `(handler, sa_flags, sa_mask_low)` for `sig`.
@@ -1373,6 +1632,12 @@ fn apply_default_action(sig: i32) -> i32 {
 /// an unknown signal; on host builds, `ENOSYS` for a stop, since there is
 /// no SlateOS kernel to suspend the test process).
 fn dispatch_self_signal(sig: i32) -> i32 {
+    dispatch_from(sig, Origin::Raised)
+}
+
+/// [`dispatch_self_signal`], for a signal from `origin`: what an
+/// `SA_SIGINFO` handler is told of it, and the frame it may change.
+fn dispatch_from(sig: i32, origin: Origin) -> i32 {
     // SIGKILL / SIGSTOP: always apply default, regardless of handler.
     // They cannot be caught, blocked, or ignored.
     if sig == SIGKILL {
@@ -1418,29 +1683,32 @@ fn dispatch_self_signal(sig: i32) -> i32 {
                 apply_blocked_low(mask_during);
             }
 
-            // Invoke the registered handler.  POSIX: the handler receives
-            // the signal number.  We cast the stored usize back to a
-            // function pointer.
-            //
-            // SAFETY: the caller registered this via signal()/sigaction()
-            // as a valid fn(i32).  We trust they provided a valid pointer.
-            let func: extern "C" fn(i32) =
-                unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
             // Before the call, not after, so that a handler that leaves by
             // `longjmp` still counts: this thread's count, for a wait the
             // signal cut short to learn whether it was interrupted
             // ([`crate::interrupt`]).
             crate::interrupt::note_handler(sa_flags & SA_RESTART != 0);
-            // `SA_ONSTACK` is honoured here and nowhere else. See
-            // [`altstack_entry`] for the four conditions, and `known-issues.md`
-            // for the one case this still cannot serve.
-            run_handler(func, sig, altstack_entry(sa_flags));
+            // Invoke the registered handler -- `handler(sig)`, or with its
+            // `siginfo_t` and `ucontext_t` when it was installed with
+            // `SA_SIGINFO`. `SA_ONSTACK` moves it to the alternate stack
+            // unless it is there already -- as when the kernel built this
+            // signal's frame there: see [`altstack_entry`] for the four
+            // conditions.
+            let top = altstack_entry(sa_flags);
+            let restore = if sa_flags & SA_SIGINFO == 0 {
+                run_handler(handler, sig, HandlerArgs::One, top);
+                blocked
+            } else {
+                run_siginfo_handler(handler, sig, origin, blocked, top)
+            };
 
-            // Restore the mask the handler ran under.  This may unblock a
-            // signal raised during the handler, which the kernel then
-            // delivers at the next syscall-return boundary.
-            if changed {
-                apply_blocked_low(blocked);
+            // Restore the mask the handler ran under -- or the one an
+            // `SA_SIGINFO` handler left in `uc_sigmask`, as `rt_sigreturn`
+            // would.  This may unblock a signal raised during the handler,
+            // which the kernel then delivers at the next syscall-return
+            // boundary.
+            if changed || restore != blocked {
+                apply_blocked_low(restore & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
             }
             0
         }
@@ -1473,6 +1741,12 @@ fn dispatch_self_signal(sig: i32) -> i32 {
 /// must match `kernel/src/proc/signal.rs::SignalContext` exactly.  The
 /// kernel writes this struct onto the user stack and passes a pointer
 /// to it in RSI; `SYS_SIGNAL_RETURN` reads it back to restore state.
+///
+/// A kernel wire format, not a C library type: no C program sees it. The
+/// one function that takes it, `__signal_dispatch`, is this library's own
+/// trampoline's entry; an `SA_SIGINFO` handler gets its registers in a
+/// `ucontext_t`'s `gregs`, translated by [`gregs_from_frame`] and back by
+/// [`frame_from_gregs`] (`check-libc-abi.py` lists it in `NO_ORACLE`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SignalContext {
@@ -1513,8 +1787,9 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 /// issues `SYS_SIGNAL_RETURN`.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub extern "C" fn __signal_dispatch(signum: i32) {
-    dispatch_delivered(signum);
+pub extern "C" fn __signal_dispatch(signum: i32, ctx: *mut SignalContext) {
+    // Ignore the return value, as `dispatch_delivered` does.
+    let _ = dispatch_from(signum, Origin::Kernel(ctx));
 }
 
 /// What the trampoline does with a signal the kernel delivered: run its
@@ -1526,7 +1801,7 @@ pub(crate) fn dispatch_delivered(signum: i32) {
     // the process (no return) or completes the handler/ignore action.
     // Any errno it sets belongs to the interrupted code's context and
     // will be clobbered when SYS_SIGNAL_RETURN restores RAX anyway.
-    let _ = dispatch_self_signal(signum);
+    let _ = dispatch_from(signum, Origin::Kernel(core::ptr::null_mut()));
 }
 
 // The trampoline the kernel jumps to when delivering a signal.
@@ -1545,7 +1820,7 @@ core::arch::global_asm!(
     ".globl __signal_trampoline",
     "__signal_trampoline:",
     "push rsi",               // save &SignalContext (RSP now 16-aligned)
-    "call __signal_dispatch",  // dispatch_self_signal(signum); RDI = signum
+    "call __signal_dispatch",  // (signum, &SignalContext): RDI, RSI as the kernel left them
     "pop rdi",                 // restore &SignalContext into arg0
     "mov rax, {sysret}",       // SYS_SIGNAL_RETURN
     "syscall",                 // kernel restores frame; does not return
@@ -1792,7 +2067,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     let self_pid = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_ID) as i32;
 
     match kill_target(pid, self_pid) {
-        KillTarget::Self_ => dispatch_self_signal(sig),
+        KillTarget::Self_ => dispatch_from(sig, Origin::Killed),
         KillTarget::ProcessGroup => {
             // No pre-emptive CAP_KILL test here (§314).  `SYS_SIGNAL_SEND`
             // is the authority for a group send exactly as it is for a
@@ -2983,6 +3258,27 @@ pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> 
 }
 
 // ---------------------------------------------------------------------------
+// siginfo si_code values: who sent a signal (Linux's, and musl's)
+// ---------------------------------------------------------------------------
+
+/// Sent by `kill`.
+pub const SI_USER: i32 = 0;
+/// Sent by the kernel.
+pub const SI_KERNEL: i32 = 0x80;
+/// Sent by `sigqueue`.
+pub const SI_QUEUE: i32 = -1;
+/// A POSIX timer expired.
+pub const SI_TIMER: i32 = -2;
+/// A message arrived on an empty POSIX message queue.
+pub const SI_MESGQ: i32 = -3;
+/// An asynchronous I/O request completed.
+pub const SI_ASYNCIO: i32 = -4;
+/// Queued `SIGIO`.
+pub const SI_SIGIO: i32 = -5;
+/// Sent by `tkill` or `tgkill` -- glibc's `raise` and `pthread_kill`.
+pub const SI_TKILL: i32 = -6;
+
+// ---------------------------------------------------------------------------
 // siginfo si_code values for SIGCHLD (used with waitid)
 // ---------------------------------------------------------------------------
 
@@ -3063,9 +3359,10 @@ pub struct SiginfoT {
     pub si_code: i32,
     /// Alignment padding — the union begins at offset 16 on 64-bit.
     _preamble_pad: i32,
-    /// `SIGCHLD` arm: PID of the child whose state changed.
+    /// `SIGCHLD` arm: PID of the child whose state changed. The `_kill`
+    /// arm's sender has the same offset, and is written here too.
     pub si_pid: i32,
-    /// `SIGCHLD` arm: real UID of that child.
+    /// `SIGCHLD` arm: real UID of that child -- or, likewise, the sender's.
     pub si_uid: u32,
     /// `SIGCHLD` arm: the child's exit code, or the signal that killed,
     /// stopped or continued it — which of the two is selected by `si_code`.
@@ -7185,6 +7482,217 @@ mod tests {
         );
         assert!(!hand_to_a_waiter(SIGUSR2), "no one waits");
         apply_blocked_low(saved);
+    }
+
+    // -----------------------------------------------------------------
+    // SA_SIGINFO: the handler's siginfo_t and ucontext_t
+    // -----------------------------------------------------------------
+
+    /// What an `SA_SIGINFO` handler saw, recorded by [`record_siginfo`].
+    #[derive(Clone, Copy, Default)]
+    struct Seen {
+        signo: i32,
+        code: i32,
+        pid: i32,
+        uid: u32,
+        mask: u64,
+        rip: i64,
+        rsp: i64,
+        rax: i64,
+        rcx: i64,
+        r11: i64,
+        stack_flags: i32,
+        fpregs_inside: bool,
+        mxcsr: u32,
+        calls: u32,
+    }
+
+    std::thread_local! {
+        static SEEN: core::cell::Cell<Seen> = const {
+            core::cell::Cell::new(Seen {
+                signo: 0, code: 0, pid: 0, uid: 0, mask: 0, rip: 0, rsp: 0, rax: 0,
+                rcx: 0, r11: 0, stack_flags: 0, fpregs_inside: false, mxcsr: 0, calls: 0,
+            })
+        };
+        /// What [`record_siginfo`] writes into the handler's `ucontext_t`:
+        /// `(rax, rip, a signal to add to uc_sigmask)`, or nothing.
+        static CHANGE: core::cell::Cell<Option<(i64, i64, i32)>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    extern "C" fn record_siginfo(sig: i32, info: *mut SiginfoT, uc: *mut core::ffi::c_void) {
+        use crate::ucontext::{REG_R11, REG_RAX, REG_RCX, REG_RIP, REG_RSP, UcontextT};
+        assert!(!info.is_null() && !uc.is_null());
+        // SAFETY: the dispatch passes its live siginfo_t and ucontext_t.
+        let (info, uc) = unsafe { (&*info, &mut *uc.cast::<UcontextT>()) };
+        let base = (&raw const *uc) as usize;
+        let fp = uc.uc_mcontext.fpregs as usize;
+        let seen = Seen {
+            signo: info.si_signo,
+            code: info.si_code,
+            pid: info.si_pid,
+            uid: info.si_uid,
+            mask: uc.uc_sigmask.bits[0],
+            rip: uc.uc_mcontext.gregs[REG_RIP],
+            rsp: uc.uc_mcontext.gregs[REG_RSP],
+            rax: uc.uc_mcontext.gregs[REG_RAX],
+            rcx: uc.uc_mcontext.gregs[REG_RCX],
+            r11: uc.uc_mcontext.gregs[REG_R11],
+            stack_flags: uc.uc_stack.ss_flags,
+            fpregs_inside: fp >= base && fp < base + core::mem::size_of::<UcontextT>(),
+            // SAFETY: checked just above to point inside `uc`.
+            mxcsr: if fp == 0 {
+                0
+            } else {
+                unsafe { (*uc.uc_mcontext.fpregs).mxcsr }
+            },
+            calls: SEEN.with(|s| s.get().calls) + 1,
+        };
+        assert_eq!(sig, seen.signo);
+        SEEN.with(|s| s.set(seen));
+        if let Some((rax, rip, add)) = CHANGE.with(core::cell::Cell::get) {
+            uc.uc_mcontext.gregs[REG_RAX] = rax;
+            uc.uc_mcontext.gregs[REG_RIP] = rip;
+            uc.uc_sigmask.bits[0] |= sigmask_bit(add);
+        }
+    }
+
+    fn install_siginfo(sig: i32) {
+        let act = Sigaction {
+            sa_handler: record_siginfo as *const () as SighandlerT,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: SA_SIGINFO,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        assert_eq!(
+            unsafe { sigaction(sig, &raw const act, core::ptr::null_mut()) },
+            0
+        );
+        SEEN.with(|s| s.set(Seen::default()));
+        CHANGE.with(|c| c.set(None));
+    }
+
+    /// An `SA_SIGINFO` handler is called with a `siginfo_t` saying who sent
+    /// the signal, as far as its origin tells, and a `ucontext_t` with the
+    /// mask as it came, the alternate stack's state and the floating-point
+    /// control state it points at inside itself.
+    #[test]
+    fn an_sa_siginfo_handler_is_given_its_siginfo_and_ucontext() {
+        install_siginfo(SIGUSR1);
+        let blocked = current_blocked_low();
+
+        assert_eq!(raise(SIGUSR1), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.calls, seen.signo, seen.code), (1, SIGUSR1, SI_TKILL));
+        assert_eq!(seen.pid, crate::process::getpid());
+        assert_eq!(seen.uid, crate::unistd::getuid());
+        assert_eq!(seen.mask, blocked, "the mask as the signal came");
+        assert_eq!(seen.stack_flags, SS_DISABLE, "no alternate stack");
+        assert!(seen.fpregs_inside, "fpregs points into the context");
+        assert_ne!(seen.mxcsr, 0, "mxcsr is never all zero: its masks are set");
+        assert_eq!(seen.rip, 0, "no frame, no registers");
+
+        assert_eq!(dispatch_from(SIGUSR1, Origin::Killed), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.calls, seen.code), (2, SI_USER));
+        assert_eq!(seen.pid, crate::process::getpid());
+
+        dispatch_delivered(SIGUSR1);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!(
+            (seen.calls, seen.code, seen.pid),
+            (3, SI_USER, 0),
+            "the frame tells no more"
+        );
+
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// From a kernel frame the handler reads the interrupted registers, and
+    /// what it changes in them -- and in `uc_sigmask` -- is what resumes, as
+    /// Linux's `rt_sigreturn` has it.
+    #[test]
+    fn a_handler_s_ucontext_is_the_frame_and_its_changes_are_resumed() {
+        install_siginfo(SIGUSR1);
+        let saved = current_blocked_low();
+        let mut ctx = SignalContext {
+            signum: 10,
+            rax: 7,
+            rdi: 1,
+            rsi: 2,
+            rdx: 3,
+            r10: 4,
+            r8: 5,
+            r9: 6,
+            rbx: 8,
+            rbp: 9,
+            r12: 12,
+            r13: 13,
+            r14: 14,
+            r15: 15,
+            rip: 0x40_1234,
+            rsp: 0x7fff_0000,
+            rflags: 0x246,
+        };
+        CHANGE.with(|c| c.set(Some((99, 0x40_4321, SIGUSR2))));
+        assert_eq!(dispatch_from(SIGUSR1, Origin::Kernel(&raw mut ctx)), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.rip, seen.rsp, seen.rax), (0x40_1234, 0x7fff_0000, 7));
+        assert_eq!(
+            (seen.rcx, seen.r11),
+            (0x40_1234, 0x246),
+            "what syscall left in them"
+        );
+
+        assert_eq!(
+            (ctx.rax, ctx.rip),
+            (99, 0x40_4321),
+            "resumed as the handler left them"
+        );
+        assert_eq!(
+            (ctx.rdi, ctx.r15, ctx.rsp, ctx.rflags),
+            (1, 15, 0x7fff_0000, 0x246)
+        );
+        assert_ne!(
+            current_blocked_low() & sigmask_bit(SIGUSR2),
+            0,
+            "uc_sigmask restored"
+        );
+
+        apply_blocked_low(saved);
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// A handler without `SA_SIGINFO` is called with the number alone, as
+    /// ever, and its frame is left as it was.
+    #[test]
+    fn a_one_argument_handler_leaves_the_frame_alone() {
+        USR2_RAN.with(|c| c.set(0));
+        let old = signal(SIGUSR2, count_usr2 as *const () as SighandlerT);
+        let mut ctx = SignalContext {
+            signum: 12,
+            rax: 7,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            r10: 0,
+            r8: 0,
+            r9: 0,
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0x40_1234,
+            rsp: 0x7fff_0000,
+            rflags: 0x246,
+        };
+        assert_eq!(dispatch_from(SIGUSR2, Origin::Kernel(&raw mut ctx)), 0);
+        assert_eq!(USR2_RAN.with(core::cell::Cell::get), 1);
+        assert_eq!((ctx.rax, ctx.rip), (7, 0x40_1234));
+        signal(SIGUSR2, old);
     }
 
     /// `sigsuspend` restores the mask it replaced.

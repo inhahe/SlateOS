@@ -34,20 +34,28 @@
  * uses 8 KiB. What it still cannot see is a handler recovering from a real
  * stack overflow: a native fault is an exception here, not a signal.
  *
+ * Checks 50-53 are an `SA_SIGINFO` handler on the alternate stack, both ways
+ * in: raised, where libc's thunk moves it there and must now pass it three
+ * arguments rather than one, and through the kernel, where its `ucontext_t`
+ * holds the registers of the interrupted code. Until 2026-09-30 libc called
+ * every handler with the signal's number alone, so an `SA_SIGINFO` handler
+ * read its `siginfo_t *` and `ucontext_t *` from leftover registers.
+ *
  * ## It cannot hang
  *
- * Checks 1-37 raise their signals with `raise()`, which dispatches
- * synchronously in-process. Checks 43-49 send theirs with `kill(0, sig)` to a
- * process group this fixture is alone in, which the kernel delivers as that
- * very system call returns -- no child, nothing waited for. Nothing reads,
- * nothing sleeps. The worst case is a wrong exit code. That is deliberate: a
- * sibling fixture once cost the kernel lane two hours by blocking a boot test
- * on a read that could not return.
+ * Checks 1-37 and 50-51 raise their signals with `raise()`, which dispatches
+ * synchronously in-process. Checks 43-49 and 52-53 send theirs with
+ * `kill(0, sig)` to a process group this fixture is alone in, which the
+ * kernel delivers as that very system call returns -- no child, nothing
+ * waited for. Nothing reads, nothing sleeps. The worst case is a wrong exit
+ * code. That is deliberate: a sibling fixture once cost the kernel lane two
+ * hours by blocking a boot test on a read that could not return.
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `return` values below).
  */
 
+#define _GNU_SOURCE /* REG_RSP and REG_RIP, for checks 50-53 */
 #include <errno.h>
 #include <signal.h>
 #include <stdint.h>
@@ -152,6 +160,65 @@ static void on_alt_deep(int sig)
     g_change_errno = errno;
 
     g_handler_ran = 1;
+}
+
+/*
+ * The SA_SIGINFO handler: what its two extra arguments said, and a change to
+ * the mask it leaves in `uc_sigmask` for the return to restore.
+ */
+static volatile int           g_si_signo;
+static volatile int           g_si_code;
+static volatile int           g_si_pid;
+static volatile int           g_uc_flags;
+static volatile int           g_uc_has_usr1;
+static volatile unsigned long g_uc_rsp;
+static volatile unsigned long g_uc_rip;
+static volatile int           g_args_null;
+
+static void on_alt_info(int sig, siginfo_t *info, void *context)
+{
+    volatile char probe = 0;
+    ucontext_t *uc = context;
+
+    (void)probe;
+    g_handler_sp = (unsigned long)(uintptr_t)&probe;
+    g_args_null = info == NULL || uc == NULL;
+    if (!g_args_null) {
+        g_si_signo = info->si_signo;
+        g_si_code = info->si_code;
+        g_si_pid = info->si_pid;
+        g_uc_flags = uc->uc_stack.ss_flags;
+        g_uc_has_usr1 = sigismember(&uc->uc_sigmask, SIGUSR1);
+        g_uc_rsp = (unsigned long)uc->uc_mcontext.gregs[REG_RSP];
+        g_uc_rip = (unsigned long)uc->uc_mcontext.gregs[REG_RIP];
+        sigaddset(&uc->uc_sigmask, SIGUSR2);
+    }
+    g_handler_ran = sig;
+}
+
+static int install_info(int sig)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = on_alt_info;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(sig, &sa, NULL);
+}
+
+/* SIGUSR2 is blocked now: what the handler left in uc_sigmask. Unblock it. */
+static int usr2_was_left_blocked(void)
+{
+    sigset_t now, usr2;
+
+    if (sigprocmask(SIG_BLOCK, NULL, &now) != 0)
+        return 0;
+    int blocked = sigismember(&now, SIGUSR2);
+    sigemptyset(&usr2);
+    sigaddset(&usr2, SIGUSR2);
+    sigprocmask(SIG_UNBLOCK, &usr2, NULL);
+    return blocked == 1;
 }
 
 /* The negative control: no SA_ONSTACK, so it must run where it was called. */
@@ -405,6 +472,62 @@ int main(void)
         ss.ss_size = 0;
         if (sigaltstack(&ss, NULL) != 0)
             return 49;
+    }
+
+    /*
+     * 50-53. SA_SIGINFO on the alternate stack. Raised: libc's thunk moves
+     * the handler and passes it its siginfo_t and ucontext_t. Through the
+     * kernel: its ucontext_t holds the interrupted registers -- this code's,
+     * on this stack, not the alternate one.
+     */
+    {
+        volatile char here = 0;
+        unsigned long main_sp = (unsigned long)(uintptr_t)&here;
+
+        ss.ss_sp = alt_stack;
+        ss.ss_flags = 0;
+        ss.ss_size = ALT_SIZE;
+        if (sigaltstack(&ss, NULL) != 0 || install_info(SIGUSR1) != 0)
+            return 50;
+
+        /* 50. Raised: three real arguments, on the alternate stack. */
+        g_handler_ran = 0;
+        g_args_null = 1;
+        if (raise(SIGUSR1) != 0 || g_handler_ran != SIGUSR1 || g_args_null)
+            return 50;
+        /* uc_stack is the stack as registered -- flags 0 -- as Linux fills it. */
+        if (!inside_alt(g_handler_sp) || g_uc_flags != 0)
+            return 50;
+        /* 51. ...saying it was raised here, and with SIGUSR1 not blocked as it came. */
+        if (g_si_signo != SIGUSR1 || g_si_code != SI_TKILL || g_si_pid != getpid())
+            return 51;
+        if (g_uc_has_usr1 != 0 || !usr2_was_left_blocked())
+            return 51;
+
+        /* 52. Through the kernel: the registers are the interrupted code's. */
+        g_handler_ran = 0;
+        g_args_null = 1;
+        g_uc_rsp = 0;
+        g_uc_rip = 0;
+        if (kill(0, SIGUSR1) != 0 || g_handler_ran != SIGUSR1 || g_args_null)
+            return 52;
+        if (!inside_alt(g_handler_sp) || g_si_signo != SIGUSR1 || g_si_code != SI_USER)
+            return 52;
+        if (inside_alt(g_uc_rsp) || g_uc_rip == 0)
+            return 52;
+        /* Within a page of this frame: the stack kill() was called on. */
+        if (g_uc_rsp > main_sp + 4096 || g_uc_rsp + 65536 < main_sp)
+            return 52;
+        /* 53. ...and the mask it left in uc_sigmask is the one restored. */
+        if (!usr2_was_left_blocked())
+            return 53;
+
+        signal(SIGUSR1, SIG_DFL);
+        ss.ss_sp = NULL;
+        ss.ss_flags = SS_DISABLE;
+        ss.ss_size = 0;
+        if (sigaltstack(&ss, NULL) != 0)
+            return 53;
     }
 
     return 42;

@@ -851,6 +851,11 @@ pub unsafe extern "C" fn __libc_start_main(
     // shared empty list.
     crate::environ::init_environ();
 
+    // The allocator's `MALLOC_PERTURB_`, `MALLOC_MMAP_THRESHOLD_` and
+    // `MALLOC_MMAP_MAX_`, read as glibc reads its tunables at start-up: once
+    // the environment is in place, before a constructor or `main` allocates.
+    crate::malloc::init_from_environment();
+
     // Register the signal trampoline so the kernel can deliver
     // catchable signals to handlers installed via signal()/sigaction().
     // Until this runs the kernel applies signal default actions itself.

@@ -76,6 +76,19 @@ upstream's `src/dlmalloc.rs` at the version above.
    `malloc_stats` on it, and `malloc_trim` on upstream's `trim`, which
    therefore lost its `#[allow(dead_code)]`.
 
+8. **`mallopt`'s knobs and `malloc_info`'s map** (2026-09-30). The
+   threshold at which a request gets a mapping of its own is a field,
+   `mmap_threshold` (change 1's `MMAP_THRESHOLD` its starting value), set by
+   `set_mmap_threshold`; `mmap_max` caps how many requests have mappings at
+   once (glibc's `DEFAULT_MMAP_MAX`, 65536, to start), set by `set_mmap_max`;
+   and the heap counts them -- `n_mmaps`, `mmapped`, their peaks, and the
+   segments' own peak -- in `mmap_alloc`, `mmap_resize` and the two places a
+   mapped chunk is released. `stats` reports the count (`hblks`) and the
+   peaks, and `free_map` -- `stats`'s walk again -- files each free chunk
+   of the segments under the bin its size belongs in, the designated victim
+   and the top chunk apart, for `malloc_info`. `mmap_settings` reads the two
+   back for the tests.
+
 The file is also exempt from this workspace's lints (the `#![allow]` at its top
 says which and why): it is upstream's code, and restyling it would make every
 future comparison with upstream a diff of noise. `dead_code` is not in that
@@ -88,6 +101,6 @@ blanket allow cannot tell a kept-for-fidelity function from a forgotten one
 ## Updating
 
 Download the new `.crate`, check its SHA-256 against crates.io's, replace this
-file with its `src/dlmalloc.rs`, and re-apply the seven changes above. Run
+file with its `src/dlmalloc.rs`, and re-apply the eight changes above. Run
 `cargo test -p posix --lib --target x86_64-pc-windows-gnu`: the upstream tests
 and `malloc.rs`'s own run the new core on the host. Update the table above.

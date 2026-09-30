@@ -3,8 +3,9 @@
 //! Implements `malloc`, `free`, `calloc`, `realloc`, `reallocarray`,
 //! `posix_memalign`, `aligned_alloc`, `memalign`, `valloc`, `pvalloc`,
 //! `malloc_usable_size`, glibc's `__libc_*` aliases, and glibc's heap
-//! statistics and trimming: `mallinfo`, `mallinfo2`, `malloc_stats`,
-//! `malloc_trim`.
+//! statistics, trimming and tuning: `mallinfo`, `mallinfo2`, `malloc_stats`,
+//! `malloc_trim`, `malloc_info`, and `mallopt` with the `MALLOC_PERTURB_`,
+//! `MALLOC_MMAP_THRESHOLD_` and `MALLOC_MMAP_MAX_` environment variables.
 //!
 //! ## The allocator is Doug Lea's
 //!
@@ -65,7 +66,7 @@
 //! that allocates while its thread holds the lock deadlocks.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 mod dlmalloc;
 
@@ -398,31 +399,48 @@ fn note_free() {
     live_allocations::bump(-1);
 }
 
-/// Test builds only: the byte a new `malloc` block is filled with.
+/// `M_PERTURB` -- `mallopt`'s, or `MALLOC_PERTURB_`'s at start-up -- or 0 for
+/// none: a new block, but `calloc`'s, is filled with its low byte inverted,
+/// and a block being freed with its low byte, as glibc's `alloc_perturb` and
+/// `free_perturb` fill them.  It shows a program that reads a block before
+/// writing it, or after freeing it, where a reused block's leftovers would
+/// hide the mistake.
 ///
-/// The allocator this one replaced gave every block a fresh, zeroed mapping
-/// and unmapped it again on `free`. So code in this crate that read a block
-/// before writing it saw zeroes, and code that read a block after freeing it
-/// faulted at once — and neither mistake could be caught, because neither
-/// could fail. A heap that reuses memory changes both, silently. Filling
-/// blocks with non-zero garbage at both ends of their life (glibc's
-/// `MALLOC_PERTURB_`) turns both into test failures instead of heisenbugs on
-/// the target.
-#[cfg(all(test, not(target_os = "none")))]
-const PERTURB_ON_ALLOC: u8 = 0xa5;
+/// Test builds start at 0x5a -- blocks filled 0xa5, then 0x5a -- for this
+/// crate's own code: the allocator this one replaced gave every block a
+/// fresh, zeroed mapping and unmapped it on `free`, so reading one too early
+/// saw zeroes and reading one too late faulted, and neither mistake could
+/// fail a test.  A heap that reuses memory changes both, silently.
+static PERTURB: AtomicI32 = AtomicI32::new(if cfg!(all(test, not(target_os = "none"))) {
+    0x5a
+} else {
+    0
+});
 
-/// Test builds only: the byte a block is overwritten with as it is freed.
-#[cfg(all(test, not(target_os = "none")))]
-const PERTURB_ON_FREE: u8 = 0x5a;
-
-/// Fill `len` bytes at `ptr` with `byte` (test builds; NULL is ignored).
+/// Fill a block about to be handed out, `len` bytes at `ptr`, as
+/// [`PERTURB`] says (NULL is passed over).
 ///
 /// # Safety
 ///
 /// `ptr` must be NULL or valid for `len` bytes of writes.
-#[cfg(all(test, not(target_os = "none")))]
-unsafe fn perturb(ptr: *mut u8, len: usize, byte: u8) {
-    if !ptr.is_null() {
+unsafe fn alloc_perturb(ptr: *mut u8, len: usize) {
+    let p = PERTURB.load(Ordering::Relaxed);
+    if p != 0 && !ptr.is_null() {
+        let [byte, ..] = (p ^ 0xff).to_le_bytes();
+        // SAFETY: the caller's contract.
+        unsafe { core::ptr::write_bytes(ptr, byte, len) };
+    }
+}
+
+/// Fill a block about to be freed, as [`PERTURB`] says.
+///
+/// # Safety
+///
+/// As [`alloc_perturb`].
+unsafe fn free_perturb(ptr: *mut u8, len: usize) {
+    let p = PERTURB.load(Ordering::Relaxed);
+    if p != 0 && !ptr.is_null() {
+        let [byte, ..] = p.to_le_bytes();
         // SAFETY: the caller's contract.
         unsafe { core::ptr::write_bytes(ptr, byte, len) };
     }
@@ -451,10 +469,7 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
         crate::errno::set_errno(crate::errno::ENOMEM);
     }
     // SAFETY: a non-null `ptr` is a new block of at least `size` bytes.
-    #[cfg(all(test, not(target_os = "none")))]
-    unsafe {
-        perturb(ptr, size, PERTURB_ON_ALLOC);
-    }
+    unsafe { alloc_perturb(ptr, size) };
     note_alloc(ptr)
 }
 
@@ -512,7 +527,6 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     let mut guard = HeapGuard::lock();
     // SAFETY (both blocks): the guard gives exclusive use of the heap; `ptr`
     // is a live block of it (the caller's contract).
-    #[cfg(all(test, not(target_os = "none")))]
     let old_usable = unsafe { guard.heap().usable_size(ptr) };
     let moved = unsafe { guard.heap().realloc(ptr, size) };
     drop(guard);
@@ -522,9 +536,11 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     // The bytes a grown block gains are as uninitialised as a new block's.
     // SAFETY: a non-null `moved` is a block of at least `size` bytes, of which
     // the first `old_usable` (when fewer) are the old contents.
-    #[cfg(all(test, not(target_os = "none")))]
-    if !moved.is_null() && size > old_usable {
-        unsafe { perturb(moved.add(old_usable), size - old_usable, PERTURB_ON_ALLOC) };
+    if let Some(gained) = size
+        .checked_sub(old_usable)
+        .filter(|&g| g > 0 && !moved.is_null())
+    {
+        unsafe { alloc_perturb(moved.add(old_usable), gained) };
     }
     // One block in, one block out: the count only changes if the old block
     // survives a failure, and then it was already counted.
@@ -547,10 +563,11 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
     // SAFETY (both blocks): the guard gives exclusive use of the heap; `ptr`
     // is a live block of it (the caller's contract), so its usable bytes are
     // still the caller's to overwrite until the `free` below.
-    #[cfg(all(test, not(target_os = "none")))]
-    unsafe {
-        let usable = guard.heap().usable_size(ptr);
-        perturb(ptr, usable, PERTURB_ON_FREE);
+    if PERTURB.load(Ordering::Relaxed) != 0 {
+        unsafe {
+            let usable = guard.heap().usable_size(ptr);
+            free_perturb(ptr, usable);
+        }
     }
     unsafe { guard.heap().free(ptr) };
     drop(guard);
@@ -594,7 +611,7 @@ pub struct Mallinfo {
     pub ordblks: i32,
     /// Free fastbin blocks: always 0, dlmalloc has no fastbins.
     pub smblks: i32,
-    /// Separately mapped blocks: 0, as C dlmalloc reports (it does not count them).
+    /// Blocks mapped on their own.
     pub hblks: i32,
     /// Bytes in separately mapped blocks.
     pub hblkhd: i32,
@@ -620,7 +637,7 @@ pub struct Mallinfo2 {
     pub ordblks: usize,
     /// Free fastbin blocks: always 0.
     pub smblks: usize,
-    /// Separately mapped blocks: 0, as C dlmalloc reports.
+    /// Blocks mapped on their own.
     pub hblks: usize,
     /// Bytes in separately mapped blocks.
     pub hblkhd: usize,
@@ -647,7 +664,7 @@ impl From<dlmalloc::HeapStats> for Mallinfo2 {
             arena: st.arena,
             ordblks: st.ordblks,
             smblks: 0,
-            hblks: 0,
+            hblks: st.hblks,
             hblkhd: st.hblkhd,
             usmblks: st.usmblks,
             fsmblks: 0,
@@ -710,12 +727,11 @@ pub extern "C" fn malloc_trim(pad: usize) -> i32 {
     i32::from(unsafe { guard.heap().trim(pad) })
 }
 
-/// Format [`malloc_stats`]'s report into `out`, returning its length.
-///
-/// glibc's layout, without the two lines it ends with ("max mmap regions" and
-/// "max mmap bytes"): dlmalloc does not keep those numbers, and a report that
-/// printed zero for them would be wrong rather than incomplete.
-fn format_malloc_stats(m: &Mallinfo2, out: &mut [u8; 256]) -> usize {
+/// Format [`malloc_stats`]'s report into `out`, returning its length: glibc's
+/// layout, to the two lines it ends with -- the most blocks there have been
+/// with mappings of their own, and the most bytes they have held -- which
+/// the heap counts since 2026-09-30 (it printed neither before).
+fn format_malloc_stats(m: &dlmalloc::HeapStats, out: &mut [u8; 256]) -> usize {
     struct Cursor<'a> {
         buf: &'a mut [u8; 256],
         len: usize,
@@ -731,7 +747,7 @@ fn format_malloc_stats(m: &Mallinfo2, out: &mut [u8; 256]) -> usize {
     }
     let mut c = Cursor { buf: out, len: 0 };
     let in_segments = m.arena.saturating_sub(m.fordblks);
-    // A report that does not fit is cut short, never allowed to overrun; five
+    // A report that does not fit is cut short, never allowed to overrun; seven
     // lines of at most 30 bytes fit 256 with room to spare.
     let _ = core::fmt::write(
         &mut c,
@@ -743,24 +759,332 @@ fn format_malloc_stats(m: &Mallinfo2, out: &mut [u8; 256]) -> usize {
                 "Total (incl. mmap):\n",
                 "system bytes     = {:>10}\n",
                 "in use bytes     = {:>10}\n",
+                "max mmap regions = {:>10}\n",
+                "max mmap bytes   = {:>10}\n",
             ),
             m.arena,
             in_segments,
             m.arena.saturating_add(m.hblkhd),
             m.uordblks,
+            m.max_hblks,
+            m.max_hblkhd,
         ),
     );
     c.len
 }
 
 /// `malloc_stats()` — print the heap's use to standard error, in glibc's
-/// layout (see [`format_malloc_stats`] for the two lines it omits).
+/// layout.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn malloc_stats() {
     let mut buf = [0u8; 256];
-    let n = format_malloc_stats(&mallinfo2(), &mut buf);
+    let n = format_malloc_stats(&heap_stats(), &mut buf);
     // Diagnostic output with nowhere to report its own failure, as in glibc.
     let _ = crate::file::write(2, buf.as_ptr(), n);
+}
+
+// ---------------------------------------------------------------------------
+// Tuning: mallopt, and the MALLOC_*_ environment variables
+// ---------------------------------------------------------------------------
+
+/// `mallopt`'s parameters, glibc's numbers: the largest fastbin request.
+pub const M_MXFAST: i32 = 1;
+/// How much free memory at the top of the heap prompts a trim.
+pub const M_TRIM_THRESHOLD: i32 = -1;
+/// How much more than asked for the heap takes from the system.
+pub const M_TOP_PAD: i32 = -2;
+/// The size from which a request gets a mapping of its own.
+pub const M_MMAP_THRESHOLD: i32 = -3;
+/// How many requests may have mappings of their own at once.
+pub const M_MMAP_MAX: i32 = -4;
+/// What a detected heap corruption does (ignored by glibc since 2.34).
+pub const M_CHECK_ACTION: i32 = -5;
+/// The byte new and freed blocks are filled with ([`PERTURB`]).
+pub const M_PERTURB: i32 = -6;
+/// How many arenas before `M_ARENA_MAX` is consulted.
+pub const M_ARENA_TEST: i32 = -7;
+/// How many arenas there may be.
+pub const M_ARENA_MAX: i32 = -8;
+
+/// glibc's `MAX_FAST_SIZE`, `80 * sizeof (size_t) / 4`: the largest
+/// `M_MXFAST` it takes.
+const MAX_FAST_SIZE: usize = 80 * core::mem::size_of::<usize>() / 4;
+
+/// `value` as glibc's `mallopt` takes a size: converted to `size_t`, so that
+/// a negative one is enormous (-1 is `SIZE_MAX`).
+#[allow(clippy::cast_sign_loss)] // that conversion is the point: C's `int` to `size_t`
+fn as_size(value: i32) -> usize {
+    value as isize as usize
+}
+
+/// What glibc's `mallopt` answers: 1 -- for every parameter, those it does
+/// not know among them -- but 0 for an `M_MXFAST` over [`MAX_FAST_SIZE`], a
+/// negative one included.
+fn mallopt_answer(param: i32, value: i32) -> i32 {
+    i32::from(!(param == M_MXFAST && as_size(value) > MAX_FAST_SIZE))
+}
+
+/// Requests of `threshold` bytes or more get a mapping of their own.
+fn set_mmap_threshold(threshold: usize) {
+    let mut guard = HeapGuard::lock();
+    guard.heap().set_mmap_threshold(threshold);
+}
+
+/// At most `max` requests have mappings of their own at once; none for 0
+/// or less.
+fn set_mmap_max(max: i32) {
+    let mut guard = HeapGuard::lock();
+    guard
+        .heap()
+        .set_mmap_max(isize::try_from(max).unwrap_or(isize::MAX));
+}
+
+/// `mallopt(param, value)` -- set an allocator parameter, answering as
+/// glibc's does ([`mallopt_answer`]): 1, or 0 for an `M_MXFAST` it refuses;
+/// `errno` untouched either way.
+///
+/// What each does here, where there is one heap and it has no fastbins and
+/// no top to trim (a region goes back to the kernel whole, when all of it is
+/// free):
+///
+/// - `M_MMAP_THRESHOLD`: requests of that many bytes or more get a mapping of
+///   their own when the heap cannot hold them already -- 256 KiB until set,
+///   never for -1 -- and `M_MMAP_MAX` caps how many have one at once (65536
+///   until set, none for 0 or less).
+/// - `M_PERTURB`: new blocks but `calloc`'s are filled with the value's low
+///   byte inverted, freed ones with its low byte; 0 stops it ([`PERTURB`]).
+/// - `M_MXFAST`, `M_TRIM_THRESHOLD`, `M_TOP_PAD`, `M_CHECK_ACTION` (which
+///   glibc too ignores), `M_ARENA_TEST`, `M_ARENA_MAX`, and parameters glibc
+///   does not know: accepted, as glibc accepts them, and nothing here for
+///   them to change.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn mallopt(param: i32, value: i32) -> i32 {
+    let answer = mallopt_answer(param, value);
+    if answer == 1 {
+        match param {
+            M_MMAP_THRESHOLD => set_mmap_threshold(as_size(value)),
+            M_MMAP_MAX => set_mmap_max(value),
+            M_PERTURB => PERTURB.store(value, Ordering::Relaxed),
+            _ => {}
+        }
+    }
+    answer
+}
+
+/// The number in a `MALLOC_*_` variable, as glibc's tunables read one
+/// (`_dl_strtoul`): blanks and tabs first, a sign, then digits -- hex after
+/// `0x` or `0X`, octal after a `0`, else decimal -- or none, which is 0;
+/// and nothing after them.  `None` for text that is not one, or a number
+/// past 64 bits.  A negative number wraps, as glibc's does.
+fn tunable_number(text: &[u8]) -> Option<u64> {
+    let mut s = text;
+    while let [b' ' | b'\t', rest @ ..] = s {
+        s = rest;
+    }
+    let negative = match s {
+        [b'-', rest @ ..] => {
+            s = rest;
+            true
+        }
+        [b'+', rest @ ..] => {
+            s = rest;
+            false
+        }
+        _ => false,
+    };
+    let mut value = 0u64;
+    if s.first().is_some_and(u8::is_ascii_digit) {
+        let base = match s {
+            [b'0', b'x' | b'X', rest @ ..] => {
+                s = rest;
+                16
+            }
+            [b'0', ..] => 8,
+            _ => 10,
+        };
+        while let Some((&c, rest)) = s.split_first() {
+            let Some(digit) = char::from(c).to_digit(16).map(u64::from) else {
+                break;
+            };
+            if digit >= base {
+                break;
+            }
+            value = value.checked_mul(base)?.checked_add(digit)?;
+            s = rest;
+        }
+    }
+    s.is_empty().then(|| {
+        if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        }
+    })
+}
+
+/// What the three variables glibc's tunables name set, each `None` when it
+/// is absent, not a number, or out of its tunable's range: `M_PERTURB`
+/// from `MALLOC_PERTURB_` (0 to 255), `M_MMAP_THRESHOLD` from
+/// `MALLOC_MMAP_THRESHOLD_` (any size; -1 is the largest), `M_MMAP_MAX`
+/// from `MALLOC_MMAP_MAX_` (0 to `INT_MAX`).
+fn environment_settings(
+    perturb: Option<&[u8]>,
+    threshold: Option<&[u8]>,
+    max: Option<&[u8]>,
+) -> (Option<i32>, Option<usize>, Option<i32>) {
+    let perturb = perturb
+        .and_then(tunable_number)
+        .and_then(|v| u8::try_from(v).ok())
+        .map(i32::from);
+    let threshold = threshold
+        .and_then(tunable_number)
+        .map(|v| usize::try_from(v).unwrap_or(usize::MAX));
+    let max = max
+        .and_then(tunable_number)
+        .and_then(|v| i32::try_from(v).ok());
+    (perturb, threshold, max)
+}
+
+/// Take `MALLOC_PERTURB_`, `MALLOC_MMAP_THRESHOLD_` and `MALLOC_MMAP_MAX_`
+/// from the environment, as glibc's tunables take them at start-up
+/// ([`environment_settings`]); a program running with privilege it was not
+/// started with is not told by its caller's environment (`secure_getenv`).
+/// `__libc_start_main` calls this once the environment is in place.
+pub(crate) fn init_from_environment() {
+    let get = |name: &core::ffi::CStr| -> Option<&'static [u8]> {
+        // SAFETY: a C string; the answer is NULL or one of the environment's.
+        let v = unsafe { crate::environ::secure_getenv(name.as_ptr().cast()) };
+        // SAFETY: non-null, a C string that the environment keeps.
+        (!v.is_null()).then(|| unsafe { core::ffi::CStr::from_ptr(v.cast()) }.to_bytes())
+    };
+    let (perturb, threshold, max) = environment_settings(
+        get(c"MALLOC_PERTURB_"),
+        get(c"MALLOC_MMAP_THRESHOLD_"),
+        get(c"MALLOC_MMAP_MAX_"),
+    );
+    if let Some(p) = perturb {
+        PERTURB.store(p, Ordering::Relaxed);
+    }
+    if let Some(t) = threshold {
+        set_mmap_threshold(t);
+    }
+    if let Some(m) = max {
+        set_mmap_max(m);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// malloc_info
+// ---------------------------------------------------------------------------
+
+/// One line of `malloc_info`'s XML, built in place: none is longer than
+/// its 160 bytes.
+struct XmlLine {
+    buf: [u8; 160],
+    len: usize,
+}
+
+impl core::fmt::Write for XmlLine {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let end = self.len.checked_add(s.len()).ok_or(core::fmt::Error)?;
+        let dst = self.buf.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        dst.copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+/// `malloc_info(options, fp)` -- the heap's state as XML on `fp`, in
+/// glibc's form: 0; or `EINVAL` itself for `options` but 0 -- glibc's answer,
+/// with `errno` untouched, not the -1 its manual page gives -- and for a
+/// NULL stream, where glibc's would fault.
+///
+/// One heap, `nr="0"`.  Its `<sizes>` are the free chunks by the bin their
+/// size belongs in -- `from` and `to` the smallest and largest, `total`
+/// their bytes -- and `<unsorted>` the free chunk dlmalloc splits for small
+/// requests first, which is in no bin, as glibc's last remainder is in its
+/// unsorted bin.  `fast` is 0: there are no fastbins.  `rest` counts every
+/// free chunk, the top one included; `system` is the heap's segments -- now,
+/// and at most -- and `mmap` the blocks mapped on their own.
+///
+/// # Safety
+///
+/// `fp` is NULL or a stream open for writing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn malloc_info(options: i32, fp: *mut u8) -> i32 {
+    if options != 0 || fp.is_null() {
+        return crate::errno::EINVAL;
+    }
+    // A snapshot under the lock, and the lock let go before a byte is
+    // written: the stream may allocate its buffer.
+    let map = {
+        let mut guard = HeapGuard::lock();
+        // SAFETY: the guard gives exclusive use of the heap; the walk reads it.
+        unsafe { guard.heap().free_map() }
+    };
+    let out = |args: core::fmt::Arguments<'_>| {
+        let mut line = XmlLine {
+            buf: [0; 160],
+            len: 0,
+        };
+        // A line that does not fit is cut short, never allowed to overrun.
+        let _ = core::fmt::write(&mut line, args);
+        // SAFETY: `fp` is the caller's stream; the bytes are `line`'s.
+        // What a failed write loses cannot be reported: glibc's
+        // `malloc_info` does not look at `fprintf`'s answers either.
+        let _ = unsafe { crate::stdio::fwrite(line.buf.as_ptr(), 1, line.len, fp) };
+    };
+    out(format_args!(
+        "<malloc version=\"1\">\n<heap nr=\"0\">\n<sizes>\n"
+    ));
+    let (mut count, mut size) = (1usize, map.top);
+    for bin in map
+        .small
+        .iter()
+        .chain(map.tree.iter())
+        .filter(|b| b.count != 0)
+    {
+        out(format_args!(
+            "  <size from=\"{}\" to=\"{}\" total=\"{}\" count=\"{}\"/>\n",
+            bin.min, bin.max, bin.total, bin.count
+        ));
+        count = count.saturating_add(bin.count);
+        size = size.saturating_add(bin.total);
+    }
+    if map.dv != 0 {
+        out(format_args!(
+            "  <unsorted from=\"{0}\" to=\"{0}\" total=\"{0}\" count=\"1\"/>\n",
+            map.dv
+        ));
+        count = count.saturating_add(1);
+        size = size.saturating_add(map.dv);
+    }
+    let totals = |closing: &str| {
+        out(format_args!(
+            "{closing}<total type=\"fast\" count=\"0\" size=\"0\"/>\n\
+             <total type=\"rest\" count=\"{count}\" size=\"{size}\"/>\n"
+        ));
+    };
+    totals("</sizes>\n");
+    let system = |out: &dyn Fn(core::fmt::Arguments<'_>)| {
+        out(format_args!(
+            "<system type=\"current\" size=\"{0}\"/>\n\
+             <system type=\"max\" size=\"{1}\"/>\n\
+             <aspace type=\"total\" size=\"{0}\"/>\n\
+             <aspace type=\"mprotect\" size=\"{0}\"/>\n",
+            map.segments, map.max_segments
+        ));
+    };
+    system(&out);
+    out(format_args!("</heap>\n"));
+    totals("");
+    out(format_args!(
+        "<total type=\"mmap\" count=\"{}\" size=\"{}\"/>\n",
+        map.mmaps, map.mmapped
+    ));
+    system(&out);
+    out(format_args!("</malloc>\n"));
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -787,10 +1111,7 @@ fn aligned_block(alignment: usize, size: usize) -> *mut u8 {
         crate::errno::set_errno(crate::errno::ENOMEM);
     }
     // SAFETY: a non-null `ptr` is a new block of at least `size` bytes.
-    #[cfg(all(test, not(target_os = "none")))]
-    unsafe {
-        perturb(ptr, size, PERTURB_ON_ALLOC);
-    }
+    unsafe { alloc_perturb(ptr, size) };
     note_alloc(ptr)
 }
 
@@ -950,6 +1271,14 @@ mod tests {
     extern crate std;
     use std::vec::Vec;
 
+    /// Held by the tests that set or look at [`PERTURB`]: the heap is the
+    /// whole test process's, and so is its fill.
+    static FILL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The byte a new block is filled with in a test build: [`PERTURB`]'s
+    /// 0x5a, inverted.
+    const TEST_FILL: u8 = 0xa5;
+
     /// `valloc`/`pvalloc` promise "page-aligned", so their alignment must be
     /// the page size `unistd` reports.
     #[test]
@@ -1042,10 +1371,13 @@ mod tests {
     /// (The fill on `free` cannot be observed without reading freed memory.)
     #[test]
     fn test_builds_fill_new_blocks() {
+        let _fill = FILL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = malloc(64);
         assert!(!p.is_null());
         let bytes = unsafe { core::slice::from_raw_parts(p, 64) };
-        assert!(bytes.iter().all(|&b| b == PERTURB_ON_ALLOC), "{bytes:?}");
+        assert!(bytes.iter().all(|&b| b == TEST_FILL), "{bytes:?}");
         unsafe { core::ptr::write_bytes(p, 0, 64) };
         let old = unsafe { malloc_usable_size(p) };
         let q = unsafe { realloc(p, old + 4096) };
@@ -1053,7 +1385,7 @@ mod tests {
         let head = unsafe { core::slice::from_raw_parts(q, 64) };
         assert!(head.iter().all(|&b| b == 0), "realloc kept the contents");
         let tail = unsafe { core::slice::from_raw_parts(q.add(old), 4096) };
-        assert!(tail.iter().all(|&b| b == PERTURB_ON_ALLOC));
+        assert!(tail.iter().all(|&b| b == TEST_FILL));
         unsafe { free(q) };
     }
 
@@ -1446,10 +1778,13 @@ mod tests {
             m.usmblks >= m.arena + m.hblkhd,
             "the peak is at least the present"
         );
-        assert_eq!(
-            (m.smblks, m.hblks, m.fsmblks),
-            (0, 0, 0),
-            "dlmalloc keeps none"
+        assert_eq!((m.smblks, m.fsmblks), (0, 0), "dlmalloc has no fastbins");
+        // `hblkhd` is C dlmalloc's "the footprint the walk did not see", which
+        // takes in the segments' own bookkeeping too: nonzero with no mapped
+        // block, but never zero with one.
+        assert!(
+            m.hblks == 0 || m.hblkhd > 0,
+            "a block mapped on its own has bytes: {m:?}"
         );
     }
 
@@ -1535,12 +1870,14 @@ mod tests {
 
     #[test]
     fn malloc_stats_reports_in_glibcs_layout() {
-        let m = Mallinfo2 {
+        let m = dlmalloc::HeapStats {
             arena: 135_168,
             fordblks: 133_104,
             hblkhd: 1_052_672,
             uordblks: 1_054_736,
-            ..Mallinfo2::default()
+            max_hblks: 3,
+            max_hblkhd: 2_105_344,
+            ..dlmalloc::HeapStats::default()
         };
         let mut buf = [0u8; 256];
         let n = format_malloc_stats(&m, &mut buf);
@@ -1553,7 +1890,316 @@ mod tests {
                 "Total (incl. mmap):\n",
                 "system bytes     =    1187840\n",
                 "in use bytes     =    1054736\n",
+                "max mmap regions =          3\n",
+                "max mmap bytes   =    2105344\n",
             )
         );
+    }
+
+    // -- mallopt, MALLOC_*_, malloc_info: glibc's answers --------------------
+
+    /// glibc 2.39's (`posix/tools/oracle/mallopt_harness.py`).
+    const ORACLE: &str = include_str!("mallopt_oracle.txt");
+
+    /// The oracle's lines that begin with `prefix`, it taken off.
+    fn oracle(prefix: &str) -> Vec<&'static str> {
+        ORACLE
+            .lines()
+            .filter_map(|l| l.strip_prefix(prefix))
+            .collect()
+    }
+
+    /// The number a parameter's name stands for in the oracle.
+    fn param(name: &str) -> i32 {
+        match name {
+            "M_MXFAST" => M_MXFAST,
+            "M_TRIM_THRESHOLD" => M_TRIM_THRESHOLD,
+            "M_TOP_PAD" => M_TOP_PAD,
+            "M_MMAP_THRESHOLD" => M_MMAP_THRESHOLD,
+            "M_MMAP_MAX" => M_MMAP_MAX,
+            "M_CHECK_ACTION" => M_CHECK_ACTION,
+            "M_PERTURB" => M_PERTURB,
+            "M_ARENA_TEST" => M_ARENA_TEST,
+            "M_ARENA_MAX" => M_ARENA_MAX,
+            n => n.parse().unwrap(),
+        }
+    }
+
+    /// Every answer of glibc's `mallopt`, over every parameter and value the
+    /// harness tried -- and `errno` is never touched.
+    #[test]
+    fn mallopt_answers_as_glibcs() {
+        let lines = oracle("mallopt ");
+        assert!(lines.len() > 200, "{}", lines.len());
+        for line in lines {
+            let mut w = line.split(' ');
+            let (name, value) = (w.next().unwrap(), w.next().unwrap());
+            let want = format!(
+                "{} {} = {} errno=kept",
+                name,
+                value,
+                mallopt_answer(param(name), value.parse().unwrap())
+            );
+            assert_eq!(line, want);
+        }
+    }
+
+    /// The bytes `M_PERTURB` fills with, by the value: glibc's, for `malloc`
+    /// and `calloc`; and the part `realloc` adds is filled as a new block --
+    /// where glibc's, which grew the block into its heap's top here, leaves
+    /// it as it was.
+    #[test]
+    fn perturb_fills_as_glibcs() {
+        let _fill = FILL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for line in oracle("perturb ") {
+            let (value, rest) = line.split_once("  = ").unwrap();
+            let value: i32 = value.parse().unwrap();
+            assert_eq!(mallopt(M_PERTURB, value), 1);
+            let p = malloc(64);
+            let c = calloc(1, 64);
+            let r = unsafe { realloc(malloc(16), 4096) };
+            let (fill, zero, added) = unsafe { (*p, *p.add(63), *c) };
+            let grown = unsafe { *r.add(1000) };
+            unsafe {
+                free(p);
+                free(c);
+                free(r);
+            }
+            let ours = format!("malloc {fill:02x} {zero:02x} calloc {added:02x}");
+            let glibc = rest.split(" realloc-added").next().unwrap();
+            assert_eq!(ours, glibc, "perturb {value}");
+            assert_eq!(grown, fill, "perturb {value}: realloc's added part");
+        }
+        mallopt(M_PERTURB, 0x5a);
+    }
+
+    /// `MALLOC_PERTURB_`, `MALLOC_MMAP_THRESHOLD_` and `MALLOC_MMAP_MAX_` as
+    /// glibc's tunables read them: what each text sets, judged by what
+    /// glibc did with it.
+    #[test]
+    fn the_environment_is_read_as_glibcs_tunables() {
+        for line in oracle("env MALLOC_PERTURB_=[") {
+            let (text, rest) = line.split_once("]  = malloc ").unwrap();
+            let glibc = &rest[..2];
+            let (perturb, _, _) = environment_settings(Some(text.as_bytes()), None, None);
+            let [fill, ..] = (perturb.unwrap_or(0) ^ 0xff).to_le_bytes();
+            let ours = if perturb.unwrap_or(0) == 0 { 0 } else { fill };
+            assert_eq!(format!("{ours:02x}"), glibc, "MALLOC_PERTURB_={text:?}");
+        }
+        // The threshold: a text glibc took decides which of 512 KiB and 2 MiB
+        // were mapped; one it did not is not taken here either.
+        let taken = |text: &str| environment_settings(None, Some(text.as_bytes()), None).1;
+        for line in oracle("env MALLOC_MMAP_THRESHOLD_=[") {
+            if line.contains("MALLOC_MMAP_MAX_") {
+                continue;
+            }
+            let (text, glibc) = line.split_once("] = ").unwrap();
+            match taken(text) {
+                Some(t) => {
+                    let ours = format!(
+                        "512K {} 2M {}",
+                        u8::from((512usize << 10) >= t),
+                        u8::from((2usize << 20) >= t)
+                    );
+                    assert_eq!(ours, glibc, "MALLOC_MMAP_THRESHOLD_={text:?}");
+                }
+                None => assert_eq!(text, "abc", "only text that is no number is passed over"),
+            }
+        }
+        for line in oracle("env MALLOC_MMAP_THRESHOLD_=[1048576] MALLOC_MMAP_MAX_=[") {
+            let (text, glibc) = line.split_once("] = ").unwrap();
+            let (_, _, max) = environment_settings(None, None, Some(text.as_bytes()));
+            let ours = format!("512K 0 2M {}", u8::from(max.unwrap_or(65536) > 0));
+            assert_eq!(ours, glibc, "MALLOC_MMAP_MAX_={text:?}");
+        }
+    }
+
+    #[test]
+    fn tunable_numbers() {
+        for (text, want) in [
+            ("66", Some(66)),
+            ("0x42", Some(66)),
+            ("0X42", Some(66)),
+            ("0102", Some(66)),
+            ("08", None),
+            ("\t 7", Some(7)),
+            ("+7", Some(7)),
+            ("-1", Some(u64::MAX)),
+            ("", Some(0)),
+            ("0x", Some(0)),
+            ("7 ", None),
+            ("7x", None),
+            ("18446744073709551615", Some(u64::MAX)),
+            ("18446744073709551616", None),
+        ] {
+            assert_eq!(tunable_number(text.as_bytes()), want, "{text:?}");
+        }
+    }
+
+    /// `M_MMAP_THRESHOLD` and `M_MMAP_MAX` do to a heap what glibc's did to
+    /// its (the harness's `mmap` lines) -- shown on heaps of the test's own,
+    /// since the shared one's top chunk may already hold a big request.
+    ///
+    /// A fresh heap for each probe: a block carved from a segment and freed
+    /// stays in the heap here -- a region goes back to the kernel only whole
+    /// -- where glibc's trims it off the top of its own, so a later request
+    /// of that size would be served from it here and never reach the
+    /// question of a mapping.  Each heap, founded by a first small request,
+    /// has nothing to serve a big one from, as glibc's had.
+    #[test]
+    fn mmap_settings_act_as_glibcs() {
+        let probe = |threshold: usize, max: isize, keep: bool, sizes: &[usize]| -> Vec<u8> {
+            let mut heap = dlmalloc::Dlmalloc::new(SlateSystem);
+            // SAFETY: a heap of this test's own; every block is freed before
+            // it is destroyed.
+            unsafe {
+                let first = heap.malloc(16);
+                heap.set_mmap_threshold(threshold);
+                heap.set_mmap_max(max);
+                let kept = keep.then(|| heap.malloc(2 << 20));
+                let answers = sizes.iter().map(|&s| alone_in(&mut heap, s)).collect();
+                if let Some(k) = kept {
+                    heap.free(k);
+                }
+                heap.free(first);
+                heap.destroy();
+                answers
+            }
+        };
+        let after = {
+            let mut heap = dlmalloc::Dlmalloc::new(SlateSystem);
+            // SAFETY: as above.
+            unsafe {
+                let first = heap.malloc(16);
+                heap.set_mmap_threshold(1 << 20);
+                heap.set_mmap_max(1);
+                let kept = heap.malloc(2 << 20);
+                heap.free(kept);
+                let answer = alone_in(&mut heap, 2 << 20);
+                heap.free(first);
+                heap.destroy();
+                answer
+            }
+        };
+        let two = |a: &[u8]| format!("512K {} 2M {}", a[0], a[1]);
+        let ours = [
+            format!(
+                "mmap M_MMAP_THRESHOLD 1048576 = {}",
+                two(&probe(1 << 20, 65536, false, &[512 << 10, 2 << 20]))
+            ),
+            format!(
+                "mmap M_MMAP_THRESHOLD 4194304 = {}",
+                two(&probe(4 << 20, 65536, false, &[512 << 10, 2 << 20]))
+            ),
+            format!(
+                "mmap M_MMAP_MAX 0 = {}",
+                two(&probe(1 << 20, 0, false, &[512 << 10, 2 << 20]))
+            ),
+            format!(
+                "mmap M_MMAP_MAX 1 with one mapped = 2M {}",
+                probe(1 << 20, 1, true, &[2 << 20])[0]
+            ),
+            format!("mmap M_MMAP_MAX 1 after = 2M {after}"),
+        ];
+        let glibc: Vec<&str> = ORACLE.lines().filter(|l| l.starts_with("mmap ")).collect();
+        assert_eq!(glibc, ours);
+        // And `mallopt` reaches the process's heap: its defaults, set again,
+        // read back.
+        assert_eq!(mallopt(M_MMAP_THRESHOLD, 256 << 10), 1);
+        assert_eq!(mallopt(M_MMAP_MAX, 65536), 1);
+        let mut guard = HeapGuard::lock();
+        assert_eq!(guard.heap().mmap_settings(), (256 << 10, 65536));
+    }
+
+    /// Whether a block of `size` gets a mapping of its own in `heap`: 1 or 0.
+    fn alone_in(heap: &mut dlmalloc::Dlmalloc<SlateSystem>, size: usize) -> u8 {
+        // SAFETY: a heap of the caller's own; the block is freed.
+        unsafe {
+            let before = heap.stats().hblks;
+            let p = heap.malloc(size);
+            assert!(!p.is_null());
+            let mapped = heap.stats().hblks > before;
+            heap.free(p);
+            u8::from(mapped)
+        }
+    }
+
+    /// `malloc_info`'s answers and its XML's outline are glibc's: `EINVAL`
+    /// itself for options but 0, `errno` untouched; and element for element,
+    /// attribute for attribute, the `<size>` and `<unsorted>` lines aside
+    /// (one per bin with free chunks, which the heap's state decides).
+    #[test]
+    fn malloc_info_is_glibcs() {
+        let mut ours = Vec::new();
+        for options in [1, -1] {
+            crate::errno::set_errno(12345);
+            // SAFETY: a stream is not written for a refused option.
+            let rc = unsafe { malloc_info(options, core::ptr::null_mut()) };
+            let kept = if crate::errno::get_errno() == 12345 {
+                "kept"
+            } else {
+                "changed"
+            };
+            ours.push(format!("malloc_info({options}) = {rc} errno={kept}"));
+        }
+        let a = malloc(100);
+        let b = malloc(4 << 20);
+        let c = malloc(40);
+        unsafe { free(a) };
+        let mut text: *mut u8 = core::ptr::null_mut();
+        let mut len = 0usize;
+        // SAFETY: the stream writes `text` and `len`, which outlive it.
+        let f = unsafe { crate::stdio_mem::open_memstream(&mut text, &mut len) };
+        assert!(!f.is_null());
+        crate::errno::set_errno(12345);
+        // SAFETY: an open stream.
+        let rc = unsafe { malloc_info(0, f) };
+        // Closing it settles `text` and `len`.
+        crate::stdio::fclose(f);
+        let kept = if crate::errno::get_errno() == 12345 {
+            "kept"
+        } else {
+            "changed"
+        };
+        ours.push(format!("malloc_info(0) = {rc} errno={kept}"));
+        // SAFETY: `text` is the stream's block of `len` bytes.
+        let xml = std::string::String::from_utf8(
+            unsafe { core::slice::from_raw_parts(text, len) }.to_vec(),
+        )
+        .unwrap();
+        unsafe {
+            free(text);
+            free(b);
+            free(c);
+        }
+        for line in xml.lines().map(str::trim_start) {
+            if line.starts_with("<size ") || line.starts_with("<unsorted ") {
+                continue;
+            }
+            let mut outline = std::string::String::from("malloc_info outline ");
+            let mut quoted = false;
+            for ch in line.chars() {
+                match (ch, quoted) {
+                    ('"', false) => quoted = true,
+                    ('"', true) => {
+                        quoted = false;
+                        outline.push('V');
+                    }
+                    (_, true) => {}
+                    (c, false) => outline.push(c),
+                }
+            }
+            ours.push(outline);
+        }
+        let glibc: Vec<&str> = ORACLE
+            .lines()
+            .filter(|l| l.starts_with("malloc_info"))
+            .collect();
+        assert_eq!(glibc, ours);
+        // Its numbers agree with themselves: the heap's free bytes, top and
+        // all, are the `rest`, and the mapped block is counted.
+        assert!(xml.contains("<total type=\"mmap\" count=\""), "{xml}");
     }
 }

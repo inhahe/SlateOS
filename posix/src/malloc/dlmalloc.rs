@@ -70,6 +70,17 @@ pub struct Dlmalloc<A> {
     release_checks: usize,
     granularity: usize,
     max_release_check_rate: usize,
+    // LOCAL ADDITION (SlateOS): `mallopt`'s knobs and `malloc_info`'s counts
+    // (VENDORED.md, local change 8). The size from which a request gets a
+    // mapping of its own; how many such mappings there may be at once; how
+    // many there are, and their bytes; and the most the segments have held.
+    mmap_threshold: usize,
+    mmap_max: isize,
+    n_mmaps: usize,
+    mmapped: usize,
+    max_n_mmaps: usize,
+    max_mmapped: usize,
+    max_segment_footprint: usize,
     system_allocator: A,
 }
 unsafe impl<A: Send> Send for Dlmalloc<A> {}
@@ -88,6 +99,10 @@ const DEFAULT_TRIM_THRESHOLD: usize = 2 * 1024 * 1024;
 // LOCAL ADDITION (SlateOS): C dlmalloc's DEFAULT_MMAP_THRESHOLD. Requests at or
 // above this size get a mapping of their own; see `mmap_alloc`.
 const MMAP_THRESHOLD: usize = 256 * 1024;
+
+// LOCAL ADDITION (SlateOS): glibc's DEFAULT_MMAP_MAX, how many chunks may be
+// mapped on their own at once until `mallopt (M_MMAP_MAX)` says otherwise.
+const DEFAULT_MMAP_MAX: isize = 65536;
 
 // Minimum legal granularity. Smaller values would let `sys_trim` compute
 // a non-`malloc_alignment`-aligned residual `topsize`, which corrupts the
@@ -170,8 +185,35 @@ impl<A> Dlmalloc<A> {
             release_checks: 0,
             granularity: 64 * 1024,
             max_release_check_rate: 4095,
+            mmap_threshold: MMAP_THRESHOLD,
+            mmap_max: DEFAULT_MMAP_MAX,
+            n_mmaps: 0,
+            mmapped: 0,
+            max_n_mmaps: 0,
+            max_mmapped: 0,
+            max_segment_footprint: 0,
             system_allocator,
         }
+    }
+
+    // LOCAL ADDITION (SlateOS): `mallopt (M_MMAP_THRESHOLD)`: requests of
+    // `threshold` bytes or more get a mapping of their own (VENDORED.md, local
+    // change 8). `usize::MAX` stops them.
+    pub fn set_mmap_threshold(&mut self, threshold: usize) {
+        self.mmap_threshold = threshold;
+    }
+
+    // LOCAL ADDITION (SlateOS): `mallopt (M_MMAP_MAX)`: at most `max` such
+    // mappings at once; none for 0 or less.
+    pub fn set_mmap_max(&mut self, max: isize) {
+        self.mmap_max = max;
+    }
+
+    // LOCAL ADDITION (SlateOS): the two, as `set_mmap_threshold` and
+    // `set_mmap_max` left them, for this libc's tests.
+    #[cfg(test)]
+    pub fn mmap_settings(&self) -> (usize, isize) {
+        (self.mmap_threshold, self.mmap_max)
     }
 
     // LOCAL CHANGE (SlateOS): upstream's configuration API. This libc keeps
@@ -497,7 +539,10 @@ impl<A: Allocator> Dlmalloc<A> {
         // instead of leaving it in a segment until that segment is wholly
         // free. `topsize != 0` is C's condition too: the first request
         // initialises the heap instead. See `VENDORED.md`.
-        if size >= MMAP_THRESHOLD && self.topsize != 0 {
+        if size >= self.mmap_threshold
+            && self.topsize != 0
+            && isize::try_from(self.n_mmaps).map_or(false, |n| n < self.mmap_max)
+        {
             let mem = self.mmap_alloc(size);
             if !mem.is_null() {
                 return mem;
@@ -516,6 +561,9 @@ impl<A: Allocator> Dlmalloc<A> {
 
         self.footprint += tsize;
         self.max_footprint = cmp::max(self.max_footprint, self.footprint);
+        // LOCAL ADDITION (SlateOS): the segments' own peak, for `malloc_info`.
+        self.max_segment_footprint =
+            cmp::max(self.max_segment_footprint, self.footprint - self.mmapped);
 
         if self.top.is_null() {
             if self.least_addr.is_null() || tbase < self.least_addr {
@@ -688,6 +736,9 @@ impl<A: Allocator> Dlmalloc<A> {
         self.least_addr = cmp::min(ptr, self.least_addr);
         self.footprint = self.footprint + newmmsize - oldmmsize;
         self.max_footprint = cmp::max(self.max_footprint, self.footprint);
+        // LOCAL ADDITION (SlateOS): see `mmap_alloc`.
+        self.mmapped = self.mmapped + newmmsize - oldmmsize;
+        self.max_mmapped = cmp::max(self.max_mmapped, self.mmapped);
         self.check_mmapped_chunk(newp);
         return newp;
     }
@@ -725,6 +776,11 @@ impl<A: Allocator> Dlmalloc<A> {
         }
         self.footprint += allocsize;
         self.max_footprint = cmp::max(self.max_footprint, self.footprint);
+        // LOCAL ADDITION (SlateOS): counted for `M_MMAP_MAX` and `malloc_info`.
+        self.n_mmaps += 1;
+        self.mmapped += allocsize;
+        self.max_n_mmaps = cmp::max(self.max_n_mmaps, self.n_mmaps);
+        self.max_mmapped = cmp::max(self.max_mmapped, self.mmapped);
         self.check_mmapped_chunk(p);
         Chunk::to_mem(p)
     }
@@ -811,6 +867,9 @@ impl<A: Allocator> Dlmalloc<A> {
                     .free(p.cast::<u8>().wrapping_sub(prevsize), psize)
                 {
                     self.footprint -= psize;
+                    // LOCAL ADDITION (SlateOS): see `mmap_alloc`.
+                    self.n_mmaps -= 1;
+                    self.mmapped -= psize;
                 }
                 return;
             }
@@ -1389,6 +1448,9 @@ impl<A: Allocator> Dlmalloc<A> {
                     .free(p.cast::<u8>().wrapping_sub(prevsize), psize)
                 {
                     self.footprint -= psize;
+                    // LOCAL ADDITION (SlateOS): see `mmap_alloc`.
+                    self.n_mmaps -= 1;
+                    self.mmapped -= psize;
                 }
                 return;
             }
@@ -1897,7 +1959,53 @@ impl<A: Allocator> Dlmalloc<A> {
         st.fordblks = mfree;
         st.keepcost = self.topsize;
         st.footprint = self.footprint;
+        st.hblks = self.n_mmaps;
+        st.max_hblks = self.max_n_mmaps;
+        st.max_hblkhd = self.max_mmapped;
         st
+    }
+
+    // LOCAL ADDITION (SlateOS): what `malloc_info` reports (VENDORED.md, local
+    // change 8): every free chunk of every segment, filed under the bin a chunk
+    // of its size belongs in -- `stats`'s walk, which finds a bin's chunks
+    // without following its lists -- with the designated victim, the top
+    // chunk and the chunks mapped on their own apart.
+    pub unsafe fn free_map(&self) -> FreeMap {
+        let mut map = FreeMap {
+            mmaps: self.n_mmaps,
+            mmapped: self.mmapped,
+            segments: self.footprint - self.mmapped,
+            max_segments: self.max_segment_footprint,
+            ..FreeMap::default()
+        };
+        if self.top.is_null() {
+            return map;
+        }
+        map.top = self.topsize;
+        map.dv = self.dvsize;
+        let mut s: *const Segment = &self.seg;
+        while !s.is_null() {
+            let mut q = self.align_as_chunk((*s).base);
+            while Segment::holds(s as *mut Segment, q.cast())
+                && q != self.top
+                && (*q).head != Chunk::fencepost_head()
+            {
+                let sz = Chunk::size(q);
+                if !Chunk::inuse(q) && q != self.dv {
+                    let bin = if self.is_small(sz) {
+                        map.small.get_mut(self.small_index(sz) as usize)
+                    } else {
+                        map.tree.get_mut(self.compute_tree_index(sz) as usize)
+                    };
+                    if let Some(bin) = bin {
+                        bin.add(sz);
+                    }
+                }
+                q = Chunk::next(q);
+            }
+            s = (*s).next;
+        }
+        map
     }
 
     // LOCAL CHANGE (SlateOS): upstream API with no caller in this libc (`trim`
@@ -1942,6 +2050,55 @@ pub struct HeapStats {
     pub keepcost: usize,
     /// Everything obtained from the system and not yet returned.
     pub footprint: usize,
+    /// Chunks mapped on their own, and the most there have been, and the
+    /// most bytes they have had (LOCAL ADDITION, local change 8).
+    pub hblks: usize,
+    pub max_hblks: usize,
+    pub max_hblkhd: usize,
+}
+
+// LOCAL ADDITION (SlateOS): one bin's free chunks, as `free_map` finds them
+// (VENDORED.md, local change 8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BinStats {
+    /// How many.
+    pub count: usize,
+    /// Their bytes.
+    pub total: usize,
+    /// The smallest and the largest.
+    pub min: usize,
+    pub max: usize,
+}
+
+impl BinStats {
+    fn add(&mut self, size: usize) {
+        if self.count == 0 || size < self.min {
+            self.min = size;
+        }
+        self.max = cmp::max(self.max, size);
+        self.count += 1;
+        self.total += size;
+    }
+}
+
+// LOCAL ADDITION (SlateOS): what `free_map` reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FreeMap {
+    /// The small bins' chunks, by bin: 8-byte steps of size.
+    pub small: [BinStats; NSMALLBINS],
+    /// The tree bins', by bin.
+    pub tree: [BinStats; NTREEBINS],
+    /// The designated victim's size, the free chunk split for small
+    /// requests first, which is in no bin; 0 for none.
+    pub dv: usize,
+    /// The top chunk's size.
+    pub top: usize,
+    /// Chunks mapped on their own, and their bytes.
+    pub mmaps: usize,
+    pub mmapped: usize,
+    /// Bytes in segments, and the most there have been.
+    pub segments: usize,
+    pub max_segments: usize,
 }
 
 const PINUSE: usize = 1 << 0;

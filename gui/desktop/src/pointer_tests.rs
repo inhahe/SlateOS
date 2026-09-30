@@ -281,6 +281,10 @@ fn every_visible_row_launches_the_program_named_on_it() {
                 );
                 continue;
             }
+            // Only a search lists a program's actions, and nothing is typed.
+            Some(crate::StartRow::Action { action, .. }) => {
+                panic!("row {row} is the action {:?} with no search", action.name)
+            }
             None => panic!("row {row} is empty in a menu longer than the screen"),
         };
         match shown {

@@ -159241,7 +159241,22 @@ direction: a consumer did exist, and was reached, and still made the displayed
 claim false, because it was fed an argument that erased the difference.
 
 
-## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17; the live half FIXED 2026-09-25, the page half OPEN
+## TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST -- 2026-09-17; the live half FIXED 2026-09-25, the page half FIXED 2026-09-29
+
+**FIXED 2026-09-29 -- the pages are reachable again, and not as rows of
+their own.** Two changes, neither the one step 2 below planned. On
+2026-09-27 (759c9e9e3, design-decisions §1425) the three pages came back as
+Settings' *jump list*: actions of its desktop entry, `settings --page
+display`, `network-status` and `sound`, offered by a right-click on Settings.
+And on 2026-09-29 (design-decisions §1451) the start menu's search finds a
+program's actions by name, ranked with the programs: "display" lists
+Settings' "Display settings" first -- above Settings, which it finds only by
+a keyword -- and a click or Enter opens the page. That is what the three
+rows did, with no row claiming a program of its own, so the identity rework
+step 2 feared (four entries sharing `/usr/bin/settings`, twenty sites keyed
+by it) is not needed: an action is carried by its program's entry, and is
+not pinned or dragged. `launcher::tests::every_settings_page_the_desktop_asks_for_is_one_settings_has`
+holds every `--page` any of these start to a name Settings answers to.
 
 **Status, 2026-09-25.** This entry was wrong about one thing that mattered:
 the three rows *were* live. The start menu has listed the database's

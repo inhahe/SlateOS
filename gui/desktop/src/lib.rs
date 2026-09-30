@@ -1147,6 +1147,14 @@ struct StartDrag {
     /// The program's name, as the start menu shows it: what a pin or a
     /// desktop shortcut made from it is called.
     name: String,
+    /// For a row that is one of a program's actions ([`StartRow::Action`]):
+    /// what a click on it starts. `None` for a program's row.
+    ///
+    /// Such a row is not carried: a drag of it lets go of nothing, since an
+    /// action is not a thing to pin or to put on the desktop -- a pin made
+    /// from "Display settings" would be a pin of Settings under the page's
+    /// name.
+    action: Option<hotkeys::Launch>,
 }
 
 /// What one taskbar button stands for.
@@ -1495,6 +1503,17 @@ pub enum StartRow<'a> {
         /// Whether it is listed inside a folder of the applications tree,
         /// and so set in under the folder's row.
         in_folder: bool,
+    },
+    /// One of a program's actions -- a row of its jump list -- found by a
+    /// search: Settings' "Display settings", which opens Settings on its
+    /// Display page. Only among a search's results. A click or Enter starts
+    /// the action, as choosing it from the jump list does; it is not carried
+    /// anywhere, since an action is not a thing to pin.
+    Action {
+        /// The program whose action it is.
+        entry: &'a AppEntry,
+        /// The action.
+        action: &'a desktopentry::Action,
     },
     /// A folder of the applications tree.
     Folder {
@@ -4049,14 +4068,15 @@ impl DesktopShell {
     }
 
     /// The programs on the start menu's rows, top to bottom: the rows of
-    /// [`Self::start_menu_rows`] that are programs, without the folders.
+    /// [`Self::start_menu_rows`] that are programs -- not the folders, and
+    /// not the programs' actions a search finds.
     #[must_use]
     pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
         self.start_menu_rows()
             .into_iter()
             .filter_map(|row| match row {
                 StartRow::Program { entry, .. } => Some(entry),
-                StartRow::Folder { .. } | StartRow::Section(_) => None,
+                StartRow::Action { .. } | StartRow::Folder { .. } | StartRow::Section(_) => None,
             })
             .collect()
     }
@@ -4067,23 +4087,19 @@ impl DesktopShell {
     /// it, each followed by its programs when it is open. A section with
     /// nothing in it has no heading, and "All apps" is headed only when
     /// another section stands above it. While something is typed, what the
-    /// search finds instead, and no folders or headings.
+    /// search finds instead -- programs and their actions, best first
+    /// (`start_search_rows`) -- and no folders or headings.
     ///
     /// A program is in the folder its entry's first main category names
     /// (`desktopentry::menu::Category::of`), and appears there even when it
     /// is pinned as well, as a pin is a shortcut rather than a move.
     #[must_use]
     pub fn start_menu_rows(&self) -> Vec<StartRow<'_>> {
-        let found = self.start_menu_programs();
-        if !self.start_query.text().trim().is_empty() {
-            return found
-                .into_iter()
-                .map(|entry| StartRow::Program {
-                    entry,
-                    in_folder: false,
-                })
-                .collect();
+        let query = self.start_query.text().trim();
+        if !query.is_empty() {
+            return self.start_search_rows(query);
         }
+        let found = self.start_menu_programs();
         let pins = self.start_pins.len().min(found.len());
         let (pinned, listed) = found.split_at(pins);
         // Recently used, as the list knows each program -- one no longer
@@ -4189,32 +4205,57 @@ impl DesktopShell {
     /// the power menu's own list at the foot of the menu, not programs in the
     /// database, and mixing them in would put "Shut down" one mis-click away
     /// from "Screenshot".
-    ///
-    /// While something is typed in the search field, only the programs it
-    /// finds, best first and each once -- a pinned program is also in the
-    /// list below, and a search that found it twice would say so twice.
-    /// Ranked by the launcher's own rule (`launcher::search_score`); ties
-    /// keep menu order.
     fn start_menu_programs(&self) -> Vec<&AppEntry> {
-        let listed = self.start_pins.iter().chain(
-            self.apps
-                .iter()
-                .filter(|app| matches!(app.category, Category::Application | Category::Setting)),
-        );
-        let query = self.start_query.text().trim();
-        if query.is_empty() {
-            return listed.collect();
-        }
+        self.start_pins
+            .iter()
+            .chain(
+                self.apps.iter().filter(|app| {
+                    matches!(app.category, Category::Application | Category::Setting)
+                }),
+            )
+            .collect()
+    }
+
+    /// What a search for `query` finds, best first: the programs it finds by
+    /// name, description or keyword (`launcher::search_score`), and the
+    /// actions of theirs -- the rows of a program's jump list -- it finds by
+    /// name (`launcher::action_search_score`), ranked together. Ties keep the
+    /// menu's order, a program before its actions.
+    ///
+    /// Each program once, and its actions once: a pinned program is also in
+    /// the list below, and a search that found it twice would say so twice.
+    ///
+    /// Actions are found so that a search lands where it asks to go:
+    /// "display" finds Settings, and above it Settings' "Display settings",
+    /// which opens Settings on the page -- what the start menu's own "Display
+    /// Settings" row did until 2026-09-17 by naming a program that could not
+    /// exist (known-issues
+    /// `TD-C-THREE-LAUNCHER-ENTRIES-NAME-A-PROGRAM-THAT-CANNOT-EXIST`).
+    fn start_search_rows(&self, query: &str) -> Vec<StartRow<'_>> {
         let mut seen = std::collections::BTreeSet::new();
-        let mut found: Vec<(u32, usize, &AppEntry)> = listed
-            .filter(|entry| seen.insert(entry.executable_path.as_str()))
-            .enumerate()
-            .filter_map(|(order, entry)| {
-                launcher::search_score(query, entry).map(|score| (score, order, entry))
-            })
-            .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        found.into_iter().map(|(_, _, entry)| entry).collect()
+        let mut found: Vec<(u32, StartRow<'_>)> = Vec::new();
+        for entry in self.start_menu_programs() {
+            if !seen.insert(entry.executable_path.as_str()) {
+                continue;
+            }
+            if let Some(score) = launcher::search_score(query, entry) {
+                found.push((
+                    score,
+                    StartRow::Program {
+                        entry,
+                        in_folder: false,
+                    },
+                ));
+            }
+            for (_, action) in entry.jump_list() {
+                if let Some(score) = launcher::action_search_score(query, action) {
+                    found.push((score, StartRow::Action { entry, action }));
+                }
+            }
+        }
+        // A stable sort, so equal scores keep the order they were found in.
+        found.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        found.into_iter().map(|(_, row)| row).collect()
     }
 
     /// How many of the rows at the top of the start menu are its pinned
@@ -5437,7 +5478,9 @@ impl DesktopShell {
     #[must_use]
     pub fn render_carry(&self) -> Option<RenderTree> {
         let (name, at) = if let Some(drag) = self.start_drag.as_ref() {
-            if !drag.source.is_dragging() {
+            // An action's row is carried nowhere, so nothing follows the
+            // pointer to say where it would go.
+            if !drag.source.is_dragging() || drag.action.is_some() {
                 return None;
             }
             (drag.name.clone(), self.carry_at)
@@ -5720,8 +5763,27 @@ impl DesktopShell {
                         let (exec, name) = (entry.executable_path.clone(), entry.name.clone());
                         let mut source = tray_dnd::DragSource::default();
                         source.on_press(exec, x, y);
-                        self.start_drag = Some(StartDrag { source, name });
+                        self.start_drag = Some(StartDrag {
+                            source,
+                            name,
+                            action: None,
+                        });
                         self.carry_at = (x, y);
+                    }
+                    // Held the same way, so a press that slides off the row
+                    // is not a click -- and let go, it starts the action
+                    // rather than the program (`finish_start_press`).
+                    Some(StartRow::Action { entry, action }) => {
+                        if let Some(launch) = entry.launch_action(&action.id) {
+                            let mut source = tray_dnd::DragSource::default();
+                            source.on_press(entry.executable_path.clone(), x, y);
+                            self.start_drag = Some(StartDrag {
+                                source,
+                                name: action.name.clone(),
+                                action: Some(launch),
+                            });
+                            self.carry_at = (x, y);
+                        }
                     }
                     // A folder is not carried anywhere: the press opens or
                     // closes it, as a tree's node does.
@@ -7233,6 +7295,16 @@ impl DesktopShell {
         {
             self.toggle_start_folder(folder);
             return HotkeyOutcome::consumed();
+        }
+        // One of a program's actions, found by a search: started, as a click
+        // on its row starts it -- so "display" and Enter opens the page.
+        let action = row.and_then(|row| match self.start_menu_rows().get(row).copied() {
+            Some(StartRow::Action { entry, action }) => entry.launch_action(&action.id),
+            _ => None,
+        });
+        if let Some(launch) = action {
+            self.close_start_menu();
+            return HotkeyOutcome::start(vec![launch]);
         }
         let chosen = row.and_then(|row| {
             self.start_program_at(row)
@@ -9024,8 +9096,9 @@ impl DesktopShell {
     }
 
     /// One row of the start menu's list, in `rect`: a program's picture and
-    /// name -- set in when it is inside a folder -- a folder's chevron,
-    /// picture and name, or a section's heading.
+    /// name -- set in when it is inside a folder -- a program's action's
+    /// picture and name, followed by its program's, dimmer; a folder's
+    /// chevron, picture and name; or a section's heading.
     fn render_start_row(&self, tree: &mut RenderTree, rect: Rect, item: StartRow<'_>) {
         let fg = self.theme.start_menu_fg;
         let size = self.font_size(TextRole::Item);
@@ -9034,6 +9107,9 @@ impl DesktopShell {
         let side = px as f32;
         let icon_y = rect.y + (rect.h - side).max(0.0) / 2.0;
         let text_y = rect.y + (rect.h - size).max(0.0) / 2.0;
+        // The program an action's row is of, named after the action: "New
+        // window" is a different row for each program that has one.
+        let mut program = None;
         let (icon_x, image_id, name) = match item {
             // No picture and no name of a thing to start: a heading of its own.
             StartRow::Section(section) => {
@@ -9048,6 +9124,24 @@ impl DesktopShell {
                 };
                 let x = rect.x + self.scale(START_ROW_ICON_X) + indent;
                 (x, self.program_icon(entry, px, fg), entry.name.as_str())
+            }
+            // The action's own picture when its entry names one, as its jump
+            // list draws it -- the generic program's when the theme has no
+            // such picture, as for a program's own -- and its program's when
+            // it names none.
+            StartRow::Action { entry, action } => {
+                let x = rect.x + self.scale(START_ROW_ICON_X);
+                let image_id = match &action.icon {
+                    Some(icon) => self.icon_registry.icon_or(
+                        icon.clone(),
+                        launcher::GENERIC_PROGRAM_ICON,
+                        px,
+                        fg,
+                    ),
+                    None => self.program_icon(entry, px, fg),
+                };
+                program = Some(entry.name.as_str());
+                (x, image_id, action.name.as_str())
             }
             StartRow::Folder { folder, open } => {
                 let chevron = Rect::new(
@@ -9078,14 +9172,25 @@ impl DesktopShell {
             image_id,
         });
         let text_x = icon_x + side + self.scale(START_ROW_ICON_GAP);
-        tree.text_in(
-            text_x,
-            text_y,
-            (rect.x + rect.w - text_x - self.scale(START_ROW_ICON_X)).max(0.0),
-            name,
-            fg,
-            size,
-        );
+        let right = rect.x + rect.w - self.scale(START_ROW_ICON_X);
+        tree.text_in(text_x, text_y, (right - text_x).max(0.0), name, fg, size);
+        // After the name, in the headings' dimmer ink, in what room is left:
+        // cut short before the action's own name is.
+        if let Some(program) = program {
+            let after = text_x
+                + text::measure(name, size, guitk::render::FontWeightHint::Regular)
+                + self.scale(START_ROW_ICON_GAP);
+            if after < right {
+                tree.text_in(
+                    after,
+                    text_y,
+                    right - after,
+                    program,
+                    with_alpha(fg, START_SECTION_ALPHA),
+                    size,
+                );
+            }
+        }
     }
 
     /// The image id of a program's picture, `px` square in `color`: its
@@ -10197,15 +10302,13 @@ impl DesktopShell {
             enabled: true,
             checked: None,
         };
-        // An action with no command line is started by D-Bus, which this
-        // system does not have, so it is not offered.
+        // What the program's jump list offers -- an action with no command
+        // line is started by D-Bus, which this system does not have -- the
+        // same ones a search offers (`AppEntry::jump_list`).
         let mut items: Vec<guitk::menu::MenuItem> = self
             .program_of(target)
             .map(|app| {
-                app.actions
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, a)| a.exec.is_some())
+                app.jump_list()
                     .map(|(index, a)| guitk::menu::MenuItem::Action {
                         id: Self::MENU_JUMP_LIST_BASE
                             .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
@@ -10929,7 +11032,8 @@ impl DesktopShell {
     /// Let go of a pressed start-menu row: a click starts the program; a drag
     /// carries it to wherever it was let go -- the taskbar pins it at the gap
     /// nearest the pointer, the desktop gets a shortcut to it there -- and
-    /// dropping it back on the menu asks for nothing.
+    /// dropping it back on the menu asks for nothing. A program's action,
+    /// found by a search, is started by a click and carried nowhere.
     fn finish_start_press(&mut self, x: f32, y: f32) -> ShellAction {
         let Some(mut drag) = self.start_drag.take() else {
             return ShellAction::Consumed;
@@ -10937,6 +11041,13 @@ impl DesktopShell {
         let exec = drag.source.pressed_key();
         // Read before `on_release`, which resets the source.
         let was_drag = drag.source.on_release();
+        if let Some(launch) = drag.action {
+            if was_drag {
+                return ShellAction::Consumed;
+            }
+            self.close_start_menu();
+            return ShellAction::Launch(launch);
+        }
         let Some(exec) = exec else {
             return ShellAction::Consumed;
         };
@@ -26506,7 +26617,8 @@ mod start_search_tests {
     }
 
     /// The rows as `[Folder]` (`[Folder +]` when closed) for a folder,
-    /// `"  name"` for a program in one and `"name"` for one at the top level.
+    /// `"  name"` for a program in one and `"name"` for one at the top level,
+    /// and `"action ~ program"` for a program's action a search found.
     fn tree(shell: &DesktopShell) -> Vec<String> {
         shell
             .start_menu_rows()
@@ -26517,6 +26629,9 @@ mod start_search_tests {
                 }
                 crate::StartRow::Program { entry, in_folder } => {
                     format!("{}{}", if *in_folder { "  " } else { "" }, entry.name)
+                }
+                crate::StartRow::Action { entry, action } => {
+                    format!("{} ~ {}", action.name, entry.name)
                 }
                 crate::StartRow::Section(section) => format!("# {}", section.label()),
             })
@@ -27447,6 +27562,193 @@ mod start_search_tests {
             .count();
         assert_eq!(hits, 1);
         assert_eq!(shell.start_pins_listed(), 0);
+    }
+
+    // ---- a search finds what a program can do ----
+
+    /// **A search finds a program's action, above the program it finds by
+    /// a keyword**: "display" is Settings' "Display settings" by name and
+    /// Settings only by keyword, so the page comes first. The action is not
+    /// a program: [`DesktopShell::start_menu_entries`] lists the programs
+    /// alone.
+    #[test]
+    fn a_search_finds_a_programs_action_before_the_program() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let rows = tree(&shell);
+        assert_eq!(rows[0], "Display settings ~ Settings", "{rows:?}");
+        assert!(rows.iter().any(|r| r == "Settings"), "{rows:?}");
+        assert!(
+            names(&shell).iter().all(|n| n != "Display settings"),
+            "an action was listed as a program"
+        );
+    }
+
+    /// **Enter starts the action found first** -- the page, as its jump
+    /// list opens it -- and the menu closes.
+    #[test]
+    fn enter_starts_the_action_a_search_found() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let outcome = shell.handle_hotkey(&press(Key::Enter));
+        assert_eq!(
+            outcome.launches,
+            [super::launcher::settings_page("display")]
+        );
+        assert!(!shell.start_menu_open);
+    }
+
+    /// **A click on an action's row starts it; a drag of it carries
+    /// nothing**: no label follows the pointer, letting go over the taskbar
+    /// pins nothing, and the menu stays up.
+    #[test]
+    fn an_actions_row_is_clicked_and_never_carried() {
+        use guitk::event::{MouseButton, MouseEvent, MouseEventKind};
+        let row_centre = |shell: &DesktopShell| {
+            let r = shell.start_menu_row_rect(0);
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        let mut clicked = shell();
+        type_text(&mut clicked, "display");
+        let at = row_centre(&clicked);
+        assert_eq!(
+            click_row(&mut clicked, at),
+            [
+                super::ShellAction::Consumed,
+                super::ShellAction::Launch(super::launcher::settings_page("display"))
+            ]
+        );
+        assert!(!clicked.start_menu_open);
+
+        let mut dragged = shell();
+        type_text(&mut dragged, "display");
+        let at = row_centre(&dragged);
+        let pins = dragged.taskbar.pinned_apps().len();
+        let bar = dragged.taskbar_rect();
+        let over = (bar.x + bar.w / 2.0, bar.y + bar.h / 2.0);
+        let event = |(x, y): (f32, f32), kind| MouseEvent { x, y, kind };
+        drop(dragged.handle_mouse(&event(at, MouseEventKind::Press(MouseButton::Left))));
+        drop(dragged.handle_mouse(&event(over, MouseEventKind::Move)));
+        assert!(
+            dragged.render_carry().is_none(),
+            "a label says where an action would go"
+        );
+        assert_eq!(
+            dragged.handle_mouse(&event(over, MouseEventKind::Release(MouseButton::Left))),
+            super::ShellAction::Consumed
+        );
+        assert_eq!(
+            dragged.taskbar.pinned_apps().len(),
+            pins,
+            "an action was pinned"
+        );
+        assert!(
+            dragged.start_menu_open,
+            "a drag that went nowhere closed the menu"
+        );
+    }
+
+    /// **A search offers what the jump list offers, once**: an action with
+    /// no command line -- started by D-Bus, which this system does not
+    /// have -- is not found, and a pinned program's actions are found once.
+    #[test]
+    fn a_search_offers_what_the_jump_list_offers_once() {
+        let mut shell = shell();
+        shell.set_programs(known_with(vec![installed(SKETCHPAD_WITH_ACTIONS)]));
+        let exec = shell
+            .apps
+            .iter()
+            .find(|app| app.name == "Sketchpad")
+            .expect("installed")
+            .executable_path
+            .clone();
+        shell.pin_to_start(&exec);
+
+        type_text(&mut shell, "Blank");
+        let found = tree(&shell);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|r| *r == "Blank Canvas ~ Sketchpad")
+                .count(),
+            1,
+            "{found:?}"
+        );
+
+        drop(shell.handle_hotkey(&press(Key::Escape)));
+        type_text(&mut shell, "D-Bus");
+        assert!(
+            tree(&shell).iter().all(|r| !r.starts_with("Only by D-Bus")),
+            "{:?}",
+            tree(&shell)
+        );
+    }
+
+    /// **An action's row draws its name, then its program's, dimmer** --
+    /// "New window" is a different row for each program that has one -- and
+    /// its program's picture when it has none of its own.
+    #[test]
+    fn an_actions_row_names_its_program() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let tree = shell.render_start_menu().expect("open");
+        // Each piece of text with where it starts and in what ink. The
+        // program's name is found on the action's own line: the menu's right
+        // column has a "Settings" of its own, further right.
+        let texts: Vec<(&str, f32, f32, guitk::color::Color)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text {
+                    text, x, y, color, ..
+                } => Some((text.as_str(), *x, *y, *color)),
+                _ => None,
+            })
+            .collect();
+        let (_, action_x, action_y, action_ink) = *texts
+            .iter()
+            .find(|(t, ..)| *t == "Display settings")
+            .expect("the action's name");
+        let (_, program_x, _, program_ink) = *texts
+            .iter()
+            .filter(|(t, x, y, _)| *t == "Settings" && *x > action_x && (*y - action_y).abs() < 0.5)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("its program's name, after it on its line");
+        assert!(program_x > action_x);
+        assert!(
+            program_ink.a < action_ink.a,
+            "the program's name is not dimmer than the action's"
+        );
+        let pictures: Vec<String> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Image { image_id, .. } => {
+                    shell.icon_request(*image_id)
+                }
+                _ => None,
+            })
+            .map(|request| request.name.into_owned())
+            .collect();
+        assert!(
+            pictures.iter().any(|p| p == "preferences-system"),
+            "{pictures:?}"
+        );
+    }
+
+    /// **A right-click on an action's row opens nothing**: the pin menu is a
+    /// program's, and an action is not one to pin.
+    #[test]
+    fn a_right_click_on_an_actions_row_opens_nothing() {
+        let mut shell = shell();
+        type_text(&mut shell, "display");
+        let r = shell.start_menu_row_rect(0);
+        shell.handle_press(
+            r.x + r.w / 2.0,
+            r.y + r.h / 2.0,
+            guitk::event::MouseButton::Right,
+        );
+        assert!(shell.render_pin_menu().is_none());
     }
 
     /// A chord with Super is still the desktop's with the menu up: the Super

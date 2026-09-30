@@ -1713,7 +1713,12 @@ live.
   would (a whole-line path opened, otherwise the words split POSIX-style),
   which is the "and running" half. Super chords, and keys the field does not
   use, still reach their shortcuts with the menu up. The field sits where the
-  "Applications" title was.
+  "Applications" title was. **And what a program can do** (2026-09-29,
+  `design-decisions.md` §1451): a search finds a program's actions -- the
+  rows of its jump list -- by name, ranked with the programs, so "display"
+  lists Settings' "Display settings" first and a click or Enter opens the
+  page; the row names its program after the action, dimmer, and is not
+  carried anywhere by a drag.
 
 - `[C]` **A file name that is not text is drawn so it can be told apart** --
   done 2026-09-25 (`design-decisions.md` §873, proposed by lane E). The file

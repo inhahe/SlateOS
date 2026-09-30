@@ -248,6 +248,20 @@ impl AppEntry {
         self.launch_with(self.exec.as_ref())
     }
 
+    /// The actions its jump list offers, each with its place in
+    /// [`actions`](Self::actions): those with a command line -- one with none
+    /// is started by D-Bus, which this system does not have.
+    ///
+    /// The start menu's search offers the same ones, from here, so a
+    /// program's jump list and a search for one of its actions cannot
+    /// disagree about what it can do.
+    pub fn jump_list(&self) -> impl Iterator<Item = (usize, &desktopentry::Action)> {
+        self.actions
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| action.exec.is_some())
+    }
+
     /// How to start one of its actions (its jump list), by the action's id:
     /// `None` for an action it does not have, or one with no command line.
     #[must_use]
@@ -359,6 +373,20 @@ pub(crate) fn search_score(query: &str, entry: &AppEntry) -> Option<u32> {
     }
 
     best
+}
+
+/// How well `query` finds `action`, one of a program's actions, or `None`
+/// if it does not: by its name, which counts as a program's name does in
+/// [`search_score`] -- so the two rank together, and "display" puts
+/// Settings' "Display settings" above Settings itself, which it finds only
+/// by a keyword.
+///
+/// The name alone: an action has no description or keywords of its own
+/// (the desktop entry specification gives it a name, a command line and a
+/// picture), and borrowing its program's would find every action of a
+/// program for a word that describes only one of them.
+pub(crate) fn action_search_score(query: &str, action: &desktopentry::Action) -> Option<u32> {
+    fuzzy_score(query, &action.name).map(|s| s.saturating_mul(2))
 }
 
 // ============================================================================
@@ -654,6 +682,60 @@ mod tests {
             mime: mime.to_owned(),
             text,
         }
+    }
+
+    /// A program read from the desktop entry `text`.
+    fn entry(text: &str) -> AppEntry {
+        let parsed = desktopentry::DesktopEntry::parse(text.as_bytes()).unwrap();
+        let app = desktopentry::App::from_entry(&parsed, "fixture.desktop", None).unwrap();
+        AppEntry::from_desktop(app).unwrap()
+    }
+
+    /// **A jump list offers the actions with a command line, each with its
+    /// place among all of them** -- the place is what a chosen row is
+    /// found again by -- and not one started by D-Bus.
+    #[test]
+    fn a_jump_list_is_the_actions_with_a_command_line() {
+        let program = entry(
+            "[Desktop Entry]\nType=Application\nName=Sketchpad\nExec=sketch\n\
+             Actions=new;dbus;blank;\n\
+             [Desktop Action new]\nName=New Drawing\nExec=sketch --new\n\
+             [Desktop Action dbus]\nName=Only by D-Bus\n\
+             [Desktop Action blank]\nName=Blank Canvas\nExec=sketch --blank\n",
+        );
+        let offered: Vec<(usize, &str)> = program
+            .jump_list()
+            .map(|(index, action)| (index, action.name.as_str()))
+            .collect();
+        assert_eq!(offered, [(0, "New Drawing"), (2, "Blank Canvas")]);
+        for (index, action) in program.jump_list() {
+            assert_eq!(program.actions[index].id, action.id);
+        }
+    }
+
+    /// **An action is found by its name, weighted as a program's name is**:
+    /// the same score a program of that name would get, so the two rank
+    /// together -- and never by a word it does not contain.
+    #[test]
+    fn an_action_is_found_by_its_name_as_a_program_is() {
+        let program = entry(
+            "[Desktop Entry]\nType=Application\nName=Settings\nExec=settings\n\
+             Keywords=display;\nActions=display;\n\
+             [Desktop Action display]\nName=Display settings\nExec=settings --page display\n",
+        );
+        let action = &program.actions[0];
+        let named_so = AppEntry {
+            name: "Display settings".to_owned(),
+            ..AppEntry::default()
+        };
+        assert_eq!(
+            action_search_score("disp", action),
+            search_score("disp", &named_so)
+        );
+        assert!(action_search_score("disp", action).is_some());
+        assert_eq!(action_search_score("volume", action), None);
+        // Above its program, which has the word only as a keyword.
+        assert!(action_search_score("display", action) > search_score("display", &program));
     }
 
     /// **A program opens the kinds its entry lists** -- in any case -- and

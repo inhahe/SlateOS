@@ -3746,7 +3746,10 @@ fi
 [ -f "$abicheck" ] || skip_abi=1
 # The checker and the table it reads are in scope alongside the types, per
 # gate 8's rule: a change to either changes every verdict it gives.
-touches posix/src/ scripts/check-libc-abi.py || skip_abi=1
+# ... and since 2026-09-30 the overlay's headers and glibc_constants.txt, which
+# its constants are compared with too.
+touches posix/src/ posix/include/ posix/tools/oracle/glibc_constants.txt \
+    scripts/check-libc-abi.py || skip_abi=1
 note_gate libc-abi "$skip_abi"
 
 if [ "$skip_abi" != "1" ]; then

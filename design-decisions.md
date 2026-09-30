@@ -41742,7 +41742,12 @@ since 2026-09-27 (§1130): every public constant whose name a musl header
 defines, compared with that header's value on each push that touches
 `posix/src` -- since 2026-09-30 every header musl has and every header the
 overlay adds, where it was a list of 105 of musl's 183 (known-issues.md,
-`D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED`).  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
+`D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED`); and enum
+constants besides macros, and, for a name musl's headers do not define,
+glibc's and then the kernel's headers through `glibc_constants.txt`
+(`D-POSIX-CONSTANTS-NO-MUSL-HEADER-NAMES-HAD-NO-ORACLE`), whose deliberate
+differences are `KNOWN_DIFFERENT_GLIBC` -- `PAGE_SHIFT` alone, 16 KiB
+pages.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
 `WEOF` -- compared in the bits both sides have, they agree, as the table says
 -- and less `SIGRTMIN` and `MB_CUR_MAX`, which with `SIGRTMAX` are its
 `NOT_CONSTANT_IN_MUSL`: musl's are calls, which no compile-time check can

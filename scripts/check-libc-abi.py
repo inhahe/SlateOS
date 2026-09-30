@@ -73,6 +73,18 @@ by a human:
    Rust type's width and the C expression's.  So musl's `(1<<31)`, an `int`
    sign-extended on its way to an `unsigned long`, agrees with a Rust `u64` of
    bit 31, and a signed Rust `WEOF` with musl's unsigned one.
+7. A name no macro accounts for is tried in the same headers as an integer
+   constant expression -- an enum constant, which `-dM` does not list
+   (`<search.h>`'s `FIND` and `ENTER`) -- and compared the same way.
+8. A name no musl or overlay header defines at all -- glibc's alone
+   (`RES_NOTLDQUERY`) or the kernel's (`BPF_*`, `IORING_OP_*`) -- is compared
+   with `posix/tools/oracle/glibc_constants.txt`: the value each header of a
+   glibc system gives it, glibc's first and then the kernel's, which
+   `glibc_constants.py` reads under WSL so that this needs none.  A constant
+   the table has not looked up is refused until the table is regenerated.
+   (Until 2026-09-30 these had no oracle: `RES_NOTLDQUERY` was
+   `RES_USE_EDNS0`'s bit, four `UFFD_FEATURE_*` bits were others', and
+   `IORING_OP_LAST` was 64.)
 
 The list is derived, never kept: a constant added tomorrow is checked from its
 first push.  `KNOWN_DIFFERENT` holds section 1119's deliberate differences and
@@ -728,6 +740,114 @@ def macro_names(define_dump: str) -> set[str]:
     return names
 
 
+# An enum constant is a number a caller passes as much as a macro is -- musl's
+# <search.h> has `FIND` and `ENTER` so, and `-dM` lists no enum. So the names
+# the macros do not account for are tried as integer constant expressions:
+# `sizeof(char[(N) ? 1 : 1])` is one exactly when N is, and anything else --
+# undeclared, a type, a function, a variable, a string -- fails its line.
+PROBE_ERROR_RE = re.compile(r"^consts\.c:(\d+):\d+: (?:fatal )?error:", re.M)
+
+
+def probe_source(includes: list[str], names: list[str]) -> tuple[str, int]:
+    """A unit trying each of `names` as an integer constant expression, and
+    the line of the first probe."""
+    head = "#define _GNU_SOURCE 1\n" + "".join(f"#include <{h}>\n" for h in includes)
+    first = head.count("\n") + 1
+    return head + "".join(f"enum {{ slate_probe_{i} = sizeof(char[({n}) ? 1 : 1]) }};\n"
+                          for i, n in enumerate(names)), first
+
+
+def probed_constants(stderr: str, names: list[str], first: int) -> set[str]:
+    """The names whose probe lines drew no error."""
+    bad = {int(m.group(1)) for m in PROBE_ERROR_RE.finditer(stderr)}
+    return {n for i, n in enumerate(names) if first + i not in bad}
+
+
+# ---------------------------------------------------------------------------
+# The names musl's headers do not define: glibc's and the kernel's values
+# ---------------------------------------------------------------------------
+#
+# A constant whose name no musl header and no overlay header gives a value --
+# glibc's alone (`RES_NOTLDQUERY`, `RTLD_DI_ORIGIN`) or the kernel's (`BPF_*`,
+# `IORING_OP_*`) -- had no oracle until 2026-09-30, and `RES_NOTLDQUERY` was
+# `RES_USE_EDNS0`'s bit. Its oracle is a glibc system's headers:
+# posix/tools/oracle/glibc_constants.py asks Ubuntu's (under WSL) for the
+# value each of the library's constant names has in each glibc and kernel
+# header, and writes glibc_constants.txt, which this reads -- so the gate
+# needs no WSL, and a constant the table has not looked up is refused until
+# it is regenerated.
+GLIBC_CONSTANTS = REPO / "posix" / "tools" / "oracle" / "glibc_constants.txt"
+REGENERATE = "python posix/tools/oracle/glibc_constants.py"
+
+# Where the library's number is deliberately not glibc's (or the kernel's)
+# for a name musl's headers lack. Each entry must keep differing.
+KNOWN_DIFFERENT_GLIBC: dict[str, str] = {
+    "PAGE_SHIFT":
+        "14 here, 12 in glibc's <sys/user.h>: this kernel's 16 KiB pages, as "
+        "PAGE_SIZE (KNOWN_DIFFERENT)",
+}
+
+
+def read_glibc_constants(text: str) -> dict[str, list[tuple[str, int, int, str]]]:
+    """name -> [(side, value, bits, header)] -- empty for a name looked up and
+    defined by no glibc or kernel header."""
+    out: dict[str, list[tuple[str, int, int, str]]] = {}
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[1] == "-":
+            out.setdefault(parts[0], [])
+            continue
+        if len(parts) != 5:
+            raise ValueError(f"{GLIBC_CONSTANTS.name}:{n}: expected 2 or 5 tab-separated fields")
+        name, side, value, bits, header = parts
+        out.setdefault(name, []).append((side, int(value), int(bits), header))
+    return out
+
+
+def agrees(c: "Const", value: int, bits: int) -> bool:
+    """Is `c` the value in the bits both have?"""
+    width = min(INT_BITS[c.ty], bits)
+    mask = (1 << width) - 1
+    return (int(c.value) & mask) == (value & mask)
+
+
+def glibc_verdict(rest: list["Const"], all_names: set[str],
+                  table: dict[str, list[tuple[str, int, int, str]]],
+                  known: dict[str, str]) -> tuple[list[str], int]:
+    """Problems with the constants musl's headers do not define, against the
+    table; and how many were compared."""
+    problems: list[str] = []
+    compared = 0
+    differing: set[str] = set()
+    for c in rest:
+        if c.name not in table:
+            problems.append(f"`{c.label}` is not in {GLIBC_CONSTANTS.name}, which has not "
+                            f"looked it up: regenerate it ({REGENERATE})")
+            continue
+        entries = table[c.name]
+        if not entries or c.ty not in INT_BITS:
+            continue
+        compared += 1
+        if any(agrees(c, v, bits) for _side, v, bits, _h in entries):
+            continue
+        differing.add(c.name)
+        if c.name in known:
+            continue
+        said = ", ".join(f"{h}'s {v}" for _side, v, _bits, h in entries)
+        problems.append(f"CONSTANT MISMATCH {c.label}: here {c.value} ({c.ty}), {said} "
+                        "(no musl header defines it; compared in the bits both have)")
+    for name in sorted(set(table) - all_names):
+        problems.append(f"{GLIBC_CONSTANTS.name} lists `{name}`, which the library no longer "
+                        f"defines: regenerate it ({REGENERATE})")
+    for name, why in sorted(known.items()):
+        if name not in differing:
+            problems.append(f"`{name}` is KNOWN_DIFFERENT_GLIBC and agrees now, or is gone. "
+                            f"Delete the entry; it read:\n  {why}")
+    return problems, compared
+
+
 def constants_source(includes: list[str], shared: list[Const]) -> tuple[str, dict[int, Const]]:
     """The translation unit, and which line asserts which constant."""
     lines = ["#define _GNU_SOURCE 1"] + [f"#include <{h}>" for h in includes] + [BITS_MACRO]
@@ -891,9 +1011,23 @@ def check_constants(zig: str, list_pairs: bool = False) -> Numbers:
                   f"{dump.stderr[-4000:]}")
             return Numbers(1, "", broken=True)
         tables[side] = macro_names(dump.stdout)
-    in_libc = [c for c in consts if c.name in tables["musl"]]
+    # The names no macro accounts for, tried as musl's enum constants.
+    others = sorted({c.name for c in consts
+                     if c.name not in tables["musl"] and c.name not in tables["kernel"]})
+    enums: set[str] = set()
+    if others and libc_h:
+        src, first = probe_source(libc_h, others)
+        proc = run_zig_unit(zig, ["-ferror-limit=0", "-c", "-o", "consts.o"], src)
+        errors = len(re.findall(r": (?:fatal )?error:", proc.stderr))
+        if errors > len(PROBE_ERROR_RE.findall(proc.stderr)):
+            print("check-libc-abi: the enum probe failed outside its probes:\n"
+                  f"{proc.stderr[-4000:]}")
+            return Numbers(1, "", broken=True)
+        enums = probed_constants(proc.stderr, others, first)
+    in_libc = [c for c in consts if c.name in tables["musl"] or c.name in enums]
     in_kernel = [c for c in consts
-                 if c.name in tables["kernel"] and c.name not in tables["musl"]]
+                 if c.name in tables["kernel"] and c.name not in tables["musl"]
+                 and c.name not in enums]
     shared = in_libc + in_kernel
     if list_pairs:
         for c in shared:
@@ -960,10 +1094,29 @@ def check_constants(zig: str, list_pairs: bool = False) -> Numbers:
         # A unit that failed for another reason reached no verdict on the
         # assertions after the failure, so a missing mismatch means nothing.
         return Numbers(problems + len(verdict.other), "", broken=True)
+
+    # The rest: against glibc's and the kernel's headers, through the table.
+    covered = tables["musl"] | tables["kernel"] | enums
+    rest = [c for c in consts if c.name not in covered]
+    if not GLIBC_CONSTANTS.exists():
+        print(f"check-libc-abi: {GLIBC_CONSTANTS} is missing: regenerate it ({REGENERATE})")
+        return Numbers(problems + 1, "", broken=True)
+    try:
+        table = read_glibc_constants(GLIBC_CONSTANTS.read_text(encoding="utf-8"))
+    except ValueError as e:
+        print(f"check-libc-abi: {e}")
+        return Numbers(problems + 1, "", broken=True)
+    glibc_problems, n_glibc = glibc_verdict(rest, {c.name for c in consts}, table,
+                                            KNOWN_DIFFERENT_GLIBC)
+    for p in glibc_problems:
+        print(f"check-libc-abi: {p}")
+    problems += len(glibc_problems)
     return Numbers(
         problems,
-        f"{len(shared)} constants checked against musl, {len(KNOWN_DIFFERENT)} known "
-        f"different, {len(NOT_CONSTANT_IN_MUSL)} not constants in musl",
+        f"{len(shared)} constants checked against musl ({len(enums)} of them enum constants), "
+        f"{n_glibc} against glibc's and the kernel's headers, {len(KNOWN_DIFFERENT)} + "
+        f"{len(KNOWN_DIFFERENT_GLIBC)} known different, {len(NOT_CONSTANT_IN_MUSL)} not "
+        "constants in musl",
     )
 
 
@@ -1042,6 +1195,53 @@ def constants_self_test() -> list[str]:
     v = classify_constants("/x/include/bits/foo.h:9:1: error: unknown type name 'bar'\n", at)
     check("an error in a header is reported too",
           len(v.other) == 1 and "outside" in v.other[0])
+
+    # The enum probe: one line per name, and the names whose lines drew no
+    # error are the integer constant expressions.
+    src, first = probe_source(["search.h"], ["FIND", "FILE", "nosuch"])
+    lines = src.splitlines()
+    check("each probe is its own line, after the includes",
+          lines[first - 1].startswith("enum { slate_probe_0 =") and "(FIND)" in lines[first - 1]
+          and "(nosuch)" in lines[first + 1])
+    err = (f"consts.c:{first + 1}:40: error: unexpected type name 'FILE'\n"
+           f"consts.c:{first + 2}:40: error: use of undeclared identifier 'nosuch'\n")
+    check("a name whose probe failed is not a constant",
+          probed_constants(err, ["FIND", "FILE", "nosuch"], first) == {"FIND"})
+
+    # The glibc table and its verdict.
+    table = read_glibc_constants(
+        "# comment\nRES_NOTLDQUERY\tlibc\t16777216\t32\tresolv.h\nLOCAL_ONLY\t-\n"
+        "NEG\tlibc\t-1\t32\tx.h\nWIDE\tkernel\t2147483648\t32\tlinux/y.h\n"
+        "TWO\tlibc\t1\t32\ta.h\nTWO\tlibc\t2\t32\tb.h\n")
+    check("the table reads values, and `-` as looked up and absent",
+          table["LOCAL_ONLY"] == [] and table["RES_NOTLDQUERY"] == [("libc", 16777216, 32, "resolv.h")])
+    rest = [Const("resolv", "RES_NOTLDQUERY", "u64", 0x0010_0000),
+            Const("x", "NEG", "u32", 0xFFFF_FFFF),
+            Const("y", "WIDE", "i64", -2147483648),
+            Const("z", "TWO", "i32", 2),
+            Const("w", "LOCAL_ONLY", "i32", 7),
+            Const("v", "NEW", "i32", 1)]
+    names = {c.name for c in rest} | {"GONE_FROM_TABLE_NOT"}
+    probs, n = glibc_verdict(rest, names, table, {})
+    text = "\n".join(probs)
+    check("a number not glibc's is a mismatch, naming the header",
+          "RES_NOTLDQUERY: here 1048576" in text and "resolv.h's 16777216" in text)
+    check("...compared in the bits both have: -1 in 32 is 0xffffffff, 2^31 in 32 is -2^31",
+          "NEG" not in text and "WIDE" not in text)
+    check("...and any one of several headers' values will do", "TWO" not in text)
+    check("a name glibc and the kernel do not define is not compared", "LOCAL_ONLY" not in text)
+    check("a name the table has not looked up is refused", "`v::NEW` is not in" in text)
+    check("the compared are counted", n == 4)
+    stale = read_glibc_constants("OLD\t-\n")
+    probs, _ = glibc_verdict([], set(), stale, {})
+    check("a name the library no longer defines makes the table stale",
+          len(probs) == 1 and "lists `OLD`" in probs[0])
+    two = {"TWO": table["TWO"]}
+    probs, _ = glibc_verdict([Const("t", "TWO", "i32", 1)], {"TWO"}, two, {"TWO": "why"})
+    check("a KNOWN_DIFFERENT_GLIBC entry that agrees now is refused",
+          len(probs) == 1 and "agrees now" in probs[0])
+    probs, _ = glibc_verdict([Const("t", "TWO", "i32", 3)], {"TWO"}, two, {"TWO": "why"})
+    check("...and one that still differs is let through", probs == [])
     return [f"constants: {f}" for f in failures]
 
 

@@ -472,6 +472,10 @@ fn a_dropdown_lists_its_choices_and_reports_the_one_chosen() {
     assert_eq!(font.rect.w, 110.0);
     assert_eq!(press(&mut r, &l, centre(font.rect)), RibbonEvent::Handled);
     assert_eq!(menu_labels(&r), ["Sans", "Serif", "Mono"]);
+    assert!(
+        r.menu.as_ref().unwrap().menu.width() >= font.rect.w,
+        "the list is narrower than the box it drops from"
+    );
     assert_eq!(
         choose(&mut r, &["Serif"]),
         RibbonEvent::Chose { id: FONT, index: 1 }
@@ -800,6 +804,34 @@ fn the_overflow_menu_holds_the_groups_there_is_no_room_for() {
     );
 }
 
+/// **Behind `»` goes everything from the first group that does not fit --
+/// not a narrow group further on that happens to fit in the gap**, which
+/// would put the groups out of their order.
+#[test]
+fn nothing_after_a_group_that_does_not_fit_is_shown() {
+    let group = |id: &str, label: &str, n: u64| {
+        Group::new(id, label).with(Control::button(Command::new(n, "x"), ButtonSize::Small))
+    };
+    let r = Ribbon::new(vec![
+        RibbonTab::new("t", "T")
+            .with(group("a", "A", 1))
+            .with(group("wide", "Supercalifragilistic", 2))
+            .with(group("b", "B", 3)),
+    ]);
+    let (_, small) = widths(&r);
+    assert!(
+        small[1] > small[0] + 1.0,
+        "the fixture's middle group is not the widest"
+    );
+    // Room for » and the first group, and for the last beside it -- not the
+    // middle one.
+    let width = OVERFLOW_WIDTH + small[0] + small[2];
+    let l = layout_at(&r, width);
+    let body = l.body.as_ref().unwrap();
+    assert_eq!(body.groups.iter().map(|g| g.group).collect::<Vec<_>>(), [0]);
+    assert_eq!(body.overflow.as_ref().unwrap().groups, [1, 2]);
+}
+
 /// **A ribbon narrower than `»` keeps it inside its own width**: a button
 /// past the ribbon's edge is one the window may not show.
 #[test]
@@ -927,6 +959,11 @@ fn columns_stack_three_rows_and_a_large_control_takes_one() {
         "a fourth row did not start a column"
     );
     assert_eq!(underline.y, BODY_TOP + CONTENT_TOP + ROW_HEIGHT);
+
+    // A gallery takes a column to itself, the body's full height.
+    let styles = slot(&r, &l, STYLES).rect;
+    assert_eq!(styles.h, CONTENT_HEIGHT, "the gallery was put in a row");
+    assert_eq!(styles.y, BODY_TOP + CONTENT_TOP);
 }
 
 /// Where the body starts in a ribbon laid out at the top of the window.
@@ -954,6 +991,8 @@ fn a_gallery_shows_the_run_that_ends_with_the_one_chosen() {
     assert_eq!(gallery_window(5, 3, None), 0..3);
     assert_eq!(gallery_window(5, 3, Some(1)), 0..3);
     assert_eq!(gallery_window(5, 3, Some(4)), 2..5);
+    // The first choice past the ones shown at the start: the window moves.
+    assert_eq!(gallery_window(5, 3, Some(3)), 1..4);
     assert_eq!(gallery_window(2, 3, None), 0..2);
     assert_eq!(gallery_window(5, 0, None), 0..1);
     assert_eq!(gallery_window(0, 3, None), 0..0);
@@ -1427,6 +1466,25 @@ fn a_letter_no_tip_starts_with_starts_again() {
     assert_eq!(r.handle_key(&l, &typed('q')), RibbonEvent::Handled);
     assert!(r.tips_shown());
     assert_eq!(r.handle_key(&l, &typed('c')), RibbonEvent::Command(CUT));
+}
+
+/// **A second letter that finishes no tip starts the typing over**: what
+/// comes next is a tip's first letter, not the rest of one already dropped.
+#[test]
+fn a_wrong_second_letter_starts_the_typing_over() {
+    let mut r = crowded(30);
+    let l = layout_at(&r, 4000.0);
+    r.handle_key(&l, &key(Key::F10, false));
+    // Items 27 on start with `t` (`ta`..`td`), and no tip is `tz`.
+    assert_eq!(r.handle_key(&l, &typed('t')), RibbonEvent::Handled);
+    assert_eq!(r.handle_key(&l, &typed('z')), RibbonEvent::Handled);
+    assert!(r.tips_shown());
+    r.handle_key(&l, &typed('i'));
+    assert_eq!(
+        r.handle_key(&l, &typed('a')),
+        RibbonEvent::Command(100),
+        "the dropped `t` was kept"
+    );
 }
 
 /// A tab of `n` small buttons, named `Item 1` onwards, numbered from 100.
@@ -2060,6 +2118,10 @@ fn an_id_that_is_not_plain_is_left_out() {
     defined[1].id = "my view;x=1".to_owned();
     let mut r = Ribbon::new(defined);
     assert!(r.hide_tab("my view;x=1", true));
+    assert_eq!(r.customization_text(), "ribbon1");
+    // A command taken out of, or put into, one of its groups likewise.
+    assert!(r.remove_from_group("my view;x=1", "zoom", ZOOM));
+    assert!(r.add_to_group("my view;x=1", "zoom", CUT));
     assert_eq!(r.customization_text(), "ribbon1");
     assert!(plain("a-b_c.1"));
     assert!(!plain(""));

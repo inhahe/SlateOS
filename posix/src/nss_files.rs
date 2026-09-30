@@ -47,12 +47,14 @@ pub(crate) enum Which {
     Rpc,
     /// `/etc/aliases` -- the mail aliases `<aliases.h>` reads.
     Aliases,
+    /// `/etc/netgroup` -- the netgroups `setnetgrent` and `innetgr` read.
+    Netgroup,
 }
 
 impl Which {
     /// How many there are: the host tests keep a slot for each.
     #[cfg(test)]
-    const COUNT: usize = 14;
+    const COUNT: usize = 15;
 }
 
 impl Which {
@@ -73,6 +75,7 @@ impl Which {
             Which::Shells => b"/etc/shells\0",
             Which::Rpc => b"/etc/rpc\0",
             Which::Aliases => b"/etc/aliases\0",
+            Which::Netgroup => b"/etc/netgroup\0",
         }
     }
 }

@@ -45,6 +45,17 @@ int getprotobyname_r(const char *__restrict, struct protoent *__restrict, char *
 int getprotobynumber_r(int, struct protoent *__restrict, char *__restrict, size_t,
                        struct protoent **__restrict);
 int getservent_r(struct servent *__restrict, char *__restrict, size_t, struct servent **__restrict);
+
+/* Netgroups, /etc/netgroup: start enumerating a group's (host,user,domain)
+ * triples (1, or 0 for no such group); end it; the next triple, its fields
+ * NULL for any value (1, or 0 at the end -- errno ERANGE when the buffer is
+ * too small); whether a group has a triple for these (NULL: any). */
+int setnetgrent(const char *);
+void endnetgrent(void);
+int getnetgrent(char **__restrict, char **__restrict, char **__restrict);
+int getnetgrent_r(char **__restrict, char **__restrict, char **__restrict, char *__restrict,
+                  size_t);
+int innetgr(const char *, const char *, const char *, const char *);
 #endif
 
 /* The obsolete lookups, which POSIX.1-2008 dropped: glibc declares them

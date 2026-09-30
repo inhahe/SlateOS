@@ -452,6 +452,7 @@ pub mod monetary;
 pub mod mqueue;
 pub mod narrow;
 pub mod netdb;
+pub mod netgroup;
 pub mod nl_types;
 pub(crate) mod nss_files;
 pub(crate) mod objtable;

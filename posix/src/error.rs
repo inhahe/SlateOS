@@ -116,26 +116,36 @@ impl Streams {
     }
 }
 
-/// Write `bytes` to `out`. What a failed write loses is the message itself,
-/// which has nowhere else to be reported -- as in glibc, whose `error`
-/// returns nothing.
-pub(crate) fn put(out: *mut u8, bytes: &[u8]) {
-    // SAFETY: `out` is a live stream; `bytes` is `bytes.len()` readable bytes.
-    let _ = unsafe { crate::stdio::fwrite(bytes.as_ptr(), 1, bytes.len(), out) };
-}
-
-/// Write the C string `s` to `out`, `(null)` for NULL, as `printf("%s")`
-/// does.
-pub(crate) fn put_cstr(out: *mut u8, s: *const u8) {
-    if s.is_null() {
-        put(out, b"(null)");
-        return;
+/// Writing a message's pieces, which `err.rs`'s family does too -- so an
+/// archive member of their own. Were they `error`'s, a program calling `warn`
+/// would extract `error`'s member with them, and one that also defines its
+/// own `error` (gnulib's `error` module does, wherever the C library lacks
+/// one, as musl does) would link two. See string.rs's module header, and
+/// CHECK 5 in scripts/check-libc-shape.py, which holds the archive to it.
+mod output {
+    /// Write `bytes` to `out`. What a failed write loses is the message
+    /// itself, which has nowhere else to be reported -- as in glibc, whose
+    /// `error` returns nothing.
+    pub(crate) fn put(out: *mut u8, bytes: &[u8]) {
+        // SAFETY: `out` is a live stream; `bytes` is `bytes.len()` readable
+        // bytes.
+        let _ = unsafe { crate::stdio::fwrite(bytes.as_ptr(), 1, bytes.len(), out) };
     }
-    // SAFETY: a C string, the caller's.
-    let len = unsafe { crate::string::strlen(s) };
-    // SAFETY: `len` bytes at `s`.
-    put(out, unsafe { core::slice::from_raw_parts(s, len) });
+
+    /// Write the C string `s` to `out`, `(null)` for NULL, as `printf("%s")`
+    /// does.
+    pub(crate) fn put_cstr(out: *mut u8, s: *const u8) {
+        if s.is_null() {
+            put(out, b"(null)");
+            return;
+        }
+        // SAFETY: a C string, the caller's.
+        let len = unsafe { crate::string::strlen(s) };
+        // SAFETY: `len` bytes at `s`.
+        put(out, unsafe { core::slice::from_raw_parts(s, len) });
+    }
 }
+pub(crate) use output::{put, put_cstr};
 
 /// Is this `error_at_line` a repeat that [`error_one_per_line`] suppresses?
 /// If not, it becomes the last one.

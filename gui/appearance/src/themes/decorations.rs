@@ -15,6 +15,7 @@
 //!     height: 30        # 20 to 56 pixels
 //!     align: left       # left | center
 //!     bold: false
+//!     overflow: ellipsis   # clip | ellipsis | keep-tail
 //!   buttons:
 //!     side: right       # left | right
 //!     order: [minimize, maximize, close]   # left to right, each once
@@ -131,10 +132,18 @@ fn read_title_bar(doc: &Document, style: &mut DecorationStyle, warnings: &mut Wa
             "bold" => read_flag(doc, &path, warnings)
                 .map(|bold| style.title_bold = bold)
                 .is_some(),
+            "overflow" => read_choice(
+                doc,
+                &path,
+                &guitk::text::Overflow::ALL.map(|o| (o.name(), o)),
+                warnings,
+            )
+            .map(|overflow| style.title_overflow = overflow)
+            .is_some(),
             other => {
                 warnings.push(format!(
                     "`{}` is ignored: a title bar has no setting called `{}` \
-                     (it has height, align and bold)",
+                     (it has height, align, bold and overflow)",
                     at(&path),
                     quoted(other)
                 ));

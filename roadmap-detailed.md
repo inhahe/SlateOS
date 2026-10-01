@@ -1800,7 +1800,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 
 ##### Tier 1 — Window Decorations
 - [-] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment — *lane C's half done 2026-10-01 (`design-decisions.md` §1456): a theme's `window-decorations` section sets the bar's height, the title's alignment and weight, the buttons' side, order, shape (rounded, circle, square, or a glyph alone), size and gap, chosen as `theme.decorations`; `DecorationStyle::title_bar` places the buttons and title. Lane F draws from it (`requests/c-f-draw-window-frames-from-the-theme.md`), lane E chooses it in Settings (`requests/c-e-choose-the-window-frames-in-settings.md`). The title's typeface is the user's UI font, not the theme's.*
-- [ ] **Title-text overflow styling (CSS-like `text-overflow`).** When the window
+- [-] **Title-text overflow styling (CSS-like `text-overflow`).** *2026-10-01: the vocabulary is `guitk::text::Overflow` (clip, ellipsis, keep-tail), cut in fitted glyphs by `text::fit_line`; a theme sets it as `window-decorations` -> `title-bar.overflow`. The taskbar's labels are cut by it; the compositor's titles are lane F's (`requests/c-f-draw-window-frames-from-the-theme.md`).* When the window
   title is too long to fit the available title-bar width, the theme/style controls
   how it is truncated. Support at least: (a) **clip** (hard cut), (b) **ellipsis at
   the end** (`"Long docume…"`), and (c) a **"keep the tail" / ellipsis-at-start**
@@ -1840,7 +1840,7 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
 - [ ] Transparency/blur level
 - [ ] Icon spacing
 - [ ] Visual treatment (color, border, shadow) — not position or size (those are layout settings, not theme)
-- [ ] **Taskbar tab-label overflow styling (CSS-like `text-overflow`).** When a
+- [x] **Taskbar tab-label overflow styling (CSS-like `text-overflow`).** *2026-10-01: a window's label on the taskbar is cut as the theme's `title-bar.overflow` says -- the same setting as window titles, so the two are cut alike -- in fitted glyphs (`guitk::text::fit_line`), as the tile's width changes.* When a
   taskbar entry shows an app/window name (optional label mode, §Taskbar) and the
   label is wider than the tab, the theme controls truncation using the *same*
   property set as window titles: **clip**, **end-ellipsis**, or **start-ellipsis /

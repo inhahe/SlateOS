@@ -8437,20 +8437,34 @@ impl DesktopShell {
                     // the half that depends on *which letters* cannot be fixed
                     // by any constant.
                     //
-                    // `text_in` also marks the cut with `…`, so a truncated
-                    // title is distinguishable from a short one — a silently
-                    // clipped one is not, and a window called "Save changes to
+                    // Cut the way the theme cuts window titles
+                    // (`window-decorations` -> `title-bar.overflow`, the
+                    // same vocabulary for both, as `design.txt` asks): at the
+                    // end with a `…` by default, so a truncated title is
+                    // distinguishable from a short one -- a silently clipped
+                    // one is not, and a window called "Save changes to
                     // report.docx?" reading as "Save changes to rep" is a
-                    // different sentence. The whole of it is the tile's
-                    // tooltip.
-                    tree.text_in(
-                        title_x,
-                        tile.y + (tile.h - title_size).max(0.0) / 2.0,
-                        room,
+                    // different sentence -- or keeping the tail, for titles
+                    // that end in the file name. The whole of it is the
+                    // tile's tooltip.
+                    let weight = guitk::render::FontWeightHint::Regular;
+                    let (label, overflow) = text::fit_line(
                         &window.title,
-                        self.theme.taskbar_fg,
+                        room,
                         title_size,
+                        weight,
+                        self.appearance.decorations().title_overflow,
                     );
+                    tree.push(guitk::render::RenderCommand::Text {
+                        x: title_x,
+                        y: tile.y + (tile.h - title_size).max(0.0) / 2.0,
+                        text: label,
+                        color: self.theme.taskbar_fg,
+                        font_size: title_size,
+                        font_weight: weight,
+                        max_width: Some(room.max(0.0)),
+                        overflow,
+                    });
                 }
             }
         }
@@ -23084,6 +23098,42 @@ mod taskbar_pin_tests {
             short.x + short.w <= shell.tray_x(),
             "the row ran into the tray"
         );
+    }
+
+    /// **A title too long for its tile is cut the way the theme cuts window
+    /// titles**: at the end with a mark by default, or keeping its tail --
+    /// the file name at the end of "… - notes/final.txt" -- under a theme
+    /// whose `title-bar.overflow` says so.
+    #[test]
+    fn a_long_title_is_cut_the_way_the_theme_cuts_titles() {
+        use guitk::render::RenderCommand;
+        let title = "Editor - /home/user/projects/report/notes/final.txt";
+        let drawn = |shell: &DesktopShell| {
+            shell
+                .render_taskbar()
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { text, .. } if text.contains('…') => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("the title is cut")
+        };
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(0, vec![window_of(1, "", title)]));
+        let end = drawn(&shell);
+        assert!(end.ends_with('…') && end.starts_with("Editor"), "{end}");
+
+        shell.appearance.decoration_theme = appearance::themes::DecorationTheme::from_style(
+            "tails",
+            appearance::decorations::DecorationStyle {
+                title_overflow: guitk::text::Overflow::KeepTail,
+                ..appearance::decorations::DecorationStyle::AERO
+            },
+        );
+        let tail = drawn(&shell);
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with("final.txt"), "{tail}");
     }
 
     /// **A window's tile is no wider than the reference's 160**, however long

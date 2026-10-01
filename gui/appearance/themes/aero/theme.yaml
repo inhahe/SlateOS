@@ -256,6 +256,9 @@ window-decorations:
     height: 30         # 20 to 56 pixels
     align: left        # where the title goes: left, or center
     bold: false        # whether the title is bold
+    overflow: ellipsis # a title too long for the bar: clip, ellipsis (cut at
+                       # the end), or keep-tail (cut at the start, keeping
+                       # the end) -- taskbar labels are cut the same way
   buttons:
     side: right        # which end of the title bar: left, or right
     order: [minimize, maximize, close]   # left to right, each once

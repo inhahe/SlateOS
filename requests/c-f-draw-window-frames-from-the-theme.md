@@ -18,7 +18,7 @@ compositor still draws from its own constants (`TITLE_BAR_HEIGHT`,
 
 - `appearance::AppearanceSettings::decorations()` -> `DecorationStyle`
   (`appearance::decorations`): `title_height`, `title_align`
-  (`Left` / `Center`), `title_bold`, `button_side` (`Left` / `Right`),
+  (`Left` / `Center`), `title_bold`, `title_overflow`, `button_side` (`Left` / `Right`),
   `buttons` (the three, left to right as drawn), `button_shape`
   (`Rounded` -- today's: as round as the window's corners -- `Circle`,
   `Square`, `Glyph`: no face, the button's mark alone, lit under the
@@ -46,7 +46,13 @@ compositor still draws from its own constants (`TITLE_BAR_HEIGHT`,
    size, `Square` at radius 0, `Glyph` with no face -- the button's mark
    (`×`, `□`/`❐`, `–`) in the title text colour, with the face drawn only
    while the pointer is on it.
-3. Redraw and re-lay-out every window when the setting changes (the
+3. Cut a title too long for its bar as `title_overflow` says
+   (`guitk::text::Overflow`: clip, ellipsis, or keep-tail -- `…` and the
+   title's end), with `guitk::text::fit_line(title, room, size, weight,
+   overflow)`, which answers the string and the `TextOverflow` to draw it
+   with. The desktop's taskbar already cuts window labels this way, so a
+   title and its label are cut alike.
+4. Redraw and re-lay-out every window when the setting changes (the
    appearance watcher already fires on `theme.decorations` and on edits to
    the chosen theme's file: `themes::fingerprint` includes it).
 

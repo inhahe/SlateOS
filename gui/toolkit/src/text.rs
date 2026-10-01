@@ -952,6 +952,66 @@ pub fn elide_start(
     out
 }
 
+/// How a one-line text too long for its room is cut -- CSS's
+/// `text-overflow`, with keeping the tail added for names whose end is what
+/// tells them apart. One vocabulary for every such line: a window's title,
+/// its taskbar label (`design.txt` -> *Taskbar/Panel Styling*: "the *same*
+/// property set as window titles").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overflow {
+    /// Cut at the edge, with no mark.
+    Clip,
+    /// Cut at the end, marked with `…`: `"Long docume…"`.
+    #[default]
+    Ellipsis,
+    /// Cut at the start, marked with `…`, keeping the end: `"…ort/final.txt"`
+    /// -- for paths and file names, whose end is the part that differs.
+    KeepTail,
+}
+
+impl Overflow {
+    /// Every way, in the order a chooser offers them.
+    pub const ALL: [Self; 3] = [Self::Clip, Self::Ellipsis, Self::KeepTail];
+
+    /// Its name in a theme or settings file.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Clip => "clip",
+            Self::Ellipsis => "ellipsis",
+            Self::KeepTail => "keep-tail",
+        }
+    }
+}
+
+/// `text` as it is drawn in `max_width` when cut as `overflow` says, and the
+/// [`TextOverflow`] to draw it with: measured
+/// here, in glyphs that fit, so the cut and its mark land where the text
+/// really runs out. A clipped line is left whole for the renderer to cut at
+/// the edge; an elided one is cut here and still asks the renderer for a
+/// mark, which it draws only if its face measures wider than this one did.
+#[must_use]
+pub fn fit_line(
+    text: &str,
+    max_width: f32,
+    size: f32,
+    weight: FontWeightHint,
+    overflow: Overflow,
+) -> (String, crate::render::TextOverflow) {
+    let max_width = max_width.max(0.0);
+    match overflow {
+        Overflow::Clip => (text.to_owned(), crate::render::TextOverflow::Clip),
+        Overflow::Ellipsis => (
+            elide(text, max_width, "…", size, weight),
+            crate::render::TextOverflow::Ellipsis,
+        ),
+        Overflow::KeepTail => (
+            elide_start(text, max_width, "…", size, weight),
+            crate::render::TextOverflow::Ellipsis,
+        ),
+    }
+}
+
 /// `text` broken into lines no wider than `max_width`, breaking at spaces.
 ///
 /// Callers need this because [`RenderCommand::Text`] does **not** wrap: the
@@ -2803,6 +2863,43 @@ mod tests {
                 "{out:?} > {max}"
             );
         }
+    }
+
+    /// **Each way of cutting a long line does what its name says** -- clipped
+    /// left whole for the renderer, cut at the end with a mark, or cut at the
+    /// start keeping the file name -- each fitting its room; a line that fits
+    /// is left whole by all three, and no room draws nothing that elides.
+    #[test]
+    fn a_long_line_is_cut_the_way_asked() {
+        use crate::render::TextOverflow;
+        let path = "/home/user/projects/report/final.txt";
+        let (size, w) = (16.0, FontWeightHint::Regular);
+        let room = measure("report/final.txt", size, w) + measure("…", size, w) + 1.0;
+
+        let (clip, how) = fit_line(path, room, size, w, Overflow::Clip);
+        assert_eq!((clip.as_str(), how), (path, TextOverflow::Clip));
+
+        let (end, how) = fit_line(path, room, size, w, Overflow::Ellipsis);
+        assert_eq!(how, TextOverflow::Ellipsis);
+        assert!(end.ends_with('…'), "{end}");
+        assert!(path.starts_with(end.trim_end_matches('…')), "{end}");
+        assert!(measure(&end, size, w) <= room);
+
+        let (tail, how) = fit_line(path, room, size, w, Overflow::KeepTail);
+        assert_eq!(how, TextOverflow::Ellipsis);
+        assert!(tail.starts_with('…'), "{tail}");
+        assert!(tail.ends_with("final.txt"), "{tail}");
+        assert!(measure(&tail, size, w) <= room);
+
+        for overflow in Overflow::ALL {
+            assert_eq!(fit_line("short", 1e6, size, w, overflow).0, "short");
+        }
+        assert_eq!(fit_line(path, -5.0, size, w, Overflow::KeepTail).0, "");
+        assert_eq!(fit_line(path, -5.0, size, w, Overflow::Ellipsis).0, "");
+        assert_eq!(
+            Overflow::ALL.map(Overflow::name),
+            ["clip", "ellipsis", "keep-tail"]
+        );
     }
 
     #[test]

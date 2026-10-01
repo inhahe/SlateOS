@@ -84,6 +84,9 @@ pub struct DecorationStyle {
     pub title_align: TitleAlign,
     /// Whether the title is bold.
     pub title_bold: bool,
+    /// How a title too long for its bar is cut -- and a window's label on
+    /// the taskbar, the same way (`guitk::text::Overflow`).
+    pub title_overflow: guitk::text::Overflow,
     /// Which end the buttons are at.
     pub button_side: ButtonSide,
     /// The buttons, left to right as drawn, each once.
@@ -114,6 +117,7 @@ impl DecorationStyle {
         title_height: 30,
         title_align: TitleAlign::Left,
         title_bold: false,
+        title_overflow: guitk::text::Overflow::Ellipsis,
         button_side: ButtonSide::Right,
         buttons: TitleButton::ALL,
         button_shape: ButtonShape::Rounded,

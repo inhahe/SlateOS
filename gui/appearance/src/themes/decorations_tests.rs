@@ -47,6 +47,7 @@ const FULL: &str = "window-decorations:
     height: 40
     align: center
     bold: true
+    overflow: keep-tail
   buttons:
     side: left
     order: [close, minimize, maximize]
@@ -62,6 +63,7 @@ const FULL_STYLE: DecorationStyle = DecorationStyle {
     title_height: 40,
     title_align: TitleAlign::Center,
     title_bold: true,
+    title_overflow: guitk::text::Overflow::KeepTail,
     button_side: ButtonSide::Left,
     buttons: [
         TitleButton::Close,
@@ -242,7 +244,7 @@ fn the_shipped_built_in_theme_writes_out_the_built_in_frames() {
     );
     assert_eq!(
         doc.keys(&[SECTION, "title-bar"]),
-        ["height", "align", "bold"]
+        ["height", "align", "bold", "overflow"]
     );
     assert_eq!(
         doc.keys(&[SECTION, "buttons"]),

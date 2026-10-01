@@ -1940,6 +1940,53 @@ fn changing_the_fit_alone_does_not_reload_the_picture() {
     );
 }
 
+/// **The position named in the settings is the part of the picture shown,
+/// and moving it re-reads nothing** -- `design.txt`'s "let the user scroll
+/// the image up/down or right/left to center it on the desktop how they
+/// want".
+#[test]
+fn the_wallpaper_shows_the_part_the_settings_say() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper = Some(fixture("rgb8"));
+    session.sync_wallpaper();
+    let id = session.wallpaper_mut().current_image_id();
+    assert_eq!(session.wallpaper_mut().config.position, (0.5, 0.5));
+
+    session.shell_mut().appearance.wallpaper_position = (0.0, 1.0);
+    session.sync_wallpaper();
+    assert_eq!(session.wallpaper_mut().config.position, (0.0, 1.0));
+    assert_eq!(
+        session.wallpaper_mut().current_image_id(),
+        id,
+        "moving the picture issued it a new id, so it will be decoded again"
+    );
+}
+
+/// **A rotating folder is placed as the settings say too.** Only the fixed
+/// picture's path applied the fit: a folder kept whatever fit was in force
+/// before it started, whatever the user chose after.
+#[test]
+fn a_rotating_folder_is_placed_as_the_settings_say() {
+    let (mut session, _desktop, _turn) = session();
+    session.shell_mut().appearance.wallpaper_folder = Some(std::env::temp_dir());
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Fit;
+    session.shell_mut().appearance.wallpaper_position = (0.25, 0.75);
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Fit
+    );
+    assert_eq!(session.wallpaper_mut().config.position, (0.25, 0.75));
+
+    session.shell_mut().appearance.wallpaper_fit = appearance::ImageFit::Center;
+    session.sync_wallpaper();
+    assert_eq!(
+        session.wallpaper_mut().config.fit,
+        appearance::ImageFit::Center,
+        "a fit chosen while the folder rotates did not take"
+    );
+}
+
 /// **A wallpaper chosen while the desktop is running is adopted without a
 /// logout.**
 ///

@@ -616,6 +616,10 @@ pub struct LoginScreen {
     /// same as the desktop, and a picture cropped in one place and letterboxed
     /// in the other is two different backgrounds however identical the file.
     background_fit: ImageFit,
+    /// Which part of that picture shows, for the same reason: the desktop's
+    /// position (`WallpaperConfig::position`), so the greeter shows the part
+    /// of the picture the user chose.
+    background_position: (f32, f32),
     /// The picture's own pixel size.
     ///
     /// Carried for the reason `known-issues.md`
@@ -676,11 +680,26 @@ impl LoginScreen {
     /// picture, when the file cannot be read, and when the compositor refuses
     /// it -- in all three cases the underlay is the background, and the
     /// greeter must still be usable.
-    pub fn set_background_image(&mut self, id: u64, width: f32, height: f32, fit: ImageFit) {
+    pub fn set_background_image(
+        &mut self,
+        id: u64,
+        width: f32,
+        height: f32,
+        fit: ImageFit,
+        position: (f32, f32),
+    ) {
         self.background_image_id = id;
         self.background_image_w = width;
         self.background_image_h = height;
         self.background_fit = fit;
+        self.background_position = position;
+    }
+
+    /// Place the picture this screen shows anew -- the desktop's fit or
+    /// position changed -- keeping the picture.
+    pub fn set_background_placement(&mut self, fit: ImageFit, position: (f32, f32)) {
+        self.background_fit = fit;
+        self.background_position = position;
     }
 
     /// The picture this screen is drawing, or `0` for none.
@@ -738,6 +757,7 @@ impl LoginScreen {
             shake_timer: 0.0,
             background_image_id: 0,
             background_fit: ImageFit::Fill,
+            background_position: (0.5, 0.5),
             background_image_w: 0.0,
             background_image_h: 0.0,
             icon_registry: crate::IconRegistry::default(),
@@ -1286,6 +1306,7 @@ impl LoginScreen {
                         self.background_image_w,
                         self.background_image_h,
                         self.background_fit,
+                        self.background_position,
                     );
                     commands.push(RenderCommand::Image {
                         x,
@@ -1797,6 +1818,36 @@ mod tests {
 
     fn make_screen() -> LoginScreen {
         LoginScreen::new(1920.0, 1080.0, make_users())
+    }
+
+    /// Where the greeter draws its picture, if it draws one.
+    fn picture_at(s: &LoginScreen) -> Option<(f32, f32, f32, f32)> {
+        s.render(&Palette::for_mode(false))
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Image {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+    }
+
+    /// **The greeter shows the part of the picture the desktop shows**, and
+    /// moves it when the desktop's placement changes, keeping the picture.
+    #[test]
+    fn the_greeter_shows_the_desktops_part_of_the_picture() {
+        let mut s = make_screen();
+        s.config.background = LoginBackground::SameAsDesktop;
+        // 3840x1080 filling 1920x1080: twice as wide as the screen.
+        s.set_background_image(7, 3840.0, 1080.0, ImageFit::Fill, (0.0, 0.5));
+        assert_eq!(picture_at(&s), Some((0.0, 0.0, 3840.0, 1080.0)));
+        s.set_background_placement(ImageFit::Fill, (1.0, 0.5));
+        assert_eq!(picture_at(&s), Some((-1920.0, 0.0, 3840.0, 1080.0)));
+        assert_eq!(s.background_image(), 7, "moving it dropped the picture");
     }
 
     #[test]

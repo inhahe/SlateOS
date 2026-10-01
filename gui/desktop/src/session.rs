@@ -1811,7 +1811,6 @@ impl<T: Transport> ShellSession<T> {
                     return Ok(());
                 }
                 self.release_login_image()?;
-                let fit = self.wallpaper.config.fit;
                 let outcome = match result {
                     Ok(image) => {
                         self.upload_decoded(self.login_surface.window, job.id, &job.path, &image)?
@@ -1830,7 +1829,7 @@ impl<T: Transport> ShellSession<T> {
                     PictureUpload::Failed(why) => {
                         // The theme colour underneath is a perfectly usable
                         // greeter.
-                        self.clear_login_picture(fit);
+                        self.clear_login_picture();
                         self.login_background_error = Some(why);
                     }
                 }
@@ -1970,15 +1969,16 @@ impl<T: Transport> ShellSession<T> {
             Some(crate::login_screen::LoginBackground::CustomImage(path)) => Some(path.clone()),
             _ => None,
         };
-        // The desktop's fit, including for a picture only the greeter shows:
-        // there is one fit setting, and a second one that only applied here
-        // would be a setting with nowhere to set it.
+        // The desktop's fit and position, including for a picture only the
+        // greeter shows: there is one of each setting, and a second that only
+        // applied here would be a setting with nowhere to set it.
         let fit = self.wallpaper.config.fit;
+        let position = self.wallpaper.config.position;
 
         let Some(path) = want else {
             self.release_login_image()?;
             self.login_image = None;
-            self.clear_login_picture(fit);
+            self.clear_login_picture();
             self.login_background_error = None;
             return Ok(());
         };
@@ -1994,7 +1994,7 @@ impl<T: Transport> ShellSession<T> {
             if let Some((id, w, h)) = self.login_uploaded.filter(|(id, _, _)| *id == asked) {
                 if !self.login_shows(id) {
                     if let Some(screen) = self.login.as_mut() {
-                        screen.set_background_image(id, w, h, fit);
+                        screen.set_background_image(id, w, h, fit, position);
                     }
                 }
             }
@@ -2017,9 +2017,10 @@ impl<T: Transport> ShellSession<T> {
     }
 
     /// Tell the greeter it has no picture, leaving the colour underneath.
-    fn clear_login_picture(&mut self, fit: appearance::ImageFit) {
+    fn clear_login_picture(&mut self) {
+        let (fit, position) = (self.wallpaper.config.fit, self.wallpaper.config.position);
         if let Some(screen) = self.login.as_mut() {
-            screen.set_background_image(0, 0.0, 0.0, fit);
+            screen.set_background_image(0, 0.0, 0.0, fit, position);
         }
     }
 
@@ -2913,7 +2914,13 @@ impl<T: Transport> ShellSession<T> {
                 // than left for `refresh_login_image` to notice, because the
                 // style may now be one that wants no picture at all, and an
                 // upload nothing will ever draw still costs the link's budget.
-                screen.set_background_image(0, 0.0, 0.0, self.wallpaper.config.fit);
+                screen.set_background_image(
+                    0,
+                    0.0,
+                    0.0,
+                    self.wallpaper.config.fit,
+                    self.wallpaper.config.position,
+                );
                 self.dirty = true;
             }
         }
@@ -2939,6 +2946,25 @@ impl<T: Transport> ShellSession<T> {
     /// switches between light and dark, and only one of them is a decision the
     /// user made.
     fn sync_wallpaper(&mut self) {
+        // How the picture is placed -- its fit and which part of it shows --
+        // is the same for every source of it, a fixed picture, a schedule's
+        // or a folder's, and is applied when it is drawn, so changing it needs
+        // no new pixels. Applied here, before the sources part ways: a
+        // rotating folder used to keep whatever fit was in force before it
+        // started, whatever the user chose after. The greeter, showing the
+        // same picture, is told too -- it used to keep the old placement
+        // until its picture next changed.
+        let fit = self.shell.appearance.wallpaper_fit;
+        let position = self.shell.appearance.wallpaper_position;
+        if self.wallpaper.config.fit != fit || self.wallpaper.config.position != position {
+            self.wallpaper.set_fit(fit);
+            self.wallpaper.set_position(position);
+            if let Some(screen) = self.login.as_mut() {
+                screen.set_background_placement(fit, position);
+            }
+            self.dirty = true;
+        }
+
         // A time-of-day schedule wins over a folder and a picture, and a
         // rotation folder over a fixed picture: each *is* the wallpaper, and
         // honouring two would leave one visible in the settings file and never
@@ -2965,17 +2991,12 @@ impl<T: Transport> ShellSession<T> {
         let wanted = scheduled.or_else(|| self.shell.appearance.wallpaper.clone());
         match wanted.as_deref() {
             Some(path) => {
-                let fit = self.shell.appearance.wallpaper_fit;
+                // Only a new picture is a new image: the placement was applied
+                // above, through `set_fit` and `set_position`, which issue no
+                // new id -- re-reading the file to move it would decode a
+                // full-screen photograph to learn nothing new about it.
                 if self.wallpaper.current_image_path() != Some(path) {
                     self.wallpaper.set_image(path, fit);
-                    self.dirty = true;
-                } else if self.wallpaper.config.fit != fit {
-                    // The picture has not changed, only where it sits. Through
-                    // `set_fit`, which does not issue a new image id: the fit
-                    // is applied when the wallpaper is drawn, so re-reading the
-                    // file to move it would decode a full-screen photograph to
-                    // learn nothing new about it.
-                    self.wallpaper.set_fit(fit);
                     self.dirty = true;
                 }
             }

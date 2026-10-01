@@ -1611,6 +1611,16 @@ pub struct AppearanceSettings {
     /// expects. The same argument `night_light`/`night_light_strength` makes
     /// one field along.
     pub wallpaper_fit: ImageFit,
+    /// Which part of the picture shows where it overflows the screen -- and
+    /// where it sits where it is smaller than the screen: fractions across
+    /// and down, `(0.0, 0.0)` its top-left corner at the screen's, the
+    /// default `(0.5, 0.5)` its middle at the screen's middle, `(1.0, 1.0)`
+    /// its bottom-right at the screen's. `design.txt`: "let the user scroll
+    /// the image up/down or right/left to center it on the desktop how they
+    /// want". `wallpaper.position_x` and `position_y` in the file, held to
+    /// 0..=1. The login screen, showing the same picture, shows the same part
+    /// of it.
+    pub wallpaper_position: (f32, f32),
 
     /// A folder to rotate wallpapers from, instead of one fixed picture.
     ///
@@ -1773,6 +1783,7 @@ impl Default for AppearanceSettings {
             // different shape usually wants, and it is what the shell did
             // unconditionally before this was settable.
             wallpaper_fit: ImageFit::Fill,
+            wallpaper_position: (0.5, 0.5),
             wallpaper_folder: None,
             // Ten minutes. Long enough that a picture is a background rather
             // than a distraction, short enough that a user who turns rotation
@@ -2060,6 +2071,13 @@ impl AppearanceSettings {
         // `clamp` cannot be handed one from a config file; a NaN written by a
         // future code path would panic here rather than propagate silently.
         self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
+        // Fractions of the room a picture leaves; a NaN set in code is the
+        // middle rather than a panic or a picture nowhere.
+        let place = |v: f32| if v.is_nan() { 0.5 } else { v.clamp(0.0, 1.0) };
+        self.wallpaper_position = (
+            place(self.wallpaper_position.0),
+            place(self.wallpaper_position.1),
+        );
         self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
         self.scaling_percent = self.scaling_percent.clamp(100, 300);
         // Up to four times, not the a11y module's five: the caret is drawn
@@ -2404,6 +2422,16 @@ impl AppearanceSettings {
             s.wallpaper_fit,
             doc.get_str(&["wallpaper", "fit"])
                 .and_then(|v| ImageFit::from_yaml_name(v.trim()))
+        );
+        read_into!(
+            s.wallpaper_position.0,
+            doc.get_f64(&["wallpaper", "position_x"])
+                .map(|v| (v as f32).clamp(0.0, 1.0))
+        );
+        read_into!(
+            s.wallpaper_position.1,
+            doc.get_f64(&["wallpaper", "position_y"])
+                .map(|v| (v as f32).clamp(0.0, 1.0))
         );
 
         if let Some(path) = doc.get_str(&["wallpaper", "image"]) {
@@ -2754,6 +2782,14 @@ impl AppearanceSettings {
         let schedule: Vec<&str> = schedule.iter().map(String::as_str).collect();
         doc.set_seq(&["wallpaper", "schedule"], &schedule);
         doc.set_str(&["wallpaper", "fit"], self.wallpaper_fit.yaml_name());
+        doc.set_f64(
+            &["wallpaper", "position_x"],
+            f64::from(self.wallpaper_position.0),
+        );
+        doc.set_f64(
+            &["wallpaper", "position_y"],
+            f64::from(self.wallpaper_position.1),
+        );
         doc.set_str(&["login", "background"], self.login_background.yaml_name());
         match &self.login_background {
             LoginBackground::SolidColor(color) => {
@@ -3638,6 +3674,7 @@ mod tests {
             // filesystem the user named, and a tidy ASCII fixture would pass
             // through a codec that mangled either.
             wallpaper_fit: ImageFit::Tile,
+            wallpaper_position: (0.25, 0.75),
             wallpaper: Some(PathBuf::from("/home/u/Pictures/maíz del alba.png")),
             theme_mode: ThemeMode::Light,
             // Not 07:00-19:00. Read back whatever the mode, since the hours are
@@ -4138,6 +4175,37 @@ mod tests {
                 Some("nord")
             );
         });
+    }
+
+    /// **The wallpaper's position is read, held to 0..=1 and written back**;
+    /// absent, it is the middle, and a NaN set in code is the middle too.
+    #[test]
+    fn the_wallpaper_position_is_read_held_and_written() {
+        let none = AppearanceSettings::read_from(&Document::parse(""));
+        assert_eq!(none.wallpaper_position, (0.5, 0.5));
+
+        let s = AppearanceSettings::read_from(&Document::parse(
+            "wallpaper:\n  position_x: 0.25\n  position_y: 0.9\n",
+        ));
+        assert_eq!(s.wallpaper_position, (0.25, 0.9));
+
+        let held = AppearanceSettings::read_from(&Document::parse(
+            "wallpaper:\n  position_x: 1.7\n  position_y: -0.5\n",
+        ));
+        assert_eq!(held.wallpaper_position, (1.0, 0.0));
+
+        let mut written = Document::new();
+        s.write_into(&mut written);
+        assert_eq!(written.get_f64(&["wallpaper", "position_x"]), Some(0.25));
+        let back = AppearanceSettings::read_from(&written);
+        assert_eq!(back.wallpaper_position, (0.25, 0.9));
+
+        let mut nan = AppearanceSettings {
+            wallpaper_position: (f32::NAN, 2.0),
+            ..AppearanceSettings::default()
+        };
+        nan.validate();
+        assert_eq!(nan.wallpaper_position, (0.5, 1.0));
     }
 
     /// **The window frames are their own setting**, `theme.decorations`:

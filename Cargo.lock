@@ -429,14 +429,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "capsh"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.5"
 

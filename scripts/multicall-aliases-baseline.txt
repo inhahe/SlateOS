@@ -14,10 +14,6 @@ at:atd
 at:atq
 at:atrm
 at:batch
-capsh:captest
-capsh:getcap
-capsh:getpcaps
-capsh:setcap
 cgroup:cgclassify
 cgroup:cgcreate
 cgroup:cgdelete

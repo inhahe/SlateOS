@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**455 programs; 88 on the image, 6 carried inside the kernel.**
+**454 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 300
+## Userland utilities and services (`userspace/`, lane B) -- 299
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -36,7 +36,6 @@ two disagree.
 | `blockdev` | Call block device ioctls from the command line. |  |  |  |
 | `bootctl` | EFI boot manager control. |  |  |  |
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
-| `capsh` | Multi-personality capability management utility for SlateOS. |  |  | `captest` *(not installed)*, `getcap` *(not installed)*, `getpcaps` *(not installed)*, `setcap` *(not installed)* |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
 | `cgroup` | Cgroup management utility. |  |  | `cgclassify` *(not installed)*, `cgcreate` *(not installed)*, `cgdelete` *(not installed)*, `cgexec` *(not installed)*, `cgget` *(not installed)*, `cgset` *(not installed)*, `lssubsys` *(not installed)* |
 | `chage` | Password-aging utility. |  |  |  |

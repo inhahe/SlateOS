@@ -2435,9 +2435,18 @@ built. Six of `systemctl`'s fourteen were never names at all -- `blame`,
 `critical-chain`, `dot`, `plot`, `security` and `verify` are
 `systemd-analyze`'s subcommands, which the detector mistook for program
 names (`dot` is graphviz's); they are excluded in its IGNORE table and the
-ledger stands at **86**. **Still to judge:** `capsh`'s four, `systemctl`'s
-eight, `sudo`'s
-three (separate permissions may earn them crates), `sysstat`, `perf`,
+ledger stands at **86**. **`userspace/capsh`** (`getcap`, `setcap`,
+`getpcaps`, `captest`) is deleted for fabricating: `setcap` kept "file
+capabilities" in a sidecar directory that exec never consults, and
+`capsh`/`captest` answered from a simulated process state -- SlateOS's
+capabilities are kernel object handles, not Linux's bit sets, so there is
+nothing for these to set. `sudo`'s three were read too: all work (the
+command really runs as the target user; a comment saying it was simulated
+was false and is fixed); `sudoedit` stays the same file, while `visudo`
+and `sudoreplay` need less than `sudo` holds and so, per §1045, earn crates
+of their own -- a split still to do. The ledger stands at **82**.
+**Still to judge:** `systemctl`'s
+eight, `sysstat`, `perf`,
 `cpupower`, `thermald`, `resolvectl`, `hostnamectl`'s domain names, `ntpd`,
 `xdg`, and the single names of `coredumpctl`, `dmidecode`, `efibootmgr`,
 `eject`, `fio`, `hwinfo`, `inotify`, `loginctl`, `losetup`, `rfkill`, `ss`.

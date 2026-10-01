@@ -25,7 +25,6 @@ userspace/arp/src/main.rs:argv-as-string
 userspace/at/src/main.rs:argv-as-string
 userspace/backup/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
-userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string

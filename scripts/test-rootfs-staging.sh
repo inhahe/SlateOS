@@ -120,6 +120,14 @@ slate_env() {
     # skipped warning -- which is why this is exported rather than left to the
     # real script to define.
     export IMG_SIZE="384M"
+    # The second loop's inputs: what the workspace builds, from a stand-in for
+    # `build-userland.py --list` that prints SLATE_TEST_PROGRAMS -- none,
+    # unless a case says -- and a kept-off list that keeps nothing off.
+    SYSROOT_PY="$(command -v python3 || command -v python)"
+    export SLATE_TEST_PROGRAMS=""
+    printf 'import os\nimport sys\nsys.stdout.write(os.environ["SLATE_TEST_PROGRAMS"])\n' \
+        > "$ROOT_DIR/scripts/build-userland.py"
+    printf '# nothing kept off\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
 }
 
 # 5. A name in the manifest with a built ELF behind it reaches /bin, and the
@@ -138,10 +146,13 @@ esac
 rm -rf "$T"
 
 # 6. THE COUPLING PROBE, and the reason the manifest exists at all. A binary
-# that is BUILT but not listed must not ship. Before the manifest this block
-# scanned the build directory, so a measurement build of every userspace crate
-# put 204 MiB into /bin and mke2fs could not allocate a block. Building a crate
-# to debug it must not change what the operating system contains.
+# that is BUILT but neither listed nor a program of the workspace's must not
+# ship. Before the manifest this block scanned the build directory, so a
+# measurement build of every userspace crate put 204 MiB into /bin and mke2fs
+# could not allocate a block. Building a crate to debug it must not change what
+# the operating system contains. Since 2026-10-01 every program the workspace
+# builds ships (case 33), but the list is still the workspace's, never the
+# directory's: here it holds nothing, so neither stray binary is one.
 slate_env
 mk_manifest ls
 mk_elf "$ROOT_DIR/target/x86_64-slateos/release/ls"
@@ -254,7 +265,7 @@ msg="$(eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
 [ "$rc" -eq 1 ] && ok || bad "an empty build dir must fail the image build (exit $rc)"
 case "$msg" in
-    *"ERROR"*"cargo +nightly build --release"*) ok ;;
+    *"ERROR"*"python scripts/build-userland.py"*) ok ;;
     *) bad "the ERROR must name the commands that fix it, got: $msg" ;;
 esac
 rm -rf "$T"
@@ -497,7 +508,7 @@ msg="$(eval "$SLATE_BLOCK" 2>&1)"
 rc=$?
 [ ! -e "$STAGE/bin/kill" ] && ok || bad "coreutils' copy of a doubly-built name must not ship"
 case "$rc:$msg" in
-    1:*"crate's build: kill"*"-p ar -p kill -p logger -p logrotate -p powerctl"*) ok ;;
+    1:*"crate's build: kill"*"python scripts/build-userland.py"*) ok ;;
     *) bad "the wrong copy must be fatal, named, with the commands, got rc=$rc: $msg" ;;
 esac
 # ...and the standalone copy, linked last, ships.
@@ -719,6 +730,128 @@ for newer in "tzrules/src/lib.rs" "posix/vendor/libm/src/lib.rs" "posix/src/lib.
 done
 got="$(sysroot_case "")"
 [ "$got" = "STALE=[] PY=[]" ] && ok || bad "without python, a current libc.a is not stale, got: $got"
+
+# 33. EVERY PROGRAM THE WORKSPACE BUILDS SHIPS (design-decisions §1053, §1164):
+# the manifest's names, and after them every program `build-userland.py --list`
+# reports, but for what rootfs-bin-kept-off.txt keeps off. A binary that is no
+# program of the workspace's -- a leftover of a deleted crate -- does not.
+R="target/x86_64-slateos/release"
+slate_env
+mk_manifest ls
+for n in ls tool other cat leftover; do mk_elf "$ROOT_DIR/$R/$n"; done
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntool\ttool\nother\tcoreutils\ncat\tcoreutils\n'
+printf 'cat  # fastpy owns it\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 0 ] && [ -e "$STAGE/bin/ls" ] && [ -e "$STAGE/bin/tool" ] \
+  && [ -e "$STAGE/bin/other" ] && [ ! -e "$STAGE/bin/cat" ] \
+  && [ ! -e "$STAGE/bin/leftover" ]; } && ok \
+    || bad "every program but the kept-off one should ship, and no stray binary, got rc=$rc: $msg"
+case "$msg" in
+    *"staged 1 SlateOS-native"*"staged 2 more programs"*"1 kept off"*) ok ;;
+    *) bad "both counts and the kept-off one should be reported, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 34. A program with no binary is an ERROR that says what to run, as a name in
+# the manifest is -- and ALLOW_PARTIAL_USERLAND=1 asks for the image without it.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\nunbuilt\tunbuilt\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"ERROR: 1 program(s)"*"unbuilt"*"python scripts/build-userland.py"*) ok ;;
+    *) bad "an unbuilt program must be fatal, named, with the command, got rc=$rc: $msg" ;;
+esac
+rm -rf "$STAGE/bin/ls"
+msg="$(ALLOW_PARTIAL_USERLAND=1 eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    0:*"NOTE: 1 program(s)"*"as asked"*"unbuilt"*) ok ;;
+    *) bad "ALLOW_PARTIAL_USERLAND=1 must make it a NOTE, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 35. A name kept off without a reason is refused: the reason is what the list
+# records.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+printf 'cat  # fastpy owns it\nwhy\nalso #   \n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"no reason: why also"*) ok ;;
+    *) bad "a kept-off name with no reason must be refused, both, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 36. A name a block above has already staged, and the list does not keep off,
+# keeps the earlier copy and says to add it -- the guard behind the list. A
+# kept-off name the workspace does not build is named as a stale entry.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mk_elf "$ROOT_DIR/$R/sh"
+printf 'dash' > "$STAGE/bin/sh"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\nsh\tcoreutils\n'
+printf 'gone  # a crate since deleted\n' > "$ROOT_DIR/scripts/rootfs-bin-kept-off.txt"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 0 ] && [ "$(cat "$STAGE/bin/sh")" = dash ]; } && ok \
+    || bad "an earlier block's copy must stay, got rc=$rc: $msg"
+case "$msg" in
+    *"already staged these names"*" sh"*"Add each to scripts/rootfs-bin-kept-off.txt"*) ok ;;
+    *) bad "the collision should be named, with the fix, got: $msg" ;;
+esac
+case "$msg" in
+    *"does"*"not build: gone"*) ok ;;
+    *) bad "a stale kept-off entry should be named, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 37. A program older than libc.a is refused, as the manifest's are, and
+# ALLOW_STALE_FIXTURES=1 packs it anyway.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mk_elf "$ROOT_DIR/$R/tool"
+touch -d "2020-01-01" "$ROOT_DIR/$R/tool"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntool\ttool\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    1:*"1 of them are OLDER than the sysroot libc.a"*"refusing"*) ok ;;
+    *) bad "a stale program must stop the image, got rc=$rc: $msg" ;;
+esac
+rm -rf "$STAGE/bin/ls" "$STAGE/bin/tool"
+msg="$(ALLOW_STALE_FIXTURES=1 eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+case "$rc:$msg" in
+    0:*"packing them anyway"*) ok ;;
+    *) bad "ALLOW_STALE_FIXTURES=1 must pack it, got rc=$rc: $msg" ;;
+esac
+rm -rf "$T"
+
+# 38. A name two packages build, and the manifest does not, ships as its
+# namesake crate's build or not at all -- the same check as case 24's.
+slate_env
+mk_manifest ls
+mk_elf "$ROOT_DIR/$R/ls"
+mkdir -p "$ROOT_DIR/$R/deps"
+printf '\177ELF other package' > "$ROOT_DIR/$R/twice"
+export SLATE_TEST_PROGRAMS=$'ls\tcoreutils\ntwice\tcoreutils\ntwice\ttwice\n'
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+rc=$?
+{ [ "$rc" -eq 1 ] && [ ! -e "$STAGE/bin/twice" ]; } && ok \
+    || bad "a shared name's unproven copy must not ship, got rc=$rc: $msg"
+case "$msg" in
+    *"not the one named after it: twice"*"python scripts/build-userland.py"*) ok ;;
+    *) bad "the wrong copy should be named, with the command, got: $msg" ;;
+esac
+rm -rf "$T"
 
 echo "test-rootfs-staging: $PASS/$((PASS + FAIL)) cases pass"
 [ "$FAIL" -eq 0 ]

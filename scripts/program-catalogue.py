@@ -12,8 +12,10 @@ a program, record it somewhere so everybody knows it exists". This file is that
 somewhere, and `--check` is the rule: it fails when a binary exists that
 `programs.md` does not list, or lists one that no longer exists.
 
-Beside each program: whether it is on the disk image that boots
-(`scripts/rootfs-bin-manifest.txt`, or the fastpy `PROMOTED` map of
+Beside each program: whether it is on the disk image that boots (every
+program under `userspace/` but for `scripts/rootfs-bin-kept-off.txt`'s, as
+`scripts/create-ext4-rootfs.sh` stages them, design-decisions §1164; the
+names in `scripts/rootfs-bin-manifest.txt`; and the fastpy `PROMOTED` map of
 `scripts/create-ext4-rootfs.sh`), and the other names it answers to -- those
 the manifest installs it under (`name = producer` lines), and those nothing
 installs yet (`scripts/multicall-aliases-baseline.txt`).
@@ -36,6 +38,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT = os.path.join(ROOT, "programs.md")
 MANIFEST = os.path.join(HERE, "rootfs-bin-manifest.txt")
+KEPT_OFF = os.path.join(HERE, "rootfs-bin-kept-off.txt")
 ROOTFS = os.path.join(HERE, "create-ext4-rootfs.sh")
 ALIASES = os.path.join(HERE, "multicall-aliases-baseline.txt")
 
@@ -110,8 +113,27 @@ def describe(doc: str, crate_desc: str) -> str:
     return text or "*(no description in the source)*"
 
 
-def on_image() -> set[str]:
+def kept_off() -> set[str]:
+    """The userland programs the image leaves off (`rootfs-bin-kept-off.txt`)."""
     names: set[str] = set()
+    try:
+        for line in open(KEPT_OFF, encoding="utf-8"):
+            name = line.split("#", 1)[0].strip()
+            if name:
+                names.add(name)
+    except OSError:
+        pass
+    return names
+
+
+def on_image(progs: list[dict]) -> set[str]:
+    """The names on the image: the manifest's, then every other program
+    `userspace/` builds but for what is kept off -- as
+    `create-ext4-rootfs.sh` stages them (design-decisions §1053, §1164) --
+    and the promoted fastpy commands."""
+    off = kept_off()
+    names: set[str] = {p["name"] for p in progs
+                       if p["dir"].startswith("userspace/") and p["name"] not in off}
     try:
         for line in open(MANIFEST, encoding="utf-8"):
             line = line.split("#", 1)[0].strip()
@@ -231,7 +253,7 @@ def targets() -> list[dict]:
 
 
 def render(progs: list[dict]) -> str:
-    image = on_image()
+    image = on_image(progs)
     embedded = kernel_embedded()
     alias = aliases()
     installed = installed_names()

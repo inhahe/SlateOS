@@ -1,1016 +1,823 @@
-//! Slate OS process resource limits utility.
+//! prlimit -- get and set process resource limits.
 //!
-//! Multi-personality binary providing:
-//! - **prlimit** — get/set process resource limits
-//! - **ulimit** — shell resource limit display (standalone)
+//! A port of util-linux 2.39.3's `sys-utils/prlimit.c`, function by function
+//! and with upstream's names, printing its table through `smartcols` (the
+//! libsmartcols port) as upstream prints through libsmartcols; measured
+//! against `prlimit from util-linux 2.39.3` by `scripts/prlimit-diff.sh`.
 //!
-//! Displays and modifies resource limits for processes using
-//! /proc/<pid>/limits or getrlimit/setrlimit.
+//! This replaces a hand-written program that issued raw Linux system-call
+//! instructions rather than calling the C library, read argv as UTF-8, laid
+//! its table out itself, and carried an unreachable `ulimit` personality.
+//!
+//! Upstream's parsing quirks are kept, because scripts depend on what a limit
+//! string means: a value is `strtoull`'s, so `-1` is unlimited and `10abc` is
+//! 10 (nothing checks what follows a lone value); `unlimitedfoo` is
+//! unlimited; and `-p 0 -p 1` is not "--pid given twice", since only a
+//! non-zero PID counts as given.
+//!
+//! Output is buffered as glibc buffers it (`ulclosestream`): when prlimit
+//! then runs a COMMAND, what it printed and had not flushed is lost with the
+//! process image, as upstream's is -- on a pipe, `prlimit --nofile CMD`
+//! prints only CMD's output; on a terminal the table comes first.
+//!
+//! # What is not upstream's
+//!
+//! * **A name in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
 
-#![deny(clippy::all)]
+mod sys;
 
-use std::env;
-use std::fs;
-use std::io::{self, Write};
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use smartcols::{FL_RIGHT, FL_TRUNC, Table};
+use std::ffi::{OsStr, OsString};
+use std::process::ExitCode;
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
+use ulstrutils::{IdListError, num_error_message, string_to_idarray, ul_strtos32};
 
-#[cfg(target_vendor = "slateos")]
-unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid for the given syscall.
-    // The `syscall` instruction clobbers rcx and r11 per the System V ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
+/// `RLIM_INFINITY`.
+const RLIM_INFINITY: u64 = u64::MAX;
 
-// Stub for development hosts (where `cargo test` runs). ENOSYS is what
-// the caller reports, so a host build says it could not set the limit
-// rather than claiming it did.
-#[cfg(not(target_vendor = "slateos"))]
-unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
-    -38 // ENOSYS
-}
+/// `PRLIMIT_SOFT` and `PRLIMIT_HARD`: which half of a limit an option set.
+const PRLIMIT_SOFT: u8 = 1 << 1;
+const PRLIMIT_HARD: u8 = 1 << 2;
 
-/// A limit as the kernel wants it. `RLIM_INFINITY` is `u64::MAX`.
-fn raw_limit(v: &LimitValue) -> u64 {
-    match v {
-        LimitValue::Unlimited => u64::MAX,
-        LimitValue::Value(n) => *n,
-    }
-}
+/// `EX_EXEC_FAILED` and `EX_EXEC_ENOENT`: `errexec`'s statuses.
+const EX_EXEC_FAILED: u8 = 126;
+const EX_EXEC_ENOENT: u8 = 127;
 
-/// `prlimit64`'s resource limit pair, as the kernel expects it.
-#[repr(C)]
-struct RLimit64 {
-    soft: u64,
-    hard: u64,
-}
+/// Getopt's errors are only sentences here; the referral follows them.
+const PRLIMIT: Program = Program::new("prlimit", 1);
 
-/// x86_64 `prlimit64`.
-const SYS_PRLIMIT64: u64 = 302;
+/// Upstream's option string: `+`, so COMMAND ends the options; each
+/// resource takes an optional value, attached (`-n5`, `-n=5`); and `v` is
+/// there twice, the first -- `--as`'s -- being the one getopt reads.
+const SHORTS: &str = "+c::d::e::f::i::l::m::n::q::r::s::t::u::v::x::y::p:o:vVh";
 
-/// Apply `soft`/`hard` to `resource` on `pid`.
-///
-/// Returns the raw negative errno on failure. This used to be nothing at
-/// all: the caller printed `prlimit: setting NOFILE for PID N: soft=10,
-/// hard=10` and exited 0, having made no syscall, so a script could set a
-/// limit, be told it was set, and run with the old one.
-fn set_rlimit(pid: u32, resource: u32, soft: u64, hard: u64) -> Result<(), i64> {
-    let new = RLimit64 { soft, hard };
-    // SAFETY: `new` outlives the call and is `#[repr(C)]` with the layout
-    // `prlimit64` documents; the old-limit pointer is null, which the
-    // syscall accepts to mean "do not report the previous value".
-    let rc = unsafe {
-        syscall4(
-            SYS_PRLIMIT64,
-            u64::from(pid),
-            u64::from(resource),
-            core::ptr::from_ref(&new) as u64,
-            0,
-        )
-    };
-    if rc < 0 { Err(rc) } else { Ok(()) }
-}
+/// `VERBOSE_OPTION`, `RAW_OPTION`, `NOHEADINGS_OPTION`: `CHAR_MAX + 1` on.
+const VERBOSE_OPTION: i32 = 128;
+const RAW_OPTION: i32 = 129;
+const NOHEADINGS_OPTION: i32 = 130;
 
-use std::process;
-
-const VERSION: &str = "0.1.0";
-
-// ============================================================================
-// Resource limit types
-// ============================================================================
-
-#[derive(Clone, Debug)]
-struct ResourceLimit {
-    resource: Resource,
-    soft: LimitValue,
-    hard: LimitValue,
-    units: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Resource {
-    AddressSpace,
-    CoreSize,
-    CpuTime,
-    DataSize,
-    FileSize,
-    Locks,
-    MemLock,
-    MsgQueue,
-    Nice,
-    OpenFiles,
-    Processes,
-    Rss,
-    RtPrio,
-    RtTime,
-    SigPending,
-    StackSize,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum LimitValue {
-    Unlimited,
-    Value(u64),
-}
-
-impl Resource {
-    /// The `RLIMIT_*` number the kernel knows this by.
-    ///
-    /// Read out of `/usr/include/asm-generic/resource.h` and
-    /// `bits/resource.h` rather than recalled: the generic header stops at
-    /// 4 and resumes at 10, because 5 through 9 are architecture-specific.
-    fn number(self) -> u32 {
-        match self {
-            Self::CpuTime => 0,
-            Self::FileSize => 1,
-            Self::DataSize => 2,
-            Self::StackSize => 3,
-            Self::CoreSize => 4,
-            Self::Rss => 5,
-            Self::Processes => 6,
-            Self::OpenFiles => 7,
-            Self::MemLock => 8,
-            Self::AddressSpace => 9,
-            Self::Locks => 10,
-            Self::SigPending => 11,
-            Self::MsgQueue => 12,
-            Self::Nice => 13,
-            Self::RtPrio => 14,
-            Self::RtTime => 15,
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            Self::AddressSpace => "AS",
-            Self::CoreSize => "CORE",
-            Self::CpuTime => "CPU",
-            Self::DataSize => "DATA",
-            Self::FileSize => "FSIZE",
-            Self::Locks => "LOCKS",
-            Self::MemLock => "MEMLOCK",
-            Self::MsgQueue => "MSGQUEUE",
-            Self::Nice => "NICE",
-            Self::OpenFiles => "NOFILE",
-            Self::Processes => "NPROC",
-            Self::Rss => "RSS",
-            Self::RtPrio => "RTPRIO",
-            Self::RtTime => "RTTIME",
-            Self::SigPending => "SIGPENDING",
-            Self::StackSize => "STACK",
-        }
-    }
-
-    fn description(&self) -> &'static str {
-        match self {
-            Self::AddressSpace => "max address space",
-            Self::CoreSize => "max core file size",
-            Self::CpuTime => "max cpu time",
-            Self::DataSize => "max data size",
-            Self::FileSize => "max file size",
-            Self::Locks => "max number of file locks held",
-            Self::MemLock => "max locked-in-memory address space",
-            Self::MsgQueue => "max bytes in POSIX mqueues",
-            Self::Nice => "max nice prio allowed to raise",
-            Self::OpenFiles => "max number of open files",
-            Self::Processes => "max number of processes",
-            Self::Rss => "max resident set size",
-            Self::RtPrio => "max real-time priority",
-            Self::RtTime => "max real-time timeout",
-            Self::SigPending => "max number of pending signals",
-            Self::StackSize => "max stack size",
-        }
-    }
-
-    fn units(&self) -> &'static str {
-        match self {
-            Self::CpuTime => "seconds",
-            Self::Nice | Self::RtPrio => "",
-            Self::OpenFiles | Self::Locks | Self::Processes | Self::SigPending => "",
-            Self::RtTime => "microseconds",
-            _ => "bytes",
-        }
-    }
-}
-
-impl LimitValue {
-    fn display(&self) -> String {
-        match self {
-            Self::Unlimited => "unlimited".to_string(),
-            Self::Value(v) => v.to_string(),
-        }
-    }
-
-    fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if s == "unlimited" || s == "infinity" || s == "-1" {
-            Some(Self::Unlimited)
-        } else {
-            s.parse::<u64>().ok().map(Self::Value)
-        }
-    }
-}
-
-// Authoritative resource list — used by the verbose listing path that
-// iterates every limit when no specific resource is requested.
-#[allow(dead_code)]
-const ALL_RESOURCES: &[Resource] = &[
-    Resource::AddressSpace,
-    Resource::CoreSize,
-    Resource::CpuTime,
-    Resource::DataSize,
-    Resource::FileSize,
-    Resource::Locks,
-    Resource::MemLock,
-    Resource::MsgQueue,
-    Resource::Nice,
-    Resource::OpenFiles,
-    Resource::Processes,
-    Resource::Rss,
-    Resource::RtPrio,
-    Resource::RtTime,
-    Resource::SigPending,
-    Resource::StackSize,
+/// Upstream's `longopts[]`, in its order (the order an ambiguity lists), and
+/// each one's `val`.
+const LONGS: &[(&str, Takes)] = &[
+    ("pid", Takes::Required),
+    ("output", Takes::Required),
+    ("as", Takes::Optional),
+    ("core", Takes::Optional),
+    ("cpu", Takes::Optional),
+    ("data", Takes::Optional),
+    ("fsize", Takes::Optional),
+    ("locks", Takes::Optional),
+    ("memlock", Takes::Optional),
+    ("msgqueue", Takes::Optional),
+    ("nice", Takes::Optional),
+    ("nofile", Takes::Optional),
+    ("nproc", Takes::Optional),
+    ("rss", Takes::Optional),
+    ("rtprio", Takes::Optional),
+    ("rttime", Takes::Optional),
+    ("sigpending", Takes::Optional),
+    ("stack", Takes::Optional),
+    ("version", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("noheadings", Takes::Nothing),
+    ("raw", Takes::Nothing),
+    ("verbose", Takes::Nothing),
+];
+const LONG_VALS: [i32; 23] = [
+    b'p' as i32,
+    b'o' as i32,
+    b'v' as i32,
+    b'c' as i32,
+    b't' as i32,
+    b'd' as i32,
+    b'f' as i32,
+    b'x' as i32,
+    b'l' as i32,
+    b'q' as i32,
+    b'e' as i32,
+    b'n' as i32,
+    b'u' as i32,
+    b'm' as i32,
+    b'r' as i32,
+    b'y' as i32,
+    b'i' as i32,
+    b's' as i32,
+    b'V' as i32,
+    b'h' as i32,
+    NOHEADINGS_OPTION,
+    RAW_OPTION,
+    VERBOSE_OPTION,
 ];
 
-// ============================================================================
-// Reading limits
-// ============================================================================
-
-fn read_proc_limits(pid: u32) -> Vec<ResourceLimit> {
-    let path = format!("/proc/{pid}/limits");
-    if let Ok(data) = fs::read_to_string(&path) {
-        return parse_proc_limits(&data);
-    }
-    generate_default_limits()
+/// `struct prlimit_desc`.
+struct PrlimitDesc {
+    name: &'static str,
+    help: &'static str,
+    unit: Option<&'static str>,
+    /// `RLIMIT_*`, Linux's numbering, which SlateOS's C library shares.
+    resource: i32,
+    /// The short option that names it.
+    flag: u8,
 }
 
-fn parse_proc_limits(data: &str) -> Vec<ResourceLimit> {
-    let mut limits = Vec::new();
+/// `prlimit_desc[]`, in `enum { AS, CORE, ... }` order: the order of the
+/// default listing.
+const PRLIMIT_DESC: [PrlimitDesc; 16] = [
+    PrlimitDesc {
+        name: "AS",
+        help: "address space limit",
+        unit: Some("bytes"),
+        resource: 9,
+        flag: b'v',
+    },
+    PrlimitDesc {
+        name: "CORE",
+        help: "max core file size",
+        unit: Some("bytes"),
+        resource: 4,
+        flag: b'c',
+    },
+    PrlimitDesc {
+        name: "CPU",
+        help: "CPU time",
+        unit: Some("seconds"),
+        resource: 0,
+        flag: b't',
+    },
+    PrlimitDesc {
+        name: "DATA",
+        help: "max data size",
+        unit: Some("bytes"),
+        resource: 2,
+        flag: b'd',
+    },
+    PrlimitDesc {
+        name: "FSIZE",
+        help: "max file size",
+        unit: Some("bytes"),
+        resource: 1,
+        flag: b'f',
+    },
+    PrlimitDesc {
+        name: "LOCKS",
+        help: "max number of file locks held",
+        unit: Some("locks"),
+        resource: 10,
+        flag: b'x',
+    },
+    PrlimitDesc {
+        name: "MEMLOCK",
+        help: "max locked-in-memory address space",
+        unit: Some("bytes"),
+        resource: 8,
+        flag: b'l',
+    },
+    PrlimitDesc {
+        name: "MSGQUEUE",
+        help: "max bytes in POSIX mqueues",
+        unit: Some("bytes"),
+        resource: 12,
+        flag: b'q',
+    },
+    PrlimitDesc {
+        name: "NICE",
+        help: "max nice prio allowed to raise",
+        unit: None,
+        resource: 13,
+        flag: b'e',
+    },
+    PrlimitDesc {
+        name: "NOFILE",
+        help: "max number of open files",
+        unit: Some("files"),
+        resource: 7,
+        flag: b'n',
+    },
+    PrlimitDesc {
+        name: "NPROC",
+        help: "max number of processes",
+        unit: Some("processes"),
+        resource: 6,
+        flag: b'u',
+    },
+    PrlimitDesc {
+        name: "RSS",
+        help: "max resident set size",
+        unit: Some("bytes"),
+        resource: 5,
+        flag: b'm',
+    },
+    PrlimitDesc {
+        name: "RTPRIO",
+        help: "max real-time priority",
+        unit: None,
+        resource: 14,
+        flag: b'r',
+    },
+    PrlimitDesc {
+        name: "RTTIME",
+        help: "timeout for real-time tasks",
+        unit: Some("microsecs"),
+        resource: 15,
+        flag: b'y',
+    },
+    PrlimitDesc {
+        name: "SIGPENDING",
+        help: "max number of pending signals",
+        unit: Some("signals"),
+        resource: 11,
+        flag: b'i',
+    },
+    PrlimitDesc {
+        name: "STACK",
+        help: "max stack size",
+        unit: Some("bytes"),
+        resource: 3,
+        flag: b's',
+    },
+];
 
-    for line in data.lines().skip(1) {
-        // Format: "Max open files            1024                 1048576              files"
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+/// `COL_*`, in upstream's enum order -- which is `infos[]`' order, and so
+/// the order `--help` lists them: DESCRIPTION before RESOURCE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Col {
+    Help,
+    Res,
+    Soft,
+    Hard,
+    Units,
+}
+
+/// `struct colinfo`.
+struct ColInfo {
+    id: Col,
+    name: &'static str,
+    whint: f64,
+    flags: u32,
+    help: &'static str,
+}
+
+/// `infos[]`.
+const INFOS: [ColInfo; 5] = [
+    ColInfo {
+        id: Col::Help,
+        name: "DESCRIPTION",
+        whint: 0.1,
+        flags: FL_TRUNC,
+        help: "resource description",
+    },
+    ColInfo {
+        id: Col::Res,
+        name: "RESOURCE",
+        whint: 0.25,
+        flags: FL_TRUNC,
+        help: "resource name",
+    },
+    ColInfo {
+        id: Col::Soft,
+        name: "SOFT",
+        whint: 0.1,
+        flags: FL_RIGHT,
+        help: "soft limit",
+    },
+    ColInfo {
+        id: Col::Hard,
+        name: "HARD",
+        whint: 1.0,
+        flags: FL_RIGHT,
+        help: "hard limit (ceiling)",
+    },
+    ColInfo {
+        id: Col::Units,
+        name: "UNITS",
+        whint: 0.1,
+        flags: FL_TRUNC,
+        help: "units",
+    },
+];
+
+/// `columns[ARRAY_SIZE(infos) * 2]`.
+const MAX_COLUMNS: usize = 10;
+
+/// `struct prlimit`: one resource to show or to change.
+struct Prlimit {
+    /// Index into [`PRLIMIT_DESC`].
+    desc: usize,
+    /// `rlim_cur`, `rlim_max`.
+    cur: u64,
+    max: u64,
+    /// `PRLIMIT_{SOFT,HARD}` mask: 0 to show the limit.
+    modify: u8,
+}
+
+stdfdguard::guard_std_fds!();
+
+fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without is closed again, as upstream -- and COMMAND, which
+    // inherits it -- would find it.
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("prlimit"), OsString::as_os_str),
+    );
+    let mut out = Stdout::new(1);
+    let status = run(&argv, &short, &mut out);
+    // `close_stdout`, which upstream registers with `atexit`.
+    ExitCode::from(out.close(status, &short))
+}
+
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
+
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `errtryhelp(EXIT_FAILURE)`.
+fn errtryhelp(short: &[u8]) -> u8 {
+    stderr_write(format!("Try '{} --help' for more information.\n", shown(short)).as_bytes());
+    1
+}
+
+/// `usage()`.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut text = b"\nUsage:\n".to_vec();
+    for form in [
+        &b" [options] [--<resource>=<limit>] [-p PID]\n"[..],
+        b" [options] [--<resource>=<limit>] COMMAND\n",
+    ] {
+        text.push(b' ');
+        text.extend_from_slice(short);
+        text.extend_from_slice(form);
+    }
+    text.extend_from_slice(
+        b"\nShow or change the resource limits of a process.\n\
+\nOptions:\n\
+\x20-p, --pid <pid>        process id\n\
+\x20-o, --output <list>    define which output columns to use\n\
+\x20    --noheadings       don't print headings\n\
+\x20    --raw              use the raw output format\n\
+\x20    --verbose          verbose output\n\
+\x20-h, --help             display this help\n\
+\x20-V, --version          display version\n\
+\nResources:\n\
+\x20-c, --core             maximum size of core files created\n\
+\x20-d, --data             maximum size of a process's data segment\n\
+\x20-e, --nice             maximum nice priority allowed to raise\n\
+\x20-f, --fsize            maximum size of files written by the process\n\
+\x20-i, --sigpending       maximum number of pending signals\n\
+\x20-l, --memlock          maximum size a process may lock into memory\n\
+\x20-m, --rss              maximum resident set size\n\
+\x20-n, --nofile           maximum number of open files\n\
+\x20-q, --msgqueue         maximum bytes in POSIX message queues\n\
+\x20-r, --rtprio           maximum real-time scheduling priority\n\
+\x20-s, --stack            maximum stack size\n\
+\x20-t, --cpu              maximum amount of CPU time in seconds\n\
+\x20-u, --nproc            maximum number of user processes\n\
+\x20-v, --as               size of virtual memory\n\
+\x20-x, --locks            maximum number of file locks\n\
+\x20-y, --rttime           CPU time in microseconds a process scheduled\n\
+\x20                       under real-time scheduling\n\
+\nArguments:\n\
+\x20<limit> is defined as a range soft:hard, soft:, :hard or a value to\n\
+\x20        define both limits (e.g. -e=0:10 -r=:10).\n\
+\nAvailable output columns:\n",
+    );
+    for info in &INFOS {
+        text.extend_from_slice(format!(" {:>11}  {}\n", info.name, info.help).as_bytes());
+    }
+    text.extend_from_slice(b"\nFor more details see prlimit(1).\n");
+    text
+}
+
+/// `column_name_to_id(name, namesz)`: a column by its name, in any case.
+/// Unknown, it is reported with the rest of the list after it, as
+/// upstream's C string runs on to the list's end.
+fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
+    let found = INFOS
+        .iter()
+        .find(|i| i.name.as_bytes().eq_ignore_ascii_case(name))
+        .map(|i| i.id);
+    if found.is_none() {
+        warnx(short, &format!("unknown column: {}", shown(rest)));
+    }
+    found
+}
+
+/// A column's `infos[]` entry.
+fn info(col: Col) -> &'static ColInfo {
+    INFOS.iter().find(|i| i.id == col).unwrap_or(&INFOS[0])
+}
+
+/// `strtoull(str, &end, 10)`: the value, where the digits end, and whether
+/// it overflowed (`ERANGE`). `None` when nothing was converted. A minus sign
+/// negates in two's complement, so `-1` is `ULLONG_MAX` -- unlimited.
+fn strtoull(s: &[u8]) -> Option<(u64, usize, bool)> {
+    let sc = ulstrutils::scan_integer(s, 10)?;
+    match u64::try_from(sc.magnitude) {
+        Ok(v) if !sc.saturated => {
+            let v = if sc.negative { v.wrapping_neg() } else { v };
+            Some((v, sc.end, false))
+        }
+        _ => Some((u64::MAX, sc.end, true)),
+    }
+}
+
+/// `strtoull` that must consume all of `s`: upstream's
+/// `errno || !end || *end || end == str` refusal.
+fn strtoull_whole(s: &[u8]) -> Result<u64, ()> {
+    match strtoull(s) {
+        Some((v, end, false)) if end == s.len() => Ok(v),
+        _ => Err(()),
+    }
+}
+
+/// `get_range(str, &soft, &hard, &found)`: a limit string's soft and hard
+/// values and which of them it set.
+fn get_range(s: &[u8]) -> Result<(u64, u64, u8), ()> {
+    let mut soft = RLIM_INFINITY;
+    let mut hard = RLIM_INFINITY;
+    if s == b"unlimited" {
+        return Ok((soft, hard, PRLIMIT_SOFT | PRLIMIT_HARD));
+    }
+    if let Some(rest) = s.strip_prefix(b":") {
+        // <:hard>
+        if rest != b"unlimited" {
+            hard = strtoull_whole(rest)?;
+        }
+        return Ok((soft, hard, PRLIMIT_HARD));
+    }
+    let end = if s.starts_with(b"unlimited") {
+        // <unlimited> or <unlimited:>, and -- since only a `:` is looked
+        // for after it -- `unlimitedfoo` too.
+        b"unlimited".len()
+    } else {
+        // <value> or <soft:>. What follows the digits is not checked unless
+        // it starts with `:`: `10abc` is 10.
+        match strtoull(s) {
+            Some((v, end, false)) => {
+                soft = v;
+                hard = v;
+                end
+            }
+            _ => return Err(()),
+        }
+    };
+    let tail = s.get(end..).unwrap_or_default();
+    let found = if tail == b":" {
+        // <soft:>
+        PRLIMIT_SOFT
+    } else if let Some(h) = tail.strip_prefix(b":") {
+        // <soft:hard>
+        hard = if h == b"unlimited" {
+            RLIM_INFINITY
+        } else {
+            strtoull_whole(h)?
+        };
+        PRLIMIT_SOFT | PRLIMIT_HARD
+    } else {
+        // <value>
+        PRLIMIT_SOFT | PRLIMIT_HARD
+    };
+    Ok((soft, hard, found))
+}
+
+/// `parse_prlim(&lim, ops, id)`: an option's value -- a leading `=` dropped,
+/// as `-n=5` hands getopt `=5` -- into `lim`. Refused, it is upstream's
+/// `failed to parse NAME limit`.
+fn parse_prlim(lim: &mut Prlimit, ops: &[u8], short: &[u8]) -> Result<(), u8> {
+    let ops = ops.strip_prefix(b"=").unwrap_or(ops);
+    match get_range(ops) {
+        Ok((soft, hard, found)) => {
+            lim.cur = soft;
+            lim.max = hard;
+            lim.modify = found;
+            Ok(())
+        }
+        Err(()) => {
+            let name = PRLIMIT_DESC.get(lim.desc).map_or("", |d| d.name);
+            warnx(short, &format!("failed to parse {name} limit"));
+            Err(1)
+        }
+    }
+}
+
+/// `add_prlim(ops, lims, id)`.
+fn add_prlim(
+    ops: Option<&[u8]>,
+    lims: &mut Vec<Prlimit>,
+    id: usize,
+    short: &[u8],
+) -> Result<(), u8> {
+    let mut lim = Prlimit {
+        desc: id,
+        cur: 0,
+        max: 0,
+        modify: 0,
+    };
+    if let Some(ops) = ops {
+        parse_prlim(&mut lim, ops, short)?;
+    }
+    lims.push(lim);
+    Ok(())
+}
+
+/// `get_unknown_hardsoft(lim)`: the half of a limit the option left out is
+/// the process's current one.
+fn get_unknown_hardsoft(pid: i32, lim: &mut Prlimit, short: &[u8]) -> Result<(), u8> {
+    let desc = PRLIMIT_DESC.get(lim.desc).ok_or(1u8)?;
+    match sys::prlimit(pid, desc.resource, None) {
+        Ok((cur, max)) => {
+            if lim.modify & PRLIMIT_SOFT == 0 {
+                lim.cur = cur;
+            } else if lim.modify & PRLIMIT_HARD == 0 {
+                lim.max = max;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            warn(short, &format!("failed to get old {} limit", desc.name), &e);
+            Err(1)
+        }
+    }
+}
+
+/// `%ju` of a limit, or `unlimited`.
+fn limit_text(v: u64) -> String {
+    if v == RLIM_INFINITY {
+        "unlimited".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+/// `do_prlimit(lims)`: set each limit an option gave a value, and read the
+/// rest. What was set is dropped from the listing.
+fn do_prlimit(
+    pid: i32,
+    verbose: bool,
+    lims: &mut Vec<Prlimit>,
+    out: &mut Stdout,
+    short: &[u8],
+) -> Result<(), u8> {
+    let mut shown_lims = Vec::new();
+    for mut lim in std::mem::take(lims) {
+        let desc = PRLIMIT_DESC.get(lim.desc).ok_or(1u8)?;
+        if lim.modify != 0 {
+            if lim.modify != PRLIMIT_HARD | PRLIMIT_SOFT {
+                get_unknown_hardsoft(pid, &mut lim, short)?;
+            }
+            if lim.cur > lim.max && (lim.cur != RLIM_INFINITY || lim.max != RLIM_INFINITY) {
+                warnx(
+                    short,
+                    &format!("the soft limit {} cannot exceed the hard limit", desc.name),
+                );
+                return Err(1);
+            }
+            if verbose {
+                let shown_pid = if pid == 0 {
+                    i64::from(std::process::id())
+                } else {
+                    i64::from(pid)
+                };
+                out.write(
+                    format!(
+                        "New {} limit for pid {shown_pid}: <{}:{}>\n",
+                        desc.name,
+                        limit_text(lim.cur),
+                        limit_text(lim.max)
+                    )
+                    .as_bytes(),
+                );
+            }
+            if let Err(e) = sys::prlimit(pid, desc.resource, Some((lim.cur, lim.max))) {
+                warn(
+                    short,
+                    &format!("failed to set the {} resource limit", desc.name),
+                    &e,
+                );
+                return Err(1);
+            }
+            // Modify only; not shown.
+        } else {
+            match sys::prlimit(pid, desc.resource, None) {
+                Ok((cur, max)) => {
+                    lim.cur = cur;
+                    lim.max = max;
+                }
+                Err(e) => {
+                    warn(
+                        short,
+                        &format!("failed to get the {} resource limit", desc.name),
+                        &e,
+                    );
+                    return Err(1);
+                }
+            }
+            shown_lims.push(lim);
+        }
+    }
+    *lims = shown_lims;
+    Ok(())
+}
+
+/// `add_scols_line` and `show_limits`: the table.
+fn show_limits(lims: &[Prlimit], columns: &[Col], raw: bool, no_headings: bool) -> Vec<u8> {
+    let mut tb = Table::new();
+    tb.enable_raw(raw);
+    tb.enable_noheadings(no_headings);
+    let ids: Vec<_> = columns
+        .iter()
+        .map(|&c| {
+            let i = info(c);
+            (c, tb.new_column(i.name.as_bytes(), i.whint, i.flags))
+        })
+        .collect();
+    for lim in lims {
+        let Some(desc) = PRLIMIT_DESC.get(lim.desc) else {
+            continue;
+        };
+        let Ok(line) = tb.new_line(None) else {
+            continue;
+        };
+        for &(col, id) in &ids {
+            let text = match col {
+                Col::Res => Some(desc.name.to_string()),
+                Col::Help => Some(desc.help.to_string()),
+                Col::Soft => Some(limit_text(lim.cur)),
+                Col::Hard => Some(limit_text(lim.max)),
+                Col::Units => desc.unit.map(str::to_string),
+            };
+            if let Some(text) = text {
+                // The line and column are this table's own.
+                let _ = tb.line_set_data(line, id, text.as_bytes());
+            }
+        }
+    }
+    // `scols_print_table`'s status is not looked at, as upstream does not
+    // look at it: what it printed before any failure is the output.
+    let mut text = Vec::new();
+    let _ = tb.print_into(&mut text);
+    text
+}
+
+/// The option each parsed item stands for, as upstream's switch sees it.
+fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
+    match opt {
+        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
+        Opt::Long(name, value) => {
+            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
+            Some((*LONG_VALS.get(i)?, value.clone()))
+        }
+        Opt::Operand(_) => None,
+    }
+}
+
+/// `main()`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "upstream's main, kept in one piece so it can be read against it"
+)]
+fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
+    let arg0 = argv
+        .first()
+        .map_or(OsStr::new("prlimit"), OsString::as_os_str);
+    let mut lims: Vec<Prlimit> = Vec::new();
+    let mut pid: i32 = 0;
+    let mut verbose = false;
+    let mut raw = false;
+    let mut no_headings = false;
+    let mut columns: Vec<Col> = Vec::new();
+
+    let own = argv.get(1..).unwrap_or_default();
+    let mut parser = PRLIMIT.parse(own, SHORTS, LONGS);
+    let mut command: Option<usize> = None;
+    while let Some(item) = parser.next() {
+        let opt = match item {
+            Ok(opt) => opt,
+            Err(e) => {
+                // glibc names the program by argv[0] as given.
+                stderr_write(format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes());
+                return errtryhelp(short);
+            }
+        };
+        let Some((c, value)) = option_code(&opt) else {
+            // `+`: the first operand is COMMAND, and the rest its arguments.
+            command = Some(parser.optind().saturating_sub(1));
+            break;
+        };
+        let value_bytes = value.as_deref().map(os_bytes);
+        // A resource's option, `-c` to `-y`: a value sets it, none shows it.
+        let resource = u8::try_from(c)
+            .ok()
+            .and_then(|f| PRLIMIT_DESC.iter().position(|d| d.flag == f));
+        if let Some(id) = resource {
+            if let Err(status) = add_prlim(value_bytes.as_deref(), &mut lims, id, short) {
+                return status;
+            }
             continue;
         }
-
-        // Split the line — the first 25 chars are the name, then soft/hard/units.
-        let name_part = if trimmed.len() > 25 {
-            trimmed[..25].trim()
-        } else {
-            trimmed
-        };
-
-        let resource = match name_part {
-            s if s.starts_with("Max address space") => Some(Resource::AddressSpace),
-            s if s.starts_with("Max core file size") => Some(Resource::CoreSize),
-            s if s.starts_with("Max cpu time") => Some(Resource::CpuTime),
-            s if s.starts_with("Max data size") => Some(Resource::DataSize),
-            s if s.starts_with("Max file size") => Some(Resource::FileSize),
-            s if s.starts_with("Max file locks") => Some(Resource::Locks),
-            s if s.starts_with("Max locked memory") => Some(Resource::MemLock),
-            s if s.starts_with("Max msgqueue size") => Some(Resource::MsgQueue),
-            s if s.starts_with("Max nice priority") => Some(Resource::Nice),
-            s if s.starts_with("Max open files") => Some(Resource::OpenFiles),
-            s if s.starts_with("Max processes") => Some(Resource::Processes),
-            s if s.starts_with("Max resident set") => Some(Resource::Rss),
-            s if s.starts_with("Max realtime priority") => Some(Resource::RtPrio),
-            s if s.starts_with("Max realtime timeout") => Some(Resource::RtTime),
-            s if s.starts_with("Max pending signals") => Some(Resource::SigPending),
-            s if s.starts_with("Max stack size") => Some(Resource::StackSize),
-            _ => None,
-        };
-
-        if let Some(res) = resource {
-            let rest = if trimmed.len() > 25 {
-                &trimmed[25..]
-            } else {
-                ""
-            };
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-
-            let soft = parts
-                .first()
-                .and_then(|s| LimitValue::parse(s))
-                .unwrap_or(LimitValue::Unlimited);
-            let hard = parts
-                .get(1)
-                .and_then(|s| LimitValue::parse(s))
-                .unwrap_or(LimitValue::Unlimited);
-
-            limits.push(ResourceLimit {
-                resource: res,
-                soft,
-                hard,
-                units: res.units(),
+        match c {
+            NOHEADINGS_OPTION => no_headings = true,
+            VERBOSE_OPTION => verbose = true,
+            RAW_OPTION => raw = true,
+            _ => match u8::try_from(c).unwrap_or(0) {
+                b'p' => {
+                    if pid != 0 {
+                        warnx(short, "option --pid may be specified only once");
+                        return 1;
+                    }
+                    let value = value.unwrap_or_default();
+                    match ul_strtos32(&os_bytes(&value), 10) {
+                        Ok(p) => pid = p,
+                        Err(e) => {
+                            warnx(short, &num_error_message("invalid PID argument", &value, e));
+                            return 1;
+                        }
+                    }
+                }
+                b'o' => {
+                    let list = value.as_deref().map(os_bytes).unwrap_or_default();
+                    // `string_to_idarray` from the start each time: a second
+                    // `-o` replaces the first.
+                    columns.clear();
+                    let parsed: Result<usize, IdListError> =
+                        string_to_idarray(&list, &mut columns, MAX_COLUMNS, |name, rest| {
+                            column_name_to_id(name, rest, short)
+                        });
+                    if parsed.is_err() {
+                        return 1;
+                    }
+                }
+                b'h' => {
+                    out.write(&usage(short));
+                    return 0;
+                }
+                b'V' => {
+                    let mut line = short.to_vec();
+                    line.extend_from_slice(b" from util-linux 2.39.3\n");
+                    out.write(&line);
+                    return 0;
+                }
+                _ => return errtryhelp(short),
+            },
+        }
+    }
+    let command = command.and_then(|i| own.get(i..)).filter(|c| !c.is_empty());
+    if command.is_some() && pid != 0 {
+        warnx(short, "options --pid and COMMAND are mutually exclusive");
+        return 1;
+    }
+    if columns.is_empty() {
+        columns = vec![Col::Res, Col::Help, Col::Soft, Col::Hard, Col::Units];
+    }
+    if lims.is_empty() {
+        // Default: every resource.
+        for id in 0..PRLIMIT_DESC.len() {
+            lims.push(Prlimit {
+                desc: id,
+                cur: 0,
+                max: 0,
+                modify: 0,
             });
         }
     }
-
-    limits
+    if let Err(status) = do_prlimit(pid, verbose, &mut lims, out, short) {
+        return status;
+    }
+    if !lims.is_empty() {
+        out.write(&show_limits(&lims, &columns, raw, no_headings));
+    }
+    if let Some(command) = command {
+        // `execvp`; what stdout holds is lost with the process image if it
+        // runs, and printed at exit if it does not -- `errexec` is `err`.
+        let e = sys::exec(command);
+        let name = command
+            .first()
+            .map(|n| os_bytes(n).into_owned())
+            .unwrap_or_default();
+        warn(short, &format!("failed to execute {}", shown(&name)), &e);
+        return if e.kind() == std::io::ErrorKind::NotFound {
+            EX_EXEC_ENOENT
+        } else {
+            EX_EXEC_FAILED
+        };
+    }
+    0
 }
-
-fn generate_default_limits() -> Vec<ResourceLimit> {
-    vec![
-        ResourceLimit {
-            resource: Resource::AddressSpace,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::CoreSize,
-            soft: LimitValue::Value(0),
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::CpuTime,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "seconds",
-        },
-        ResourceLimit {
-            resource: Resource::DataSize,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::FileSize,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::Locks,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::MemLock,
-            soft: LimitValue::Value(65536),
-            hard: LimitValue::Value(65536),
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::MsgQueue,
-            soft: LimitValue::Value(819200),
-            hard: LimitValue::Value(819200),
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::Nice,
-            soft: LimitValue::Value(0),
-            hard: LimitValue::Value(0),
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::OpenFiles,
-            soft: LimitValue::Value(1024),
-            hard: LimitValue::Value(1048576),
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::Processes,
-            soft: LimitValue::Value(63195),
-            hard: LimitValue::Value(63195),
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::Rss,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-        ResourceLimit {
-            resource: Resource::RtPrio,
-            soft: LimitValue::Value(0),
-            hard: LimitValue::Value(0),
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::RtTime,
-            soft: LimitValue::Unlimited,
-            hard: LimitValue::Unlimited,
-            units: "microseconds",
-        },
-        ResourceLimit {
-            resource: Resource::SigPending,
-            soft: LimitValue::Value(63195),
-            hard: LimitValue::Value(63195),
-            units: "",
-        },
-        ResourceLimit {
-            resource: Resource::StackSize,
-            soft: LimitValue::Value(8388608),
-            hard: LimitValue::Unlimited,
-            units: "bytes",
-        },
-    ]
-}
-
-// ============================================================================
-// Output
-// ============================================================================
-
-fn print_limits_table(
-    out: &mut io::StdoutLock<'_>,
-    limits: &[ResourceLimit],
-    json: bool,
-    raw: bool,
-) {
-    if json {
-        let _ = writeln!(out, "{{");
-        let _ = writeln!(out, "  \"limits\": [");
-        for (i, lim) in limits.iter().enumerate() {
-            let comma = if i + 1 < limits.len() { "," } else { "" };
-            let _ = writeln!(
-                out,
-                "    {{\"resource\":\"{}\",\"description\":\"{}\",\"soft\":\"{}\",\"hard\":\"{}\",\"units\":\"{}\"}}{comma}",
-                lim.resource.name(),
-                lim.resource.description(),
-                lim.soft.display(),
-                lim.hard.display(),
-                lim.units
-            );
-        }
-        let _ = writeln!(out, "  ]");
-        let _ = writeln!(out, "}}");
-        return;
-    }
-
-    if raw {
-        for lim in limits {
-            let _ = writeln!(
-                out,
-                "{}:{}:{}:{}",
-                lim.resource.name(),
-                lim.soft.display(),
-                lim.hard.display(),
-                lim.units
-            );
-        }
-        return;
-    }
-
-    let _ = writeln!(
-        out,
-        "{:<14} {:<36} {:>14} {:>14} {:>12}",
-        "RESOURCE", "DESCRIPTION", "SOFT", "HARD", "UNITS"
-    );
-    for lim in limits {
-        let _ = writeln!(
-            out,
-            "{:<14} {:<36} {:>14} {:>14} {:>12}",
-            lim.resource.name(),
-            lim.resource.description(),
-            lim.soft.display(),
-            lim.hard.display(),
-            lim.units
-        );
-    }
-}
-
-// ============================================================================
-// prlimit command
-// ============================================================================
-
-fn cmd_prlimit(args: &[String]) {
-    let mut pid: Option<u32> = None;
-    let mut json = false;
-    let mut raw = false;
-    let mut filter_resources: Vec<Resource> = Vec::new();
-    let mut set_operations: Vec<(Resource, LimitValue, LimitValue)> = Vec::new();
-    let mut output_cols: Option<String> = None;
-    let mut command: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                println!("Usage: prlimit [options] [--pid PID] [--<resource>[=<soft>:<hard>]]");
-                println!();
-                println!("Get or set process resource limits.");
-                println!();
-                println!("Options:");
-                println!("  -p, --pid PID      Process ID (default: self)");
-                println!("  -o, --output LIST  Column list");
-                println!("  --raw              Raw output");
-                println!("  -J, --json         JSON output");
-                println!();
-                println!("Resource options (use --<name> to show, --<name>=soft:hard to set):");
-                println!("  --as               Address space");
-                println!("  --core             Core file size");
-                println!("  --cpu              CPU time");
-                println!("  --data             Data size");
-                println!("  --fsize            File size");
-                println!("  --locks            File locks");
-                println!("  --memlock          Locked memory");
-                println!("  --msgqueue         Message queues");
-                println!("  --nice             Nice priority");
-                println!("  --nofile           Open files");
-                println!("  --nproc            Processes");
-                println!("  --rss              Resident set size");
-                println!("  --rtprio           RT priority");
-                println!("  --rttime           RT timeout");
-                println!("  --sigpending       Pending signals");
-                println!("  --stack            Stack size");
-                println!();
-                println!("  -h, --help         Show help");
-                println!("  -V, --version      Show version");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("prlimit {VERSION}");
-                process::exit(0);
-            }
-            "-p" | "--pid" => {
-                i += 1;
-                if i < args.len() {
-                    pid = args[i].parse().ok();
-                }
-            }
-            "-J" | "--json" => json = true,
-            "--raw" => raw = true,
-            "-o" | "--output" => {
-                i += 1;
-                if i < args.len() {
-                    output_cols = Some(args[i].clone());
-                }
-            }
-            s if s.starts_with("--") => {
-                let rest = &s[2..];
-                if let Some((name, value)) = rest.split_once('=') {
-                    // Set operation.
-                    if let Some(res) = parse_resource_name(name) {
-                        let parts: Vec<&str> = value.split(':').collect();
-                        let soft = LimitValue::parse(parts.first().unwrap_or(&"unlimited"))
-                            .unwrap_or(LimitValue::Unlimited);
-                        let hard = LimitValue::parse(
-                            parts
-                                .get(1)
-                                .unwrap_or(parts.first().unwrap_or(&"unlimited")),
-                        )
-                        .unwrap_or(LimitValue::Unlimited);
-                        set_operations.push((res, soft, hard));
-                    } else {
-                        // Used to fall out of the `if` and be forgotten, so
-                        // `prlimit --nofil=10 cmd` set nothing and said
-                        // nothing.
-                        eprintln!(
-                            "prlimit: {}: unknown resource",
-                            quoting::quoteaf(name.as_bytes())
-                        );
-                        process::exit(1);
-                    }
-                } else if let Some(res) = parse_resource_name(rest) {
-                    filter_resources.push(res);
-                } else {
-                    eprintln!(
-                        "prlimit: {}: unknown resource",
-                        quoting::quoteaf(rest.as_bytes())
-                    );
-                    process::exit(1);
-                }
-            }
-            // The first non-option ends the options and begins the command,
-            // as it does for `flock`. Everything after it, dashes and all,
-            // belongs to the command being run.
-            _ => {
-                command = args.get(i..).unwrap_or(&[]).to_vec();
-                break;
-            }
-        }
-        i += 1;
-    }
-
-    let target_pid = pid.unwrap_or(process::id());
-    let _ = output_cols; // Reserved for future column filtering.
-
-    // A command was given: apply the limits to *this* process, which the
-    // child inherits, then run it. That is what `prlimit` does when it is
-    // handed a command rather than a `--pid`, and this build used to drop
-    // the command entirely -- `prlimit --nofile=10 echo ran` printed
-    // nothing where the reference prints `ran`.
-    if let Some(program) = command.first() {
-        for (res, soft, hard) in &set_operations {
-            // pid 0 is the calling process.
-            if let Err(errno) = set_rlimit(0, res.number(), raw_limit(soft), raw_limit(hard)) {
-                eprintln!("prlimit: cannot set {}: errno {}", res.name(), -errno);
-                process::exit(1);
-            }
-        }
-        let rest = command.get(1..).unwrap_or(&[]);
-        match process::Command::new(program).args(rest).status() {
-            Ok(status) => process::exit(status.code().unwrap_or(1)),
-            Err(e) => {
-                eprintln!(
-                    "prlimit: failed to execute {}: {e}",
-                    quoting::quoteaf(program.as_bytes())
-                );
-                process::exit(1);
-            }
-        }
-    }
-
-    // Handle set operations.
-    let mut failed = false;
-    if !set_operations.is_empty() {
-        for (res, soft, hard) in &set_operations {
-            // This used to print the line below and stop -- no syscall, no
-            // change, exit 0. A caller could set a limit, be told it was
-            // set, and run with the old one.
-            if let Err(errno) =
-                set_rlimit(target_pid, res.number(), raw_limit(soft), raw_limit(hard))
-            {
-                eprintln!(
-                    "prlimit: cannot set {} for PID {}: errno {}",
-                    res.name(),
-                    target_pid,
-                    -errno
-                );
-                failed = true;
-                continue;
-            }
-            eprintln!(
-                "prlimit: setting {} for PID {}: soft={}, hard={}",
-                res.name(),
-                target_pid,
-                soft.display(),
-                hard.display()
-            );
-        }
-        // A limit that could not be set is reported and the status says so.
-        // On a host build the syscall is the ENOSYS stub, so every set
-        // fails here and says why -- which is the honest answer, and is
-        // what this printed success for before.
-        if failed {
-            process::exit(1);
-        }
-        return;
-    }
-
-    // Read and display limits.
-    let limits = read_proc_limits(target_pid);
-    let filtered = if filter_resources.is_empty() {
-        limits
-    } else {
-        limits
-            .into_iter()
-            .filter(|l| filter_resources.contains(&l.resource))
-            .collect()
-    };
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    print_limits_table(&mut out, &filtered, json, raw);
-}
-
-fn parse_resource_name(name: &str) -> Option<Resource> {
-    match name.to_lowercase().as_str() {
-        "as" | "address" | "addressspace" => Some(Resource::AddressSpace),
-        "core" | "coresize" => Some(Resource::CoreSize),
-        "cpu" | "cputime" => Some(Resource::CpuTime),
-        "data" | "datasize" => Some(Resource::DataSize),
-        "fsize" | "filesize" => Some(Resource::FileSize),
-        "locks" => Some(Resource::Locks),
-        "memlock" | "lockedmemory" => Some(Resource::MemLock),
-        "msgqueue" | "messagequeue" => Some(Resource::MsgQueue),
-        "nice" => Some(Resource::Nice),
-        "nofile" | "openfiles" => Some(Resource::OpenFiles),
-        "nproc" | "processes" => Some(Resource::Processes),
-        "rss" => Some(Resource::Rss),
-        "rtprio" | "realtimepriority" => Some(Resource::RtPrio),
-        "rttime" | "realtimetimeout" => Some(Resource::RtTime),
-        "sigpending" | "signals" => Some(Resource::SigPending),
-        "stack" | "stacksize" => Some(Resource::StackSize),
-        _ => None,
-    }
-}
-
-// ============================================================================
-// ulimit command
-// ============================================================================
-
-fn cmd_ulimit(args: &[String]) {
-    let mut resource = Resource::FileSize; // Default: -f.
-    let mut show_all = false;
-    let mut hard = false;
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: ulimit [options] [limit]");
-                println!();
-                println!("Shell resource limits.");
-                println!();
-                println!("Options:");
-                println!("  -a    Show all limits");
-                println!("  -H    Show hard limit");
-                println!("  -S    Show soft limit (default)");
-                println!("  -c    Core file size");
-                println!("  -d    Data segment size");
-                println!("  -f    File size (default)");
-                println!("  -l    Locked memory");
-                println!("  -m    RSS");
-                println!("  -n    Open files");
-                println!("  -s    Stack size");
-                println!("  -t    CPU time");
-                println!("  -u    Processes");
-                println!("  -v    Address space");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("ulimit {VERSION}");
-                process::exit(0);
-            }
-            "-a" => show_all = true,
-            "-H" => hard = true,
-            "-S" => hard = false,
-            "-c" => resource = Resource::CoreSize,
-            "-d" => resource = Resource::DataSize,
-            "-f" => resource = Resource::FileSize,
-            "-l" => resource = Resource::MemLock,
-            "-m" => resource = Resource::Rss,
-            "-n" => resource = Resource::OpenFiles,
-            "-s" => resource = Resource::StackSize,
-            "-t" => resource = Resource::CpuTime,
-            "-u" => resource = Resource::Processes,
-            "-v" => resource = Resource::AddressSpace,
-            // A resource limit reported for a request that was not parsed
-            // is still a number someone will act on: `ulimit --zzq` printed
-            // "unlimited".
-            other if other.starts_with('-') && other != "-" => {
-                eprintln!("ulimit: unknown option: {}", quoting::quoteaf_os(other));
-                process::exit(1);
-            }
-            _ => {}
-        }
-    }
-
-    let limits = read_proc_limits(process::id());
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    if show_all {
-        for lim in &limits {
-            let val = if hard { &lim.hard } else { &lim.soft };
-            let _ = writeln!(out, "{:<40} {}", lim.resource.description(), val.display());
-        }
-    } else {
-        for lim in &limits {
-            if lim.resource == resource {
-                let val = if hard { &lim.hard } else { &lim.soft };
-                let _ = writeln!(out, "{}", val.display());
-                return;
-            }
-        }
-        let _ = writeln!(out, "unlimited");
-    }
-}
-
-// ============================================================================
-// CLI
-// ============================================================================
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("prlimit");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "ulimit" => cmd_ulimit(&rest),
-        _ => cmd_prlimit(&rest),
-    }
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Read out of the kernel headers, not recalled. The generic header
-    /// stops at 4 and resumes at 10 because 5..=9 are architecture
-    /// specific, which is exactly the gap a memory of this list gets wrong.
-    #[test]
-    fn resource_numbers_are_the_kernels() {
-        assert_eq!(Resource::CpuTime.number(), 0);
-        assert_eq!(Resource::FileSize.number(), 1);
-        assert_eq!(Resource::DataSize.number(), 2);
-        assert_eq!(Resource::StackSize.number(), 3);
-        assert_eq!(Resource::CoreSize.number(), 4);
-        assert_eq!(Resource::Rss.number(), 5);
-        assert_eq!(Resource::Processes.number(), 6);
-        assert_eq!(Resource::OpenFiles.number(), 7);
-        assert_eq!(Resource::MemLock.number(), 8);
-        assert_eq!(Resource::AddressSpace.number(), 9);
-        assert_eq!(Resource::Locks.number(), 10);
-        assert_eq!(Resource::SigPending.number(), 11);
-        assert_eq!(Resource::MsgQueue.number(), 12);
-        assert_eq!(Resource::Nice.number(), 13);
-        assert_eq!(Resource::RtPrio.number(), 14);
-        assert_eq!(Resource::RtTime.number(), 15);
-    }
-
-    /// Every resource has a distinct number -- a duplicate would silently
-    /// set the wrong limit, which no other test here would catch.
-    #[test]
-    fn no_two_resources_share_a_number() {
-        let all = [
-            Resource::CpuTime,
-            Resource::FileSize,
-            Resource::DataSize,
-            Resource::StackSize,
-            Resource::CoreSize,
-            Resource::Rss,
-            Resource::Processes,
-            Resource::OpenFiles,
-            Resource::MemLock,
-            Resource::AddressSpace,
-            Resource::Locks,
-            Resource::SigPending,
-            Resource::MsgQueue,
-            Resource::Nice,
-            Resource::RtPrio,
-            Resource::RtTime,
-        ];
-        let mut seen: Vec<u32> = all.iter().map(|r| r.number()).collect();
-        seen.sort_unstable();
-        seen.dedup();
-        assert_eq!(seen.len(), all.len(), "a number is used twice");
-    }
-
-    #[test]
-    fn test_resource_names() {
-        assert_eq!(Resource::OpenFiles.name(), "NOFILE");
-        assert_eq!(Resource::StackSize.name(), "STACK");
-        assert_eq!(Resource::CpuTime.name(), "CPU");
-        assert_eq!(Resource::AddressSpace.name(), "AS");
-    }
-
-    #[test]
-    fn test_resource_descriptions() {
-        assert_eq!(
-            Resource::OpenFiles.description(),
-            "max number of open files"
-        );
-        assert_eq!(Resource::StackSize.description(), "max stack size");
-    }
-
-    #[test]
-    fn test_resource_units() {
-        assert_eq!(Resource::OpenFiles.units(), "");
-        assert_eq!(Resource::StackSize.units(), "bytes");
-        assert_eq!(Resource::CpuTime.units(), "seconds");
-        assert_eq!(Resource::RtTime.units(), "microseconds");
-    }
-
-    #[test]
-    fn test_limit_value_display() {
-        assert_eq!(LimitValue::Unlimited.display(), "unlimited");
-        assert_eq!(LimitValue::Value(1024).display(), "1024");
-        assert_eq!(LimitValue::Value(0).display(), "0");
-    }
-
-    #[test]
-    fn test_limit_value_parse() {
-        assert_eq!(LimitValue::parse("unlimited"), Some(LimitValue::Unlimited));
-        assert_eq!(LimitValue::parse("infinity"), Some(LimitValue::Unlimited));
-        assert_eq!(LimitValue::parse("-1"), Some(LimitValue::Unlimited));
-        assert_eq!(LimitValue::parse("1024"), Some(LimitValue::Value(1024)));
-        assert_eq!(LimitValue::parse("0"), Some(LimitValue::Value(0)));
-        assert!(LimitValue::parse("abc").is_none());
-    }
-
-    #[test]
-    fn test_parse_resource_name() {
-        assert_eq!(parse_resource_name("nofile"), Some(Resource::OpenFiles));
-        assert_eq!(parse_resource_name("stack"), Some(Resource::StackSize));
-        assert_eq!(parse_resource_name("cpu"), Some(Resource::CpuTime));
-        assert_eq!(parse_resource_name("as"), Some(Resource::AddressSpace));
-        assert_eq!(parse_resource_name("nice"), Some(Resource::Nice));
-        assert!(parse_resource_name("unknown").is_none());
-    }
-
-    #[test]
-    fn test_generate_default_limits() {
-        let limits = generate_default_limits();
-        assert_eq!(limits.len(), 16);
-    }
-
-    #[test]
-    fn test_default_open_files() {
-        let limits = generate_default_limits();
-        let nofile = limits
-            .iter()
-            .find(|l| l.resource == Resource::OpenFiles)
-            .unwrap();
-        assert_eq!(nofile.soft, LimitValue::Value(1024));
-        assert_eq!(nofile.hard, LimitValue::Value(1048576));
-    }
-
-    #[test]
-    fn test_default_stack_size() {
-        let limits = generate_default_limits();
-        let stack = limits
-            .iter()
-            .find(|l| l.resource == Resource::StackSize)
-            .unwrap();
-        assert_eq!(stack.soft, LimitValue::Value(8388608));
-        assert_eq!(stack.hard, LimitValue::Unlimited);
-    }
-
-    #[test]
-    fn test_default_core_size() {
-        let limits = generate_default_limits();
-        let core = limits
-            .iter()
-            .find(|l| l.resource == Resource::CoreSize)
-            .unwrap();
-        assert_eq!(core.soft, LimitValue::Value(0));
-        assert_eq!(core.hard, LimitValue::Unlimited);
-    }
-
-    #[test]
-    fn test_resource_limit_clone() {
-        let lim = ResourceLimit {
-            resource: Resource::OpenFiles,
-            soft: LimitValue::Value(1024),
-            hard: LimitValue::Value(1048576),
-            units: "",
-        };
-        let c = lim.clone();
-        assert_eq!(c.resource, Resource::OpenFiles);
-        assert_eq!(c.soft, LimitValue::Value(1024));
-    }
-
-    #[test]
-    fn test_all_resources_count() {
-        assert_eq!(ALL_RESOURCES.len(), 16);
-    }
-
-    #[test]
-    fn test_read_proc_limits_self() {
-        let limits = read_proc_limits(process::id());
-        assert!(!limits.is_empty());
-    }
-
-    #[test]
-    fn test_read_proc_limits_invalid_pid() {
-        let limits = read_proc_limits(999999999);
-        // Should fall back to defaults.
-        assert!(!limits.is_empty());
-    }
-
-    #[test]
-    fn test_resource_equality() {
-        assert_eq!(Resource::OpenFiles, Resource::OpenFiles);
-        assert_ne!(Resource::OpenFiles, Resource::StackSize);
-    }
-
-    #[test]
-    fn test_limit_value_equality() {
-        assert_eq!(LimitValue::Unlimited, LimitValue::Unlimited);
-        assert_eq!(LimitValue::Value(42), LimitValue::Value(42));
-        assert_ne!(LimitValue::Unlimited, LimitValue::Value(0));
-    }
-
-    #[test]
-    fn test_parse_resource_case_insensitive() {
-        assert_eq!(parse_resource_name("NOFILE"), Some(Resource::OpenFiles));
-        assert_eq!(parse_resource_name("Stack"), Some(Resource::StackSize));
-    }
-}
+mod tests;

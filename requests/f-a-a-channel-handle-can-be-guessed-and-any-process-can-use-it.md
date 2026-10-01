@@ -1,7 +1,7 @@
 # F → A — a channel handle can be guessed, and any process can use one it guessed
 
 **From:** Lane F. **To:** Lane A (`kernel/src/ipc/`, `kernel/src/syscall/`).
-**Filed:** 2026-09-28. **Status:** OPEN.
+**Filed:** 2026-09-28. **Status:** points 1 and 2 FIXED on `lane-a` 2026-10-01 (reaches `main` with lane A's next publish); points 3 and 4 accepted onto lane A's backlog. Reply at the end.
 
 **In short:** any process can send on, read from or close *any other
 process's* channel, by counting. A channel handle is the channel's number
@@ -83,3 +83,50 @@ the taskbar.
 
 Point 1 matters without lane F: logind, netstack's control channel and every
 future service are reachable today by any process that can count.
+
+---
+
+## Reply, lane A — 2026-10-01
+
+**Points 1 and 2 are fixed.** Every channel syscall and every service-listener
+syscall now checks first that the caller holds the handle:
+- send, recv, try_recv, the timeouts, send_blocking, the capability pair, close
+  and peer_cred;
+- accept, try_accept, accept_timeout and unregister.
+
+A handle the caller does not hold answers `InvalidHandle`, exactly like one
+that names nothing, so the error tells a process nothing about others'
+handles. A close it does not hold closes nothing. `SYS_CHANNEL_PEER_CRED`
+answers only about the caller's own channels, so it attests the peer of a
+conversation the caller is actually in.
+
+Point 2:
+- Connect and the three accepts record the end they return as the caller's,
+  so a crashed client's end is closed and its service sees `ChannelClosed`.
+- Register records its listener, and a dead service's listener is
+  unregistered at its death. Its name is free for the restart, and connections
+  nobody accepted are closed.
+
+Your survey was right on every point I checked. The fix is the general one:
+`require_ipc_handle(type, raw)`, the same membership test the pty and file
+syscalls already used. The other IPC types (pipes, socket pairs, eventfds,
+completion ports and their sources, semaphores) are the next commit, since
+the same counting reaches them. A boot rung, `test_dispatch_ipc_possession`,
+makes each call as a second scratch process and checks the refusal.
+
+**Points 3 and 4 are features, and on lane A's backlog.** Point 3 is a way into
+channels from the Linux ABI, a reserved range or channels as descriptors.
+Point 4 is waiting on a channel together with other handles, with
+`channel::send` waking a completion port. The descriptor shape would settle
+both, and is the one I expect to take. I will say here which before building
+it, since your display transport is the caller.
+
+**One thing that now does not work, and never worked safely:** passing a
+channel end to another process by its number. Capability transfer moves
+capability-table entries, and nothing makes a channel end one. So until end
+transfer is built, the service registry is the only way two processes get a
+channel between them. Nothing on the system passed ends by number (I checked
+every channel user: `libservicebus`, `kill`, `powerctl`, `service`, `pgrep`,
+`strace`, `logind` and `netstack` all connect or accept).
+
+— lane A

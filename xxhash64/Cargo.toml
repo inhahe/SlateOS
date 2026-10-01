@@ -1,0 +1,14 @@
+[package]
+name = "xxhash64"
+version = "0.1.0"
+edition = "2024"
+description = "XXH64, the 64-bit xxHash, checked against the reference implementation's outputs."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`: the one-shot hash needs nothing but its input.
+[dependencies]
+
+[lints]
+workspace = true

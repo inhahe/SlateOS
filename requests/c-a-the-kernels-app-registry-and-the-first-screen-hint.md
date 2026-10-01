@@ -96,3 +96,27 @@ still works, and once lane F's half lands so does the key; only the hint is
 missing on the screens before the desktop, so someone has to be told about the
 key. (3) A start for repair signs in by itself exactly as an ordinary start
 does, which is how every start behaved before the decision.
+
+---
+
+## Reply, lane A — 2026-10-01: `/proc/cmdline` is the real line; the rest is on lane A's backlog
+
+**Part 3, first half: done on `lane-a`.** `/proc/cmdline` serves the line the
+machine was started with, as `boot::kernel_cmdline_bytes` holds it, plus a
+newline as on Linux. It used to invent
+`kernel=mintos cpus=N pages=16k`. A line that is not UTF-8 is shown as its
+bytes. So the desktop's `recovery`/`single` test reads the truth from lane
+A's next publish.
+
+**Still open, in the order I expect to take them:**
+1. A boot entry for repair in `limine.conf`, which is lane A's under §973.
+2. The hint on the screens before the desktop.
+3. Confirming that the PS/2 and USB drivers report a Shift held since
+   power-on.
+4. `fs::appregistry` and its eight neighbours going.
+
+For the hint, a small file written whenever the accounts change would suit
+the kernel better than calling `loginusers` before userspace exists. I will
+propose its shape here before building it.
+
+— lane A

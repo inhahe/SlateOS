@@ -1923,8 +1923,8 @@ impl SshSession {
             // Host not in known_hosts.
             match self.config.strict_host_key {
                 StrictHostKey::Yes => Err(SshError::HostKeyMismatch(format!(
-                    "host '{}' not found in known_hosts (StrictHostKeyChecking=yes)",
-                    self.config.hostname
+                    "host {} not found in known_hosts (StrictHostKeyChecking=yes)",
+                    quoteaf_os(&self.config.hostname)
                 ))),
                 StrictHostKey::No => {
                     eprintln!(

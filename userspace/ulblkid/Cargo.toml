@@ -1,0 +1,27 @@
+[package]
+name = "ulblkid"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's libblkid, ported: low-level probing of filesystem and RAID superblocks, partition tables and topology"
+
+[lints]
+workspace = true
+
+[dependencies]
+# lib/sysfs.c: whole disks, device names, dm-private devices.
+ulsysfs = { path = "../ulsysfs" }
+# strtoumax, for a hint's NAME=value.
+ulstrutils = { path = "../ulstrutils" }
+# Paths from bytes.
+quoting = { path = "../quoting" }
+# The superblock checksums the probers verify.
+crc32 = { path = "../../crc32" }
+crc32c = { path = "../../crc32c" }
+crc64 = { path = "../../crc64" }
+xxhash64 = { path = "../../xxhash64" }
+# btrfs's SHA-256 checksum, and the UUID HFS derives with MD5.
+sha2 = { path = "../../sha2" }
+md5 = { path = "../../md5" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

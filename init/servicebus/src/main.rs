@@ -1246,7 +1246,8 @@ impl ServiceBus {
             for ch in segment.chars() {
                 if !ch.is_alphanumeric() && ch != '_' && ch != '-' {
                     return Err(BusError::InvalidName(format!(
-                        "invalid character '{ch}' in name segment"
+                        "invalid character {} in name segment",
+                        quoteaf_os(ch.to_string())
                     )));
                 }
             }

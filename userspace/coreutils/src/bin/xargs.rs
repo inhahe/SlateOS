@@ -78,7 +78,7 @@
 //!    the child; here it fails before the spawn and exits 1.
 
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{Opt, Program, Takes};
+use coreutils::getopt::{Opt, Program, Report, Takes};
 use coreutils::quote::{Style, os_bytes, os_from_bytes, quote};
 use coreutils::stdfd;
 use std::ffi::OsString;

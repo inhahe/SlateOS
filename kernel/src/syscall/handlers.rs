@@ -207,11 +207,43 @@ fn caller_pid() -> Option<u64> {
 /// This mirrors the `options.parent != 0` condition on the pty arm of
 /// [`crate::proc::spawn`]'s `fd_map` loop.
 fn require_file_handle_owner(handle: u64) -> Result<(), KernelError> {
+    require_ipc_handle(ResourceType::File, handle)
+}
+
+/// The calling process holds this IPC handle: it created it, accepted it, or
+/// was given it on a path that registered it in its `ipc_handles`.
+///
+/// **The handle value is not the capability.** Most IPC handles in this kernel
+/// are a counter shifted left with a side bit -- a channel's is
+/// `(channel_id << 1) | side`, with ids counting up from 1 -- so any process
+/// can name every channel, pipe or socket in the system by counting. Until
+/// 2026-10-01 most of the syscalls that take one did no more than look the
+/// value up, so any process could send on, read from or close another's
+/// channel -- logind's and netstack's included
+/// (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`).
+/// Possession is what makes a handle unforgeable, as design.txt requires of
+/// every kernel object; the value only says which one.
+///
+/// A handle the caller does not hold answers `InvalidHandle`, the same as one
+/// that names nothing: telling the two apart would let a process learn which
+/// handle values are live in other processes.
+///
+/// A bare kernel task (no calling process) passes: it holds handles nothing
+/// registered against a pid, and no user process is claiming anything.
+fn require_ipc_handle(resource_type: ResourceType, handle: u64) -> Result<(), KernelError> {
     match caller_pid() {
-        Some(pid) if !pcb::owns_ipc_handle(pid, ResourceType::File, handle) => {
+        Some(pid) if !pcb::owns_ipc_handle(pid, resource_type, handle) => {
             Err(KernelError::InvalidHandle)
         }
         _ => Ok(()),
+    }
+}
+
+/// Record a handle the kernel has just given the calling process, so that
+/// [`require_ipc_handle`] lets it be used and the process's death releases it.
+fn register_for_caller(resource_type: ResourceType, handle: u64) {
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, resource_type, handle);
     }
 }
 
@@ -1458,11 +1490,10 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
         channel::create()
     };
 
-    // Register both endpoints for cleanup on process death.
-    if let Some(pid) = caller_pid() {
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep0.raw());
-        pcb::register_ipc_handle(pid, ResourceType::Channel, ep1.raw());
-    }
+    // Both endpoints are the caller's: usable by it alone, released when it
+    // dies.
+    register_for_caller(ResourceType::Channel, ep0.raw());
+    register_for_caller(ResourceType::Channel, ep1.raw());
 
     // Pack handles into the two return registers.
     #[allow(clippy::cast_possible_wrap)]
@@ -1494,6 +1525,9 @@ fn read_message_body(ptr: u64, len: usize) -> KernelResult<alloc::vec::Vec<u8>> 
 /// `arg2`: length of message data.
 pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -1528,6 +1562,9 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success.
 pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1577,6 +1614,9 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length, 0 if empty, negative error code on failure.
 pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -1623,6 +1663,9 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: channel handle.
 pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Channel, handle.raw());
     }
@@ -1640,6 +1683,9 @@ pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success, `TimedOut` if deadline expires.
 pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1687,6 +1733,9 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -1719,6 +1768,9 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
 
     if args.arg1 == 0 && data_len > 0 {
@@ -1752,6 +1804,9 @@ pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let caps_count = args.arg4 as usize;
 
@@ -1799,6 +1854,9 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
 /// Returns (rdx): number of capability handles received.
 pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let caps_out_cap = args.arg4 as usize;
 
@@ -2278,6 +2336,9 @@ where
 /// Returns: number of bytes written.
 pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -2314,6 +2375,9 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
 /// Returns: number of bytes read (0 = EOF).
 pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -2340,6 +2404,9 @@ pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
 /// Same as `SYS_PIPE_WRITE` but returns `WouldBlock` if buffer is full.
 pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -2368,6 +2435,9 @@ pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
 /// Same as `SYS_PIPE_READ` but returns `WouldBlock` if empty.
 pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -2391,6 +2461,9 @@ pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pipe handle (either end).
 pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Pipe, handle.raw());
     }
@@ -2408,6 +2481,9 @@ pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
 /// - bit 4 (0x10): hangup (other end closed)
 pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let flags = pipe::poll_status(handle);
     SyscallResult::ok(flags as i64)
 }
@@ -2415,6 +2491,9 @@ pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_PIPE_READABLE_BYTES` — return bytes buffered in a pipe.
 pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let bytes = pipe::readable_bytes(handle);
     SyscallResult::ok(bytes as i64)
 }
@@ -2429,6 +2508,9 @@ pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 /// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
 pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -2458,6 +2540,9 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: bytes written, `TimedOut` if deadline expires.
 pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -2491,6 +2576,9 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
 /// are left untouched — this is the non-destructive primitive behind `tee(2)`.
 pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let offset = args.arg1;
     let buf_cap = args.arg3 as usize;
 
@@ -2518,6 +2606,9 @@ pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
 /// Consumes no bytes — the blocking-wait primitive `tee(2)` uses before peeking.
 pub fn sys_pipe_wait_readable(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Pipe, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     match pipe::wait_readable(handle) {
         Ok(true) => SyscallResult::ok(1),
         Ok(false) => SyscallResult::ok(0),
@@ -2551,6 +2642,9 @@ pub fn sys_socketpair_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SEND` — send bytes on an endpoint (blocking).
 pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -2577,6 +2671,9 @@ pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_RECV` — receive bytes from an endpoint (blocking).
 pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -2598,6 +2695,9 @@ pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_TRY_SEND` — non-blocking send.
 pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
 
     if args.arg1 == 0 && len > 0 {
@@ -2622,6 +2722,9 @@ pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_TRY_RECV` — non-blocking receive.
 pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -2643,6 +2746,9 @@ pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_CLOSE` — close an endpoint handle.
 pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::StreamSocket, handle.raw());
     }
@@ -2653,6 +2759,9 @@ pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SEND_TIMEOUT` — send with a deadline.
 pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -2678,6 +2787,9 @@ pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_RECV_TIMEOUT` — receive with a deadline.
 pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
@@ -2700,6 +2812,9 @@ pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_POLL` — query endpoint readiness.
 pub fn sys_socketpair_poll(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let flags = stream_socket::poll_status(handle);
     SyscallResult::ok(i64::from(flags))
 }
@@ -2707,6 +2822,9 @@ pub fn sys_socketpair_poll(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_READABLE_BYTES` — bytes available to receive.
 pub fn sys_socketpair_readable_bytes(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let bytes = stream_socket::readable_bytes(handle);
     #[allow(clippy::cast_possible_wrap)]
     let b = bytes as i64;
@@ -2716,6 +2834,9 @@ pub fn sys_socketpair_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SHUTDOWN` — shut down one or both directions.
 pub fn sys_socketpair_shutdown(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::StreamSocket, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let how = args.arg1 as u32;
     match stream_socket::shutdown(handle, how) {
         Ok(()) => SyscallResult::ok(0),
@@ -3104,6 +3225,9 @@ pub fn sys_eventfd_create(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_eventfd_write(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let value = args.arg1;
 
     match eventfd::write(handle, value) {
@@ -3119,6 +3243,9 @@ pub fn sys_eventfd_write(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value (> 0).
 pub fn sys_eventfd_read(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match eventfd::read(handle) {
         Ok(val) => {
@@ -3137,6 +3264,9 @@ pub fn sys_eventfd_read(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value, or `WouldBlock` if counter is 0.
 pub fn sys_eventfd_try_read(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match eventfd::try_read(handle) {
         Ok(val) => {
@@ -3153,6 +3283,9 @@ pub fn sys_eventfd_try_read(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: eventfd handle.
 pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::EventFd, handle.raw());
     }
@@ -3168,6 +3301,9 @@ pub fn sys_eventfd_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: counter value, or `TimedOut` if deadline expires.
 pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match eventfd::read_timeout(handle, timeout_ns) {
@@ -3187,6 +3323,9 @@ pub fn sys_eventfd_read_timeout(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: timeout in nanoseconds.
 pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let value = args.arg1;
     let timeout_ns = args.arg2;
 
@@ -3205,6 +3344,9 @@ pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
 /// consuming the eventfd value.
 pub fn sys_eventfd_has_value(args: &SyscallArgs) -> SyscallResult {
     let handle = EventFdHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::EventFd, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     SyscallResult::ok(i64::from(eventfd::has_value(handle)))
 }
 
@@ -3227,6 +3369,36 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         6 => Some(WaitSource::Semaphore(handle)),
         7 => Some(WaitSource::IoCompletion(handle)),
         _ => None,
+    }
+}
+
+/// The caller holds what a completion-port source names, judged as that
+/// source's own syscalls judge it.
+///
+/// Registering a source that is not yours would tell you when another process's
+/// pipe or channel carries data, and park your task among its waiters.
+/// Unregistering is not checked this way: a source the caller has since closed
+/// must still come off its own port.
+///
+/// A process-exit source names a pid, not a handle; what it reveals, that a
+/// process ended, `/proc` already shows.
+fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
+    match *source {
+        WaitSource::Channel(h) => require_ipc_handle(ResourceType::Channel, h),
+        WaitSource::PipeRead(h) | WaitSource::PipeWrite(h) => {
+            require_ipc_handle(ResourceType::Pipe, h)
+        }
+        WaitSource::EventFd(h) => require_ipc_handle(ResourceType::EventFd, h),
+        WaitSource::Timer(h) => require_ipc_handle(ResourceType::Timer, h),
+        WaitSource::IoCompletion(ring) => {
+            if crate::ipc::io_ring::owned_by_caller(ring) {
+                Ok(())
+            } else {
+                Err(KernelError::InvalidHandle)
+            }
+        }
+        WaitSource::Semaphore(h) => require_ipc_handle(ResourceType::Semaphore, h),
+        WaitSource::ProcessExit(_) => Ok(()),
     }
 }
 
@@ -3254,10 +3426,16 @@ pub fn sys_cp_create(args: &SyscallArgs) -> SyscallResult {
 /// `arg3`: `user_data`.
 pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
     };
+    if let Err(e) = require_wait_source(&source) {
+        return SyscallResult::err(e);
+    }
 
     match completion::register(cp, source, args.arg3) {
         Ok(()) => SyscallResult::ok(0),
@@ -3272,6 +3450,9 @@ pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: source handle.
 pub fn sys_cp_unregister(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -3357,6 +3538,9 @@ fn deliver_events(
 /// `arg2`: buffer capacity (max events).
 pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -3399,6 +3583,9 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
 /// Same arguments as `SYS_CP_WAIT`.
 pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     let buf_cap = args.arg2 as usize;
 
     if args.arg1 == 0 && buf_cap > 0 {
@@ -3434,6 +3621,9 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: CP handle.
 pub fn sys_cp_close(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::CompletionPort, cp.raw());
     }
@@ -3448,6 +3638,9 @@ pub fn sys_cp_close(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: source handle.
 pub fn sys_cp_notify(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::CompletionPort, cp.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(source) = decode_wait_source(args.arg1, args.arg2) else {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -9214,6 +9407,9 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
     if handle == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
+    if let Err(e) = require_ipc_handle(ResourceType::Timer, handle) {
+        return SyscallResult::err(e);
+    }
 
     if let Some(pid) = caller_pid() {
         pcb::deregister_ipc_handle(pid, ResourceType::Timer, handle);
@@ -14314,6 +14510,8 @@ pub fn sys_sem_create(args: &SyscallArgs) -> SyscallResult {
     let max_count = args.arg1;
 
     let handle = semaphore::create(initial, max_count);
+    // The caller's alone, and closed when it dies.
+    register_for_caller(ResourceType::Semaphore, handle.raw());
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(handle.raw() as i64)
@@ -14327,6 +14525,9 @@ pub fn sys_sem_signal(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let count = args.arg1;
 
     match semaphore::signal(handle, count) {
@@ -14342,6 +14543,9 @@ pub fn sys_sem_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -14356,6 +14560,9 @@ pub fn sys_sem_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match semaphore::try_wait(handle) {
         Ok(()) => SyscallResult::ok(0),
@@ -14370,6 +14577,12 @@ pub fn sys_sem_close(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::Semaphore, handle.raw());
+    }
     semaphore::close(handle);
     SyscallResult::ok(0)
 }
@@ -14384,6 +14597,9 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::semaphore::{self, SemHandle};
 
     let handle = SemHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Semaphore, handle.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match semaphore::wait_timeout(handle, timeout_ns) {
@@ -14424,8 +14640,11 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::register(&name) {
-        Ok(listener) =>
-        {
+        Ok(listener) => {
+            // The listener is the caller's, and its death unregisters the
+            // name -- before this, a service that died kept its name for ever
+            // and its restart got `AlreadyExists`.
+            register_for_caller(ResourceType::Service, listener.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(listener.raw() as i64)
         }
@@ -14454,8 +14673,11 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
     };
 
     match service::connect(&name) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            // The client's end: usable by the client alone, and closed when
+            // it dies, so the service sees `ChannelClosed` instead of holding
+            // the connection's state for ever.
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14470,10 +14692,13 @@ pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle.
 pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::accept(listener) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14488,10 +14713,13 @@ pub fn sys_service_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `WouldBlock`.
 pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::try_accept(listener) {
-        Ok(Some(handle)) =>
-        {
+        Ok(Some(handle)) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14508,11 +14736,14 @@ pub fn sys_service_try_accept(args: &SyscallArgs) -> SyscallResult {
 /// Returns: server-side channel handle, or `TimedOut`.
 pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
     let timeout_ns = args.arg1;
 
     match service::accept_timeout(listener, timeout_ns) {
-        Ok(handle) =>
-        {
+        Ok(handle) => {
+            register_for_caller(ResourceType::Channel, handle.raw());
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
         }
@@ -14527,9 +14758,17 @@ pub fn sys_service_accept_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
     let listener = ServiceListenerHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Service, listener.raw()) {
+        return SyscallResult::err(e);
+    }
 
     match service::unregister(listener) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::Service, listener.raw());
+            }
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -14557,6 +14796,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 ///
 /// # Errors
 ///
+/// - `InvalidHandle` — the caller does not hold `arg0`. A process can ask who
+///   is on the other end of its own channels only: before 2026-10-01 any
+///   process could ask about any channel, and learn who was talking to whom.
 /// - `NotFound` — `arg0` names no live channel, or no process was ever
 ///   recorded for the peer side.  Both are *unknown*, not *nobody*, and a
 ///   service must treat either as a refusal rather than as a credential.
@@ -14567,6 +14809,9 @@ pub fn sys_service_unregister(args: &SyscallArgs) -> SyscallResult {
 /// - `Fault` — the output buffer is not writable.
 pub fn sys_channel_peer_cred(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, handle.raw()) {
+        return SyscallResult::err(e);
+    }
 
     let Some(cred) = channel::peer_cred(handle) else {
         // "No such channel" and "no record for the peer" are deliberately
@@ -16692,14 +16937,15 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
             continue;
         };
 
-        // Authorise exactly as this kind's own read/write syscalls do. Only the
-        // pty handle space is enumerable — `(tty_id << 1) | end` — so it is the
-        // only one whose value is not self-authorising; see `owned_pty_handle`.
-        // Waiting must not confer authority that operating would not: without
-        // this, `kind = Pty, handle = 2` would be a readiness oracle over every
-        // pty on the machine *and* would splice the caller's task into a
-        // stranger's waiter set.
-        if matches!(test, WaitTest::Pty) && owned_pty_handle(item.handle).is_err() {
+        // Authorise exactly as this kind's own syscalls do: the caller must
+        // hold the handle. This used to be checked for ptys alone, on the
+        // reading that only the pty handle space -- `(tty_id << 1) | end` -- was
+        // enumerable. Every space here is: pipes, eventfds and socket pairs
+        // are counters too (A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS).
+        // Waiting must not confer authority that operating would not: an
+        // unheld handle would be a readiness oracle over a stranger's object
+        // *and* would splice the caller's task into its waiter set.
+        if !pcb::owns_ipc_handle(pid, kind, item.handle) {
             item.revents = u32::from(poll_bits::POLLNVAL);
             continue;
         }

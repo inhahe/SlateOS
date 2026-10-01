@@ -8,3 +8,6 @@ description = "SlateOS network interface and routing configuration utility"
 # an argv word, so it is whatever the user typed and not text this program
 # chose.
 quoting = { path = "../quoting" }
+# The kernel's native error codes: SYS_NET_IF_CONFIG refuses with its own
+# numbers (PermissionDenied is -400), not Linux's errno.
+kerror = { path = "../kerror" }

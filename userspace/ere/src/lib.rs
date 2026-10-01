@@ -33,6 +33,7 @@
 //! | `sed` | BRE | substring search, plus a hand-rolled `.`/`*` matcher | yes |
 //! | `awk`'s `/re/` and `~` | ERE | substring search | yes |
 //! | `expr`'s `:` | BRE anchored at the start | no `:` operator whatsoever | yes |
+//! | `ptx`'s `-S` and `-W` | glibc's Emacs syntax, newline-anchored | (not ported until then) | yes, through [`emacs`] |
 //!
 //! That is not four small gaps; it is one missing component, absent four times.
 //! Three of the four also failed *quietly* — `grep '^posix'` finds nothing
@@ -51,9 +52,9 @@
 //! about the same file.
 //!
 //! `posix`'s `regcomp`/`regexec` (`posix/src/regex.rs`) deliberately stays a
-//! separate implementation: it has fixed-size buffers and a C ABI, and it
-//! answers to a different specification — POSIX's, byte-for-byte, including the
-//! error codes, which is what a C program linking `libc` is entitled to expect.
+//! separate implementation: it has a C ABI, and it answers to a different
+//! specification — POSIX's, with glibc's syntax and error codes, which is what
+//! a C program linking `libc` is entitled to expect (design-decisions §1160).
 //! This crate is for the Rust programs.
 //!
 //! ## Why this crate is `no_std`
@@ -114,6 +115,7 @@ extern crate std;
 
 pub mod bre;
 pub mod ch;
+pub mod emacs;
 pub mod engine;
 
 pub use ch::{BStr, Ch, Str, chars, from_chars};

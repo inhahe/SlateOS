@@ -1724,8 +1724,6 @@ pub fn dispatch_linux_with_frame(frame: &mut crate::syscall::entry::SyscallFrame
 ///     Tracked in todo.txt ("CLONE_PIDFD sibling-consistency gap").
 ///   * `CLONE_INTO_CGROUP` or `cgroup != 0` — no cgroup subsystem.
 ///   * `set_tid_size > 0` — we don't honour manual TID assignment.
-///   * `CLONE_CLEAR_SIGHAND` — our signal-handler model doesn't yet
-///     track per-thread handler tables independently from the PCB.
 ///   * Any namespace flag (`CLONE_NEWNS`, `CLONE_NEWPID`, etc.) —
 ///     these need a namespace subsystem (deferred per `design.txt`).
 ///   * `exit_signal` outside the low byte — Linux constrains this
@@ -1891,16 +1889,14 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
     if flags_user & clone_flags::CLONE_INTO_CGROUP != 0 {
         return Err(errno::EINVAL);
     }
-    // CLONE_CLEAR_SIGHAND: the child starts with every signal handler reset
-    // to its default disposition.  glibc's posix_spawn(3) sets this (together
-    // with CLONE_VM | CLONE_VFORK) so the spawned helper can't run an inherited
-    // SIGCHLD/SIGPIPE handler before it execs.  Our per-signal dispositions
-    // live in userspace and are discarded with the old address space on the
-    // imminent execve (see signal::on_exec); the kernel-side trampoline is
-    // likewise reset there.  For the (rare) clone3 child that does NOT exec,
-    // the flag is honoured in linux_clone_inner by resetting the child's
-    // kernel-side signal state after creation.  Either way we accept it
-    // rather than rejecting with EINVAL.
+    // CLONE_CLEAR_SIGHAND: the child starts with every caught signal reset to
+    // its default disposition, ignored ones staying ignored.  glibc's
+    // posix_spawn(3) sets this (together with CLONE_VM | CLONE_VFORK) so the
+    // spawned helper can't run an inherited SIGCHLD/SIGPIPE handler before it
+    // execs.  A Linux-ABI process's dispositions live in the kernel's table, so
+    // the clone path resets the child's there once it has been copied from the
+    // parent (`linux_sigaction_on_exec`, the same reset an exec makes); the
+    // blocked mask and the alternate stack are inherited as on any clone.
     if set_tid_size != 0 || set_tid != 0 {
         return Err(errno::EINVAL);
     }
@@ -2666,14 +2662,8 @@ fn linux_clone_inner(
             child_stack,
         ) {
             Ok(child_pid) => {
-                // CLONE_CLEAR_SIGHAND: reset the child's kernel-side signal
-                // state (trampoline + blocked mask) to defaults.  The child
-                // normally execs immediately (which does this anyway via
-                // on_exec), but honouring it here keeps the contract for any
-                // child that delays or skips exec.
-                if flags & clone_flags::CLONE_CLEAR_SIGHAND != 0 {
-                    crate::proc::signal::on_exec(child_pid);
-                }
+                // CLONE_CLEAR_SIGHAND was honoured inside the fork, before the
+                // child had a thread (`fork_process_clone_inner`).
                 #[allow(clippy::cast_possible_wrap)]
                 {
                     child_pid as i64
@@ -37065,6 +37055,39 @@ fn sigtimedwait_deliver(uinfo: u64, sig: u32) -> SyscallResult {
     SyscallResult::ok(i64::from(sig))
 }
 
+/// The signals that end a Linux program's `rt_sigtimedwait` without being
+/// taken by it: not blocked, outside the set it waits for, and doing something
+/// when delivered -- a handler, or a default action of terminate.
+///
+/// Ignored ones do not end the wait, explicitly (`SIG_IGN`) or by default
+/// (`SIGCHLD`, `SIGURG`, `SIGWINCH`), which is what glibc's tests measure on
+/// Linux (`posix/src/interrupt_oracle.txt`). Default stop and continue are
+/// left out as well: job control acts on them on the way back to user mode,
+/// and whether a stop should end the wait is not a question anything here asks.
+fn sigtimedwait_interrupters(pid: crate::proc::pcb::ProcessId, waited: u64) -> u64 {
+    use crate::proc::signal::{DefaultAction, default_action, signal_bit};
+    let candidates = !crate::proc::signal::blocked(pid) & !waited;
+    let mut set = 0u64;
+    for sig in 1..=crate::proc::signal::NSIG {
+        let Some(bit) = signal_bit(sig) else {
+            continue;
+        };
+        if candidates & bit == 0 {
+            continue;
+        }
+        let handler = linux_sigaction_get(pid, sig).sa_handler;
+        let acts = match handler {
+            SIG_IGN => false,
+            SIG_DFL => default_action(sig) == DefaultAction::Terminate,
+            _ => true,
+        };
+        if acts {
+            set |= bit;
+        }
+    }
+    set
+}
+
 /// `rt_sigtimedwait(set*, info*, timeout*, sigsetsize)`.
 ///
 /// Linux gate order (kernel/signal.c
@@ -37176,10 +37199,25 @@ fn sys_rt_sigtimedwait(args: &SyscallArgs) -> SyscallResult {
         if let Some(sig) = crate::proc::signal::take_pending_in_mask(caller, mask) {
             return sigtimedwait_deliver(args.arg1, sig);
         }
+        // A signal outside the set that would *do* something when delivered
+        // ends the wait with EINTR, and the delivery on the way out does it:
+        // Linux's `do_sigtimedwait` sleeps interruptibly and answers -EINTR
+        // when woken with none of the set to take. Without this the wait went
+        // on to its timeout, or for ever -- a handled ^C reached Python's
+        // `sigtimedwait` only when the wait ended, and a default-action
+        // SIGTERM did not end the program at all until then
+        // (requests/d-a-rt-sigtimedwait-sleeps-through-a-handled-signal.md).
+        // Recomputed every pass: a handler installed by another thread counts
+        // from the next wake.
+        let interrupters = sigtimedwait_interrupters(caller, mask);
+        if crate::proc::signal::has_pending_in_mask(caller, interrupters) {
+            return linux_err(errno::EINTR);
+        }
         // Register-then-recheck so a signal raised in the gap before we
         // park is not missed (`set_pending` wakes registered waiters).
-        crate::proc::signal::register_signalfd_waiter(caller, task, mask);
-        if crate::proc::signal::has_pending_in_mask(caller, mask) {
+        let wake_on = mask | interrupters;
+        crate::proc::signal::register_signalfd_waiter(caller, task, wake_on);
+        if crate::proc::signal::has_pending_in_mask(caller, wake_on) {
             crate::proc::signal::deregister_signalfd_waiter(caller, task);
             continue;
         }
@@ -55343,6 +55381,57 @@ fn self_test_sigaction_table() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// Which signals end `rt_sigtimedwait` without being taken by it
+/// ([`sigtimedwait_interrupters`]): a handled one and a default-terminate one
+/// do; an ignored one, a default-ignore one, a default-stop one, a blocked one
+/// and one of the waited set do not
+/// (requests/d-a-rt-sigtimedwait-sleeps-through-a-handled-signal.md).
+#[inline(never)]
+fn self_test_sigtimedwait_interrupters() -> crate::error::KernelResult<()> {
+    use crate::proc::signal::signal_bit;
+    use crate::serial_println;
+
+    let pid: u64 = 0xFFFF_FFFF_DEAD_0003;
+    let bit = |sig: u32| signal_bit(sig).unwrap_or(0);
+    let handler = |addr: u64| LinuxSigaction {
+        sa_handler: addr,
+        ..LinuxSigaction::default()
+    };
+    linux_sigaction_set(pid, 10, handler(0x4000)); // SIGUSR1: a handler
+    linux_sigaction_set(pid, 12, handler(SIG_IGN)); // SIGUSR2: ignored
+    linux_sigaction_set(pid, 2, handler(0x5000)); // SIGINT: a handler, but blocked
+    crate::proc::signal::set_blocked(pid, bit(2));
+    let waited = bit(14); // SIGALRM is what the wait is for
+
+    let got = sigtimedwait_interrupters(pid, waited);
+    linux_sigaction_on_exit(pid);
+    crate::proc::signal::remove(pid);
+
+    for (sig, want, why) in [
+        (10, true, "a handled signal"),
+        (15, true, "a default-terminate signal (SIGTERM)"),
+        (12, false, "an ignored signal"),
+        (17, false, "a default-ignore signal (SIGCHLD)"),
+        (20, false, "a default-stop signal (SIGTSTP)"),
+        (2, false, "a blocked signal"),
+        (14, false, "a signal of the waited set"),
+    ] {
+        if (got & bit(sig) != 0) != want {
+            serial_println!(
+                "[syscall/linux]   FAIL: sigtimedwait interrupters: {} ({}) {} the wait",
+                why,
+                sig,
+                if want { "does not end" } else { "ends" }
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[syscall/linux]   rt_sigtimedwait: a handled or fatal signal ends the wait, an ignored, stopping, blocked or waited one does not: OK"
+    );
+    Ok(())
+}
+
 /// SA_RESTART core mechanism: the pure [`restart::restart_action`] decision
 /// table and the sentinel-classification helpers.
 ///
@@ -58720,6 +58809,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     //   because dispatch_linux's rt_sigaction needs a live caller pid
     //   to record state, which the boot self-test doesn't have.
     self_test_sigaction_table()?;
+    self_test_sigtimedwait_interrupters()?;
 
     // SA_RESTART core mechanism — pure restart-decision table + sentinel
     // helpers (independent of any userspace handler delivery).

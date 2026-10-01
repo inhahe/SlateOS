@@ -384,8 +384,10 @@ fn listing_of(keys: &[EnrolledKey], hash: &str) -> Listing {
         return Listing::Forbidden(k.id);
     }
     if let Some(k) = keys.iter().find(|k| {
-        matches!(k.key_type, KeyType::SignatureDatabase | KeyType::MachineOwnerKey)
-            && k.fingerprint == hash
+        matches!(
+            k.key_type,
+            KeyType::SignatureDatabase | KeyType::MachineOwnerKey
+        ) && k.fingerprint == hash
     }) {
         return Listing::Allowed(k.id);
     }
@@ -543,7 +545,11 @@ fn self_test_inner() -> KernelResult<()> {
     // 3: Not enforcing: an unlisted image may run, and the verdict says it
     //    is unlisted rather than pretending it was checked.
     let v = need(verify_image(b"kernel", H3), "verify, disabled")?;
-    check_eq!(v.listing, Listing::Unlisted, "an unlisted hash, not enforcing");
+    check_eq!(
+        v.listing,
+        Listing::Unlisted,
+        "an unlisted hash, not enforcing"
+    );
     check!(!v.enforced && v.allowed, "not enforcing: {:?}", v);
     crate::serial_println!("  [3/9] not enforcing: unlisted, runs, says so: OK");
 
@@ -553,7 +559,11 @@ fn self_test_inner() -> KernelResult<()> {
         "enrol db",
     )?;
     let dbx = need(
-        enroll_key(KeyType::ForbiddenSignature, "revoked build", &H2.to_ascii_lowercase()),
+        enroll_key(
+            KeyType::ForbiddenSignature,
+            "revoked build",
+            &H2.to_ascii_lowercase(),
+        ),
         "enrol dbx",
     )?;
     check_eq!(list_keys().len(), 2, "entries after two enrolments");
@@ -619,13 +629,19 @@ fn self_test_inner() -> KernelResult<()> {
         Listing::Unlisted,
         "the removed MOK hash"
     );
-    check_eq!(remove_key(mok), Err(KernelError::NotFound), "removing twice");
+    check_eq!(
+        remove_key(mok),
+        Err(KernelError::NotFound),
+        "removing twice"
+    );
     crate::serial_println!("  [8/9] remove: OK");
 
     // 9: Records and counts: every verification above, newest first.
     let records = get_records(100);
     check_eq!(records.len(), 8, "records kept");
-    let newest = records.first().map(|r| (r.image_name.as_slice(), r.hash.as_str()));
+    let newest = records
+        .first()
+        .map(|r| (r.image_name.as_slice(), r.hash.as_str()));
     let h3 = need(normalize_sha256(H3), "normalise H3")?;
     check_eq!(
         newest,

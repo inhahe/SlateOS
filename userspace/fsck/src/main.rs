@@ -241,7 +241,8 @@ fn parse_args_from(args: &[String]) -> Result<Options, ParseTerminal> {
             other => {
                 if other.starts_with('-') {
                     return Err(ParseTerminal::UsageError(format!(
-                        "fsck: unknown option '{other}'"
+                        "fsck: unknown option {}",
+                        quoting::quoteaf_os(other)
                     )));
                 }
                 opts.devices.push(other.to_string());

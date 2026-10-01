@@ -48,7 +48,7 @@
 //! likewise prints the help rather than complaining about `abc`.
 
 use coreutils::extfloat;
-use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Report, Takes};
 use coreutils::quote::{os_bytes, quote};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;

@@ -312,10 +312,21 @@ pub fn kernel_file_address() -> Option<(u64, usize)> {
 ///
 /// Returns the null-terminated cmdline string from the Limine kernel-file
 /// descriptor. Returns `None` when no cmdline was provided, it is empty, or it
-/// is not valid UTF-8. The returned slice lives for the entire kernel lifetime
-/// (Limine guarantees its boot info persists). This is the single source of
-/// truth for boot parameters — nothing should fabricate a command line.
+/// is not valid UTF-8 -- [`kernel_cmdline_bytes`] has it whatever its bytes.
+/// The returned slice lives for the entire kernel lifetime (Limine guarantees
+/// its boot info persists). This is the single source of truth for boot
+/// parameters — nothing should fabricate a command line.
 pub fn kernel_cmdline() -> Option<&'static str> {
+    kernel_cmdline_bytes().and_then(|bytes| core::str::from_utf8(bytes).ok())
+}
+
+/// The kernel command line as the bootloader passed it: bytes, without the
+/// terminator. `None` when none was provided or it is empty.
+///
+/// For a reader that must show the line exactly -- `/proc/cmdline` -- rather
+/// than parse it; a line that is not UTF-8 is still the line the machine was
+/// started with.
+pub fn kernel_cmdline_bytes() -> Option<&'static [u8]> {
     let response = KERNEL_FILE_REQUEST.response()?;
     let file_ptr = response.kernel_file;
     if file_ptr.is_null() {
@@ -346,6 +357,5 @@ pub fn kernel_cmdline() -> Option<&'static str> {
     }
     // SAFETY: bytes 0..len are valid, initialized, and live for the kernel
     // lifetime per the Limine guarantee above.
-    let bytes = unsafe { core::slice::from_raw_parts(file.cmdline, len) };
-    core::str::from_utf8(bytes).ok()
+    Some(unsafe { core::slice::from_raw_parts(file.cmdline, len) })
 }

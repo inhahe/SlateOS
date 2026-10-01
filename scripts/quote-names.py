@@ -151,6 +151,15 @@ IGNORE = {
     # sixteen interpolates a fixed `"-d"`/`"-t"` and is not a name at all.
     "userspace/oils/src/interp.rs": "bash's own message text -- B-Q12",
     "userspace/oils/src/arith.rs": "bash's own message text -- B-Q12",
+    # gnulib parse-datetime.y's `--debug` text, byte for byte, which
+    # `date-diff.sh` and `parse-datetime-diff.sh` compare against GNU
+    # `date --debug`. Every single-quoted value in it is text the parser
+    # formatted itself: `(Y-M-D) 2021-06-15 12:00:00` with a numeric `TZ=`,
+    # `12:00:00`, or `str_days`'s words from two fixed tables. None is a name,
+    # and the file reads no names -- `date -f FILE` lives in bin/date.rs. The
+    # one echo of raw input, upstream's `TZ="..." in date string`, is
+    # double-quoted bytes and was never this pattern's to find.
+    "userspace/coreutils/src/parse_datetime/mod.rs": "gnulib's --debug text; the quotes wrap formatted dates",
 }
 
 # The macros that build a message somebody will read.
@@ -175,7 +184,19 @@ IGNORE = {
 # canonical defect written in the one macro it could not see.
 #
 # Spelled once now, so the next predicate cannot disagree with the other three.
-_MESSAGE_OPEN = re.compile(r'(?P<mac>e?println!|format!)\s*\(\s*"')
+#
+# ... and it was not spelled once: `join_wrapped_calls` carried a fourth copy,
+# `("eprintln!", "println!")`, which the `format!` widening above never reached.
+# So a `format!` short enough to stay on one line was checked and one rustfmt
+# had wrapped was not -- and a message long enough to be worth reading is
+# usually long enough to be wrapped. 94 sites in 41 files were behind it on
+# 2026-09-25, found because `numfmt` had four messages of one shape and the
+# gate refused only the one that fitted on a line. The set is now a tuple both
+# the pattern and the joiner are built from.
+_MESSAGE_MACROS = ("eprintln!", "println!", "format!")
+_MESSAGE_OPEN = re.compile(
+    r"(?P<mac>" + "|".join(re.escape(m) for m in _MESSAGE_MACROS) + r')\s*\(\s*"'
+)
 
 
 def bare_interpolated_name(line: str) -> str | None:
@@ -390,8 +411,8 @@ def _delta(src: str) -> int | None:
 def join_wrapped_calls(text: str) -> list[tuple[int, int, str]]:
     """Group physical lines into logical ones: `(first, last, source)`.
 
-    A `println!`/`eprintln!` whose arguments rustfmt split across lines is
-    rejoined into one entry. Without this the detectors are blind to exactly
+    A call to any of `_MESSAGE_MACROS` whose arguments rustfmt split across
+    lines is rejoined into one entry. Without this the detectors are blind to exactly
     the sites formatting touched -- and *measurably* so: running `cargo fmt`
     over five untouched crates in this tree made three real violations
     disappear from the count, because rustfmt had moved the macro name onto a
@@ -418,7 +439,7 @@ def join_wrapped_calls(text: str) -> list[tuple[int, int, str]]:
     while i < len(lines):
         line = lines[i]
         start = -1
-        for mac in ("eprintln!", "println!"):
+        for mac in _MESSAGE_MACROS:
             at = line.find(mac)
             if at != -1 and (start == -1 or at < start):
                 start = at
@@ -1148,7 +1169,7 @@ def write_baseline(found: dict[str, list[tuple[int, str, str]]]) -> None:
         "# scanned roots. If a number rises in a commit that also edits code,",
         "# the code is what raised it.",
         "#",
-        "# It has happened three times.",
+        "# It has happened four times.",
         "#",
         "#   2026-08-23  Calls rustfmt had wrapped onto two lines were invisible.",
         "#               71 sites.",
@@ -1162,11 +1183,20 @@ def write_baseline(found: dict[str, list[tuple[int, str, str]]]) -> None:
         "#               because efibootmgr was given three diagnostics of one",
         "#               shape in one commit and this gate refused one of them.",
         "#               507 sites, and the ledger had been at ZERO.",
+        "#   2026-09-25  ... and it still only half did. The joiner that",
+        "#               reassembles a wrapped call kept its own list of",
+        "#               macros, `eprintln!` and `println!`, so the widening",
+        "#               above reached only the `format!` calls short enough",
+        "#               to stay on one line. Found because numfmt had four",
+        "#               messages of one shape and the gate refused the one",
+        "#               that fitted. 94 sites, and the ledger had been at",
+        "#               ZERO again.",
         "#",
-        "# That last line is the one to read twice. This file said the tree was",
-        "# clean the day before, and the tree was not clean; it was unexamined in",
-        "# a macro nobody had thought to look in. An empty ratchet is a claim",
-        "# about the detector as much as about the code.",
+        "# Those two ZEROs are the lines to read twice. Both times this file said",
+        "# the tree was clean the day before, and the tree was not clean; it was",
+        "# unexamined -- first in a macro nobody had thought to look in, then in",
+        "# the half of that macro rustfmt had wrapped. An empty ratchet is a",
+        "# claim about the detector as much as about the code.",
         "#",
         f"# {sum(len(v) for v in found.values())} sites across {len(found)} files.",
         "",
@@ -1815,6 +1845,43 @@ def selftest() -> int:
         "format! already routed through the quoting helpers",
         """fn f() -> String { format!("cut: {}: {e}", quotef_os(path)) }""",
         0,
+    )
+    #     ... and a `format!` that rustfmt has wrapped. The joiner kept its own
+    #     list of macros and it said `eprintln!` and `println!`, so the widening
+    #     above reached only the calls short enough to stay on one line. The
+    #     first three cases fail against the detector as it stood before
+    #     2026-09-25; the first is the shape `numfmt` was written in.
+    expect(
+        "wrapped format! with hand-written quotes",
+        'fn f() -> String {\n    format!(\n'
+        '        "value too large to be printed: \'{g}\' (cannot handle values > 999Q)"\n'
+        '    )\n}',
+        1,
+    )
+    expect(
+        "wrapped format! into Err, the name in the argument list",
+        'fn f() {\n    return Err(format!(\n'
+        '        "target directory \'{}\' does not exist",\n'
+        '        td.display()\n    ));\n}',
+        1,
+    )
+    expect(
+        "wrapped format! inside an error constructor",
+        'return Err(Error::Io(format!(\n'
+        '    "editor \'{}\' exited with {}",\n    editor,\n    code\n)));',
+        1,
+    )
+    expect(
+        "wrapped format! already routed through the quoting helpers",
+        'fn f() -> String {\n    format!(\n'
+        '        "target directory {} does not exist",\n'
+        '        quoteaf_os(td)\n    )\n}',
+        0,
+    )
+    expect_join(
+        "a wrapped format! rejoins to the text the compiler sees",
+        'let m = format!(\n    "a \'{x}\' b",\n    x = y\n);',
+        'format!( "a \'{x}\' b", x = y );',
     )
 
     # 13. Test code is not a diagnostic.

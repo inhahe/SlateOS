@@ -1,0 +1,18 @@
+[package]
+name = "crc32c"
+version = "0.1.0"
+edition = "2024"
+description = "CRC-32C (Castagnoli), written once, checked against the standard check value."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like `crc32`: the state is one `u32` and the table
+# is a `const`. The kernel keeps its own copy in `crypto.rs` (ext4 and btrfs
+# metadata checksums); this crate is the one everything outside the kernel
+# links -- first libblkid's port, whose ext, xfs, btrfs, bcachefs, erofs,
+# mpool, stratis and cs_fvault2 probers all verify with it.
+[dependencies]
+
+[lints]
+workspace = true

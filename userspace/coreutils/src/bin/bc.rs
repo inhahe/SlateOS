@@ -3213,7 +3213,7 @@ fn run_main() -> ExitCode {
     // UTF-8, so `bc $'caf\xe9.bc'` aborted before the file name could even be
     // reported. A path may hold every byte but `/` and NUL.
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let settings = match parse_args(&args) {
+    let settings = match parse_args(&args, getopt::posixly_correct()) {
         Err(refusal) => return refusal.report(),
         Ok(Request::Help) => {
             println!("{USAGE}");
@@ -3365,7 +3365,10 @@ fn eval_stdin(interp: &mut Interpreter, stdin: &io::Stdin) -> Result<Session, Tr
 
 // -------------------------------------------------------------------- parsing
 
-fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+/// `posixly_correct` is [`getopt::posixly_correct`], passed in so that a test
+/// can choose it. When it is set, the first operand ends option parsing, as it
+/// does in glibc's getopt -- see "Where option parsing stops" in that module.
+fn parse_args(args: &[OsString], posixly_correct: bool) -> Result<Request, Refusal> {
     let mut settings = Settings::default();
     let mut only_operands = false;
     let mut at = 0usize;
@@ -3384,6 +3387,8 @@ fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
             // A bare `-` is a file name, not standard input: GNU answers
             // `bc -` with `File - is unavailable.` and exits 1.
             settings.inputs.push(Input::File(arg.clone()));
+            // Under POSIXLY_CORRECT, glibc's getopt stops at the first operand.
+            only_operands = posixly_correct;
         } else if let Some(body) = bytes.strip_prefix(b"--") {
             if let Some(request) = long_option(body, &bytes, args, &mut at, &mut settings)? {
                 return Ok(request);
@@ -3551,6 +3556,32 @@ fn arg_bytes(arg: &OsString) -> Vec<u8> {
 )]
 mod tests {
     use super::*;
+
+    /// `parse_args` with `POSIXLY_CORRECT` pinned off, so that a test putting an
+    /// option after an operand does not depend on the environment `cargo test`
+    /// inherited. The tests of the variable itself call `super::parse_args`.
+    fn parse_args(args: &[OsString]) -> Result<Request, Refusal> {
+        super::parse_args(args, false)
+    }
+
+    /// Measured against GNU on 2026-09-25: `POSIXLY_CORRECT=1 bc f -q` takes
+    /// `-q` for a second file, where without the variable it is an option.
+    #[test]
+    fn posixly_correct_makes_an_option_after_an_operand_an_operand() {
+        let argv: Vec<OsString> = ["f", "-q"].iter().map(OsString::from).collect();
+        let files =
+            |argv: &[OsString]| -> Vec<Input> { argv.iter().cloned().map(Input::File).collect() };
+        let Ok(Request::Run(settings)) = super::parse_args(&argv, true) else {
+            panic!("expected a run");
+        };
+        assert!(!settings.quiet);
+        assert_eq!(settings.inputs, files(&argv));
+        let Ok(Request::Run(settings)) = super::parse_args(&argv, false) else {
+            panic!("expected a run");
+        };
+        assert!(settings.quiet);
+        assert_eq!(settings.inputs, files(&argv[..1]));
+    }
 
     // Helper: evaluate an expression string and return the formatted result.
     fn eval_expr(input: &str) -> String {

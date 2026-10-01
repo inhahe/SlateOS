@@ -49,6 +49,41 @@ STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # match arm `"--all" => ...` is not mistaken for an advertisement.
 HELPISH = re.compile(r"^\s*(-|Usage:|usage:|Options:|Commands:)")
 
+# `#[cfg(test)] mod NAME;` -- a test module kept in a file of its own. Every
+# line of that file is test code, but `rustlex.live_code` works within one file
+# and cannot know it: the attribute is in the PARENT. `lsblk/src/tests.rs`,
+# which checks the program's usage text against upstream's, was this gate's
+# first false positive of the kind -- a fixture's copy of the help, read as
+# a help the file itself failed to parse.
+CFG_TEST_MOD = re.compile(
+    r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
+    r"mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
+)
+
+
+def test_module_files(files):
+    """The files among `files` that are out-of-line `#[cfg(test)]` modules.
+
+    A module's children live beside `main.rs`, `lib.rs` and `mod.rs`, and in a
+    directory named after any other file (`src/bin/foo.rs` -> `src/bin/foo/`).
+    """
+    out = set()
+    for f in files:
+        try:
+            raw = io.open(f, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        # Comments out, so a doc comment showing the declaration is not one.
+        text = rustlex.strip_noise(raw)
+        base = os.path.dirname(f)
+        stem = os.path.splitext(os.path.basename(f))[0]
+        moddir = base if stem in ("main", "lib", "mod") else os.path.join(base, stem)
+        for m in CFG_TEST_MOD.finditer(text):
+            name = m.group(1)
+            out.add(os.path.normpath(os.path.join(moddir, name + ".rs")))
+            out.add(os.path.normpath(os.path.join(moddir, name, "mod.rs")))
+    return out
+
 
 def advertised(text):
     """Options named in help-looking string literals, with the line each came from."""
@@ -208,6 +243,30 @@ def selftest():
         print("  FAIL  raw-source check did not see the test mention")
         failures += 1
 
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src")
+        os.makedirs(os.path.join(src, "bin"))
+        parts = {
+            "main.rs": "mod util;\n#[cfg(test)]\nmod tests;\n// #[cfg(test)] mod doc;\n",
+            "bin/tool.rs": "#[cfg(test)]\n#[allow(clippy::all)]\nmod checks;\n",
+        }
+        for rel, body in parts.items():
+            with io.open(os.path.join(src, rel), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+        got = test_module_files([os.path.join(src, "main.rs"), os.path.join(src, "bin", "tool.rs")])
+        want_in = [os.path.join(src, "tests.rs"), os.path.join(src, "bin", "tool", "checks.rs")]
+        want_out = [os.path.join(src, "util.rs"), os.path.join(src, "doc.rs")]
+        if all(os.path.normpath(p) in got for p in want_in) and not any(
+            os.path.normpath(p) in got for p in want_out
+        ):
+            print("  ok    an out-of-line #[cfg(test)] module is test code, and")
+            print("        neither an ordinary module nor a commented one is")
+        else:
+            print("  FAIL  test_module_files gave %r" % sorted(got))
+            failures += 1
+
     print("selftest: %d failure(s)" % failures)
     return 1 if failures else 0
 
@@ -223,9 +282,12 @@ def main():
                 if n.endswith(".rs"):
                     files.append(os.path.join(base, n))
     files.sort()
+    test_files = test_module_files(files)
 
     total, liars = 0, []
     for f in files:
+        if os.path.normpath(f) in test_files:
+            continue
         try:
             raw = io.open(f, encoding="utf-8", errors="replace").read()
         except OSError:

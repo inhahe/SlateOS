@@ -1919,8 +1919,7 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    let posixly_correct = std::env::var_os("POSIXLY_CORRECT").is_some();
-    match parse_args(&args, posixly_correct) {
+    match parse_args(&args, getopt::posixly_correct()) {
         Ok(parsed) => {
             for message in &parsed.printed {
                 diagnose(message);

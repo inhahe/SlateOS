@@ -95095,7 +95095,11 @@ fn cmd_secureboot(args: &str) {
             } else {
                 shell_println!("{} record(s), newest first:", records.len());
                 for r in &records {
-                    let status = if r.verdict.allowed { "may run" } else { "REFUSED" };
+                    let status = if r.verdict.allowed {
+                        "may run"
+                    } else {
+                        "REFUSED"
+                    };
                     shell_println!(
                         "  {}.{:03}s {} [{}, {}{}] hash={} entry={:?}",
                         r.timestamp_ns / 1_000_000_000,
@@ -95103,7 +95107,11 @@ fn cmd_secureboot(args: &str) {
                         secureboot::name_display(&r.image_name),
                         status,
                         r.verdict.listing.label(),
-                        if r.verdict.enforced { "" } else { ", not enforcing" },
+                        if r.verdict.enforced {
+                            ""
+                        } else {
+                            ", not enforcing"
+                        },
                         r.hash,
                         r.verdict.listing.key_id()
                     );

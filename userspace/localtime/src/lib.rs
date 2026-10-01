@@ -15,27 +15,35 @@
 //! That is the shape of every duplication this tree has found so far: not one
 //! program doing it wrong, but several doing it *differently*, so that `date`,
 //! `ls -l` and the shell's `\t` prompt can disagree about what time it is on
-//! the same machine at the same instant. This crate is the one copy.
+//! the same machine at the same instant. This crate is the one copy. `oils`
+//! moved onto it on 2026-09-26, its `ShellZone` and `strftime` gone; the libc's
+//! stays its own, being `no_std` and lane D's.
 //!
 //! # What "resolve `TZ`" actually means
 //!
-//! Four rules, all of which glibc applies and none of which is guessable:
+//! What glibc 2.39's `tzset` does, which is not guessable and not POSIX's —
+//! the `tzset` module is the port, function by function, and says why each
+//! detail is visible:
 //!
-//! 1. **Unset or empty `TZ` is not UTC** — it is `/etc/localtime`, a TZif file.
-//!    A program that answers UTC for an unset `TZ` prints the wrong hour on
-//!    every desktop in the world, and prints it *silently*.
-//! 2. **A leading `:` forces the file interpretation.** POSIX reserves that
-//!    prefix for implementation-defined forms; every libc reads it as "the rest
-//!    is a file name", and glibc still accepts `:EST5EDT`.
-//! 3. **Otherwise a POSIX rule string is tried first, and a file only if that
-//!    fails.** The order is observable, because `EST5EDT` is *both* a valid
-//!    POSIX rule and a file in every zoneinfo tree — and the two do not agree,
-//!    since the rule cannot know that the United States moved the start of
-//!    daylight saving in 2007.
-//! 4. **A zone name with a `..` component is refused.** `TZ` is inherited from
-//!    whoever started the process, so without this check `TZ=../../etc/shadow`
-//!    makes any program that prints a time open an arbitrary file and reveal,
-//!    through whether the time changed, whether it parsed as TZif.
+//! 1. **Unset `TZ` is not UTC** — it is `/etc/localtime`, a TZif file, and UTC
+//!    (named `UTC`) only if that cannot be read. A program that answers UTC for
+//!    an unset `TZ` prints the wrong hour on every desktop in the world, and
+//!    prints it *silently*.
+//! 2. **Empty `TZ` is the name `Universal`**, which is then resolved like any
+//!    other value: the zoneinfo file of that name if there is one, else UTC
+//!    under that name.
+//! 3. **A leading `:` is dropped**, and means nothing more: `:EST5EDT` and
+//!    `EST5EDT` are the same value.
+//! 4. **A file is tried before a rule.** The order is observable, because
+//!    `EST5EDT` is *both* a POSIX rule and a file in every zoneinfo tree — and
+//!    the two do not agree, since the rule cannot know that the United States
+//!    moved the start of daylight saving in 2007.
+//! 5. **A rule is glibc's even where it is odd**: what parses of it is kept
+//!    (`Foo/Bar` is UTC named `Foo`), a DST name with no dates borrows
+//!    `posixrules`' history, and every year up to 1970 changes on 1970's dates.
+//! 6. **A zone name with a `..` component is never read as a file** — here
+//!    always, where glibc does so only in a setuid program. It falls through to
+//!    the POSIX rule instead, as a missing file does.
 //!
 //! # Why the calendar arithmetic lives here too
 //!
@@ -44,10 +52,33 @@
 //! to turn "seconds east of Greenwich" into a day of the week — which is where
 //! the off-by-one lives, since 1970-01-01 was a **Thursday** and the obvious
 //! `days % 7` makes it a Sunday.
+//!
+//! # And `mktime`, the way glibc does it
+//!
+//! The inverse of [`Zone::local`] is [`Zone::mktime`], with [`Zone::localtime_r`]
+//! beside it, over a C-shaped [`StructTm`]: glibc's answers for the skipped
+//! and repeated hours, its handling of an explicit `tm_isdst`, and its
+//! failures. See the `mktime` module for why each of those is observable.
+//!
+//! There used to be a second inverse, `Zone::epoch`, with its own rule for the
+//! skipped and repeated hours. It was removed on 2026-09-26 when its last
+//! callers (`touch -t`, `cal`) moved to `mktime`: every program here ports one
+//! that calls glibc's, and a second inverse was only ever an invitation to
+//! pick the one whose answers GNU's never give.
 
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock};
 
-use tzrules::{Tz, TzFile, TzInfo, TzName};
+use tzrules::{TzInfo, TzName};
+
+mod mktime;
+pub use mktime::{StructTm, with_mktime_offset};
+
+mod strftime;
+pub use strftime::{nstrftime, nstrftime_z, strftime};
+
+mod tzset;
+use tzset::Engine;
 
 /// Where a bare zone name is looked up when `TZDIR` says nothing.
 pub const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
@@ -55,33 +86,63 @@ pub const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
 /// The file an unset `TZ` means.
 pub const LOCALTIME_PATH: &str = "/etc/localtime";
 
-/// Largest zoneinfo file that will be read.
+/// An owned timezone, as glibc holds one: POSIX rules, or a zoneinfo file's
+/// tables, copied out of the file when it is read.
 ///
-/// The biggest in tzdata is under 4 KiB, so this is generous. The cap is not an
-/// optimisation: `TZ=/dev/zero` is a legal thing for a parent process to set,
-/// and without a bound the first program to print a timestamp reads until it
-/// runs out of memory.
-const MAX_ZONEINFO_BYTES: usize = 64 * 1024;
-
-/// The read limit: one byte past the cap, so an oversized file is refused
-/// rather than truncated to a prefix that might still parse as TZif.
-const ZONEINFO_READ_LIMIT: u64 = MAX_ZONEINFO_BYTES as u64 + 1;
-
-/// An owned timezone: either a POSIX rule or the bytes of a zoneinfo file.
+/// Owned because the something a utility wants is a value it can keep for the
+/// length of a listing — and copied rather than re-read from the file's bytes
+/// per lookup, because `ls -l` asks once per line.
 ///
-/// Owned rather than borrowed because a zoneinfo zone *is* the file's bytes —
-/// [`TzFile`] reads the transition table out of them on every lookup rather
-/// than copying it — so something has to hold them, and the something a
-/// utility wants is a value it can keep for the length of a listing.
-#[derive(Clone, Debug)]
-pub struct Zone(Inner);
+/// # When it is read, and read again
+///
+/// A zone made from a `TZ` value is read at its first use, not when it is
+/// made, and can be read again in place — because glibc's reads are
+/// observable, in their order and their number. Its one zone state is filled
+/// in at the first conversion, re-read whenever `TZ` changes (every `TZ="…"`
+/// in a date string changes it twice), and re-read by every `mktime` if the
+/// zone came from `posixrules`. Each read can move the process-wide value the
+/// next `posixrules` zone is anchored by; see the `tzset` module. So:
+///
+/// * [`Zone::lookup`] and everything built on it read the zone if nothing has
+///   yet, as `localtime_r` does;
+/// * [`Zone::tzset`] is glibc's `tzset ()`, which [`Zone::mktime`] calls as
+///   glibc's `mktime` does;
+/// * [`Zone::reread`] is a switch of `TZ` to this zone, and [`Zone::switched`]
+///   is gnulib's pair of them around one conversion in another zone.
+#[derive(Debug)]
+pub struct Zone {
+    /// `None` until the zone is first read.
+    engine: RwLock<Option<Engine>>,
+    source: Source,
+}
 
-#[derive(Clone, Debug)]
-enum Inner {
-    /// A POSIX `TZ` rule string, or the UTC fallback.
-    Posix(Tz),
-    /// The bytes of a zoneinfo file, already known to parse as TZif.
-    File(Vec<u8>),
+/// What a [`Zone`] is read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Source {
+    /// A `TZ` value (`None`: unset), and the zoneinfo tree and default file it
+    /// is read against.
+    Tz {
+        tz: Option<Vec<u8>>,
+        dir: PathBuf,
+        localtime: PathBuf,
+    },
+    /// Not a `TZ` value — [`Zone::utc`], [`Zone::from_file`] — and so never
+    /// read again.
+    Fixed,
+}
+
+impl Clone for Zone {
+    fn clone(&self) -> Self {
+        let engine = self
+            .engine
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Self {
+            engine: RwLock::new(engine),
+            source: self.source.clone(),
+        }
+    }
 }
 
 impl Default for Zone {
@@ -91,99 +152,235 @@ impl Default for Zone {
 }
 
 impl Zone {
-    /// The UTC zone, which is what every failure here falls back to.
+    /// A zone that is exactly `engine`, and is never read again.
+    fn fixed(engine: Engine) -> Self {
+        Self {
+            engine: RwLock::new(Some(engine)),
+            source: Source::Fixed,
+        }
+    }
+
+    /// UTC, named `UTC`: what glibc falls back to when neither `TZ` nor
+    /// `/etc/localtime` gives it anything to read.
     #[must_use]
     pub fn utc() -> Self {
-        Self(Inner::Posix(Tz::UTC))
+        Self::fixed(Engine::Rules(tzset::Rules::utc()))
+    }
+
+    /// Read the zone from its source: glibc's `tzset_internal`.
+    fn read(&self) -> Engine {
+        match &self.source {
+            Source::Tz { tz, dir, localtime } => tzset::resolve(tz.as_deref(), dir, localtime),
+            // Unreachable: a fixed zone is built with its engine, and
+            // `reread` leaves it alone.
+            Source::Fixed => Engine::Rules(tzset::Rules::utc()),
+        }
+    }
+
+    /// Run `f` on the zone state, reading the zone first if nothing has —
+    /// `tzset_internal (0)`, which is what `localtime_r` does.
+    fn with_engine<R>(&self, f: impl FnOnce(&Engine) -> R) -> R {
+        {
+            let guard = self.engine.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(engine) = guard.as_ref() {
+                return f(engine);
+            }
+        }
+        let mut guard = self.engine.write().unwrap_or_else(PoisonError::into_inner);
+        if guard.is_none() {
+            *guard = Some(self.read());
+        }
+        match guard.as_ref() {
+            Some(engine) => f(engine),
+            // Just filled in, under the same lock.
+            None => f(&Engine::Rules(tzset::Rules::utc())),
+        }
+    }
+
+    /// Read this zone again, as glibc does whenever `TZ` is changed to name
+    /// it. A zone that is not a `TZ` value is left alone.
+    pub fn reread(&self) {
+        if self.source == Source::Fixed {
+            return;
+        }
+        let fresh = self.read();
+        *self.engine.write().unwrap_or_else(PoisonError::into_inner) = Some(fresh);
+    }
+
+    /// glibc's `tzset ()` while `TZ` names this zone: read it if nothing has,
+    /// and read it again if it came from `posixrules` — glibc leaves nothing
+    /// to compare the next `TZ` with after one, so it re-reads every time.
+    /// Otherwise nothing: the value has not changed.
+    pub fn tzset(&self) {
+        let stale = self
+            .engine
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(Engine::stale);
+        if stale {
+            self.reread();
+        }
+    }
+
+    /// Whether `self` and `other` are the same `TZ` value — gnulib's test in
+    /// `set_tz` for whether a conversion in `self`, in a process whose `TZ`
+    /// names `other`, needs `TZ` changed at all. Only as bytes, as `strcmp`
+    /// compares them: `EST5EDT` and `:EST5EDT` differ.
+    #[must_use]
+    pub fn same_tz(&self, other: &Zone) -> bool {
+        match (&self.source, &other.source) {
+            (Source::Tz { tz: a, .. }, Source::Tz { tz: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+
+    /// Whether glibc's `tzset ()`, finding `other`'s `TZ` where `self`'s was,
+    /// would see no change and keep the zone it has — the two values compared
+    /// as `tzset_internal` compares them, after an empty value has become
+    /// `Universal` and one leading `:` has been dropped. So `:EST5EDT` after
+    /// `EST5EDT` is no change here, where to [`Zone::same_tz`] (gnulib's
+    /// comparison) it is one.
+    ///
+    /// Two unset values are the same: glibc re-reads `/etc/localtime` every
+    /// time, but its stat cache finds the file it read before and changes
+    /// nothing. A zone built from `posixrules` is re-read whatever this says;
+    /// that is [`Zone::tzset`]'s business.
+    #[must_use]
+    pub fn tzset_would_keep(&self, other: &Zone) -> bool {
+        fn value(tz: Option<&[u8]>) -> Option<&[u8]> {
+            tz.map(|v| {
+                let v: &[u8] = if v.is_empty() { b"Universal" } else { v };
+                v.strip_prefix(b":").unwrap_or(v)
+            })
+        }
+        match (&self.source, &other.source) {
+            (Source::Tz { tz: a, .. }, Source::Tz { tz: b, .. }) => {
+                value(a.as_deref()) == value(b.as_deref())
+            }
+            _ => false,
+        }
+    }
+
+    /// gnulib's `set_tz` and `revert_tz` around `f`, a conversion in `self` by
+    /// a process whose own zone is `process`: unless the two are the same
+    /// value, `TZ` is switched to `self` (which reads it) and back (which
+    /// reads `process` again).
+    pub fn switched<R>(&self, process: &Zone, f: impl FnOnce() -> R) -> R {
+        if self.same_tz(process) {
+            return f();
+        }
+        self.reread();
+        let out = f();
+        process.reread();
+        out
     }
 
     /// The zone this process is running in, from `TZ`, `TZDIR` and
     /// `/etc/localtime`.
     ///
     /// This is the call a utility wants. It reads the environment exactly once,
-    /// which matters for more than speed: `ls -l` renders a timestamp per file,
-    /// and re-resolving per file would open `/etc/localtime` once per line.
+    /// and the zone file once, at the first conversion — which matters for
+    /// more than speed: `ls -l` renders a timestamp per file, and re-resolving
+    /// per file would open `/etc/localtime` once per line.
     #[must_use]
     pub fn from_env() -> Self {
         let tz = std::env::var_os("TZ");
-        let dir = std::env::var_os("TZDIR")
-            .and_then(|d| d.into_string().ok())
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| TZDIR_DEFAULT.to_string());
         // Bytes, not a `String`: `TZ` is environment data, and environment data
         // is not required to be text. A non-UTF-8 `TZ` names no zone, but it
         // must reach the "names no zone" path rather than panic on the way.
         let raw = tz.as_ref().map(|v| os_bytes(v));
-        Self::resolve(raw.as_deref(), &dir, Path::new(LOCALTIME_PATH))
+        Self::from_tz(raw.as_deref())
     }
 
-    /// Resolve an explicit `TZ` value against an explicit zoneinfo tree.
+    /// The zone a process would run in if its `TZ` were `tz` — resolved
+    /// against this process's `TZDIR` and `/etc/localtime`, as [`from_env`]
+    /// resolves the real one.
+    ///
+    /// This is gnulib's `tzalloc` followed by a `localtime_rz`: what a date
+    /// string's own `TZ="…"` prefix means to `parse_datetime`, which must
+    /// resolve that value exactly as it would have resolved the environment's.
+    ///
+    /// [`from_env`]: Zone::from_env
+    ///
+    /// `TZDIR` is read as glibc reads it: any bytes, and the default only
+    /// when it is unset or empty. A path is bytes here as everywhere, so a
+    /// zoneinfo tree whose name is not UTF-8 is still a zoneinfo tree.
+    #[must_use]
+    pub fn from_tz(tz: Option<&[u8]>) -> Self {
+        let dir = std::env::var_os("TZDIR")
+            .filter(|d| !d.is_empty())
+            .map_or_else(|| PathBuf::from(TZDIR_DEFAULT), PathBuf::from);
+        Self::resolve(tz, &dir, Path::new(LOCALTIME_PATH))
+    }
+
+    /// Resolve an explicit `TZ` value against an explicit zoneinfo tree and
+    /// default file — glibc's `tzset` with `TZDIR` and `TZDEFAULT` given.
     ///
     /// Split out from [`Zone::from_env`] so it can be tested without a process
     /// environment, and so a caller that keeps its own variables — a shell —
     /// can pass its own rather than the ones it happened to inherit.
     ///
-    /// `None`, or an empty value, means "the machine's zone": `localtime` is
-    /// read. See the module docs for why that is not UTC.
+    /// `None` means "the machine's zone": `localtime` is read. An empty value
+    /// is the name `Universal`. See the module docs for the rest.
     #[must_use]
-    pub fn resolve(tz: Option<&[u8]>, dir: &str, localtime: &Path) -> Self {
-        let Some(value) = tz.filter(|v| !v.is_empty()) else {
-            return Self::from_file(localtime);
-        };
-        if let Some(name) = value.strip_prefix(b":") {
-            return Self::from_name(name, dir);
-        }
-        match Tz::parse(value) {
-            Some(tz) => Self(Inner::Posix(tz)),
-            None => Self::from_name(value, dir),
+    pub fn resolve(tz: Option<&[u8]>, dir: &Path, localtime: &Path) -> Self {
+        Self {
+            engine: RwLock::new(None),
+            source: Source::Tz {
+                tz: tz.map(<[u8]>::to_vec),
+                dir: dir.to_path_buf(),
+                localtime: localtime.to_path_buf(),
+            },
         }
     }
 
-    /// Load the zoneinfo file `name` names under `dir`, falling back to UTC.
+    /// The zoneinfo file `name` names under `dir` (or at `name`, if it is
+    /// absolute), falling back to UTC. No POSIX rule is tried; for what `TZ`
+    /// means, use [`Zone::resolve`].
     #[must_use]
-    pub fn from_name(name: &[u8], dir: &str) -> Self {
+    pub fn from_name(name: &[u8], dir: &Path) -> Self {
         match zoneinfo_path(name, dir) {
             Some(path) => Self::from_file(&path),
             None => Self::utc(),
         }
     }
 
-    /// Read and validate a zoneinfo file, falling back to UTC.
+    /// Read a zoneinfo file, falling back to UTC.
     ///
-    /// The bytes are parsed *here* so that a file which is not TZif never
-    /// becomes a zone. Every later lookup then has a file it already knows
-    /// parses, and cannot silently answer UTC halfway down a listing.
+    /// The file is parsed *here*, so one that is not TZif never becomes a zone
+    /// and a listing cannot silently switch to UTC halfway down.
     #[must_use]
     pub fn from_file(path: &Path) -> Self {
-        let Ok(file) = std::fs::File::open(path) else {
-            return Self::utc();
-        };
-        let mut bytes = Vec::new();
-        if std::io::Read::read_to_end(
-            &mut std::io::Read::take(file, ZONEINFO_READ_LIMIT),
-            &mut bytes,
-        )
-        .is_err()
-            || bytes.len() > MAX_ZONEINFO_BYTES
-            || TzFile::parse(&bytes).is_none()
-        {
-            return Self::utc();
-        }
-        Self(Inner::File(bytes))
+        tzset::read_capped(path)
+            .and_then(|bytes| tzset::Table::from_tzif(&bytes))
+            .map_or_else(Self::utc, |table| Self::fixed(Engine::Table(table)))
     }
 
     /// The zone state in force at UTC instant `t`.
+    ///
+    /// Total, where glibc is not: for a POSIX-rule zone and an instant whose
+    /// UTC year does not fit in `tm_year`, glibc's `localtime` fails, and this
+    /// answers with the rule's standard half. [`Zone::localtime_r`] is the
+    /// glibc-faithful form.
     #[must_use]
     pub fn lookup(&self, t: i64) -> TzInfo {
-        match &self.0 {
-            Inner::Posix(tz) => tz.lookup(t),
-            // `from_file` only builds this arm from bytes that parsed, so the
-            // fallback is unreachable; it exists so that rendering a timestamp
-            // cannot panic.
-            Inner::File(bytes) => {
-                TzFile::parse(bytes).map_or_else(|| Tz::UTC.lookup(t), |f| f.lookup(t))
-            }
-        }
+        self.with_engine(|engine| engine.state_or_standard(t).info())
+    }
+
+    /// `lookup`, `None` where glibc's `localtime_r` fails: for a POSIX-rule
+    /// zone and an instant whose UTC year does not fit in `tm_year`.
+    fn lookup_r(&self, t: i64) -> Option<TzInfo> {
+        self.with_engine(|engine| engine.state(t).map(|state| state.info()))
+    }
+
+    /// glibc's `localtime` — not `localtime_r` — for the programs that call
+    /// it (`find -printf`, `ps`, `tar`, `who`): the same answer, after a
+    /// `tzset ()`, which re-reads a zone made from `posixrules` on every call.
+    #[must_use]
+    pub fn localtime(&self, t: i64, nanos: u32) -> Tm {
+        self.tzset();
+        self.local(t, nanos)
     }
 
     /// Break UTC instant `t` (plus `nanos`) down into this zone's calendar.
@@ -191,81 +388,6 @@ impl Zone {
     pub fn local(&self, t: i64, nanos: u32) -> Tm {
         Tm::from_utc(t, nanos, self.lookup(t))
     }
-
-    /// The inverse of [`Zone::local`]: a civil local time to a UTC instant.
-    ///
-    /// This is `mktime`. It returns the instant *and* the normalised [`Tm`],
-    /// because a caller that hands in `2024-02-31` or `month: 13` needs to know
-    /// what that resolved to — which is the same reason C's `mktime` writes
-    /// back through its argument.
-    ///
-    /// # Why it iterates
-    ///
-    /// The offset depends on the instant and the instant depends on the offset.
-    /// So it starts from the UTC guess and applies the offset in force there,
-    /// repeating until it settles. Three rounds converge for every real zone,
-    /// because an offset change is never larger than a day and never happens
-    /// twice within one.
-    ///
-    /// A local time that a spring-forward skipped **does not exist**, and this
-    /// resolves it to a nearby instant rather than failing — which is what
-    /// glibc does with `tm_isdst = -1`. An ambiguous time in a fall-back hour
-    /// picks one of the two, likewise as glibc does.
-    ///
-    /// # Why it lives here
-    ///
-    /// `userspace/coreutils/src/bin/cal.rs` carried this, under a comment
-    /// saying "there is no inverse of `Zone::local` in the `localtime` crate,
-    /// so this is it". Three other files carry private copies of the
-    /// [`days_from_civil`] half alone. That is the same shape as the
-    /// duplication this crate was created to end — see the module docs, where
-    /// `unix_secs_to_datetime` is recorded as the fourth copy of the *forward*
-    /// arithmetic. This is the first copy of the reverse.
-    #[must_use]
-    pub fn epoch(&self, civil: &Civil) -> (i64, Tm) {
-        // Normalise the month first, so `days_from_civil` sees 1..=12 and any
-        // day-of-month overflow (31 February) is left for it to carry.
-        let year = civil
-            .year
-            .saturating_add((civil.month.saturating_sub(1)).div_euclid(12));
-        let month = (civil.month.saturating_sub(1))
-            .rem_euclid(12)
-            .saturating_add(1);
-
-        let days = days_from_civil(year, month, civil.day);
-        let local_secs = days
-            .saturating_mul(86_400)
-            .saturating_add(civil.hour.saturating_mul(3_600))
-            .saturating_add(civil.minute.saturating_mul(60))
-            .saturating_add(civil.second);
-
-        let mut t = local_secs;
-        for _ in 0..3 {
-            let off = i64::from(self.lookup(t).gmtoff);
-            let next = local_secs.saturating_sub(off);
-            if next == t {
-                break;
-            }
-            t = next;
-        }
-        (t, self.local(t, 0))
-    }
-}
-
-/// A civil (wall-clock) local time, with fields allowed **out of range**.
-///
-/// Out-of-range is the point: it is what lets a caller say "the 32nd of March"
-/// or "month 13" and have [`Zone::epoch`] carry it, which is how `date -d` and
-/// `cal` resolve `tomorrow` without special-casing month ends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Civil {
-    pub year: i64,
-    /// 1..=12 nominally; outside that range it carries into the year.
-    pub month: i64,
-    pub day: i64,
-    pub hour: i64,
-    pub minute: i64,
-    pub second: i64,
 }
 
 /// Days since 1970-01-01 for a proleptic-Gregorian civil date.
@@ -275,7 +397,7 @@ pub struct Civil {
 /// table.
 ///
 /// Note that `m` and `d` are *not* range-checked: this is the arithmetic half,
-/// and [`Zone::epoch`] is where normalisation happens.
+/// and [`Zone::mktime`] is where normalisation happens.
 #[must_use]
 pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y.saturating_sub(1) } else { y };
@@ -302,11 +424,16 @@ pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// Build the path of the zoneinfo file `name` names, or `None` for a name that
-/// must not be resolved.
+/// must not be read as a file.
 ///
-/// See rule 4 in the module docs for why `..` is refused rather than resolved.
+/// Absolute names are used as given; others are under `dir`, as glibc's
+/// `TZDIR/NAME`. A name with a `..` component is refused (rule 6 in the module
+/// docs), where glibc refuses one only in a setuid program: `TZ` is inherited
+/// from whoever started the process, and the libc (`posix/src/tz.rs`) refuses
+/// the same names — two readers of one `TZ` must not disagree about what it
+/// means.
 #[must_use]
-pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
+pub fn zoneinfo_path(name: &[u8], dir: &Path) -> Option<PathBuf> {
     if name.is_empty() || name.contains(&0) {
         return None;
     }
@@ -314,11 +441,29 @@ pub fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
     if name.split(|&b| b == b'/').any(|part| part == b"..") {
         return None;
     }
-    let text = std::str::from_utf8(name).ok()?;
-    if text.starts_with('/') {
-        return Some(PathBuf::from(text));
+    let path = bytes_path(name)?;
+    if name.starts_with(b"/") {
+        return Some(path);
     }
-    Some(Path::new(dir).join(text))
+    Some(dir.join(path))
+}
+
+/// A path from bytes: exact on Unix, where a path is bytes.
+#[cfg(unix)]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the host twin refuses bytes that are not UTF-8; one signature serves both"
+)]
+fn bytes_path(name: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(
+        <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name),
+    ))
+}
+
+/// A path from bytes on the Windows host build, where only UTF-8 round-trips.
+#[cfg(not(unix))]
+fn bytes_path(name: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(name).ok().map(PathBuf::from)
 }
 
 /// Broken-down local time: what `struct tm` carries, plus what it does not.
@@ -420,489 +565,6 @@ pub const MON_FULL: [&[u8]; 12] = [
     b"December",
 ];
 
-/// `strftime` over bytes, in the C locale.
-///
-/// Bytes rather than text throughout, because the *format* is user input —
-/// `ls --time-style=+…` and `date +…` both hand it straight through from argv —
-/// and argv is not required to be UTF-8. A format holding a stray `0x80` must
-/// come back with that byte intact rather than as `U+FFFD`.
-///
-/// An unrecognised specifier is emitted **literally, `%` included**, which is
-/// what glibc does and is not merely lenient: `%q` is not an error anyone
-/// reports, so a renderer that swallowed it would silently delete two
-/// characters of the user's format.
-#[must_use]
-#[allow(
-    clippy::too_many_lines,
-    reason = "one arm per specifier; a table would hide which is which"
-)]
-pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
-    let mut out = Vec::with_capacity(fmt.len().saturating_add(16));
-    let mut it = fmt.iter().copied().peekable();
-    while let Some(b) = it.next() {
-        if b != b'%' {
-            out.push(b);
-            continue;
-        }
-        // Flags and width first, then the conversion. A `%` followed only
-        // by flags is a trailing `%`, same as a bare one.
-        let fs = read_spec(&mut it);
-        let Some(spec) = it.next() else {
-            out.push(b'%');
-            break;
-        };
-        // Rendered aside so the case flags and the string width can be applied
-        // to the whole conversion rather than to whatever `out` already held.
-        let mut piece: Vec<u8> = Vec::new();
-        // `%P` is already the flipped spelling of `%p`, so glibc treats `#`
-        // on it as a no-op -- measured, `%#P` is `am` and not `AM`. Every
-        // other string field flips.
-        let fs = if spec == b'P' {
-            Spec { swap: false, ..fs }
-        } else {
-            fs
-        };
-        match spec {
-            b'%' => piece.push(b'%'),
-            b'n' => piece.push(b'\n'),
-            b't' => piece.push(b'\t'),
-            b'a' => piece.extend_from_slice(pick(&WDAY_ABBR, tm.wday as usize)),
-            b'A' => piece.extend_from_slice(pick(&WDAY_FULL, tm.wday as usize)),
-            b'b' | b'h' => piece.extend_from_slice(pick(&MON_ABBR, month_index(tm))),
-            b'B' => piece.extend_from_slice(pick(&MON_FULL, month_index(tm))),
-            b'c' => piece.extend_from_slice(&strftime(b"%a %b %e %H:%M:%S %Y", tm)),
-            b'x' => piece.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
-            b'X' | b'T' => piece.extend_from_slice(&strftime(b"%H:%M:%S", tm)),
-            b'r' => piece.extend_from_slice(&strftime(b"%I:%M:%S %p", tm)),
-            b'R' => piece.extend_from_slice(&strftime(b"%H:%M", tm)),
-            b'D' => piece.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
-            b'F' => piece.extend_from_slice(&strftime(b"%Y-%m-%d", tm)),
-            b'C' => pad_with(
-                &mut piece,
-                tm.year.div_euclid(100),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'd' => pad_with(
-                &mut piece,
-                i64::from(tm.day),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'e' => pad_with(
-                &mut piece,
-                i64::from(tm.day),
-                fs.num_width(2),
-                fs.num_pad(b' '),
-            ),
-            b'H' => pad_with(
-                &mut piece,
-                i64::from(tm.hour),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'k' => pad_with(
-                &mut piece,
-                i64::from(tm.hour),
-                fs.num_width(2),
-                fs.num_pad(b' '),
-            ),
-            b'I' => pad_with(
-                &mut piece,
-                i64::from(hour12(tm)),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'l' => pad_with(
-                &mut piece,
-                i64::from(hour12(tm)),
-                fs.num_width(2),
-                fs.num_pad(b' '),
-            ),
-            b'j' => pad_with(
-                &mut piece,
-                i64::from(tm.yday).saturating_add(1),
-                fs.num_width(3),
-                fs.num_pad(b'0'),
-            ),
-            b'm' => pad_with(
-                &mut piece,
-                i64::from(tm.month),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            // Quarter of the year, 1-4. A GNU extension, not in C89's set.
-            //
-            // Default width 1 and ZERO padding when widened, which is not
-            // obvious and was measured: `%3q` gives `001`, not `  1`. `%-q`
-            // and `%_q` both give `1`, since a width of 1 leaves nothing to
-            // pad either way.
-            b'q' => pad_with(
-                &mut piece,
-                i64::from(tm.month.saturating_sub(1) / 3).saturating_add(1),
-                fs.num_width(1),
-                fs.num_pad(b'0'),
-            ),
-            b'M' => pad_with(
-                &mut piece,
-                i64::from(tm.minute),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'S' => pad_with(
-                &mut piece,
-                i64::from(tm.second),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'N' => pad_with(
-                &mut piece,
-                i64::from(tm.nanos),
-                fs.num_width(9),
-                fs.num_pad(b'0'),
-            ),
-            b'p' => piece.extend_from_slice(if tm.hour < 12 { b"AM" } else { b"PM" }),
-            b'P' => piece.extend_from_slice(if tm.hour < 12 { b"am" } else { b"pm" }),
-            b's' => push_int(&mut piece, tm.epoch),
-            b'u' => push_int(&mut piece, i64::from(iso_wday(tm))),
-            b'w' => push_int(&mut piece, i64::from(tm.wday)),
-            b'U' => pad_with(
-                &mut piece,
-                i64::from(week_of_year(tm, 0)),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'W' => pad_with(
-                &mut piece,
-                i64::from(week_of_year(tm, 1)),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'V' => pad_with(
-                &mut piece,
-                i64::from(iso_week(tm).1),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'G' => push_int(&mut piece, iso_week(tm).0),
-            b'g' => pad_with(
-                &mut piece,
-                iso_week(tm).0.rem_euclid(100),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'y' => pad_with(
-                &mut piece,
-                tm.year.rem_euclid(100),
-                fs.num_width(2),
-                fs.num_pad(b'0'),
-            ),
-            b'Y' => push_int(&mut piece, tm.year),
-            b'z' => push_offset(&mut piece, tm.gmtoff, 0),
-            // `%:z`, `%::z` and `%:::z` -- GNU's colon forms, which are a
-            // MODIFIER on `z` rather than specifiers of their own, so they are
-            // read here rather than in the match arm above.
-            //
-            // They are not decoration: `date -Iseconds` and
-            // `date --rfc-3339=seconds` are both defined in terms of `%:z`, so
-            // without this they emit a literal `%:z` where the zone should be.
-            // That is how this was found -- `date -Iseconds` printed
-            // `2001-09-09T01:46:40%:z`.
-            b':' => {
-                let mut colons: u8 = 1;
-                let mut next = it.next();
-                while next == Some(b':') && colons < 3 {
-                    colons = colons.saturating_add(1);
-                    next = it.next();
-                }
-                if next == Some(b'z') {
-                    push_offset(&mut piece, tm.gmtoff, colons);
-                } else {
-                    // Not a zone directive after all. Emit what was consumed,
-                    // unchanged, the way an unknown specifier is emitted.
-                    piece.push(b'%');
-                    out.extend(std::iter::repeat_n(b':', usize::from(colons)));
-                    if let Some(c) = next {
-                        piece.push(c);
-                    }
-                }
-            }
-            b'Z' => piece.extend_from_slice(tm.abbr.as_bytes()),
-            other => {
-                piece.push(b'%');
-                piece.push(other);
-            }
-        }
-        finish_piece(&mut piece, fs);
-        out.extend_from_slice(&piece);
-    }
-    out
-}
-
-/// Index a name table without panicking on a value that cannot occur.
-fn pick(table: &[&'static [u8]], index: usize) -> &'static [u8] {
-    table.get(index).copied().unwrap_or(b"?")
-}
-
-fn month_index(tm: &Tm) -> usize {
-    (tm.month as usize).saturating_sub(1)
-}
-
-/// The ISO weekday: Monday is 1 and Sunday is 7, where [`Tm::wday`] has Sunday
-/// at 0.
-fn iso_wday(tm: &Tm) -> u32 {
-    if tm.wday == 0 { 7 } else { tm.wday }
-}
-
-/// `%U` (`first = 0`, weeks start on Sunday) and `%W` (`first = 1`, Monday).
-///
-/// Week 1 is the one containing the first `first`-day of the year; the days
-/// before it are week 0. That is glibc's rule and it is *not* the ISO one —
-/// `%U`, `%W` and `%V` can all three differ on the same date, which is why
-/// there are three of them.
-fn week_of_year(tm: &Tm, first: u32) -> u32 {
-    // How far into its week this day sits, counting from `first`. The `+ 7`
-    // keeps the subtraction above zero for a Sunday under `%W`; it is written
-    // saturating only because every arithmetic operator in this crate is.
-    let offset = tm.wday.saturating_add(7).saturating_sub(first) % 7;
-    tm.yday.saturating_add(7).saturating_sub(offset) / 7
-}
-
-/// `%G` and `%V`: the ISO 8601 week-based year and week number.
-///
-/// A week belongs to the year that holds its Thursday, so the first days of
-/// January can be week 52 or 53 of the *previous* year and the last days of
-/// December can be week 1 of the next.
-fn iso_week(tm: &Tm) -> (i64, u32) {
-    let yday1 = i64::from(tm.yday).saturating_add(1);
-    let week = yday1
-        .saturating_sub(i64::from(iso_wday(tm)))
-        .saturating_add(10)
-        .div_euclid(7);
-    if week < 1 {
-        let prev = tm.year.saturating_sub(1);
-        return (prev, weeks_in_year(prev));
-    }
-    let week = u32::try_from(week).unwrap_or(1);
-    if week > weeks_in_year(tm.year) {
-        return (tm.year.saturating_add(1), 1);
-    }
-    (tm.year, week)
-}
-
-/// 52 or 53, by the ISO rule: a year is long when it starts on a Thursday, or
-/// when it is a leap year starting on a Wednesday.
-///
-/// Expressed the usual way, over `p(y)` — the weekday of 31 December of year
-/// `y` counted from Sunday — because the two conditions above then collapse to
-/// `p(y) == 4 || p(y-1) == 3` and no leap-year test is needed at all.
-fn weeks_in_year(year: i64) -> u32 {
-    let p = |y: i64| {
-        y.saturating_add(y.div_euclid(4))
-            .saturating_sub(y.div_euclid(100))
-            .saturating_add(y.div_euclid(400))
-            .rem_euclid(7)
-    };
-    if p(year) == 4 || p(year.saturating_sub(1)) == 3 {
-        53
-    } else {
-        52
-    }
-}
-
-/// The 12-hour clock's reading, where midnight and noon are both 12.
-fn hour12(tm: &Tm) -> u32 {
-    match tm.hour % 12 {
-        0 => 12,
-        h => h,
-    }
-}
-
-fn push_int(out: &mut Vec<u8>, value: i64) {
-    out.extend_from_slice(value.to_string().as_bytes());
-}
-
-/// `value` right-aligned in `width`, padded with `fill`.
-fn pad_with(out: &mut Vec<u8>, value: i64, width: usize, fill: u8) {
-    let text = value.to_string();
-    for _ in text.len()..width {
-        out.push(fill);
-    }
-    out.extend_from_slice(text.as_bytes());
-}
-
-/// Zero-padded, for the offset fields that always are.
-fn pad_zero(out: &mut Vec<u8>, value: i64, width: usize) {
-    pad_with(out, value, width, b'0');
-}
-
-/// The flags and field width GNU allows between `%` and the conversion.
-///
-/// Measured against coreutils 9.4 with `date -d @1000000000 +'[%X]'`, because
-/// two of these rules are not what an implementation would naturally do:
-///
-/// | directive | output | rule |
-/// |---|---|---|
-/// | `%d` `%-d` `%_d` `%0d` | `09` `9` ` 9` `09` | `-` none, `_` space, `0` zero |
-/// | `%e` `%0e` | ` 9` `09` | `0` overrides a space-padded field |
-/// | `%a` `%^a` `%#a` | `Sun` `SUN` `SUN` | `^` upper, `#` swap case |
-/// | `%S` `%5S` `%-5S` `%_5S` | `40` `00040` `40` `   40` | `-` discards the width too |
-/// | `%5a` `%10B` | `  Sun` ` September` | a STRING field pads with space |
-/// | `%0a` `%_a` | `Sun` `Sun` | a pad flag does nothing to a string |
-///
-/// **`%1d` is `9`, not `09`.** The width REPLACES the field's default width;
-/// it is not a minimum applied to the default rendering. Rendering `%d` as
-/// `09` and then padding to 1 returns `09`, which is why the width has to
-/// reach the number formatter rather than being applied afterwards.
-///
-/// **The last flag wins**: `%-0d` is `09` and `%0-d` is `9`.
-#[derive(Clone, Copy, Default)]
-struct Spec {
-    /// `Some(b'0')` or `Some(b' ')` from an explicit flag.
-    pad: Option<u8>,
-    /// `-`: no padding at all, and the width is discarded with it.
-    nopad: bool,
-    width: Option<usize>,
-    upper: bool,
-    swap: bool,
-}
-
-impl Spec {
-    /// The width a numeric conversion should render at, given its default.
-    fn num_width(self, default: usize) -> usize {
-        if self.nopad {
-            0
-        } else {
-            self.width.unwrap_or(default)
-        }
-    }
-
-    /// The character a numeric conversion should pad with, given its default.
-    fn num_pad(self, default: u8) -> u8 {
-        self.pad.unwrap_or(default)
-    }
-}
-
-/// Read the flags and width after a `%`, leaving the iterator on the
-/// conversion character.
-fn read_spec<I: Iterator<Item = u8>>(it: &mut core::iter::Peekable<I>) -> Spec {
-    let mut spec = Spec::default();
-    while let Some(&c) = it.peek() {
-        match c {
-            // Last of a kind wins, which is why each simply overwrites.
-            b'-' => {
-                spec.nopad = true;
-                spec.pad = None;
-            }
-            b'_' => {
-                spec.pad = Some(b' ');
-                spec.nopad = false;
-            }
-            b'0' => {
-                spec.pad = Some(b'0');
-                spec.nopad = false;
-            }
-            b'^' => spec.upper = true,
-            b'#' => spec.swap = true,
-            _ => break,
-        }
-        it.next();
-    }
-    // `0` is a flag before it is a digit, so the width is whatever digits
-    // remain -- `%05S` is flag `0` and width `5`, not width `05`.
-    let mut width: Option<usize> = None;
-    while let Some(&c) = it.peek() {
-        if !c.is_ascii_digit() {
-            break;
-        }
-        let d = usize::from(c.wrapping_sub(b'0'));
-        width = Some(width.unwrap_or(0).saturating_mul(10).saturating_add(d));
-        it.next();
-    }
-    spec.width = width;
-    spec
-}
-
-/// Apply `^`/`#` and pad a STRING conversion out to the requested width.
-///
-/// Numeric conversions have already been rendered at their width, so the pad
-/// below is a no-op for them -- which is why one function can serve both.
-fn finish_piece(piece: &mut Vec<u8>, spec: Spec) {
-    if spec.upper {
-        piece.make_ascii_uppercase();
-    } else if spec.swap {
-        // `#` flips the case of the FIELD, not of each character, and the
-        // direction comes from the text. Measured:
-        //
-        //     %a Sun -> %#a SUN          %p AM -> %#p am
-        //     %B September -> SEPTEMBER  %Z UTC -> %#Z utc
-        //
-        // A per-character swap gives `sUN` for the first, which is what the
-        // obvious reading of "opposite case" produces and is wrong.
-        if piece.iter().any(u8::is_ascii_lowercase) {
-            piece.make_ascii_uppercase();
-        } else {
-            piece.make_ascii_lowercase();
-        }
-    }
-    if spec.nopad {
-        return;
-    }
-    if let Some(w) = spec.width {
-        if piece.len() < w {
-            let mut padded = vec![b' '; w.saturating_sub(piece.len())];
-            padded.extend_from_slice(piece);
-            *piece = padded;
-        }
-    }
-}
-
-/// `%z`: `+hhmm`, with the sign taken from the offset and the magnitude from
-/// its absolute value — `-0400`, not `-04-00`.
-/// `colons` selects GNU's four spellings of the UTC offset, measured against
-/// coreutils 9.4 at `+00:00`:
-///
-/// | directive | output |
-/// |---|---|
-/// | `%z`     | `+0000` |
-/// | `%:z`    | `+00:00` |
-/// | `%::z`   | `+00:00:00` |
-/// | `%:::z`  | `+00` — the *minimal* form, which drops trailing zero fields |
-fn push_offset(out: &mut Vec<u8>, gmtoff: i32, colons: u8) {
-    let (sign, mag) = if gmtoff < 0 {
-        (b'-', gmtoff.unsigned_abs())
-    } else {
-        (b'+', gmtoff.unsigned_abs())
-    };
-    let (hh, mm, ss) = (mag / 3600, (mag / 60) % 60, mag % 60);
-    out.push(sign);
-    pad_zero(out, i64::from(hh), 2);
-    match colons {
-        0 => pad_zero(out, i64::from(mm), 2),
-        1 => {
-            out.push(b':');
-            pad_zero(out, i64::from(mm), 2);
-        }
-        2 => {
-            out.push(b':');
-            pad_zero(out, i64::from(mm), 2);
-            out.push(b':');
-            pad_zero(out, i64::from(ss), 2);
-        }
-        // `%:::z` prints only as much as it needs to.
-        _ => {
-            if mm != 0 || ss != 0 {
-                out.push(b':');
-                pad_zero(out, i64::from(mm), 2);
-                if ss != 0 {
-                    out.push(b':');
-                    pad_zero(out, i64::from(ss), 2);
-                }
-            }
-        }
-    }
-}
-
 /// An `OsStr`'s bytes, on both the host and the target.
 #[cfg(unix)]
 fn os_bytes(s: &std::ffi::OsStr) -> Vec<u8> {
@@ -928,8 +590,10 @@ mod tests {
         Zone::utc().local(t, 0)
     }
 
+    /// gnulib's `nstrftime`: every expectation in this module was measured
+    /// through coreutils' `date`, which formats with it.
     fn fmt(f: &str, tm: &Tm) -> String {
-        String::from_utf8(strftime(f.as_bytes(), tm)).unwrap()
+        String::from_utf8(nstrftime(f.as_bytes(), tm)).unwrap()
     }
 
     /// The flags and widths GNU allows between `%` and the conversion.
@@ -1136,53 +800,43 @@ mod tests {
         }
     }
 
+    /// `mktime` of what `localtime_r` gave back is the instant it was given.
     #[test]
-    fn zone_epoch_is_the_inverse_of_zone_local() {
+    fn mktime_is_the_inverse_of_localtime_r() {
         let utc = Zone::utc();
         for t in [0i64, 1, -1, 1_000_000_000, -1_000_000_000, 1_614_834_367] {
-            let tm = utc.local(t, 0);
-            let civil = Civil {
-                year: tm.year,
-                month: i64::from(tm.month),
-                day: i64::from(tm.day),
-                hour: i64::from(tm.hour),
-                minute: i64::from(tm.minute),
-                second: i64::from(tm.second),
-            };
-            assert_eq!(utc.epoch(&civil).0, t, "round trip failed for {t}");
+            let mut tm = utc.localtime_r(t).unwrap();
+            let mut offset = 0;
+            assert_eq!(
+                utc.mktime_internal(&mut tm, &mut offset),
+                Some(t),
+                "round trip failed for {t}"
+            );
         }
     }
 
+    /// The 32nd of March is the 1st of April, month 12 (C's 0-based 13th) is
+    /// next January, and February 30th of a leap year is March 1st -- what
+    /// `date -d tomorrow` and `cal` rely on, so load-bearing rather than a
+    /// curiosity.
     #[test]
-    fn zone_epoch_normalises_out_of_range_fields() {
+    fn mktime_normalises_out_of_range_fields() {
         let utc = Zone::utc();
-        // The 32nd of March is the 1st of April, and month 13 is next January.
-        // This is the behaviour `date -d tomorrow` and `cal` rely on, so it is
-        // load-bearing rather than a curiosity.
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2021,
-            month: 3,
-            day: 32,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2021, 4, 1));
-
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2021,
-            month: 13,
-            day: 1,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2022, 1, 1));
-
-        // February 30th in a leap year is March 1st.
-        let (_, tm) = utc.epoch(&Civil {
-            year: 2024,
-            month: 2,
-            day: 30,
-            ..Civil::default()
-        });
-        assert_eq!((tm.year, tm.month, tm.day), (2024, 3, 1));
+        let normalised = |year: i32, mon: i32, mday: i32| {
+            let mut tm = StructTm {
+                tm_year: year - 1900,
+                tm_mon: mon,
+                tm_mday: mday,
+                tm_isdst: -1,
+                ..StructTm::default()
+            };
+            let mut offset = 0;
+            utc.mktime_internal(&mut tm, &mut offset).unwrap();
+            (tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+        };
+        assert_eq!(normalised(2021, 2, 32), (2021, 4, 1));
+        assert_eq!(normalised(2021, 12, 1), (2022, 1, 1));
+        assert_eq!(normalised(2024, 1, 30), (2024, 3, 1));
     }
 
     #[test]
@@ -1284,7 +938,10 @@ mod tests {
             (2024, 52),
             (2026, 53),
         ] {
-            assert_eq!(weeks_in_year(y), n, "{y}");
+            // December 28th is always in its year's last ISO week, so its
+            // `%V` is the year's week count.
+            let dec28 = utc_tm(tzrules::days_from_civil(y, 12, 28) * 86_400);
+            assert_eq!(fmt("%V", &dec28), n.to_string(), "{y}");
         }
     }
 
@@ -1332,28 +989,29 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_absent_tz_is_the_machines_zone_not_utc() {
+    fn an_absent_tz_is_the_machines_zone_and_an_empty_one_is_universal() {
         // The rule that is wrong in the obvious implementation, and wrong
         // silently: an unset `TZ` means `/etc/localtime`, not Greenwich. Here
-        // the file does not exist, so the fallback is UTC — what is being
-        // asserted is that it was *looked for*.
+        // the file does not exist, so the fallback is UTC named `UTC` — what
+        // is being asserted is that it was *looked for*, since a rule would
+        // have been named after the value.
         let missing = Path::new("/nonexistent-localtime-for-this-test");
-        assert!(matches!(
-            Zone::resolve(None, TZDIR_DEFAULT, missing).0,
-            Inner::Posix(_)
-        ));
-        assert!(matches!(
-            Zone::resolve(Some(b""), TZDIR_DEFAULT, missing).0,
-            Inner::Posix(_)
-        ));
+        let dir = Path::new("/nonexistent-zoneinfo-dir");
+        let name = |tz: Option<&[u8]>| Zone::resolve(tz, dir, missing).lookup(0).name;
+        assert_eq!(name(None).as_bytes(), b"UTC");
+        // Empty is glibc's `Universal`: no such file here, so the rule.
+        assert_eq!(name(Some(b"")).as_bytes(), b"Universal");
     }
 
     #[test]
-    fn a_posix_rule_beats_a_file_of_the_same_name() {
-        // `EST5EDT` is both. glibc tries the rule first, and so do we — which
-        // is observable, because the rule does not know about 2007.
-        let zone = Zone::resolve(Some(b"EST5EDT"), TZDIR_DEFAULT, Path::new(LOCALTIME_PATH));
-        assert!(matches!(zone.0, Inner::Posix(_)));
+    fn with_no_file_of_that_name_a_posix_rule_is_read() {
+        // `EST5EDT` is both a rule and a file. glibc tries the file first
+        // (see the `tzset` tests); with no zoneinfo tree, the rule answers.
+        let zone = Zone::resolve(
+            Some(b"EST5EDT"),
+            Path::new("/nonexistent-zoneinfo-dir"),
+            Path::new("/nonexistent-localtime-for-this-test"),
+        );
         // Midsummer: EDT, four hours west.
         let summer = zone.lookup(tzrules::days_from_civil(2020, 7, 1) * 86_400);
         assert_eq!(summer.gmtoff, -4 * 3600);
@@ -1361,27 +1019,26 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_colon_forces_the_file_reading() {
-        // `:EST5EDT` is a *file* name even though the rest parses as a rule.
-        // The file will not be there under this test's directory, so the
-        // observable is that we did not end up with the rule's offsets.
+    fn a_leading_colon_is_only_dropped() {
+        // glibc reads `:EST5EDT` exactly as `EST5EDT`: a file if there is one,
+        // else the rule.
         let zone = Zone::resolve(
             Some(b":EST5EDT"),
-            "/nonexistent-zoneinfo-dir",
-            Path::new(LOCALTIME_PATH),
+            Path::new("/nonexistent-zoneinfo-dir"),
+            Path::new("/nonexistent-localtime-for-this-test"),
         );
-        assert_eq!(zone.lookup(0).gmtoff, 0);
+        assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
     }
 
     #[test]
     fn a_dotdot_component_is_refused_but_a_dotdot_inside_a_name_is_not() {
-        assert!(zoneinfo_path(b"../../etc/shadow", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"..", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"America/..", TZDIR_DEFAULT).is_none());
+        assert!(zoneinfo_path(b"../../etc/shadow", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"..", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"America/..", Path::new(TZDIR_DEFAULT)).is_none());
         // Not a traversal: `..` has to be a whole component.
-        assert!(zoneinfo_path(b"a..b", TZDIR_DEFAULT).is_some());
-        assert!(zoneinfo_path(b"", TZDIR_DEFAULT).is_none());
-        assert!(zoneinfo_path(b"a\0b", TZDIR_DEFAULT).is_none());
+        assert!(zoneinfo_path(b"a..b", Path::new(TZDIR_DEFAULT)).is_some());
+        assert!(zoneinfo_path(b"", Path::new(TZDIR_DEFAULT)).is_none());
+        assert!(zoneinfo_path(b"a\0b", Path::new(TZDIR_DEFAULT)).is_none());
     }
 
     #[test]
@@ -1389,7 +1046,7 @@ mod tests {
         // `TZ=/etc/localtime` is a thing people set, and joining it onto TZDIR
         // would look for `/usr/share/zoneinfo/etc/localtime`.
         assert_eq!(
-            zoneinfo_path(b"/etc/localtime", TZDIR_DEFAULT).unwrap(),
+            zoneinfo_path(b"/etc/localtime", Path::new(TZDIR_DEFAULT)).unwrap(),
             PathBuf::from("/etc/localtime")
         );
     }
@@ -1398,7 +1055,44 @@ mod tests {
     fn a_file_that_is_not_tzif_is_not_a_zone() {
         // Rejected at load, so a listing cannot switch to UTC halfway down.
         let zone = Zone::from_file(Path::new("Cargo.toml"));
-        assert!(matches!(zone.0, Inner::Posix(_)));
+        assert!(zone.with_engine(|e| matches!(e, Engine::Rules(_))));
         assert_eq!(zone.lookup(0).gmtoff, 0);
+    }
+
+    #[test]
+    fn a_zone_is_read_at_first_use_not_when_made() {
+        let zone = Zone::resolve(
+            Some(b"EST5"),
+            Path::new("/nonexistent-zoneinfo-dir"),
+            Path::new("/x"),
+        );
+        assert!(zone.engine.read().unwrap().is_none());
+        assert_eq!(zone.lookup(0).gmtoff, -5 * 3600);
+        assert!(zone.engine.read().unwrap().is_some());
+    }
+
+    #[test]
+    fn tzset_would_keep_compares_as_glibc_does() {
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, Path::new("/d"), Path::new("/x"));
+        // glibc drops one `:` and reads empty as `Universal` before comparing.
+        assert!(at(Some(b"EST5")).tzset_would_keep(&at(Some(b":EST5"))));
+        assert!(!at(Some(b"EST5")).tzset_would_keep(&at(Some(b"::EST5"))));
+        assert!(at(Some(b"Universal")).tzset_would_keep(&at(Some(b""))));
+        assert!(at(None).tzset_would_keep(&at(None)));
+        assert!(!at(None).tzset_would_keep(&at(Some(b"UTC"))));
+        assert!(!at(Some(b"EST5")).tzset_would_keep(&at(Some(b"EST6"))));
+        assert!(!Zone::utc().tzset_would_keep(&Zone::utc()));
+        // gnulib's `set_tz` compares the values as written.
+        assert!(!at(Some(b"EST5")).same_tz(&at(Some(b":EST5"))));
+    }
+
+    #[test]
+    fn same_tz_is_a_comparison_of_the_values_as_written() {
+        let at = |tz: Option<&[u8]>| Zone::resolve(tz, Path::new("/d"), Path::new("/x"));
+        assert!(at(Some(b"EST5")).same_tz(&at(Some(b"EST5"))));
+        assert!(!at(Some(b"EST5")).same_tz(&at(Some(b":EST5"))));
+        assert!(at(None).same_tz(&at(None)));
+        assert!(!at(None).same_tz(&at(Some(b""))));
+        assert!(!Zone::utc().same_tz(&Zone::utc()));
     }
 }

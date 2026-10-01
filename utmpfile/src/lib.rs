@@ -11,8 +11,9 @@
 //! | `userspace/uptime` | 384-byte records, `ut_type` only | correct; crate retired 2026-09-12 |
 //! | `userspace/w` | **colon-separated text** | never matches anything |
 //!
-//! `posix/src/linux_utmp_types.rs` already declares `UTMPX_RECORD_SIZE = 384`
-//! as the canonical value, so there were four statements of one fact and one
+//! The C library states the same size and checks it at compile time
+//! (`posix/src/utmpx.rs`: `const _: () = assert!(RECORD == 384);`, glibc's
+//! x86-64 `struct utmp`), so there were four statements of one fact and one
 //! of them disagreed. `userspace/w` read the file with `read_to_string` and
 //! split on `:`, which cannot parse a binary record — so its user list was
 //! always empty, and it fell back to inventing a session from `$USER`.
@@ -58,10 +59,10 @@
 
 /// Size of one utmp record on x86_64 Linux, which is the layout we mirror.
 ///
-/// Must equal `posix::linux_utmp_types::UTMPX_RECORD_SIZE`. It is repeated
-/// rather than imported because `posix` is the OS's own libc and pulling it
-/// into a host-side utility crate would drag the whole ABI surface along for
-/// one integer.
+/// Must equal the C library's record size (`posix/src/utmpx.rs`, `RECORD`,
+/// asserted there to be 384). It is repeated rather than imported because
+/// `posix` is the OS's own libc and pulling it into a host-side utility crate
+/// would drag the whole ABI surface along for one integer.
 pub const RECORD_SIZE: usize = 384;
 
 // Field offsets within a record. These are the x86_64 `struct utmpx` layout.
@@ -480,8 +481,8 @@ mod tests {
 
     #[test]
     fn the_record_size_matches_the_one_posix_declares() {
-        // posix/src/linux_utmp_types.rs: UTMPX_RECORD_SIZE = 384. If that ever
-        // changes, this crate is wrong and every reader with it.
+        // posix/src/utmpx.rs: `const _: () = assert!(RECORD == 384);`. If that
+        // ever changes, this crate is wrong and every reader with it.
         assert_eq!(RECORD_SIZE, 384);
     }
 }

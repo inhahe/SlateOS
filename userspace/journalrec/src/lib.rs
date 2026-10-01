@@ -99,6 +99,21 @@ impl Record {
     /// The record as one JSON-lines entry, without the trailing newline.
     #[must_use]
     pub fn to_json_line(&self) -> String {
+        self.to_json_line_with(&[])
+    }
+
+    /// As [`Record::to_json_line`], with further fields after the ones
+    /// above, in order, as `"key":"value"` -- a syslog message's facility,
+    /// or the fields `logger --journald` was given. `journalctl` keeps and
+    /// shows keys it does not interpret.
+    ///
+    /// They are an argument rather than a field of `Record` so that every
+    /// writer that builds a `Record` literal -- other lanes' among them --
+    /// is unaffected by writers that need more. A key that repeats one of
+    /// the fields above would make the record ambiguous, so the writer is
+    /// expected not to supply one; this writes what it is given.
+    #[must_use]
+    pub fn to_json_line_with(&self, extra: &[(String, String)]) -> String {
         let mut parts: Vec<String> = Vec::new();
         parts.push(format!("\"ts\":{}", self.ts));
         parts.push(format!("\"level\":\"{}\"", escape(&self.level)));
@@ -106,6 +121,9 @@ impl Record {
         parts.push(format!("\"msg\":\"{}\"", escape(&self.msg)));
         if let Some(pid) = self.pid {
             parts.push(format!("\"pid\":{pid}"));
+        }
+        for (key, value) in extra {
+            parts.push(format!("\"{}\":\"{}\"", escape(key), escape(value)));
         }
         let mut out = String::from("{");
         out.push_str(&parts.join(","));
@@ -118,6 +136,7 @@ impl Record {
 mod tests {
     use super::*;
     use alloc::string::ToString;
+    use alloc::vec;
 
     /// The reason this is one function and not two. A message is
     /// attacker-shaped text: a bare quote ends the field and a bare newline
@@ -205,5 +224,25 @@ mod tests {
             pid: None,
         };
         assert!(!r.to_json_line().contains("pid"));
+    }
+
+    /// Extra fields follow the known ones, in order, escaped like them.
+    #[test]
+    fn extra_fields_follow_in_order_and_are_escaped() {
+        let r = Record {
+            ts: 1,
+            level: "err".to_string(),
+            service: "logger".to_string(),
+            msg: "m".to_string(),
+            pid: Some(7),
+        };
+        let extra = vec![
+            ("facility".to_string(), "user".to_string()),
+            ("CODE_LINE".to_string(), "a\"b\nc".to_string()),
+        ];
+        assert_eq!(
+            r.to_json_line_with(&extra),
+            r#"{"ts":1,"level":"err","service":"logger","msg":"m","pid":7,"facility":"user","CODE_LINE":"a\"b\nc"}"#
+        );
     }
 }

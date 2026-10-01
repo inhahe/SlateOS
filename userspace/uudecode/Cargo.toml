@@ -1,0 +1,27 @@
+[package]
+name = "uudecode"
+version = "0.1.0"
+edition = "2024"
+description = "uudecode from GNU sharutils 4.15.2: uuencoded or base64 files back to what they were"
+
+[lints]
+workspace = true
+
+[dependencies]
+# sharutils' option machinery -- flags, ~/.sharrc, --help, --version, the
+# save/load of options -- as libopts 41.1 does it.
+autoopts = { path = "../autoopts" }
+# stdout buffered as glibc buffers it, so the call that meets a full disk is
+# the one reported, and a write error at the end is seen.
+ulclosestream = { path = "../ulclosestream" }
+# A closed descriptor 0 or 1 stays closed, as upstream sees it.
+stdfdguard = { path = "../stdfdguard" }
+# strerror, for error(3)'s ": REASON".
+errmsg = { path = "../errmsg" }
+# gnulib's base64_decode_ctx, for begin-base64 bodies and -encoded names.
+gnubase64 = { path = "../gnubase64" }
+# getpwnam, for `begin 644 ~user/file`: /etc/passwd read as glibc reads it.
+pwdb = { path = "../pwdb" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

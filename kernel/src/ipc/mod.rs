@@ -82,6 +82,11 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::Timer => {
                 timer::cancel(handle_raw);
             }
+            ResourceType::Semaphore => {
+                // Wakes any waiter, who gets `ChannelClosed`, as an explicit
+                // close does.
+                semaphore::close(semaphore::SemHandle::from_raw(handle_raw));
+            }
             ResourceType::StreamSocket => {
                 stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
             }
@@ -140,10 +145,27 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                 // handle reaching this path was still open at exit.
                 let _ = crate::fs::handle::close(handle_raw);
             }
+            ResourceType::Service => {
+                // A service listener the process registered: unregistering
+                // frees the name for a restart and closes the connections
+                // nobody accepted. `InvalidHandle` means the process
+                // unregistered it already, which is no fault at exit.
+                if let Err(e) =
+                    service::unregister(service::ServiceListenerHandle::from_raw(handle_raw))
+                {
+                    if e != crate::error::KernelError::InvalidHandle {
+                        crate::serial_println!(
+                            "[ipc] cleanup: service listener {:#x} not unregistered: {:?}",
+                            handle_raw,
+                            e
+                        );
+                    }
+                }
+            }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
             // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice) or
-            // managed by other subsystems (Socket, Service, Namespace).
+            // managed by other subsystems (Socket, Namespace).
             //
             // BlockDevice is a token and not a handle because an open of
             // `/dev/vda` is an ordinary VFS open and registers an ordinary
@@ -167,7 +189,6 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::DeviceIrq
             | ResourceType::Socket
             | ResourceType::IoScheduler
-            | ResourceType::Service
             | ResourceType::NetRaw
             | ResourceType::SystemClock
             | ResourceType::PrivilegedPort

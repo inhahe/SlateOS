@@ -672,15 +672,20 @@ pub fn remove(pid: ProcessId) {
 /// libc init re-registers). Since our per-signal dispositions live in
 /// userspace and are discarded with the old address space, the kernel's
 /// job is simply to drop the now-stale trampoline so we never jump to a
-/// garbage address in the new image. Pending signals are preserved
-/// (matching POSIX), and will be delivered once the new image registers
-/// its trampoline.
+/// garbage address in the new image.
+///
+/// **Kept:** the pending signals and the blocked mask. POSIX `execve` lists
+/// "process signal mask" among what the new image inherits, and Linux keeps
+/// `current->blocked` untouched; a shell blocks SIGCHLD or SIGINT around a
+/// fork, execs the command, and relies on it starting with them blocked. This
+/// cleared the mask until 2026-10-01, under a comment claiming POSIX asked
+/// for that (`requests/d-a-exec-must-keep-the-signal-mask.md`). Pending
+/// signals are delivered once the new image registers its trampoline and
+/// unblocks them.
 pub fn on_exec(pid: ProcessId) {
     with_states(|states| {
         if let Some(state) = states.get_mut(&pid) {
             state.trampoline = 0;
-            // Blocked mask is also reset on exec per POSIX.
-            state.blocked = 0;
             // An alternate signal stack is NOT preserved across execve (see
             // sigaltstack(2)), and here it must not be: the address named a
             // buffer in the old image's address space, which has just been
@@ -1580,7 +1585,10 @@ fn test_on_exec() -> KernelResult<()> {
     set_blocked(p, 1 << 0);
     on_exec(p);
     check(!has_trampoline(p), "exec clears trampoline")?;
-    check(blocked(p) == 0, "exec clears blocked mask")?;
+    check(
+        blocked(p) == 1 << 0,
+        "exec keeps the blocked mask (POSIX execve)",
+    )?;
     check(
         pending(p) & (1 << 11) == (1 << 11),
         "exec preserves pending",

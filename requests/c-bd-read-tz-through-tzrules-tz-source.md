@@ -76,3 +76,20 @@ GNU's on those names, and the same request notes the libc now does.
 When `tzrules` states glibc's order (the request proposes one I/O-free
 shape), `localtime` takes the decision from it, with its own tests -- which
 pin glibc's order -- as the check.
+
+## Lane D — 2026-10-01: the libc reads `TZ` as glibc does, no longer through `tz_source`
+
+Since 2026-09-28 the libc followed `tz_source`. On one point
+`tz_source`'s order is the reverse of glibc's: for a value that is both a
+file and a rule, it takes the rule
+(`requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`),
+so `TZ=EST5EDT` read an hour off for any year before 2007. The libc now
+reads `TZ` exactly as glibc 2.39 does, its `tzset.c` and `tzfile.c` ported
+function by function and held to glibc's answers (design-decisions §1165).
+That is the order this request meant to share, given by glibc's own code.
+
+So the three readers agree now only where `tz_source` agrees with glibc. If
+you change it to glibc's order, the desktop's clock agrees with the libc
+everywhere. If you would rather have one reader for all three, the libc's
+(`State::tzset_internal` in `posix/src/tz.rs`) is `no_std` and could move
+into `tzrules` -- your call, and say if you want it moved.

@@ -162,8 +162,8 @@ conversions), `posix/src/ctype.rs` (`MB_CUR_MAX`), `posix/src/iconv.rs`
 does, several parts of it were written by translating glibc's own source
 code into Rust, line by line -- most recently the Tamil character set,
 the new C23 maths functions and `clog10` -- and `<obstack.h>`'s macros
-follow glibc's header's, macro for macro, and argp glibc's source,
-function for function. glibc's licence (the LGPL)
+follow glibc's header's, macro for macro, and argp and the timezone
+code glibc's source, function for function. glibc's licence (the LGPL)
 allows that, on a condition: anyone who receives a program containing it
 must be able to rebuild that program with their own copy of the library.
 The C library is built into *every* program on SlateOS, so the condition
@@ -193,6 +193,7 @@ What is translated, as far as lane D knows:
 | `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
 | `posix/include/obstack.h`: the macros, macro for macro -- C, in a header a program compiles into itself | the installed `<obstack.h>` (`malloc/obstack.h`) | 2026-09-30 |
 | `posix/src/argp/`: the parse, the help's order and layout, the line filler -- function for function | `argp/argp-parse.c`, `argp-help.c`, `argp-fmtstream.c` | 2026-10-01 |
+| `posix/src/tz.rs`: `tzset`, the POSIX rule engine, the zoneinfo reader and `mktime`'s search -- function for function, read from the source | `time/tzset.c`, `time/tzfile.c`, `time/mktime.c` | 2026-10-01 |
 
 One more part, since this was raised, was written with glibc's source
 open, though not translated from it: `posix/src/regex/parse.rs`
@@ -229,6 +230,16 @@ glibc's on purpose: help text that breaks where glibc's does needs the
 same buffering and the same scan. Under **B** it would be written again
 from the manual and the oracle alone, which fix the order of the calls
 and the layout, though not every effect of the buffering.
+
+The timezone code, `posix/src/tz.rs`, is glibc's `tzset.c`, `tzfile.c` and
+`mktime.c` translated function by function, with glibc 2.39's source open
+(2026-10-01): which zone a `TZ` value names, and what each call leaves for
+the next -- `tzname`, the `posixrules` offset, `mktime`'s remembered guess
+-- live in those files' details, and a program written against glibc
+sees them. Under **B** it would be written again from the oracle's answers
+alone (`posix/tools/oracle/tz_harness.py`, 57 scenarios), which fix every
+behaviour they exercise, though not glibc's state after sequences of
+calls they do not.
 
 (The character tables themselves -- which byte means which letter -- are
 facts read from glibc's data files and from running its converters, not

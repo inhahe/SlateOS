@@ -82082,7 +82082,16 @@ indistinguishable. The stale `/etc/users.yaml` (§353) comment is gone rather
 than edited, as this entry prescribed. Eleven further defects came out of that
 file with it — see `B-stat-HAS-NO-OPTIONS-AND-CANNOT-READ-A-CLOCK` above.
 
-### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- OPEN, security-relevant (lane B, 2026-08-23)
+### B-WHOAMI-AND-LOGNAME-TRUST-THE-ENVIRONMENT -- FIXED 2026-08-24 (`f3ba2a369` whoami, `9e2e77b69` logname), security-relevant (lane B, 2026-08-23)
+
+**Resolution (recorded 2026-10-01; the heading said OPEN for five weeks after
+the fix).** Both were rewritten the day after this entry, as it proposes.
+`whoami` is `geteuid()` then the password database, fails with `cannot find
+name for user ID N` rather than printing a number, and never reads the
+environment; `logname` is `getlogin()`. Both now take `--help`/`--version`,
+refuse an extra operand, write the name as bytes and report a failed write.
+Each file's module docs list the defects it replaced. The entry is kept below
+as it was filed.
 
 **What.** `whoami` and `logname` both answer from environment variables:
 
@@ -102961,7 +102970,13 @@ forked by the announcing shell as it goes, which is a different division of
 labour between the parent and the `&` job's clone than osh currently has. Worth
 doing only if a real observable is found that depends on it.
 
-### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B, REPORTED
+### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B — FIXED 2026-08-26 (`ae285d901`)
+
+**Resolution (recorded 2026-10-01).** Fixed the day it was reported, the way
+the request suggests: the test now asserts the documented dup fallback on the
+dev host and the re-open where procfs exists, so the fallback is covered rather
+than excused (`userspace/oils/src/interp.rs`, the test's doc comment names the
+request). The heading went on saying REPORTED; the entry is kept below as filed.
 
 **In short:** `cargo test --workspace` has exactly one failing test, and it is a
 test rather than a bug. The shell (`osh`) can be told to read a file "through a

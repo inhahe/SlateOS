@@ -1090,9 +1090,16 @@ pub const SYS_CP_CREATE: u64 = 250;
 ///
 /// `arg0`: completion port handle.
 /// `arg1`: source type (0=channel, 1=pipe_read, 2=pipe_write, 3=eventfd,
-///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion).
-/// `arg2`: source handle (raw u64).
+///         4=process_exit, 5=timer, 6=semaphore, 7=io_completion,
+///         8=service listener -- ready when a connection is waiting to be
+///         accepted, the handle `SYS_SERVICE_REGISTER` returned; since
+///         2026-10-01).
+/// `arg2`: source handle (raw u64). The caller must hold it, as that
+///         source's own syscalls require.
 /// `arg3`: `user_data` — arbitrary u64 returned with events.
+///
+/// A channel is ready when a message is waiting or the peer has closed; a
+/// listener when a connection is waiting or the listener is gone.
 ///
 /// Returns: 0 on success.
 pub const SYS_CP_REGISTER: u64 = 251;
@@ -1111,6 +1118,13 @@ pub const SYS_CP_UNREGISTER: u64 = 252;
 /// `arg0`: completion port handle.
 /// `arg1`: pointer to event buffer (array of `CpEventRaw`).
 /// `arg2`: buffer capacity (max events to return).
+///
+/// Parks until a registered source is ready: channels, pipes, eventfds and
+/// listeners wake it themselves; timers and io_rings post to it; process exit
+/// and semaphores are re-checked on a backoff from 0.5 ms to 20 ms. Until
+/// 2026-10-01 it woke only for a post, so a port waiting on a channel slept
+/// through its messages. A deliverable signal ends the wait with
+/// `Interrupted`, as any blocking call.
 ///
 /// Returns: number of events written to buffer.
 pub const SYS_CP_WAIT: u64 = 253;
@@ -5239,6 +5253,19 @@ pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 /// `POLLNVAL` in *its own* `revents` and does not fail the call, matching
 /// `poll(2)`'s treatment of a bad fd: one bad entry in a large set must not
 /// deny the caller readiness for the other 99.
+///
+/// Since 2026-10-01 two native kinds join the set, both truly blockable:
+/// - a **channel** end (`ResourceType::Channel`) -- `POLLIN` when a message is
+///   waiting, `POLLHUP` when the peer has closed (a receive answers
+///   `ChannelClosed`);
+/// - a **service listener** (`ResourceType::Service`, the handle
+///   `SYS_SERVICE_REGISTER` returned) -- `POLLIN` when a connection is
+///   waiting to be accepted, or the listener is gone.
+///
+/// So a server can wait on its listener and its clients' channels together
+/// (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`;
+/// lane F's `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`
+/// point 4).
 ///
 /// Chosen number 1066, at the high-water mark — see
 /// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.

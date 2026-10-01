@@ -180141,9 +180141,12 @@ nowhere.
   check possession, close deregisters, and a dead process's semaphores are
   closed (waiters get `ChannelClosed`). Not inherited across fork, like a
   channel.
-- **Points 3 and 4 of lane F's request are features, on lane A's backlog.**
-  A Linux-ABI process (every Rust `std` program) cannot reach channels at all,
-  and nothing waits on a channel together with anything else.
+- **Point 3 of lane F's request is a feature, on lane A's backlog.** A
+  Linux-ABI process (every Rust `std` program) cannot reach channels at all.
+  Point 4 -- waiting on a channel together with anything else -- was done the
+  same day: `SYS_WAIT_MULTIPLE` takes channels and service listeners, and
+  completion ports wake when their sources become ready (they had slept until
+  a `notify()` that channels, pipes and eventfds never made).
 - **Moving an end to another process is not supported.** Capability transfer
   in a message moves capability-table entries, and nothing makes a channel end
   one. A process can hand another process an end only through the service

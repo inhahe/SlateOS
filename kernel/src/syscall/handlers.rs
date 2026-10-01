@@ -3368,6 +3368,7 @@ fn decode_wait_source(source_type: u64, handle: u64) -> Option<WaitSource> {
         5 => Some(WaitSource::Timer(handle)),
         6 => Some(WaitSource::Semaphore(handle)),
         7 => Some(WaitSource::IoCompletion(handle)),
+        8 => Some(WaitSource::Listener(handle)),
         _ => None,
     }
 }
@@ -3398,6 +3399,10 @@ fn require_wait_source(source: &WaitSource) -> Result<(), KernelError> {
             }
         }
         WaitSource::Semaphore(h) => require_ipc_handle(ResourceType::Semaphore, h),
+        // A listener is registered under `Service` when `SYS_SERVICE_REGISTER`
+        // hands it out: knowing that a service has callers waiting is the
+        // service's business.
+        WaitSource::Listener(h) => require_ipc_handle(ResourceType::Service, h),
         WaitSource::ProcessExit(_) => Ok(()),
     }
 }
@@ -3421,7 +3426,7 @@ pub fn sys_cp_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_CP_REGISTER` — register a source with a completion port.
 ///
 /// `arg0`: CP handle.
-/// `arg1`: source type (0-3).
+/// `arg1`: source type (0-8; see the syscall number's docs).
 /// `arg2`: source handle.
 /// `arg3`: `user_data`.
 pub fn sys_cp_register(args: &SyscallArgs) -> SyscallResult {
@@ -3487,6 +3492,7 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
         WaitSource::Timer(h) => (5, h),
         WaitSource::Semaphore(h) => (6, h),
         WaitSource::IoCompletion(h) => (7, h),
+        WaitSource::Listener(h) => (8, h),
     };
     CpEventRaw {
         source_type,
@@ -17267,6 +17273,12 @@ enum WaitTest {
     StreamSocket,
     /// A pty end. Native-only, and the one ownership-checked handle space.
     Pty,
+    /// A channel end: readable when a message is waiting or the peer has
+    /// closed. Native-only.
+    Channel,
+    /// A service listener: readable when a connection is waiting to be
+    /// accepted. Native-only.
+    Listener,
 }
 
 /// An item that resolved to something waitable.
@@ -17300,6 +17312,8 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::NetSocket => WaitTest::Handle(HandleKind::Socket),
         ResourceType::StreamSocket => WaitTest::StreamSocket,
         ResourceType::Pty => WaitTest::Pty,
+        ResourceType::Channel => WaitTest::Channel,
+        ResourceType::Service => WaitTest::Listener,
         _ => return None,
     })
 }
@@ -17348,6 +17362,28 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
                 poll_bits::POLLHUP
             }
         }
+        WaitTest::Channel => {
+            let h = crate::ipc::channel::ChannelHandle::from_raw(raw);
+            let mut r = 0u16;
+            if crate::ipc::channel::has_pending(h) {
+                r |= poll_bits::POLLIN | poll_bits::POLLRDNORM;
+            }
+            // A closed peer (or a channel gone) is POLLHUP, as a socket
+            // whose peer has gone: a receive answers ChannelClosed.
+            if crate::ipc::channel::readable(h) && r == 0 {
+                r |= poll_bits::POLLHUP;
+            }
+            r
+        }
+        WaitTest::Listener => {
+            if crate::ipc::service::readable(crate::ipc::service::ServiceListenerHandle::from_raw(
+                raw,
+            )) {
+                poll_bits::POLLIN | poll_bits::POLLRDNORM
+            } else {
+                0
+            }
+        }
     };
 
     bits & (events | always)
@@ -17368,6 +17404,8 @@ fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarge
         WaitTest::Handle(kind) => super::linux::wait_target_for_handle(kind, raw),
         WaitTest::StreamSocket => WaitTarget::StreamSocket(raw),
         WaitTest::Pty => WaitTarget::Pty(raw),
+        WaitTest::Channel => WaitTarget::Channel(raw),
+        WaitTest::Listener => WaitTarget::Listener(raw),
     }
 }
 

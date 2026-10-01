@@ -645,8 +645,21 @@ touches_nl='
 
 # The paths the push's own commits change, one per line (with blank lines
 # between commits): every unpublished commit against its parent, a root commit
-# against nothing, a merge not at all. `touches` answers from this list when it
-# can, and the tooling-suite gate reads the names from it.
+# against nothing, and a merge by what its own resolution wrote -- the paths
+# that differ from every parent (`--diff-merges=dense-combined`). `touches`
+# answers from this list when it can, and the tooling-suite gate reads the
+# names from it.
+#
+# A merge was not listed at all until 2026-10-01, because `git log
+# --name-only` prints no files for a merge unless asked to diff merges. So a
+# conflict resolution was invisible to every gate scoped by path: lane B
+# resolved this very file in a merge of origin/main, gave two gates one
+# number, and the hook's own suite -- run whenever the hook is pushed -- did
+# not run, the merge being the only commit that touched it
+# (requests/b-a-pushed-paths-cannot-see-what-a-merge-resolved.md). Dense, not
+# every path the merge brought in: a path taken unchanged from one side was
+# gated when that side was pushed, and a merge of main must not run every
+# gate over another lane's tree.
 #
 # ONE `git log` OVER EVERY COMMIT, NOT `rev-list | xargs git diff-tree`. That
 # was how the tooling-suite gate listed the pushed files, and `diff-tree` takes
@@ -662,7 +675,7 @@ pushed_paths() {
     [ -n "$pushed_shas" ] || return 0
     # shellcheck disable=SC2086
     git -c core.quotePath=false log $pushed_shas \
-        --no-renames --root --name-only --format= \
+        --no-renames --root --name-only --format= --diff-merges=dense-combined \
         --not --remotes="$remote_name" -- 2>/dev/null
 }
 

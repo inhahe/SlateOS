@@ -58,27 +58,117 @@
 use alloc::vec::Vec;
 
 use crate::ch::{BStr, Ch, Str, chars};
-use crate::engine::{EreError, RegCode, Regex};
+use crate::engine::{EreError, RegCode, Regex, Syntax};
 
-/// Compile a BRE, with `ci` selecting case-insensitive matching.
+/// Which of glibc's basic syntaxes a pattern is read in.
+///
+/// The GNU programs that take a basic expression do not all read it the same
+/// way: each passes glibc a different set of syntax bits, and three of those
+/// bits change what a pattern means. Measured against grep 3.11, sed 4.9, ed
+/// 1.20, coreutils 9.4 (`expr`, `csplit`, `nl`), diffutils 3.10 (`diff -I`)
+/// and findutils 4.9 `-regextype`; util-linux `more` compiles with POSIX's
+/// `regcomp`, which is glibc's POSIX basic syntax:
+///
+/// | pattern | sed, ed, `more` | grep, `diff -I` | `expr`, `csplit`, `nl` | find `posix-minimal-basic` |
+/// |---|---|---|---|---|
+/// | `a**`, `a\{2\}*`, `a\+*` | refused | a repetition repeated | the same | the same |
+/// | `\{2\}a` | refused | the text `{2}a` | the same | the same |
+/// | `[z-a]` | refused | refused | matches nothing | refused |
+/// | `a\+`, `a\|b` | operators | operators | operators | the characters |
+///
+/// (`a*\+` is accepted everywhere: glibc refuses only a `*` or `\{` straight
+/// after a repetition, and `\+` is neither.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreSyntax {
+    /// glibc's `RE_CONTEXT_INVALID_DUP`: a `*` or `\{` straight after a
+    /// repetition is refused ("In BRE consecutive duplications are not
+    /// allowed", says glibc's `parse_expression`), and so is a `\{` with
+    /// nothing before it. Without it the first is a repetition of a repetition
+    /// and the second the literal character `{`.
+    pub context_invalid_dup: bool,
+    /// glibc's `RE_LIMITED_OPS`: `\+`, `\?` and `\|` are the characters, not
+    /// the GNU operators.
+    pub limited_ops: bool,
+    /// A backwards range (`[z-a]`) is empty rather than refused -- glibc's
+    /// syntax without `RE_NO_EMPTY_RANGES`; see [`Syntax::empty_ranges`].
+    pub empty_ranges: bool,
+}
+
+impl BreSyntax {
+    /// `RE_SYNTAX_POSIX_BASIC`: GNU sed's and ed's, and find's `posix-basic`,
+    /// `ed` and `sed` types.
+    pub const POSIX_BASIC: BreSyntax = BreSyntax {
+        context_invalid_dup: true,
+        limited_ops: false,
+        empty_ranges: false,
+    };
+
+    /// GNU grep's basic syntax, glibc's `RE_SYNTAX_GREP`, and find's `grep`
+    /// type: POSIX basic without `RE_CONTEXT_INVALID_DUP`.
+    pub const GREP: BreSyntax = BreSyntax {
+        context_invalid_dup: false,
+        limited_ops: false,
+        empty_ranges: false,
+    };
+
+    /// GNU coreutils' -- `expr`, `csplit` and `nl` all set it: POSIX basic
+    /// without `RE_CONTEXT_INVALID_DUP` and without `RE_NO_EMPTY_RANGES`.
+    pub const COREUTILS: BreSyntax = BreSyntax {
+        context_invalid_dup: false,
+        limited_ops: false,
+        empty_ranges: true,
+    };
+
+    /// `RE_SYNTAX_POSIX_MINIMAL_BASIC`, find's `posix-minimal-basic` type: no
+    /// GNU operators at all, and no `RE_CONTEXT_INVALID_DUP` either.
+    pub const POSIX_MINIMAL_BASIC: BreSyntax = BreSyntax {
+        context_invalid_dup: false,
+        limited_ops: true,
+        empty_ranges: false,
+    };
+}
+
+/// Compile a BRE in glibc's POSIX basic syntax -- sed's and ed's -- with `ci`
+/// selecting case-insensitive matching.
 ///
 /// # Errors
 /// Returns the translation's error, or the ERE engine's, whichever stops first.
 pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
-    let ere = to_ere(pattern)?;
-    Regex::new_flags(&ere, ci)
+    compile_syntax(pattern, ci, BreSyntax::POSIX_BASIC)
 }
 
-/// Translate a POSIX BRE into the equivalent ERE.
+/// Compile a BRE in a chosen basic syntax; see [`BreSyntax`].
+///
+/// # Errors
+/// Returns the translation's error, or the ERE engine's, whichever stops first.
+pub fn compile_syntax(pattern: BStr<'_>, ci: bool, syntax: BreSyntax) -> Result<Regex, EreError> {
+    let ere = to_ere_syntax(pattern, syntax)?;
+    let engine = Syntax {
+        empty_ranges: syntax.empty_ranges,
+        ..Syntax::POSIX_EXTENDED
+    };
+    Regex::new_syntax(&ere, ci, engine)
+}
+
+/// Translate a POSIX BRE into the equivalent ERE, in glibc's POSIX basic
+/// syntax; see [`to_ere_syntax`].
+///
+/// # Errors
+/// As [`to_ere_syntax`].
+pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
+    to_ere_syntax(pattern, BreSyntax::POSIX_BASIC)
+}
+
+/// Translate a BRE in `syntax` into the equivalent ERE.
 ///
 /// The result is a pattern for [`crate::engine`], not something to show a user:
 /// it is the same language, respelled.
 ///
 /// # Errors
 /// Returns [`EreError`] for a trailing backslash, an unmatched `\(`, `\{` or
-/// `[`, or a quantifier with nothing to repeat.
+/// `[`, or a repetition the syntax refuses.
 #[allow(clippy::too_many_lines)] // One flat dispatch over BRE's characters; splitting it would hide the table.
-pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
+pub fn to_ere_syntax(pattern: BStr<'_>, syntax: BreSyntax) -> Result<Str, EreError> {
     let cs: Vec<Ch> = chars(pattern).collect();
     let mut out = Str::new();
     let mut i = 0usize;
@@ -95,11 +185,25 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
     // reads `*` as a literal (`\<*`) *and* `^` as a literal (`\<^`), so the two
     // rules need two flags. Measured on GNU grep 3.11, sed 4.9 and ed 1.20.
     let mut at_start = true;
+    // Whether what was just emitted is a repetition, for
+    // `BreSyntax::context_invalid_dup`: glibc refuses a `*` or `\{` here.
+    let mut after_dup = false;
     // How deep in `\(` we are, so an unmatched one is reported rather than
     // handed to the engine as a stray `(`.
     let mut depth = 0usize;
+    // glibc's refusal of a repetition where there is nothing it may repeat:
+    // "Invalid preceding regular expression".
+    let bad_repeat = |what: &[u8]| {
+        EreError::new(
+            RegCode::BadRepeat,
+            [b"nothing to repeat before ".as_slice(), what].concat(),
+        )
+    };
 
     while let Some(&c) = cs.get(i) {
+        // Whether the previous step emitted a repetition; this step decides
+        // afresh whether *it* does.
+        let was_dup = core::mem::take(&mut after_dup);
         match c.as_ascii() {
             Some('\\') => {
                 let Some(&e) = cs.get(i.saturating_add(1)) else {
@@ -128,20 +232,40 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         prev_atom = true;
                         at_start = false;
                     }
+                    // With nothing to repeat, a `\{` is refused under
+                    // `RE_CONTEXT_INVALID_DUP` and is the character `{`
+                    // without it -- `grep '\{2\}a'` matches the text `{2}a`.
+                    // Straight after a repetition it is refused under that bit
+                    // too, and repeats the repetition without it.
                     Some('{') => {
                         if !prev_atom {
-                            return Err(EreError::new(
-                                RegCode::BadRepeat,
-                                br"nothing to repeat before \{".to_vec(),
-                            ));
+                            if syntax.context_invalid_dup {
+                                return Err(bad_repeat(br"\{"));
+                            }
+                            out.extend_from_slice(br"\{");
+                            prev_atom = true;
+                            at_start = false;
+                        } else {
+                            if syntax.context_invalid_dup && was_dup {
+                                return Err(bad_repeat(br"\{"));
+                            }
+                            i = copy_interval(&cs, i, &mut out)?;
+                            after_dup = true;
                         }
-                        i = copy_interval(&cs, i, &mut out)?;
                     }
+                    // A `\}` that closes no interval is the character `}`, in
+                    // every basic syntax: `grep 'a\}'`, `sed`, `ed` and `expr`
+                    // all match `a}` (measured). It was refused here, as
+                    // "unmatched \}".
                     Some('}') => {
-                        return Err(EreError::new(
-                            RegCode::UnmatchedBrace,
-                            br"unmatched \}".to_vec(),
-                        ));
+                        out.extend_from_slice(br"\}");
+                        prev_atom = true;
+                        at_start = false;
+                    }
+                    Some('|') if syntax.limited_ops => {
+                        out.extend_from_slice(br"\|");
+                        prev_atom = true;
+                        at_start = false;
                     }
                     Some('|') => {
                         out.push(b'|');
@@ -157,9 +281,11 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     // to repeat", which none of them does.) `\{` is different
                     // -- `RE_CONTEXT_INVALID_DUP` is in that syntax -- which is
                     // why the interval arm above still refuses.
+                    // Under `RE_LIMITED_OPS` they are always the characters.
                     Some(q @ ('+' | '?')) => {
-                        if prev_atom {
+                        if prev_atom && !syntax.limited_ops {
                             out.push(q as u8);
+                            after_dup = true;
                         } else {
                             out.push(b'\\');
                             out.push(q as u8);
@@ -241,7 +367,13 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
             }
             Some('*') => {
                 if prev_atom {
+                    // `a**` and `a\{2\}*`: refused under
+                    // `RE_CONTEXT_INVALID_DUP`, a repetition repeated without.
+                    if syntax.context_invalid_dup && was_dup {
+                        return Err(bad_repeat(b"*"));
+                    }
                     out.push(b'*');
+                    after_dup = true;
                 } else {
                     out.extend_from_slice(br"\*");
                     prev_atom = true;
@@ -569,6 +701,66 @@ mod tests {
         assert!(err(r"a\{2").contains(r"unmatched \{"));
         assert!(err("[a").contains("unmatched ["));
         assert!(err(r"\{2\}").contains("nothing to repeat"));
+    }
+
+    /// Match under a chosen basic syntax.
+    fn ms(syntax: BreSyntax, pat: &str, subject: &str) -> bool {
+        compile_syntax(pat.as_bytes(), false, syntax)
+            .unwrap()
+            .is_match(subject.as_bytes())
+            .unwrap()
+    }
+
+    /// The rows of [`BreSyntax`]'s table, each measured against the tools it
+    /// names.
+    #[test]
+    fn the_basic_syntaxes_differ_where_the_gnu_tools_do() {
+        let refused =
+            |pat: &str, syntax: BreSyntax| compile_syntax(pat.as_bytes(), false, syntax).is_err();
+        // A repetition straight after a repetition: sed and ed refuse it;
+        // grep, expr, csplit and nl repeat it.
+        for pat in [r"a**", r"a*\{2\}", r"a\{2\}*", r"a\{1\}\{2\}", r"a\+*"] {
+            assert!(
+                refused(pat, BreSyntax::POSIX_BASIC),
+                "{pat} under POSIX basic"
+            );
+            assert!(!refused(pat, BreSyntax::GREP), "{pat} under grep");
+            assert!(!refused(pat, BreSyntax::COREUTILS), "{pat} under coreutils");
+        }
+        assert!(ms(BreSyntax::GREP, "^a**$", "aa"));
+        // ...but only a `*` or `\{` after one: `a*\+` is accepted everywhere.
+        assert!(!refused(r"a*\+", BreSyntax::POSIX_BASIC));
+        // An interval with nothing before it: refused, or the text itself.
+        assert!(refused(r"\{2\}a", BreSyntax::POSIX_BASIC));
+        assert!(ms(BreSyntax::GREP, r"^\{2\}a$", "{2}a"));
+        assert!(ms(BreSyntax::COREUTILS, r"^\(\{1\}a\)$", "{1}a"));
+        // A backwards range: empty for coreutils, refused for the rest.
+        assert!(refused("[z-a]", BreSyntax::GREP));
+        assert!(refused("[z-a]", BreSyntax::POSIX_BASIC));
+        assert!(!ms(BreSyntax::COREUTILS, "a[z-a]", "ab"));
+        assert!(ms(BreSyntax::COREUTILS, "^a[z-a]*$", "a"));
+        // Minimal basic: no GNU operators.
+        assert!(ms(BreSyntax::POSIX_MINIMAL_BASIC, r"^a\+$", "a+"));
+        assert!(!ms(BreSyntax::POSIX_MINIMAL_BASIC, r"^a\+$", "aa"));
+        assert!(ms(BreSyntax::POSIX_MINIMAL_BASIC, r"^a\|b$", "a|b"));
+        assert!(ms(BreSyntax::POSIX_MINIMAL_BASIC, r"^a?$", "a?"));
+        assert!(ms(BreSyntax::POSIX_MINIMAL_BASIC, r"^a**$", "aaa"));
+    }
+
+    /// A `\}` that closes no interval is the character, in every syntax:
+    /// grep, sed, ed and expr all match `a}` with `a\}` (measured).
+    #[test]
+    fn a_stray_close_brace_is_the_character() {
+        assert_eq!(t(r"a\}"), r"a\}");
+        for syntax in [
+            BreSyntax::POSIX_BASIC,
+            BreSyntax::GREP,
+            BreSyntax::COREUTILS,
+        ] {
+            assert!(ms(syntax, r"^a\}$", "a}"));
+        }
+        // An *opening* one with no close is still an error.
+        assert!(err(r"a\{").contains(r"unmatched \{"));
     }
 
     /// With nothing to repeat, `\+` and `\?` are literal characters, while

@@ -179637,9 +179637,33 @@ the extended engine must then accept, so `to_ere` should rewrite it (zero or
 more of a zero-width assertion is the empty string; one or more is the
 assertion). Harness rows in `grep-diff.sh`, `find-diff.sh` and `awk-diff.sh`.
 
-## TD-B-FIND-REGEXTYPES-ARE-TWO-DIALECTS -- `find -regextype` maps thirteen glibc syntaxes onto two (lane B, 2026-10-01)
+## TD-B-FIND-REGEXTYPES-ARE-TWO-DIALECTS -- `find -regextype` maps thirteen glibc syntaxes onto two (lane B, 2026-10-01) — **FIXED** 2026-10-01
 
-**Status:** open
+**Status:** FIXED 2026-10-01
+
+**Resolution.** Every type is now the dialect it is: the two Emacs types
+through `ere::emacs` (`findutils-default` with `.` matching a newline,
+`emacs::compile_dot_newline`), the basic types through `ere::bre::BreSyntax`,
+the extended through `ere::Syntax` -- which grew `GNU_AWK` and `AWK` and the
+three bits they need (`leading_repeat_literal`, `no_intervals`,
+`no_backrefs`) -- and every type with glibc's `newline_anchor`, which
+`re_compile_pattern` sets (`-regextype posix-extended -regex 't/a$.b'` finds
+`a<newline>b`). `find-diff.sh` runs all thirteen types against seventeen
+patterns, each chosen so that one syntax bit decides it: 221 rows, all agreeing.
+
+Measuring the basic types turned up the same split in the tools themselves,
+fixed in the same change -- `ere::bre::BreSyntax`, one per GNU syntax:
+
+| | sed, ed, `more` | grep, `diff -I` | `expr`, `csplit`, `nl` |
+|---|---|---|---|
+| `a**`, `a\{2\}*` | refused | accepted | accepted |
+| `\{2\}a` | refused | the text `{2}a` | the text `{2}a` |
+| `[z-a]` | refused | refused | matches nothing |
+
+Ours had accepted the first everywhere, refused the second everywhere and
+refused the third everywhere; and a `\}` that closes no interval, which every
+one of them reads as `}`, was refused here as "unmatched \}". The original
+entry follows.
 
 **In short:** `find -regex` matches a file's whole path against a regular
 expression, and `-regextype` picks which of GNU's thirteen regex dialects the

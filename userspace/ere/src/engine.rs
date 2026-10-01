@@ -602,6 +602,29 @@ pub struct Syntax {
     /// '/^\w$/'` matches the line `w`. Every other caller here wants the
     /// operators, which glibc reads in both of its POSIX dialects.
     pub no_gnu_ops: bool,
+    /// A repetition operator with nothing to repeat -- at the start of the
+    /// pattern, a branch or a group, or straight after an assertion -- is the
+    /// character itself, instead of an error. `context_indep_ops`, when set,
+    /// wins: then it repeats the empty expression.
+    ///
+    /// glibc's syntaxes with neither `RE_CONTEXT_INDEP_OPS` nor
+    /// `RE_CONTEXT_INVALID_OPS`, whose `parse_expression` falls through to
+    /// "We treat it as a normal character": the two awk syntaxes findutils
+    /// offers, `awk` and `gnu-awk`. Measured: `find -regextype gnu-awk -regex
+    /// 'ft/(*a)'` finds the file `*a`, where `posix-awk` refuses the pattern
+    /// and `egrep` finds `a`.
+    pub leading_repeat_literal: bool,
+    /// `{` is always the character: there are no intervals at all.
+    ///
+    /// glibc's syntax without `RE_INTERVALS`, which is `RE_SYNTAX_AWK`:
+    /// `find -regextype awk -regex 't/a{2}'` finds the file `a{2}`, not `aa`.
+    pub no_intervals: bool,
+    /// `\1`–`\9` are the digits, not backreferences.
+    ///
+    /// glibc's `RE_NO_BK_REFS`, which `RE_SYNTAX_AWK` sets: `find -regextype
+    /// awk -regex 't/a\1'` finds the file `a1`, where every other type refuses
+    /// the pattern ("Invalid back reference").
+    pub no_backrefs: bool,
 }
 
 impl Syntax {
@@ -612,6 +635,9 @@ impl Syntax {
         empty_ranges: false,
         backslash_escape_in_lists: false,
         no_gnu_ops: false,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
     };
 
     /// `RE_SYNTAX_EGREP` as GNU `grep -E` applies it.
@@ -621,6 +647,38 @@ impl Syntax {
         empty_ranges: false,
         backslash_escape_in_lists: false,
         no_gnu_ops: false,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
+    };
+
+    /// `RE_SYNTAX_GNU_AWK`, findutils' `gnu-awk` type: POSIX-extended with a
+    /// backslash in a bracket quoting, a malformed interval a literal brace,
+    /// and a repetition with nothing to repeat the character itself. The GNU
+    /// operators and backreferences stay.
+    pub const GNU_AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: true,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: false,
+        leading_repeat_literal: true,
+        no_intervals: false,
+        no_backrefs: false,
+    };
+
+    /// `RE_SYNTAX_AWK`, findutils' `awk` type: traditional awk's regexes --
+    /// no intervals, no backreferences, no GNU operators, a backslash in a
+    /// bracket quoting, and a repetition with nothing to repeat the character.
+    pub const AWK: Syntax = Syntax {
+        context_indep_ops: false,
+        invalid_interval_ord: false,
+        empty_ranges: false,
+        backslash_escape_in_lists: true,
+        no_gnu_ops: true,
+        leading_repeat_literal: true,
+        no_intervals: true,
+        no_backrefs: true,
     };
 
     /// `RE_SYNTAX_POSIX_AWK`: what `gawk --posix` compiles a regex with, and so
@@ -637,6 +695,9 @@ impl Syntax {
         empty_ranges: false,
         backslash_escape_in_lists: true,
         no_gnu_ops: true,
+        leading_repeat_literal: false,
+        no_intervals: false,
+        no_backrefs: false,
     };
 }
 
@@ -883,7 +944,7 @@ impl EParser {
         // A `{` already rolled back to a literal is an atom, not a quantifier
         // looking for one; see `literal_brace`.
         let rolled_back = self.literal_brace == Some(self.pos);
-        if is_quantifier_start(self.peek_ascii()) && !rolled_back {
+        if self.quantifier_here() && !rolled_back {
             // A quantifier has to have something to quantify — under
             // `RE_SYNTAX_POSIX_EXTENDED`, where `RE_CONTEXT_INVALID_OPS` makes
             // it `REG_BADRPT`. glibc rejects `*a`, `?a`, `{2}a` and — because
@@ -893,7 +954,18 @@ impl EParser {
             // error, `{b}a` and `{}a` and `{a` included: measured against
             // findutils 4.9.0, which reports "Invalid preceding regular
             // expression" for all of them.
+            //
+            // In a syntax with neither of glibc's two context bits it is the
+            // character itself -- see `Syntax::leading_repeat_literal` -- and
+            // can be repeated like any other: `**` is a star, repeated.
             if !self.syntax.context_indep_ops {
+                if self.syntax.leading_repeat_literal
+                    && let Some(c) = self.peek()
+                {
+                    self.bump(1);
+                    self.seen_atom = true;
+                    return self.stack_quantifiers(Node::Lit(c));
+                }
                 return Err(nothing_to_repeat());
             }
             // Under egrep syntax the quantifier repeats the *empty*
@@ -975,10 +1047,12 @@ impl EParser {
         // Judged on the *character*, before `parse_quantifier` reads it, for
         // the same reason: glibc meets the `{` at the start of an expression,
         // so `^{b}` is refused even in a dialect where `a{b}` is four literals.
-        if is_assertion(&node)
-            && !self.syntax.context_indep_ops
-            && is_quantifier_start(self.peek_ascii())
-        {
+        if is_assertion(&node) && !self.syntax.context_indep_ops && self.quantifier_here() {
+            // Where a repetition with nothing to repeat is the character, it
+            // is one here too: the next `parse_repeat` reads it as such.
+            if self.syntax.leading_repeat_literal {
+                return Ok(node);
+            }
             return Err(nothing_to_repeat());
         }
         while let Some(q) = self.parse_quantifier()? {
@@ -1023,10 +1097,22 @@ impl EParser {
             // That is the same `None` this function uses for "no quantifier
             // here", and deliberately so: to the caller the two are the same
             // fact — the cursor has not moved and the next thing is an atom.
-            Some('{') => Ok(self
+            // With no intervals in the syntax at all it is never one.
+            Some('{') if !self.syntax.no_intervals => Ok(self
                 .parse_brace()?
                 .map(|(min, max)| Quant::new(Quantifier::Interval, min, max))),
             _ => Ok(None),
+        }
+    }
+
+    /// Whether a repetition operator is at the cursor: `*`, `+`, `?`, or a `{`
+    /// in a syntax that has intervals. A `{` counts even when the braces turn
+    /// out to be malformed -- what that means is `parse_brace`'s to decide.
+    fn quantifier_here(&self) -> bool {
+        match self.peek_ascii() {
+            Some('*' | '+' | '?') => true,
+            Some('{') => !self.syntax.no_intervals,
+            _ => false,
         }
     }
 
@@ -1240,8 +1326,9 @@ impl EParser {
                 // glibc reports too ("Invalid back reference"). The alternative
                 // — treating `\7` in a pattern with two groups as the literal
                 // `7` — is the silent-wrong-answer shape this crate exists to
-                // avoid.
-                if let Some(d @ '1'..='9') = e.as_ascii() {
+                // avoid. (In a syntax with no backreferences at all, the digit
+                // is the digit: `Syntax::no_backrefs`.)
+                if let Some(d @ '1'..='9') = e.as_ascii().filter(|_| !self.syntax.no_backrefs) {
                     let n = (d as usize).saturating_sub('0' as usize);
                     if n > self.ngroups {
                         return Err(EreError::new(
@@ -1294,11 +1381,14 @@ impl EParser {
             // brace got here because `parse_brace` rolled back, which is
             // `RE_INVALID_INTERVAL_ORD` saying the character was never an
             // interval. Falling through to the literal arm below is the whole
-            // of the difference for `grep -E 'a{b}'`.
-            Some('{') if !self.syntax.invalid_interval_ord => Err(EreError::new(
-                RegCode::UnmatchedBrace,
-                b"invalid interval in regex".to_vec(),
-            )),
+            // of the difference for `grep -E 'a{b}'`. In a syntax without
+            // intervals a `{` is always a literal, and arrives here as one.
+            Some('{') if !self.syntax.invalid_interval_ord && !self.syntax.no_intervals => {
+                Err(EreError::new(
+                    RegCode::UnmatchedBrace,
+                    b"invalid interval in regex".to_vec(),
+                ))
+            }
             // Anything that is not one of the ASCII metacharacters above is a
             // literal — including a character that is not ASCII and a byte that
             // decodes to no character at all.
@@ -1437,12 +1527,6 @@ impl EParser {
         self.bump(1);
         Ok(c)
     }
-}
-
-/// Whether a character begins a quantifier. `{` counts even when the braces
-/// turn out to be malformed — that is an error either way, never a literal.
-fn is_quantifier_start(c: Option<char>) -> bool {
-    matches!(c, Some('*' | '+' | '?' | '{'))
 }
 
 /// Whether a node is a zero-width assertion -- one of glibc's `ANCHOR` tokens,
@@ -3560,6 +3644,50 @@ mod tests {
         assert!(me("a$+", "a"));
         assert!(!me("a$+", "ab"));
         assert!(me(r"a\`*", "ab"));
+    }
+
+    /// findutils' `awk` and `gnu-awk` regex types, measured against findutils
+    /// 4.9: a repetition with nothing to repeat is the character, `awk` has
+    /// no intervals and no backreferences, and `gnu-awk` keeps both and the GNU
+    /// operators.
+    #[test]
+    fn the_two_awk_syntaxes_findutils_offers() {
+        for syntax in [Syntax::AWK, Syntax::GNU_AWK] {
+            // `(*a)` is a group holding a star and an `a`.
+            assert!(ms(syntax, "^(*a)$", "*a"), "{syntax:?}");
+            assert!(!ms(syntax, "^(*a)$", "a"), "{syntax:?}");
+            assert!(ms(syntax, "^*a$", "*a"));
+            assert!(ms(syntax, "^x|+a$", "+a"));
+            // A leading star repeated is a star repeated.
+            assert!(ms(syntax, "^**$", "***"));
+            // After an assertion too: `a$*` is an `a`, the end, and a star
+            // that can never follow it -- compiled, matching nothing.
+            assert!(Regex::new_syntax(b"a$*", false, syntax).is_ok());
+            assert!(!ms(syntax, "a$*", "a"));
+            assert!(!ms(syntax, "a$*", "a*"));
+            // A backslash in a bracket quotes.
+            assert!(ms(syntax, "^[a\\]b]$", "]"));
+        }
+        // `awk`: `{` is the character, `\1` the digit, `\w` the letter.
+        assert!(ms(Syntax::AWK, "^a{2}$", "a{2}"));
+        assert!(!ms(Syntax::AWK, "^a{2}$", "aa"));
+        assert!(ms(Syntax::AWK, "^a\\1$", "a1"));
+        assert!(ms(Syntax::AWK, "^a\\w$", "aw"));
+        // `gnu-awk`: intervals, backreferences and GNU operators all stay.
+        assert!(ms(Syntax::GNU_AWK, "^a{2}$", "aa"));
+        assert!(ms(Syntax::GNU_AWK, "^a{b}$", "a{b}"));
+        assert!(ms(Syntax::GNU_AWK, "^(a)\\1$", "aa"));
+        assert!(ms(Syntax::GNU_AWK, "^a\\w$", "a1"));
+        assert_eq!(
+            Regex::new_syntax(b"a\\1", false, Syntax::GNU_AWK)
+                .unwrap_err()
+                .code,
+            RegCode::BadBackReference
+        );
+        // And the other ERE syntaxes still refuse or skip it, as measured.
+        assert!(Regex::new_syntax(b"(*a)", false, Syntax::POSIX_AWK).is_err());
+        assert!(Regex::new(b"(*a)").is_err());
+        assert!(me("^(*a)$", "a"));
     }
 
     /// Match under `syntax`.

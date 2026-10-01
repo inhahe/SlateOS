@@ -610,6 +610,10 @@ run_pipe 'g/a\\>*/p\nq\n'            anchors.txt
 run_pipe 'g/\\+a/p\nq\n'             anchors.txt
 run_pipe 'g/a\\b\\{1\\}/p\nq\n'      anchors.txt
 run_pipe 'g/a$*/p\nq\n' --extended-regexp anchors.txt
+# ed's basic syntax is RE_SYNTAX_POSIX_BASIC: consecutive repetitions refused.
+run_pipe 'g/a**/p\nq\n'              anchors.txt
+run_pipe 'g/a*\\+/p\nq\n'            anchors.txt
+run_pipe 'g/a\\}/p\nq\n'             anchors.txt
 run_pipe 'v/beta/p\nq\n'             f.txt
 run_pipe 'g/a/d\n,p\nq\n'            f.txt
 run_pipe 'v/beta/d\n,p\nq\n'         f.txt

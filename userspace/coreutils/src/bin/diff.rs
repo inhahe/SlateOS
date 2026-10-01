@@ -1693,7 +1693,9 @@ fn compile_ignore_pattern(pattern: &OsString) -> Result<ere::Regex, String> {
     // ( or \(` for `a\(`, not one fixed phrase for every failure. The pattern is
     // printed as typed, except that a byte that could forge a line or garble the
     // terminal is spelled in octal.
-    ere::bre::compile(&bytes, false).map_err(|e| {
+    // diffutils compiles `-I` patterns in grep's basic syntax, not sed's:
+    // `a**` is accepted and `[z-a]` refused (measured, diffutils 3.10).
+    ere::bre::compile_syntax(&bytes, false, ere::bre::BreSyntax::GREP).map_err(|e| {
         format!(
             "diff: {}: {}",
             quoting::escape_unprintable(&bytes),

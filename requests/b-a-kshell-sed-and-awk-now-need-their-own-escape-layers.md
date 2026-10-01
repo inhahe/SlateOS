@@ -27,6 +27,13 @@ do the same, through two new modules in `ere` that are there for kshell too:
 - `sed 's/\t/X/'` in kshell now replaces a `t`; GNU's replaces a tab.
 - `awk '/a\tb/'` in kshell now matches `atb`; gawk's matches `a<TAB>b`.
 - `awk '/[\.]/'` in kshell now matches a backslash too; gawk's matches only a dot.
+- Later the same day, and needing nothing from you: `ere::bre::compile` is now
+  glibc's POSIX basic syntax exactly, which is GNU sed's. So kshell's
+  `sed 's/a**/X/'` is refused, as GNU sed refuses it (a repetition straight after
+  a repetition), and a `\}` that closes no interval is the character `}` where it
+  used to be an error. (grep's and expr's basic syntaxes differ from sed's; they
+  are `ere::bre::BreSyntax::GREP` and `::COREUTILS`, should kshell ever grow a
+  grep that compiles through `ere`.)
 
 None of kshell's 109 `sed`/`awk` self-test commands writes a C escape in a
 regex (I checked every `piped("sed …")` and `piped("awk …")`), so the boot test

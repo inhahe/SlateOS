@@ -1025,7 +1025,7 @@ struct Parser<'a> {
     depth_first: bool,
     xdev: bool,
     ignore_readdir_race: bool,
-    extended_regex: bool,
+    regex_type: RegexType,
     files0_from: Option<Vec<u8>>,
 
     // Time origins, fixed at startup.
@@ -1109,7 +1109,7 @@ impl<'a> Parser<'a> {
             depth_first: false,
             xdev: false,
             ignore_readdir_race: false,
-            extended_regex: false,
+            regex_type: RegexType::FindutilsDefault,
             files0_from: None,
             now,
             cur_day_start,
@@ -1466,27 +1466,42 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
     Ok(letters)
 }
 
-/// Upstream `lib/regextype.c`'s table, reduced to the one bit that changes
-/// what a pattern means here: basic or extended.
+/// One of findutils' thirteen `-regextype` names, as the dialect it is.
 ///
-/// The Emacs dialects are an approximation — `ere` has no Emacs syntax, so
-/// they are treated as POSIX basic, which agrees on everything except Emacs's
-/// own escapes (`\\|`, `\\(`…`\\)` are the same, but `\\w`, `\\b` and the
-/// symbol classes are not). Documented in `known-issues.md`.
-fn regex_is_extended(name: &[u8]) -> Option<bool> {
-    match name {
-        b"findutils-default"
-        | b"ed"
-        | b"emacs"
-        | b"grep"
-        | b"posix-basic"
-        | b"posix-minimal-basic"
-        | b"sed" => Some(false),
-        b"gnu-awk" | b"posix-awk" | b"awk" | b"posix-egrep" | b"egrep" | b"posix-extended" => {
-            Some(true)
-        }
-        _ => None,
-    }
+/// Upstream `lib/regextype.c` maps each name to a glibc syntax, and every one
+/// of those is here: the Emacs syntax through `ere::emacs`, the basic ones
+/// through `ere::bre`'s syntaxes, the extended ones through `ere::Syntax`.
+/// Until 2026-10-01 this was a boolean -- basic or extended -- so the default,
+/// which is Emacs syntax, was read as POSIX basic (`a+` a literal, `\{2\}` an
+/// interval, both backwards), and the three awk types as POSIX extended.
+/// Measured, every type, in `scripts/find-diff.sh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegexType {
+    /// `RE_SYNTAX_EMACS | RE_DOT_NEWLINE`: the default.
+    FindutilsDefault,
+    /// `RE_SYNTAX_EMACS`, where `.` does not match a newline.
+    Emacs,
+    /// A basic syntax.
+    Basic(ere::bre::BreSyntax),
+    /// An extended one.
+    Extended(ere::Syntax),
+}
+
+fn regex_type(name: &[u8]) -> Option<RegexType> {
+    use ere::bre::BreSyntax;
+    Some(match name {
+        b"findutils-default" => RegexType::FindutilsDefault,
+        b"emacs" => RegexType::Emacs,
+        b"gnu-awk" => RegexType::Extended(ere::Syntax::GNU_AWK),
+        b"awk" => RegexType::Extended(ere::Syntax::AWK),
+        b"posix-awk" => RegexType::Extended(ere::Syntax::POSIX_AWK),
+        b"egrep" | b"posix-egrep" => RegexType::Extended(ere::Syntax::EGREP),
+        b"posix-extended" => RegexType::Extended(ere::Syntax::POSIX_EXTENDED),
+        b"grep" => RegexType::Basic(BreSyntax::GREP),
+        b"posix-minimal-basic" => RegexType::Basic(BreSyntax::POSIX_MINIMAL_BASIC),
+        b"posix-basic" | b"ed" | b"sed" => RegexType::Basic(BreSyntax::POSIX_BASIC),
+        _ => return None,
+    })
 }
 
 const REGEX_TYPES: &[&[u8]] = &[
@@ -1505,12 +1520,19 @@ const REGEX_TYPES: &[&[u8]] = &[
     b"sed",
 ];
 
-fn compile_regex(pattern: &[u8], extended: bool, ci: bool) -> Parsed<ere::Regex> {
-    let result = if extended {
-        ere::Regex::new_flags(pattern, ci)
-    } else {
-        ere::bre::compile(pattern, ci)
+fn compile_regex(pattern: &[u8], kind: RegexType, ci: bool) -> Parsed<ere::Regex> {
+    let result = match kind {
+        RegexType::FindutilsDefault => ere::emacs::compile_dot_newline(pattern, ci),
+        RegexType::Emacs => ere::emacs::compile(pattern, ci),
+        RegexType::Basic(syntax) => ere::bre::compile_syntax(pattern, ci, syntax),
+        RegexType::Extended(syntax) => ere::Regex::new_syntax(pattern, ci, syntax),
     };
+    // `re_compile_pattern`, which findutils compiles every type with, turns on
+    // glibc's `newline_anchor`: `^` and `$` hold beside a newline inside a name
+    // as well as at its ends. Measured: `-regextype posix-extended -regex
+    // 't/a$.b'` finds `a<newline>b`. (Only the types whose anchors can appear
+    // mid-pattern can tell.)
+    let result = result.map(|re| re.with_newline_anchor(true));
     result.map_err(|e| {
         // `e.message()`, not `e.detail`: upstream hands the pattern to GNU
         // regex and prints straight back whatever `re_compile_pattern`
@@ -1614,12 +1636,12 @@ impl Parser<'_> {
             }
             b"regex" | b"iregex" => {
                 let pat = self.arg(tok)?;
-                let re = compile_regex(&pat, self.extended_regex, canon == b"iregex")?;
+                let re = compile_regex(&pat, self.regex_type, canon == b"iregex")?;
                 self.push_prim(tok, Prim::Regex(Box::new(re)));
             }
             b"regextype" => {
                 let name = self.arg(tok)?;
-                let Some(extended) = regex_is_extended(&name) else {
+                let Some(kind) = regex_type(&name) else {
                     let names: Vec<String> = REGEX_TYPES.iter().map(|n| quote(n)).collect();
                     return Err(Fatal::new(format!(
                         "Unknown regular expression type {}; valid types are {}.",
@@ -1627,7 +1649,7 @@ impl Parser<'_> {
                         names.join(", ")
                     )));
                 };
-                self.extended_regex = extended;
+                self.regex_type = kind;
                 self.push_prim(tok, Prim::Noop);
             }
 

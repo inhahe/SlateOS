@@ -324,6 +324,17 @@ run_stdin anchors.txt -E -n '/a\b*/p'
 run_stdin anchors.txt -E -n '/a$*/p'
 run_stdin anchors.txt -E -n '/a($)*/p'
 
+# --- sed's basic syntax is RE_SYNTAX_POSIX_BASIC, which is not grep's ----------
+# RE_CONTEXT_INVALID_DUP: a `*` or `\{` straight after a repetition is refused,
+# and so is a `\{` with nothing before it; `a*\+` is not. A `\}` closing nothing
+# is the character. (ere::bre::BreSyntax::POSIX_BASIC)
+run_stdin anchors.txt -n '/a**/p'
+run_stdin anchors.txt -n '/a\{1\}*/p'
+run_stdin anchors.txt -n '/a\+*/p'
+run_stdin anchors.txt -n '/a*\+/p'
+run_stdin anchors.txt -n '/\{1\}a/p'
+run_stdin anchors.txt -n 's/a\}/X/p'
+
 # --- substitution ------------------------------------------------------------
 run_stdin words.txt 's/foo/FOO/'
 run_stdin words.txt 's/foo/FOO/g'

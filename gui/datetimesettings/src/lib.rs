@@ -924,6 +924,39 @@ mod tests {
         out
     }
 
+    /// A `TZif` v2 file that changes once, at `at`, from `before` to `after`
+    /// -- each seconds east and a name -- and states no rule past that.
+    fn tzif_changing(at: i64, before: (i32, &str), after: (i32, &str)) -> Vec<u8> {
+        let mut names = Vec::new();
+        names.extend_from_slice(before.1.as_bytes());
+        names.push(0);
+        let after_name = u8::try_from(names.len()).unwrap();
+        names.extend_from_slice(after.1.as_bytes());
+        names.push(0);
+        let chars = u32::try_from(names.len()).unwrap();
+        let block = |out: &mut Vec<u8>, time: &[u8]| {
+            out.extend_from_slice(b"TZif2");
+            out.extend_from_slice(&[0; 15]);
+            // isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt
+            for count in [0u32, 0, 0, 1, 2, chars] {
+                out.extend_from_slice(&count.to_be_bytes());
+            }
+            out.extend_from_slice(time);
+            // The one transition is into type 1.
+            out.push(1);
+            out.extend_from_slice(&before.0.to_be_bytes());
+            out.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(&after.0.to_be_bytes());
+            out.extend_from_slice(&[0, after_name]);
+            out.extend_from_slice(&names);
+        };
+        let mut out = Vec::new();
+        block(&mut out, &i32::try_from(at).unwrap().to_be_bytes());
+        block(&mut out, &at.to_be_bytes());
+        out.extend_from_slice(b"\n\n");
+        out
+    }
+
     /// The paths a reader was asked for, in order.
     type Asked = std::rc::Rc<std::cell::RefCell<Vec<PathBuf>>>;
 
@@ -1045,6 +1078,16 @@ mod tests {
         let zone = resolve_zone(tzrules::tz_plan(Some(b"JST-9")), None, read);
         assert_eq!(zone.std_gmtoff, 3_600);
         assert_eq!(zone.std_name.as_bytes(), b"XYZ");
+
+        // The state *after* its last change, not the one before its first.
+        let present = [(
+            "/etc/localtime",
+            tzif_changing(1_000_000_000, (3_600, "OLD"), (7_200, "NEW")),
+        )];
+        let (read, _) = files(&present);
+        let zone = resolve_zone(tzrules::tz_plan(None), None, read);
+        assert_eq!(zone.std_gmtoff, 7_200);
+        assert_eq!(zone.std_name.as_bytes(), b"NEW");
     }
 
     /// Everything that cannot be read, parsed or resolved is UTC -- as it is

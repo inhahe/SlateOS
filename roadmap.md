@@ -2134,8 +2134,8 @@ live.
   frame from the window-decorations axis -- its title bar, title, close button,
   border and shadow, in the frame's colours, with the windows' geometry
   (`DecorationStyle::title_bar`) -- and the run box lays its content out
-  inside it; its close button cancels. The shell's five other dialogs follow
-  as each is touched (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
+  inside it; its close button cancels. The security prompt and the print
+  dialog take it when they are wired up (`TD-C-THE-SHELLS-OTHER-DIALOGS-DRAW-FRAMES-OF-THEIR-OWN`).
 
 - `[C]` **The taskbar's glass and spacing are a theme axis**
   (`roadmap-detailed.md` → *Tier 2 — Taskbar/Panel Styling*;

@@ -75,10 +75,12 @@ impl Widget {
 
     /// Draw what this widget is -- not the background and border its style
     /// gives every widget, nor its children -- with its border box at
-    /// `(x, y, w, h)` in its parent's content space.
+    /// `(x, y, w, h)` in its parent's content space, on `ground`, the
+    /// colour behind it.
     pub(super) fn draw_kind(
         &self,
         p: &Palette,
+        ground: Color,
         tree: &mut RenderTree,
         (x, y, w, h): (f32, f32, f32, f32),
     ) {
@@ -110,7 +112,7 @@ impl Widget {
                     disabled,
                     focused: self.focused,
                 },
-                p.base,
+                ground,
                 FOCUS_RING_WIDTH,
             ),
             WidgetKind::TextInput {

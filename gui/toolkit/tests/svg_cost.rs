@@ -3,10 +3,11 @@
 //! Every icon the shell shows is an SVG drawn by `guitk::svg` -- the start
 //! menu's, the taskbar's, a folder of files in the file manager -- at login,
 //! at every theme change, and whenever one is asked for at a new size. The
-//! renderer learned gradients, `<use>`, clip paths and viewport clipping on
-//! 2026-10-01, each of which puts work on every pixel it covers: a gradient
-//! colour per pixel, a mask byte per pixel per clip. This measures the four
-//! shapes of icon that work produces, at a taskbar's size and a large one.
+//! renderer learned gradients, `<use>`, clip paths, viewport clipping and
+//! masks on 2026-10-01, each of which puts work on every pixel it covers: a
+//! gradient colour per pixel, a mask byte per pixel per clip, a mask's content
+//! drawn a second time. This measures the five shapes of icon that work
+//! produces, at a taskbar's size and a large one.
 //!
 //! # What it cost when it was written
 //!

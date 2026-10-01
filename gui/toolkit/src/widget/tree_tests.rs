@@ -11,12 +11,13 @@
 )]
 
 use super::{CheckState, Widget, WidgetKind, WidgetTree};
+use crate::color::Color;
 use crate::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::Rect;
 use crate::layout::{Size, SizeConstraint};
 use crate::palette::Palette;
 use crate::render::{RenderCommand, RenderTree};
-use crate::style::FOCUS_RING_WIDTH;
+use crate::style::{Edges, FOCUS_RING_WIDTH};
 
 /// A dark palette, so a colour that ignored it -- black text, say -- shows.
 fn dark() -> Palette {
@@ -373,7 +374,6 @@ fn a_scroll_views_content_is_hit_where_it_shows() {
     let index = (scroll / 28.0).floor() as usize;
     let top = view.layout.y + 2.0;
     let below = view.layout.y + view.layout.border_box_height() + 10.0;
-    let hidden = view.children[index + 5].id;
     tree.handle_event(&mouse(x, top, MouseEventKind::Press(MouseButton::Left)));
     let pressed: Vec<usize> = tree.root.children[0]
         .children
@@ -384,7 +384,189 @@ fn a_scroll_views_content_is_hit_where_it_shows() {
         .collect();
     assert_eq!(pressed, [index]);
     // Below the view, nothing in it is hit -- though a button lies there.
-    assert_ne!(tree.root.focus_target_at(x, below), Some(hidden));
+    assert_eq!(tree.root.focus_target_at(x, below), None);
+}
+
+/// **A scroll view's padding hides what is scrolled under it**: a press in
+/// the strip between the view's edge and its content, where a button lies
+/// scrolled out of sight, neither focuses nor presses it.
+#[test]
+fn a_scroll_views_padding_hides_what_is_scrolled_under_it() {
+    let mut view = Widget::scroll_view();
+    view.style.padding = Edges::all(10.0);
+    view.style.min_height = Some(100.0);
+    view.style.max_height = Some(100.0);
+    for i in 0..20 {
+        view = view.with_child(Widget::button(&format!("Item {i}")));
+    }
+    let mut tree = tree_of(vec![view]);
+    let (x, y) = centre(&tree, 0);
+    for _ in 0..3 {
+        tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+    }
+    // Scrolled further than the padding is deep: a button lies under it.
+    assert!(scrolled(&tree, 0) > 10.0, "{}", scrolled(&tree, 0));
+    let view = &tree.root.children[0];
+    let x = view.layout.x + view.layout.border_box_width() / 2.0;
+    // Inside the view's box, above its content's.
+    let strip = view.layout.y + view.layout.margin.top + 5.0;
+    assert!(view.contains(x, strip));
+    assert_eq!(tree.root.focus_target_at(x, strip), None);
+    tree.handle_event(&mouse(x, strip, MouseEventKind::Press(MouseButton::Left)));
+    assert_eq!(tree.focused_id(), None);
+    assert!(
+        tree.root.children[0]
+            .children
+            .iter()
+            .all(|b| matches!(b.kind, WidgetKind::Button { pressed: false, .. }))
+    );
+}
+
+/// **A scroll view is as big as its room, not its content**: over a status
+/// line, in a window too short for all it holds, it takes what the line
+/// leaves -- and the line keeps its height, at the window's foot.
+#[test]
+fn a_scroll_view_is_as_big_as_its_room() {
+    let p = dark();
+    let mut view = Widget::scroll_view();
+    for i in 0..20 {
+        view = view.with_child(Widget::button(&format!("Item {i}")));
+    }
+    let status = Widget::label("Ready");
+    let line = status.border_box_size(&p).height;
+    assert!(line > 0.0);
+    let tree = tree_of(vec![view, status]);
+    let (view, status) = (&tree.root.children[0], &tree.root.children[1]);
+    let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(
+        close(status.layout.border_box_height(), line),
+        "{} for {line}",
+        status.layout.border_box_height()
+    );
+    assert!(close(status.layout.y + line, 400.0), "{}", status.layout.y);
+    assert!(close(view.layout.border_box_height(), 400.0 - line));
+}
+
+/// **The wheel scrolls a text area** too long for it, as it scrolls one
+/// alone: what it shows moves.
+#[test]
+fn the_wheel_scrolls_a_text_area() {
+    let lines: Vec<String> = (0..40).map(|i| format!("Line {i}")).collect();
+    let mut area = Widget::text_area(&lines.join("\n"), "");
+    area.style.max_height = Some(80.0);
+    let mut tree = tree_of(vec![area.with_flex_grow(0.0)]);
+    let before = tree.render().commands;
+    let (x, y) = centre(&tree, 0);
+    tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 0.0, dy: -1.0 }));
+    let w = &tree.root.children[0];
+    let WidgetKind::TextArea { area, .. } = &w.kind else {
+        panic!("not a text area");
+    };
+    assert!(area.scroll_y(&w.text_metrics()) > 0.0);
+    assert_ne!(tree.render().commands, before);
+}
+
+/// A palette whose buttons' surface is translucent, as a glass theme's is:
+/// the face a button is drawn with shows what it was drawn on.
+fn glass() -> Palette {
+    let mut p = dark();
+    p.surface1 = Color::rgba(255, 255, 255, 40);
+    p
+}
+
+/// What a lit "OK" button draws where `b` is laid out, on `ground`.
+fn lit_button_on(p: &Palette, b: &Widget, ground: Color) -> Vec<RenderCommand> {
+    let mut out = Vec::new();
+    crate::button::draw(
+        &mut out,
+        p,
+        (
+            b.layout.x + b.layout.margin.left,
+            b.layout.y + b.layout.margin.top,
+            b.layout.border_box_width(),
+            b.layout.border_box_height(),
+        ),
+        "OK",
+        crate::button::Kind::Plain,
+        crate::button::State {
+            hovered: true,
+            ..crate::button::State::default()
+        },
+        ground,
+        FOCUS_RING_WIDTH,
+    );
+    out
+}
+
+/// Whether `part` is drawn, whole and in order, among `commands`.
+fn draws(commands: &[RenderCommand], part: &[RenderCommand]) -> bool {
+    commands.windows(part.len()).any(|w| w == part)
+}
+
+/// **A control is drawn on what is behind it**: a button works out its face
+/// and its label's contrast against the colour it sits on -- the window's
+/// base at the root of a tree, a panel's background inside one (through a
+/// container with none of its own), a translucent panel's laid over what
+/// is behind it.
+#[test]
+fn a_control_is_drawn_on_what_is_behind_it() {
+    let p = glass();
+    let lit = || {
+        let mut b = Widget::button("OK");
+        b.hovered = true;
+        b
+    };
+    let at_root = alone(lit(), 90.0, 28.0, &p);
+    assert_eq!(drawn(&at_root, &p), lit_button_on(&p, &at_root, p.base));
+
+    let white = alone(
+        Widget::container()
+            .with_background(Color::WHITE)
+            .with_child(Widget::container().with_child(lit())),
+        120.0,
+        40.0,
+        &p,
+    );
+    let b = &white.children[0].children[0];
+    let on_white = lit_button_on(&p, b, Color::WHITE);
+    assert!(
+        draws(&drawn(&white, &p), &on_white),
+        "{:?}",
+        drawn(&white, &p)
+    );
+    assert_ne!(on_white, lit_button_on(&p, b, p.base));
+
+    let veil = Color::rgba(255, 255, 255, 230);
+    let veiled = alone(
+        Widget::container().with_background(veil).with_child(lit()),
+        120.0,
+        40.0,
+        &p,
+    );
+    let b = &veiled.children[0];
+    let on_veil = lit_button_on(&p, b, veil.over(p.base));
+    assert!(draws(&drawn(&veiled, &p), &on_veil));
+    assert_ne!(on_veil, lit_button_on(&p, b, p.base));
+    assert_ne!(on_veil, lit_button_on(&p, b, veil));
+
+    // Faded by half in the white panel: worked out on white, as it would be
+    // drawn unfaded, and then faded -- a group fades as one.
+    let mut half = lit();
+    half.style.opacity = 0.5;
+    let faded = alone(
+        Widget::container()
+            .with_background(Color::WHITE)
+            .with_child(half),
+        120.0,
+        40.0,
+        &p,
+    );
+    let b = &faded.children[0];
+    let on_white_faded: Vec<RenderCommand> = lit_button_on(&p, b, Color::WHITE)
+        .into_iter()
+        .map(|c| c.faded(0.5))
+        .collect();
+    assert!(draws(&drawn(&faded, &p), &on_white_faded));
 }
 
 /// **The pointer over a button lights it**, and leaving puts it out.

@@ -2223,10 +2223,26 @@ mod tests {
     /// pattern: each is the process's one.
     static GNU_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The lock, with both globals as a new process has them: no syntax and
+    /// no `re_comp` pattern. glibc's oracle ran from a new process; a test
+    /// that left a pattern behind had the oracle's `re_comp(NULL)` -- "No
+    /// previous regular expression" -- answered with NULL in a test that ran
+    /// after it, which only some orders show.
     fn gnu_lock() -> std::sync::MutexGuard<'static, ()> {
-        GNU_GLOBALS
+        let g = GNU_GLOBALS
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        re_set_syntax(0);
+        // SAFETY: a static lock, alive for the process.
+        let _p = unsafe { crate::perprocess::lock_pool((&raw const RE_COMP_LOCK).cast_mut()) };
+        let buf = &raw mut RE_COMP_BUF;
+        // SAFETY: both locks are held, so this thread alone uses the buffer;
+        // `regfree` frees what `re_comp` allocated, its fastmap included.
+        unsafe {
+            regfree(buf);
+            buf.write(RegexT::new());
+        }
+        g
     }
 
     /// The harness's translate tables, `malloc`ed, as `regfree` frees one.

@@ -9,7 +9,12 @@
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
-use super::{ALL, INVALID_ARGUMENT, NOT_SUPPORTED, PERMISSION_DENIED, describe, lookup, message};
+use super::{
+    ALL, ALREADY_EXISTS, CHANNEL_CLOSED, CHANNEL_FULL, INVALID_ADDRESS, INVALID_ARGUMENT,
+    INVALID_CAPABILITY, INVALID_HANDLE, MESSAGE_TOO_LARGE, NO_SUCH_DEVICE, NO_SUCH_SYSCALL,
+    NOT_FOUND, NOT_SUPPORTED, OUT_OF_MEMORY, PERMISSION_DENIED, RESOURCE_EXHAUSTED, TIMED_OUT,
+    WOULD_BLOCK, describe, lookup, message,
+};
 
 const KERNEL_ERROR_RS: &str = include_str!("../../../kernel/src/error.rs");
 
@@ -97,6 +102,33 @@ fn the_codes_a_refusal_is_made_of() {
     // no kernel code at all.
     assert_eq!(message(-1), Some("internal kernel error"));
     assert_eq!(lookup(-13), None);
+}
+
+#[test]
+fn every_named_constant_is_the_code_of_the_variant_it_names() {
+    // Checked against the table rather than restated, so a constant cannot
+    // drift from the kernel without the table's own tests noticing first.
+    for (name, code) in [
+        ("PermissionDenied", PERMISSION_DENIED),
+        ("NotSupported", NOT_SUPPORTED),
+        ("InvalidArgument", INVALID_ARGUMENT),
+        ("NoSuchSyscall", NO_SUCH_SYSCALL),
+        ("NoSuchDevice", NO_SUCH_DEVICE),
+        ("WouldBlock", WOULD_BLOCK),
+        ("TimedOut", TIMED_OUT),
+        ("OutOfMemory", OUT_OF_MEMORY),
+        ("InvalidAddress", INVALID_ADDRESS),
+        ("ChannelClosed", CHANNEL_CLOSED),
+        ("ChannelFull", CHANNEL_FULL),
+        ("MessageTooLarge", MESSAGE_TOO_LARGE),
+        ("ResourceExhausted", RESOURCE_EXHAUSTED),
+        ("InvalidCapability", INVALID_CAPABILITY),
+        ("NotFound", NOT_FOUND),
+        ("AlreadyExists", ALREADY_EXISTS),
+        ("InvalidHandle", INVALID_HANDLE),
+    ] {
+        assert_eq!(lookup(code).map(|k| k.name), Some(name), "{code}");
+    }
 }
 
 #[test]

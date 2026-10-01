@@ -9254,6 +9254,18 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
   - [x] BusError: typed errors matching kernel error codes
   - [x] Blocking, non-blocking, and timeout variants for all operations
   - [x] Unit tests for message round-trip, error mapping, duration helpers
+  - [x] **Made true 2026-10-01 (B).** Until then three of the ticks above were
+        not: no reply serial on the wire, so `call` never returned; errors
+        numbered like errnos (-1..-8), not the kernel's codes; and the tests
+        never made a round trip. Now: wire format v2, codes through `kerror`,
+        peer credentials from `SYS_CHANNEL_PEER_CRED`, `call_fields`, and
+        tests that drive a scripted channel and read the kernel's own
+        constants. Lane F's
+        `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`.
+  - [ ] A listener as an event-loop source, and `logind` back on one event
+        loop -- blocked on lane A
+        (`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`
+        and lane F's f-a request, point 4); `design-decisions.md` §1054.
 
 ---
 

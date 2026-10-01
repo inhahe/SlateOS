@@ -41,6 +41,31 @@ pub const INVALID_ARGUMENT: i64 = -3;
 pub const NO_SUCH_SYSCALL: i64 = -10;
 /// `NoSuchDevice`.
 pub const NO_SUCH_DEVICE: i64 = -601;
+/// `WouldBlock`: nothing ready, on a call that does not wait.
+pub const WOULD_BLOCK: i64 = -4;
+/// `TimedOut`.
+pub const TIMED_OUT: i64 = -6;
+/// `OutOfMemory`.
+pub const OUT_OF_MEMORY: i64 = -100;
+/// `InvalidAddress`: a pointer argument the kernel could not read or write
+/// through.
+pub const INVALID_ADDRESS: i64 = -101;
+/// `ChannelClosed`: the other end of the channel has closed.
+pub const CHANNEL_CLOSED: i64 = -300;
+/// `ChannelFull`: the channel's queue has no room.
+pub const CHANNEL_FULL: i64 = -301;
+/// `MessageTooLarge`: bigger than a channel carries.
+pub const MESSAGE_TOO_LARGE: i64 = -302;
+/// `ResourceExhausted`: a kernel table or limit is full.
+pub const RESOURCE_EXHAUSTED: i64 = -304;
+/// `InvalidCapability`.
+pub const INVALID_CAPABILITY: i64 = -401;
+/// `NotFound`.
+pub const NOT_FOUND: i64 = -500;
+/// `AlreadyExists`.
+pub const ALREADY_EXISTS: i64 = -501;
+/// `InvalidHandle`: the handle names nothing.
+pub const INVALID_HANDLE: i64 = -505;
 
 const fn e(code: i64, name: &'static str, message: &'static str) -> KernelError {
     KernelError {

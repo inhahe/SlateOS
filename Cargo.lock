@@ -1971,6 +1971,9 @@ dependencies = [
 [[package]]
 name = "libservicebus"
 version = "0.1.0"
+dependencies = [
+ "kerror",
+]
 
 [[package]]
 name = "life"

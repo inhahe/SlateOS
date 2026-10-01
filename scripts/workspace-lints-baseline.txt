@@ -97,7 +97,6 @@ userspace/last
 userspace/ldconfig  # bare deny(clippy::all)
 userspace/less
 userspace/lex
-userspace/libservicebus
 userspace/locale
 userspace/localectl  # bare deny(clippy::all)
 userspace/login

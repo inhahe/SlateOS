@@ -25,17 +25,26 @@
 //! goes through [`authorize`], which needs to know who is calling, and the
 //! kernel is the only party that can say (`libservicebus::Credentials`).
 //!
-//! **The kernel cannot say yet.** `SYS_SERVICE_ACCEPT` hands back a bare
-//! channel handle and records nothing about the process on the other end, so
-//! `Connection::peer_credentials()` answers `None` for every connection, and
-//! every method here consequently answers [`ERR_UNKNOWN_CALLER`]. That is the
-//! correct behaviour and it is deliberate: the alternative — assume the caller
-//! is the session's owner because usually it is — would make
-//! `ForceUnlockSession` a password-free unlock for anything that can open a
-//! channel, which is the exact hole §341 was written to close. The syscall is
-//! requested in `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`;
-//! when it lands, `peer_credentials` starts returning `Some`, and nothing in
-//! this file changes.
+//! **The kernel says, through `SYS_CHANNEL_PEER_CRED`** (lane A, 2026-08-21,
+//! for `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`): the
+//! uid, gid and pid of the client as they were when it connected, which
+//! `Connection::peer_credentials()` returns. When the kernel has no record --
+//! a channel it did not broker, a peer that is a kernel task -- the answer is
+//! `None`, and every method here answers [`ERR_UNKNOWN_CALLER`]. That is
+//! deliberate: the alternative — assume the caller is the session's owner
+//! because usually it is — would make `ForceUnlockSession` a password-free
+//! unlock for anything that can open a channel, which is the exact hole §341
+//! was written to close.
+//!
+//! (Until 2026-10-01 `peer_credentials` never asked the kernel and answered
+//! `None` for everyone, so every method here refused every caller: lane F's
+//! `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`.)
+//!
+//! One limit is the kernel's: a channel handle can today be guessed, and the
+//! channel syscalls do not check that the caller holds the handle it passes,
+//! so a credential proves who *connected*, not who is sending (lane F's
+//! `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`,
+//! point 1). That is lane A's to close; nothing here can.
 //!
 //! # The policy, in one paragraph
 //!

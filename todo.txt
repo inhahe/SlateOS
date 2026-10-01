@@ -54873,6 +54873,19 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   "revisit if/when" clauses, and the "### How to reverse" heading form
 ##   (about 30 entries) which the bolded-label grep does not match.
 ##
+##   TRACKED FROM BIRTH (lane B, 2026-10-01): S1054 -- logind serves a thread
+##   per client because a completion port is neither woken by channel sends
+##   nor able to wait on a listener. Its reversing condition is BOTH of:
+##   lane F's requests/f-a-a-channel-handle-...md point 4 (channel::send
+##   notifies the ports that registered the channel) AND
+##   requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md
+##   (a listener wait source). Falsifier: a `completion::notify` call in
+##   kernel/src/ipc/channel.rs's send path, and a `Listener` arm in
+##   handlers.rs's `encode_event`. When both exist: libservicebus gets
+##   SourceType::Listener + EventLoop::register_listener, logind's serve goes
+##   back to one event loop, known-issues B-LOGIND-SERVES-A-THREAD-PER-CLIENT-...
+##   closes.
+##
 ##   AUDIT PASS 2026-08-18 (lane A) -- IN PROGRESS, resumable. Findings so far:
 ##   * S59 (GPU accel scope, Q18): PREMISE HAS FIRED. It defers the Mesa port
 ##     "until a virgl test environment exists"; one exists and always did. The

@@ -1051,7 +1051,7 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
     let mut conn = match libservicebus::Connection::connect(LOGIND_SERVICE) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("login: no session registered: cannot reach {LOGIND_SERVICE}: {e:?}");
+            eprintln!("login: no session registered: cannot reach {LOGIND_SERVICE}: {e}");
             return None;
         }
     };
@@ -1066,7 +1066,7 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
     let uid = user.uid.to_string();
     let pid = std::process::id().to_string();
     let tty = tty.unwrap_or("");
-    let payload = libservicebus::fields::encode(&[
+    let args: [&[u8]; 12] = [
         uid.as_bytes(),
         name.as_bytes(),
         b"tty",
@@ -1079,18 +1079,51 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
         b"login",
         b"",
         pid.as_bytes(),
-    ]);
+    ];
 
-    match conn.call("CreateSession", &payload) {
-        Ok(reply) => libservicebus::fields::decode_exact(&reply.payload, 1)
-            .and_then(|f| f.first().and_then(|b| core::str::from_utf8(b).ok()))
-            .map(ToOwned::to_owned),
+    match conn.call_fields("CreateSession", &args, LOGIND_TIMEOUT_NS) {
+        Ok(libservicebus::Outcome::Done(fields)) => match fields.as_slice() {
+            [id] => {
+                let id = core::str::from_utf8(id).ok().map(ToOwned::to_owned);
+                if id.is_none() {
+                    eprintln!(
+                        "login: no session registered: {LOGIND_SERVICE} returned a session \
+                         id that is not text"
+                    );
+                }
+                id
+            }
+            _ => {
+                eprintln!(
+                    "login: no session registered: {LOGIND_SERVICE} answered CreateSession \
+                     with {} fields where one session id was expected",
+                    fields.len()
+                );
+                None
+            }
+        },
+        // logind answered, and the answer was no; its error's name says why.
+        Ok(libservicebus::Outcome::Refused { error, .. }) => {
+            eprintln!(
+                "login: no session registered: {LOGIND_SERVICE} refused CreateSession: {error}"
+            );
+            None
+        }
         Err(e) => {
-            eprintln!("login: no session registered: CreateSession failed: {e:?}");
+            eprintln!("login: no session registered: CreateSession failed: {e}");
             None
         }
     }
 }
+
+/// How long `login` waits for `logind` to answer: 25 seconds, D-Bus's
+/// default method-call timeout and so what `pam_systemd` waits.
+///
+/// Bounded because the alternative is worse than no session: a logind that is
+/// running but wedged would otherwise hold every login at the prompt for ever,
+/// turning a bookkeeping outage into the lockout `register_with_logind` is
+/// best-effort to avoid.
+const LOGIND_TIMEOUT_NS: u64 = libservicebus::secs_to_ns(25);
 
 /// Tell `logind` the session is over.
 ///
@@ -1099,13 +1132,26 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
 /// users who left hours ago as present -- which is a fabricated reading, and
 /// a worse outcome than not registering at all.
 fn release_from_logind(session_id: &str) {
-    let Ok(mut conn) = libservicebus::Connection::connect(LOGIND_SERVICE) else {
-        eprintln!("login: session {session_id} left registered: cannot reach {LOGIND_SERVICE}");
-        return;
+    let mut conn = match libservicebus::Connection::connect(LOGIND_SERVICE) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "login: session {session_id} left registered: cannot reach {LOGIND_SERVICE}: {e}"
+            );
+            return;
+        }
     };
-    let payload = libservicebus::fields::encode(&[session_id.as_bytes()]);
-    if let Err(e) = conn.call("TerminateSession", &payload) {
-        eprintln!("login: session {session_id} left registered: {e:?}");
+    match conn.call_fields(
+        "TerminateSession",
+        &[session_id.as_bytes()],
+        LOGIND_TIMEOUT_NS,
+    ) {
+        Ok(libservicebus::Outcome::Done(_)) => {}
+        Ok(libservicebus::Outcome::Refused { error, .. }) => eprintln!(
+            "login: session {session_id} left registered: {LOGIND_SERVICE} refused \
+             TerminateSession: {error}"
+        ),
+        Err(e) => eprintln!("login: session {session_id} left registered: {e}"),
     }
 }
 

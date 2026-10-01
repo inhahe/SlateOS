@@ -11,8 +11,8 @@ description = "SlateOS logind - session manager (logind/loginctl)"
 # `requests/b-c-desktop-password-checks-go-through-a-privileged-verifier.md`.
 #
 # `libservicebus` is the transport: it carries the desktop's question to this
-# daemon, and — once the kernel can report a peer — it is also where the
-# answer to "who is asking?" comes from. Both halves matter; a privileged
+# daemon, and it is also where the answer to "who is asking?" comes from (the
+# kernel's `SYS_CHANNEL_PEER_CRED`). Both halves matter; a privileged
 # method reached over an endpoint that cannot identify its caller is not a
 # privileged method.
 [dependencies]

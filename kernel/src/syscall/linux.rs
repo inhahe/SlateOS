@@ -23952,36 +23952,31 @@ fn dispatch_inotify_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 
 /// `inotify_add_watch(fd, pathname, mask)`.
 fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
-    // Mirror Linux's `SYSCALL_DEFINE3(inotify_add_watch)` gate order
-    // (fs/notify/inotify/inotify_user.c):
-    //   1. if (mask & ~ALL_INOTIFY_BITS) return -EINVAL;
-    //   2. if ((mask & (IN_MASK_ADD|IN_MASK_CREATE)) ==
-    //          (IN_MASK_ADD|IN_MASK_CREATE)) return -EINVAL;
-    //   3. fdget(fd) — EBADF if fd is invalid;
-    //   4. f.file->f_op != inotify_fops → EINVAL;
-    //   5. user_path_at(pathname) → EFAULT on bad ptr, ENOENT, etc.
+    // Linux 6.6's `SYSCALL_DEFINE3(inotify_add_watch)` order
+    // (fs/notify/inotify/inotify_user.c:730-770):
+    //   1. mask & ~ALL_INOTIFY_BITS          -> EINVAL  (:746)
+    //   2. !(mask & ALL_INOTIFY_BITS)        -> EINVAL  (:753, a zero mask)
+    //   3. fdget(fd)                         -> EBADF   (:756)
+    //   4. IN_MASK_ADD and IN_MASK_CREATE    -> EINVAL  (:761, after fdget)
+    //   5. f.file->f_op != &inotify_fops     -> EINVAL  (:767)
+    //   6. user_path_at(pathname)            -> EFAULT, ENOENT, ...
     //
-    // Pre-batch sys_inotify_add_watch did (a) NULL path → EFAULT, (b)
-    // validate_user_read(path) → EFAULT, (c) mask == 0 → EINVAL, (d)
-    // fd lookup → EBADF.  That diverged from Linux in three ways:
-    //   * (fd=0, path=NULL, mask=valid): Linux returns EBADF (the fd
-    //     is stdin, not an inotify fd; user_path_at hasn't run yet
-    //     when the fdget/f_op check fires); we returned EFAULT.
-    //   * (fd=any, path=valid, mask=0): Linux accepts mask=0 (it just
-    //     filters down to no events; the watch is still added).  We
-    //     rejected it with EINVAL.  Pulled from a guess, not Linux.
-    //   * No bit-validity check for mask, so a probe with bogus
-    //     high bits walked past us to EBADF where Linux returns
-    //     EINVAL.
+    // Until 2026-10-01 a zero mask was accepted (a comment said Linux does;
+    // 6.6 refuses it at :753) and the ADD-and-CREATE test came before the
+    // descriptor (lane D's request
+    // `d-a-the-kernels-inotify-add-watch-is-not-in-6-6s-order`).
     //
-    // ALL_INOTIFY_BITS layout from include/uapi/linux/inotify.h:
-    //   IN_ACCESS=0x1 .. IN_MOVE_SELF=0x800 (low events: 0xFFF),
+    // ALL_INOTIFY_BITS, include/linux/inotify.h, from
+    // include/uapi/linux/inotify.h:
+    //   IN_ACCESS=0x1 .. IN_MOVE_SELF=0x800 (the events: 0xFFF),
     //   IN_UNMOUNT=0x2000, IN_Q_OVERFLOW=0x4000, IN_IGNORED=0x8000,
     //   IN_ONLYDIR=0x0100_0000, IN_DONT_FOLLOW=0x0200_0000,
     //   IN_EXCL_UNLINK=0x0400_0000, IN_MASK_CREATE=0x1000_0000,
     //   IN_MASK_ADD=0x2000_0000, IN_ISDIR=0x4000_0000,
-    //   IN_ONESHOT=0x8000_0000.
-    const ALL_INOTIFY_BITS: u32 = 0xF007_EFFF;
+    //   IN_ONESHOT=0x8000_0000: 0xF700_EFFF. It was written 0xF007_EFFF
+    //   until 2026-10-01, which refused IN_ONLYDIR, IN_DONT_FOLLOW and
+    //   IN_EXCL_UNLINK as unknown bits and took three that name nothing.
+    const ALL_INOTIFY_BITS: u32 = 0xF700_EFFF;
     const IN_MASK_CREATE: u32 = 0x1000_0000;
     const IN_MASK_ADD: u32 = 0x2000_0000;
 
@@ -23990,7 +23985,8 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
     if mask & !ALL_INOTIFY_BITS != 0 {
         return linux_err(errno::EINVAL);
     }
-    if (mask & (IN_MASK_ADD | IN_MASK_CREATE)) == (IN_MASK_ADD | IN_MASK_CREATE) {
+    // Something to watch for: at least one valid bit.
+    if mask & ALL_INOTIFY_BITS == 0 {
         return linux_err(errno::EINVAL);
     }
 
@@ -24008,12 +24004,17 @@ fn sys_inotify_add_watch(args: &SyscallArgs) -> SyscallResult {
         None => return linux_err(errno::EBADF),
     };
 
-    // Gate 4: f.file->f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
+    // Gate 4: IN_MASK_ADD and IN_MASK_CREATE make no sense together.
+    if (mask & (IN_MASK_ADD | IN_MASK_CREATE)) == (IN_MASK_ADD | IN_MASK_CREATE) {
+        return linux_err(errno::EINVAL);
+    }
+
+    // Gate 5: f.file->f_op != inotify_fops → EINVAL (fd isn't an inotify fd).
     if entry.kind != crate::proc::linux_fd::HandleKind::Inotify {
         return linux_err(errno::EINVAL);
     }
 
-    // Gate 5: user_path_at(pathname).  NULL/unreadable → EFAULT; then
+    // Gate 6: user_path_at(pathname).  NULL/unreadable → EFAULT; then
     // canonicalize against the caller's cwd and confirm the target exists
     // (Linux's lookup walk returns ENOENT for a missing path, ENOTDIR when
     // IN_ONLYDIR was requested but the target is not a directory).
@@ -76975,10 +76976,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 serial_println!("[syscall/linux]   FAIL: inotify_add_watch(NULL,mask=1) not EBADF");
                 return Err(KernelError::InternalError);
             }
-            // inotify_add_watch(_, path, mask=0) -> EBADF.  Pre-batch returned
-            // EINVAL on mask=0, but Linux accepts mask=0 (the watch is added
-            // and filters down to no events).  Now the fd lookup is the gate
-            // that fires.
+            // inotify_add_watch(_, path, mask=0) -> EINVAL, before the
+            // descriptor: 6.6 requires a valid bit (:753). It was EBADF here
+            // until 2026-10-01, on a comment that said Linux accepts it.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0x1000,
@@ -76987,9 +76987,46 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != -i64::from(errno::EBADF) {
-                serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EBADF");
+            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+                != i64::from(errno::EINVAL).wrapping_neg()
+            {
+                serial_println!("[syscall/linux]   FAIL: inotify_add_watch(mask=0) not EINVAL");
                 return Err(KernelError::InternalError);
+            }
+            // The flags are valid bits: IN_ONLYDIR | IN_DONT_FOLLOW |
+            // IN_EXCL_UNLINK with IN_MODIFY passes the mask and meets the
+            // descriptor (EBADF in kernel context). ALL_INOTIFY_BITS was
+            // written 0xF007_EFFF until 2026-10-01 and refused all three as
+            // EINVAL; 0x0001_0000, which names nothing, it took.
+            for (mask, want, what) in [
+                (
+                    0x0700_0002_u64,
+                    errno::EBADF,
+                    "IN_ONLYDIR|IN_DONT_FOLLOW|IN_EXCL_UNLINK",
+                ),
+                (
+                    0x0001_0002_u64,
+                    errno::EINVAL,
+                    "0x0001_0000, no inotify bit",
+                ),
+            ] {
+                let a = SyscallArgs {
+                    arg0: 0,
+                    arg1: 0x1000,
+                    arg2: mask,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != i64::from(want).wrapping_neg()
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: inotify_add_watch({}) not errno {}",
+                        what,
+                        want
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
             // inotify_add_watch(_, path, mask with bit outside ALL_INOTIFY_BITS)
             // -> EINVAL.  Bit 0x1000 (between IN_IGNORED and IN_ONLYDIR) is
@@ -77009,18 +77046,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // inotify_add_watch(_, path, IN_MASK_ADD | IN_MASK_CREATE) -> EINVAL.
-            // The two flags are mutually exclusive; Linux rejects the combo.
+            // inotify_add_watch(bad fd, path, IN_MODIFY | IN_MASK_ADD |
+            // IN_MASK_CREATE) -> EBADF: 6.6 tests the pair after fdget
+            // (:761). It was EINVAL here, before the descriptor, until
+            // 2026-10-01.
             let a = SyscallArgs {
                 arg0: 0,
                 arg1: 0x1000,
-                arg2: 0x1000_0000 | 0x2000_0000,
+                arg2: 0x2 | 0x1000_0000 | 0x2000_0000,
                 arg3: 0,
                 arg4: 0,
                 arg5: 0,
             };
-            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: inotify_add_watch ADD+CREATE not EINVAL");
+            if dispatch_linux(nr::INOTIFY_ADD_WATCH, &a).value
+                != i64::from(errno::EBADF).wrapping_neg()
+            {
+                serial_println!(
+                    "[syscall/linux]   FAIL: inotify_add_watch(bad fd, ADD+CREATE) not EBADF"
+                );
                 return Err(KernelError::InternalError);
             }
             serial_println!("[syscall/linux]   inotify_add_watch mask/EBADF gating: OK");

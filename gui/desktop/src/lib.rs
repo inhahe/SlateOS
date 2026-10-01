@@ -89,6 +89,7 @@ pub mod calendar;
 pub mod clipboard_viewer;
 pub mod datetime_settings;
 pub mod device_settings;
+pub mod dialog_frame;
 /// The sweep that proves a module draws nothing that is immediately erased.
 ///
 /// Test-only, like `appearance`'s `palette_check`: it exists to check the other modules'
@@ -2980,6 +2981,13 @@ impl DesktopShell {
         self.run_dialog.set_caret_width(appearance.caret_width());
         self.icons.set_caret_width(appearance.caret_width());
         self.widgets.set_caret_width(appearance.caret_width());
+        // The run box's frame: the theme's window frame, at the interface's
+        // scale (`dialog_frame`, design-decisions §1461).
+        self.run_dialog
+            .set_frame(dialog_frame::DialogFrame::from_settings(
+                &appearance,
+                appearance.scale_factor(),
+            ));
         // The focus width with it, to the fields that draw a focus mark
         // (`guitk::field`), for the same reason.
         self.run_dialog

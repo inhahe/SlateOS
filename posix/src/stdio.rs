@@ -3950,6 +3950,107 @@ pub fn lock_std_streams_for_test() -> StdStreamTestGuard {
     StdStreamTestGuard { _inner: inner }
 }
 
+/// What `f` writes to `stream` -- `stdout` or `stderr` -- caught, where on
+/// the host it would be lost to the stub descriptors: while `f` runs the
+/// stream's far end is a byte sink, and what reaches it, flushed at the end,
+/// is the answer. [`STD_STREAM_TEST_LOCK`] and the stream's own lock are held
+/// throughout, so neither another test nor another thread writes into it;
+/// the stream is as it was afterwards, a panic in `f` included.
+#[cfg(test)]
+pub fn capture_std_stream(stream: *mut u8, f: impl FnOnce()) -> std::vec::Vec<u8> {
+    let _g = lock_std_streams_for_test();
+    let Some(file) = stream_to_file(stream) else {
+        panic!("capture_std_stream: not a stream");
+    };
+    let mut sink: std::vec::Vec<u8> = std::vec::Vec::new();
+    {
+        // SAFETY: a static stream, which outlives the guard.
+        let _l = unsafe { locked(file) };
+        // Its first-use setup done now, at its own far end, so that the
+        // sink's is not what decides it is no terminal for good.
+        // SAFETY: locked.
+        first_use(unsafe { &mut *file });
+        // SAFETY: locked; the sink outlives the swap, which is undone when
+        // `_s` is dropped -- before `_l`, so still locked.
+        let _s = unsafe { Swapped::new(file, (&raw mut sink).cast()) };
+        f();
+        // SAFETY: locked.
+        unsafe { sync(file) };
+    }
+    sink
+}
+
+/// A stream's far end swapped for [`capture_std_stream`]'s sink, and put
+/// back when this is dropped.
+#[cfg(test)]
+struct Swapped {
+    file: *mut File,
+    ops: &'static Ops,
+    cookie: *mut core::ffi::c_void,
+}
+
+#[cfg(test)]
+impl Swapped {
+    /// # Safety
+    ///
+    /// `file` is locked, and `sink` is a `Vec<u8>` that outlives this.
+    unsafe fn new(file: *mut File, sink: *mut core::ffi::c_void) -> Self {
+        // SAFETY: the caller's contract.
+        let f = unsafe { &mut *file };
+        let s = Self {
+            file,
+            ops: f.ops,
+            cookie: f.cookie,
+        };
+        f.ops = &CAPTURE_OPS;
+        f.cookie = sink;
+        s
+    }
+}
+
+#[cfg(test)]
+impl Drop for Swapped {
+    fn drop(&mut self) {
+        // SAFETY: still locked, as `Swapped::new`'s caller arranged.
+        let f = unsafe { &mut *self.file };
+        f.ops = self.ops;
+        f.cookie = self.cookie;
+    }
+}
+
+#[cfg(test)]
+static CAPTURE_OPS: Ops = Ops {
+    read: fd_read,
+    write: capture_write,
+    seek: fd_seek,
+    close: fd_close,
+};
+
+/// [`CAPTURE_OPS`]'s write: the window and then `src`, onto the sink.
+///
+/// # Safety
+///
+/// `f` is locked, and its cookie is [`capture_std_stream`]'s sink.
+#[cfg(test)]
+unsafe fn capture_write(f: *mut File, src: *const u8, len: usize) -> usize {
+    // SAFETY: the caller's contract.
+    let file = unsafe { &mut *f };
+    // SAFETY: the caller's contract: the cookie is the sink.
+    let sink = unsafe { &mut *file.cookie.cast::<std::vec::Vec<u8>>() };
+    // SAFETY: the window, when active.
+    let pending = unsafe { pending_bytes(file) };
+    if pending > 0 {
+        // SAFETY: `pending` bytes from `wbase`, inside the buffer.
+        sink.extend_from_slice(unsafe { core::slice::from_raw_parts(file.wbase, pending) });
+    }
+    if len > 0 {
+        // SAFETY: the caller's `len` bytes at `src`.
+        sink.extend_from_slice(unsafe { core::slice::from_raw_parts(src, len) });
+    }
+    reset_write_window(file);
+    len
+}
+
 #[cfg(test)]
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod tests {
@@ -4278,24 +4379,43 @@ mod tests {
 
     #[test]
     fn puts_answers_the_length_plus_one() {
-        let _g = lock_std_streams_for_test();
-        // Fully buffered for the call, so nothing reaches the host's
-        // descriptor (whose writes fail); restored after.
-        let out = &raw mut STDOUT_FILE;
-        let (flags, lbf) = unsafe { ((*out).flags, (*out).lbf) };
-        unsafe {
-            (*out).flags |= F_INIT;
-            (*out).lbf = EOF;
-        }
-        let r = unsafe { puts(c"four".as_ptr().cast()) };
-        unsafe {
-            (*out).flags = flags;
-            (*out).lbf = lbf;
-        }
+        let mut r = 0;
+        let text = capture_std_stream(stdout_stream(), || {
+            r = unsafe { puts(c"four".as_ptr().cast()) };
+        });
         assert_eq!(r, 5);
+        assert_eq!(text, b"four\n");
+        let _g = lock_std_streams_for_test();
         errno::set_errno(0);
         assert_eq!(unsafe { puts(core::ptr::null()) }, EOF);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// The capture sees a line-buffered stream's lines and its unfinished
+    /// last one, and leaves the stream as it found it -- its far end, and
+    /// its buffering -- even when the code it ran panicked.
+    #[test]
+    fn capture_std_stream_catches_a_stream_and_puts_it_back() {
+        let out = stdout_stream();
+        let text = capture_std_stream(out, || {
+            let s = b"one\ntwo";
+            assert_eq!(unsafe { fwrite(s.as_ptr(), 1, s.len(), out) }, s.len());
+        });
+        assert_eq!(text, b"one\ntwo");
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            capture_std_stream(out, || panic!("inside the capture"))
+        }));
+        assert!(caught.is_err());
+        let text = capture_std_stream(stderr_stream(), || {
+            assert!(unsafe { fputs(c"err".as_ptr().cast(), stderr_stream()) } >= 0);
+        });
+        assert_eq!(text, b"err");
+        let _g = lock_std_streams_for_test();
+        let f = &raw mut STDOUT_FILE;
+        let (ops, cookie, flags) = unsafe { ((*f).ops, (*f).cookie, (*f).flags) };
+        assert!(core::ptr::eq(ops, &FD_OPS));
+        assert!(cookie.is_null());
+        assert_ne!(flags & F_INIT, 0);
     }
 
     // -----------------------------------------------------------------------

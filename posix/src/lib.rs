@@ -477,6 +477,7 @@ pub mod random;
 pub mod regex;
 pub(crate) mod rem_pio2_large;
 pub mod res_debug;
+pub mod res_print;
 pub mod resolv;
 pub mod resource;
 pub mod scanf;

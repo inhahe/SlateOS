@@ -16,6 +16,8 @@
 #define _SLATEOS_RESOLV_H
 
 #include <bits/slateos-features.h>
+/* FILE, for the message printers below: glibc's header includes it. */
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -102,6 +104,30 @@ int loc_aton(const char *, unsigned char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
 const char *loc_ntoa(const unsigned char *, char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
 int b64_ntop(const unsigned char *, size_t, char *, size_t);
 int b64_pton(char const *, unsigned char *, size_t);
+
+/* The message and name printers, res_debug.c's rest: a whole message as
+ * dig prints one, a name read out of a message, and a state's options --
+ * renamed and deprecated as glibc's are. p_query prints to stdout. */
+#define fp_nquery __fp_nquery
+#define fp_query __fp_query
+#define p_query __p_query
+#define fp_resstat __fp_resstat
+#define p_cdname __p_cdname
+#define p_cdnname __p_cdnname
+#define p_fqname __p_fqname
+#define p_fqnname __p_fqnname
+void fp_nquery(const unsigned char *, int, FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+void fp_query(const unsigned char *, FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+void p_query(const unsigned char *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+void fp_resstat(const res_state, FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const unsigned char *p_cdnname(const unsigned char *, const unsigned char *, int,
+                               FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const unsigned char *p_cdname(const unsigned char *, const unsigned char *,
+                              FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const unsigned char *p_fqnname(const unsigned char *, const unsigned char *, int,
+                               char *, int) _SLATEOS_ATTRIBUTE_DEPRECATED;
+const unsigned char *p_fqname(const unsigned char *, const unsigned char *,
+                              FILE *) _SLATEOS_ATTRIBUTE_DEPRECATED;
 
 #ifdef __cplusplus
 }

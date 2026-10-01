@@ -2130,7 +2130,7 @@ live.
   fix the seven lane E applications already using the picker share.
 
 - `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
-  rendering support*) -- done 2026-10-01. The toolkit's SVG renderer paints a
+  rendering support*; `design-decisions.md` §1462) -- done 2026-10-01. The toolkit's SVG renderer paints a
   fill or stroke of `url(#id)` with that linear or radial gradient, wherever
   the document defines it: both units, `gradientTransform`, pad, reflect and
   repeat, a focal point, one gradient inheriting another's stops through

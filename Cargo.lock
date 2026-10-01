@@ -1069,6 +1069,7 @@ dependencies = [
  "gamechrome",
  "guitk",
  "oswindow",
+ "textline",
 ]
 
 [[package]]
@@ -1092,6 +1093,7 @@ dependencies = [
  "safeio",
  "scratchdir",
  "settingsfile",
+ "textline",
  "yamldoc",
 ]
 

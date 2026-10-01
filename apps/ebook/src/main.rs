@@ -2109,17 +2109,23 @@ impl EbookApp {
             return false;
         }
 
+        // Every key but a Ctrl chord and what the search types is taken
+        // plain: a chord with Alt or the Windows key is the window's or the
+        // desktop's and arrives carrying its key -- Alt+Y answered "remove
+        // this book?" with yes, and Alt+Right turned the page.
+        let plain = textline::is_plain(event.modifiers);
+
         // Above the view dispatch, so the card works from all five and closes
         // from all five. `F1` alone: `?` is Shift and the slash key, and the
         // slash arm below opens the search without looking at Shift.
-        if event.key == Key::F1 {
+        if event.key == Key::F1 && plain {
             self.show_help = !self.show_help;
             return true;
         }
         if self.show_help {
             // Modal. Letting keys through would mean turning pages the reader
             // cannot see.
-            if matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
+            if plain && matches!(event.key, Key::Escape | Key::Enter | Key::F1) {
                 self.show_help = false;
             }
             return true;
@@ -2128,6 +2134,7 @@ impl EbookApp {
             // Modal too: the question is about one book, and a key that moved
             // the selection would leave it asking about another.
             match event.key {
+                _ if !plain => {}
                 Key::Enter | Key::Y => {
                     self.confirm_remove = None;
                     self.remove_book(index);
@@ -2137,9 +2144,30 @@ impl EbookApp {
             }
             return true;
         }
-        if event.key == Key::O && event.modifiers.ctrl {
-            self.picker.open_to_read();
+        // The two Ctrl chords, as Ctrl chords: AltGr arrives as Ctrl+Alt and
+        // types -- AltGr+O is a Polish `ó`, and opened a file.
+        if textline::is_ctrl_chord(event.modifiers) {
+            return match event.key {
+                Key::O => {
+                    self.picker.open_to_read();
+                    true
+                }
+                Key::B if self.view == AppView::Reading && !self.search_active => {
+                    self.show_bookmark_list();
+                    true
+                }
+                _ => false,
+            };
+        }
+        // The search's text: what a key typed, AltGr's among it, and not a
+        // command's letter, which a chord carries -- Alt+X typed an `x`.
+        if self.view == AppView::Reading && self.search_active && textline::types_into_field(event)
+        {
+            self.search_query.extend(event.typed());
             return true;
+        }
+        if !plain {
+            return false;
         }
 
         match self.view {
@@ -2204,12 +2232,9 @@ impl EbookApp {
                 self.go_to_last_page();
                 true
             }
+            // Ctrl+B, the list of bookmarks, is answered with the chords.
             Key::B => {
-                if event.modifiers.ctrl {
-                    self.show_bookmark_list();
-                } else {
-                    self.toggle_bookmark();
-                }
+                self.toggle_bookmark();
                 true
             }
             Key::T => {
@@ -2263,14 +2288,8 @@ impl EbookApp {
                 self.search_query.pop();
                 true
             }
-            _ => {
-                // If the key produces a character, add it to the query.
-                if event.types_text() {
-                    self.search_query.extend(event.typed());
-                    return true;
-                }
-                false
-            }
+            // What a key typed went in before this was asked.
+            _ => false,
         }
     }
 
@@ -3554,6 +3573,82 @@ mod tests {
 
     fn make_app() -> EbookApp {
         EbookApp::with_sample_library()
+    }
+
+    /// **A chord is neither a reader's key nor typing, and AltGr types**:
+    /// Alt+Y answered "remove this book?" with yes, Alt+Right turned the
+    /// page and Alt+B bookmarked it, each chord arriving carrying its key;
+    /// AltGr+O -- a Polish `ó` -- opened a file rather than typing; and the
+    /// search took Alt+X as an `x` and Ctrl+B as a `b`.
+    #[test]
+    fn a_chord_is_neither_a_readers_key_nor_typing() {
+        let altgr = Modifiers {
+            alt: true,
+            ..Modifiers::ctrl()
+        };
+        let chords = [Modifiers::alt(), Modifiers::super_key(), altgr];
+        let typed = |key: Key, text: &str, modifiers: Modifiers| KeyEvent {
+            key,
+            pressed: true,
+            modifiers,
+            text: text.to_owned(),
+        };
+        let mut app = make_app();
+        let books = app.library.len();
+        for m in chords {
+            for k in [Key::Delete, Key::Enter, Key::Down, Key::F1] {
+                assert!(
+                    !app.handle_key_event(&make_key_with_mod(k, m)),
+                    "{m:?} {k:?} was taken in the library"
+                );
+            }
+        }
+        assert_eq!(app.view, AppView::Library, "a chord opened a book");
+        assert!(
+            app.confirm_remove.is_none(),
+            "a chord asked to remove a book"
+        );
+
+        // Asked by a plain Delete, the question takes a plain answer only.
+        app.handle_key_event(&make_key(Key::Delete));
+        assert!(app.confirm_remove.is_some(), "control: Delete asks");
+        for m in chords {
+            app.handle_key_event(&make_key_with_mod(Key::Y, m));
+            app.handle_key_event(&make_key_with_mod(Key::Enter, m));
+        }
+        assert_eq!(app.library.len(), books, "a chord removed a book");
+        assert!(
+            app.confirm_remove.is_some(),
+            "a chord answered the question"
+        );
+        app.handle_key_event(&make_key(Key::Escape));
+
+        // Reading: chords turn no page and bookmark nothing.
+        app.handle_key_event(&make_key(Key::Enter));
+        assert_eq!(app.view, AppView::Reading, "control: Enter opens the book");
+        let page = app.current_page();
+        for m in chords {
+            for k in [Key::Right, Key::End, Key::B, Key::S, Key::T, Key::Escape] {
+                assert!(
+                    !app.handle_key_event(&make_key_with_mod(k, m)),
+                    "{m:?} {k:?} was taken while reading"
+                );
+            }
+        }
+        assert_eq!(app.current_page(), page, "a chord turned the page");
+        assert!(app.bookmarks().is_empty(), "a chord bookmarked the page");
+
+        // The search types what a key typed.
+        app.handle_key_event(&make_key(Key::Slash));
+        assert!(app.search_active, "control: / searches");
+        app.handle_key_event(&typed(Key::X, "x", Modifiers::alt()));
+        app.handle_key_event(&typed(Key::B, "b", Modifiers::ctrl()));
+        app.handle_key_event(&typed(Key::O, "ó", altgr));
+        assert_eq!(
+            app.search_query, "ó",
+            "the search typed a command or lost AltGr's ó"
+        );
+        assert!(!app.picker.is_open(), "AltGr+O opened a file");
     }
 
     fn make_key(key: Key) -> KeyEvent {

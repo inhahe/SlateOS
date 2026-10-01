@@ -10,6 +10,8 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 # Where the library is kept: beside every other program's settings.
 settingsfile = { path = "../../gui/settingsfile" }
+# `is_plain`, `is_ctrl_chord`, `types_into_field`: a chord is neither a reader's key nor typing.
+textline = { path = "../textline" }
 # The reading theme, kept in `ebook.yaml` (C-Q26).
 yamldoc = { path = "../../yamldoc" }
 # A book's path in the library file, spelled so that any name survives (§426).

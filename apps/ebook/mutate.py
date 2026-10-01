@@ -244,6 +244,36 @@ MAIN = [
         '        changed || true\n    }\n\n    /// Get current theme colors.',
         ['the_theme_chosen_in_one_window_reaches_the_others'],
     ),
+    (
+        'a chord raises the keys',
+        '        if event.key == Key::F1 && plain {',
+        '        if event.key == Key::F1 {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord answers the question before a book is removed',
+        '                _ if !plain => {}\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'AltGr is taken for Ctrl',
+        '        if textline::is_ctrl_chord(event.modifiers) {',
+        '        if event.modifiers.ctrl {',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        "a command's letter is typed into the search",
+        '&& textline::types_into_field(event)',
+        '&& event.types_text()',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
+    (
+        'a chord works the reader',
+        '        if !plain {\n            return false;\n        }\n',
+        '',
+        ['a_chord_is_neither_a_readers_key_nor_typing'],
+    ),
 ]
 
 TABLES = {

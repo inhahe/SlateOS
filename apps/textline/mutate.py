@@ -179,6 +179,24 @@ MUTATIONS = [
         '    modifiers.ctrl == modifiers.alt && !modifiers.super_key',
         ['a_chord_a_command_and_typing_by_modifiers'],
     ),
+    (
+        "AltGr is Alt's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.alt || modifiers.super_key\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        "Alt alone is not Alt's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.super_key\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
+    (
+        "the Windows key is not the desktop's",
+        '    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key\n}',
+        '    modifiers.alt && !modifiers.ctrl\n}',
+        ['a_chord_a_command_and_typing_by_modifiers'],
+    ),
 ]
 
 if __name__ == "__main__":

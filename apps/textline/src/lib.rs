@@ -78,6 +78,20 @@ pub const fn is_plain(modifiers: Modifiers) -> bool {
     !modifiers.ctrl && !modifiers.alt && !modifiers.super_key
 }
 
+/// Whether a key held with `modifiers` is Alt's or the Windows key's: Alt
+/// without Ctrl, or anything with the Windows key.
+///
+/// Such a chord is never a text field's. A field's own chords are Ctrl's,
+/// and AltGr -- Ctrl+Alt -- types, so neither is one of these. What this is
+/// for is a field a program does not own and cannot ask: the toolkit's
+/// multi-line field takes every key it is given and types the letter of a
+/// chord it does not know (`requests/e-cf-a-toolkit-field-types-the-letter-of-a-shortcut-it-does-not-know.md`),
+/// so the program keeps these out of it -- Alt+X typed an `x` into an email.
+#[must_use]
+pub const fn is_alt_or_windows_chord(modifiers: Modifiers) -> bool {
+    (modifiers.alt && !modifiers.ctrl) || modifiers.super_key
+}
+
 /// Whether `key` types into a text field: a press that is not a command
 /// ([`is_command`]) and produced a character other than a control character
 /// (`KeyEvent::types_text` -- Enter, Tab and Escape produce `\r`, `\t` and
@@ -437,6 +451,13 @@ mod tests {
             // Plain is nothing held at all: AltGr, not a command, is not
             // plain either.
             assert_eq!(is_plain(held), !(ctrl || alt || windows), "plain: {held:?}");
+            // Alt's or the Windows key's: Alt without Ctrl, or the Windows
+            // key with anything.
+            assert_eq!(
+                is_alt_or_windows_chord(held),
+                (alt && !ctrl) || windows,
+                "Alt's or the Windows key's: {held:?}"
+            );
             let press = KeyEvent {
                 key: Key::A,
                 pressed: true,

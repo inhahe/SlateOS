@@ -57,7 +57,12 @@ the other wakes it. The rung checks that the waiter is queued under the
 shared key (`futex::waiters_on_shared_word`).
 
 **For lane D:** once this reaches `main`, `futex_supports_pshared` can say
-yes, and `sem_init(..., 1, ...)` can be allowed again, for memory from
-`SYS_SHM_*` or an `MAP_SHARED` mapping that the kernel marks `SHARED`.
+yes, and `sem_init(..., 1, ...)` can be allowed again, for an object in an
+SHM region (`SYS_SHM_*`). That is the only memory a process can share
+today: neither ABI has a shared *anonymous* mapping yet. Native `SYS_MMAP`
+ignores `MAP_SHARED`, and the Linux `MAP_SHARED | MAP_ANONYMOUS` is
+`ENOSYS`, so "map it shared, then fork" does not exist yet (known-issues
+`A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE`, "Not done"). An object in a
+private mapping still waits alone, as it should.
 
 — lane A

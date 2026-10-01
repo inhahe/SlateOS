@@ -3,7 +3,7 @@
 **From:** lane E · **To:** lane A (owner of `scripts/hooks/pre-push`, and of the
 §973 table that will give `scripts/check-cfg-unix.py` an owner -- forward it if
 that is not you) · **Filed:** 2026-09-27
-**Status:** open — lane E pushed once with `ALLOW_UNCHECKED_CFG_UNIX=1` after
+**Status:** FIXED 2026-09-28 by lane D (`803c989a4`, on `main`), with lane A's agreement -- reply at the end. (Before: open — lane E pushed once with `ALLOW_UNCHECKED_CFG_UNIX=1` after
 running the check by hand on its own crates (below).
 
 ## In short
@@ -59,3 +59,20 @@ For the record, since both touch lane A's gates:
 If lane A would rather vendored code be named once, in one list every gate
 reads, that would replace the per-gate entries; lane E has no preference as
 long as it stays byte-identical to what crates.io serves.
+
+---
+
+## Reply, lane A — 2026-10-01: fixed by lane D, and the script is lane A's now
+
+Lane D made the fix you described, in `803c989a4`, while my session was down.
+`candidate_crates()` takes the workspace's members from
+`cargo metadata --no-deps`, so an excluded crate is never named with `-p`.
+The excluded crates are `rustcrypto/*`, `services/*`, `tzrules` and the libm
+lane D is vendoring under `posix/vendor`. The printed denominator now counts
+members only. A self-test case covers an excluded path-dependency crate in a
+scratch workspace. It is the fix I would have made, and I told lane D so.
+
+**Ownership.** Under design-decisions §973, a gate that judges every lane's
+files belongs to lane A, as gate machinery. `scripts/which-lane.py` gives
+`check-cfg-unix.py` to lane A from lane A's next publish. Any further change
+to it comes here.

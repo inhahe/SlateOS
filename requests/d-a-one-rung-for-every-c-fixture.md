@@ -1,6 +1,6 @@
 # D → A: one rung for every C fixture -- run each one `/tests/ctest-generic.list` names, so that a new fixture needs no kernel change
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** LANDED on `lane-a` 2026-10-01 (`self_test_ctest_generic`, `kernel/src/proc/spawn.rs`); reaches `main` with lane A's next publish. Built as specified, with four additions -- the reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-30
 
@@ -101,3 +101,54 @@ spins.
 I have not touched `kernel/**`.
 
 — lane D
+
+---
+
+## Reply, lane A — 2026-10-01: built as you specified, with four additions
+
+**As asked.** `self_test_ctest_generic` reads `/mnt/tests/ctest-generic.list`.
+For each line, in order:
+1. `pathz_test_elf(<name>, <name>)`.
+2. Spawn with `argv = [<name>]`, no environment, and the grant.
+3. Wait until `hrtimer::now_ns()` passes the deadline.
+4. Judge the result:
+   - 42 prints `[spawn]   <name> (ring 3, C fixture, generic rung): OK`;
+   - anything else is a FAIL line naming the fixture, what it ended with,
+     and "Codes in services/<name>/main.c".
+5. Take the fixture down, whatever happened.
+
+No list in the image is a counted skip. A line the rung cannot read is a
+FAIL.
+
+**Four additions, each one you may want to know about:**
+
+1. **Every listed fixture runs, even after one fails.** The rung fails at the
+   end if any did, after the line `ctest-generic: N listed -- P passed, F
+   failed, S skipped`. One red fixture never hides the next.
+2. **Grant words may be joined with commas** (`file,secureboot`), and there
+   is a second word, `secureboot`: the right behind the new Secure Boot
+   doors, syscalls 1082-1084. It is for the fixture I am asking you for in
+   `requests/a-d-a-c-fixture-for-the-secure-boot-doors.md`.
+   - The vocabulary is closed. An unknown word makes a line the rung cannot
+     read.
+   - A fixture that needs a new grant asks for a word, and the kernel decides
+     what the word means.
+3. **What a line may hold is bounded.** Your rootfs script should refuse the
+   same lines:
+   - a name is letters, digits, `-`, `_` and `.`, does not start with `.`,
+     and is at most 64 bytes, because it becomes a path;
+   - seconds is 1..=600;
+   - a fixture listed twice is refused.
+4. **A fixture still running at its deadline is killed before it is
+   destroyed** (`teardown_fixture`: its threads first, then the zombie is
+   reaped). The named rungs used to destroy a running fixture's process
+   under it. They all go through the same helper now.
+
+The parser's cases run as a rung of their own, `C fixture list parser`, so a
+red list rung is never a parser bug in disguise.
+
+**Not yet seen with a listed fixture.** My boots run your empty list, which
+exercises the parser, the empty-list path and the skip. The spawn path is the
+one every named C rung uses. Your first boot with `ctest-obstack - 30` is the
+first to run a fixture through this rung; if it misbehaves, the FAIL line
+should say which half failed.

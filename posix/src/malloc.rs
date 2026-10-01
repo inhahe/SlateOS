@@ -367,6 +367,7 @@ pub(crate) mod live_allocations {
 
     std::thread_local! {
         static COUNT: Cell<i64> = const { Cell::new(0) };
+        static FAIL_IN: Cell<u64> = const { Cell::new(0) };
     }
 
     /// Add `delta` to this thread's live-block count.
@@ -380,6 +381,38 @@ pub(crate) mod live_allocations {
     pub(crate) fn count() -> i64 {
         COUNT.with(Cell::get)
     }
+
+    /// Make this thread's `n`th allocation from now fail (`malloc`,
+    /// `calloc`, `realloc` or an aligned one, as glibc's
+    /// tst-regcomp-bracket-free fails them); 0 for none. What a caller does
+    /// when the heap runs out, at every point it can, is testable so.
+    pub(crate) fn fail_after(n: u64) {
+        FAIL_IN.with(|c| c.set(n));
+    }
+
+    /// Whether the allocation being made is the one to fail.
+    pub(super) fn injected() -> bool {
+        FAIL_IN
+            .try_with(|c| {
+                let n = c.get();
+                if n == 0 {
+                    return false;
+                }
+                c.set(n.wrapping_sub(1));
+                n == 1
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Whether a test asked for this allocation to fail (never, outside tests).
+#[inline]
+fn injected_failure() -> bool {
+    #[cfg(all(test, not(target_os = "none")))]
+    if live_allocations::injected() {
+        return true;
+    }
+    false
 }
 
 /// Record a block handed out (tests only).
@@ -476,7 +509,7 @@ fn enomem() -> *mut u8 {
 /// had, including for a size above `PTRDIFF_MAX` ([`MAX_BLOCK`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn malloc(size: usize) -> *mut u8 {
-    if size > MAX_BLOCK {
+    if size > MAX_BLOCK || injected_failure() {
         return enomem();
     }
     let mut guard = HeapGuard::lock();
@@ -501,6 +534,9 @@ pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
     let Some(total) = nmemb.checked_mul(size).filter(|&t| t <= MAX_BLOCK) else {
         return enomem();
     };
+    if injected_failure() {
+        return enomem();
+    }
     let mut guard = HeapGuard::lock();
     let heap = guard.heap();
     // SAFETY: the guard gives exclusive use of the heap, and a non-null result
@@ -542,7 +578,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
         unsafe { free(ptr) };
         return core::ptr::null_mut();
     }
-    if size > MAX_BLOCK {
+    if size > MAX_BLOCK || injected_failure() {
         return enomem();
     }
     let mut guard = HeapGuard::lock();
@@ -1116,7 +1152,7 @@ pub unsafe extern "C" fn malloc_info(options: i32, fp: *mut u8) -> i32 {
 /// `ENOMEM` on failure -- and for a size or an alignment above `PTRDIFF_MAX`
 /// ([`MAX_BLOCK`]), which glibc refuses the same way.
 fn aligned_block(alignment: usize, size: usize) -> *mut u8 {
-    if size > MAX_BLOCK || alignment > MAX_BLOCK {
+    if size > MAX_BLOCK || alignment > MAX_BLOCK || injected_failure() {
         return enomem();
     }
     let mut guard = HeapGuard::lock();

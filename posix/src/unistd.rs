@@ -2198,8 +2198,11 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_SYMLOOP_MAX => 40,        // Max symlink resolution depth (Linux default).
         _SC_STREAM_MAX => 16,         // Max stdio streams (our FILE_POOL size).
         _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
-        _SC_RE_DUP_MAX => 255, // Max RE_DUP count (POSIX minimum 255).
-        _SC_TZNAME_MAX => 6,   // Timezone name max (POSIX minimum 6).
+        // The largest interval count regcomp takes: glibc's 32767, where
+        // <limits.h> (musl's) gives POSIX's floor, 255 -- RE_DUP_MAX is one
+        // of the limits a system may raise past its header's value.
+        _SC_RE_DUP_MAX => i64::from(crate::regex::RE_DUP_MAX),
+        _SC_TZNAME_MAX => 6, // Timezone name max (POSIX minimum 6).
         _SC_MQ_OPEN_MAX => i64::from(crate::limits::MQ_OPEN_MAX),
         _SC_MQ_PRIO_MAX => i64::from(crate::limits::MQ_PRIO_MAX),
         _SC_SEM_VALUE_MAX => i64::from(crate::limits::SEM_VALUE_MAX),
@@ -5106,6 +5109,8 @@ mod tests {
             val >= 255,
             "RE_DUP_MAX should be at least POSIX minimum 255"
         );
+        // What regcomp takes, and glibc's `getconf RE_DUP_MAX`.
+        assert_eq!(val, 32767);
     }
 
     #[test]

@@ -177230,7 +177230,7 @@ now with this case.
 **Where:** `posix/src/signal.rs` (`tgkill`, `proc_task_exists`);
 `services/ctest-pgroup/main.c` (checks 84-88).
 
-## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: OPEN (regcomp below; memalign's, getopt's, strfmon's and wordexp's FIXED 2026-09-30)**
+## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (all five of ours; `posix_spawn`'s attributes, brought up again below, stay with TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES)**
 
 **In short:** glibc fixed a run of security bugs in 2024-2026, and the
 oracle's glibc -- Ubuntu's 2.39, `2.39-0ubuntu8.9` -- carries the fixes.
@@ -177254,7 +177254,7 @@ and brought up again `posix_spawn`'s attributes, already recorded.
 | CVE-2026-19542 | `tdelete`'s parent stack overflowed | a fixed 128-entry stack, each push checked -- the size glibc's fix chose (`posix/src/search.rs`) |
 | CVE-2026-4437 | DNS answers read on past the answer section | lookups go to the kernel's resolver, whose parsers loop over ANCOUNT only (`kernel/src/net/dns.rs`) |
 | CVE-2026-0915 | `getnetbyaddr`'s DNS query built from uninitialised bytes | `getnetbyaddr` reads files only (`posix/src/netdb.rs`) |
-| CVE-2025-8058 | `regcomp` freed twice after an allocation failed | fixed buffers, no such path -- but see `regcomp` below |
+| CVE-2025-8058 | `regcomp` freed twice after an allocation failed | nothing freed by hand: every table is dropped once, and glibc's test -- each allocation failed in turn -- is mirrored (`posix/src/regex.rs`) |
 | CVE-2026-19499 | `strfmon` right-justified over its own padding | ours ignores widths altogether -- see `strfmon` below |
 | CVE-2025-15281, CVE-2026-6368, CVE-2026-6791 | `wordexp`'s `WRDE_REUSE`, `WRDE_APPEND` and `~user` | ours has none of the three -- see `wordexp` below |
 | CVE-2024-2961, CVE-2026-4046, CVE-2026-77117, CVE-2026-80489 | iconv's ISO-2022-CN-EXT, IBM1364, SHIFT_JISX0213 and EUC-JISX0213 converters | none of those charsets is here |
@@ -177275,7 +177275,12 @@ standard with glibc as the oracle, as the rest of this library is:
   `{m,n}`) and no back-references (`\1`), both of which POSIX requires;
   patterns past 1024 bytes, programs past 512 instructions and more than 9
   groups are refused. The userland's own tools use `userspace/ere`, which
-  has both; C programs that call `regcomp` get this.
+  has both; C programs that call `regcomp` get this. **Fixed 2026-09-30**:
+  intervals, back-references, every GNU operator glibc's `regcomp` reads,
+  REG_STARTEND, and no fixed limit; glibc's answers to some 544,000 cases
+  given alike but for the 16,444 where they contradict the standard or
+  glibc's own (design-decisions section 1160). What is bounded still:
+  D-POSIX-REGEX-BOUNDS-AND-WORST-CASES.
 - **`posix_spawn`'s attributes** (`posix/src/spawn.rs`): the flags are
   stored, and a child asked for with a signal mask, default signal actions,
   a new session or a scheduler gets none of them. Already known:
@@ -177303,3 +177308,57 @@ standard with glibc as the oracle, as the rest of this library is:
 
 **Where:** the modules named above; the patches are in
 `glibc_2.39-0ubuntu8.9.debian.tar.xz` (Launchpad), `debian/patches/`.
+
+## D-POSIX-PRIVATE-GROWABLE-ARRAYS — glob.rs, gai.rs and wordexp.rs each carry a private growable array of their own, beside the crate's `list::List` (lane D, 2026-09-30) — **Status: OPEN**
+
+**In short:** the C library has no `Vec` (it is built without an allocator
+crate; its own `malloc` is the allocator), so code that has to grow a table
+writes its own. Three modules did, each slightly differently: `glob.rs`'s
+and `gai.rs`'s `List`, `wordexp.rs`'s `List`/`Bytes`. The regex rewrite
+added `posix/src/list.rs`, one tested `List` for the whole crate. Three
+copies of the same unsafe code are three places for the same bug to hide.
+
+**The fix:** move the three onto `crate::list::List`, each mapping `NoMem`
+into its own error (`GLOB_NOSPACE`, `EAI_MEMORY`, `WRDE_NOSPACE`), and
+delete the private copies.
+
+**Where:** `posix/src/glob.rs`, `posix/src/gai.rs`, `posix/src/wordexp.rs`;
+`posix/src/list.rs`.
+
+## D-POSIX-REGEX-BOUNDS-AND-WORST-CASES — the rewritten `regcomp`/`regexec` bounds two things glibc does not, and has inputs that cost it quadratic time (lane D, 2026-09-30) — **Status: OPEN (limits, by design; the costs measured)**
+
+**In short:** the new regular-expression engine (`posix/src/regex.rs`,
+design-decisions §1160) answers every case of its oracle as the standard
+does. It is not unbounded, though, and some patterns cost it more than they
+should. None of this is a wrong answer on an input that fits; each is where
+it stops, or slows.
+
+- **A program past two million instructions is refused** (REG_ESPACE from
+  `regcomp`). Bounded repetitions are written out, as glibc writes them
+  out: `(a{1000}){1000}` is a million copies. glibc stops only when
+  `malloc` does.
+- **A back-referencing match past four million table entries answers
+  REG_NOMATCH**, as glibc answers a `regexec` whose memory ran out. Typical
+  patterns are nowhere near it -- `(.*)\1` over 4,000 bytes, `(a|b)*\1`
+  over 8,000 (5.8 s in glibc, measured) are near-linear -- but a pattern
+  built so that every position leaves a different set of group spans can
+  reach it.
+- **Quadratic in the span, not linear:** taking apart a repetition whose
+  body has variable width runs the body forwards once per iteration, and a
+  body whose threads live long (`(a|a*b)*` over a long run of `a`) makes
+  each run long; a bounded repetition holding a group keeps a table of
+  span x count bits (capped at `min + span` counts); and a back-reference
+  pattern whose relaxed form matches at every start but whose exact form
+  does not retries each start.
+- **No lazy DFA.** The search is a Thompson simulation, the program's size
+  a byte; glibc caches DFA states, and is faster on long subjects for big
+  patterns without submatches.
+
+**The fixes, if these ever bite:** a lazy DFA for the search and for
+`dissect.rs`'s forward runs (states cached per byte, as glibc and RE2 do);
+the iterations of a variable-width repetition found from one backward and
+one forward pass rather than one pass each; the back-reference engine's
+states keyed on only the spans a later back-reference can still reach.
+
+**Where:** `posix/src/regex/prog.rs` (`MAX_INSTS`), `posix/src/regex/backref.rs`
+(`MAX_ENTRIES`), `posix/src/regex/dissect.rs`.

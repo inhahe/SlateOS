@@ -5657,7 +5657,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests)
   - [x] getent: NSS database lookup (passwd/group/hosts/services/protocols/networks/shadow)
   - [x] nologin/false/true: login refusal and exit-code shells
-  - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is its own crate, not yet procmail's (TD-B-LOCKFILE-IS-NOT-PROCMAILS)
+  - [x] flock/lockfile: advisory file locking from shell scripts — flock is now a port of util-linux 2.39.3's (real `flock(2)`, where the old one created `FILE.lock` files; `-w` polls `LOCK_NB` because SlateOS's blocking `flock()` cannot be interrupted, TD-B-FLOCK-WAIT-POLLS; checked by `scripts/flock-diff.sh`); lockfile is procmail 3.24's, ported function by function (2026-10-01; `scripts/lockfile-diff.sh`, 46 cases against Ubuntu's agree, files left behind included)
   - [x] bridge/tc/ebtables: L2 bridge management, traffic control (7 qdisc types, filter matching, ethernet bridge filtering, 170 tests)
   - [x] nsenter: enter namespaces of other processes (8 namespace types, per-ns file overrides)
   - [x] unshare: create new namespaces (CLONE_NEW* flags, user mapping, mount propagation)

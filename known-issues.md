@@ -174468,7 +174468,21 @@ util-linux's `setup_timer` + blocking `flock()` + `EINTR` check, delete the
 `LOCK_NB` polling, and re-run `scripts/flock-diff.sh` -- including a case that
 holds the lock past the deadline, which is the one the timer exists for.
 
-## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **open**
+## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **FIXED** 2026-10-01
+
+**Resolution.** `userspace/lockfile` is now procmail 3.24's `lockfile.c` as
+Ubuntu builds it (3.24-1ubuntu2), with what it calls from `exopen.c`,
+`acommon.c`, `authenticate.c` and `mcommon.c`, function by function: the
+unique temporary (`_` pid separator time `.` host, procmail's base 64), the
+`fstat`/`lstat` check, the hard link with NFS's false failure caught, the
+`EXDEV` fallback, `-l` as the age of a stale lock, the second pass that
+releases what was taken, and procmail's messages, version text and sysexits.
+`scripts/lockfile-diff.sh` runs it against Ubuntu's (fetched with
+`apt-get download`, no root needed) over 46 cases, comparing output, status
+and the files left behind -- mode, link count, contents: 46 agree. 33 unit
+tests drive the control flow over a fake system (a lying `link`, `EXDEV`, a
+name length limit, a signal). Licence: GPL-2.0-or-later OR Artistic-1.0,
+`userspace/lockfile/licenses/`. The entry below is as it was filed.
 
 **In short:** `lockfile` -- the command scripts use to create a lock file
 the way procmail does -- is a SlateOS approximation, not a port. It became

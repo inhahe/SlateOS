@@ -1976,8 +1976,7 @@ dependencies = [
 name = "lockfile"
 version = "0.1.0"
 dependencies = [
- "quoting",
- "usageerror",
+ "pwdb",
 ]
 
 [[package]]

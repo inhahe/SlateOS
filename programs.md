@@ -141,7 +141,7 @@ two disagree.
 | `link` | Call the link function to create a link named FILE2 to FILE1. |  | `coreutils` |  |
 | `ln` | Create links between files. | yes | `coreutils` |  |
 | `localectl` | Locale and keyboard configuration. |  |  |  |
-| `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. |  |  |  |
+| `lockfile` | Procmail 3.24's `lockfile(1)`, ported. |  |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |
 | `login` | User login program |  |  |  |
 | `loginctl` | Slate OS session and user management |  |  |  |

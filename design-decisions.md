@@ -83354,6 +83354,52 @@ Request to lane C: the width query, and the fitting rule above.
 **Where:** `userspace/charwidth/src/lib.rs`; `known-issues.md` ->
 `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
 
+**Corrected the same day (2026-09-27), on measurement, before the table was
+touched; applied 2026-10-01.** The correction is Claude's, inside the same
+operator-approved scope ("whichever looks the best"), so it is as revisable as
+the choice it corrects. Dumping gnulib's `uc_width` for every code point from coreutils
+9.5's own `libcoreutils.a` and comparing it with our table gives the known 626
+differences in 71 runs (plus NUL), and they are not one kind of thing:
+
+| Kind | Where | Ours | gnulib's | Better-looking |
+|---|---|---|---|---|
+| **Unicode version.** Ours came from Unicode **16.0** (the build machine's Python), gnulib's is **15.1** | emoji and symbols new or made wide in 16.0 (U+1FA89, U+1FAE8, U+1D300-1D356, U+4DC0-4DFF), and the scripts 16.0 added | 16.0's | 15.1's: 1 for anything 15.1 had not assigned | **ours** -- a new emoji given one cell overlaps its neighbour |
+| **Soft hyphen** U+00AD | common in pasted web text | 1 | 0 | **gnulib's** -- Unicode shows it only at a line break; width 1 draws a stray hyphen mid-word |
+| **Prepended concatenation marks** U+0600-0605, 06DD, 070F, 0890-0891, 08E2, 110BD, 110CD | Arabic number signs and kin | 0 | 1 | **gnulib's** -- a visible sign given no cell piles onto the next character |
+| **Hangul Jamo Extended-B** conjoining medials and finals U+D7B0-D7FB | Old Korean | 1 | 0 | **gnulib's** -- they combine with the syllable, as U+1160-11FF (which both tables zero) do |
+| **Unassigned code points in East Asian blocks** (U+3040, U+3097-3098, U+FF00, U+1F203-1F20F, ...) | nothing yet | 1 | 2 | neither, visibly -- no text contains an unassigned code point. UAX #11's own defaults (EastAsianWidth.txt's `@missing` lines) make only the ideograph blocks wide before assignment; gnulib rounds up whole blocks by its own list. The standard's rule is taken |
+| **Kannada** U+0CBF, U+0CC6 | real Kannada text | 0 (non-spacing marks, `Mn`; glibc agrees) | 1 | ours |
+| **NUL** | -- | none: a control | 0 | ours -- NUL ends a C string; it is not a zero-width character |
+
+So neither table as it stands is the best-looking one, and "(a), gnulib's" is
+revised to what the operator actually asked for: **the newest Unicode data
+(18.0.0), pinned by SHA-256 rather than taken from whichever Python builds it,
+with gnulib's three rendering policies** -- soft hyphen 0, prepended
+concatenation marks 1, conjoining Jamo 0 -- **and UAX #11's defaults for
+unassigned code points**. `scripts/charwidth-gen.py` generates it. No upstream
+matches that byte for byte, so each harness that measures widths (`ls`,
+`wc -L`, `osh`'s `select`, `column` and the `libsmartcols` programs) records
+the code points where it differs on purpose.
+
+The rationale above also said GNU's table buys agreement in "`ls`, `wc -L` and
+`column`". `column` was wrong: util-linux measures with **glibc's** `wcwidth`,
+and since B-Q8 was written lane B has ported `column` and ten programs built on
+`libsmartcols`, all reading this table. Taking gnulib's wholesale would have
+traded bash *and* util-linux for coreutils, not bash alone.
+
+**One more table, found on the way.** SlateOS's C library (`posix/src/wchar.rs`,
+lane D's) carries a third, hand-written `wcwidth`, so a C program ported to
+SlateOS measures with neither. One table for the system means libc's `wcwidth`
+answering from the same data; that is requested from lane D
+(`requests/b-d-libc-wcwidth-should-answer-from-the-one-width-table.md`).
+
+**And a notice.** A table generated from the UCD's files is a modified copy of
+them, and the Unicode licence asks for its notice with every copy, so
+`userspace/charwidth/licenses/notices.yaml` names the Unicode Character
+Database at the version the tables come from (§1433's gatherer carries it into
+the image); `charwidth-gen.py --emit` keeps that version in step and `--check`
+refuses a mismatch.
+
 ---
 
 ## 1043. Genuine Oils becomes the default shell; our Rust OSH stays as a fallback

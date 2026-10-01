@@ -52,6 +52,19 @@ how terminals have always been extended.
    writing to a pipe or over ssh cannot see the font. If the renderer does
    something else today, that is worth knowing either way.
 
+3. **Do not draw what the table gives no cell, unless it is a mark.**
+   §1042 makes the soft hyphen (U+00AD) and every other format character
+   zero width, as Unicode intends: they are invisible except where they have
+   an effect -- a soft hyphen shows only where a line breaks at it. A
+   renderer that overlays every zero-width character on the previous cell,
+   as it must for a combining accent, would draw the font's glyph for a soft
+   hyphen through the letter before it. The characters with Unicode's
+   `Default_Ignorable_Code_Point` property (format characters, variation
+   selectors, the joiners) want skipping when drawn -- the variation
+   selectors although they are marks, since they change how the character
+   before them is presented rather than adding to it; the remaining
+   non-spacing and enclosing marks (`Mn`, `Me`) are the ones to overlay.
+
 ## What lane B will do with it
 
 `userspace/charwidth` switches to gnulib's table (Unicode 15.1.0) under §1042

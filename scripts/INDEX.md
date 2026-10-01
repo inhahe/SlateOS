@@ -45,6 +45,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/canary-load.py` | Hold the host CPU busy across a *named window* of a `--bench` run. |
 | `scripts/canary-spread-survey.py` | Survey the canary's observed spread across every recorded run. |
 | `scripts/cat-diff.sh` | Differential test: our cat against GNU coreutils' cat. |
+| `scripts/charwidth-gen.py` | Generate the terminal-column width tables of `userspace/charwidth`. |
 | `scripts/check-absent-operand-default.py` | Refuse a missing shell operand that silently becomes a number. |
 | `scripts/check-accidental-headings.py` | Refuse to build when a `---` separator has silently become an `<h2>`. |
 | `scripts/check-ansic-quoting-vs-bash.py` | Pin bash's `$'...'` (ANSI-C quoting) rules, for TD-SHELLQUOTE-NO-ANSI-C-QUOTING. |
@@ -215,6 +216,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
 | `scripts/gen-script-index.py` | Generate a searchable one-line index of every script, and refuse a stale one. |
+| `scripts/getconf-diff.sh` | getconf-diff.sh — compare our `getconf` against glibc's, inside WSL. |
+| `scripts/getconf-gen.py` | Generate `userspace/getconf`'s variable table from glibc 2.39's getconf.c. |
 | `scripts/getopt-ambiguity-check.py` | Differential check: does our long-option resolution agree with GNU's? |
 | `scripts/getopt-diff.sh` | Differential test: our `getopt` against util-linux 2.39.3's. |
 | `scripts/gitenv.py` | Choosing which git repository a subprocess talks to. |
@@ -474,4 +477,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_464 scripts._
+_467 scripts._

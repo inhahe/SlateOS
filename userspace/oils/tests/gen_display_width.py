@@ -1,64 +1,51 @@
 #!/usr/bin/env python3
-"""Derive osh's display-width table, and check it against the reference bash.
+"""Measure osh's display widths against the reference bash.
 
 `osh`'s `display_width` has to reproduce bash's `displen` (execute_cmd.c),
-which is `wcswidth` of the decoded string. The rule below is the usual
-`wcwidth` one — zero for combining marks, format characters and the Hangul
-Jamo medial/final blocks, two for East Asian Wide and Fullwidth, one for
-everything else — and `--check` measures the reference shell at every range
-boundary the rule produces, so the table is verified against the shell rather
-than assumed from the standard.
+which is `wcswidth` of the decoded string -- except for the width of each
+character, which comes from `charwidth`'s table. That table is SlateOS's, not
+bash's: `scripts/charwidth-gen.py` builds it from the Unicode 18.0 data with
+the policy of design-decisions §1042, and bash measures with glibc's. So this
+no longer derives or emits anything; it measures where the two differ.
 
-    python gen_display_width.py --check          # measure, report disagreements
-    python gen_display_width.py --emit > width.rs
+    python gen_display_width.py --check        # bash's width at every range edge
+    python gen_display_width.py --diff-osh PATH  # osh's menu bytes against bash's
+
+`--check` reports every boundary code point where bash's width is not the
+table's -- the deliberate differences §1042 lists (the soft hyphen, the
+prepended concatenation marks, Hangul Jamo Extended-B, characters newer than
+the host's glibc) and anything else, which would be news.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import os
 import sys
 import unicodedata as ud
 
-MAX = 0x110000
-# Hangul Jamo medial vowels and final consonants combine with the leading
-# consonant before them, so they occupy no column of their own. They are `Lo`,
-# not marks, so no general-category rule catches them; every wcwidth carries
-# this range as a special case.
-JAMO_ZERO = range(0x1160, 0x1200)
-# The soft hyphen is `Cf`, but is the one format character that is printed.
-SOFT_HYPHEN = 0x00AD
+HERE = os.path.dirname(os.path.abspath(__file__))
+GEN = os.path.join(HERE, "..", "..", "..", "scripts", "charwidth-gen.py")
 
 
-def width_of(cp: int) -> int:
-    c = chr(cp)
-    cat = ud.category(c)
-    if cat in ("Mn", "Me") or (cat == "Cf" and cp != SOFT_HYPHEN) or cp in JAMO_ZERO:
-        return 0
-    if ud.east_asian_width(c) in ("W", "F"):
-        return 2
-    return 1
+def table_widths() -> list[int]:
+    """Every code point's width as `charwidth` gives it (-1 for none)."""
+    spec = importlib.util.spec_from_file_location("charwidth_gen", GEN)
+    if spec is None or spec.loader is None:
+        sys.exit(f"cannot load {GEN}")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    return gen.widths()
 
 
-def ranges(width: int) -> list[tuple[int, int]]:
-    out: list[list[int]] = []
-    for cp in range(MAX):
-        if width_of(cp) != width:
-            continue
-        if out and out[-1][1] + 1 == cp:
-            out[-1][1] = cp
-        else:
-            out.append([cp, cp])
-    return [(a, b) for a, b in out]
-
-
-def boundaries(rs: list[tuple[int, int]]) -> list[int]:
-    """The code points a wrong edge would show up at."""
-    seen = []
-    for lo, hi in rs:
-        for cp in (lo - 1, lo, hi, hi + 1):
-            if 0 <= cp < MAX:
-                seen.append(cp)
-    return seen
+def boundaries(widths: list[int]) -> list[int]:
+    """The code points on either side of every change of width."""
+    out = []
+    for cp in range(1, len(widths)):
+        if widths[cp] != widths[cp - 1]:
+            out += [cp - 1, cp]
+    return sorted(set(out))
 
 
 def probeable(cp: int) -> bool:
@@ -70,34 +57,9 @@ def probeable(cp: int) -> bool:
     return cp not in (0x00, 0x0A, 0x27)  # NUL, newline, the quote we wrap with
 
 
-def emit(zero: list[tuple[int, int]], wide: list[tuple[int, int]]) -> str:
-    def table(name: str, rs: list[tuple[int, int]], doc: str) -> str:
-        rows = ",\n".join(f"    (0x{a:04X}, 0x{b:04X})" for a, b in rs)
-        head = "\n".join(f"/// {line}".rstrip() for line in doc.splitlines())
-        return f"{head}\nstatic {name}: [(u32, u32); {len(rs)}] = [\n{rows},\n];\n"
-
-    return (
-        table(
-            "ZERO_WIDTH",
-            zero,
-            "Code points that occupy no terminal column: the combining marks\n"
-            "(`Mn`/`Me`), the format characters (`Cf`) other than the soft\n"
-            "hyphen, and the Hangul Jamo medial vowels and final consonants.",
-        )
-        + "\n"
-        + table(
-            "WIDE",
-            wide,
-            "Code points that occupy two terminal columns: East Asian Wide and\n"
-            "Fullwidth (UAX #11).",
-        )
-    )
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true")
-    ap.add_argument("--emit", action="store_true")
     ap.add_argument("--shell", default="C:/Program Files/Git/usr/bin/bash.exe")
     ap.add_argument("--locale", default="C.UTF-8")
     ap.add_argument("--limit", type=int, default=0)
@@ -108,47 +70,36 @@ def main() -> int:
         "instead of inferring the width bash used",
     )
     a = ap.parse_args()
+    if not (a.check or a.diff_osh):
+        ap.error("give --check or --diff-osh PATH")
 
-    zero = ranges(0)
-    wide = ranges(2)
-    print(
-        f"zero-width: {len(zero)} ranges; wide: {len(wide)} ranges",
-        file=sys.stderr,
-    )
+    import probe_displen as probe
 
-    if a.emit:
-        sys.stdout.write(emit(zero, wide))
-
-    if a.check:
-        import probe_displen as probe
-
-        cps = sorted({cp for cp in boundaries(zero) + boundaries(wide) if probeable(cp)})
-        if a.limit:
-            cps = cps[:: max(1, len(cps) // a.limit)]
-        bad = 0
-        for i, cp in enumerate(cps):
-            if a.diff_osh:
-                # The end-to-end test: not "what width did bash use" but "does
-                # osh lay the menu out byte for byte as bash does".
-                ref, mine = (
-                    probe.measure_one(sh, a.locale, chr(cp), probe.FILLERS[0])[1]
-                    for sh in (a.shell, a.diff_osh)
-                )
-                if ref != mine:
-                    bad += 1
-                    print(f"U+{cp:04X}\tbash {ref!r}\tosh {mine!r}\t{ud.category(chr(cp))}")
-            else:
-                want = width_of(cp)
-                got = probe.measure(a.shell, a.locale, chr(cp))
-                if got != [want]:
-                    bad += 1
-                    print(
-                        f"U+{cp:04X}\tpredicted {want}\tbash {got}\t{ud.category(chr(cp))}"
-                    )
-            if i % 200 == 199:
-                print(f"  … {i + 1}/{len(cps)}, {bad} disagreements", file=sys.stderr)
-        print(f"{len(cps)} boundary code points, {bad} disagreements", file=sys.stderr)
-        return 1 if bad else 0
+    widths = table_widths()
+    cps = [cp for cp in boundaries(widths) if probeable(cp)]
+    if a.limit:
+        cps = cps[:: max(1, len(cps) // a.limit)]
+    bad = 0
+    for i, cp in enumerate(cps):
+        if a.diff_osh:
+            # The end-to-end test: not "what width did bash use" but "does
+            # osh lay the menu out byte for byte as bash does".
+            ref, mine = (
+                probe.measure_one(sh, a.locale, chr(cp), probe.FILLERS[0])[1]
+                for sh in (a.shell, a.diff_osh)
+            )
+            if ref != mine:
+                bad += 1
+                print(f"U+{cp:04X}\tbash {ref!r}\tosh {mine!r}")
+        else:
+            want = widths[cp]
+            got = probe.measure(a.shell, a.locale, chr(cp))
+            if got != [want]:
+                bad += 1
+                print(f"U+{cp:04X}\ttable {want}\tbash {got}")
+        if i % 200 == 199:
+            print(f"  … {i + 1}/{len(cps)}, {bad} differences", file=sys.stderr)
+    print(f"{len(cps)} boundary code points, {bad} differences", file=sys.stderr)
     return 0
 
 

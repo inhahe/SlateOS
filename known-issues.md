@@ -2344,6 +2344,144 @@ personality of something else any more. None of the new bins is on the
 image yet: that is lane D's
 manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 
+**UPDATE 2026-10-01: the §1045 triage has begun, and the ledger stands at
+118.** The operator's rule (B-Q11, design-decisions §1045): each name is
+decided on its own; a name for a subsystem SlateOS does not have is deleted
+(§1006), and with it the crate when its own program is the same kind; a name
+that is kept is installed as the same file. First settled, as whole crates:
+**`userspace/apparmor`** (`aa-status` and seven more) and
+**`userspace/selinux`** (`getenforce` and ten more), deleted -- SlateOS has no
+Linux security module and none is planned (its security is capabilities), so
+every command acted on `/sys/kernel/security/apparmor` or `/sys/fs/selinux`,
+neither of which exists, and `apparmor_parser`'s load was a comment where the
+write would be. Then **`userspace/grub2`** (`grub-install`, `grub-mkconfig`,
+`grub-probe`, `grub-set-default`, `grub-reboot`, `grub-editenv`,
+`update-grub`), judged command by command because design.txt (lines
+1237-1243) plans for SlateOS to live beside a Linux GRUB on dual-boot
+machines -- and deleted, because that plan is already met elsewhere: SlateOS
+boots with Limine, and adding it to another OS's GRUB is the installer's
+(`apps/installer`, `--grub-detect/--grub-add/--grub-update/--grub-remove`,
+which knows where that GRUB's files are). None of the seven served it.
+`grub-install` wrote no bootloader image (it said so, and exited 0);
+`grub-mkconfig` and `update-grub` built a menu from Linux kernels in SlateOS's
+own `/boot`, where there are none; `grub-set-default` and `grub-reboot` wrote
+`/boot/grub/grubenv` on SlateOS's disk, which no bootloader reads, and said
+the default had been set; `grub-probe` names devices the way only a GRUB
+config needs; `grub-editenv`, the one that did real work, edited a file
+GRUB's way but printed what GRUB's does not. If "boot the other system once"
+is ever wanted, it belongs in the installer's GRUB code, by setting
+`next_entry` in the grubenv it has found, with GRUB's own `grub-editenv`
+ported if a command is wanted too. The ledger was 118 after the three crates,
+and is **115**: `ranlib`, `strip` and `killall` were never unreachable --
+lane D's manifest installs them (`ranlib = ar`) -- but the checker did not
+read the manifest until 2026-10-01. **Kept, first batch** -- installed as the
+same file, asked of lane D with the lines to add
+(`requests/b-d-stage-every-program-that-builds.md`): `gunzip`, `zcat`,
+`gzcat` (gzip); `clear`, `reset`, `tset` (tput); `groupadd`, `groupdel`,
+`groupmod`, `userdel`, `usermod` (useradd); `w` (who); `unzip` (zip). Each is
+implemented and tested in its crate and needs no permission its program
+lacks; they leave the ledger when the lines land.
+
+Deleted next, as whole crates, each for a subsystem SlateOS has not got and
+does not plan: **`userspace/audit`** (`auditctl`, `auditd`, `ausearch`,
+`aureport`, `autrace` -- the Linux audit framework's netlink rules and
+`/var/log/audit`; SlateOS's auditing is the kernel's own capability and
+filesystem audit rings, which none of them read; `auditctl` kept rules that
+nothing enforced, `auditd` could not start), **`userspace/firejail`**
+(`firecfg`, `firemon` -- a namespace-and-seccomp sandbox; it parsed profiles
+and refused to run anything, and SlateOS confines programs by capabilities,
+with no sandbox tool of this kind on the roadmap), **`userspace/mkinitramfs`**
+(`lsinitramfs`, `update-initramfs` -- SlateOS boots no initramfs: Limine loads
+the kernel, which carries its services) and **`userspace/plymouth`**
+(`plymouthd` -- no splash daemon exists or is planned, and the client printed
+what it "would" show). **The ledger stood at 106.**
+
+Reading each remaining name's code turned up two that *fabricate*, which
+§1006 deletes whatever the name: **`userspace/xattr`** (`getfattr`,
+`setfattr`, `attr`) invented its answers -- `getfattr` listed a
+`user.mime_type` guessed from the file's extension and an SELinux label for
+anything under `/bin/`, `setfattr` printed "setting ... on ..." and wrote
+nothing, and `attr` was mapped onto `getfattr`'s parser although it is a
+different command -- so the crate is deleted (a port of the `attr`
+package's tools replaces it when they are wanted); and `chattr`'s **`lsattr`**
+reported the extents flag for every file whose flags it could not read.
+`lsattr` is kept -- it waits on the FS_IOC_GETFLAGS lane A scheduled -- and
+now refuses instead (b3367ac33). **The ledger stood at 104**, and stands at
+**102** after `userspace/locale` (`getconf`, `localedef`), deleted for the same
+reason: all three of its programs fabricated, as
+`B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED` records with the ports that replace them
+(`getconf` was ported the same day). Then **`userspace/mesg`** (`write`, `talk`),
+whose three programs agreed with one another through files instead of
+terminals (`B-MESG-AND-WRITE-UNTIL-PORTED`). **The ledger stood at 100.**
+
+Four daemons followed for inventing their answers, which §1006 settles
+before any naming question: **`userspace/udisks`** (`udisksd`) listed a
+made-up `/dev/sda`, ext4, UUID `12345678-abcd-...`, whenever it found no
+block device; **`userspace/upower`** (`upowerd`) reported "daemon
+initialized (simulated mode)"; **`userspace/fwupd`** (`fwupdtool`) offered
+firmware 1.1.0, "Bug fixes and security updates", for a device it never
+queried; **`userspace/tuned`** (`tuned-adm`, `tuned-gui`) answered every
+`verify` setting `OK (simulated)`. Then **`userspace/numactl`** (`numastat`,
+`numademo`, `memhog`): `numactl -m 0 CMD` printed the policy it would set and
+never ran CMD, `memhog` reported "Allocation complete." having allocated
+nothing, `numademo` printed invented bandwidths. **The ledger stands at 92.**
+
+**Kept, second batch** (sent to lane D the same way): `xxd`, `atd`, `atq`,
+`atrm`, `batch`, `anacron`, `lastb`, `lastlog`, `sg`, `mingetty` -- working
+programs -- and `lsattr`, the seven cgroup tools and the five `lp` names,
+which refuse honestly while what they wait for (FS_IOC_GETFLAGS, the
+kernel's cgroupfs at `/sys/fs/cgroup`, its print queue) is scheduled or
+built. Six of `systemctl`'s fourteen were never names at all -- `blame`,
+`critical-chain`, `dot`, `plot`, `security` and `verify` are
+`systemd-analyze`'s subcommands, which the detector mistook for program
+names (`dot` is graphviz's); they are excluded in its IGNORE table and the
+ledger stands at **86**. **`userspace/capsh`** (`getcap`, `setcap`,
+`getpcaps`, `captest`) is deleted for fabricating: `setcap` kept "file
+capabilities" in a sidecar directory that exec never consults, and
+`capsh`/`captest` answered from a simulated process state -- SlateOS's
+capabilities are kernel object handles, not Linux's bit sets, so there is
+nothing for these to set. `sudo`'s three were read too: all work (the
+command really runs as the target user; a comment saying it was simulated
+was false and is fixed); `sudoedit` stays the same file, while `visudo`
+and `sudoreplay` need less than `sudo` holds and so, per §1045, earn crates
+of their own -- a split still to do. The ledger stood at **82**.
+**`userspace/perf`** (`perf-stat`, `perf-record`, `perf-report`, `perf-top`) is
+deleted for fabricating: its counters came from "simulated"
+`/proc/<pid>/perf_events` files, and without them `perf stat` printed
+`0 cycles` as a measurement (its tests asserted the zero). **78.**
+
+**Third pass** (2026-10-01): names that only repeated a subcommand of their
+own program, under a name no upstream ships, went -- `coredump-extract`
+(`coredumpctl dump`), `lodetach` (`losetup -d`), `rfkill-event` (`rfkill
+event`), `fio-verify` (fio verifies through `verify=`). Names for Linux
+interfaces SlateOS will not have went too -- `cifsiostat` and `tapestat`
+(`sysstat`; `/proc/fs/cifs` and `/proc/scsi/tape`). Two printed another
+program's answer under a real tool's name and went: `turbostat`
+(`cpupower`, labelling the current and maximum frequency as turbostat's
+MSR averages) and `biosdecode` (`dmidecode`, printing DMI type 0 for a
+tool that decodes the BIOS's entry points). `fio`'s trim workload, which
+wrote zeros and counted them as trims, now refuses. And
+**`userspace/resolvectl`** (`host`, `resolvconf`, `systemd-resolve`) is
+deleted for fabricating: `resolvectl service` printed an invented SRV
+record, and `host` answered NXDOMAIN to every reverse lookup but
+localhost without sending a query, and ignored `-t`. **Kept, third
+batch:** `mpstat`, `pidstat` (sysstat, reading `/proc`), `sockstat` (ss,
+in BSD's format), `ntpdate`, `sntp` (ntpd, which really queries and sets
+the clock). **The ledger stands at 67.**
+`systemctl`'s eight were read next: `systemd-analyze` (a fixed "Startup
+finished in 1.200s (kernel) + 2.500s" and a fixed `blame` list),
+`systemd-notify` ("Sending: READY=1" to nobody; `--booted` said yes) and
+`systemd-tmpfiles` (built-in entries instead of its configuration) made
+their answers up and went; `systemd-cat` (the journal), `systemd-escape`,
+`systemd-path`, `systemd-cgls` and `systemd-cgtop` (honest about a missing
+cgroupfs) stay. **The ledger stands at 64.** **Still to judge:**
+`cpufreq-info` and `cpufreq-set`
+(cpupower) and `thermal-monitor`, `thermal-conf` (thermald), which wait on
+the kernel's cpufreq and thermal modules reaching `/sys`; `hostnamectl`'s
+four domain names (which belong to `hostname`, if anywhere); `xdg`'s two;
+and `efivar`, `volname`, `lshw`, `inotifywatch`, `userdbctl`. `sudo`'s
+`visudo` and `sudoreplay` are to be split into crates.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 
@@ -10368,9 +10506,14 @@ See TD-NATIVE-MPROTECT below for the remaining native-mprotect handler work.
 
 ### TD-OILS-UNASSIGNED-CODE-POINTS-TAKE-THE-UNICODE-WIDTH-NOT-THE-HOSTS. `select` measures U+3104 as one column where this host's bash measures two — 2026-08-08 — OPEN (deliberate)
 
-**Where:** `userspace/oils/src/width.rs` — the `ZERO_WIDTH` and `WIDE` tables,
-generated by `tests/gen_display_width.py` from the Unicode 16.0 character
-database.
+**Where:** `userspace/charwidth/src/lib.rs` — the `ZERO_WIDTH` and `WIDE`
+tables, which `userspace/oils/src/width.rs` reads. *Updated 2026-10-01:* they
+are generated by `scripts/charwidth-gen.py` from the Unicode 18.0.0 database
+(pinned by SHA-256), no longer by `tests/gen_display_width.py` from whichever
+Python ran it. The generator takes UAX #11's own defaults for unassigned code
+points (EastAsianWidth.txt's `@missing` lines: wide only in the ideograph
+blocks), so what this entry argued for is now the stated policy of
+design-decisions §1042 rather than a side effect of the data's granularity.
 
 **What.** osh gives every *assigned* code point the width this host's bash
 gives it — verified at 1701 range boundaries, byte for byte, through the
@@ -10400,12 +10543,17 @@ and the disagreement will close on its own.
 
 **Repro:** `python userspace/oils/tests/gen_display_width.py --check
 --diff-osh <path-to-osh>` — 1701 boundary code points, 74 disagreements, all
-`Cn`. Drop `--diff-osh` to see the widths bash used instead of the menu bytes.
+`Cn` (measured 2026-08-08, against the Unicode 16.0 tables). Drop `--diff-osh`
+to see the widths bash used instead of the menu bytes. Since §1042 the
+boundaries are the 18.0.0 table's, and the script also reports the policy's
+deliberate differences from glibc (the soft hyphen, the prepended
+concatenation marks, Hangul Jamo Extended-B, characters newer than the host's
+C library) beside these.
 
 **If it ever needs closing:** the table generator is the single place to change
-— give `width_of` a block-level default for unassigned code points and
-regenerate. Do not special-case the 74; they are a symptom of the granularity,
-not the rule.
+— give `scripts/charwidth-gen.py` a block-level default for unassigned code
+points and regenerate. Do not special-case the 74; they are a symptom of the
+granularity, not the rule.
 
 ### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — **NOT REPRODUCIBLE OFF WINDOWS (confirmed 2026-08-25)**; the host-only claim is now measured rather than argued
 
@@ -78693,8 +78841,14 @@ of a heading it is about to print, and `t/noperm` never gets one, because the
 exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
 named on the command line, and GNU reserves 2 for the latter.
 
-### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
-**Status:** OPEN — blocked on B-Q8, still open 2026-09-24.
+### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — ✅ RESOLVED 2026-09-27 (lane B)
+**Status:** ✅ RESOLVED 2026-09-27 — B-Q8 answered (design-decisions §1042 and its
+correction). The table is now neither bash's nor gnulib's: it is generated by
+`scripts/charwidth-gen.py` from the Unicode 18.0.0 data, pinned by SHA-256, with
+gnulib's three rendering choices (soft hyphen 0, prepended concatenation marks 1,
+Hangul Jamo Extended-B 0) and UAX #11's defaults for unassigned code points.
+`--compare` against a dump of either upstream lists every code point where it
+differs; the entry below is kept as the record of how the question was measured.
 
 > **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
 > terminal (`apps/terminal`) has **no notion of character width at all**: it
@@ -179167,29 +179321,60 @@ terminals' lines.
 2.39.3's `term-utils/agetty.c`, `update_utmp` -- `pututxline` of a
 `LOGIN_PROCESS` record and `updwtmpx` to `wtmp`, through `libcall::utmp`.
 
-## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: OPEN (next task)**
+## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: FIXED 2026-10-01**
 
-**In short:** much of lane B's userland is ported from other projects --
-GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later), util-linux 2.39.3
-(`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`, `logger`, `column`,
-`findmnt` and more, plus the `ulblkid`/`ulsysfs`/`smartcols`/`ulmount`
-library ports: GPL-2.0-or-later and LGPL-2.1-or-later), Oils (Apache-2.0)
-and others. An image may carry other people's code only with their licence
-notices, and `scripts/gather-notices.py` -- which builds the image's
+**Fixed:** five manifests now name every upstream lane B's code is ported
+from, eleven components in all, each with its licence texts beside it (the
+gatherer finds 108 notices, 41 from manifests, where it found 97):
+
+| Manifest | Components |
+|---|---|
+| `userspace/coreutils/licenses/` | GNU coreutils 9.4, gnulib, GNU findutils 4.9.0, GNU diffutils 3.10, GNU Time 1.9, procps-ng 4.0.4 |
+| `userspace/ulclosestream/licenses/` | util-linux 2.39.3 (every util-linux port links this crate) |
+| `userspace/localtime/licenses/` | glibc 2.39 (also `ere`'s regcomp messages, `ulstrutils`'s strverscmp) |
+| `userspace/oils/licenses/` | GNU Bash 5.2.37 |
+| `userspace/autoopts/licenses/` | AutoOpts (libopts 41.1), GNU sharutils 4.15.2 |
+
+The survey went past the module docs' "a port of": "transcription of",
+"transcribed from" and "ported from" found procps-ng (`free`, `uptime`),
+findutils (`find`, `xargs`), diffutils, GNU Time, sharutils and libopts, and
+util-linux's `cal` and `renice` inside `userspace/coreutils`. Each licence
+was read from the upstream files themselves, not assumed: gnulib's modules
+as coreutils 9.4 ships them are GPL-3.0-or-later, LGPL-3.0-or-later and
+LGPL-2.1-or-later by module (gnulib-tool did not relicense them);
+util-linux's are per file -- GPL-2.0-or-later by default, LGPL-2.1-or-later
+for the libraries, BSD-4-Clause-UC for `cal.c`, `column.c`, `logger.c` and
+`renice.c`, BSD-4.3TAHOE for `login.c`, MIT for `flock.c` -- and the BSD and
+MIT notices are each file's own, reproduced in `BSD-notices` and
+`MIT-flock`. The entry above was wrong in one respect: `userspace/oils`
+carries no upstream Oils code (it is written here, §72); what it carries is
+bash's. Each manifest's comments say which crates its components cover, and
+a crate that ports more of one adds itself there: the gatherer refuses a
+component named by two manifests.
+
+Unicode data, settled the same day: `userspace/charwidth`'s width tables
+are now generated by `scripts/charwidth-gen.py` from the Unicode Character
+Database's own files (design-decisions §1042's correction), and a table
+derived from those files is a modified copy of them, which the Unicode
+licence lets travel only with its notice. So
+`userspace/charwidth/licenses/notices.yaml` names the Unicode Character
+Database 18.0.0 under `Unicode-3.0` (twelve components in all, then), and
+the generator keeps that version equal to the one it generated from. Other
+lanes' Unicode-derived tables are theirs to name the same way.
+
+**Original report.** Much of lane B's userland is ported from other
+projects -- GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later),
+util-linux 2.39.3 (`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`,
+`logger`, `column`, `findmnt` and more, plus the
+`ulblkid`/`ulsysfs`/`smartcols`/`ulmount` library ports) and others. An
+image may carry other people's code only with their licence notices, and
+`scripts/gather-notices.py` -- which builds the image's
 `/usr/share/licenses` and the notices page -- can find ported code only
 through a `licenses/notices.yaml` naming it (`design-decisions.md` §1433,
-`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B has
-none, except `userspace/file`'s (file 5.45, added 2026-10-01). So today the
-image carries those programs without the notices their licences require.
-
-**The fix:** one manifest for lane B's ports in `userspace/licenses/`, one
-entry per upstream project (name, version, licence, texts), with each
-project's licence texts beside it. Per project rather than per crate: the
-notices page lists components, and forty copies of the GPL would say
-nothing forty-one did not. Needs, per crate, the upstream it states and the
-version it was ported from -- most say so in their module docs ("a port of
-util-linux 2.39.3's ..."), which a survey of `userspace/` already finds for
-26 crates and 40 coreutils programs.
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B had
+none, except `userspace/file`'s (file 5.45). The fix first planned, one
+manifest in `userspace/licenses/`, cannot exist: the workspace's
+`userspace/*` member glob makes every directory there a crate.
 
 **One thing for the operator to know, not decide here:** code ported from
 GPL projects makes those programs GPL-licensed derived works, with the
@@ -179199,3 +179384,99 @@ rather than creating it.
 
 **Where:** `userspace/**`, `init/**`; the gatherer is `scripts/gather-notices.py`
 and its check runs in the boot test (`scripts/test-gather-notices.py`).
+
+## B-OILS-UNIT-TESTS-RUN-WHICHEVER-GREP-PATH-FINDS — six `osh` unit tests fail when `cargo test` is run from PowerShell on this machine (lane B, 2026-10-01) — **Status: OPEN (debt)**
+
+**In short:** some of `osh`'s unit tests pipe the shell's output through an
+external `grep` to pick out the lines under test (22 sites in
+`userspace/oils/src/interp.rs`, e.g. `readonly -p | grep ' [ab]='`). The
+`grep` is whichever one `PATH` finds. From Git Bash -- where the pre-push hook
+and the boot test run -- that is GNU grep and every test passes. From
+PowerShell on the development machine the first `grep` on `PATH` is
+Embarcadero's (`C:\Program Files (x86)\Embarcadero\Studio\23.0\bin\grep.exe`),
+which prints a `STDIN` header and CRLF line ends, and six tests fail:
+`readonly_print_lists_vars`, `local_dash_binds_a_variable_no_listing_reports`,
+`funcname_is_present_and_empty_outside_a_function`,
+`posix_mode_is_the_posixly_correct_variable`,
+`a_declaration_without_a_value_still_brings_the_name_into_being` and
+`assigning_a_dynamic_variable_stores_the_number_not_the_text`. Nothing is
+wrong with the shell; the tests are not hermetic.
+
+**The proper fix:** filter in the test, not in a subprocess -- capture the
+whole output and keep the wanted lines in Rust -- so a unit test of the shell
+depends on nothing but the shell. Where the pipeline itself is under test, the
+test should name its tool (the workspace's own `grep`, built alongside) rather
+than take `PATH`'s.
+
+**How to see it:** in PowerShell, `cargo test -p oils --lib --target
+x86_64-pc-windows-msvc`; the same command in Git Bash passes.
+
+## B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED — `getconf`, `locale` and `localedef` were deleted for fabricating, and POSIX requires all three (lane B, 2026-10-01) — **Status: OPEN for `locale` and `localedef`; `getconf` FIXED 2026-10-01**
+
+**In short:** `userspace/locale` answered as `locale`, `localedef` and
+`getconf`, and all three made their answers up: `locale -a` listed twelve
+locales (`de_DE.UTF-8`, `ja_JP.UTF-8`...) on a system whose C library
+supports only the C locale (`posix/src/locale.rs`'s `setlocale` returns `"C"`
+whatever it is asked); `localedef` printed "locale ... created" and compiled
+nothing; `getconf` printed a fixed table (`OPEN_MAX` 1024, `CHILD_MAX`
+32768...) instead of asking `sysconf`. Per §1006 the crate was deleted
+(2026-10-01, in the §1045 triage). POSIX requires all three utilities, so
+their absence is a gap to close, not a resolution.
+
+**The proper fix, in order of use:**
+
+* **`getconf`** first -- configure scripts and build systems call it
+  (`getconf _NPROCESSORS_ONLN`, `getconf LONG_BIT`, `getconf PAGESIZE`).
+  **Done the same day:** `userspace/getconf` is glibc 2.39's
+  `posix/getconf.c`, ported, answering every name through the C library's
+  `sysconf`, `pathconf` and `confstr` (`libcall::conf`), so it cannot
+  disagree with what a C program on the same system is told. Its 320 names
+  are upstream's table, generated by `scripts/getconf-gen.py` with the
+  constants' values measured from glibc's headers (the numbering SlateOS's
+  library shares; a test holds every constant `posix` defines to it).
+  `scripts/getconf-diff.sh` compares it with Ubuntu's built for Linux, where
+  both ask the same glibc: 123 cases agree, `-a`'s 320 values among them,
+  and three differ on purpose (`--version`'s package string, `--help`'s
+  bug-report address). Its notice joined the glibc entry in
+  `userspace/localtime/licenses/`, which gained GPL-2.0-or-later for it.
+  On SlateOS a name `posix`'s `sysconf` does not implement prints
+  `undefined`, as glibc's does for one its kernel does not support.
+* **`locale`** and **`localedef`** when the C library has locales to report
+  and an archive to compile into -- lane D's `setlocale` first. Until then a
+  `locale` would have exactly one locale to print.
+
+**Where:** a new crate per program under `userspace/`; the deleted crate is
+in history at `userspace/locale` before this entry's commit.
+
+## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: DEFERRED (needs a design: `deferred-questions.md` DQ5)**
+
+**In short:** `userspace/mesg` answered as `mesg`, `write` and `talk`, and the
+three agreed with one another through files no other program reads, rather
+than through the terminals they are about. `mesg n` wrote
+`/var/run/mesg/<user>` instead of clearing the terminal's group-write bit;
+`write` "sent" by appending to `/var/run/messages/<user>`, never opening the
+recipient's terminal, and exited 0; `talk` printed `[Connecting to
+bob...]` and `[Connection from alice]` -- naming the *sender* as the one
+connecting -- and echoed the sender's own typing back. It also read
+`/var/run/utmp` as text lines, which it is not. Deleted 2026-10-01 under
+§1006, in the §1045 triage.
+
+**The proper fix:** ports of util-linux 2.39.3's `term-utils/mesg.c` (the
+terminal's `S_IWGRP` bit through `fchmod`, as POSIX specifies `mesg`) and
+`term-utils/write.c` (the recipient found through `utmp` with
+`libcall::utmp`, its terminal checked writable by group, the message
+written to it with control characters made visible), each with a WSL
+differential harness. `talk` needs a `talkd` on the other end and is not
+coming back with them.
+
+**Why it is deferred, found the same day:** those ports cannot work as
+written on SlateOS. A terminal there is reached only through a handle held
+by its owner, never by opening `/dev/pts/N` (the kernel's `fchmod` refuses a
+terminal descriptor outright, and `SYS_PTY_SLAVE_ID` documents that the name
+"grants nothing"). `write` opening someone else's terminal is exactly the
+ambient authority the design removes, so the tools need a service that holds
+the terminals and delivers with consent first -- a design question, recorded
+as `deferred-questions.md` DQ5 with its trigger.
+
+**Where:** new crates `userspace/mesg` and `userspace/write`; the deleted
+crate is in history at `userspace/mesg`.

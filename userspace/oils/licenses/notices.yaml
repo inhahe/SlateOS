@@ -1,0 +1,16 @@
+# The bash code userspace/oils carries (design-decisions 1433), read by
+# scripts/gather-notices.py.
+#
+# osh is written here rather than cross-compiled from upstream Oils (72), and
+# where it must behave as bash does, parts of it are ports of bash 5.2.37's
+# own sources, each citing the function it follows: hashlib.c (src/assoc.rs),
+# parse.y's error reporting (`error_token_from_text`, `parser_error`), and
+# functions of subst.c, arrayfunc.c, variables.c, expr.c and builtins/
+# (`sh_getopt`, declare.def, read.def...). userspace/charwidth's tables are
+# generated from Unicode data and only measured against bash, so they carry
+# nothing of it.
+GNU Bash:
+  version: 5.2.37
+  licence: GPL-3.0-or-later
+  texts:
+    - GPL-3.0

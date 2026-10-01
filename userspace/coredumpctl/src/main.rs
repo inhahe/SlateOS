@@ -2,11 +2,10 @@
 
 //! coredumpctl — Slate OS core dump management
 //!
-//! Multi-personality binary for viewing, analyzing, and managing core dumps.
-//! Detected via argv[0]:
-//!
-//! - `coredumpctl` (default) — core dump list/info/dump/debug
-//! - `coredump-extract` — extract core dump to file
+//! Lists, shows, extracts and debugs core dumps (`list`, `info`, `dump`,
+//! `debug`, `config`). It used to answer to `coredump-extract` too, a name
+//! no other system ships for what is `coredumpctl dump`; the name went in
+//! the §1045 triage (2026-10-01) and `dump` is the way to extract.
 
 use quoting::quoteaf_os;
 use std::collections::BTreeMap;
@@ -654,31 +653,6 @@ fn cmd_config() {
     );
 }
 
-// ── coredump-extract personality ───────────────────────────────────────
-
-fn run_coredump_extract(args: Vec<String>) -> i32 {
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    if rest.is_empty() || rest.iter().any(|a| a == "-h" || a == "--help") {
-        println!("coredump-extract — Extract core dump to file");
-        println!();
-        println!("Usage: coredump-extract [OPTIONS] [PID|EXE]");
-        println!();
-        println!("Options:");
-        println!("  -o, --output FILE     Output path (default: core.<comm>.<pid>)");
-        println!("  -h, --help            Show this help");
-        return 0;
-    }
-
-    // The status is returned, not discarded. When `cmd_dump` gained a return
-    // value in the previous commit this caller kept dropping it, so the
-    // option guard inside fired, printed, and the personality reported
-    // success anyway -- the same message-right/status-wrong shape that
-    // commit was fixing elsewhere. Rust does not warn on a discarded `i32`,
-    // and the sweep is what caught it.
-    cmd_dump(&rest)
-}
-
 // ── Help ───────────────────────────────────────────────────────────────
 
 fn print_help() {
@@ -745,25 +719,7 @@ fn run_coredumpctl(args: Vec<String>) -> i32 {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("coredumpctl");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let code = match prog_name.as_str() {
-        "coredump-extract" => run_coredump_extract(args),
-        _ => run_coredumpctl(args),
-    };
+    let code = run_coredumpctl(args);
 
     process::exit(code);
 }
@@ -880,27 +836,5 @@ mod tests {
         let config = read_config();
         // Will return default if /etc/systemd/coredump.conf doesn't exist
         assert_eq!(config.storage, "external");
-    }
-
-    #[test]
-    fn test_prog_name_detection() {
-        let cases = vec![
-            ("coredumpctl", "coredumpctl"),
-            ("coredump-extract", "coredump-extract"),
-            ("/usr/bin/coredumpctl", "coredumpctl"),
-            ("C:\\bin\\coredumpctl.exe", "coredumpctl"),
-        ];
-        for (input, expected) in cases {
-            let bytes = input.as_bytes();
-            let mut last_sep = 0;
-            for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' {
-                    last_sep = i + 1;
-                }
-            }
-            let base = &input[last_sep..];
-            let base = base.strip_suffix(".exe").unwrap_or(base);
-            assert_eq!(base, expected);
-        }
     }
 }

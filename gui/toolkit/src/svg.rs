@@ -9,8 +9,10 @@
 //! - Path element with full command set (M, L, H, V, C, S, Q, T, A, Z)
 //! - Styling: fill, fill-rule, fill-opacity, stroke, stroke-width,
 //!   stroke-linecap, stroke-linejoin, stroke-miterlimit, stroke-opacity,
-//!   opacity, display, transforms -- as presentation attributes or in a
-//!   `style` attribute, which wins; a `<style>` sheet's rules are not applied
+//!   opacity, display, transforms -- as presentation attributes, in a
+//!   `style` attribute, or from a `<style>` sheet's rules (the `css` module:
+//!   type, class, id and universal selectors, compounds, descendant and
+//!   child combinators), with CSS's cascade
 //! - Gradients: a fill or stroke of `url(#id)` paints with the linear or
 //!   radial gradient of that id, wherever the document defines it (see the
 //!   `paint` module for what of them is drawn); a fallback colour after the
@@ -52,6 +54,7 @@ use core::f32::consts::PI;
 use std::collections::HashMap;
 
 mod clip;
+mod css;
 mod paint;
 #[cfg(test)]
 mod use_tests;
@@ -1307,12 +1310,17 @@ impl DeclaredSize {
 impl SvgDocument {
     /// Parse an SVG string into a document tree.
     pub fn parse(svg_data: &str) -> Result<Self, SvgError> {
-        let elements = parse_xml(svg_data)?;
+        let mut elements = parse_xml(svg_data)?;
         // `first` rather than an `is_empty` check followed by `[0]`: the check
         // and the read are one expression, so they cannot drift apart.
         let first = elements
-            .first()
+            .first_mut()
             .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
+        // The document's `<style>` sheets first, into the `style` of each
+        // element they select, so that everything read below -- gradients'
+        // stops, clip paths, shapes -- reads what they say.
+        css::Sheet::of(first).apply(first);
+        let first: &XmlElement = first;
         // The gradients first, from the whole document: a shape may name one
         // defined after it. Their percentages are of the viewport.
         let (_, _, view_w, view_h) = DeclaredSize::of(first).shown();
@@ -1639,6 +1647,10 @@ struct XmlElement {
     tag: String,
     attrs: Vec<(String, String)>,
     children: Vec<XmlElement>,
+    /// The text a `<style>` element holds, its CDATA sections with it; empty
+    /// for every other element -- this renderer draws no text, and a sheet is
+    /// the one text it reads.
+    text: String,
 }
 
 impl XmlElement {
@@ -1798,6 +1810,11 @@ fn skip_prolog(c: &mut XmlCursor) {
 ///
 /// Always consumes at least one byte, which is what stops its callers' loops.
 fn skip_special(c: &mut XmlCursor) {
+    // A CDATA section runs to its `]]>`, whatever `>`s are in it.
+    if c.starts_with(CDATA_OPEN) {
+        take_cdata(c);
+        return;
+    }
     if c.starts_with(b"<!--") {
         c.advance(4);
         while !c.at_end() {
@@ -1876,6 +1893,9 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
     }
 
     let mut children = Vec::new();
+    // A style sheet is the one text this renderer reads.
+    let keeps_text = local_tag(&tag) == "style";
+    let mut text = String::new();
     if c.eat(b'/') {
         // Self-closing, `<tag ... />`. If the document ends before the '>',
         // the element is still what it is; there is nothing to recover.
@@ -1885,8 +1905,13 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
             c.skip_whitespace();
             let Some(byte) = c.peek() else { break };
             if byte != b'<' {
-                // Text content, which this parser has no use for.
-                c.bump();
+                if keeps_text {
+                    text.push_str(&decode_entities(&c.take_while(|b| b != b'<')));
+                    text.push('\n');
+                } else {
+                    // Text content, which this parser has no use for.
+                    c.bump();
+                }
                 continue;
             }
             match c.peek_at(1) {
@@ -1899,6 +1924,10 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
                     c.eat(b'>');
                     break;
                 }
+                Some(b'!') if keeps_text && c.starts_with(CDATA_OPEN) => {
+                    text.push_str(take_cdata(c));
+                    text.push('\n');
+                }
                 Some(b'!' | b'?') => skip_special(c),
                 _ => children.push(parse_element(c, depth.saturating_add(1))?),
             }
@@ -1909,7 +1938,77 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
         tag,
         attrs,
         children,
+        text,
     })
+}
+
+/// How a CDATA section opens, and closes.
+const CDATA_OPEN: &[u8] = b"<![CDATA[";
+const CDATA_CLOSE: &[u8] = b"]]>";
+
+/// The CDATA section at the cursor, read and passed: its text, which runs to
+/// its `]]>` -- not to the first `>`, which CSS's child combinator holds -- or
+/// to the end of the document if it never closes.
+fn take_cdata<'a>(c: &mut XmlCursor<'a>) -> &'a str {
+    c.advance(CDATA_OPEN.len());
+    let rest = c.rest();
+    let end = rest
+        .windows(CDATA_CLOSE.len())
+        .position(|w| w == CDATA_CLOSE)
+        .unwrap_or(rest.len());
+    c.advance(end.saturating_add(CDATA_CLOSE.len()));
+    // The document is text and the section is cut at ASCII bytes, so this
+    // cannot fail; were it to, the section reads as nothing rather than as
+    // text with its bytes replaced.
+    rest.get(..end)
+        .and_then(|section| core::str::from_utf8(section).ok())
+        .unwrap_or("")
+}
+
+/// `text` with XML's five named entities and its character references
+/// written out. One that is none of these is kept as written.
+fn decode_entities(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let decoded = from.find(';').and_then(|semi| {
+            let name = from.get(1..semi)?;
+            let ch = match name {
+                "lt" => '<',
+                "gt" => '>',
+                "amp" => '&',
+                "quot" => '"',
+                "apos" => '\'',
+                _ => {
+                    let code = match name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                        None => name.strip_prefix('#')?.parse::<u32>().ok()?,
+                    };
+                    char::from_u32(code)?
+                }
+            };
+            Some((ch, semi))
+        });
+        match decoded {
+            Some((ch, semi)) => {
+                out.push(ch);
+                rest = from.get(semi.saturating_add(1)..).unwrap_or("");
+            }
+            None => {
+                out.push('&');
+                rest = from.get(1..).unwrap_or("");
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An element's name without a namespace prefix (`svg:style` is `style`).
+fn local_tag(tag: &str) -> &str {
+    tag.rsplit_once(':').map_or(tag, |(_, local)| local)
 }
 
 fn parse_attr_value(c: &mut XmlCursor) -> Result<String, SvgError> {

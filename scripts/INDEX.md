@@ -216,6 +216,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/gen-human-fixture.sh` | Regenerate userspace/coreutils/tests/data/human-gnu.txt — the table of |
 | `scripts/gen-oils-bind-tables.py` | Regenerate `userspace/oils/src/bind_tables.rs` from the reference bash. |
 | `scripts/gen-script-index.py` | Generate a searchable one-line index of every script, and refuse a stale one. |
+| `scripts/getconf-diff.sh` | getconf-diff.sh — compare our `getconf` against glibc's, inside WSL. |
+| `scripts/getconf-gen.py` | Generate `userspace/getconf`'s variable table from glibc 2.39's getconf.c. |
 | `scripts/getopt-ambiguity-check.py` | Differential check: does our long-option resolution agree with GNU's? |
 | `scripts/getopt-diff.sh` | Differential test: our `getopt` against util-linux 2.39.3's. |
 | `scripts/gitenv.py` | Choosing which git repository a subprocess talks to. |
@@ -475,4 +477,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_465 scripts._
+_467 scripts._

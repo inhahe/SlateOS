@@ -1411,6 +1411,16 @@ name = "gdb"
 version = "0.1.0"
 
 [[package]]
+name = "getconf"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "libcall",
+ "posix",
+ "sysroot-dep",
+]
+
+[[package]]
 name = "getent"
 version = "0.1.0"
 dependencies = [

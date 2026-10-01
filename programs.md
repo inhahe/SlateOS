@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**460 programs; 88 on the image, 6 carried inside the kernel.**
+**461 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 305
+## Userland utilities and services (`userspace/`, lane B) -- 306
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -105,6 +105,7 @@ two disagree.
 | `fw` | Firewall Management CLI (`fw`) |  |  |  |
 | `fwupd` | Slate OS firmware update daemon |  |  | `fwupdtool` *(not installed)* |
 | `gdb` | GDB-like debugger and gdbserver |  |  |  |
+| `getconf` | Query system configuration variables: glibc 2.39's `posix/getconf.c`, ported. |  |  |  |
 | `getent` | Name service lookup utility. |  |  |  |
 | `getopt` | Parse command options for a shell script. |  |  |  |
 | `getty` | Virtual terminal login manager (agetty/mingetty) |  |  | `mingetty` *(not installed)* |

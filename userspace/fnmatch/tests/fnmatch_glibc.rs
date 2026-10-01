@@ -31,6 +31,15 @@
 //! Where we differ from glibc on purpose, [`DELIBERATE`] says so and why; every
 //! other difference is a bug in [`fnmatch`].
 
+// A test panics on a malformed fixture line by design: that is the failure it
+// reports. CLAUDE.md allows these lints in test code and nowhere else.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
 use fnmatch::{Flags, fnmatch};
 
 const FIXTURE: &str = include_str!("fnmatch-glibc.txt");

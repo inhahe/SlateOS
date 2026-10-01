@@ -99,6 +99,17 @@ def kind(note: str) -> str:
 
 
 def main() -> int:
+    # The checkers these cases trace run `git -C <scratch repo>` with the
+    # environment they inherit, and under a git hook that environment binds a
+    # repository: git exports GIT_DIR to its hooks, and GIT_DIR outranks -C.
+    # So under the pre-push hook every checker's git read the REAL repository
+    # -- the same answer before and after a case changed the scratch one --
+    # and "the repository moved, so git answers differently" got a HIT and
+    # failed a push (2026-10-01). Run by hand it passed, because nothing was
+    # bound. Scrubbing here is what the other git-touching suites do.
+    removed = gitenv.scrub_environ()
+    if removed:
+        print(f"(ignoring the repository this suite was started in: {', '.join(removed)})")
     fx = Fixture()
     try:
         cases(fx)

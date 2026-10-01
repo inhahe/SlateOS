@@ -167,10 +167,12 @@
 #      three, and it is worth it because the failure it catches is one lane
 #      handing another a red main -- twice in one day, from the same lane,
 #      through the same hole.
-#  51. Refuse a pushed revision holding a tracked file with no owner, a line
-#      in the ownership table naming nothing tracked, or a script owned by
-#      two lanes (design-decisions §973, the operator's answer to A-Q11). A
-#      new file gets its owner in the commit that creates it.
+#  51. Refuse a warning in the libc's own sources, compiled as they ship:
+#      toolchain/build-sysroot.ps1's crates, with its settings, for its
+#      target. That build and gate 40's compile of posix both judge by exit
+#      status, which a warning leaves at 0, and the host's tests and clippy
+#      never compile `cfg(target_os = "none")` -- so a function dead there
+#      sat in every sysroot build's output for six commits, read by nothing.
 #  52. Run check-manifest-producers.py at the push (design-decisions 974): manifest producers.
 #  53. Run check-cp-diff-sees-nul.py at the push (design-decisions 974): cp-diff sees NUL.
 #  54. Run check-gates-can-refuse.py at the push (design-decisions 974): gates can refuse.
@@ -193,13 +195,10 @@
 #  71. Run check-generated-tables.py at the push (design-decisions 974): generated tables.
 #  72. Run check-diskcleanup-test-roots.py at the push (design-decisions 974): diskcleanup test roots.
 #  73. Run check-selftest-reinit.py at the push (design-decisions 974): self-test tables re-opened.
-#
-#  51. Refuse a warning in the libc's own sources, compiled as they ship:
-#      toolchain/build-sysroot.ps1's crates, with its settings, for its
-#      target. That build and gate 40's compile of posix both judge by exit
-#      status, which a warning leaves at 0, and the host's tests and clippy
-#      never compile `cfg(target_os = "none")` -- so a function dead there
-#      sat in every sysroot build's output for six commits, read by nothing.
+#  74. Refuse a pushed revision holding a tracked file with no owner, a line
+#      in the ownership table naming nothing tracked, or a script owned by
+#      two lanes (design-decisions §973, the operator's answer to A-Q11). A
+#      new file gets its owner in the commit that creates it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the

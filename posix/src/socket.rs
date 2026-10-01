@@ -4693,8 +4693,9 @@ fn nic_counters() -> Option<[u64; 6]> {
             return None;
         }
         let mut counters = [0u64; 6];
-        for (counter, bytes) in counters.iter_mut().zip(raw.chunks_exact(8)) {
-            *counter = <[u8; 8]>::try_from(bytes).map_or(0, u64::from_le_bytes);
+        let (words, _) = raw.as_chunks::<8>();
+        for (counter, bytes) in counters.iter_mut().zip(words) {
+            *counter = u64::from_le_bytes(*bytes);
         }
         Some(counters)
     }

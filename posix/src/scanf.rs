@@ -1496,7 +1496,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
     /// -- as glibc's `ungetc(c)` after its `inchar` chain gives back the last
     /// one.
     fn read_nil(&mut self) -> Result<(), Option<I::U>> {
-        for want in [b'n', b'i', b'l'] {
+        for want in *b"nil" {
             match self.inp.get() {
                 Some(x) if x.byte().to_ascii_lowercase() == want => {}
                 other => return Err(other),
@@ -1539,7 +1539,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
         if lower == b'n' {
             // "nan", or nothing.
             self.charbuf.push(c.byte());
-            for want in [b'a', b'n'] {
+            for want in *b"an" {
                 if width == 0 {
                     return Err(Stop::Conv);
                 }
@@ -1556,7 +1556,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
         } else if lower == b'i' {
             // "inf", maybe "infinity".
             self.charbuf.push(c.byte());
-            for want in [b'n', b'f'] {
+            for want in *b"nf" {
                 if width == 0 {
                     return Err(Stop::Conv);
                 }
@@ -1576,7 +1576,7 @@ impl<I: Input> Engine<'_, '_, '_, I> {
                             width = width.wrapping_sub(1);
                         }
                         self.charbuf.push(next.byte());
-                        for want in [b'n', b'i', b't', b'y'] {
+                        for want in *b"nity" {
                             if width == 0 {
                                 return Err(Stop::Conv);
                             }

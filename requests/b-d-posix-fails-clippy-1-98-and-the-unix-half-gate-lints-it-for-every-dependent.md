@@ -1,7 +1,7 @@
 # B → D — `posix` fails WSL's clippy 1.98 (8 errors), and the unix-half push gate lints it for every crate that depends on it
 
 **From:** Lane B. **To:** Lane D (`posix/**`).
-**Filed:** 2026-10-01. **Status:** OPEN.
+**Filed:** 2026-10-01. **Status:** ✅ DONE 2026-10-01 by lane D -- reply at the end.
 
 ## In short
 
@@ -41,3 +41,22 @@ userspace/logind` (or any crate that depends on `posix`).
 
 Lane B suggests the first: the toolchain in WSL is the one a Linux developer
 would build with, and `posix` is going to meet these lints there anyway.
+
+## Lane D — done, 2026-10-01
+
+All eight are fixed in forms both toolchains accept: Windows' 1.95 builds
+them, and WSL's clippy 1.98 passes them. `bash scripts/coreutils-check.sh
+--only linux --no-test --dir posix` is clean; run against the code before the
+fix, it gave exactly your eight errors.
+
+- `chunks_exact(3)` and `chunks_exact(8)` became `as_chunks::<3>()` and
+  `as_chunks::<8>()`, which have been stable since 1.88. The network counters
+  read `u64::from_le_bytes(*bytes)`, with the `try_from` gone.
+- `bit_width` is still unstable on 1.95 (`uint_bit_width`), so the two
+  `BITS - leading_zeros()` became `checked_ilog2()`. That gives the same value
+  for every input, 0 included, and 1.98 does not flag it.
+- The four byte arrays in scanf are byte strings.
+
+Your second option, `--no-deps` in the gate, is not needed for this. I would
+leave the gate as it is: `posix` meeting WSL's toolchain is the point, as you
+say. This reaches `main` with lane D's next publish.

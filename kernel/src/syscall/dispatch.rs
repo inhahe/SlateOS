@@ -1025,6 +1025,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_exec_close()?;
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
+    test_dispatch_shared_anonymous_memory()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2802,6 +2803,97 @@ fn test_cpu_current() -> KernelResult<()> {
     serial_println!(
         "[syscall]   SYS_CPU_CURRENT (1092): CPU {}, node 0: OK",
         got
+    );
+    Ok(())
+}
+
+/// Shared anonymous memory, through both ABIs, as a scratch process maps it
+/// (known-issues `A-FORK-MADE-SHARED-MEMORY-COPY-ON-WRITE`, "Not done"):
+///
+/// - native `SYS_MMAP` with `MAP_SHARED` maps committed pages marked
+///   `PageFlags::SHARED`, which fork shares rather than copies
+///   (`mm::cow::test_fork_keeps_shared_pages_shared`) and futexes key by
+///   physical page;
+/// - `MAP_SHARED | MAP_LAZY` is refused;
+/// - the Linux `MAP_SHARED | MAP_ANONYMOUS` does the same (it was `ENOSYS`),
+///   and a map with neither `MAP_SHARED` nor `MAP_PRIVATE` is `EINVAL`.
+fn test_dispatch_shared_anonymous_memory() -> KernelResult<()> {
+    use super::number::{MAP_LAZY, MAP_READ, MAP_SHARED, MAP_WRITE};
+    use crate::mm::page_table::{VirtAddr, shared_phys};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: shared anonymous memory: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4: u64::MAX, // the Linux fd: -1
+        arg5: 0,
+    };
+    const LEN: u64 = 0x8000; // two 16 KiB frames
+
+    let pid = pcb::create("shared-anon", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let shared_at = |va: u64| shared_phys(pml4, VirtAddr::new(va)).is_some();
+
+    // Native: committed, shared, every page.
+    let native = as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_WRITE | MAP_SHARED, 0));
+    let Ok(native) = u64::try_from(native) else {
+        serial_println!("[syscall]     native MAP_SHARED answered {}", native);
+        return fail("native MAP_SHARED did not map", pid);
+    };
+    let native_ok = shared_at(native) && shared_at(native.saturating_add(0x4000));
+    let unmapped = as_pid(SYS_MUNMAP, args(native, LEN, 0, 0));
+    if !native_ok || unmapped != 0 {
+        return fail("native MAP_SHARED pages are not marked shared", pid);
+    }
+    if as_pid(SYS_MMAP, args(0, LEN, MAP_READ | MAP_SHARED | MAP_LAZY, 0))
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("MAP_SHARED | MAP_LAZY was not refused", pid);
+    }
+
+    // Linux: MAP_SHARED | MAP_ANONYMOUS (0x21), PROT_READ | PROT_WRITE.
+    let linux = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x21)).value
+    });
+    let Ok(linux) = u64::try_from(linux) else {
+        serial_println!(
+            "[syscall]     Linux MAP_SHARED|MAP_ANONYMOUS answered {}",
+            linux
+        );
+        return fail("Linux shared anonymous mmap did not map", pid);
+    };
+    let linux_ok = shared_at(linux);
+    let linux_unmapped = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MUNMAP, &args(linux, LEN, 0, 0)).value
+    });
+    let neither = self_test_as_process(pid, || {
+        super::linux::dispatch_linux(super::linux::nr::MMAP, &args(0, LEN, 0x3, 0x20)).value
+    });
+    if !linux_ok || linux_unmapped != 0 {
+        return fail("Linux shared anonymous pages are not marked shared", pid);
+    }
+    if neither != i64::from(super::linux::errno::EINVAL).wrapping_neg() {
+        serial_println!("[syscall]     a map with no type answered {}", neither);
+        return fail(
+            "a map with neither MAP_SHARED nor MAP_PRIVATE was not EINVAL",
+            pid,
+        );
+    }
+
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   shared anonymous memory (native MAP_SHARED, Linux MAP_SHARED|MAP_ANONYMOUS): OK"
     );
     Ok(())
 }

@@ -6696,7 +6696,11 @@ fn resolve_mmap_addr_hint(addr: u64, fixed: bool, frame_size: u64) -> Option<u64
 ///   [`linux_file_mmap`], which backs `ld.so`'s shared-object loading and
 ///   `MAP_PRIVATE` data maps. A `/dev/dri/cardN` fd is special-cased to
 ///   [`drm_mmap_dumb`] (the dumb-buffer GEM mapping).
-/// - Shared *anonymous* (`MAP_ANONYMOUS` without `MAP_PRIVATE`): `-ENOSYS`.
+/// - Shared *anonymous* (`MAP_ANONYMOUS | MAP_SHARED`, or
+///   `MAP_SHARED_VALIDATE`): committed memory marked shared, so a `fork`
+///   shares it rather than copying it (native `MAP_SHARED`). It was `-ENOSYS`
+///   until 2026-10-01. A map with neither `MAP_SHARED` nor `MAP_PRIVATE` is
+///   `-EINVAL`, as on Linux.
 /// - File-backed with no fd: `-EBADF`; unaligned `offset`: `-EINVAL`;
 ///   `length == 0`: `-EINVAL` — gate order matches x86_64 Linux.
 ///
@@ -6740,7 +6744,6 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::HW_PAGE_SIZE;
 
-    const MAP_PRIVATE: u64 = 0x02;
     const MAP_ANONYMOUS: u64 = 0x20;
     const MAP_FIXED: u64 = 0x10;
 
@@ -6804,10 +6807,15 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         };
         return linux_file_mmap(&entry, pid, addr_hint, length, prot, flags, offset);
     }
-    if (flags & MAP_PRIVATE) == 0 {
-        // We don't support shared anonymous in Linux ABI yet.
-        return linux_err(errno::ENOSYS);
-    }
+    // The map type: MAP_SHARED (1), MAP_PRIVATE (2), or MAP_SHARED_VALIDATE
+    // (3, shared with its flags validated). Neither is EINVAL, as Linux's
+    // `do_mmap` answers it.
+    const MAP_TYPE: u64 = 0x03;
+    let shared = match flags & MAP_TYPE {
+        0x02 => false,
+        0x01 | 0x03 => true,
+        _ => return linux_err(errno::EINVAL),
+    };
     // length == 0 is EINVAL on Linux.  Catch it here so the rlimit
     // charge doesn't see a zero-byte request slip through.
     if length == 0 {
@@ -6824,7 +6832,10 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // with `BadAlignment`, so we register a *demand-paged* 4 KiB-granular
     // `Anonymous` VMA here — the per-subpage fault resolver zero-fills it,
     // sharing the straddled 16 KiB frame with the adjacent data segment.
-    if fixed {
+    // ld.so's 4 KiB demand-paged overlay is private by nature; a shared
+    // MAP_FIXED map goes through the committed native path below, at frame
+    // granularity.
+    if fixed && !shared {
         // Unaligned MAP_FIXED address is EINVAL on Linux (get_unmapped_area),
         // and this gate is independent of process context — run it first so it
         // fires even in kernel/self-test callers (no owning pid) and matches
@@ -6913,7 +6924,11 @@ fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // overrides it.
     let sysctl_linux_lazy =
         crate::sysctl::get(crate::sysctl::PARAM_MM_LINUX_LAZY_DEFAULT) != Some(0);
-    let mut native_flags: u64 = if commit_policy.linux_lazy(sysctl_linux_lazy) {
+    // Shared anonymous memory is always committed (native `MAP_SHARED`): a
+    // lazily faulted page would not be shared with a forked child.
+    let mut native_flags: u64 = if shared {
+        super::number::MAP_SHARED
+    } else if commit_policy.linux_lazy(sysctl_linux_lazy) {
         super::number::MAP_LAZY
     } else {
         0

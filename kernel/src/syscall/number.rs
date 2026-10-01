@@ -107,6 +107,8 @@ pub const SYS_SLEEP: u64 = 11;
 /// | `MAP_NOCACHE` | 3   | Disable CPU caching (for MMIO)           |
 /// | `MAP_MMIO`    | 4   | Map specific phys addr from `arg3`       |
 /// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
+/// | `MAP_LAZY`    | 6   | Demand-paged rather than committed       |
+/// | `MAP_SHARED`  | 7   | Shared with every process forked from it |
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub const SYS_MMAP: u64 = 20;
@@ -131,6 +133,19 @@ pub const MAP_FIXED: u64 = 1 << 5;
 /// committed allocation (the default per design spec: "committed
 /// memory by default, lazy allocation opt-in").
 pub const MAP_LAZY: u64 = 1 << 6;
+/// Mmap flag: anonymous memory **shared** with every process that inherits it
+/// by `fork`, rather than copied on write -- POSIX `MAP_SHARED |
+/// MAP_ANONYMOUS`, the everyday way to share memory with a child.
+///
+/// The pages are marked `PageFlags::SHARED`. Fork then maps the same frames
+/// into the child, writable on both sides, and a futex word in them is one
+/// futex in every process that maps them. Always committed: a lazily faulted
+/// page would be faulted separately in each process and share nothing, so
+/// `MAP_SHARED | MAP_LAZY` is `InvalidArgument`, and the per-process lazy
+/// default does not apply. Ignored with `MAP_MMIO`, whose device memory is
+/// shared already. Since 2026-10-01; it was ignored before, so "map it
+/// shared, then fork" did not exist.
+pub const MAP_SHARED: u64 = 1 << 7;
 
 /// Unmap a previously mapped region.
 ///

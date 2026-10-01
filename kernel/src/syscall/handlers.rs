@@ -940,7 +940,9 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
-    use super::number::{MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_WRITE};
+    use super::number::{
+        MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_SHARED, MAP_WRITE,
+    };
     use crate::mm::frame::{FRAME_SIZE, PhysFrame};
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
@@ -949,6 +951,14 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     let size = args.arg1;
     let mut flags = args.arg2;
     let phys_addr = args.arg3;
+    // Shared anonymous memory is always committed: a page faulted in lazily
+    // would be faulted separately in each process after a fork and share
+    // nothing (see `MAP_SHARED`). An explicit request for both is a contract
+    // nobody can keep; device memory is shared already, so MMIO ignores it.
+    let shared_anon = flags & MAP_SHARED != 0 && flags & MAP_MMIO == 0;
+    if shared_anon && flags & MAP_LAZY != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
 
     // If the caller didn't explicitly specify a commit bit (MAP_LAZY /
     // MAP_MMIO), pick the default commit mode.  A per-process policy
@@ -956,7 +966,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // the system-wide default (PARAM_MM_LAZY_DEFAULT) applies.  MMIO
     // mappings are always committed (they must map specific physical
     // addresses), so they bypass this entirely.
-    if flags & (MAP_LAZY | MAP_MMIO) == 0 {
+    if flags & (MAP_LAZY | MAP_MMIO) == 0 && !shared_anon {
         let sysctl_lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
         let policy = thread::owner_process(sched::current_task_id())
             .and_then(pcb::get_mmap_commit_policy)
@@ -1012,6 +1022,13 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     }
     if flags & MAP_NOCACHE != 0 {
         page_flags |= PageFlags::NO_CACHE;
+    }
+    // Shared anonymous memory: fork maps these frames into the child as they
+    // are instead of copy-on-write, and a futex in them is keyed by the
+    // physical page (`ipc::futex`). The VMA carries the flag too, so the
+    // committed path below maps every page with it.
+    if shared_anon {
+        page_flags |= PageFlags::SHARED;
     }
 
     // Pick a virtual address.

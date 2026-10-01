@@ -176730,11 +176730,17 @@ address space holding a shared page. Both sides must map the one frame
 writable, with no `COW` and no rmap entry, and the reference counts must
 balance through teardown. `mark_cow` must refuse the page.
 
-**Not done.** The Linux ABI still has no writable shared mapping at all
-(`MAP_SHARED | MAP_ANONYMOUS` and writable `MAP_SHARED` of a file are
-`ENOSYS`), and native `SYS_MMAP` ignores `MAP_SHARED`. So the everyday
-POSIX way to share memory with a child -- map it shared, then fork -- does
-not exist yet. The kernel half of it is now right.
+**Shared anonymous memory, done 2026-10-01.** Native `SYS_MMAP` takes
+`MAP_SHARED` (`1 << 7`): committed pages marked `SHARED`, so a fork shares
+them. `MAP_SHARED | MAP_LAZY` is refused, since a lazily faulted page would
+not be shared. The Linux `MAP_SHARED | MAP_ANONYMOUS` maps the same way
+(it was `ENOSYS`), and a map with neither type is `EINVAL`. Test:
+`syscall::dispatch::test_dispatch_shared_anonymous_memory`. libc's half --
+it passes `prot` through as the native flags and never says `MAP_SHARED` --
+is `requests/a-d-libc-mmap-should-say-map-shared-and-translate-prot.md`.
+
+**Still not done:** a writable `MAP_SHARED` of a *file* is `ENOSYS`. There is
+no writeback, so a write could not reach the file.
 
 ### [A] A-MPROTECT-READ-ONLY-DID-NOT-STICK-ON-COPY-ON-WRITE-PAGES: a page made read-only after a fork could still be written -- 2026-09-27
 **Status:** FIXED on lane-a 2026-09-27, awaiting a boot. Found alongside

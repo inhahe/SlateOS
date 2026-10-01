@@ -240,6 +240,44 @@ pub(crate) fn abi_asserts() -> String {
          rdlength as "rdlength", rdata as "rdata");
     abi!(out, hdrs, crate::resolv::NsFlagData, "struct _ns_flagdata", "arpa/nameser.h",
          mask as "mask", shift as "shift");
+    // The resolver's state, which res_ninit and the other reentrant calls
+    // take of the caller's own. `ndots`, `nsort` and `ipv6_unavail` are
+    // bit-fields, which `offsetof` cannot name -- ours hold them as `bits`;
+    // the size and every field around them pin it.
+    abi!(
+        out,
+        hdrs,
+        crate::resolv::ResState,
+        "struct __res_state",
+        "resolv.h",
+        retrans,
+        retry,
+        options,
+        nscount,
+        nsaddr_list,
+        id,
+        dnsrch,
+        defdname,
+        pfcode,
+        sort_list,
+        qhook,
+        rhook,
+        res_h_errno,
+        _vcsock,
+        _flags,
+        _u
+    );
+    // A symbol table's entry, which sym_ntos and its kin take tables of.
+    abi!(
+        out,
+        hdrs,
+        crate::res_debug::ResSym,
+        "struct res_sym",
+        "resolv.h",
+        number,
+        name,
+        humanname
+    );
 
     // --- time: ftime's result -------------------------------------------------
     abi!(
@@ -656,7 +694,33 @@ pub(crate) fn abi_asserts() -> String {
     );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
-    abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
+    // glibc's `struct re_pattern_buffer`, posix/include's; its seven
+    // bit-fields, which `offsetof` cannot name, are the `unsigned int` at 56
+    // that the size covers.
+    abi!(
+        out,
+        hdrs,
+        crate::regex::RegexT,
+        "regex_t",
+        "regex.h",
+        buffer,
+        allocated,
+        used,
+        syntax,
+        fastmap,
+        translate,
+        re_nsub,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::regex::ReRegisters,
+        "struct re_registers",
+        "regex.h",
+        num_regs,
+        start,
+        end
+    );
     abi!(
         out,
         hdrs,
@@ -665,6 +729,38 @@ pub(crate) fn abi_asserts() -> String {
         "regex.h",
         rm_so,
         rm_eo
+    );
+
+    // --- obstack: the program's own, which <obstack.h>'s macros open --------
+    // glibc's `struct obstack`, posix/include's; its three bit-fields, which
+    // `offsetof` cannot name, are the `unsigned int` at 80 that the size
+    // covers.
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::Obstack,
+        "struct obstack",
+        "obstack.h",
+        chunk_size,
+        chunk,
+        object_base,
+        next_free,
+        chunk_limit,
+        temp,
+        alignment_mask,
+        chunkfun,
+        freefun,
+        extra_arg,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::obstack::ObstackChunk,
+        "struct _obstack_chunk",
+        "obstack.h",
+        limit,
+        prev,
+        contents
     );
 
     // --- small odds and ends -------------------------------------------------
@@ -779,6 +875,55 @@ pub(crate) fn abi_asserts() -> String {
         sp_inact,
         sp_expire,
         sp_flag
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::gshadow::Sgrp,
+        "struct sgrp",
+        "gshadow.h",
+        sg_namp,
+        sg_passwd,
+        sg_adm,
+        sg_mem
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::aliases::Aliasent,
+        "struct aliasent",
+        "aliases.h",
+        alias_name,
+        alias_members_len,
+        alias_members,
+        alias_local
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::fstab::Fstab,
+        "struct fstab",
+        "fstab.h",
+        fs_spec,
+        fs_file,
+        fs_vfstype,
+        fs_mntops,
+        fs_type,
+        fs_freq,
+        fs_passno
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::ttyent::Ttyent,
+        "struct ttyent",
+        "ttyent.h",
+        ty_name,
+        ty_getty,
+        ty_type,
+        ty_status,
+        ty_window,
+        ty_comment
     );
     abi!(
         out,
@@ -948,7 +1093,25 @@ pub(crate) fn abi_asserts() -> String {
     // promise.
     abi!(out, hdrs, crate::poll::FdSet, "fd_set", "sys/select.h");
     abi!(out, hdrs, crate::signal::SiginfoT, "siginfo_t", "signal.h");
-    abi!(out, hdrs, crate::glob::GlobT, "glob_t", "glob.h");
+    // Not opaque: posix/include's <glob.h> names glibc's fields, which musl's
+    // calls __dummy1 and __dummy2 -- GLOB_ALTDIRFUNC's functions among them,
+    // which a program sets.
+    abi!(
+        out,
+        hdrs,
+        crate::glob::GlobT,
+        "glob_t",
+        "glob.h",
+        gl_pathc,
+        gl_pathv,
+        gl_offs,
+        gl_flags,
+        gl_closedir,
+        gl_readdir,
+        gl_opendir,
+        gl_lstat,
+        gl_stat
+    );
     abi!(
         out,
         hdrs,
@@ -985,6 +1148,21 @@ pub(crate) fn abi_asserts() -> String {
         aio_reqprio,
         aio_sigevent,
         aio_lio_opcode
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::aio::AioInit,
+        "struct aioinit",
+        "aio.h",
+        aio_threads,
+        aio_num,
+        aio_locks,
+        aio_usedba,
+        aio_debug,
+        aio_numusers,
+        aio_idle_time,
+        aio_reserved
     );
     abi!(
         out,
@@ -1085,6 +1263,29 @@ pub(crate) fn abi_asserts() -> String {
         n_aliases,
         n_addrtype,
         n_net
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::gai_a::Gaicb,
+        "struct gaicb",
+        "netdb.h",
+        ar_name,
+        ar_service,
+        ar_request,
+        ar_result,
+        ret as "__return",
+        reserved as "__glibc_reserved"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::netdb::Rpcent,
+        "struct rpcent",
+        "rpc/netdb.h",
+        r_name,
+        r_aliases,
+        r_number
     );
     abi!(
         out,
@@ -1296,6 +1497,19 @@ pub(crate) fn abi_asserts() -> String {
         crate::sys_timex::Timex,
         "struct timex",
         "sys/timex.h"
+    );
+    // glibc's, which the overlay defines in place of musl's shorter one.
+    abi!(
+        out,
+        hdrs,
+        crate::sys_timex::NtpTimeval,
+        "struct ntptimeval",
+        "sys/timex.h",
+        time,
+        maxerror,
+        esterror,
+        tai,
+        reserved as "__glibc_reserved1"
     );
 
     // --- the kernel-ABI structs, checked against the kernel's own uapi -------

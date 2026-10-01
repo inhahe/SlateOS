@@ -27,6 +27,10 @@
 //!   `sigqueue` cannot deliver one yet; plain `raise` is glibc's own choice
 //!   on a system without queued signals.
 //!
+//! With no pool, glibc's `aio_init` has nothing to tune: it takes its
+//! `struct aioinit` and ignores it ([`aio_init`]).  glibc's large-file
+//! names, `aio_read64` ... `lio_listio64`, are the same functions.
+//!
 //! ## What changed on 2026-09-26
 //!
 //! Every request's outcome used to live in a 16-entry table keyed by the
@@ -43,6 +47,8 @@
 //! (`known-issues.md` → `B-D-AIO-OUTCOMES-EVICTED-AND-NEVER-NOTIFIED`.)
 
 use crate::errno;
+use crate::interrupt::Restart;
+use crate::lowlevellock::Waited;
 use crate::sigevent::{SigeventView, notify};
 use core::sync::atomic::{AtomicI32, AtomicIsize, Ordering};
 
@@ -489,7 +495,10 @@ pub extern "C" fn aio_cancel(fd: i32, aiocbp: *mut Aiocb) -> i32 {
 /// 0 at once when any listed request is not in progress, or when every
 /// entry is NULL; otherwise it sleeps until one completes.  A `timeout` is
 /// relative and measured on `CLOCK_MONOTONIC`; running out is `EAGAIN`, and
-/// a malformed one is `EINVAL` when it comes to be used.
+/// a malformed one is `EINVAL` when it comes to be used.  A signal handler
+/// that runs on the thread meanwhile is `EINTR` -- without a timeout, only
+/// one installed without `SA_RESTART`, as glibc's answers
+/// ([`crate::interrupt`]).
 ///
 /// Until 2026-09-26 this refused `nent == 0`, which glibc accepts, and never
 /// waited: a request another thread was performing was reported complete.
@@ -518,7 +527,11 @@ pub extern "C" fn aio_suspend(
             break 0;
         }
         if timeout.is_null() {
-            crate::lowlevellock::futex_wait(seq, seen);
+            let waited =
+                crate::lowlevellock::futex_wait_interruptible(seq, seen, None, Restart::IfAsked);
+            if waited == Waited::Interrupted {
+                break errno::EINTR;
+            }
             continue;
         }
         let at = match deadline {
@@ -540,7 +553,17 @@ pub extern "C" fn aio_suspend(
         let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
         match crate::lowlevellock::ns_until(&now, &at) {
             None => break errno::EAGAIN,
-            Some(ns) => crate::lowlevellock::futex_wait_timeout(seq, seen, ns),
+            Some(ns) => {
+                let waited = crate::lowlevellock::futex_wait_interruptible(
+                    seq,
+                    seen,
+                    Some(ns),
+                    Restart::Never,
+                );
+                if waited == Waited::Interrupted {
+                    break errno::EINTR;
+                }
+            }
         }
     };
     sleepers.fetch_sub(1, Ordering::SeqCst);
@@ -550,6 +573,25 @@ pub extern "C" fn aio_suspend(
         errno::set_errno(result);
         -1
     }
+}
+
+/// A request another thread is performing, as `aio_suspend` sees one: for
+/// [`crate::interrupt`]'s tests, which suspend on it.
+#[cfg(test)]
+pub(crate) fn test_in_progress() -> Aiocb {
+    // SAFETY: every field is an integer, an atomic integer, a raw pointer or
+    // a byte array, for all of which zero is valid.
+    let cb: Aiocb = unsafe { core::mem::zeroed() };
+    cb.error_code.store(errno::EINPROGRESS, Ordering::Relaxed);
+    cb
+}
+
+/// Finish `cb` as the thread performing it would: for [`crate::interrupt`]'s
+/// tests.
+#[cfg(test)]
+pub(crate) fn test_finish(cb: &Aiocb) {
+    record(cb, 0, 0);
+    completed();
 }
 
 /// Would glibc's `aio_suspend` sleep on this list: is there a non-NULL
@@ -728,6 +770,112 @@ pub extern "C" fn lio_listio(
     }
     if refused { -1 } else { 0 }
 }
+
+// ---------------------------------------------------------------------------
+// glibc's large-file names
+// ---------------------------------------------------------------------------
+//
+// glibc's `struct aiocb64` is its `struct aiocb` with a 64-bit offset, which
+// on x86_64 `aio_offset` is already, and each `*64` call its twin under a
+// second name. musl's <aio.h> makes the names macros for the standard ones
+// under `_LARGEFILE64_SOURCE`; these are for code that declares them itself.
+
+/// `aio_read64` -- [`aio_read`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_read64(aiocbp: *mut Aiocb) -> i32 {
+    aio_read(aiocbp)
+}
+
+/// `aio_write64` -- [`aio_write`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_write64(aiocbp: *mut Aiocb) -> i32 {
+    aio_write(aiocbp)
+}
+
+/// `aio_error64` -- [`aio_error`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_error64(aiocbp: *const Aiocb) -> i32 {
+    aio_error(aiocbp)
+}
+
+/// `aio_return64` -- [`aio_return`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_return64(aiocbp: *mut Aiocb) -> isize {
+    aio_return(aiocbp)
+}
+
+/// `aio_cancel64` -- [`aio_cancel`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_cancel64(fd: i32, aiocbp: *mut Aiocb) -> i32 {
+    aio_cancel(fd, aiocbp)
+}
+
+/// `aio_fsync64` -- [`aio_fsync`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_fsync64(op: i32, aiocbp: *mut Aiocb) -> i32 {
+    aio_fsync(op, aiocbp)
+}
+
+/// `aio_suspend64` -- [`aio_suspend`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_suspend64(
+    list: *const *const Aiocb,
+    nent: i32,
+    timeout: *const crate::stat::Timespec,
+) -> i32 {
+    aio_suspend(list, nent, timeout)
+}
+
+/// `lio_listio64` -- [`lio_listio`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lio_listio64(
+    mode: i32,
+    list: *const *mut Aiocb,
+    nent: i32,
+    sig: *mut crate::time::Sigevent,
+) -> i32 {
+    lio_listio(mode, list, nent, sig)
+}
+
+// ---------------------------------------------------------------------------
+// aio_init -- glibc's tuning of its thread pool
+// ---------------------------------------------------------------------------
+
+/// glibc's `struct aioinit` (`<aio.h>`, `_GNU_SOURCE`): how [`aio_init`]
+/// should size glibc's thread pool. 32 bytes, eight `int`s.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AioInit {
+    /// The most threads the pool may have.
+    pub aio_threads: i32,
+    /// How many requests are expected at once.
+    pub aio_num: i32,
+    /// Unused, in glibc too.
+    pub aio_locks: i32,
+    /// Unused, in glibc too.
+    pub aio_usedba: i32,
+    /// Unused, in glibc too.
+    pub aio_debug: i32,
+    /// Unused, in glibc too.
+    pub aio_numusers: i32,
+    /// How many seconds an idle thread waits for work before it ends.
+    pub aio_idle_time: i32,
+    /// Reserved.
+    pub aio_reserved: i32,
+}
+
+/// `aio_init(init)` (GNU): tune the implementation. glibc sizes its thread
+/// pool from `aio_threads` and `aio_num`, until the pool first exists, and
+/// takes how long an idle worker waits from `aio_idle_time`; the other
+/// fields it ignores, and it answers nothing.
+///
+/// This library has no pool -- each request is performed in the calling
+/// thread before its call returns (the module's documentation) -- so there
+/// is nothing to size, and every field is ignored. No caller can tell:
+/// glibc's tuning changes which threads carry the requests, never what the
+/// requests do. A NULL `init`, which glibc's reads through, is ignored too.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn aio_init(_init: *const AioInit) {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1121,6 +1269,129 @@ mod tests {
         };
         let at = add_timespec(&now, &rel);
         assert_eq!((at.tv_sec, at.tv_nsec), (12, 100_000_000));
+    }
+
+    // -- aio_init --
+
+    #[test]
+    fn test_aioinit_is_glibcs_layout() {
+        assert_eq!(size_of::<AioInit>(), 32);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_num), 4);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_idle_time), 24);
+        assert_eq!(core::mem::offset_of!(AioInit, aio_reserved), 28);
+    }
+
+    /// Any tuning, NULL too, is accepted, and changes nothing a request does:
+    /// a write and a read after it complete as they do without it.
+    #[test]
+    fn test_aio_init_changes_no_outcome() {
+        let tunings = [
+            AioInit::default(),
+            AioInit {
+                aio_threads: 1,
+                aio_num: 1,
+                aio_idle_time: 1,
+                ..AioInit::default()
+            },
+            AioInit {
+                aio_threads: -5,
+                aio_num: i32::MAX,
+                aio_locks: -1,
+                aio_usedba: -1,
+                aio_debug: -1,
+                aio_numusers: -1,
+                aio_idle_time: i32::MIN,
+                aio_reserved: -1,
+            },
+        ];
+        errno::set_errno(4321);
+        aio_init(core::ptr::null());
+        for t in &tunings {
+            aio_init(t);
+        }
+        assert_eq!(errno::get_errno(), 4321, "aio_init leaves errno alone");
+        let fd = eventfd();
+        let mut seven = 7u64;
+        let mut w = write_request(fd, &mut seven);
+        assert_eq!(aio_write(&raw mut w), 0);
+        assert_eq!((aio_error(&w), aio_return(&raw mut w)), (0, 8));
+        let mut got = 0u64;
+        let mut r = write_request(fd, &mut got);
+        assert_eq!(aio_read(&raw mut r), 0);
+        assert_eq!((aio_error(&r), aio_return(&raw mut r)), (0, 8));
+        assert_eq!(got, 7);
+        crate::file::close(fd);
+    }
+
+    // -- glibc's large-file names --
+
+    /// What `f` returned and the errno it left, errno cleared first.
+    fn outcome<T>(f: impl FnOnce() -> T) -> (T, i32) {
+        errno::set_errno(0);
+        let r = f();
+        (r, errno::get_errno())
+    }
+
+    /// Each `*64` name is its base: a request cycle through them alone, and
+    /// their refusals with their bases' errno.
+    #[test]
+    fn test_large_file_names_are_their_bases() {
+        let fd = eventfd();
+        let (mut a, mut b) = (4u64, 6u64);
+        let mut w = write_request(fd, &mut a);
+        assert_eq!(aio_write64(&raw mut w), 0);
+        assert_eq!(aio_error64(&w), 0);
+        assert_eq!(aio_return64(&raw mut w), 8);
+        let mut lw = write_request(fd, &mut b);
+        lw.aio_lio_opcode = LIO_WRITE;
+        let list = [&raw mut lw];
+        assert_eq!(
+            lio_listio64(LIO_WAIT, list.as_ptr(), 1, core::ptr::null_mut()),
+            0
+        );
+        let mut got = 0u64;
+        let mut r = write_request(fd, &mut got);
+        assert_eq!(aio_read64(&raw mut r), 0);
+        let done = [&raw const r];
+        assert_eq!(aio_suspend64(done.as_ptr(), 1, core::ptr::null()), 0);
+        assert_eq!((aio_error64(&r), aio_return64(&raw mut r)), (0, 8));
+        assert_eq!(got, 10, "an eventfd's counter sums its writes");
+        assert_eq!(aio_cancel64(fd, core::ptr::null_mut()), AIO_ALLDONE);
+        let mut sync = blank();
+        sync.aio_fildes = fd;
+        assert_eq!(aio_fsync64(crate::fcntl::O_SYNC, &raw mut sync), 0);
+        assert_eq!(aio_error64(&sync), 0);
+        crate::file::close(fd);
+
+        let null = core::ptr::null_mut::<Aiocb>();
+        assert_eq!(outcome(|| aio_read64(null)), outcome(|| aio_read(null)));
+        assert_eq!(outcome(|| aio_write64(null)), outcome(|| aio_write(null)));
+        assert_eq!(outcome(|| aio_error64(null)), outcome(|| aio_error(null)));
+        assert_eq!(outcome(|| aio_return64(null)), outcome(|| aio_return(null)));
+        for fd in [-1, 250] {
+            assert_eq!(
+                outcome(|| aio_cancel64(fd, null)),
+                outcome(|| aio_cancel(fd, null))
+            );
+        }
+        for op in [0, 99, crate::fcntl::O_SYNC] {
+            assert_eq!(
+                outcome(|| aio_fsync64(op, null)),
+                outcome(|| aio_fsync(op, null))
+            );
+        }
+        for nent in [-1, 0, 5] {
+            assert_eq!(
+                outcome(|| aio_suspend64(core::ptr::null(), nent, core::ptr::null())),
+                outcome(|| aio_suspend(core::ptr::null(), nent, core::ptr::null()))
+            );
+            for mode in [LIO_WAIT, LIO_NOWAIT, 42] {
+                assert_eq!(
+                    outcome(|| lio_listio64(mode, core::ptr::null(), nent, core::ptr::null_mut())),
+                    outcome(|| lio_listio(mode, core::ptr::null(), nent, core::ptr::null_mut()))
+                );
+            }
+        }
     }
 
     // -- lio_listio --

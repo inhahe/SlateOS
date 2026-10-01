@@ -32,6 +32,14 @@ unsigned int arc4random_uniform(unsigned int);
 int ecvt_r(double, int, int *__restrict, int *__restrict, char *__restrict, size_t);
 int fcvt_r(double, int, int *__restrict, int *__restrict, char *__restrict, size_t);
 
+/* ecvt, fcvt and gcvt of a long double (glibc's q forms), and the first two
+ * into the caller's buffer. */
+char *qecvt(long double, int, int *__restrict, int *__restrict);
+char *qfcvt(long double, int, int *__restrict, int *__restrict);
+char *qgcvt(long double, int, char *);
+int qecvt_r(long double, int, int *__restrict, int *__restrict, char *__restrict, size_t);
+int qfcvt_r(long double, int, int *__restrict, int *__restrict, char *__restrict, size_t);
+
 /* atexit, whose function is also given the exit status and an argument. */
 int on_exit(void (*)(int, void *), void *);
 #endif
@@ -83,6 +91,13 @@ int lcong48_r(unsigned short[7], struct drand48_data *);
 #ifdef _GNU_SOURCE
 /* realpath(name, NULL). */
 char *canonicalize_file_name(const char *);
+/* posix_openpt(O_RDWR). */
+int getpt(void);
+#endif
+
+#ifdef _SLATEOS_USE_MISC
+/* 1 for a yes, 0 for a no, by the locale's YESEXPR and NOEXPR; else -1. */
+int rpmatch(const char *);
 #endif
 
 /* ecvt, fcvt and gcvt: glibc declares them by default, musl's header only

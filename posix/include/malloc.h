@@ -17,6 +17,34 @@
 
 #include <bits/slateos-features.h>
 
+/* FILE, for malloc_info: glibc's <malloc.h> includes <stdio.h>. */
+#include <stdio.h>
+
+/* mallopt's parameters: the SVID ones, of which glibc's malloc and this one
+ * use only M_MXFAST (and here it changes nothing: there are no fastbins)... */
+#ifndef M_MXFAST
+#define M_MXFAST 1 /* the largest request a fastbin serves */
+#endif
+#ifndef M_NLBLKS
+#define M_NLBLKS 2 /* unused */
+#endif
+#ifndef M_GRAIN
+#define M_GRAIN 3 /* unused */
+#endif
+#ifndef M_KEEP
+#define M_KEEP 4 /* unused */
+#endif
+
+/* ...and glibc's. */
+#define M_TRIM_THRESHOLD -1 /* free bytes at the top that prompt a trim */
+#define M_TOP_PAD -2        /* the extra taken from the system each time */
+#define M_MMAP_THRESHOLD -3 /* the size from which a block is mapped alone */
+#define M_MMAP_MAX -4       /* how many blocks may be mapped alone at once */
+#define M_CHECK_ACTION -5   /* what a corrupted heap does (ignored) */
+#define M_PERTURB -6        /* the byte new and freed blocks are filled with */
+#define M_ARENA_TEST -7     /* arenas before M_ARENA_MAX is consulted */
+#define M_ARENA_MAX -8      /* the most arenas there may be */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -62,6 +90,11 @@ void *pvalloc(size_t);
 /* realloc of an array, refusing an overflowing size: glibc declares it here
  * as in <stdlib.h>; musl only there. */
 void *reallocarray(void *, size_t, size_t);
+
+/* Set a parameter: 1, or 0 when it is refused. */
+int mallopt(int, int);
+/* The heap's state as XML on the stream: 0, or EINVAL for options but 0. */
+int malloc_info(int, FILE *);
 
 #ifdef __cplusplus
 }

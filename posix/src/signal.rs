@@ -184,92 +184,326 @@ process_global! {
     /// hundred lines below, which asks the kernel via `SYS_SIGNAL_PENDING`.)
     fn blocked_mask_ptr() -> SigsetT = SigsetT::EMPTY;
 
-    /// How many signal handlers this process has actually run.
-    ///
-    /// Bumped by `dispatch_self_signal` immediately before a registered
-    /// handler is invoked, and read by [`wait_for_delivery`], which is what
-    /// `pause(2)` and [`sigsuspend`] wait on.
-    ///
-    /// It has to exist because **a delivered signal otherwise leaves no
-    /// trace a waiter could observe.** Delivery is asynchronous — the kernel
-    /// redirects the thread to `__signal_trampoline`, the handler runs, and
-    /// execution resumes — so afterwards nothing distinguishes "a signal was
-    /// caught" from "nothing happened". `SYS_SIGNAL_PENDING` does not help:
-    /// it reports signals *blocked and queued*, which is the opposite set.
-    ///
-    /// Wrapping is harmless. Both waiters compare for inequality against a
-    /// sample taken before they slept, so only a *change* matters; aliasing
-    /// would need 2^64 handlers to run inside one sleep interval.
-    ///
-    /// **Atomic, and not because of threads.** The other globals in this
-    /// block are plain values on the macro's stated assumption that the
-    /// target is single-threaded. This one is a read-modify-write performed
-    /// *in signal-delivery context*, and a second delivery landing inside it
-    /// would lose an update -- which is not a corrupt count but a missed
-    /// wake: `pause` would stay parked for a signal it was already sent.
-    /// `fetch_add` is what makes the increment survive being interrupted by
-    /// the very thing it is counting.
-    fn deliveries_ptr() -> core::sync::atomic::AtomicU64 =
+    /// The threads waiting in `sigtimedwait` and its kin, as the dispatch
+    /// finds them ([`hand_to_a_waiter`]).  Atomics, and no lock: the
+    /// dispatch runs in signal context, on any thread, and must never wait
+    /// on a lock the thread it interrupted may hold.
+    fn acceptors_ptr() -> [Acceptor; ACCEPTORS] = [const { Acceptor::free() }; ACCEPTORS];
+
+    /// Bumped by every change to what the kernel's blocked mask should be --
+    /// the program's mask, or a set a waiter has opened -- so that a
+    /// [`sync_kernel_blocked_mask`] another one raced knows to write again.
+    fn mask_generation_ptr() -> core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
 }
 
-/// Read the delivery counter.
+/// How many threads may wait in `sigtimedwait` and its kin at once.  A
+/// thread past it is told `EAGAIN`, as if its wait had timed out at once.
+const ACCEPTORS: usize = 32;
+
+/// `got`'s value once its waiter has stopped waiting: it takes nothing more,
+/// and a signal the dispatch brings then is the dispatch's to deal with.
+const CLOSED: i32 = -1;
+
+/// A thread waiting to take a signal (`sigtimedwait`, `sigwaitinfo`,
+/// `sigwait`), as the trampoline's dispatch sees it.
 ///
-/// On the host this has no caller outside the tests: `wait_for_delivery` is a
-/// stub there, because there is no kernel to deliver anything, so the only
-/// reader of the counter is compiled out. The `allow` is scoped to that build
-/// rather than blanket, so a genuinely dead reader on the target -- which
-/// would mean nothing waits on signals at all -- still warns.
-#[cfg_attr(not(target_os = "none"), allow(dead_code))]
-fn deliveries() -> u64 {
-    // SAFETY: `deliveries_ptr()` is owned solely by this process (this thread
-    // on host builds) and always points at an initialised `AtomicU64`.
-    unsafe { (*deliveries_ptr()).load(core::sync::atomic::Ordering::Relaxed) }
+/// The native kernel cannot take a pending signal off the pending set
+/// without delivering it, and its mask is the process's, not a thread's.
+/// So a waiter publishes its set; the kernel's mask lets the set through
+/// for as long as it is published ([`kernel_mask_now`]) -- the program's
+/// own mask, which `sigprocmask` reports and handlers set and restore, is
+/// left as it was -- and the kernel delivers a signal of it to whichever
+/// thread it chooses, where the dispatch hands the signal to the waiter
+/// instead of running its disposition.
+pub(crate) struct Acceptor {
+    /// Claimed by a waiter.
+    busy: core::sync::atomic::AtomicBool,
+    /// The signals it takes (signal N at bit N - 1), which the kernel lets
+    /// through meanwhile; 0 while not published.
+    set: core::sync::atomic::AtomicU64,
+    /// 0 while it waits, the signal handed to it, or [`CLOSED`].  The futex
+    /// word it sleeps on.
+    got: core::sync::atomic::AtomicI32,
+    /// Signals of its set that came once `got` was filled: handed back to
+    /// the kernel when the waiter stops, by it or by the dispatch.
+    extra: core::sync::atomic::AtomicU64,
 }
 
-/// Record that a registered handler is about to run.
-///
-/// Bumped *before* the call rather than after, so that a handler which never
-/// returns normally — one that `longjmp`s out, as `setjmp`-based error
-/// recovery does — still counts as a delivery.
-fn note_delivery() {
-    // SAFETY: as `deliveries()`.
-    unsafe {
-        (*deliveries_ptr()).fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+impl Acceptor {
+    /// A slot no one has claimed.
+    const fn free() -> Self {
+        Self {
+            busy: core::sync::atomic::AtomicBool::new(false),
+            set: core::sync::atomic::AtomicU64::new(0),
+            got: core::sync::atomic::AtomicI32::new(0),
+            extra: core::sync::atomic::AtomicU64::new(0),
+        }
     }
 }
 
-/// Block until this process runs a signal handler.
+/// Hand `sig` to a thread waiting to take it, if one is -- instead of its
+/// disposition, since a signal a thread waits for is taken, not delivered.
+/// Whether one was.
 ///
-/// Polls, because there is nothing else to poll with: the kernel has no
-/// wait-for-signal primitive. The sleep is what makes this a wait rather than
-/// a spin, and 2 ms bounds the latency a caller sees while costing 500
-/// syscalls a second in the rare process that is parked here at all.
+/// A waiter whose `got` is 0 takes it, and is woken.  Failing one, a waiter
+/// that has taken another signal and not yet stopped keeps it in `extra`,
+/// for when it stops.  It cannot be handed back to the kernel now: the
+/// kernel lets the set through while the waiter waits, so it would deliver
+/// the signal again at once, on this thread, from inside this dispatch --
+/// and again from that one.  A waiter whose `got` is [`CLOSED`] has stopped
+/// and takes nothing; the signal is then the dispatch's as if no one waited
+/// -- blocked, as POSIX asks of a set waited for, it is kept pending.
 ///
-/// A `SYS_SIGNAL_WAIT` would remove the poll and is worth asking for if this
-/// ever shows up in a profile — not before, since a process in `pause` is by
-/// definition doing nothing else.
+/// A waiter that stops closes `got` before it empties `extra`, and the
+/// dispatch fills `extra` before it asks whether `got` is closed.  So a
+/// signal kept in `extra` is either in the `extra` the waiter empties or
+/// kept pending here -- or both, which costs nothing: a pending signal is
+/// pending once.
+fn hand_to_a_waiter(sig: i32) -> bool {
+    use core::sync::atomic::Ordering::SeqCst;
+    let bit = sigmask_bit(sig);
+    if bit == 0 {
+        return false;
+    }
+    // SAFETY: this process's table of waiters; every field is an atomic.
+    let waiters = unsafe { &*acceptors_ptr() };
+    let wants = |a: &&Acceptor| a.set.load(SeqCst) & bit != 0;
+    for a in waiters.iter().filter(wants) {
+        if a.got.compare_exchange(0, sig, SeqCst, SeqCst).is_ok() {
+            crate::lowlevellock::futex_wake_all(&a.got);
+            return true;
+        }
+    }
+    for a in waiters.iter().filter(wants) {
+        let got = a.got.load(SeqCst);
+        // 0: freed since the first pass, and perhaps claimed for another
+        // wait; the signal is kept pending below, and the kernel delivers it
+        // again if that wait is for it.
+        if got == CLOSED || got == 0 {
+            continue;
+        }
+        a.extra.fetch_or(bit, SeqCst);
+        if a.got.load(SeqCst) == CLOSED {
+            keep_pending(sig);
+        }
+        return true;
+    }
+    false
+}
+
+/// Take a signal of `set`, the low word of a `sigset_t`: one pending, or the
+/// next to come -- until `deadline` (`CLOCK_MONOTONIC`), when there is one.
+/// The body of [`sigtimedwait`].
 ///
-/// Note what it does **not** wake for: a signal whose disposition is `SIG_IGN`,
-/// or whose default action is ignore, runs no handler and bumps no counter, so
-/// it correctly leaves `pause` waiting. That is POSIX's rule, and it falls out
-/// of counting handler *invocations* rather than deliveries.
-#[cfg(target_os = "none")]
-pub(crate) fn wait_for_delivery() {
-    let start = deliveries();
-    while deliveries() == start {
-        let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 2_000_000_u64);
+/// `Err(EINTR)` when a signal handler has run on this thread since `mark`,
+/// `SA_RESTART` or not -- a handler for a signal outside the set, since one
+/// of the set is taken, not handled -- as glibc's answers on Linux have it;
+/// `Err(EAGAIN)` when the time runs out, or when every one of the
+/// [`ACCEPTORS`] slots is in use.  `SIGKILL` and `SIGSTOP` cannot be taken,
+/// and are dropped from the set, as the kernel drops them.
+fn accept(
+    set: u64,
+    deadline: Option<&crate::stat::Timespec>,
+    mark: crate::interrupt::Mark,
+) -> Result<i32, i32> {
+    use core::sync::atomic::Ordering::SeqCst;
+    let wanted = set & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
+    // SAFETY: this process's table of waiters; every field is an atomic.
+    let waiters = unsafe { &*acceptors_ptr() };
+    let Some(a) = waiters
+        .iter()
+        .find(|a| a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok())
+    else {
+        return Err(errno::EAGAIN);
+    };
+    a.got.store(0, SeqCst);
+    a.extra.store(0, SeqCst);
+    // Published: the dispatch hands the set's signals to `a` from here, and
+    // the kernel lets them through -- a pending one at once, as its mask is
+    // written.
+    a.set.store(wanted, SeqCst);
+    mask_changed();
+    let outcome = loop {
+        let got = a.got.load(SeqCst);
+        if got > 0 {
+            break Ok(got);
+        }
+        if mark.interrupted(crate::interrupt::Restart::Never) {
+            break Err(errno::EINTR);
+        }
+        let left = match deadline {
+            None => None,
+            Some(at) => {
+                let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
+                match crate::lowlevellock::ns_until(&now, at) {
+                    Some(ns) => Some(ns),
+                    None => break Err(errno::EAGAIN),
+                }
+            }
+        };
+        if left.is_none() && nothing_to_wait_for() {
+            break Err(errno::EAGAIN);
+        }
+        // Whatever ended the wait -- the signal handed over, a handler, the
+        // time, a spurious wake -- the loop's head asks for itself.
+        let _ = crate::lowlevellock::futex_wait_interruptible_since(
+            &a.got,
+            0,
+            left,
+            crate::interrupt::Restart::Never,
+            mark,
+        );
+    };
+
+    // Withdrawn, and the kernel's mask made the program's again, before
+    // `got` is closed: a signal of the set that comes after this is blocked,
+    // and stays pending for the next wait -- or goes to another waiter that
+    // has the kernel let it through.
+    a.set.store(0, SeqCst);
+    mask_changed();
+    let got = a.got.swap(CLOSED, SeqCst);
+    let extra = a.extra.swap(0, SeqCst);
+    for n in 1..=64 {
+        if extra & sigmask_bit(n) != 0 {
+            keep_pending(n);
+        }
+    }
+    a.busy.store(false, SeqCst);
+    // A signal handed over as the wait decided otherwise is still this
+    // call's to answer.
+    if got > 0 { Ok(got) } else { outcome }
+}
+
+/// In a child of `fork`: forget the parent's waiters, whose threads the
+/// child does not have, and make the kernel's mask -- copied from the
+/// parent's, with their sets let through -- the program's again.
+/// Async-signal-safe (atomics and one system call), as `_Fork` needs.
+pub(crate) fn forget_waiters_after_fork() {
+    use core::sync::atomic::Ordering::SeqCst;
+    // SAFETY: this process's table of waiters; every field is an atomic.
+    for a in unsafe { &*acceptors_ptr() } {
+        a.set.store(0, SeqCst);
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
+    }
+    mask_changed();
+}
+
+/// Leave `sig` pending with the kernel, for when it is unblocked -- with the
+/// kernel's mask brought up to date first.  The kernel's mask can lag the
+/// program's while another thread is between writing the one and the other,
+/// and a signal left pending while the kernel lets it through is delivered
+/// straight back: to this thread, from inside this dispatch, and again from
+/// that one.
+fn keep_pending(sig: i32) {
+    sync_kernel_blocked_mask();
+    set_pending_self(sig);
+}
+
+/// The signals waiters have opened at the kernel: the union of their sets.
+fn opened_by_waiters() -> u64 {
+    use core::sync::atomic::Ordering::SeqCst;
+    // SAFETY: this process's table of waiters; every field is an atomic.
+    unsafe { &*acceptors_ptr() }
+        .iter()
+        .fold(0, |union, a| union | a.set.load(SeqCst))
+}
+
+/// What the kernel's blocked mask should be now: the program's -- as
+/// `sigprocmask`, a handler's `sa_mask` or `sigsuspend` left it -- less the
+/// sets waiters have opened.
+fn kernel_mask_now() -> u64 {
+    current_blocked_low() & !opened_by_waiters()
+}
+
+/// One of the kernel's mask's inputs has changed -- the program's mask, or a
+/// waiter's set: bring the kernel's up to date.
+fn mask_changed() {
+    // SAFETY: an atomic, shared by every thread.
+    unsafe { &*mask_generation_ptr() }.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    sync_kernel_blocked_mask();
+}
+
+/// Block until a signal handler has run on this thread since `mark`: the
+/// wait of `pause`, and of `sigsuspend` once its mask is in place.
+///
+/// A futex wait on a word of its own, which nothing wakes and the kernel ends
+/// for every signal it hands the trampoline; the counts the dispatch keeps
+/// per thread say whether a handler ran here ([`crate::interrupt`]).  So a
+/// signal set to `SIG_IGN`, or ignored by default, leaves the wait where it
+/// is, as POSIX has it -- and so does one another thread handles, `pause`
+/// being the thread's.  A signal whose action ends the process never returns
+/// here at all.
+///
+/// Until 2026-09-30 this polled a process-wide count of handlers every 2 ms,
+/// sampled only once the wait began: `sigsuspend` sets its mask first, a
+/// signal that mask lets through is delivered as it is set, and so the one
+/// signal `sigsuspend` was waiting for had already been counted -- it then
+/// waited for another.  Counting from `mark`, taken before the mask, is what
+/// makes the mask and the wait one step.
+pub(crate) fn wait_for_handler(mark: crate::interrupt::Mark) {
+    let word = core::sync::atomic::AtomicI32::new(0);
+    while !nothing_to_wait_for() {
+        let waited = crate::lowlevellock::futex_wait_interruptible_since(
+            &word,
+            0,
+            None,
+            crate::interrupt::Restart::Never,
+            mark,
+        );
+        if waited == crate::lowlevellock::Waited::Interrupted {
+            return;
+        }
     }
 }
 
-/// Host build: return at once.
+/// Run `call` with `mask` -- the low word of a `sigset_t`, when there is
+/// one -- as the blocked set, and the set it replaced back afterwards: the
+/// mask of `ppoll`, `pselect`, `epoll_pwait` and `io_pgetevents`, which Linux
+/// sets and waits under in one step (`set_user_sigmask`).  `SIGKILL` and
+/// `SIGSTOP` cannot be blocked, and are dropped from it as `sigprocmask`
+/// drops them.
 ///
-/// There is no kernel here to deliver anything, so the loop above would wait
-/// for something that cannot happen — it would hang `cargo test` rather than
-/// fail it. The host keeps the old immediate return, which is wrong in the
-/// same way it always was and is at least bounded.
-#[cfg(not(target_os = "none"))]
-pub(crate) fn wait_for_delivery() {}
+/// `call` is handed a mark taken before the mask is set.  A pending signal
+/// the mask lets through is delivered as it is set, before `call` sleeps; a
+/// call that counts handlers from that mark ends as Linux's does, for which
+/// the signal would still have been pending when it slept
+/// ([`crate::interrupt`]).
+pub(crate) fn under_mask<R>(
+    mask: Option<u64>,
+    call: impl FnOnce(crate::interrupt::Mark) -> R,
+) -> R {
+    let mark = crate::interrupt::Mark::now();
+    let Some(low) = mask else {
+        return call(mark);
+    };
+    let previous = current_blocked_low();
+    apply_blocked_low(low & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
+    let answer = call(mark);
+    apply_blocked_low(previous);
+    answer
+}
+
+/// Whether a wait for a signal could never end: on the host, where there is
+/// no kernel to send one, unless a test has scripted one
+/// (`crate::interrupt::script`).  There the wait ends at once, as it always
+/// has -- wrong in the same way, and bounded.  Never so on the target.
+fn nothing_to_wait_for() -> bool {
+    #[cfg(target_os = "none")]
+    {
+        false
+    }
+    #[cfg(all(not(target_os = "none"), test))]
+    {
+        crate::interrupt::script::is_empty()
+    }
+    #[cfg(all(not(target_os = "none"), not(test)))]
+    {
+        true
+    }
+}
 
 /// Install a signal handler.
 ///
@@ -623,7 +857,7 @@ fn apply_blocked_low(low: u64) {
         m.bits[0] = low;
         blocked_mask_ptr().write(m);
     }
-    sync_kernel_blocked_mask(low);
+    mask_changed();
 }
 
 /// Capture the current process-wide blocked mask for `sigsetjmp`.
@@ -663,8 +897,28 @@ fn set_pending_self(sig: i32) {
     let _ = crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, self_pid, sig as u64);
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(all(not(target_os = "none"), not(test)))]
 fn set_pending_self(_sig: i32) {}
+
+/// The host's stand-in under test: each signal left pending, with the
+/// kernel's mask as it was when it was ([`kept_pending`]).
+#[cfg(all(not(target_os = "none"), test))]
+fn set_pending_self(sig: i32) {
+    KEPT_PENDING.with(|k| k.borrow_mut().push((sig, kernel_blocked_low())));
+}
+
+#[cfg(all(not(target_os = "none"), test))]
+std::thread_local! {
+    static KEPT_PENDING: core::cell::RefCell<std::vec::Vec<(i32, u64)>> =
+        const { core::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+/// The signals this thread has left pending since the last call, each with
+/// the kernel's mask as it was then; the record is emptied.
+#[cfg(all(not(target_os = "none"), test))]
+fn kept_pending() -> std::vec::Vec<(i32, u64)> {
+    KEPT_PENDING.with(|k| core::mem::take(&mut *k.borrow_mut()))
+}
 
 /// Reset a signal's disposition to the default (`SIG_DFL`) with empty
 /// flags/mask.  Invoked for `SA_RESETHAND` before the handler runs, so
@@ -752,10 +1006,12 @@ struct AltStack {
     /// stack pointer starts at `sp + size` because x86 stacks grow down.
     sp: usize,
     size: usize,
-    /// Whether a handler is running on it right now. POSIX's `SS_ONSTACK`,
-    /// and the reason changing the stack is `EPERM` while it is set: moving
-    /// the ground out from under a running handler is not a request that can
-    /// be honoured.
+    /// Whether this library moved a handler onto it ([`run_handler`]) and
+    /// the handler has not returned. One of the two ways to be on it -- see
+    /// [`on_the_alt_stack`], which is what POSIX's `SS_ONSTACK` reports, and
+    /// the reason changing the stack is `EPERM` while it holds: moving the
+    /// ground out from under a running handler is not a request that can be
+    /// honoured.
     on: bool,
     /// `SS_AUTODISARM`, remembered so `sigaltstack` reports back what it was
     /// given. Nothing acts on it yet -- see the note in [`sigaltstack`].
@@ -858,8 +1114,11 @@ fn publish_altstack() {
 ///
 /// * the handler asked, with `SA_ONSTACK`;
 /// * a stack is registered;
-/// * we are not already on it -- a nested delivery must not restart at the
-///   top and overwrite the frames of the handler it interrupted;
+/// * we are not already on it ([`on_the_alt_stack`]) -- a nested delivery
+///   must not restart at the top and overwrite the frames of the handler it
+///   interrupted, and a signal the kernel delivered onto it must not either:
+///   the kernel built its frame at the top, and the trampoline and this
+///   dispatch run just below it;
 /// * it is big enough, which `sigaltstack` already enforced, so this is a
 ///   restatement rather than a check.
 fn altstack_entry(sa_flags: u32) -> Option<usize> {
@@ -867,10 +1126,37 @@ fn altstack_entry(sa_flags: u32) -> Option<usize> {
         return None;
     }
     let alt = altstack();
-    if alt.sp == 0 || alt.on {
+    if alt.sp == 0 || on_the_alt_stack(&alt) {
         return None;
     }
     alt.sp.checked_add(alt.size)
+}
+
+/// Whether a handler is running on the registered alternate stack now:
+/// this library moved it there ([`AltStack::on`]), or the stack pointer is
+/// inside the region.
+///
+/// The second is how the kernel starts one. Since lane A's 87ef09d0b it
+/// builds an `SA_ONSTACK` signal's frame at the top of the alternate stack,
+/// so the trampoline, this dispatch and the frame are all there already when
+/// the handler is looked up -- and nothing of this library's has run to note
+/// it. Until 2026-09-30 only the first was asked: [`altstack_entry`] then
+/// moved such a handler to the top a second time, where its frames overwrote
+/// the kernel's saved context and the dispatch below it, and a handler that
+/// used more than a few words of stack never returned intact.
+fn on_the_alt_stack(alt: &AltStack) -> bool {
+    alt.on || stack_pointer_in(alt)
+}
+
+/// Whether this thread's stack pointer is inside `alt`'s region -- the
+/// kernel's own test in `altstack_top_for`.
+#[inline(never)]
+fn stack_pointer_in(alt: &AltStack) -> bool {
+    let here = 0u8;
+    // A local's address is in this call's frame, on the stack in use; the
+    // black box keeps it a real stack slot.
+    let sp = core::hint::black_box(core::ptr::addr_of!(here)) as usize;
+    alt.sp != 0 && (alt.sp..alt.sp.saturating_add(alt.size)).contains(&sp)
 }
 
 /// Record that a handler is (or is no longer) running on the alternate stack.
@@ -883,8 +1169,10 @@ fn set_altstack_on(on: bool) {
 
 // The thunk that runs a handler on a different stack.
 //
-// On entry: RDI = handler, ESI = signal number, RDX = the address to start
-// the stack at (one past its end -- x86 stacks grow down).
+// On entry: RDI = handler, ESI = signal number, RDX = the `siginfo_t *` and
+// RCX = the `ucontext_t *` for its second and third arguments (null for a
+// one-argument handler, which does not read them), R8 = the address to
+// start the stack at (one past its end -- x86 stacks grow down).
 //
 // RBP is callee-saved, so the handler is obliged to give it back, which is
 // what makes it a safe place to keep the interrupted stack pointer across a
@@ -898,9 +1186,11 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp", // the interrupted stack, in a register the handler must preserve
     "mov rax, rdi", // handler
-    "mov rsp, rdx", // switch
+    "mov rsp, r8",  // switch
     "and rsp, -16", // …and align, whatever the caller's ss_sp+ss_size was
     "mov edi, esi", // signum becomes arg0
+    "mov rsi, rdx", // siginfo_t * becomes arg1
+    "mov rdx, rcx", // ucontext_t * becomes arg2
     "call rax",
     "mov rsp, rbp", // back to the interrupted stack
     "pop rbp",
@@ -910,30 +1200,53 @@ core::arch::global_asm!(
 #[cfg(target_os = "none")]
 unsafe extern "C" {
     /// See the `global_asm!` above.
-    fn __call_on_alt_stack(handler: extern "C" fn(i32), signum: i32, top: usize);
+    fn __call_on_alt_stack(
+        handler: usize,
+        signum: i32,
+        info: *mut SiginfoT,
+        uc: *mut crate::ucontext::UcontextT,
+        top: usize,
+    );
 }
 
-/// Run `func(sig)`, on the alternate signal stack when `top` says so.
+/// What a handler is called with besides the signal's number: nothing, or
+/// -- for one installed with `SA_SIGINFO` -- its `siginfo_t` and its
+/// `ucontext_t`.
+#[derive(Clone, Copy)]
+enum HandlerArgs {
+    One,
+    Three(*mut SiginfoT, *mut crate::ucontext::UcontextT),
+}
+
+/// Run `handler` with `args`, on the alternate signal stack when `top` says
+/// so.
 ///
 /// The switch is around the *handler* and nothing else. Everything the
 /// dispatcher does either side of it -- the mask bookkeeping, the disposition
 /// lookup -- stays on the interrupted stack, because the point of an
 /// alternate stack is to give the caller's code room, not to relocate ours.
-fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
+fn run_handler(handler: usize, sig: i32, args: HandlerArgs, top: Option<usize>) {
     let Some(top) = top else {
-        func(sig);
+        call_handler(handler, sig, args);
         return;
     };
     set_altstack_on(true);
     #[cfg(target_os = "none")]
-    // SAFETY: `func` was registered through `signal`/`sigaction`, which is the
-    // same trust the direct call above extends it. `top` is `ss_sp + ss_size`
-    // for a stack the caller registered and `sigaltstack` accepted, so it is
-    // one past a region of at least `MINSIGSTKSZ` writable bytes. The thunk
-    // restores RSP from RBP before returning, so the interrupted stack is
-    // exactly as it was.
-    unsafe {
-        __call_on_alt_stack(func, sig, top);
+    {
+        let (info, uc) = match args {
+            HandlerArgs::One => (core::ptr::null_mut(), core::ptr::null_mut()),
+            HandlerArgs::Three(info, uc) => (info, uc),
+        };
+        // SAFETY: `handler` was registered through `signal`/`sigaction`, which
+        // is the same trust `call_handler` extends it; `info` and `uc` are
+        // null or the caller's live locals. `top` is `ss_sp + ss_size` for a
+        // stack the caller registered and `sigaltstack` accepted, so it is one
+        // past a region of at least `MINSIGSTKSZ` writable bytes. The thunk
+        // restores RSP from RBP before returning, so the interrupted stack is
+        // exactly as it was.
+        unsafe {
+            __call_on_alt_stack(handler, sig, info, uc, top);
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
@@ -943,9 +1256,243 @@ fn run_handler(func: extern "C" fn(i32), sig: i32, top: Option<usize>) {
         // the bookkeeping every test here asserts on is the same code the
         // target runs.
         let _ = top;
-        func(sig);
+        call_handler(handler, sig, args);
     }
     set_altstack_on(false);
+}
+
+/// Call `handler` on the stack in use: `handler(sig)`, or for `SA_SIGINFO`
+/// `handler(sig, info, uc)`.
+fn call_handler(handler: usize, sig: i32, args: HandlerArgs) {
+    match args {
+        HandlerArgs::One => {
+            // SAFETY: registered through `signal`/`sigaction` as a
+            // `void (*)(int)`; we trust the caller's pointer as C does.
+            let func: extern "C" fn(i32) =
+                unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
+            func(sig);
+        }
+        HandlerArgs::Three(info, uc) => {
+            // SAFETY: registered with `SA_SIGINFO`, so as the
+            // `void (*)(int, siginfo_t *, void *)` that flag says it is.
+            let func: extern "C" fn(i32, *mut SiginfoT, *mut core::ffi::c_void) = unsafe {
+                core::mem::transmute::<
+                    usize,
+                    extern "C" fn(i32, *mut SiginfoT, *mut core::ffi::c_void),
+                >(handler)
+            };
+            func(sig, info, uc.cast());
+        }
+    }
+}
+
+/// Where a signal being dispatched came from, as far as its handler's
+/// `siginfo_t` and `ucontext_t` can say.
+#[derive(Clone, Copy)]
+enum Origin {
+    /// Delivered by the kernel through the trampoline, with its frame of the
+    /// interrupted registers -- null where there is none (the host tests'
+    /// stand-in for the kernel). A host build that is not a test has
+    /// neither, so nothing there makes one.
+    #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+    Kernel(*mut SignalContext),
+    /// Raised on the calling thread: `raise`, `abort`, `pthread_kill` of
+    /// itself. glibc sends these with `tgkill`, which Linux reports as
+    /// `SI_TKILL`.
+    Raised,
+    /// Sent by `kill` to the process's own pid: `SI_USER`.
+    Killed,
+}
+
+/// The `siginfo_t` a handler is given: the signal, and who sent it as far as
+/// `origin` tells.
+///
+/// Raised here (`SI_TKILL`) or sent by `kill` to this process's own pid
+/// (`SI_USER`), the sender is this process: its pid and real uid. Delivered
+/// by the kernel, `SI_USER` and no more: the native frame carries the
+/// signal's number alone, and the kernel's record of the rest -- its code,
+/// its sender, `sigqueue`'s value -- does not reach the trampoline (known-issues
+/// `D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE`).
+fn siginfo_for(sig: i32, origin: Origin) -> SiginfoT {
+    let mut info = SiginfoT {
+        si_signo: sig,
+        ..SiginfoT::default()
+    };
+    match origin {
+        Origin::Kernel(_) => info.si_code = SI_USER,
+        Origin::Raised | Origin::Killed => {
+            info.si_code = if matches!(origin, Origin::Raised) {
+                SI_TKILL
+            } else {
+                SI_USER
+            };
+            info.si_pid = crate::process::getpid();
+            info.si_uid = crate::unistd::getuid();
+        }
+    }
+    info
+}
+
+/// The alternate stack for a handler's `ucontext_t` (`uc_stack`), filled as
+/// Linux's `__save_altstack` fills it: the stack as registered, with the
+/// flags it was registered with -- `SS_DISABLE` for none, `SS_AUTODISARM`
+/// when asked for. Not `SS_ONSTACK`: that is `sigaltstack`'s answer about
+/// the stack pointer at the moment it is asked, which a handler can ask for
+/// itself.
+fn altstack_for_ucontext() -> StackT {
+    let alt = altstack();
+    let mut flags = if alt.sp == 0 { SS_DISABLE } else { 0 };
+    if alt.autodisarm {
+        flags |= SS_AUTODISARM;
+    }
+    StackT {
+        ss_sp: alt.sp as *mut u8,
+        ss_flags: flags,
+        ss_size: alt.size,
+    }
+}
+
+/// The interrupted registers, from the kernel's frame into a `ucontext_t`'s
+/// `gregs`. The frame is taken as a system call returns, when `rcx` and `r11`
+/// hold what `syscall` put there -- where to resume, and the flags -- so they
+/// are filled with those.
+fn gregs_from_frame(c: &SignalContext, g: &mut [i64; crate::ucontext::NGREG]) {
+    use crate::ucontext::{
+        REG_EFL, REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX,
+        REG_RBP, REG_RBX, REG_RCX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+    };
+    for (reg, value) in [
+        (REG_R8, c.r8),
+        (REG_R9, c.r9),
+        (REG_R10, c.r10),
+        (REG_R11, c.rflags),
+        (REG_R12, c.r12),
+        (REG_R13, c.r13),
+        (REG_R14, c.r14),
+        (REG_R15, c.r15),
+        (REG_RDI, c.rdi),
+        (REG_RSI, c.rsi),
+        (REG_RBP, c.rbp),
+        (REG_RBX, c.rbx),
+        (REG_RDX, c.rdx),
+        (REG_RAX, c.rax),
+        (REG_RCX, c.rip),
+        (REG_RSP, c.rsp),
+        (REG_RIP, c.rip),
+        (REG_EFL, c.rflags),
+    ] {
+        if let Some(slot) = g.get_mut(reg) {
+            *slot = value.cast_signed();
+        }
+    }
+}
+
+/// A handler's `gregs`, back into the kernel's frame, which the trampoline
+/// then resumes -- as Linux's `rt_sigreturn` resumes a `ucontext_t`'s. The
+/// frame holds no `rcx` or `r11`, which `sysret` overwrites in any case, so a
+/// change to those two is not kept.
+fn frame_from_gregs(g: &[i64; crate::ucontext::NGREG], c: &mut SignalContext) {
+    use crate::ucontext::{
+        REG_EFL, REG_R8, REG_R9, REG_R10, REG_R12, REG_R13, REG_R14, REG_R15, REG_RAX, REG_RBP,
+        REG_RBX, REG_RDI, REG_RDX, REG_RIP, REG_RSI, REG_RSP,
+    };
+    let get = |reg: usize| g.get(reg).copied().unwrap_or(0).cast_unsigned();
+    c.r8 = get(REG_R8);
+    c.r9 = get(REG_R9);
+    c.r10 = get(REG_R10);
+    c.r12 = get(REG_R12);
+    c.r13 = get(REG_R13);
+    c.r14 = get(REG_R14);
+    c.r15 = get(REG_R15);
+    c.rdi = get(REG_RDI);
+    c.rsi = get(REG_RSI);
+    c.rbp = get(REG_RBP);
+    c.rbx = get(REG_RBX);
+    c.rdx = get(REG_RDX);
+    c.rax = get(REG_RAX);
+    c.rsp = get(REG_RSP);
+    c.rip = get(REG_RIP);
+    c.rflags = get(REG_EFL);
+}
+
+/// The floating-point control state into a `ucontext_t`'s `fpregs_mem`, in
+/// `_fpstate`'s layout, with `uc_mcontext.fpregs` pointing at it: the x87
+/// control word and `mxcsr`. They are callee-saved, and nothing between the
+/// interrupted code and here changes them, so they are the interrupted
+/// code's. The data registers are not: the frame is taken at a system call's
+/// return, across which the SSE registers are the caller's to lose, and the
+/// x87 stack is empty at every call.
+fn fill_fp_control(uc: &mut crate::ucontext::UcontextT) {
+    let mut mxcsr: u32 = 0;
+    let mut cw: u16 = 0;
+    // SAFETY: each stores into its local and changes no state.
+    unsafe {
+        core::arch::asm!("stmxcsr [{}]", in(reg) &raw mut mxcsr, options(nostack, preserves_flags));
+        core::arch::asm!("fnstcw [{}]", in(reg) &raw mut cw, options(nostack, preserves_flags));
+    }
+    let fp = uc
+        .fpregs_mem
+        .as_mut_ptr()
+        .cast::<crate::ucontext::Fpstate>();
+    // SAFETY: `fpregs_mem` is 512 bytes, 8-aligned, the size and alignment of
+    // `Fpstate`, whose fields are all integers.
+    unsafe {
+        (*fp).cwd = cw;
+        (*fp).mxcsr = mxcsr;
+    }
+    uc.uc_mcontext.fpregs = fp;
+}
+
+/// Run an `SA_SIGINFO` handler: `handler(sig, &info, &uc)`, on the stack
+/// `top` says, and return the mask to restore -- `uc_sigmask` as the handler
+/// left it.
+///
+/// `info` is what `origin` can tell ([`siginfo_for`]). `uc` holds the mask as
+/// the signal came (`blocked`), the alternate stack as registered, the
+/// floating-point control state, and -- for a signal the
+/// kernel delivered -- the interrupted registers from its frame, which the
+/// handler may change: they are written back and resumed as it left them, as
+/// Linux's `rt_sigreturn` resumes a `ucontext_t`'s. For a signal raised here
+/// there is no frame, and `gregs` is zero.
+///
+/// Until 2026-09-30 every handler was called as `handler(sig)`, so one
+/// installed with `SA_SIGINFO` found in its second and third arguments
+/// whatever the dispatch had left in `rsi` and `rdx`.
+fn run_siginfo_handler(
+    handler: usize,
+    sig: i32,
+    origin: Origin,
+    blocked: u64,
+    top: Option<usize>,
+) -> u64 {
+    let mut info = siginfo_for(sig, origin);
+    let mut uc = crate::ucontext::UcontextT::ZERO;
+    uc.uc_sigmask.bits[0] = blocked;
+    uc.uc_stack = altstack_for_ucontext();
+    if let Some(slot) = uc.uc_mcontext.gregs.get_mut(crate::ucontext::REG_OLDMASK) {
+        *slot = blocked.cast_signed();
+    }
+    fill_fp_control(&mut uc);
+    let frame = match origin {
+        Origin::Kernel(ctx) if !ctx.is_null() => Some(ctx),
+        _ => None,
+    };
+    if let Some(ctx) = frame {
+        // SAFETY: the kernel's frame for this delivery, on this thread's
+        // stack; nothing else touches it until the trampoline returns it.
+        gregs_from_frame(unsafe { &*ctx }, &mut uc.uc_mcontext.gregs);
+    }
+    run_handler(
+        handler,
+        sig,
+        HandlerArgs::Three(&raw mut info, &raw mut uc),
+        top,
+    );
+    if let Some(ctx) = frame {
+        // SAFETY: as above.
+        frame_from_gregs(&uc.uc_mcontext.gregs, unsafe { &mut *ctx });
+    }
+    uc.uc_sigmask.bits[0]
 }
 
 /// Read the registered `(handler, sa_flags, sa_mask_low)` for `sig`.
@@ -1087,6 +1634,12 @@ fn apply_default_action(sig: i32) -> i32 {
 /// an unknown signal; on host builds, `ENOSYS` for a stop, since there is
 /// no SlateOS kernel to suspend the test process).
 fn dispatch_self_signal(sig: i32) -> i32 {
+    dispatch_from(sig, Origin::Raised)
+}
+
+/// [`dispatch_self_signal`], for a signal from `origin`: what an
+/// `SA_SIGINFO` handler is told of it, and the frame it may change.
+fn dispatch_from(sig: i32, origin: Origin) -> i32 {
     // SIGKILL / SIGSTOP: always apply default, regardless of handler.
     // They cannot be caught, blocked, or ignored.
     if sig == SIGKILL {
@@ -1098,13 +1651,18 @@ fn dispatch_self_signal(sig: i32) -> i32 {
         // fixed regardless of the disposition table: stop the process.
         return stop_self(sig);
     }
+    // A signal a thread is waiting to take is taken, not delivered: no
+    // handler runs and no default action is taken.
+    if hand_to_a_waiter(sig) {
+        return 0;
+    }
 
     let (handler, sa_flags, sa_mask_low) = lookup_action(sig);
     let blocked = current_blocked_low();
 
     match plan_self_dispatch(sig, blocked, handler, sa_flags, sa_mask_low) {
         SelfDispatch::Pending => {
-            set_pending_self(sig);
+            keep_pending(sig);
             0
         }
         SelfDispatch::Ignore => 0,
@@ -1127,26 +1685,32 @@ fn dispatch_self_signal(sig: i32) -> i32 {
                 apply_blocked_low(mask_during);
             }
 
-            // Invoke the registered handler.  POSIX: the handler receives
-            // the signal number.  We cast the stored usize back to a
-            // function pointer.
-            //
-            // SAFETY: the caller registered this via signal()/sigaction()
-            // as a valid fn(i32).  We trust they provided a valid pointer.
-            let func: extern "C" fn(i32) =
-                unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
-            // Before the call, not after: see `note_delivery`.
-            note_delivery();
-            // `SA_ONSTACK` is honoured here and nowhere else. See
-            // [`altstack_entry`] for the four conditions, and `known-issues.md`
-            // for the one case this still cannot serve.
-            run_handler(func, sig, altstack_entry(sa_flags));
+            // Before the call, not after, so that a handler that leaves by
+            // `longjmp` still counts: this thread's count, for a wait the
+            // signal cut short to learn whether it was interrupted
+            // ([`crate::interrupt`]).
+            crate::interrupt::note_handler(sa_flags & SA_RESTART != 0);
+            // Invoke the registered handler -- `handler(sig)`, or with its
+            // `siginfo_t` and `ucontext_t` when it was installed with
+            // `SA_SIGINFO`. `SA_ONSTACK` moves it to the alternate stack
+            // unless it is there already -- as when the kernel built this
+            // signal's frame there: see [`altstack_entry`] for the four
+            // conditions.
+            let top = altstack_entry(sa_flags);
+            let restore = if sa_flags & SA_SIGINFO == 0 {
+                run_handler(handler, sig, HandlerArgs::One, top);
+                blocked
+            } else {
+                run_siginfo_handler(handler, sig, origin, blocked, top)
+            };
 
-            // Restore the mask the handler ran under.  This may unblock a
-            // signal raised during the handler, which the kernel then
-            // delivers at the next syscall-return boundary.
-            if changed {
-                apply_blocked_low(blocked);
+            // Restore the mask the handler ran under -- or the one an
+            // `SA_SIGINFO` handler left in `uc_sigmask`, as `rt_sigreturn`
+            // would.  This may unblock a signal raised during the handler,
+            // which the kernel then delivers at the next syscall-return
+            // boundary.
+            if changed || restore != blocked {
+                apply_blocked_low(restore & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
             }
             0
         }
@@ -1179,6 +1743,12 @@ fn dispatch_self_signal(sig: i32) -> i32 {
 /// must match `kernel/src/proc/signal.rs::SignalContext` exactly.  The
 /// kernel writes this struct onto the user stack and passes a pointer
 /// to it in RSI; `SYS_SIGNAL_RETURN` reads it back to restore state.
+///
+/// A kernel wire format, not a C library type: no C program sees it. The
+/// one function that takes it, `__signal_dispatch`, is this library's own
+/// trampoline's entry; an `SA_SIGINFO` handler gets its registers in a
+/// `ucontext_t`'s `gregs`, translated by [`gregs_from_frame`] and back by
+/// [`frame_from_gregs`] (`check-libc-abi.py` lists it in `NO_ORACLE`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SignalContext {
@@ -1212,19 +1782,32 @@ pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 
 /// C entry point invoked by the assembly trampoline.
 ///
-/// Runs the registered disposition for `signum` on the current process
-/// (`dispatch_self_signal` handles SIG_IGN / handler invocation /
-/// default action).  If the disposition terminates the process this
-/// never returns; otherwise control returns to the trampoline, which
-/// issues `SYS_SIGNAL_RETURN`.
+/// Runs the registered disposition for `signum` on this thread, with the
+/// kernel's frame `ctx` for an `SA_SIGINFO` handler's `ucontext_t`
+/// (`dispatch_from` handles SIG_IGN / handler invocation / default
+/// action).  If the disposition terminates the process this never returns;
+/// otherwise control returns to the trampoline, which issues
+/// `SYS_SIGNAL_RETURN`.
 #[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
-pub extern "C" fn __signal_dispatch(signum: i32) {
-    // Ignore the return value: dispatch_self_signal either terminates
-    // the process (no return) or completes the handler/ignore action.
-    // Any errno it sets belongs to the interrupted code's context and
-    // will be clobbered when SYS_SIGNAL_RETURN restores RAX anyway.
-    let _ = dispatch_self_signal(signum);
+pub extern "C" fn __signal_dispatch(signum: i32, ctx: *mut SignalContext) {
+    // Ignore the return value: the dispatch either terminates the process
+    // (no return) or completes the handler/ignore action.  Any errno it
+    // sets belongs to the interrupted code's context and will be clobbered
+    // when SYS_SIGNAL_RETURN restores RAX anyway.
+    let _ = dispatch_from(signum, Origin::Kernel(ctx));
+}
+
+/// What the trampoline's `__signal_dispatch` does with a signal the kernel
+/// delivered -- run its disposition on this thread -- with no frame: the
+/// host tests' stand-in for the kernel ([`crate::interrupt::script`]) calls
+/// it as the trampoline would.  The tests' alone: the target's trampoline
+/// passes its frame, and until 2026-09-30 this was left in the target's
+/// build unused, its one warning.
+#[cfg(test)]
+pub(crate) fn dispatch_delivered(signum: i32) {
+    // Ignore the return value, as `__signal_dispatch` does.
+    let _ = dispatch_from(signum, Origin::Kernel(core::ptr::null_mut()));
 }
 
 // The trampoline the kernel jumps to when delivering a signal.
@@ -1243,7 +1826,7 @@ core::arch::global_asm!(
     ".globl __signal_trampoline",
     "__signal_trampoline:",
     "push rsi",               // save &SignalContext (RSP now 16-aligned)
-    "call __signal_dispatch",  // dispatch_self_signal(signum); RDI = signum
+    "call __signal_dispatch",  // (signum, &SignalContext): RDI, RSI as the kernel left them
     "pop rdi",                 // restore &SignalContext into arg0
     "mov rax, {sysret}",       // SYS_SIGNAL_RETURN
     "syscall",                 // kernel restores frame; does not return
@@ -1257,19 +1840,51 @@ unsafe extern "C" {
     fn __signal_trampoline();
 }
 
-/// Register the signal trampoline with the kernel.
+/// Register the signal trampoline with the kernel, and take the signal mask
+/// this image inherited.
 ///
 /// Called once during process startup (from `__libc_start_main`).  After
 /// this, the kernel delivers pending catchable signals by redirecting to
 /// `__signal_trampoline`.  Until a trampoline is registered the kernel
 /// applies signal default actions itself (terminating signals kill the
 /// process; others are dropped).
+///
+/// POSIX has a new image inherit its signal mask across `exec`, so the
+/// program's mask starts as the kernel's, not empty. `SYS_SIGNAL_MASK` only
+/// replaces the mask, answering the old one, so it is read by blocking
+/// everything and putting back what came back -- with one thread, before
+/// `main`, nothing sees the moment between. Until 2026-09-30 the program's
+/// mask started empty whatever the kernel held; the kernel clears the mask
+/// at `exec` itself today (`requests/d-a-exec-must-keep-the-signal-mask.md`),
+/// so the two agreed only by that.
 #[cfg(target_os = "none")]
 pub fn init_signals() {
     let addr = __signal_trampoline as *const () as usize as u64;
     // A failure here just means async delivery stays in the kernel's
     // default-action mode; nothing else in startup depends on it.
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_REGISTER, addr);
+    let mut inherited: u64 = 0;
+    let read = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_MASK,
+        u64::MAX,
+        core::ptr::addr_of_mut!(inherited) as u64,
+    );
+    // A failed read leaves `inherited` 0: the empty mask this library
+    // always started with, which `adopt_inherited_mask` then writes back.
+    adopt_inherited_mask(if read < 0 { 0 } else { inherited });
+}
+
+/// Start the program's mask as `inherited` -- what the kernel held as this
+/// image began -- and write the kernel's to match.
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+fn adopt_inherited_mask(inherited: u64) {
+    // SAFETY: `blocked_mask_ptr()` is this process's; startup has one thread.
+    unsafe {
+        let mut m = blocked_mask_ptr().read();
+        m.bits[0] = inherited & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
+        blocked_mask_ptr().write(m);
+    }
+    mask_changed();
 }
 
 /// Host-build no-op: there is no kernel to register with, and issuing a
@@ -1277,25 +1892,57 @@ pub fn init_signals() {
 #[cfg(not(target_os = "none"))]
 pub fn init_signals() {}
 
-/// Push the low 64 bits of the blocked mask to the kernel so that
-/// asynchronous delivery actually honours `sigprocmask`.
+/// Write the kernel's blocked mask ([`kernel_mask_now`]) so that
+/// asynchronous delivery honours `sigprocmask` -- and write it again for as
+/// long as its inputs change while it is written.  Two threads that each
+/// write the mask they computed can land in either order, and the one
+/// computed first must not be the one that stays; each change bumps the
+/// generation before it calls this ([`mask_changed`]), so whichever write
+/// landed stale is followed by another.
 ///
 /// Our kernel signal shim supports 64 signals, stored in one word; that
 /// maps exactly to `SigsetT::bits[0]` (signal N → bit N-1).  Higher
 /// realtime signals are not deliverable asynchronously yet, so only the
-/// low word is synchronised.  No-op on the host.
+/// low word is synchronised.
 #[cfg(target_os = "none")]
-fn sync_kernel_blocked_mask(low: u64) {
-    let mut old: u64 = 0;
-    let _ = crate::syscall::syscall2(
-        crate::syscall::SYS_SIGNAL_MASK,
-        low,
-        core::ptr::addr_of_mut!(old) as u64,
-    );
+fn sync_kernel_blocked_mask() {
+    use core::sync::atomic::Ordering::SeqCst;
+    // SAFETY: an atomic, shared by every thread.
+    let generation = unsafe { &*mask_generation_ptr() };
+    loop {
+        let seen = generation.load(SeqCst);
+        let mut old: u64 = 0;
+        // The kernel's answer is not needed: the call fails only for a bad
+        // out-pointer, and this one is a local.
+        let _ = crate::syscall::syscall2(
+            crate::syscall::SYS_SIGNAL_MASK,
+            kernel_mask_now(),
+            core::ptr::addr_of_mut!(old) as u64,
+        );
+        if generation.load(SeqCst) == seen {
+            break;
+        }
+    }
+}
+
+/// The host's stand-in: there is no kernel, so the mask is only kept, for
+/// the tests to read ([`kernel_blocked_low`]).
+#[cfg(not(target_os = "none"))]
+fn sync_kernel_blocked_mask() {
+    HOST_KERNEL_MASK.with(|m| m.set(kernel_mask_now()));
 }
 
 #[cfg(not(target_os = "none"))]
-fn sync_kernel_blocked_mask(_low: u64) {}
+std::thread_local! {
+    /// The mask the host's stand-in for `SYS_SIGNAL_MASK` was last given.
+    static HOST_KERNEL_MASK: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// The kernel's blocked mask, as the host's stand-in last wrote it.
+#[cfg(all(test, not(target_os = "none")))]
+fn kernel_blocked_low() -> u64 {
+    HOST_KERNEL_MASK.with(core::cell::Cell::get)
+}
 
 /// Classification of a *validated* `kill(pid, sig)` request with
 /// `sig != 0` (so `sig` is already known to be in `[1, NSIG)`).
@@ -1458,7 +2105,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     let self_pid = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_ID) as i32;
 
     match kill_target(pid, self_pid) {
-        KillTarget::Self_ => dispatch_self_signal(sig),
+        KillTarget::Self_ => dispatch_from(sig, Origin::Killed),
         KillTarget::ProcessGroup => {
             // No pre-emptive CAP_KILL test here (§314).  `SYS_SIGNAL_SEND`
             // is the authority for a group send exactly as it is for a
@@ -1574,6 +2221,124 @@ pub extern "C" fn raise(sig: i32) -> i32 {
     dispatch_self_signal(sig)
 }
 
+/// Send `sig` to thread `tid` of process `tgid` (Linux; glibc's since
+/// 2.30). Returns 0, or -1 with `errno` set.
+///
+/// Signals here are process-directed, as [`crate::pthread::pthread_kill`]
+/// explains. To the calling thread, `sig` is dispatched at once, as `raise`
+/// dispatches it, and an `SA_SIGINFO` handler is told `SI_TKILL`. To any
+/// other thread -- of this process or another -- it goes to that thread's
+/// process, and whichever of its threads next dispatches runs it; the kernel
+/// has no native thread-directed send, which
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` asks for.
+///
+/// What `tgkill` is for is kept all the same: `tid` must be a thread of
+/// `tgid`, or the answer is `ESRCH`, so that a thread id reused since the
+/// caller learnt it cannot carry the signal into some other process. This
+/// process's threads are this library's own to know
+/// ([`crate::pthread::thread_is_live`]); another's are looked for in
+/// `/proc/<tgid>/task/<tid>` -- which a process without a File capability
+/// with METADATA rights may not look at, and then the thread is not
+/// signalled: `EPERM` (or `ESRCH` when the process is not there at all),
+/// never a guess.
+///
+/// Errors, in Linux's order: `EINVAL` for a `tgid` or `tid` not above
+/// zero; `ESRCH` when `tid` is not a thread of `tgid`, `EPERM` when that
+/// cannot be checked; `EINVAL` for a signal outside `0..NSIG`; then what
+/// the kernel answers the send, `EPERM` among it. Signal 0 checks, and
+/// sends nothing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tgkill(tgid: crate::types::PidT, tid: crate::types::PidT, sig: i32) -> i32 {
+    if tgid <= 0 || tid <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let own = tgid == crate::process::getpid();
+    let calling = own && tid == crate::process::gettid();
+    let exists = if calling {
+        true
+    } else if own {
+        u64::try_from(tid).is_ok_and(crate::pthread::thread_is_live)
+    } else {
+        match proc_task_exists(tgid, tid) {
+            Some(e) => e,
+            None => {
+                // This process may not look at `/proc` (procfs's stat
+                // wants a File capability with METADATA rights). A process
+                // that is not there is still ESRCH; a thread that cannot
+                // be checked is not signalled -- tgkill's point is that a
+                // thread id another thread has since been given is not
+                // hit -- and the refusal is EPERM, never a false ESRCH.
+                #[allow(clippy::cast_sign_loss)]
+                let alive =
+                    crate::syscall::syscall1(crate::syscall::SYS_PROCESS_IS_READY, tgid as u64)
+                        >= 0;
+                errno::set_errno(if alive { errno::EPERM } else { errno::ESRCH });
+                return -1;
+            }
+        }
+    };
+    if !exists {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    if !(0..NSIG).contains(&sig) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    if calling {
+        return dispatch_self_signal(sig);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let ret = crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, tgid as u64, sig as u64);
+    if ret < 0 {
+        errno::set_errno(signal_send_errno(ret));
+        return -1;
+    }
+    0
+}
+
+/// Whether `/proc/<tgid>/task/<tid>` exists: whether `tid` is a thread of
+/// process `tgid`, as procfs sees it -- or `None` when this process may not
+/// look (`EACCES`: procfs's stat wants a File capability with METADATA
+/// rights, which a process started without capabilities lacks; the pgroup
+/// rung starts its fixture so). Until 2026-09-30 a refusal read as "no such
+/// thread", and tgkill answered a false ESRCH in such a process.
+fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> Option<bool> {
+    /// The path, NUL-terminated, in a buffer of its own.
+    struct PathBuf {
+        buf: [u8; 48],
+        len: usize,
+    }
+    impl core::fmt::Write for PathBuf {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let end = self.len.checked_add(s.len()).ok_or(core::fmt::Error)?;
+            self.buf
+                .get_mut(self.len..end)
+                .ok_or(core::fmt::Error)?
+                .copy_from_slice(s.as_bytes());
+            self.len = end;
+            Ok(())
+        }
+    }
+    let mut path = PathBuf {
+        buf: [0; 48],
+        len: 0,
+    };
+    // Two ten-digit numbers and the rest fit in 48; a path that did not
+    // would name no thread.
+    if core::fmt::write(&mut path, format_args!("/proc/{tgid}/task/{tid}\0")).is_err() {
+        return Some(false);
+    }
+    if crate::file::access(path.buf.as_ptr(), crate::fcntl::F_OK) == 0 {
+        return Some(true);
+    }
+    (errno::get_errno() != errno::EACCES).then_some(false)
+}
+
 /// Examine and change blocked signals.
 ///
 /// Stores the signal mask in process-local state so that
@@ -1649,7 +2414,7 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
         // delivery honours the blocked set.  (Realtime signals 65+
         // aren't deliverable asynchronously yet, so only bits[0] is
         // synchronised.)
-        sync_kernel_blocked_mask(new_mask.bits[0]);
+        mask_changed();
     }
 
     0
@@ -1709,9 +2474,14 @@ pub extern "C" fn sigsuspend(mask: *const SigsetT) -> i32 {
     // SAFETY: non-null (checked just above); read unaligned to tolerate a
     // caller buffer that is not naturally aligned, as `setitimer` does.
     let requested = unsafe { core::ptr::read_unaligned(mask) };
+    // Handlers counted from before the mask: one that the mask lets through
+    // runs as it is set, and is the signal this was waiting for.
+    let mark = crate::interrupt::Mark::now();
     let previous = current_blocked_low();
-    apply_blocked_low(requested.bits[0]);
-    wait_for_delivery();
+    // `sigdelsetmask(&newset, sigmask(SIGKILL) | sigmask(SIGSTOP))`, as
+    // Linux's `sigsuspend` has it: those two cannot be blocked.
+    apply_blocked_low(requested.bits[0] & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP)));
+    wait_for_handler(mark);
     // Restored even though every path returns -1: the mask is process state,
     // and a caller looping on `sigsuspend` must not accumulate the mask it
     // passed in.
@@ -2175,7 +2945,7 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 
         // Before anything else: the running handler's frames live on this
         // memory, so it cannot be moved out from under it.
-        if old.on {
+        if on_the_alt_stack(&old) {
             errno::set_errno(errno::EPERM);
             return -1;
         }
@@ -2222,7 +2992,7 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 
     // Last, so that a rejected `ss` leaves it alone.
     if !oss.is_null() {
-        let flags = if old.on {
+        let flags = if on_the_alt_stack(&old) {
             SS_ONSTACK
         } else if old.sp == 0 {
             SS_DISABLE
@@ -2262,9 +3032,12 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 /// This used to validate `sig` and return 0, ignoring `flag`, above a comment
 /// reading "Since our OS doesn't deliver signals, there is no SA_RESTART
 /// behavior to toggle". That stopped being true: `crt.rs` registers a signal
-/// trampoline so the kernel can deliver to installed handlers, `signal()`
-/// installs with `SA_RESTART`, and the kernel reads the flag. A caller asking
-/// for interruptible syscalls was being told yes and getting restartable ones.
+/// trampoline so the kernel can deliver to installed handlers, and `signal()`
+/// installs with `SA_RESTART`. The flag is read by this library, not by the
+/// kernel, which cannot see it: the calls that wait in the library restart
+/// by it as Linux's do ([`crate::interrupt`]); one the kernel itself sleeps in
+/// does not yet (known-issues
+/// `D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL`).
 ///
 /// Errors (Linux-matching, via glibc's `siginterrupt` implementation
 /// which internally calls `sigaction`):
@@ -2443,38 +3216,41 @@ pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
 }
 
 // ---------------------------------------------------------------------------
-// sigwait / sigtimedwait / sigqueue — stubs
+// sigwait / sigtimedwait / sigwaitinfo, and sigqueue
 // ---------------------------------------------------------------------------
 
-/// Wait for a signal from a set.
+/// Wait for a signal from a set, and take it.
 ///
-/// Stub: our OS doesn't deliver signals.  Sleeps for 1 second then
-/// returns `EINTR` (wait interrupted, no signal delivered).
+/// `sigtimedwait` with no timeout, answering by its return value -- 0 with
+/// the signal's number in `*sig`, or an error number -- and never `EINTR`:
+/// a wait a signal handler ends is begun again, as glibc's `sigwait` does.
+/// The set's signals should be blocked, as POSIX asks: one that is not may
+/// run its handler instead, when it comes while no one waits.
 ///
-/// `sigwait` reports errors via its return value (positive errno),
-/// **not** via `errno`.  POSIX requires the function to return zero on
-/// success and a positive error number on failure.
+/// Until 2026-09-30 this slept for a second and answered `EINTR`, having
+/// taken nothing (known-issues `D-POSIX-SIGWAIT-AND-SIGTIMEDWAIT-ARE-STUBS`).
 ///
-/// Errors (Linux-matching priority, via glibc's `sigwait` wrapper
-/// around `sigtimedwait`/`rt_sigtimedwait`):
-/// * `EFAULT` — `set` is NULL (the kernel copies it via
-///   `copy_from_user`, which faults).  Validated before any sleep so a
-///   buggy caller doesn't silently block for a second first.
+/// Errors: `EFAULT` for a NULL `set`, before anything else.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigwait(set: *const SigsetT, sig: *mut i32) -> i32 {
     if set.is_null() {
         // sigwait returns its error code via the return value, not errno.
         return crate::errno::EFAULT;
     }
-    // Sleep briefly so callers in a loop don't spin.
-    let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
-    if !sig.is_null() {
-        // SAFETY: sig is valid if non-null (caller contract).
-        unsafe {
-            *sig = 0;
+    loop {
+        let r = sigtimedwait(set, core::ptr::null_mut(), core::ptr::null());
+        if r > 0 {
+            if !sig.is_null() {
+                // SAFETY: a non-null `sig` is writable, per the contract.
+                unsafe { sig.write_unaligned(r) };
+            }
+            return 0;
+        }
+        let e = errno::get_errno();
+        if e != errno::EINTR {
+            return e;
         }
     }
-    crate::errno::EINTR
 }
 
 /// Maximum valid value for `timespec.tv_nsec` (one less than a second
@@ -2482,33 +3258,42 @@ pub extern "C" fn sigwait(set: *const SigsetT, sig: *mut i32) -> i32 {
 /// per Linux's `kernel/time/posix-timers.c::do_sigtimedwait`.
 pub const SIGTIMEDWAIT_NSEC_MAX: i64 = 999_999_999;
 
-/// Wait for a signal with a timeout.
+/// Wait for a signal from a set, for at most `timeout` (relative; NULL
+/// waits as long as it takes), and take it: its number, with `*info`
+/// filled when `info` is not NULL.
 ///
-/// Stub: validates arguments per Linux `kernel/signal.c::do_sigtimedwait`,
-/// then returns `-1` with `EAGAIN` (timeout expired, no signal delivered).
+/// A signal of the set that is pending is taken at once; otherwise the next
+/// to come, to whichever thread the kernel delivers it ([`accept`]).  A
+/// signal handler that runs on this thread meanwhile -- for a signal
+/// outside the set -- ends the wait with `EINTR`, `SA_RESTART` or not; a
+/// signal that runs no handler here does not.  Those are glibc's answers on
+/// Linux (`interrupt_oracle.txt`).  The siginfo carries the signal's number
+/// and nothing else: the native signal frame brings no more.
+///
+/// Until 2026-09-30 this answered `EAGAIN` at once, having taken nothing.
 ///
 /// Errors (Linux-matching priority order):
 /// * `EFAULT` — `set` is NULL (kernel copies it into a kernel sigset
 ///   via `copy_from_user`; NULL faults immediately).
 /// * `EINVAL` — `timeout` is non-NULL and contains a negative `tv_sec`
 ///   or an out-of-range `tv_nsec` (must be in `[0, 999_999_999]`).
-///
-/// Behaviour notes:
-/// * A NULL `timeout` is the "wait forever" form; we still surface
-///   `EAGAIN` because no signal can ever be delivered in this stub.
-/// * `info` may be NULL — POSIX explicitly allows callers that don't
-///   care about siginfo to pass NULL.
+/// * `EAGAIN` — the time ran out.
+/// * `EINTR` — a signal handler ran on this thread.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigtimedwait(
     set: *const SigsetT,
-    _info: *mut core::ffi::c_void,
+    info: *mut core::ffi::c_void,
     timeout: *const crate::stat::Timespec,
 ) -> i32 {
+    // Handlers counted from here: in Linux the call is one system call.
+    let mark = crate::interrupt::Mark::now();
     if set.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
-    if !timeout.is_null() {
+    let deadline = if timeout.is_null() {
+        None
+    } else {
         // SAFETY: timeout was just confirmed non-NULL.  We read fields
         // by-value; alignment is the caller's responsibility per the
         // documented C ABI.
@@ -2517,9 +3302,33 @@ pub extern "C" fn sigtimedwait(
             crate::errno::set_errno(crate::errno::EINVAL);
             return -1;
         }
+        let now = crate::lowlevellock::now_on(crate::time::CLOCK_MONOTONIC);
+        let ns = u64::try_from(ts.tv_sec)
+            .unwrap_or(0)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::try_from(ts.tv_nsec).unwrap_or(0));
+        Some(crate::lowlevellock::after(&now, ns))
+    };
+    // SAFETY: non-null, a readable `sigset_t`; its first word is the
+    // kernel's 64 signals.
+    let wanted = unsafe { set.cast::<u64>().read_unaligned() };
+    match accept(wanted, deadline.as_ref(), mark) {
+        Ok(sig) => {
+            if !info.is_null() {
+                let si = SiginfoT {
+                    si_signo: sig,
+                    ..SiginfoT::default()
+                };
+                // SAFETY: a non-null `info` is a writable `siginfo_t`.
+                unsafe { info.cast::<SiginfoT>().write_unaligned(si) };
+            }
+            sig
+        }
+        Err(e) => {
+            crate::errno::set_errno(e);
+            -1
+        }
     }
-    crate::errno::set_errno(crate::errno::EAGAIN);
-    -1
 }
 
 /// Wait for a signal from a set, reporting which one arrived.
@@ -2529,19 +3338,11 @@ pub extern "C" fn sigtimedwait(
 /// `sigwaitinfo(set, info)` as equivalent to `sigtimedwait` with a null
 /// timeout, and glibc (`sysdeps/unix/sysv/linux/sigwaitinfo.c`) and musl
 /// both implement it as that one call.  Expressing it as a forward is what
-/// keeps the two from drifting: any validation — or, later, any real
-/// delivery — added to [`sigtimedwait`] is inherited here for free, which a
-/// hand-copied body would not be.
+/// keeps the two from drifting.
 ///
 /// Returns the signal number on success, or `-1` with `errno` set.  Note the
 /// `-1`/`errno` convention, unlike its near-neighbour [`sigwait`], which
 /// returns the errno directly; that inconsistency is POSIX's, not ours.
-///
-/// While nothing can be delivered to a waiter, this reports `EAGAIN` (from
-/// `sigtimedwait`) rather than blocking forever.  A caller that treats
-/// `EAGAIN` as "timed out, go round again" therefore spins — which is worse
-/// than a real wait and better than a hang, and is the same answer the timed
-/// form already gives.
 ///
 /// CPython reaches this from `signal.sigwaitinfo`
 /// (`Modules/signalmodule.c:1178`); it was one of the thirteen symbols that
@@ -2611,6 +3412,27 @@ pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> 
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// siginfo si_code values: who sent a signal (Linux's, and musl's)
+// ---------------------------------------------------------------------------
+
+/// Sent by `kill`.
+pub const SI_USER: i32 = 0;
+/// Sent by the kernel.
+pub const SI_KERNEL: i32 = 0x80;
+/// Sent by `sigqueue`.
+pub const SI_QUEUE: i32 = -1;
+/// A POSIX timer expired.
+pub const SI_TIMER: i32 = -2;
+/// A message arrived on an empty POSIX message queue.
+pub const SI_MESGQ: i32 = -3;
+/// An asynchronous I/O request completed.
+pub const SI_ASYNCIO: i32 = -4;
+/// Queued `SIGIO`.
+pub const SI_SIGIO: i32 = -5;
+/// Sent by `tkill` or `tgkill` -- glibc's `raise` and `pthread_kill`.
+pub const SI_TKILL: i32 = -6;
 
 // ---------------------------------------------------------------------------
 // siginfo si_code values for SIGCHLD (used with waitid)
@@ -2693,9 +3515,10 @@ pub struct SiginfoT {
     pub si_code: i32,
     /// Alignment padding — the union begins at offset 16 on 64-bit.
     _preamble_pad: i32,
-    /// `SIGCHLD` arm: PID of the child whose state changed.
+    /// `SIGCHLD` arm: PID of the child whose state changed. The `_kill`
+    /// arm's sender has the same offset, and is written here too.
     pub si_pid: i32,
-    /// `SIGCHLD` arm: real UID of that child.
+    /// `SIGCHLD` arm: real UID of that child -- or, likewise, the sender's.
     pub si_uid: u32,
     /// `SIGCHLD` arm: the child's exit code, or the signal that killed,
     /// stopped or continued it — which of the two is selected by `si_code`.
@@ -2907,6 +3730,51 @@ mod tests {
     fn clear() {
         let off = stack_at(0, 0, SS_DISABLE);
         assert_eq!(sigaltstack(&raw const off, core::ptr::null_mut()), 0);
+    }
+
+    /// A handler the kernel started on the alternate stack -- its frame built
+    /// at the top, the dispatch just below -- is not moved to the top again;
+    /// and while it runs, `sigaltstack` reports `SS_ONSTACK` and refuses a
+    /// change. The kernel's doing is stood in for by registering a region
+    /// around this test's own stack, which is where the stack pointer then
+    /// is; nothing switches to it.
+    #[test]
+    fn a_handler_the_kernel_started_on_the_alternate_stack_stays_where_it_is() {
+        let here = 0u8;
+        let sp = core::hint::black_box(core::ptr::addr_of!(here)) as usize;
+        // SAFETY: this thread's registration (the host's is per thread); the
+        // region is only compared with, never written.
+        unsafe {
+            *altstack_ptr() = AltStack {
+                sp: sp - 32768,
+                size: 65536,
+                on: false,
+                autodisarm: false,
+            };
+        }
+        assert_eq!(altstack_entry(SA_ONSTACK), None, "already on it");
+        assert_eq!(query().ss_flags, SS_ONSTACK);
+        let other = stack_at(0x1000, MINSIGSTKSZ, 0);
+        crate::errno::set_errno(0);
+        assert_eq!(sigaltstack(&raw const other, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+
+        // A region the stack pointer is not in is still switched to.
+        // SAFETY: as above.
+        unsafe {
+            *altstack_ptr() = AltStack {
+                sp: 0x1000,
+                size: 65536,
+                on: false,
+                autodisarm: false,
+            };
+        }
+        assert_eq!(altstack_entry(SA_ONSTACK), Some(0x1000 + 65536));
+        assert_eq!(query().ss_flags, 0);
+        // SAFETY: as above.
+        unsafe {
+            *altstack_ptr() = AltStack::NONE;
+        }
     }
 
     // ---- the SA_ONSTACK mask the kernel is told about ----
@@ -6390,51 +7258,680 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // The delivery counter, which `pause` and `sigsuspend` wait on.
-    //
-    // These are host tests of a mechanism whose *wait* is bare-metal only
-    // (`wait_for_delivery` is a no-op off-target, or `cargo test` would park
-    // forever waiting for a kernel that is not there). What the host can
-    // still check is the half that decides whether the wait ever ends: that
-    // the counter moves exactly when a handler runs. If it did not move, a
-    // process in `pause` on the target would never wake, and no host test
-    // would have said so.
+    // The wait of `pause` and `sigsuspend`, with the kernel played by
+    // `crate::interrupt::script`.
     // -----------------------------------------------------------------
 
-    /// The counter moves when a handler actually runs.
+    /// A signal that runs no handler here -- ignored, or handled on another
+    /// thread -- leaves the wait where it is; one that runs a handler ends
+    /// it, `SA_RESTART` or not.
     #[test]
-    fn test_delivery_counter_increments_when_a_handler_runs() {
+    fn pause_waits_for_a_handler_on_its_own_thread() {
+        use crate::interrupt::script::{self, Step};
         extern "C" fn handler(_sig: i32) {}
-
-        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
-        let before = deliveries();
-        assert_eq!(raise(SIGUSR1), 0);
-        assert_eq!(
-            deliveries(),
-            before.wrapping_add(1),
-            "a handler ran, so the delivery counter must have moved"
-        );
+        let old = signal(SIGUSR1, SIG_IGN);
+        script::set([
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {
+                // The next signal finds a handler.
+                signal(SIGUSR1, handler as *const () as SighandlerT);
+            })),
+            Step::Signal(SIGUSR1),
+        ]);
+        crate::errno::set_errno(0);
+        assert_eq!(crate::unistd::pause(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
+        assert_eq!(script::clear(), 0, "it waited through the first two");
         signal(SIGUSR1, old);
     }
 
-    /// ...and does not move for a signal that runs no handler.
-    ///
-    /// This is the one that keeps `pause` correct rather than merely awake.
-    /// POSIX says an ignored signal does not end a `pause`, and that falls
-    /// out of counting handler *invocations* rather than deliveries. Count
-    /// deliveries instead and `pause` would return on a signal the process
-    /// asked to ignore.
+    /// A handler that ran after the mark and before the wait -- as one does
+    /// when `sigsuspend`'s mask lets a pending signal through -- ends the
+    /// wait without a sleep.
     #[test]
-    fn test_delivery_counter_ignores_a_signal_with_no_handler() {
-        let old = signal(SIGUSR1, SIG_IGN);
-        let before = deliveries();
+    fn a_handler_since_the_mark_ends_the_wait_at_once() {
+        use crate::interrupt::script::{self, Step};
+        extern "C" fn handler(_sig: i32) {}
+        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
+        let mark = crate::interrupt::Mark::now();
         assert_eq!(raise(SIGUSR1), 0);
-        assert_eq!(
-            deliveries(),
-            before,
-            "SIG_IGN runs no handler, so it must not count as a delivery"
-        );
+        script::set([Step::Wake(std::boxed::Box::new(|| panic!("it slept")))]);
+        wait_for_handler(mark);
+        assert_eq!(script::clear(), 1);
         signal(SIGUSR1, old);
+    }
+
+    // -----------------------------------------------------------------
+    // sigtimedwait and its kin take a signal, handed over by the dispatch;
+    // the kernel is played by `crate::interrupt::script`.
+    // -----------------------------------------------------------------
+
+    std::thread_local! {
+        static USR2_RAN: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
+
+    extern "C" fn count_usr2(_sig: i32) {
+        USR2_RAN.with(|c| c.set(c.get() + 1));
+    }
+
+    fn usr2_set() -> SigsetT {
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = sigmask_bit(SIGUSR2);
+        set
+    }
+
+    /// A signal of the set that comes while the thread waits is handed to it
+    /// by the dispatch -- no handler runs -- and the set is blocked again
+    /// afterwards, as it was.
+    #[test]
+    fn a_signal_waited_for_is_taken_not_handled() {
+        use crate::interrupt::script::{self, Step};
+        let old = signal(SIGUSR2, count_usr2 as *const () as SighandlerT);
+        let set = usr2_set();
+        let mut before = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, &raw const set, &raw mut before), 0);
+        USR2_RAN.with(|c| c.set(0));
+
+        script::set([Step::SignalElsewhere(std::boxed::Box::new(|| {
+            dispatch_delivered(SIGUSR2);
+        }))]);
+        let mut info = SiginfoT::default();
+        let taken = sigtimedwait(&raw const set, (&raw mut info).cast(), core::ptr::null());
+        assert_eq!(taken, SIGUSR2);
+        assert_eq!(info.si_signo, SIGUSR2);
+        assert_eq!(
+            USR2_RAN.with(core::cell::Cell::get),
+            0,
+            "taken, not handled"
+        );
+        assert_eq!(script::clear(), 0);
+        assert_ne!(
+            current_blocked_low() & sigmask_bit(SIGUSR2),
+            0,
+            "still blocked"
+        );
+        assert_ne!(
+            kernel_blocked_low() & sigmask_bit(SIGUSR2),
+            0,
+            "blocked again at the kernel"
+        );
+
+        // sigwait answers by its return value, and sigwaitinfo by the number.
+        script::set([Step::SignalElsewhere(std::boxed::Box::new(|| {
+            dispatch_delivered(SIGUSR2);
+        }))]);
+        let mut sig = 0;
+        assert_eq!(sigwait(&raw const set, &raw mut sig), 0);
+        assert_eq!(sig, SIGUSR2);
+        script::set([Step::SignalElsewhere(std::boxed::Box::new(|| {
+            dispatch_delivered(SIGUSR2);
+        }))]);
+        assert_eq!(sigwaitinfo(&raw const set, core::ptr::null_mut()), SIGUSR2);
+        assert_eq!(USR2_RAN.with(core::cell::Cell::get), 0);
+
+        // With no one waiting, the dispatch runs the handler, as ever.
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(raise(SIGUSR2), 0);
+        assert_eq!(USR2_RAN.with(core::cell::Cell::get), 1);
+        signal(SIGUSR2, old);
+    }
+
+    /// A handler for a signal outside the set ends the wait, `SA_RESTART` or
+    /// not; a signal that runs no handler here does not.
+    #[test]
+    fn a_handler_ends_sigtimedwait_whatever_its_sa_restart() {
+        use crate::interrupt::script::{self, Step};
+        extern "C" fn nothing(_: i32) {}
+        let set = usr2_set();
+        for flags in [0, SA_RESTART] {
+            let act = Sigaction {
+                sa_handler: nothing as *const () as SighandlerT,
+                sa_mask: SigsetT::EMPTY,
+                sa_flags: flags,
+                sa_restorer: 0,
+            };
+            // SAFETY: a valid action; the old one is not wanted.
+            assert_eq!(
+                unsafe { sigaction(SIGUSR1, &raw const act, core::ptr::null_mut()) },
+                0
+            );
+            script::set([Step::Signal(SIGUSR1)]);
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sigtimedwait(&raw const set, core::ptr::null_mut(), core::ptr::null()),
+                -1
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINTR,
+                "flags {flags:#x}"
+            );
+        }
+        let old = signal(SIGUSR1, SIG_IGN);
+        script::set([
+            Step::Signal(SIGUSR1),
+            Step::SignalElsewhere(std::boxed::Box::new(|| {
+                dispatch_delivered(SIGUSR2);
+            })),
+        ]);
+        assert_eq!(
+            sigtimedwait(&raw const set, core::ptr::null_mut(), core::ptr::null()),
+            SIGUSR2
+        );
+        assert_eq!(script::clear(), 0);
+        signal(SIGUSR1, old);
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// The dispatch's side, on a slot set by hand: the first signal of the
+    /// set is the waiter's; a second is kept for when it stops; once it has
+    /// stopped, it takes nothing; one outside every set is not taken at all.
+    #[test]
+    fn the_dispatch_keeps_what_it_cannot_hand_over() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's table (the host's is per thread).
+        let a = &unsafe { &*acceptors_ptr() }[0];
+        assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.set
+            .store(sigmask_bit(SIGUSR1) | sigmask_bit(SIGUSR2), SeqCst);
+
+        assert!(hand_to_a_waiter(SIGUSR1));
+        assert_eq!(a.got.load(SeqCst), SIGUSR1);
+        assert!(hand_to_a_waiter(SIGUSR2));
+        assert_eq!(
+            a.got.load(SeqCst),
+            SIGUSR1,
+            "the first is still the waiter's"
+        );
+        assert_eq!(
+            a.extra.load(SeqCst),
+            sigmask_bit(SIGUSR2),
+            "the second is kept"
+        );
+        a.got.store(CLOSED, SeqCst);
+        assert!(
+            !hand_to_a_waiter(SIGUSR2),
+            "one that has stopped takes nothing"
+        );
+        assert!(!hand_to_a_waiter(SIGHUP), "outside the set");
+
+        a.set.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
+        assert!(!hand_to_a_waiter(SIGUSR1), "no one waits");
+    }
+
+    /// While a thread waits for a set, the kernel lets the set through and
+    /// the program's mask -- what `sigprocmask` reports -- still blocks it; a
+    /// handler elsewhere that sets its mask and restores the one it found
+    /// does not close it.  Once the wait is over the kernel's mask is the
+    /// program's again.
+    #[test]
+    fn a_waiter_opens_its_set_at_the_kernel_and_not_in_the_programs_mask() {
+        use crate::interrupt::script::{self, Step};
+        let usr2 = sigmask_bit(SIGUSR2);
+        let old = signal(SIGUSR2, count_usr2 as *const () as SighandlerT);
+        USR2_RAN.with(|c| c.set(0));
+        let set = usr2_set();
+        let mut before = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, &raw const set, &raw mut before), 0);
+        assert_ne!(kernel_blocked_low() & usr2, 0, "blocked at the kernel too");
+
+        script::set([Step::Wake(std::boxed::Box::new(move || {
+            assert_eq!(
+                kernel_blocked_low() & usr2,
+                0,
+                "let through while waited for"
+            );
+            let mut now = SigsetT::EMPTY;
+            assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+            assert_ne!(now.bits[0] & usr2, 0, "blocked, as sigprocmask tells it");
+            // A handler on another thread: its mask, then the one it found.
+            let found = current_blocked_low();
+            apply_blocked_low(found | sigmask_bit(SIGUSR1));
+            apply_blocked_low(found);
+            assert_eq!(kernel_blocked_low() & usr2, 0, "still let through");
+            dispatch_delivered(SIGUSR2);
+        }))]);
+        assert_eq!(
+            sigtimedwait(&raw const set, core::ptr::null_mut(), core::ptr::null()),
+            SIGUSR2
+        );
+        assert_eq!(script::clear(), 0);
+        assert_eq!(
+            USR2_RAN.with(core::cell::Cell::get),
+            0,
+            "taken, not handled"
+        );
+        assert_eq!(
+            kernel_blocked_low(),
+            current_blocked_low(),
+            "the program's again"
+        );
+        assert_ne!(kernel_blocked_low() & usr2, 0);
+
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const before, core::ptr::null_mut()),
+            0
+        );
+        signal(SIGUSR2, old);
+    }
+
+    /// The kernel lets through the union of the sets waited for: one waiter
+    /// that stops leaves open what another still waits for.
+    #[test]
+    fn the_kernel_lets_through_every_set_waited_for() {
+        use core::sync::atomic::Ordering::SeqCst;
+        let (usr1, usr2) = (sigmask_bit(SIGUSR1), sigmask_bit(SIGUSR2));
+        let both = usr1 | usr2;
+        let saved = current_blocked_low();
+        apply_blocked_low(saved | both);
+        // SAFETY: this thread's table (the host's is per thread).
+        let table = unsafe { &*acceptors_ptr() };
+        let (a, b) = (&table[0], &table[1]);
+        a.set.store(both, SeqCst);
+        b.set.store(usr2, SeqCst);
+        mask_changed();
+        assert_eq!(kernel_blocked_low() & both, 0);
+        a.set.store(0, SeqCst);
+        mask_changed();
+        assert_eq!(
+            kernel_blocked_low() & both,
+            usr1,
+            "SIGUSR2 is still waited for"
+        );
+        b.set.store(0, SeqCst);
+        mask_changed();
+        assert_eq!(kernel_blocked_low() & both, both);
+        apply_blocked_low(saved);
+    }
+
+    /// A signal goes to a waiter free to take it before it is kept for one
+    /// that has taken another; a waiter that has stopped takes nothing.
+    #[test]
+    fn the_dispatch_prefers_a_waiter_free_to_take_a_signal() {
+        use core::sync::atomic::Ordering::SeqCst;
+        let usr2 = sigmask_bit(SIGUSR2);
+        // SAFETY: this thread's table (the host's is per thread).
+        let table = unsafe { &*acceptors_ptr() };
+        let (a, b) = (&table[0], &table[1]);
+        for w in [a, b] {
+            w.extra.store(0, SeqCst);
+            w.set.store(usr2, SeqCst);
+        }
+        a.got.store(SIGUSR1, SeqCst);
+        b.got.store(0, SeqCst);
+        assert!(hand_to_a_waiter(SIGUSR2));
+        assert_eq!(b.got.load(SeqCst), SIGUSR2, "the free one takes it");
+        assert_eq!(a.extra.load(SeqCst), 0, "not kept for the other");
+
+        b.set.store(0, SeqCst);
+        a.got.store(CLOSED, SeqCst);
+        assert!(!hand_to_a_waiter(SIGUSR2), "no waiter takes it");
+        assert_eq!(a.extra.load(SeqCst), 0);
+        for w in [a, b] {
+            w.set.store(0, SeqCst);
+            w.got.store(0, SeqCst);
+            w.extra.store(0, SeqCst);
+        }
+    }
+
+    /// The dispatch leaves a blocked signal pending only once the kernel's
+    /// mask blocks it too.  Another thread between writing the program's mask
+    /// and the kernel's leaves the kernel letting it through, and the kernel
+    /// would deliver it straight back: to this thread, from inside this
+    /// dispatch, and again from that one.
+    #[test]
+    fn a_signal_is_kept_pending_only_once_the_kernel_blocks_it() {
+        let usr2 = sigmask_bit(SIGUSR2);
+        let old = signal(SIGUSR2, count_usr2 as *const () as SighandlerT);
+        USR2_RAN.with(|c| c.set(0));
+        let saved = current_blocked_low();
+        apply_blocked_low(saved | usr2);
+        // The kernel's mask as that other thread leaves it, for a moment.
+        HOST_KERNEL_MASK.with(|m| m.set(0));
+        drop(kept_pending());
+
+        dispatch_delivered(SIGUSR2);
+        assert_eq!(
+            USR2_RAN.with(core::cell::Cell::get),
+            0,
+            "blocked: not handled"
+        );
+        let kept = kept_pending();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].0, SIGUSR2);
+        assert_ne!(kept[0].1 & usr2, 0, "blocked at the kernel as it was kept");
+
+        apply_blocked_low(saved);
+        signal(SIGUSR2, old);
+    }
+
+    /// A child of `fork` has none of its parent's other threads, so none of
+    /// their waits: it forgets them, and the kernel's mask is the program's.
+    #[test]
+    fn a_forked_child_forgets_the_parents_waiters() {
+        use core::sync::atomic::Ordering::SeqCst;
+        let usr2 = sigmask_bit(SIGUSR2);
+        let saved = current_blocked_low();
+        apply_blocked_low(saved | usr2);
+        // SAFETY: this thread's table (the host's is per thread).
+        let table = unsafe { &*acceptors_ptr() };
+        let w = &table[3];
+        w.busy.store(true, SeqCst);
+        w.set.store(usr2, SeqCst);
+        mask_changed();
+        assert_eq!(kernel_blocked_low() & usr2, 0);
+
+        forget_waiters_after_fork();
+        assert!(!w.busy.load(SeqCst));
+        assert_eq!(w.set.load(SeqCst), 0);
+        assert_ne!(
+            kernel_blocked_low() & usr2,
+            0,
+            "blocked, as the program has it"
+        );
+        assert!(!hand_to_a_waiter(SIGUSR2), "no one waits");
+        apply_blocked_low(saved);
+    }
+
+    // -----------------------------------------------------------------
+    // SA_SIGINFO: the handler's siginfo_t and ucontext_t
+    // -----------------------------------------------------------------
+
+    /// What an `SA_SIGINFO` handler saw, recorded by [`record_siginfo`].
+    #[derive(Clone, Copy, Default)]
+    struct Seen {
+        signo: i32,
+        code: i32,
+        pid: i32,
+        uid: u32,
+        mask: u64,
+        rip: i64,
+        rsp: i64,
+        rax: i64,
+        rcx: i64,
+        r11: i64,
+        stack_flags: i32,
+        fpregs_inside: bool,
+        mxcsr: u32,
+        calls: u32,
+    }
+
+    std::thread_local! {
+        static SEEN: core::cell::Cell<Seen> = const {
+            core::cell::Cell::new(Seen {
+                signo: 0, code: 0, pid: 0, uid: 0, mask: 0, rip: 0, rsp: 0, rax: 0,
+                rcx: 0, r11: 0, stack_flags: 0, fpregs_inside: false, mxcsr: 0, calls: 0,
+            })
+        };
+        /// What [`record_siginfo`] writes into the handler's `ucontext_t`:
+        /// `(rax, rip, a signal to add to uc_sigmask)`, or nothing.
+        static CHANGE: core::cell::Cell<Option<(i64, i64, i32)>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    extern "C" fn record_siginfo(sig: i32, info: *mut SiginfoT, uc: *mut core::ffi::c_void) {
+        use crate::ucontext::{REG_R11, REG_RAX, REG_RCX, REG_RIP, REG_RSP, UcontextT};
+        assert!(!info.is_null() && !uc.is_null());
+        // SAFETY: the dispatch passes its live siginfo_t and ucontext_t.
+        let (info, uc) = unsafe { (&*info, &mut *uc.cast::<UcontextT>()) };
+        let base = (&raw const *uc) as usize;
+        let fp = uc.uc_mcontext.fpregs as usize;
+        let seen = Seen {
+            signo: info.si_signo,
+            code: info.si_code,
+            pid: info.si_pid,
+            uid: info.si_uid,
+            mask: uc.uc_sigmask.bits[0],
+            rip: uc.uc_mcontext.gregs[REG_RIP],
+            rsp: uc.uc_mcontext.gregs[REG_RSP],
+            rax: uc.uc_mcontext.gregs[REG_RAX],
+            rcx: uc.uc_mcontext.gregs[REG_RCX],
+            r11: uc.uc_mcontext.gregs[REG_R11],
+            stack_flags: uc.uc_stack.ss_flags,
+            fpregs_inside: fp >= base && fp < base + core::mem::size_of::<UcontextT>(),
+            // SAFETY: checked just above to point inside `uc`.
+            mxcsr: if fp == 0 {
+                0
+            } else {
+                unsafe { (*uc.uc_mcontext.fpregs).mxcsr }
+            },
+            calls: SEEN.with(|s| s.get().calls) + 1,
+        };
+        assert_eq!(sig, seen.signo);
+        SEEN.with(|s| s.set(seen));
+        if let Some((rax, rip, add)) = CHANGE.with(core::cell::Cell::get) {
+            uc.uc_mcontext.gregs[REG_RAX] = rax;
+            uc.uc_mcontext.gregs[REG_RIP] = rip;
+            uc.uc_sigmask.bits[0] |= sigmask_bit(add);
+        }
+    }
+
+    fn install_siginfo(sig: i32) {
+        let act = Sigaction {
+            sa_handler: record_siginfo as *const () as SighandlerT,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: SA_SIGINFO,
+            sa_restorer: 0,
+        };
+        // SAFETY: a valid action; the old one is not wanted.
+        assert_eq!(
+            unsafe { sigaction(sig, &raw const act, core::ptr::null_mut()) },
+            0
+        );
+        SEEN.with(|s| s.set(Seen::default()));
+        CHANGE.with(|c| c.set(None));
+    }
+
+    /// An `SA_SIGINFO` handler is called with a `siginfo_t` saying who sent
+    /// the signal, as far as its origin tells, and a `ucontext_t` with the
+    /// mask as it came, the alternate stack's state and the floating-point
+    /// control state it points at inside itself.
+    #[test]
+    fn an_sa_siginfo_handler_is_given_its_siginfo_and_ucontext() {
+        install_siginfo(SIGUSR1);
+        let blocked = current_blocked_low();
+
+        assert_eq!(raise(SIGUSR1), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.calls, seen.signo, seen.code), (1, SIGUSR1, SI_TKILL));
+        assert_eq!(seen.pid, crate::process::getpid());
+        assert_eq!(seen.uid, crate::unistd::getuid());
+        assert_eq!(seen.mask, blocked, "the mask as the signal came");
+        assert_eq!(seen.stack_flags, SS_DISABLE, "no alternate stack");
+        assert!(seen.fpregs_inside, "fpregs points into the context");
+        assert_ne!(seen.mxcsr, 0, "mxcsr is never all zero: its masks are set");
+        assert_eq!(seen.rip, 0, "no frame, no registers");
+
+        assert_eq!(dispatch_from(SIGUSR1, Origin::Killed), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.calls, seen.code), (2, SI_USER));
+        assert_eq!(seen.pid, crate::process::getpid());
+
+        dispatch_delivered(SIGUSR1);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!(
+            (seen.calls, seen.code, seen.pid),
+            (3, SI_USER, 0),
+            "the frame tells no more"
+        );
+
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// From a kernel frame the handler reads the interrupted registers, and
+    /// what it changes in them -- and in `uc_sigmask` -- is what resumes, as
+    /// Linux's `rt_sigreturn` has it.
+    #[test]
+    fn a_handler_s_ucontext_is_the_frame_and_its_changes_are_resumed() {
+        install_siginfo(SIGUSR1);
+        let saved = current_blocked_low();
+        let mut ctx = SignalContext {
+            signum: 10,
+            rax: 7,
+            rdi: 1,
+            rsi: 2,
+            rdx: 3,
+            r10: 4,
+            r8: 5,
+            r9: 6,
+            rbx: 8,
+            rbp: 9,
+            r12: 12,
+            r13: 13,
+            r14: 14,
+            r15: 15,
+            rip: 0x40_1234,
+            rsp: 0x7fff_0000,
+            rflags: 0x246,
+        };
+        CHANGE.with(|c| c.set(Some((99, 0x40_4321, SIGUSR2))));
+        assert_eq!(dispatch_from(SIGUSR1, Origin::Kernel(&raw mut ctx)), 0);
+        let seen = SEEN.with(core::cell::Cell::get);
+        assert_eq!((seen.rip, seen.rsp, seen.rax), (0x40_1234, 0x7fff_0000, 7));
+        assert_eq!(
+            (seen.rcx, seen.r11),
+            (0x40_1234, 0x246),
+            "what syscall left in them"
+        );
+
+        assert_eq!(
+            (ctx.rax, ctx.rip),
+            (99, 0x40_4321),
+            "resumed as the handler left them"
+        );
+        assert_eq!(
+            (ctx.rdi, ctx.r15, ctx.rsp, ctx.rflags),
+            (1, 15, 0x7fff_0000, 0x246)
+        );
+        assert_ne!(
+            current_blocked_low() & sigmask_bit(SIGUSR2),
+            0,
+            "uc_sigmask restored"
+        );
+
+        apply_blocked_low(saved);
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// A handler without `SA_SIGINFO` is called with the number alone, as
+    /// ever, and its frame is left as it was.
+    #[test]
+    fn a_one_argument_handler_leaves_the_frame_alone() {
+        USR2_RAN.with(|c| c.set(0));
+        let old = signal(SIGUSR2, count_usr2 as *const () as SighandlerT);
+        let mut ctx = SignalContext {
+            signum: 12,
+            rax: 7,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            r10: 0,
+            r8: 0,
+            r9: 0,
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            rip: 0x40_1234,
+            rsp: 0x7fff_0000,
+            rflags: 0x246,
+        };
+        assert_eq!(dispatch_from(SIGUSR2, Origin::Kernel(&raw mut ctx)), 0);
+        assert_eq!(USR2_RAN.with(core::cell::Cell::get), 1);
+        assert_eq!((ctx.rax, ctx.rip), (7, 0x40_1234));
+        signal(SIGUSR2, old);
+    }
+
+    /// A new image's mask is the one it inherited: the program's and the
+    /// kernel's both, less the two signals no mask can hold.
+    #[test]
+    fn a_new_image_starts_with_the_mask_it_inherited() {
+        let saved = current_blocked_low();
+        let inherited = sigmask_bit(SIGUSR1) | sigmask_bit(SIGCHLD) | sigmask_bit(SIGKILL);
+        adopt_inherited_mask(inherited);
+        let mut now = SigsetT::EMPTY;
+        assert_eq!(sigprocmask(SIG_BLOCK, core::ptr::null(), &raw mut now), 0);
+        assert_eq!(now.bits[0], sigmask_bit(SIGUSR1) | sigmask_bit(SIGCHLD));
+        assert_eq!(kernel_blocked_low(), now.bits[0]);
+        apply_blocked_low(saved);
+    }
+
+    /// glibc 2.39's answers on Linux (`posix/tools/oracle/tgkill_harness.py`),
+    /// replayed: every case but the two about another process, which the host
+    /// cannot make.
+    #[test]
+    fn tgkill_answers_as_glibcs() {
+        use crate::process::{getpid, gettid};
+        const ORACLE: &str = include_str!("tgkill_oracle.txt");
+        let name = |e: i32| match e {
+            crate::errno::EINVAL => "EINVAL",
+            crate::errno::ESRCH => "ESRCH",
+            crate::errno::EPERM => "EPERM",
+            _ => "other",
+        };
+        let (me, t) = (getpid(), gettid());
+        let mut replayed = 0;
+        for line in ORACLE.lines().filter(|l| !l.starts_with('#')) {
+            let (case, glibc) = line.split_once(" = ").expect("<case> = <answer>");
+            let (tgid, tid, sig) = match case {
+                "tgid 0" => (0, t, SIGUSR1),
+                "tid 0" => (me, 0, SIGUSR1),
+                "tgid -1" => (-1, t, SIGUSR1),
+                "tid -5" => (me, -5, SIGUSR1),
+                "no such thread here, bad signal" => (me, 0x3fff_ffff, 999),
+                "no such process, bad signal" => (0x3fff_fff0, 1, 999),
+                "this thread, signal 65" => (me, t, 65),
+                "this thread, signal -1" => (me, t, -1),
+                "this thread, signal 0" => (me, t, 0),
+                "this thread, SIGUSR1" => {
+                    install_siginfo(SIGUSR1);
+                    (me, t, SIGUSR1)
+                }
+                other if other.starts_with("another process") => continue,
+                other => panic!("a case this test does not know: {other}"),
+            };
+            crate::errno::set_errno(0);
+            let r = tgkill(tgid, tid, sig);
+            let e = crate::errno::get_errno();
+            let mut ours = format!("{r} {}", if r == 0 { "0" } else { name(e) });
+            if case == "this thread, SIGUSR1" {
+                let seen = SEEN.with(core::cell::Cell::get);
+                let when = if seen.calls == 1 {
+                    "before the return"
+                } else {
+                    "not yet"
+                };
+                let told = if seen.code == SI_TKILL {
+                    "SI_TKILL"
+                } else {
+                    "something else"
+                };
+                ours = format!("{ours}, the handler {when}, told {told}");
+                signal(SIGUSR1, SIG_DFL);
+            }
+            assert_eq!(ours, glibc, "{case}");
+            replayed += 1;
+        }
+        assert_eq!(replayed, 10, "every case the host can make");
+    }
+
+    /// The path `tgkill` asks procfs about.
+    #[test]
+    fn proc_task_exists_asks_for_the_thread_s_directory() {
+        // Nothing on the host has it; the digits are what is under test, by
+        // way of numbers whose paths cannot exist -- whether the host's
+        // answer is "not there" or "may not look".
+        assert_ne!(proc_task_exists(1_234_567_890, 2_147_483_647), Some(true));
+        assert_ne!(proc_task_exists(7, 1), Some(true));
     }
 
     /// `sigsuspend` restores the mask it replaced.

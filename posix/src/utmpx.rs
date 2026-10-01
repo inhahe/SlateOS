@@ -36,6 +36,18 @@
 //! comparing it with a record read, or writing it -- after the file's own
 //! errors, and not at all when nothing would be compared or written.
 //!
+//! ## libutil's three, and glibc's two copies
+//!
+//! [`login`], [`logout`] and [`logwtmp`] are glibc's `login/login.c`,
+//! `logout.c` and `logwtmp.c` over the calls above -- `login` names the line
+//! after the terminal of standard input, output or error (`???` with none,
+//! and then writes the history alone), and both it and `logout` leave the
+//! database's name `_PATH_UTMP`, as glibc's do. Each is an archive member of
+//! its own, as in glibc: `login` and `logout` are names a program may have
+//! for functions of its own. [`getutmp`] and [`getutmpx`] copy an entry
+//! field by field, `struct utmp` being `struct utmpx` in musl's headers.
+//! Where glibc's dereferences a NULL argument, these do nothing.
+//!
 //! Until 2026-09-26 every call here was a stub: nothing was ever read,
 //! [`pututxline`] reported success writing nothing, and [`utmpxname`]
 //! accepted any name and used none.  So `who` saw nobody, and a login
@@ -1099,6 +1111,243 @@ pub extern "C" fn updwtmp(file: *const u8, utmpx: *const Utmpx) {
 }
 
 // ---------------------------------------------------------------------------
+// glibc's getutmp and getutmpx, and libutil's login, logout and logwtmp
+// ---------------------------------------------------------------------------
+
+/// The field a C `strncpy(field, s, sizeof field)` makes: `s`'s bytes up to
+/// its NUL or the field's end, and NULs after -- no terminator when `s` fills
+/// it, as in the file's records.
+///
+/// # Safety
+///
+/// `s` must be NULL (taken as "") or a C string.
+unsafe fn strncpy_field(field: &mut [u8], s: *const u8) {
+    field.fill(0);
+    if s.is_null() {
+        return;
+    }
+    for (i, slot) in field.iter_mut().enumerate() {
+        // SAFETY: a C string, read up to its NUL.
+        let b = unsafe { *s.add(i) };
+        if b == 0 {
+            break;
+        }
+        *slot = b;
+    }
+}
+
+/// Now, as a record's time: glibc's `TIMESPEC_TO_TIMEVAL` of the real-time
+/// clock.
+fn now() -> UtmpxTimeval {
+    let mut ts = crate::stat::Timespec::default();
+    // A clock that cannot be read leaves the zero time, which glibc would
+    // have written from its uninitialised stack instead.
+    let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut ts);
+    UtmpxTimeval {
+        tv_sec: ts.tv_sec,
+        tv_usec: ts.tv_nsec / 1000,
+    }
+}
+
+/// Copy the fields of one entry into another, field by field, as glibc's
+/// `getutmp` and `getutmpx` do: the destination's reserved bytes are left
+/// as they were.
+fn copy_fields(from: &Utmpx, to: &mut Utmpx) {
+    to.ut_type = from.ut_type;
+    to.ut_pid = from.ut_pid;
+    to.ut_line = from.ut_line;
+    to.ut_id = from.ut_id;
+    to.ut_user = from.ut_user;
+    to.ut_host = from.ut_host;
+    to.ut_exit = from.ut_exit;
+    to.ut_session = from.ut_session;
+    to.ut_tv = from.ut_tv;
+    to.ut_addr_v6 = from.ut_addr_v6;
+}
+
+/// `getutmp(ux, u)` (glibc): copy a `struct utmpx` into a `struct utmp`.
+/// In musl's headers they are one structure (`<utmp.h>` defines `utmp` as
+/// `utmpx`), so every field comes across. A NULL pointer, which glibc's
+/// dereferences, copies nothing.
+///
+/// # Safety
+///
+/// Each pointer must be NULL or a valid entry.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getutmp(ux: *const Utmpx, u: *mut Utmpx) {
+    // SAFETY: the caller's entries.
+    if let (Some(from), Some(to)) = unsafe { (ux.as_ref(), u.as_mut()) } {
+        copy_fields(from, to);
+    }
+}
+
+/// `getutmpx(u, ux)` (glibc): copy a `struct utmp` into a `struct utmpx` --
+/// see [`getutmp`].
+///
+/// # Safety
+///
+/// As [`getutmp`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn getutmpx(u: *const Utmpx, ux: *mut Utmpx) {
+    // SAFETY: the caller's entries.
+    if let (Some(from), Some(to)) = unsafe { (u.as_ref(), ux.as_mut()) } {
+        copy_fields(from, to);
+    }
+}
+
+// libutil's three are each an archive member of their own, as in glibc
+// (login.o, logout.o, logwtmp.o): `login` and `logout` are names a program
+// may well have for functions of its own, which must not meet these because
+// it also reads the database. See string.rs's module header.
+
+/// Own archive member -- see above.
+mod gnu_login {
+    use super::{
+        USER_PROCESS, UTMPX_FILE, Utmpx, WTMPX_FILE, endutxent, pututxline, setutxent,
+        strncpy_field, updwtmpx, utmpxname,
+    };
+
+    /// `login(ut)` (libutil): record a login -- `ut`, as a `USER_PROCESS`
+    /// entry of this process, on the terminal of standard input (else
+    /// output, else error) -- in the database, and append it to the
+    /// history. With no terminal, the line is `???` and only the history is
+    /// written. As glibc's, this leaves the database's name set to
+    /// `_PATH_UTMP`. A NULL entry, which glibc's dereferences, records
+    /// nothing.
+    ///
+    /// # Safety
+    ///
+    /// `ut` must be NULL or a valid entry.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn login(ut: *const Utmpx) {
+        // SAFETY: the caller's entry.
+        let Some(given) = (unsafe { ut.as_ref() }) else {
+            return;
+        };
+        let mut copy = *given;
+        copy.ut_type = USER_PROCESS;
+        copy.ut_pid = crate::process::getpid();
+        let mut tty = [0u8; crate::linux_limits::PATH_MAX];
+        let named = [0, 1, 2]
+            .into_iter()
+            .any(|fd| crate::ioctl::ttyname_r(fd, tty.as_mut_ptr(), tty.len()) == 0);
+        if named {
+            let len = tty.iter().position(|&b| b == 0).unwrap_or(tty.len());
+            let path = tty.get(..len).unwrap_or(&[]);
+            // /dev/pts/3 is `pts/3`; elsewhere, the name after the last slash.
+            let line = path.strip_prefix(b"/dev/").unwrap_or_else(|| {
+                path.iter()
+                    .rposition(|&b| b == b'/')
+                    .and_then(|i| path.get(i.saturating_add(1)..))
+                    .unwrap_or(path)
+            });
+            let mut name = [0u8; crate::linux_limits::PATH_MAX];
+            if let Some(dst) = name.get_mut(..line.len()) {
+                dst.copy_from_slice(line);
+            }
+            // SAFETY: `name` holds `line` and a NUL.
+            unsafe { strncpy_field(&mut copy.ut_line, name.as_ptr()) };
+            if utmpxname(UTMPX_FILE.as_ptr()) == 0 {
+                setutxent();
+                // What pututline does with the entry is the database's; glibc
+                // does not look at its result either.
+                let _ = pututxline(&raw const copy);
+                endutxent();
+            }
+        } else {
+            // SAFETY: a C string literal.
+            unsafe { strncpy_field(&mut copy.ut_line, c"???".as_ptr().cast()) };
+        }
+        updwtmpx(WTMPX_FILE.as_ptr(), &raw const copy);
+    }
+}
+pub use gnu_login::login;
+
+/// Own archive member -- see above.
+mod gnu_logout {
+    use super::{
+        DEAD_PROCESS, USER_PROCESS, UTMPX_FILE, Utmpx, endutxent, getutline_r, now, pututxline,
+        setutxent, strncpy_field, utmpxname,
+    };
+
+    /// `logout(line)` (libutil): mark the database's login on `line` ended
+    /// -- a `DEAD_PROCESS` entry, its user and host cleared, stamped now.
+    /// 1 if an entry was found and rewritten, else 0. As glibc's, this
+    /// leaves the database's name set to `_PATH_UTMP`. A NULL line, which
+    /// glibc's reads, is 0.
+    ///
+    /// # Safety
+    ///
+    /// `line` must be NULL or a C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn logout(line: *const u8) -> i32 {
+        if line.is_null() || utmpxname(UTMPX_FILE.as_ptr()) == -1 {
+            return 0;
+        }
+        setutxent();
+        let mut wanted = Utmpx::ZERO;
+        wanted.ut_type = USER_PROCESS;
+        // SAFETY: the caller's C string.
+        unsafe { strncpy_field(&mut wanted.ut_line, line) };
+        let mut buffer = Utmpx::ZERO;
+        let mut found: *mut Utmpx = core::ptr::null_mut();
+        let mut result = 0;
+        // SAFETY: an entry, a buffer and a result pointer of this frame's.
+        if unsafe { getutline_r(&raw const wanted, &raw mut buffer, &raw mut found) } >= 0 {
+            // SAFETY: getutline_r answered with `buffer`.
+            if let Some(ut) = unsafe { found.as_mut() } {
+                ut.ut_user = [0; super::UT_NAMESIZE];
+                ut.ut_host = [0; super::UT_HOSTSIZE];
+                ut.ut_tv = now();
+                ut.ut_type = DEAD_PROCESS;
+                if !pututxline(ut).is_null() {
+                    result = 1;
+                }
+            }
+        }
+        endutxent();
+        result
+    }
+}
+pub use gnu_logout::logout;
+
+/// Own archive member -- see above.
+mod gnu_logwtmp {
+    use super::{DEAD_PROCESS, USER_PROCESS, Utmpx, WTMPX_FILE, now, strncpy_field, updwtmpx};
+
+    /// `logwtmp(line, name, host)` (libutil): append to the history an
+    /// entry for this process, now: a `USER_PROCESS` login on `line` by
+    /// `name` from `host`, or with `name` empty a `DEAD_PROCESS` logout. A
+    /// NULL argument, which glibc's reads, appends nothing.
+    ///
+    /// # Safety
+    ///
+    /// Each argument must be NULL or a C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn logwtmp(line: *const u8, name: *const u8, host: *const u8) {
+        if line.is_null() || name.is_null() || host.is_null() {
+            return;
+        }
+        let mut ut = Utmpx::ZERO;
+        ut.ut_pid = crate::process::getpid();
+        // SAFETY: the caller's C strings.
+        unsafe {
+            ut.ut_type = if *name != 0 {
+                USER_PROCESS
+            } else {
+                DEAD_PROCESS
+            };
+            strncpy_field(&mut ut.ut_line, line);
+            strncpy_field(&mut ut.ut_user, name);
+            strncpy_field(&mut ut.ut_host, host);
+        }
+        ut.ut_tv = now();
+        updwtmpx(WTMPX_FILE.as_ptr(), &raw const ut);
+    }
+}
+pub use gnu_logwtmp::logwtmp;
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1446,5 +1695,176 @@ mod tests {
         updwtmpx(WTMPX_FILE.as_ptr(), &u);
         assert!(io::file(wtmp).is_none(), "not created");
         assert_eq!(io::open_count(), 0);
+    }
+
+    // -- getutmp, getutmpx, and libutil's login, logout, logwtmp --
+
+    const WTMP: &[u8] = b"/var/log/wtmp";
+
+    fn cstr_field(field: &[u8]) -> Vec<u8> {
+        field.iter().copied().take_while(|&b| b != 0).collect()
+    }
+
+    /// The history's entries, whole.
+    fn history() -> Vec<Utmpx> {
+        io::file(WTMP)
+            .unwrap()
+            .chunks(RECORD)
+            .map(|c| {
+                let mut rec = FileRecord::ZERO;
+                // SAFETY: RECORD bytes into a plain-integer struct.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(c.as_ptr(), (&raw mut rec).cast::<u8>(), RECORD);
+                }
+                rec.entry()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn getutmp_and_getutmpx_copy_every_field_and_no_reserved_byte() {
+        let mut from = entry(USER_PROCESS, b"p1", b"pts/1", b"alice");
+        from.ut_pid = 42;
+        from.ut_host[..4].copy_from_slice(b"host");
+        from.ut_exit = [1, 2, 3, 4];
+        from.ut_session = 7;
+        from.ut_tv = UtmpxTimeval {
+            tv_sec: 5,
+            tv_usec: 6,
+        };
+        from.ut_addr_v6 = [1, 2, 3, 4];
+        let mut to = Utmpx::ZERO;
+        to._reserved = [9; 20];
+        // SAFETY: entries of this frame's.
+        unsafe { getutmp(&raw const from, &raw mut to) };
+        assert_eq!(record_bytes(&to), record_bytes(&from));
+        assert_eq!((to.ut_tv.tv_sec, to.ut_tv.tv_usec), (5, 6));
+        assert_eq!(to._reserved, [9; 20], "glibc copies field by field");
+        let mut back = Utmpx::ZERO;
+        // SAFETY: as above; NULL copies nothing.
+        unsafe {
+            getutmpx(&raw const to, &raw mut back);
+            getutmp(core::ptr::null(), &raw mut to);
+            getutmpx(&raw const from, core::ptr::null_mut());
+        }
+        assert_eq!(record_bytes(&back), record_bytes(&from));
+    }
+
+    #[test]
+    fn logwtmp_appends_a_login_and_a_logout() {
+        io::put_file(WTMP, &[]);
+        // SAFETY: C string literals; NULL appends nothing.
+        unsafe {
+            logwtmp(
+                c"pts/2".as_ptr().cast(),
+                c"bob".as_ptr().cast(),
+                c"example.org".as_ptr().cast(),
+            );
+            logwtmp(
+                c"pts/2".as_ptr().cast(),
+                c"".as_ptr().cast(),
+                c"".as_ptr().cast(),
+            );
+            logwtmp(core::ptr::null(), c"x".as_ptr().cast(), c"".as_ptr().cast());
+        }
+        let h = history();
+        assert_eq!(h.len(), 2);
+        assert_eq!((h[0].ut_type, h[1].ut_type), (USER_PROCESS, DEAD_PROCESS));
+        assert_eq!(cstr_field(&h[0].ut_user), b"bob");
+        assert_eq!(cstr_field(&h[0].ut_line), b"pts/2");
+        assert_eq!(cstr_field(&h[0].ut_host), b"example.org");
+        assert_eq!(h[0].ut_pid, crate::process::getpid());
+        assert!(h[0].ut_tv.tv_sec > 0, "stamped with the time");
+        assert_eq!(cstr_field(&h[1].ut_user), b"");
+        io::remove_file(WTMP);
+    }
+
+    /// On a terminal -- standard input here is the console, as a program's
+    /// is on this system -- `login` records the entry, a `USER_PROCESS` of
+    /// this process on the terminal's name less `/dev/`, in the database
+    /// and the history.
+    #[test]
+    fn login_on_a_terminal_records_it_in_both() {
+        fresh(&[]);
+        io::put_file(WTMP, &[]);
+        let ut = entry(LOGIN_PROCESS, b"c1", b"was", b"erin");
+        // SAFETY: an entry of this frame's.
+        unsafe { login(&raw const ut) };
+        assert_eq!(records_in(DB), [(USER_PROCESS, b"erin".to_vec())]);
+        let h = history();
+        assert_eq!(h.len(), 1);
+        assert_eq!(cstr_field(&h[0].ut_line), b"console");
+        assert_eq!(h[0].ut_pid, crate::process::getpid());
+        io::remove_file(WTMP);
+    }
+
+    /// With no terminal on standard input, output or error, `login` names
+    /// the line `???` and writes the history alone, as glibc's does.
+    #[test]
+    fn login_with_no_terminal_writes_the_history_alone() {
+        fresh(&[]);
+        io::put_file(WTMP, &[]);
+        // This thread's descriptors 0 to 2, closed for the call.
+        let saved: Vec<_> = (0..3)
+            .map(|fd| (fd, crate::fdtable::close_fd(fd)))
+            .collect();
+        let ut = entry(LOGIN_PROCESS, b"c1", b"was", b"carol");
+        // SAFETY: an entry of this frame's; NULL records nothing.
+        unsafe {
+            login(&raw const ut);
+            login(core::ptr::null());
+        }
+        for (fd, e) in saved {
+            if let Some(e) = e {
+                let _ = crate::fdtable::install_fd(fd, e.kind, e.handle);
+            }
+        }
+        assert_eq!(records_in(DB), [], "the database is not written");
+        let h = history();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].ut_type, USER_PROCESS);
+        assert_eq!(h[0].ut_pid, crate::process::getpid());
+        assert_eq!(cstr_field(&h[0].ut_line), b"???");
+        assert_eq!(cstr_field(&h[0].ut_user), b"carol");
+        io::remove_file(WTMP);
+    }
+
+    #[test]
+    fn logout_marks_the_line_dead() {
+        let mut on = entry(USER_PROCESS, b"p3", b"pts/3", b"dave");
+        on.ut_host[..6].copy_from_slice(b"remote");
+        fresh(&[entry(LOGIN_PROCESS, b"t1", b"tty1", b"LOGIN"), on]);
+        // SAFETY: C string literals.
+        assert_eq!(unsafe { logout(c"pts/3".as_ptr().cast()) }, 1);
+        let bytes = io::file(DB).unwrap();
+        let mut rec = FileRecord::ZERO;
+        // SAFETY: RECORD bytes into a plain-integer struct.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes[RECORD..].as_ptr(),
+                (&raw mut rec).cast::<u8>(),
+                RECORD,
+            );
+        }
+        let dead = rec.entry();
+        assert_eq!(dead.ut_type, DEAD_PROCESS);
+        assert_eq!(cstr_field(&dead.ut_line), b"pts/3", "the line is kept");
+        assert_eq!(
+            (cstr_field(&dead.ut_user), cstr_field(&dead.ut_host)),
+            (Vec::new(), Vec::new())
+        );
+        assert!(dead.ut_tv.tv_sec > 0, "stamped with the time");
+        assert_eq!(
+            records_in(DB)[0],
+            (LOGIN_PROCESS, b"LOGIN".to_vec()),
+            "the other untouched"
+        );
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(logout(c"pts/9".as_ptr().cast()), 0, "no login there");
+            assert_eq!(logout(core::ptr::null()), 0);
+            io::remove_file(DB);
+            assert_eq!(logout(c"pts/3".as_ptr().cast()), 0, "no database");
+        }
     }
 }

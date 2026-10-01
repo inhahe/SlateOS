@@ -844,12 +844,25 @@ pub unsafe extern "C" fn __libc_start_main(
         }
     }
 
+    // The arguments, kept for the library's own later use -- `wordexp`'s
+    // positional parameters -- as glibc keeps `__libc_argc` and `__libc_argv`.
+    // SAFETY: startup path, single-threaded; plain words written once.
+    unsafe {
+        addr_of_mut!(PROGRAM_ARGC).write(actual_argc);
+        addr_of_mut!(PROGRAM_ARGV).write(actual_argv);
+    }
+
     // Ensure `environ` is never NULL, so programs can iterate it without
     // checking. If the kernel provided an environment,
     // `retrieve_initial_args()` has already pointed `environ` at it
     // (`environ::adopt_initial_envp`); otherwise this leaves it at the
     // shared empty list.
     crate::environ::init_environ();
+
+    // The allocator's `MALLOC_PERTURB_`, `MALLOC_MMAP_THRESHOLD_` and
+    // `MALLOC_MMAP_MAX_`, read as glibc reads its tunables at start-up: once
+    // the environment is in place, before a constructor or `main` allocates.
+    crate::malloc::init_from_environment();
 
     // Register the signal trampoline so the kernel can deliver
     // catchable signals to handlers installed via signal()/sigaction().
@@ -1139,6 +1152,16 @@ pub static __dso_handle: u8 = 0;
 
 /// Default program name when argv[0] is not available.
 static UNKNOWN_PROG: [u8; 8] = *b"unknown\0";
+
+/// The program's argument count as `__libc_start_main` handed it to `main`
+/// (glibc's `__libc_argc`): `wordexp`'s `$#` is one less. 0 before start-up
+/// and in the host's tests.
+pub(crate) static mut PROGRAM_ARGC: i32 = 0;
+
+/// The program's arguments as `__libc_start_main` handed them to `main`
+/// (glibc's `__libc_argv`): `wordexp`'s `$0`, `$1`, .... NULL before
+/// start-up and in the host's tests.
+pub(crate) static mut PROGRAM_ARGV: *const *const u8 = core::ptr::null();
 
 // Two variables, each with two names, as in glibc: `__progname_full`, which
 // GNU calls `program_invocation_name` -- argv[0] as the program was started

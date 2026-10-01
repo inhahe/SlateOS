@@ -41725,8 +41725,8 @@ eleven are this table, and are not to be "fixed":
 | Name | Here | musl | Why it stays |
 |---|---|---|---|
 | `FD_SETSIZE` | 256 | 1024 | a policy limit, the fd table's size; the `fd_set` layout is musl's 1024 bits (`FD_SET_BITS`, §1011) |
-| `PAGE_SIZE`, `SHMLBA` | 16384 | 4096 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says |
-| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX` | 2 MiB, 64, 65536 | 128 KiB, 255, 32 | the kernel's real limits (Linux's); musl's header states its own |
+| `PAGE_SIZE`, `SHMLBA`, `NBPG`; `PAGE_MASK` | 16384; ~16383 | 4096; ~4095 | this kernel's pages are 16 KiB; a port that uses the macro instead of `sysconf(_SC_PAGESIZE)` is wrong here whatever the library says (`NBPG` and `PAGE_MASK` added 2026-09-30) |
+| `ARG_MAX`, `HOST_NAME_MAX`, `NGROUPS_MAX`, `NGROUPS` | 2 MiB, 64, 65536, 65536 | 128 KiB, 255, 32, 32 | the kernel's real limits (Linux's); musl's header states its own (`NGROUPS`, glibc's `<sys/param.h>`'s name for `NGROUPS_MAX`, added 2026-09-30) |
 | `MAXQUOTAS` | 3 | 2 | the kernel has project quotas; musl's header predates them |
 | `O_ACCMODE` | 3 | `3 \| O_PATH` | musl folds `O_SEARCH` into the access mode; the library's own masking is glibc's |
 | `SIGRTMIN`, `MB_CUR_MAX` | 32, 4 | calls | musl's macros call `__libc_current_sigrtmin` and `__ctype_get_mb_cur_max`, which are this library's and answer 32 and 4 |
@@ -41740,7 +41740,14 @@ eleven are this table, and are not to be "fixed":
 **What keeps it true.** The constants half of `scripts/check-libc-abi.py`,
 since 2026-09-27 (§1130): every public constant whose name a musl header
 defines, compared with that header's value on each push that touches
-`posix/src`.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
+`posix/src` -- since 2026-09-30 every header musl has and every header the
+overlay adds, where it was a list of 105 of musl's 183 (known-issues.md,
+`D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED`); and enum
+constants besides macros, and, for a name musl's headers do not define,
+glibc's and then the kernel's headers through `glibc_constants.txt`
+(`D-POSIX-CONSTANTS-NO-MUSL-HEADER-NAMES-HAD-NO-ORACLE`), whose deliberate
+differences are `KNOWN_DIFFERENT_GLIBC` -- `PAGE_SHIFT` alone, 16 KiB
+pages.  The table above is its `KNOWN_DIFFERENT`, less `__WCLONE` and
 `WEOF` -- compared in the bits both sides have, they agree, as the table says
 -- and less `SIGRTMIN` and `MB_CUR_MAX`, which with `SIGRTMAX` are its
 `NOT_CONSTANT_IN_MUSL`: musl's are calls, which no compile-time check can
@@ -42996,6 +43003,887 @@ Everything else -- `dlopen`'s handles and mode checks, the messages,
 record of it.
 
 **Where:** `posix/src/dlfcn.rs`.
+
+## 1148. `fnmatch` follows POSIX and glibc's manual in the three places glibc's does not
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `fnmatch` (does a name fit a wildcard pattern?) is written
+from POSIX and, for glibc's extra flags, from glibc's manual, and checked
+against glibc 2.39's answers -- two million of them agree. In three narrow
+places glibc's answer contradicts the text it implements, and this library
+follows the text: a pattern like `*\/` finds the slash it names, a wildcard
+before a ksh-style group finds the matches glibc misses at the end of a
+string, and "match a leading directory" applies to the whole pattern. Each
+is a case where glibc says "no match" (or, for the last, a mix) for a string
+the definition says matches; no program relies on those answers, and a
+program written from the documentation gets what it expects.
+
+| Pattern, flags | Here | glibc 2.39 | The text |
+|---|---|---|---|
+| `*\/`, `FNM_PATHNAME` | matches `a/` and `/` | matches nothing | POSIX: "a <backslash> ... followed by any other character shall match that second character", and a slash is to be "explicitly matched by a <slash> in pattern" -- which an escaped one is |
+| `*@(a\|)`, `*!(a)`, `**(a/b)`, `FNM_EXTMATCH` | match what the groups allow | a `*` before a group tries every split of the string but the last, and `**(x)` is read as `*` | glibc's manual: the group "matches if ... any of the patterns in the pattern-list allow matching the input string" |
+| `!(a)`, `*(a)b`, `FNM_EXTMATCH\|FNM_LEADING_DIR` | whether the string starts with a directory name the whole pattern matches | the flag applied inside the alternatives of `*`, `+` and `!` groups, and not of `@` and `?` ones | glibc's manual: "test whether string starts with a directory name that pattern matches" |
+
+The alternative -- replaying glibc's answers exactly -- would mean
+reproducing an off-by-one in its search loop and an inconsistency between
+two of its group functions, neither documented nor intended. The cost is a
+difference a program could only observe by depending on glibc failing to
+match. `posix/src/fnmatch_deviations.txt` lists all 1,443 affected cases of
+the oracle's, generated by `posix/tools/oracle/fnmatch_model.py`, which
+states these rules executably.
+
+**Where:** `posix/src/fnmatch.rs`.
+
+## 1149. `glob` answers `*/` as glibc answers `**/`, and `GLOB_NOCHECK` returns the whole pattern
+
+**Date:** 2026-09-29
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `glob` (expand a wildcard pattern into the file names it
+matches) is written from POSIX and glibc's manual and checked against
+glibc 2.39's answers over a test directory tree -- 1,545 of 1,568 agree. The
+23 that do not come from two places where glibc contradicts itself or POSIX.
+First, glibc handles a pattern that is one character followed by a slash
+(`*/`, `?/`) by a different route from every longer one: `*/` with
+`GLOB_MARK` gives `dir1//` where `**/` -- which matches exactly the same
+names -- gives `dir1/`. This library answers `*/` as glibc answers `**/`.
+Second, when nothing matches and `GLOB_NOCHECK` asks for the pattern back,
+glibc returns `??/` as `??`, dropping the slash; POSIX says the pattern
+itself, which this returns.
+
+| Pattern, flags | Here | glibc 2.39 | glibc for the same names spelled longer |
+|---|---|---|---|
+| `*/`, `GLOB_MARK` | `dir1/ dir2/ ...` | `dir1// dir2// ...` | `**/`: `dir1/ dir2/ ...` |
+| `*/`, `GLOB_PERIOD` | `../ ./ dir1/ ...` | `dir1/ ...` | `**/`: `../ ./ dir1/ ...` |
+| `?/`, `GLOB_PERIOD` | `./` | no match | `[!x]/`: `./` |
+| `*/`, any flags: `GLOB_MAGCHAR` | set | not set | `**/`: set |
+| `??/`, `GLOB_NOCHECK`, nothing matching | `??/` | `??` | `a/`, `?/`: the pattern, slash and all |
+
+**Why the first is glibc's accident.** The answers show two routes. `X/`
+with two or more characters in `X` is answered as `X` would be, directories
+only, each with its slash: the caller's flags apply to `X`. With one
+character, glibc treats the `*` as a directory part -- scanned with the
+restricted flags it gives directory parts, so no `GLOB_PERIOD` -- and the
+empty name after the slash as a name to look up, so no scan of a last
+component, so no `GLOB_MAGCHAR`; `GLOB_MARK` then marks `dir1/` again. (Its
+`glob.c` sends a trailing-slash pattern down the first route only past a
+length test on the part before the slash, which a single character fails.)
+Nothing in glibc's manual or header says a one-character pattern means
+something different; `**/`, `[!x]/` and the `*/` inside `*/*/` are all
+answered the first way. A program cannot want `dir1//`.
+
+**Why the second follows POSIX.** XSH `glob`, on `GLOB_NOCHECK`: "If pattern
+does not match any pathname, then glob() shall return a list consisting of
+only pattern". glibc keeps the slash for `a/` and `?/` and drops it only
+when two or more characters precede it -- the same route as above, from the
+other side.
+
+**Kept as glibc has it**, though a reading of the flags could argue
+otherwise: `GLOB_PERIOD` applies to the last component only -- a wildcard
+in a directory part never matches a leading `.`, so `*/*` does not walk
+through `..` -- because glibc does it consistently, programs written for
+glibc expect it, and the alternative makes `*/*/*` climb the tree.
+`GLOB_MAGCHAR` is glibc's rule, which its header's "set if any metachars
+seen" does not describe: set when the last component was matched against a
+directory's entries and something was found or `GLOB_NOCHECK` answered for
+it -- so not for `*/f1`, whose last component is looked up.
+
+**Cost:** a program that tests glibc's `dir1//` or its missing
+`GLOB_MAGCHAR` would see a difference; none is known to, and the doubled
+slash is a defect to any program that prints the names. The 23 probes are
+listed in `posix/src/glob_deviations.txt`, written by
+`posix/tools/oracle/glob_model.py`, which states these rules executably, and
+the tests check the two equivalences above for every flag set.
+
+**Where:** `posix/src/glob.rs`.
+
+## 1150. `fmtmsg` reads `SEV_LEVEL` at the first call of `fmtmsg` or `addseverity`, not only of `fmtmsg`
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `fmtmsg` prints diagnostics with a severity like `ERROR`, and
+extra severities can come from two places: the user's `SEV_LEVEL`
+environment variable and the program's own `addseverity` calls. glibc reads
+the environment variable lazily, at the first `fmtmsg`. So if a program
+calls `addseverity(5, "OVER")` before its first message and the user's
+`SEV_LEVEL` also defines level 5, the user's definition silently replaces
+the program's -- but if the program had printed one message first, the
+program's would win. This library reads the environment at the first call
+of either function, so the program's `addseverity` always wins, whatever
+order the calls come in.
+
+| A program, with `SEV_LEVEL=five,5,FIVE` in its environment | glibc 2.39 | here |
+|---|---|---|
+| `addseverity(5, "OVER")`, then `fmtmsg(..., 5, ...)` | prints `FIVE` | prints `OVER` |
+| `fmtmsg(...)`, `addseverity(5, "OVER")`, `fmtmsg(..., 5, ...)` | prints `OVER` | prints `OVER` |
+| `addseverity(5, NULL)` before the first `fmtmsg` | `MM_NOTOK` (5 is not yet defined), and 5 then prints `FIVE` | `MM_OK`, and 5 is no longer a level |
+
+Neither POSIX (which has no `SEV_LEVEL` or `addseverity`) nor glibc's manual
+says which of the two should win; glibc's answer depends on whether any
+message has been printed yet, which no program means to depend on. The other
+reading -- the environment always wins -- was the alternative: it would let
+a user override a program's level, but a program defines its levels to say
+what its messages mean, and the user's variable has its own levels to
+define. `posix/src/fmtmsg_deviations.txt` lists the three affected cases of
+the oracle's 804, generated by `posix/tools/oracle/fmtmsg_model.py`, which
+states the rule executably and agrees with glibc everywhere else.
+
+**Where:** `posix/src/fmtmsg.rs` (`Table::ensure_ready`).
+
+## 1151. `tmpfile`'s file keeps its name until the stream lets go of it, and a temporary name's directory test leaves `errno` alone
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a file from `tmpfile` must vanish when it is closed or the
+program exits. glibc makes that happen by deleting the file's name the
+moment it is created -- the open file carries on without one, and the
+system reclaims it at the last close. That trick does not work on this
+kernel: a descriptor reaches its file by name, so deleting the name cuts the
+program off from its own file. So `tmpfile` here keeps the name and deletes
+it when the stream is done with the file: `fclose`, `freopen` onto another
+file, or `exit`. The one thing a user could notice is that the file is
+visible in `/tmp` while the program has it open -- and that a program
+killed before it exits leaves the file behind, which the C standard allows.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| the file while open | no name (`O_TMPFILE`, or unlinked at once); `fstat` says 0 links | `/tmp/tmpfXXXXXX`; 1 link |
+| removed | at the last close, by the kernel | at `fclose`, at `freopen` onto another file, at `exit` -- by the process that made it |
+| a program killed, or ending by `_exit` | removed | left in `/tmp` ("implementation-defined", ISO C 7.21.4.3) |
+| a child that inherited the stream closes it | nothing happens to the parent's | nothing happens to the parent's (the child does not remove it) |
+
+**The alternatives:** unlink at once as glibc does, which here loses the
+file's contents to the program itself -- every read and write after it
+fails; keep the old behaviour, never removing the file, which filled `/tmp`;
+or refuse `tmpfile` (`EOPNOTSUPP`) until the kernel can do it, which breaks
+every program that uses it for a file that works in every other way. The
+name-while-open difference is the least of these, and it is temporary:
+`O_TMPFILE` is tried first, so the day the kernel supports it `tmpfile` is
+glibc's with no change here; if instead descriptors come to outlive their
+names, one line makes `tmpfile` unlink at once
+(`known-issues.md` → `D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS`).
+
+**Second, smaller:** glibc's test of whether a directory exists (for
+`tempnam`, `tmpnam` and `tmpfile`) is a `stat` whose failure it leaves in
+`errno`, so a `tempnam` that succeeds after passing over a missing
+`$TMPDIR` answers `errno` `ENOENT` -- undoing the care glibc's own
+`__gen_tempname` takes to leave `errno` as it was on success. POSIX leaves
+`errno` after a success unspecified, so neither is wrong; this library
+leaves it alone in both places, as it did before. The oracle's `tempnam`
+lines that say `ENOENT` after a name are the cases (`tempname.rs`'s
+`tempnam_is_glibcs` states the difference).
+
+**Where:** `posix/src/stdlib.rs` (`tmpfile`); `posix/src/stdio.rs`
+(`hold_temporary`, `release_temporary`, and `fclose`, `freopen` and
+`exit_cleanup` calling it); `posix/src/tempname.rs` (`dir_exists`).
+
+## 1152. `<sys/timex.h>`'s `struct ntptimeval` is glibc's, and musl's is renamed out of the way while its header is read
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a program that asks the clock for its time and error bounds
+with `ntp_gettimex` gets them in a `struct ntptimeval`, and on glibc that
+struct also carries the TAI offset (how many leap seconds atomic time is
+ahead of UTC) and four reserved words. musl's header defines the struct as
+it was before the TAI offset -- three fields -- so a glibc program that
+reads `tai` did not compile here, and a 72-byte answer written into musl's
+32-byte struct would run 40 bytes past it. The overlay's `<sys/timex.h>`
+now gives C glibc's struct. C lets a struct be defined only once, so while
+musl's header is read, its struct is given another name, which nothing
+refers to.
+
+| | before | now |
+|---|---|---|
+| `struct ntptimeval` | musl's: `time`, `maxerror`, `esterror` (32 bytes) | glibc's: those, `tai`, and four reserved words (72 bytes) |
+| `ntp_gettimex` | missing | fills all of it, the reserved words 0 |
+| `ntp_gettime` | missing | in C, `ntp_gettimex` under that name, as glibc's header makes it; the library's own `ntp_gettime` fills the older three fields, for what calls it by name, as glibc's does |
+
+**The alternatives:** replace musl's `<sys/timex.h>` outright, as the
+overlay's `<glob.h>` replaces musl's -- the overlay would then carry musl's
+`struct timex` and its hundred-odd `ADJ_`, `STA_` and `TIME_` constants
+itself, and have to keep them in step with musl's; or keep musl's struct and
+declare `ntp_gettimex` over it, which leaves glibc programs that read `tai`
+uncompilable and every call writing past the caller's struct. The rename is
+sound here because musl declares nothing that takes its struct: the name
+`__slateos_musl_ntptimeval` is never used again, and `check-libc-overlay.py`
+holds the struct that is used to glibc's layout. `<glob.h>` could not be
+done this way -- musl's own `glob` and `globfree` are declared with its
+`glob_t`.
+
+**Where:** `posix/include/sys/timex.h`; `posix/src/sys_timex.rs`
+(`NtpTimeval`, `ntp_gettime`, `ntp_gettimex`).
+
+## 1153. `/etc/aliases` is read as glibc reads it but in four places, where glibc's reader of it does what its readers of every other database do not
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** the mail aliases file says what an address such as
+`postmaster` stands for. glibc's reader of it has four faults its readers of
+the other databases do not share: a stray comma (`a: x,,y`) makes it loop
+for good, so the program hangs; an entry too big for the caller's buffer is
+lost instead of coming again with a bigger one; an indented entry after an
+empty line can be listed but not looked up; and an `:include:` file that is
+missing leaves an error code behind after a call that succeeded. This
+library reads the file as glibc does in every other respect, and in these
+four does what glibc does everywhere else.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| an empty member: `a: x,,y`, `a: ,x`, a carried-on line that starts with `,` | loops for good | passed over (`a` has `x` and `y`), as glibc's own `:include:` reading passes over one |
+| `getaliasent_r` given a buffer too small for the next entry | `ERANGE`, and the entry is lost: the next call starts partway into it | `ERANGE`, and the same entry comes next time -- what glibc does for every other database |
+| `getaliasent`, which retries with a bigger buffer, on an entry over 1 KiB | passes over it | gives it |
+| `getaliasbyname` for an entry that begins with white space after an empty line | NULL, though `getaliasent` lists it | the entry |
+| `errno` after enumerating past an `:include:` that cannot be opened | `open`'s error, the call having succeeded | as it was, as after any other enumeration |
+
+**The alternatives:** reproduce all four, so that a typo in `/etc/aliases`
+hangs whatever reads it and a mail system enumerating its aliases loses the
+long ones without a word; or leave `<aliases.h>` out. POSIX does not
+specify these functions and glibc's manual describes none of the four;
+glibc's other readers show what its interface means. Everywhere else the
+tests replay glibc's answers (`aliases_oracle.txt`), and in these four they
+state the difference -- glibc's loops are in the oracle as `loops`, from a
+five-second timeout.
+
+**Not a difference:** with no `/etc/aliases`, a lookup fails with `ENOENT`,
+as glibc's -- there is no built-in copy, as there is for `/etc/services`
+(section 1113's reasoning is about registries, and aliases are a site's own).
+
+**Where:** `posix/src/aliases.rs`.
+
+## 1154. A netgroup triple over 1 KiB is read: `getnetgrent`'s block grows and `innetgr` has no buffer
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** netgroups are named sets of (host, user, domain) triples in
+`/etc/netgroup`. glibc reads a triple into a fixed 1 KiB buffer in two
+places -- `getnetgrent`, which returns them one by one, and `innetgr`,
+which asks whether a group has one -- and a longer triple is treated as the
+end: `getnetgrent`'s enumeration stops there, and `innetgr` looks no further
+in that group. Here both read a triple of any length: `getnetgrent`'s block
+grows, as every other non-reentrant lookup's does in glibc and here, and
+`innetgr` compares the triple where it lies. Every other answer is glibc's
+(`netgroup_oracle.txt`).
+
+| | glibc 2.39 | here |
+|---|---|---|
+| `getnetgrent` at a triple over 1 KiB | 0, as at the end; the triples after it are never given | the triple, and the ones after it |
+| `innetgr` for a triple after one over 1 KiB in the same group | 0, the group's scan abandoned | 1 |
+| `getnetgrent_r` with a buffer too small | 0, `errno` `ERANGE`, the same triple next time | the same |
+
+**The alternatives:** reproduce the limit, which loses the end of a group
+without a word -- no error tells the caller the enumeration was cut short;
+or make it an error, which no caller of a function that returns 0 at the
+end could see either. glibc's `getpwnam`, `getgrnam` and the rest grow
+their buffers; its netgroup functions are the ones that do not.
+
+**Where:** `posix/src/netgroup.rs` (`getnetgrent`, `innetgr`).
+
+## 1155. A cancelled asynchronous lookup says so, and counts as answered for its batch
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `getaddrinfo_a` looks names up in the background, and
+`gai_cancel` takes a request out of the queue before it runs. On glibc the
+cancelled request is then left saying "still being looked up" for ever: its
+`gai_error` answers `EAI_INPROGRESS` -- while a second `gai_cancel` calls it
+finished -- and the batch it came in never counts it, so a caller waiting
+for the batch waits for ever and a batch to be announced is never announced.
+Here a cancelled request's `gai_error` is `EAI_CANCELED`, as the
+getaddrinfo_a(3) manual page says it is, and cancelling it counts as its
+answer: the waiting caller returns, the announcement comes.
+
+| | glibc 2.39 | here |
+|---|---|---|
+| `gai_error` of a cancelled request | `EAI_INPROGRESS`, for ever | `EAI_CANCELED` |
+| `gai_suspend` on it | not woken by the cancellation | woken; then `EAI_ALLDONE`, nothing listed being looked up |
+| `getaddrinfo_a(GAI_WAIT, ...)` whose request another thread cancels | waits for ever | returns 0 |
+| a `GAI_NOWAIT` batch with a cancelled request | never announced | announced once the rest have answers |
+
+**The alternatives:** reproduce it, so that a program which cancels a request
+and polls `gai_error` until it stops saying `EAI_INPROGRESS` -- the loop the
+interface invites -- spins for ever, and a waiting batch hangs; or refuse to
+cancel (`EAI_NOTCANCELED` always), which glibc does not do either. glibc's
+own answers disagree with each other here (in progress to `gai_error`,
+finished to `gai_cancel`); the manual page gives the answer taken.
+
+**Not a difference:** `gai_suspend` answers `EAI_ALLDONE`, not 0, when every
+request it is given already has its answer. glibc's code meant 0 there -- the
+test it has for it can never succeed -- but "all done" is the error's own
+name for that case, and programs written against glibc have met only this.
+
+**Where:** `posix/src/gai_a.rs`.
+
+## 1156. A call that waits in the C library ends for a signal as glibc's does on Linux: only for a handler that ran on its own thread, and despite `SA_RESTART` wherever Linux's kernel would not restart it
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** some calls wait inside this library rather than in the
+kernel -- `sem_wait`, the message queues, System V's `msgrcv` and `semop`,
+`io_getevents`, `aio_suspend`, `gai_suspend`, Linux's `futex()`. When a
+signal comes, each must decide whether to fail with "interrupted" (`EINTR`)
+or keep waiting. They now decide as glibc's do on Linux, which is not what
+POSIX's text alone gives: POSIX has a handler installed with `SA_RESTART`
+restart every such call, and Linux ends some of them anyway -- the timed
+waits, System V's calls, `io_getevents`. This follows Linux, because the
+programs written for it count on those interruptions.
+
+### The decision
+
+Three rules, from glibc 2.39's answers on Linux -- 115 cases in
+`posix/src/interrupt_oracle.txt` (`posix/tools/oracle/interrupt_harness.py`),
+replayed by `interrupt::tests::every_interruption_is_glibcs`:
+
+1. **A signal that runs no handler on the waiting thread never ends the
+   call**: one set to `SIG_IGN`, one ignored by default (`SIGCHLD`,
+   `SIGURG`), a stop and continue, one another thread handles.  POSIX says
+   so too (XSH 2.4.4: "Signals that are ignored shall not affect the
+   behavior of any function").
+2. **A handler installed without `SA_RESTART` ends every one of them**, with
+   `EINTR` (`gai_suspend`: `EAI_INTR`).
+3. **A handler installed with `SA_RESTART` ends only the calls Linux's kernel
+   never restarts**: the timed semaphore waits, `msgsnd`, `msgrcv`, `semop`,
+   `semtimedop`, `io_getevents`, and `aio_suspend`, `gai_suspend` and
+   `futex(FUTEX_WAIT)` when given a timeout.  `sem_wait`, the message-queue
+   calls (timed or not), and the untimed `aio_suspend`, `gai_suspend` and
+   `futex` wait on.
+
+The thread functions POSIX forbids to answer `EINTR` (`pthread_mutex_lock`,
+`pthread_cond_wait` and the rest) and `getaddrinfo_a(GAI_WAIT)` end for no
+signal, here as in glibc.
+
+### The alternative: POSIX's `SA_RESTART` alone
+
+XSH `sigaction`: "If set, and a function specified as interruptible is
+interrupted by this signal, the function shall restart and shall not fail
+with [EINTR] unless otherwise specified."  Read strictly, that restarts
+`semop`, `msgrcv` and `sem_timedwait` too; glibc's manual says as much in
+general ("return from that handler will resume a primitive"), and
+signal(7) as Ubuntu 24.04 ships it lists `sem_timedwait`, with `sem_wait`,
+among the calls `SA_RESTART` restarts -- which the oracle shows Linux does
+not do for `sem_timedwait`.
+
+- **For:** the letter of both texts, and one rule where this has two.
+- **Against:** a program written for Linux that installs its shutdown
+  handler with `signal()` -- which sets `SA_RESTART` -- and waits in
+  `msgrcv` or `semop` for work gets `EINTR` there on Linux, checks its flag
+  and exits.  Restarting would leave it waiting for work that never comes.
+  Linux's behaviour is not an accident to be corrected: signal(7) lists the
+  System V calls and `io_getevents` as "never restarted", and the kernel's
+  restart machinery is built to end timed waits (`ERESTART_RESTARTBLOCK`,
+  which any handler turns into `EINTR`).  And no ported program can depend
+  on `SA_RESTART` keeping one of these calls going, since on Linux it does
+  not.
+
+This is D-Q6's rule applied with its purpose rather than its letter: it
+departs from glibc where glibc contradicts its standards; here glibc
+contradicts POSIX's and its own manual's general statement, and is followed,
+because what it does is the kernel's documented, deliberate behaviour and
+the one the programs are written against.
+
+### How a wait tells, which is not a choice but is not obvious
+
+The native kernel cannot see a disposition or `SA_RESTART` -- they are this
+library's table -- so it ends a futex wait for every signal it hands the
+trampoline.  The trampoline's dispatch, which runs on the thread whose wait
+was ended, counts in that thread's block each handler it runs and those
+installed without `SA_RESTART`; a wait compares the counts with a mark taken
+before it slept (`posix/src/interrupt.rs`).  The calls that are system calls
+on Linux (the message queues, System V's, `io_getevents`, `futex`) take the
+mark as the call begins, since a signal arriving anywhere in a Linux system
+call is still pending when it next sleeps; the calls glibc builds from futex
+waits in user space (`sem_wait`, `aio_suspend`, `gai_suspend`) take one per
+sleep, since a handler that runs between two of glibc's sleeps is over by
+the second.  `io_pgetevents` takes its mark before it sets its signal mask,
+so that a signal the mask lets through as it is set ends the call, as the
+atomic mask-and-sleep of Linux's makes it.
+
+**Where:** `posix/src/interrupt.rs`, `posix/src/lowlevellock.rs`
+(`futex_wait_interruptible`), and the calls: `semaphore.rs`, `mqueue.rs`,
+`sysv_msg.rs`, `sysv_sem.rs`, `linux_aio_abi.rs`, `aio.rs`, `gai_a.rs`,
+`linux_futex.rs`.
+
+## 1157. A sleep, and each slice of the library's polling loops, is a timed futex wait on a word of its own, which the kernel ends for a signal -- not `SYS_SLEEP`, which sleeps its full time
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `sleep`, `nanosleep`, `usleep` and `clock_nanosleep` slept in
+the kernel's `SYS_SLEEP`, which no signal ends: a program that caught
+`SIGINT` during `sleep(10)` ran its handler ten seconds later, and
+`nanosleep` never answered `EINTR`. The loops the library builds from the
+kernel's non-blocking calls -- `poll`, `select`, `epoll_wait`, the socket
+waits, `flock`, the timerfd and inotify reads -- slept their 10 ms slices the
+same way. All of them now sleep in a timed futex wait on a word nothing ever
+wakes: the kernel ends that wait for a signal, and the counts
+`posix/src/interrupt.rs` keeps say whether a handler ran here.
+
+### The alternative: an interruptible `SYS_SLEEP`
+
+Ask lane A for a `SYS_SLEEP` that the kernel ends for a signal and that
+answers the time left, as Linux's `hrtimer_nanosleep` does.
+
+- **For:** the kernel's own sleep, which picks a tick-based path for sleeps
+  over 100 ms to spare its high-resolution timers; and the remaining time
+  from the kernel rather than from a second clock read.
+- **Against:** a kernel change for a fault that is entirely this library's
+  to fix, with the lane waiting on it; and a second mechanism beside the futex
+  wait every other interruptible wait here already uses, with its own
+  restart rules to keep in step. The timer cost is the one every timed wait
+  already pays -- the hrtimer queue is sized for one timer per task in a
+  timed wait (`kernel/src/hrtimer.rs`, 256 a CPU before it even warns, 4096
+  before it refuses) -- and a sleep is one such task. The remaining time is
+  the deadline less the clock, read once as the sleep ends.
+
+### Consequences
+
+- A signal handler ends a sleep at once, `SA_RESTART` or not (Linux never
+  restarts one), with the time left in `nanosleep`'s `rem` and
+  `clock_nanosleep`'s `remain`, and `sleep` answering the whole seconds
+  left, truncated, as glibc's does.
+- The polling loops stay polling loops -- 10 ms slices, and 2 ms for
+  `flock`, which had spun on `yield` -- but a signal ends a slice at once, and
+  a handler ends the call by its rule: `Never` for `poll`, `select` and
+  `epoll_wait` (signal(7)), `IfAsked` for the reads, `accept` and `flock`,
+  `Never` for a socket with a timeout.
+- `pause` and `sigsuspend` wait the same way rather than polling a count
+  every 2 ms, which also closed a lost wake-up in `sigsuspend`.
+
+**Where:** `posix/src/lowlevellock.rs` (`sleep_until`, `nap`),
+`posix/src/time.rs`, `posix/src/poll.rs`, `posix/src/epoll.rs`,
+`posix/src/socket.rs`, `posix/src/file.rs`, `posix/src/signal.rs`.
+
+## 1158. `sigwait` takes its signal from the trampoline's dispatch, with the set let through by the kernel's mask alone -- not from the kernel's pending set, and not by unblocking it in the program's mask
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** `sigwait`, `sigtimedwait` and `sigwaitinfo` were stubs that
+took no signal. They now take one the way the rest of this library handles
+signals: the kernel delivers it to the trampoline, and the dispatch, instead
+of running a handler, hands it to the thread waiting for it. While a thread
+waits, only the kernel's copy of the signal mask lets its set through; the
+program's own mask -- what `sigprocmask` reports, and what a handler sets
+and restores -- still blocks it.
+
+### Alternative 1: take the signal from the kernel's pending set
+
+Ask lane A for a native call that takes a pending signal of a set without
+delivering it, as `rt_sigtimedwait` already does for Linux programs here
+(`kernel/src/syscall/linux.rs`, over `take_pending_in_mask`).
+
+- **For:** the set stays blocked throughout and no mask changes at all; the
+  kernel's record of the signal -- its sender, its code, its value -- could
+  come with it, where the native frame brings the number alone; and the
+  kernel arbitrates between several waiters.
+- **Against:** a kernel change with the lane waiting on it, for a call the
+  library can serve today from what it has. The call would also have to end
+  for a handler that runs on the waiting thread, as glibc's does, which is
+  more than taking a signal.
+
+### Alternative 2: unblock the set in the program's mask while waiting
+
+What this change's first draft did: note the mask, clear the set from it,
+wait, put the noted mask back.
+
+- **For:** no second idea of the mask to keep in step.
+- **Against:** the mask is one word for the whole process, and every other
+  writer of it notes and restores it too. A handler that ends on another
+  thread while the wait is under way puts back the mask it found -- the set
+  blocked -- and the waiter sleeps through its own signal. One that began
+  during the wait and ends after it reopens the set, and the next signal of
+  it runs its disposition -- the default one, fatal for most -- instead of
+  waiting, pending, for the next `sigwait`. And `sigprocmask` would report
+  the set unblocked, which on Linux a waiting thread's mask never is.
+
+### What was done
+
+The kernel's mask is the program's less the union of the sets the waiters
+have published (`kernel_mask_now`), written again whenever either changes --
+and once more if another change raced the write, which a generation count
+detects, since two writers' masks can land in either order. The table of
+waiters is lock-free, the dispatch running in signal context on any thread:
+it hands a signal to a waiter free to take it before keeping it for one that
+has taken another, and a waiter that has stopped takes nothing.
+
+### Consequences
+
+- A signal of a set waited for is taken, with no handler run, by the thread
+  waiting for it, whichever thread the kernel delivers it to.
+- The dispatch no longer leaves a blocked signal pending while the kernel's
+  mask may still let it through (`keep_pending`): the kernel would have
+  delivered it straight back into the same dispatch, and again from there.
+- A child of `fork` forgets its parent's waiters, whose threads it lacks.
+- `sigwaitinfo`'s siginfo carries the number only, as long as the native
+  frame carries nothing more.
+- At most 32 threads wait at once (`ACCEPTORS`); a 33rd is told `EAGAIN`.
+
+**Where:** `posix/src/signal.rs` (`Acceptor`, `hand_to_a_waiter`, `accept`,
+`kernel_mask_now`, `sync_kernel_blocked_mask`, `keep_pending`,
+`forget_waiters_after_fork`); `posix/src/process.rs` (`fork_raw`).
+
+## 1159. The C library's own code is held free of warnings, as it ships, by a push gate on the library's trees -- not by making warnings errors in the crate, and not in gate 40
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** A compiler warning that appears only when the C library is
+built for the real machine -- not for the development machine its tests run
+on -- went unnoticed for six commits, because every build that prints it
+passes anyway. A push that changes the library now has it compiled exactly
+as it ships, and is refused if the library's own code draws a warning. The
+refusal stops only the push that changes the library; it never fails the
+shared build that all six lanes' boot tests depend on.
+
+### Alternative 1: `#![cfg_attr(target_os = "none", deny(warnings))]` in posix
+
+- **For:** nothing to run or wire: every build for the target -- the
+  sysroot's, gate 40's, a scratch check -- fails at the source, at once.
+- **Against:** the toolchain is an unpinned nightly (`cargo +nightly`), and
+  a toolchain update that brings a new warning -- rustc gains lints most
+  releases -- would fail `toolchain/build-sysroot.ps1`, and every lane's
+  boot test with it, until lane D fixed posix, which only lane D may. A
+  warning is a defect to fix, not a reason to stop five other lanes.
+
+### Alternative 2: refuse warnings in gate 40 (`check-pinned-target-build.py`)
+
+- **For:** it already compiles posix for bare metal on every push that
+  touches it.
+- **Against:** it compiles for posix's pinned `x86_64-unknown-none`, not the
+  spec libc.a is built for (`posix/x86_64-slateos-libc.json`: hard-float,
+  among the rest); and it judges eight crates in one verdict, lane A's
+  `services/netstack` among them, over a `touches` that includes
+  `netproto/` -- so a warning in posix would refuse lane A's push.
+
+### Chosen: gate 51, `scripts/check-libc-target-warnings.py`
+
+- It reads `build-sysroot.ps1` for the crates it builds and the settings it
+  builds them with (`$sysrootFlags` as RUSTFLAGS, `$buildStd`, `--release`,
+  `$spec`, its `$env:` settings), and has no verdict if that script's cargo
+  line stops being the one it mirrors -- so the check cannot drift from what
+  ships.
+- `cargo check --message-format=json`: a warning or error in a crate whose
+  manifest is in the tree and not under `vendor/` -- posix, toolchain/stubs,
+  tzrules -- is refused; the vendored libm's 32 are counted and printed, not
+  refused (upstream's code, kept as upstream wrote it). An error in any
+  crate is refused, since the library then does not build.
+- Scoped to `posix/`, `tzrules/`, `toolchain/stubs/`,
+  `toolchain/build-sysroot.ps1` and itself; ~11 s when posix has changed,
+  ~2 s when not. Without a nightly toolchain with rust-src it exits 3 and
+  the hook reports it skipped.
+- **Against:** a check, not a build, so a lint that fires only at code
+  generation is not seen (`large_assignments` and its kind) -- a build of
+  posix is minutes where the check is seconds. And a toolchain update that
+  adds a warning still refuses lane D's pushes until it is fixed, which is
+  the point: the lane that owns the code is the one held to it.
+
+**Where:** `scripts/check-libc-target-warnings.py`; `scripts/hooks/pre-push`
+(gate 51).
+
+## 1160. `regexec` reports submatches by the standard's rule, not by the first path glibc's automaton finds -- and follows the standard in the places glibc contradicts itself
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** a regular expression can often match the same text in more
+than one way -- `(a|ab)(c|bcd)(d*)` matches "abcd" as "a", "bcd" and "", or
+as "ab", "c" and "d" -- and a program asking `regexec` for the parts in
+parentheses gets one of those ways. POSIX says which: after the whole match is the
+leftmost and longest, "each subpattern, from left to right, shall match the
+longest possible string". glibc does not follow that rule; it takes the
+first way its internal automaton happens to find, which favours the first
+alternative and the greediest loop. This library's new `regcomp`/`regexec`
+follows the standard, so for a pattern where the two differ, `\1`, `\2`...
+come out as POSIX says rather than as glibc returns them. The whole match
+(where it starts and ends) is the same in both, except in a handful of
+places where glibc is simply wrong by its own answers elsewhere, and there
+this library gives the answer glibc gives everywhere else.
+
+**The rule, exactly.** "Longest subpattern first, left to right" is read as
+Okui and Suzuki formalise it (CIAA 2010, and Borsotti and Trofimovich after
+them): of all the ways -- parse trees -- the leftmost-longest match can be
+made, the one greatest when the trees are compared position by position in
+pre-order, each position by the length it matched (-1 for a subpattern that
+took no part). So a concatenation's elements are made as long as they can
+be in turn, the first first; of an alternation's branches that match the
+same text, the first; a repetition's iterations are made as long as they can
+be in turn, each past the minimum count non-empty, and one that matched
+nothing reports one empty iteration rather than none ("a null string shall
+be considered to be longer than no match at all", XBD 9.1, whose own
+example is `\(a*\)*` against "bc"). Then, as XSH regexec says, a group
+reports its last match, and a group inside another reports only within what
+that one reports.
+
+| Pattern | Subject | Here (POSIX) | glibc 2.39 | Why glibc's is wrong |
+|---|---|---|---|---|
+| `(a\|ab)(c\|bcd)(d*)` | abcd | (0,2) (2,3) (3,4) | (0,1) (1,4) (4,4) | the first subpattern is not the longest it can be |
+| `(a\|ab)b*` | ab | `\1`=(0,2) | (0,1) | same |
+| `((a)\|b)*` | ab | `\2`=-1 | `\2`=(0,1) | `\2` is inside `\1`, whose report is the last iteration, "b" -- `\2` took no part in it |
+| `(a?){2,3}` | a | `\1`=(1,1) | (0,1) | the first iteration is the longest, "a"; the second, required, is empty |
+| `(a*)+\1` | aaa | (0,3) | (0,2) | glibc misses the longer match altogether |
+| `(a*)*\1` | aaa | `\1`=(1,2) | `\1`=(0,-1) | a half-set pair is no submatch at all |
+| `$.` (no REG_NEWLINE) | "\n" | no match | (0,1) | glibc's `a$` does not match "a\nb" -- without REG_NEWLINE a newline is no line end, as POSIX says |
+| `(\Ba){0,2}` | a | (0,0) | (0,1) | glibc's own `\Ba` and `(\Ba)?` find no `\B` there |
+| `(^[a-c]{0,2}){0,2}.{2,}\|[^a]{0,1}` | aaa | (0,3) | no match | the second branch matches the empty string anywhere |
+| `\a`, REG_ICASE | a | (0,1) | no match | glibc upper-cases the pattern but not the escaped letter |
+| `[Z-a]`, REG_ICASE | | accepted | REG_ERANGE | the range is valid as written; glibc reads it as `[Z-A]` |
+| `(){32767}` and four more | | an answer | crash | |
+
+In the oracle (`posix/tools/oracle/regex_harness.py`, `regex_oracle.txt`,
+some 544,000 answers) the 16,444 lines of `posix/src/regex_deviations.txt`
+record, with both answers, each place the standard's is given instead of
+glibc's. By the harness's count of subjects: 8,259 differ in the submatches
+alone (the rule above); 1,662 have back-references (where glibc also misses
+matches); 5,599 are under REG_ICASE (the case of escapes and range ends),
+where 277 patterns also compile differently; 408 are where glibc's `\B`, `^`
+or `$` contradict its own answers; and 5 patterns crash glibc. `posix/tools/oracle/regex_model.py` computes the standard's answer
+by enumerating every parse -- independently of this library's engine, which
+dissects the match with automata -- and the harness refuses to write the
+files if the model and glibc disagree anywhere but in the submatches or one
+of those listed reasons.
+
+**Alternatives.**
+
+- *glibc's answers exactly.* That would mean reproducing its engine's
+  search order, which is nowhere documented, and its outright bugs (the
+  crashes, the missed matches, the half-set pairs, the `\B` and `^`
+  failures) -- the D-Q6 rule is glibc where POSIX leaves it open, and the
+  submatch rule is not left open.
+- *Fowler's "left-associative" reading of the rule*, under which
+  `(a|ab)(c|bcd)(d*)` makes the first two groups together as long as they
+  can be (glibc's answer happens to agree there). The text says "each
+  subpattern, from left to right", which is the reading above; it is also
+  Okui and Suzuki's, Kuklewicz's (regex-tdfa) and RE2C's.
+- *Empty iterations allowed anywhere* (dispreferred rather than excluded).
+  It only matters with back-references -- `(a*)*\1` against "a" could then
+  match (0,1) through an empty second iteration -- and glibc's answer there,
+  (0,1) with `\1`=(0,0), fits neither reading.
+
+**The cost.** A program ported from Linux that relies on glibc's particular
+choice of submatch -- a `sed` script using `\(a\|ab\)\(c\|bcd\)`, say -- sees
+the standard's instead. Such patterns are ambiguous by construction, and a
+program written from the standard, or tested against musl, BSD or AT&T's
+library, expects this.
+
+**Where:** `posix/src/regex.rs` and `posix/src/regex/`; the oracle and its
+model in `posix/tools/oracle/`.
+
+## 1161. `regex_t` is glibc's `struct re_pattern_buffer`, with offsets as wide as POSIX requires, and the GNU regex interface is the library's own
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** glibc has two ways in to its regular expressions: POSIX's
+`regcomp` and `regexec`, and an older GNU one -- `re_compile_pattern`,
+`re_search` and the rest -- which reads a pattern in a syntax given as a set
+of bits (grep's, awk's, Emacs's ...) and works on the same structure, whose
+fields a program fills in and reads. This library had only the POSIX calls,
+on musl's version of the structure, which hides those fields. It now has
+the GNU calls too, on glibc's structure field for field, so that a program
+written for either interface compiles and runs here as on glibc. One thing
+differs on purpose: a position in the string (`regoff_t`) is a `long`, as
+POSIX requires and musl's is, where glibc's is an `int`.
+
+| | before | now |
+|---|---|---|
+| `regex_t` | musl's: `re_nsub`, then opaque bytes (64 in all) | glibc's `struct re_pattern_buffer`: `buffer`, `allocated`, `used`, `syntax`, `fastmap`, `translate`, `re_nsub` and seven bit-fields (64 bytes) |
+| `<regex.h>` | musl's, with glibc's extra flags and codes after it | `posix/include`'s own: glibc's, in its `_REGEX_LARGE_OFFSETS` form |
+| `regoff_t`, `regmatch_t` | `long`; 16 bytes | the same (glibc's: `int`; 8 bytes) |
+| the GNU calls | none | `re_set_syntax`, `re_compile_pattern`, `re_compile_fastmap`, `re_search`, `re_search_2`, `re_match`, `re_match_2`, `re_set_registers`, `re_syntax_options`, the `RE_*` syntax bits; BSD's `re_comp` and `re_exec` for `_REGEX_RE_COMP` |
+
+**Why glibc's structure.** The GNU interface is defined by its structure: a
+program sets `translate` and `fastmap` before compiling, may give
+`re_compile_pattern` a block of its own in `buffer` and `allocated`, sets
+`not_bol`, `not_eol` and `newline_anchor` before searching, and reads
+`re_nsub` and `can_be_null` after. glibc's `regex_t` is that structure, and
+a program may compile with one interface and use the other: `regexec` of a
+pattern `re_compile_pattern` compiled, `regfree` of either. musl's
+`regex_t` names none of those fields, and musl's header declares `regcomp`
+with it, so `<regex.h>` is replaced rather than extended -- as `<glob.h>`
+is, for the same reason.
+
+**Why not glibc's `regoff_t`.** POSIX: `regoff_t` is a signed integer type
+"that can hold the largest value that can be stored in either a ptrdiff_t
+type or a ssize_t type". glibc's is an `int`, and its header says why --
+"The traditional GNU regex implementation mishandles strings longer than
+INT_MAX" -- and keeps, under `_REGEX_LARGE_OFFSETS`, the form that does what
+POSIX asks ("POSIX 1003.1-2008 requires that regoff_t be at least as wide as
+ptrdiff_t and ssize_t"). This library's matcher has no such limit, musl's
+`regoff_t` was a `long` already, and every C program here is compiled
+against this header: so the header is glibc's in that form. A program that
+keeps a position in an `int` works as before; one that gives
+`re_set_registers` arrays of `int` must use `regoff_t`, as the interface
+says. `scripts/check-libc-overlay.py` holds `regmatch_t` and the five calls
+that take or return a `regoff_t` to this (`LAYOUT_OVERRIDES`,
+`TYPE_OVERRIDES`), and each entry to glibc's own type as well, so that a
+change in glibc's is seen.
+
+**As glibc does.** Each of the twenty-six syntax bits as glibc's parser reads
+it, and glibc's named syntaxes (`posix/tools/oracle/regex_gnu_harness.py`:
+every token and pair of tokens in each named syntax, and in context in each
+of POSIX's two with each bit turned over); a translate table applied to the
+pattern as glibc applies it, and to the string; `re_search` forwards,
+backwards, and over two strings, with glibc's handling of its arguments; the
+registers allocated, grown or used as they are, with the extra -1 element
+glibc's code adds; the fastmap -- the bytes a match can begin with -- as
+glibc's automaton gives it, down to the lower-case letters a negated bracket
+expression puts in under RE_ICASE, none of which can begin a match;
+`re_comp` and `re_exec` with their one pattern. The submatches are the
+standard's, as `regexec`'s are (§1160).
+
+**Where not.**
+
+- With a translate table, an escaped letter stands for its translation, as
+  glibc's header says the table is applied "to a pattern when it is
+  compiled"; glibc's stands for itself, which a translated string never
+  holds, so `\A` under a case-folding table matches nothing there -- the
+  same fault as REG_ICASE's `\a` (§1160), and the same answer.
+- No match begins or ends past `re_search_2`'s `stop`. glibc's search goes
+  on past it and finds an empty match there -- `$` at the end of the second
+  string, with `stop` at 2 -- though its header says the search stops at
+  `stop`.
+- `re_comp` and `re_exec` take turns at their one pattern under a lock,
+  where two threads would race on glibc's; and `re_exec` before any pattern
+  answers 0, where glibc's reads through a NULL pointer and crashes.
+
+The oracle's cases where glibc answers otherwise -- 100 of some 44,900 --
+are in `posix/src/regex_gnu_deviations.txt`, each with this library's
+answer.
+
+**The alternatives.**
+
+- *musl's `regex_t`, and a separate `struct re_pattern_buffer` for the GNU
+  calls*: nothing changes for a program that uses POSIX's calls alone, but
+  one that mixes the two, as glibc allows, fails to compile.
+- *glibc's header exactly, its `int` `regoff_t` and all*: the layouts
+  glibc's own binaries have -- but no binary built against glibc runs here,
+  so all that would be gained is the limit POSIX forbids.
+- *No GNU interface*: programs that bring their own copy of the engine
+  (gnulib's) still build; those that call glibc's do not.
+
+**Where:** `posix/include/regex.h`; `posix/src/regex.rs`,
+`posix/src/regex/parse.rs`, `posix/src/regex/fastmap.rs`;
+`scripts/check-libc-overlay.py`.
+
+## 1162. GNU obstacks are glibc's: its older interface, its chunk sizes, and an `obstack_printf` that reaches the chunks only by name
+
+**Date:** 2026-09-30
+**Decided by:** Claude (autonomous)
+**Lane:** D
+
+**In short:** an obstack (GNU's "object stack") is a heap a program keeps
+for itself. Objects go one after another into large blocks ("chunks") that
+the program's own allocation function supplies; one object at a time can
+grow at the end until it is finished; and freeing one object frees
+everything made after it. elfutils, among others, uses the C library's.
+Almost all of it is macros in `<obstack.h>`, which the program compiles
+into itself; the library has only the functions those macros call when a
+chunk runs out. This library had none of it. It now has glibc 2.39's: the
+same structure field for field, the macros doing what glibc's do, and the
+functions asking the program's allocation function for exactly the sizes
+glibc's ask for -- which the program can see.
+
+| | glibc 2.39 | gnulib's own | here |
+|---|---|---|---|
+| lengths, `_obstack_memory_used` | `int` | `size_t` | `int` |
+| the chunk size, the allocation function's argument | `long` | `size_t` | `long` |
+| `alignment_mask` | `int` | `size_t` | `int` |
+| `struct obstack` on x86-64 | 88 bytes | 88 bytes, each field at glibc's offset | glibc's |
+
+**Why glibc's older interface.** glibc has kept the interface obstacks had
+in the 1990s, `int` lengths and all, for its binaries' sake. gnulib's
+obstack module has a newer one, with `size_t`, and compiles it into the
+program whenever the C library's `_obstack_memory_used` returns an `int` --
+on glibc, that is, and so here. Programs are therefore of two kinds: those
+written against glibc's header, which want glibc's interface, and those
+that bring gnulib's and never call the library's functions at all, which
+want only that the library's stay out of their way (below). So the
+interface is glibc's (D-Q6's rule: glibc 2.39 is the oracle). Its limit is
+glibc's too: an object of 2 GiB or more cannot be made.
+
+**As glibc does** (`posix/tools/oracle/obstack_harness.py`: twenty-five
+scenarios, each operation's resulting state replayed against the library
+by `posix/src/obstack.rs`'s tests). A first chunk of 4064 bytes and an
+alignment of 16 when the program asks for neither; each new chunk asked
+for at the object's size plus the length wanted, plus an eighth of the
+object, plus the alignment mask, plus 100 bytes -- never less than the
+chunk size; the chunk an object leaves freed when the object was all it
+held, unless it may hold an empty object as well; an object's start
+aligned as an address, not as an offset in its chunk; `obstack_free` back
+to an object in any chunk, and an abort for an address in none; the
+default failure handler printing "memory exhausted" and exiting with
+`obstack_exit_failure`, which is 1. `obstack_printf` and `obstack_vprintf`
+add their output to the growing object with no NUL after it, as glibc's
+do, and so do their fortified `__obstack_printf_chk` and
+`__obstack_vprintf_chk`.
+
+**The header's macros.** `posix/include/obstack.h` follows glibc's
+installed header macro for macro (D-Q6 lists it): the GNU C forms, which
+evaluate each argument once, and the portable forms, which go through the
+obstack's `temp` field. Both are held to glibc: the harness builds its own
+program against this header and glibc's functions, in each form, and must
+print glibc's answers line for line (`obstack_harness.py --header`); and
+`services/ctest-obstack` is the same program built for SlateOS, against
+this header and this library.
+
+**`obstack_printf` reaches the chunks only by name.** Each new chunk
+`obstack_printf` needs is had through `_obstack_newchunk`, called by its C
+name, as glibc's is. A program with gnulib's obstacks has its own
+`_obstack_newchunk`, and the call is to that; were it to the library's own,
+linking would bring the library's obstack functions in beside the
+program's, and two definitions of each would refuse to link. For the same
+reason printf's core holds no reference to obstacks at all -- its
+destination is a function and a context, which `obstack_vprintf` passes --
+and `scripts/check-libc-shape.py` makes obstack a strict family: its
+functions in one archive member with nothing else, and nothing outside it
+referring to anything in it but their names.
+
+**Where not.** A failure handler that returns -- glibc's manual says it
+must exit or longjmp -- leaves glibc's `_obstack_newchunk` going on through
+the null chunk it could not have, and it faults. This library aborts at
+that point instead: the result is the same, the process ends, but it ends
+before the macro that asked for room can write past the chunk there is.
+`services/ctest-obstack` checks it (its exit 2).
+
+**The alternatives.**
+
+- *gnulib's newer interface, `size_t` throughout*: objects past 2 GiB, but
+  not glibc's interface -- a program written for glibc's, printing
+  `obstack_object_size` with `%u` as its `unsigned` asks, or declaring
+  `_obstack_memory_used` itself, is wrong against it; and gnulib's programs
+  gain nothing, since they bring their own.
+- *No obstacks*: gnulib's programs still build, with their own copies;
+  those that call the C library's, elfutils among them, do not.
+- *A returning handler answered by returning*: the obstack left as it was,
+  as a longjmp leaves it -- but the macro that called would then write past
+  its chunk, silently, where glibc's faults.
+
+**Where:** `posix/src/obstack.rs`; `posix/include/obstack.h`;
+`posix/src/printf.rs` (`obstack_printf`, `obstack_vprintf`, printf's
+destinations), `posix/src/fortify_printf.rs` (their `__*_chk` forms);
+`scripts/check-libc-shape.py`; `services/ctest-obstack/`.
 
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 

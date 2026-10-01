@@ -30,6 +30,9 @@ int pidfd_open(pid_t, unsigned int);
  * process. The flags must be 0. */
 int pidfd_getfd(int, int, unsigned int);
 
+/* The pid of the process the descriptor refers to (glibc 2.39). */
+pid_t pidfd_getpid(int);
+
 /* Send the process the signal, with the siginfo_t if it is not NULL. The
  * flags must be 0. (musl's <signal.h> has siginfo_t only where it has the
  * rest of POSIX: in a strict ISO C compilation there is none to take.) */

@@ -566,14 +566,13 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 ///   it would remove the enforcement rather than raise it.  Daemons that
 ///   lift their own `NOFILE` to infinity at startup — several do — must
 ///   handle the refusal instead of assuming it worked.
-/// - **Raising any hard limit is refused outright**, for every resource
-///   and every caller.  This differs from Linux, which permits the raise
-///   with `CAP_SYS_RESOURCE`, and it differed from this function's own
-///   behaviour until the native syscalls landed.  The capability is not
-///   consulted because the kernel does not consult it; when that changes
-///   it changes in `pcb::set_rlimit`, which both ABIs funnel through.
-///   Lowering a hard limit, holding it equal, or editing only the soft
-///   limit is always permitted.  See design-decisions.md §707.
+/// - **Raising a hard limit takes authority**: the kernel permits it to a
+///   caller holding a `ResourceLimit` capability with `WRITE` -- the host
+///   build's `CAP_SYS_RESOURCE`, the name Linux gives the same permission
+///   -- and refuses it to everyone else.  Lowering a hard limit, holding
+///   it equal, or editing only the soft limit is always permitted.  See
+///   design-decisions.md §640, which replaced §707's refusal of every raise
+///   on 2026-08-30 (this paragraph described the refusal until 2026-09-30).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     prlimit(0, resource, rlp, core::ptr::null_mut())
@@ -1097,6 +1096,19 @@ pub extern "C" fn prlimit64(
     old_limit: *mut Rlimit,
 ) -> i32 {
     prlimit(pid, resource, new_limit, old_limit)
+}
+
+/// `getrlimit64` -- [`getrlimit`] by glibc's large-file name: its
+/// `struct rlimit64` is `struct rlimit` on x86_64.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getrlimit64(resource: i32, rlp: *mut Rlimit) -> i32 {
+    getrlimit(resource, rlp)
+}
+
+/// `setrlimit64` -- [`setrlimit`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setrlimit64(resource: i32, rlp: *const Rlimit) -> i32 {
+    setrlimit(resource, rlp)
 }
 
 // ---------------------------------------------------------------------------
@@ -1955,9 +1967,9 @@ mod tests {
         };
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
-        // prlimit: get old, set new.  The new hard limit must be at or below
-        // the old one — no caller may raise a hard limit — so this walks the
-        // pair down rather than up.
+        // prlimit: get old, set new.  Down rather than up, so that the call
+        // needs no authority: raising a hard limit takes CAP_SYS_RESOURCE
+        // (design-decisions.md §640).
         let new = Rlimit {
             rlim_cur: 5,
             rlim_max: 15,
@@ -2006,6 +2018,68 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // getrlimit64 / setrlimit64 -- glibc's large-file names
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getrlimit64_and_setrlimit64_are_their_bases() {
+        reset_global_state();
+        let lowered = Rlimit {
+            rlim_cur: 50,
+            rlim_max: 60,
+        };
+        assert_eq!(setrlimit64(RLIMIT_FSIZE, &lowered), 0);
+        let mut seen = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(getrlimit(RLIMIT_FSIZE, &mut seen), 0);
+        assert_eq!((seen.rlim_cur, seen.rlim_max), (50, 60));
+        let mut seen64 = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(getrlimit64(RLIMIT_FSIZE, &mut seen64), 0);
+        assert_eq!((seen64.rlim_cur, seen64.rlim_max), (50, 60));
+
+        // Their answers, to the errno: an unknown resource; NULL, which sets
+        // nothing (glibc's is prlimit64(0, resource, NULL, NULL)); a hard
+        // limit raised, which this test's CAP_SYS_RESOURCE permits; a soft
+        // limit above the hard one, which nothing permits.
+        let raised = Rlimit {
+            rlim_cur: 10,
+            rlim_max: 1000,
+        };
+        let inverted = Rlimit {
+            rlim_cur: 70,
+            rlim_max: 5,
+        };
+        for resource in [-1, RLIMIT_FSIZE, 999] {
+            crate::errno::set_errno(0);
+            let r64 = (
+                getrlimit64(resource, core::ptr::null_mut()),
+                crate::errno::get_errno(),
+            );
+            crate::errno::set_errno(0);
+            let r = (
+                getrlimit(resource, core::ptr::null_mut()),
+                crate::errno::get_errno(),
+            );
+            assert_eq!(r64, r, "getrlimit64({resource}, NULL)");
+            for limit in [core::ptr::null(), &raw const raised, &raw const inverted] {
+                crate::errno::set_errno(0);
+                let r64 = (setrlimit64(resource, limit), crate::errno::get_errno());
+                crate::errno::set_errno(0);
+                let r = (setrlimit(resource, limit), crate::errno::get_errno());
+                assert_eq!(r64, r, "setrlimit64({resource})");
+            }
+            crate::errno::set_errno(0);
+            assert_eq!(setrlimit64(resource, &raw const inverted), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // prlimit64 — alias for prlimit
     // -----------------------------------------------------------------------
 
@@ -2020,7 +2094,7 @@ mod tests {
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
         // Use prlimit64 to get old and set new.  Downward, as in
-        // `prlimit_get_and_set`: a hard limit never rises.
+        // `prlimit_get_and_set`, so that no authority is needed.
         let new = Rlimit {
             rlim_cur: 30,
             rlim_max: 40,

@@ -50,6 +50,7 @@
 //! descriptor, so `poll` and `close` do not accept one (Linux's does).
 
 use crate::errno;
+use crate::interrupt::Mark;
 use crate::perprocess::process_global;
 use crate::sigevent::{SigeventView, notify};
 use crate::stat::Timespec;
@@ -375,8 +376,13 @@ fn changed() {
 }
 
 /// Sleep until the queues change from `seen`, or until `deadline`
-/// (`CLOCK_REALTIME`): `Err(ETIMEDOUT)` once it has passed.
-fn wait_for_change(seen: i32, deadline: Option<&Timespec>) -> Result<(), i32> {
+/// (`CLOCK_REALTIME`): `Err(ETIMEDOUT)` once it has passed, and
+/// `Err(EINTR)` when a signal handler installed without `SA_RESTART` has
+/// run on this thread since `mark`, the call's start -- in Linux a signal
+/// that comes at any point in the call ends its next sleep.  Linux restarts
+/// the message-queue calls for a handler installed with it, timed or not,
+/// and so does this ([`crate::interrupt`]).
+fn wait_for_change(seen: i32, deadline: Option<&Timespec>, mark: Mark) -> Result<(), i32> {
     // SAFETY: this process's words.
     let (seq, sleeping) = unsafe { (&*changes(), &*sleepers()) };
     let timeout = match deadline {
@@ -387,11 +393,17 @@ fn wait_for_change(seen: i32, deadline: Option<&Timespec>) -> Result<(), i32> {
         }
     };
     sleeping.fetch_add(1, Ordering::SeqCst);
-    match timeout {
-        None => crate::lowlevellock::futex_wait(seq, seen),
-        Some(ns) => crate::lowlevellock::futex_wait_timeout(seq, seen, ns),
-    }
+    let waited = crate::lowlevellock::futex_wait_interruptible_since(
+        seq,
+        seen,
+        timeout,
+        crate::interrupt::Restart::IfAsked,
+        mark,
+    );
     sleeping.fetch_sub(1, Ordering::SeqCst);
+    if waited == crate::lowlevellock::Waited::Interrupted {
+        return Err(errno::EINTR);
+    }
     Ok(())
 }
 
@@ -761,6 +773,7 @@ fn send(mqdes: MqdT, msg: *const u8, len: usize, prio: u32, deadline: Option<&Ti
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    let mark = Mark::now();
     loop {
         let seen = change_seen();
         let mut l = lock();
@@ -813,7 +826,7 @@ fn send(mqdes: MqdT, msg: *const u8, len: usize, prio: u32, deadline: Option<&Ti
             return -1;
         }
         drop(l);
-        if let Err(e) = wait_for_change(seen, deadline) {
+        if let Err(e) = wait_for_change(seen, deadline, mark) {
             errno::set_errno(e);
             return -1;
         }
@@ -859,6 +872,7 @@ fn receive(
     prio_out: *mut u32,
     deadline: Option<&Timespec>,
 ) -> isize {
+    let mark = Mark::now();
     let mut waiting_on: Option<usize> = None;
     let result = loop {
         let seen = change_seen();
@@ -891,7 +905,7 @@ fn receive(
             waiting_on = Some(desc.queue);
         }
         drop(l);
-        if let Err(e) = wait_for_change(seen, deadline) {
+        if let Err(e) = wait_for_change(seen, deadline, mark) {
             break Err((e, lock()));
         }
     };

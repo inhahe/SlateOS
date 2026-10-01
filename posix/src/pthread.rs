@@ -74,8 +74,10 @@
 //! by-value copy is already wrong whatever the size.  `<=` states what
 //! matters for them and keeps firing if a field is ever added.
 //!
-//! Where an explicit `_reserved` tail *is* carried — `SemT`, `RegexT`,
-//! `GlobT`, and `PosixSpawnFileActionsT` — the assertion is tightened to
+//! Where an explicit `_reserved` tail *is* carried — `SemT` and
+//! `PosixSpawnFileActionsT` — or every field of the header's is there by
+//! name, as in `GlobT` since 2026-09-29 and `RegexT` (glibc's `struct
+//! re_pattern_buffer`) since 2026-09-30, the assertion is tightened to
 //! `==`, which says strictly more: it catches a field *removal* as well as
 //! an addition, and a removal is what would silently shorten a by-value
 //! copy of one of those.  (See `TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-
@@ -769,6 +771,9 @@ pub extern "C" fn pthread_create(
     {
         return errno::EPERM;
     }
+    if let Some(e) = want.affinity {
+        return e;
+    }
     let Some(slot) = claim_slot() else {
         return errno::EAGAIN;
     };
@@ -808,6 +813,13 @@ struct CreateAttr {
     /// The policy and priority asked for with `PTHREAD_EXPLICIT_SCHED`;
     /// `None` to inherit the creator's.
     explicit_sched: Option<(i32, i32)>,
+    /// What making the attribute's CPU set the new thread's affinity would
+    /// answer, if it has one and that is not 0: glibc's `pthread_create`
+    /// sets it on the new thread and fails with its error, the thread never
+    /// running.  Here every thread runs on every CPU, so a set of them all
+    /// is kept and any other refused -- `ENOSYS`, or `EINVAL` for one with no
+    /// CPU there is (`crate::sched::affinity_change`).
+    affinity: Option<i32>,
 }
 
 impl CreateAttr {
@@ -822,28 +834,43 @@ impl CreateAttr {
         stack_addr: None,
         detached: false,
         explicit_sched: None,
+        affinity: None,
     };
 
     /// What `attr` asks for; NULL stands for the process's default
-    /// attributes (`pthread_setattr_default_np`).
+    /// attributes (`pthread_setattr_default_np`), read while they are
+    /// locked -- their CPU set is theirs, and another thread may replace
+    /// them.
     fn read(attr: *const PthreadAttrT) -> Self {
         if attr.is_null() {
-            let default = default_attr_copy();
-            return Self::read(&raw const default);
+            return with_default_attr(|d| Self::read_buf(d));
         }
         // SAFETY: non-null, and by the caller's contract an initialised
         // attribute object.
-        let buf = unsafe { &*attr };
+        Self::read_buf(unsafe { &*attr })
+    }
+
+    /// What the attribute object `buf` asks for.
+    fn read_buf(buf: &PthreadAttrT) -> Self {
         let size = attr_read_stacksize(buf);
-        let addr = attr_read_stackaddr(buf);
+        let stack_size = if size == 0 {
+            DEFAULT_THREAD_STACK_SIZE
+        } else {
+            size
+        };
+        let top = attr_read_stackaddr(buf);
+        // SAFETY: an initialised attribute object's extension is live.
+        let affinity = unsafe { attr_cpuset(buf) }.and_then(|set| {
+            crate::sched::read_affinity_mask(set.len(), set.as_ptr().cast())
+                .and_then(|mask| crate::sched::affinity_change(&mask, crate::sched::online_cpus()))
+                .err()
+        });
         Self {
-            stack_size: if size == 0 {
-                DEFAULT_THREAD_STACK_SIZE
-            } else {
-                size
-            },
+            stack_size,
             guard_size: attr_read_guardsize(buf),
-            stack_addr: (addr != 0).then_some(addr),
+            // The top less the size: glibc's `stackaddr - stacksize`, which
+            // a caller with a top below its size has wrap as glibc's does.
+            stack_addr: (top != 0).then(|| top.wrapping_sub(stack_size)),
             detached: attr_read_detachstate(buf) == PTHREAD_CREATE_DETACHED,
             explicit_sched: (attr_read_i32(buf, ATTR_OFF_INHERIT) == PTHREAD_EXPLICIT_SCHED).then(
                 || {
@@ -853,6 +880,7 @@ impl CreateAttr {
                     )
                 },
             ),
+            affinity,
         }
     }
 }
@@ -1175,6 +1203,43 @@ pub unsafe extern "C" fn pthread_timedjoin_np(
     retval: *mut *mut u8,
     abstime: *const crate::stat::Timespec,
 ) -> i32 {
+    // SAFETY: the caller's contract.
+    unsafe { timed_join(thread_id, retval, crate::time::CLOCK_REALTIME, abstime) }
+}
+
+/// Join a thread, waiting for it until `abstime` on `clockid`
+/// (`pthread_clockjoin_np`, GNU): [`pthread_timedjoin_np`] against the clock
+/// named, which must be `CLOCK_REALTIME` or `CLOCK_MONOTONIC` -- `EINVAL`
+/// for any other, before the thread is looked at, as glibc checks it.
+///
+/// # Safety
+///
+/// `abstime` is NULL or a readable `struct timespec`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_clockjoin_np(
+    thread_id: PthreadT,
+    retval: *mut *mut u8,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if clockid != crate::time::CLOCK_REALTIME && clockid != crate::time::CLOCK_MONOTONIC {
+        return errno::EINVAL;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { timed_join(thread_id, retval, clockid, abstime) }
+}
+
+/// [`pthread_clockjoin_np`] with the clock checked.
+///
+/// # Safety
+///
+/// As [`pthread_clockjoin_np`].
+unsafe fn timed_join(
+    thread_id: PthreadT,
+    retval: *mut *mut u8,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
     if abstime.is_null() {
         return pthread_join(thread_id, retval);
     }
@@ -1190,7 +1255,7 @@ pub unsafe extern "C" fn pthread_timedjoin_np(
             return errno::EINVAL;
         }
         let mut now = crate::stat::Timespec::default();
-        if crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now) != 0 {
+        if crate::time::clock_gettime(clockid, &raw mut now) != 0 {
             return errno::get_errno();
         }
         let left_ns = i128::from(deadline.tv_sec)
@@ -1315,7 +1380,7 @@ pub(crate) fn record_initial_thread() {
 /// task stays a zombie until reaped.  What it must never do is the reverse —
 /// report a live thread as absent — and it cannot, because a slot is only
 /// released after the thread is confirmed off its stack.
-fn thread_is_live(thread: PthreadT) -> bool {
+pub(crate) fn thread_is_live(thread: PthreadT) -> bool {
     if thread == SLOT_EMPTY {
         // No kernel task has id 0 — that is precisely why `SLOT_EMPTY` is
         // 0.  Rejecting it here also stops an unrecorded `INITIAL_TASK_ID`
@@ -2310,6 +2375,13 @@ pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
 /// - 0: unlocked
 /// - positive N: N readers holding the lock
 /// - -1: one writer holding the lock
+///
+/// Readers are preferred -- glibc's default -- unless the lock was made
+/// with [`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`]: then, while a
+/// writer waits, a new reader does not join the readers holding the lock
+/// but waits with the writer, so that the read phase ends and the writer
+/// gets its turn.  A reader asking again for a lock it holds would then wait
+/// for itself, which is why glibc calls it non-recursive.
 #[repr(C)]
 pub struct PthreadRwlockT {
     /// 0 unlocked, N > 0 held by N readers, [`RWLOCK_WRITER`] held by a
@@ -2321,7 +2393,15 @@ pub struct PthreadRwlockT {
     /// The writer's task id while `state` is [`RWLOCK_WRITER`], for
     /// `EDEADLK`.
     writer: AtomicI32,
-    _pad: [u8; 44],
+    /// 1 if writers are preferred ([`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`]),
+    /// else 0.  At byte 12 -- the fourth `int` of musl's `pthread_rwlock_t`
+    /// -- where posix/include's `PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP`
+    /// puts it.
+    prefer_writer: AtomicI32,
+    /// Writers waiting for a writer-preferring lock; the futex readers held
+    /// back by them sleep on.  Kept only on such a lock.
+    writers_waiting: AtomicI32,
+    _pad: [u8; 36],
 }
 
 /// [`PthreadRwlockT::state`] while a writer holds the lock.
@@ -2346,24 +2426,58 @@ pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
     state: AtomicI32::new(0),
     waiters: AtomicI32::new(0),
     writer: AtomicI32::new(0),
-    _pad: [0; 44],
+    prefer_writer: AtomicI32::new(0),
+    writers_waiting: AtomicI32::new(0),
+    _pad: [0; 36],
 };
+
+/// Readers preferred, glibc's default (`pthread_rwlockattr_setkind_np`): a
+/// reader is not held back by a waiting writer, so a reader may lock again.
+pub const PTHREAD_RWLOCK_PREFER_READER_NP: i32 = 0;
+/// Writers preferred -- in name: glibc takes it as
+/// [`PTHREAD_RWLOCK_PREFER_READER_NP`], since a reader locking again while a
+/// writer waits would wait for itself, and so does this library.
+pub const PTHREAD_RWLOCK_PREFER_WRITER_NP: i32 = 1;
+/// Writers preferred, readers never locking again (see [`PthreadRwlockT`]).
+pub const PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP: i32 = 2;
+/// The default kind: [`PTHREAD_RWLOCK_PREFER_READER_NP`].
+pub const PTHREAD_RWLOCK_DEFAULT_NP: i32 = PTHREAD_RWLOCK_PREFER_READER_NP;
+
+/// Where a `pthread_rwlockattr_t` keeps its kind: the second `unsigned` of
+/// musl's two (the first is the process-shared flag).
+const RWLOCKATTR_OFF_KIND: usize = 4;
 
 /// Initialize a read-write lock.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_init(
     rwlock: *mut PthreadRwlockT,
-    _attr: *const PthreadRwlockattrT,
+    attr: *const PthreadRwlockattrT,
 ) -> i32 {
     if rwlock.is_null() {
         return errno::EFAULT;
     }
+    // Writers are preferred only for the non-recursive kind: glibc's
+    // `__flags` is set for it alone (nptl/pthread_rwlock_init.c).
+    // SAFETY: NULL or the caller's attribute object.
+    let kind = unsafe { attr.as_ref() }.map_or(PTHREAD_RWLOCK_DEFAULT_NP, rwlockattr_kind);
+    // SAFETY: non-null, the caller's lock, not in use (POSIX's contract).
     unsafe {
         (*rwlock).state = AtomicI32::new(0);
         (*rwlock).waiters = AtomicI32::new(0);
         (*rwlock).writer = AtomicI32::new(0);
+        (*rwlock).prefer_writer = AtomicI32::new(i32::from(
+            kind == PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP,
+        ));
+        (*rwlock).writers_waiting = AtomicI32::new(0);
     }
     0
+}
+
+/// The kind an attribute object holds.
+fn rwlockattr_kind(attr: &PthreadRwlockattrT) -> i32 {
+    attr.get(RWLOCKATTR_OFF_KIND..RWLOCKATTR_OFF_KIND + 4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(PTHREAD_RWLOCK_DEFAULT_NP, i32::from_ne_bytes)
 }
 
 /// Destroy a read-write lock.
@@ -2396,6 +2510,13 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     let rw = unsafe { &*rwlock };
     let current = rw.state.load(Ordering::Acquire);
     if current < 0 {
+        return errno::EBUSY;
+    }
+    // A writer-preferring lock with a writer waiting is busy to a reader
+    // (glibc's `pthread_rwlock_tryrdlock`).
+    if rw.prefer_writer.load(Ordering::Relaxed) != 0
+        && rw.writers_waiting.load(Ordering::Acquire) > 0
+    {
         return errno::EBUSY;
     }
     if current == i32::MAX {
@@ -2583,6 +2704,32 @@ fn rwlock_sleep(
     in_time
 }
 
+/// Sleep while `writers_waiting` is still `seen` -- a reader held back by a
+/// writer on a writer-preferring lock -- or until `deadline`: `false` once it
+/// has passed.  The writer wakes it when it stops waiting, with the lock or
+/// without.
+fn held_back_sleep(
+    rw: &PthreadRwlockT,
+    seen: i32,
+    deadline: Option<&(i32, crate::stat::Timespec)>,
+) -> bool {
+    match deadline {
+        None => {
+            crate::lowlevellock::futex_wait(&rw.writers_waiting, seen);
+            true
+        }
+        Some((clock, at)) => {
+            match crate::lowlevellock::ns_until(&crate::lowlevellock::now_on(*clock), at) {
+                None => false,
+                Some(ns) => {
+                    crate::lowlevellock::futex_wait_timeout(&rw.writers_waiting, seen, ns);
+                    true
+                }
+            }
+        }
+    }
+}
+
 /// The read lock, with an optional deadline.
 fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
     if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
@@ -2590,9 +2737,23 @@ fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
     {
         return errno::EDEADLK;
     }
+    let prefer_writer = rw.prefer_writer.load(Ordering::Relaxed) != 0;
     loop {
         let s = rw.state.load(Ordering::Acquire);
         if s >= 0 {
+            // Readers hold it and a writer waits: on a writer-preferring
+            // lock, wait with the writer rather than extend the read phase.
+            // With no reader holding it, race the writer for it, as glibc's
+            // does -- one of the two was going to win anyway.
+            if prefer_writer && s > 0 {
+                let w = rw.writers_waiting.load(Ordering::Acquire);
+                if w > 0 {
+                    if !held_back_sleep(rw, w, deadline.as_ref()) {
+                        return errno::ETIMEDOUT;
+                    }
+                    continue;
+                }
+            }
             if s == i32::MAX {
                 return errno::EAGAIN;
             }
@@ -2612,6 +2773,10 @@ fn rdlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
 }
 
 /// The write lock, with an optional deadline.
+///
+/// On a writer-preferring lock a writer that has to wait says so in
+/// `writers_waiting`, which holds new readers back, and on leaving it -- with
+/// the lock or without -- wakes the readers it held back to look again.
 fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespec)>) -> i32 {
     let self_id = current_tid();
     if rw.state.load(Ordering::Relaxed) == RWLOCK_WRITER
@@ -2619,23 +2784,37 @@ fn wrlock_until(rw: &PthreadRwlockT, deadline: Option<(i32, crate::stat::Timespe
     {
         return errno::EDEADLK;
     }
-    loop {
+    let prefer_writer = rw.prefer_writer.load(Ordering::Relaxed) != 0;
+    let mut waiting = false;
+    let answer = loop {
         if rw
             .state
             .compare_exchange_weak(0, RWLOCK_WRITER, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             rw.writer.store(self_id, Ordering::Relaxed);
-            return 0;
+            break 0;
         }
         let s = rw.state.load(Ordering::Acquire);
         if s == 0 {
             continue;
         }
-        if !rwlock_sleep(rw, s, deadline.as_ref()) {
-            return errno::ETIMEDOUT;
+        if prefer_writer && !waiting {
+            // Counted before the sleep, and the lock looked at again after,
+            // so that no reader can join in between unseen.
+            rw.writers_waiting.fetch_add(1, Ordering::SeqCst);
+            waiting = true;
+            continue;
         }
+        if !rwlock_sleep(rw, s, deadline.as_ref()) {
+            break errno::ETIMEDOUT;
+        }
+    };
+    if waiting {
+        rw.writers_waiting.fetch_sub(1, Ordering::SeqCst);
+        crate::lowlevellock::futex_wake_all(&rw.writers_waiting);
     }
+    answer
 }
 
 // ---------------------------------------------------------------------------
@@ -2659,14 +2838,22 @@ pub extern "C" fn sched_yield() -> i32 {
 //
 //   [ 0.. 8)  stack size   (usize)
 //   [ 8..12)  detach state (i32: 0 = joinable, 1 = detached)
-//   [16..24)  stack address — lowest address of the stack region (usize)
+//   [16..24)  stack address — the stack's top, one past its highest byte
+//             (usize), as glibc's `stackaddr` is: `pthread_attr_setstack`
+//             stores its address plus its size, `pthread_attr_setstackaddr`
+//             its argument, and the lowest address is the top less the
+//             stack size wherever it is needed -- so a size set afterwards
+//             moves the bottom, not the top, as in glibc.  0 for none.
 //   [24..32)  guard size    (usize)
 //   [32..36)  inherit-scheduler (i32: PTHREAD_INHERIT_SCHED or _EXPLICIT_)
 //   [36..40)  scheduling policy (i32: SCHED_*)
 //   [40..44)  scheduling priority (i32)
 //   [44..48)  contention scope (i32: PTHREAD_SCOPE_SYSTEM)
+//   [48..56)  extension — a `malloc`ed [`AttrExt`], or NULL: the CPU set
+//             `pthread_attr_setaffinity_np` gives the new thread, which
+//             `pthread_attr_destroy` frees (glibc's `extension`)
 //
-// Offsets 12..16 and 48..56 are reserved/unused.  These offsets are an
+// Offsets 12..16 are reserved/unused.  These offsets are an
 // internal contract only — C callers treat the type as opaque.  All-zero
 // fields 32..48 are the defaults: inherit, `SCHED_OTHER`, priority 0, system
 // scope -- so `pthread_attr_init`'s zeroing, and `encode_attr`'s, set them.
@@ -2678,6 +2865,134 @@ const ATTR_OFF_INHERIT: usize = 32;
 const ATTR_OFF_POLICY: usize = 36;
 const ATTR_OFF_PRIORITY: usize = 40;
 const ATTR_OFF_SCOPE: usize = 44;
+const ATTR_OFF_EXT: usize = 48;
+
+/// What an attribute object holds out of line (glibc's
+/// `struct pthread_attr_extension`, less the signal mask this library cannot
+/// give one thread alone -- signal masks are the process's here, see
+/// `signal.rs`'s `pthread_sigmask`).
+#[repr(C)]
+struct AttrExt {
+    /// The CPU set's bytes, `malloc`ed, or NULL for none.
+    cpuset: *mut u8,
+    /// How many.
+    cpusetsize: usize,
+}
+
+/// The attribute object's extension, or NULL.
+fn attr_read_ext(buf: &PthreadAttrT) -> *mut AttrExt {
+    // SAFETY: reading 8 bytes at offset 48 ends at index 55 < 56.
+    let v = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_EXT).cast::<usize>()) };
+    core::ptr::with_exposed_provenance_mut(v)
+}
+
+/// Make `ext` the attribute object's extension.
+fn attr_write_ext(buf: &mut PthreadAttrT, ext: *mut AttrExt) {
+    // SAFETY: writing 8 bytes at offset 48 ends at index 55 < 56.
+    unsafe {
+        core::ptr::write_unaligned(
+            buf.as_mut_ptr().add(ATTR_OFF_EXT).cast::<usize>(),
+            ext.expose_provenance(),
+        );
+    }
+}
+
+/// The attribute object's CPU set, if it has one.
+///
+/// # Safety
+///
+/// `buf`'s extension, if any, is one this file made and has not freed.
+unsafe fn attr_cpuset(buf: &PthreadAttrT) -> Option<&[u8]> {
+    let ext = attr_read_ext(buf);
+    if ext.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract; the set is `cpusetsize` bytes.
+    unsafe {
+        let e = &*ext;
+        if e.cpuset.is_null() {
+            None
+        } else {
+            Some(core::slice::from_raw_parts(e.cpuset, e.cpusetsize))
+        }
+    }
+}
+
+/// Give the attribute object `set` as its CPU set -- `ENOMEM` if there is
+/// no memory for it, the object as it was -- or none, for an empty `set`.
+///
+/// # Safety
+///
+/// As [`attr_cpuset`]; `set` is not the object's own.
+unsafe fn attr_set_cpuset(buf: &mut PthreadAttrT, set: &[u8]) -> Result<(), i32> {
+    let mut ext = attr_read_ext(buf);
+    if set.is_empty() {
+        if !ext.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe {
+                crate::malloc::free((*ext).cpuset);
+                (*ext).cpuset = core::ptr::null_mut();
+                (*ext).cpusetsize = 0;
+            }
+        }
+        return Ok(());
+    }
+    if ext.is_null() {
+        ext = crate::malloc::calloc(1, core::mem::size_of::<AttrExt>()).cast::<AttrExt>();
+        if ext.is_null() {
+            return Err(errno::ENOMEM);
+        }
+        attr_write_ext(buf, ext);
+    }
+    // SAFETY: the caller's contract, or the zeroed extension just made
+    // (a NULL set of 0 bytes).
+    unsafe {
+        if (*ext).cpusetsize != set.len() {
+            let grown = crate::malloc::realloc((*ext).cpuset, set.len());
+            if grown.is_null() {
+                return Err(errno::ENOMEM);
+            }
+            (*ext).cpuset = grown;
+            (*ext).cpusetsize = set.len();
+        }
+        core::ptr::copy_nonoverlapping(set.as_ptr(), (*ext).cpuset, set.len());
+    }
+    Ok(())
+}
+
+/// Free the attribute object's extension, and forget it.
+///
+/// # Safety
+///
+/// As [`attr_cpuset`].
+unsafe fn attr_free_ext(buf: &mut PthreadAttrT) {
+    let ext = attr_read_ext(buf);
+    if !ext.is_null() {
+        // SAFETY: the caller's contract.
+        unsafe {
+            crate::malloc::free((*ext).cpuset);
+            crate::malloc::free(ext.cast());
+        }
+        attr_write_ext(buf, core::ptr::null_mut());
+    }
+}
+
+/// A copy of the attribute object whose extension is its own: `ENOMEM` if
+/// there is no memory for it (glibc's `__pthread_attr_copy`).
+///
+/// # Safety
+///
+/// As [`attr_cpuset`].
+unsafe fn attr_deep_copy(buf: &PthreadAttrT) -> Result<PthreadAttrT, i32> {
+    let mut copy = *buf;
+    attr_write_ext(&mut copy, core::ptr::null_mut());
+    // SAFETY: the caller's contract.
+    if let Some(set) = unsafe { attr_cpuset(buf) } {
+        // SAFETY: `copy` has no extension yet; `set` is `buf`'s.
+        unsafe { attr_set_cpuset(&mut copy, set) }?;
+    }
+    Ok(copy)
+}
 
 /// Take the scheduling attributes from the creating thread (the default).
 pub const PTHREAD_INHERIT_SCHED: i32 = 0;
@@ -2775,7 +3090,10 @@ fn encode_attr(buf: &mut PthreadAttrT, attr: StackAttr) {
             p.add(ATTR_OFF_DETACH).cast::<i32>(),
             i32::from(attr.detached),
         );
-        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), attr.addr);
+        core::ptr::write_unaligned(
+            p.add(ATTR_OFF_STACKADDR).cast::<usize>(),
+            attr.addr.wrapping_add(attr.size),
+        );
         core::ptr::write_unaligned(p.add(ATTR_OFF_GUARDSIZE).cast::<usize>(), attr.guard);
     }
 }
@@ -2792,7 +3110,7 @@ fn attr_read_detachstate(buf: &PthreadAttrT) -> i32 {
     unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_DETACH).cast::<i32>()) }
 }
 
-/// Read the stored stack address from an attribute buffer.
+/// Read the stored stack top from an attribute buffer (0 for none).
 fn attr_read_stackaddr(buf: &PthreadAttrT) -> usize {
     // SAFETY: reading 8 bytes at offset 16 ends at index 23 < 56.
     unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_STACKADDR).cast::<usize>()) }
@@ -2852,11 +3170,16 @@ pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     0
 }
 
-/// Destroy a thread attribute object.
-///
-/// No-op — no resources to release.
+/// Destroy a thread attribute object: its CPU set, if it has one, is
+/// freed.  (Until 2026-09-30 an attribute object held nothing to free.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_attr_destroy(_attr: *mut PthreadAttrT) -> i32 {
+pub extern "C" fn pthread_attr_destroy(attr: *mut PthreadAttrT) -> i32 {
+    // SAFETY: NULL or the caller's attribute object, whose extension, if
+    // any, `pthread_attr_setaffinity_np` or `pthread_getattr_np` made.
+    if let Some(buf) = unsafe { attr.as_mut() } {
+        // SAFETY: as above.
+        unsafe { attr_free_ext(buf) };
+    }
     0
 }
 
@@ -2974,7 +3297,7 @@ pub extern "C" fn pthread_attr_getstack(
     }
     // SAFETY: attr verified non-null; PthreadAttrT is [u8; 56].
     let buf = unsafe { &*attr };
-    let addr = attr_read_stackaddr(buf);
+    let top = attr_read_stackaddr(buf);
     // Same semantics as pthread_attr_getstacksize: a stored 0 means the
     // size was never set, so report the default.
     // SAFETY: attr non-null; reading 8 bytes at offset 0 is in-bounds.
@@ -2984,6 +3307,8 @@ pub extern "C" fn pthread_attr_getstack(
     } else {
         stored
     };
+    // The top less the size, as glibc's (0, none, stays NULL).
+    let addr = if top == 0 { 0 } else { top.wrapping_sub(size) };
     // SAFETY: both out-pointers verified non-null above.
     unsafe {
         *stackaddr = addr as *mut core::ffi::c_void;
@@ -2994,7 +3319,9 @@ pub extern "C" fn pthread_attr_getstack(
 
 /// Set both the stack address and size in a thread attribute object.
 ///
-/// `stackaddr` is the lowest address of the caller-provided stack region.
+/// `stackaddr` is the lowest address of the caller-provided stack region;
+/// the object keeps its top, `stackaddr + stacksize`, as glibc's does -- a
+/// region ending past the top of the address space is `EINVAL`.
 ///
 /// As with [`pthread_attr_setstacksize`], the size is checked against
 /// [`PTHREAD_STACK_MIN`] before `attr` is examined: glibc's
@@ -3012,15 +3339,132 @@ pub extern "C" fn pthread_attr_setstack(
     if attr.is_null() {
         return errno::EFAULT;
     }
+    let Some(top) = (stackaddr as usize).checked_add(stacksize) else {
+        return errno::EINVAL;
+    };
     let p = attr.cast::<u8>();
     // SAFETY: attr is non-null; writing 8 bytes at offsets 0 and 16 ends at
     // index ≤ 23 < 56.  Unaligned because PthreadAttrT has align(1).
     unsafe {
         core::ptr::write_unaligned(p.add(ATTR_OFF_STACKSIZE).cast::<usize>(), stacksize);
-        core::ptr::write_unaligned(
-            p.add(ATTR_OFF_STACKADDR).cast::<usize>(),
-            stackaddr as usize,
-        );
+        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), top);
+    }
+    0
+}
+
+/// `pthread_attr_getstackaddr(attr, &addr)` (obsolete; POSIX dropped it in
+/// 2008 for `pthread_attr_getstack`): the stack address the object holds --
+/// its top, as `pthread_attr_setstackaddr` takes it and as glibc keeps it
+/// (after `pthread_attr_setstack`, the address plus the size) -- or NULL for
+/// none.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getstackaddr(
+    attr: *const PthreadAttrT,
+    stackaddr: *mut *mut core::ffi::c_void,
+) -> i32 {
+    if attr.is_null() || stackaddr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both non-null: the caller's attribute object and pointer.
+    unsafe {
+        *stackaddr = core::ptr::with_exposed_provenance_mut(attr_read_stackaddr(&*attr));
+    }
+    0
+}
+
+/// `pthread_attr_setstackaddr(attr, addr)` (obsolete): the new thread's
+/// stack ends at `addr` -- its top, the stack growing down from it, as
+/// glibc's header says of a stack that grows down -- and is the object's
+/// stack size long.  The memory is the caller's; nothing is checked until
+/// `pthread_create`, as in glibc.  NULL takes a stack address back.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setstackaddr(
+    attr: *mut PthreadAttrT,
+    stackaddr: *mut core::ffi::c_void,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if let Some(slot) = buf.get_mut(ATTR_OFF_STACKADDR..ATTR_OFF_STACKADDR + 8) {
+        slot.copy_from_slice(&stackaddr.expose_provenance().to_ne_bytes());
+    }
+    0
+}
+
+/// `pthread_attr_setaffinity_np(attr, size, set)` (GNU): threads created
+/// with the object run only on the CPUs in `set`'s first `size` bytes --
+/// kept in the object (`ENOMEM` if there is no memory for them) until it is
+/// destroyed.  A NULL `set` or a `size` of 0 takes a set back.
+///
+/// Every thread here runs on every CPU (see `pthread_setaffinity_np`), so a
+/// set that leaves one out makes `pthread_create` fail (`ENOSYS`), as a
+/// failed affinity makes glibc's; one with no CPU there is, `EINVAL`.
+///
+/// # Safety
+///
+/// `cpuset` is NULL or readable for `cpusetsize` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_attr_setaffinity_np(
+    attr: *mut PthreadAttrT,
+    cpusetsize: usize,
+    cpuset: *const CpuSetT,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    let set: &[u8] = if cpuset.is_null() || cpusetsize == 0 {
+        &[]
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { core::slice::from_raw_parts(cpuset.cast::<u8>(), cpusetsize) }
+    };
+    // SAFETY: an initialised attribute object; `set` is the caller's.
+    match unsafe { attr_set_cpuset(buf, set) } {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// `pthread_attr_getaffinity_np(attr, size, set)` (GNU): the object's CPU
+/// set into `size` bytes at `set`, the bytes past its own zeroed -- `EINVAL`
+/// if a CPU it holds does not fit -- or, for an object with none, every bit
+/// of the `size` bytes set, as glibc answers "no information".
+///
+/// # Safety
+///
+/// `cpuset` is writable for `cpusetsize` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_attr_getaffinity_np(
+    attr: *const PthreadAttrT,
+    cpusetsize: usize,
+    cpuset: *mut CpuSetT,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    if cpuset.is_null() && cpusetsize > 0 {
+        return errno::EFAULT;
+    }
+    let out = cpuset.cast::<u8>();
+    // SAFETY: an initialised attribute object.
+    match unsafe { attr_cpuset(buf) } {
+        Some(set) => {
+            if set.iter().skip(cpusetsize).any(|&b| b != 0) {
+                return errno::EINVAL;
+            }
+            let n = set.len().min(cpusetsize);
+            // SAFETY: `out` is writable for `cpusetsize >= n` bytes (the
+            // caller's contract), and is not the object's own set.
+            unsafe {
+                core::ptr::copy_nonoverlapping(set.as_ptr(), out, n);
+                core::ptr::write_bytes(out.add(n), 0, cpusetsize.wrapping_sub(n));
+            }
+        }
+        // SAFETY: as above.
+        None => unsafe { core::ptr::write_bytes(out, 0xff, cpusetsize) },
     }
     0
 }
@@ -3084,7 +3528,34 @@ pub extern "C" fn pthread_getattr_np(thread: PthreadT, attr: *mut PthreadAttrT) 
     // SAFETY: attr verified non-null; PthreadAttrT is [u8; 56].
     let buf = unsafe { &mut *attr };
     encode_attr(buf, resolved);
-    0
+    attr_add_thread_affinity(buf, thread)
+}
+
+/// glibc's `pthread_getattr_np` tail: the thread's CPU set into the object,
+/// asked for in 32 bytes and twice as many until it fits (`EINVAL` from
+/// `pthread_getaffinity_np` for too few), up to 10 KiB.  0, or the error
+/// that stopped it -- `ENOMEM`, or `ENOSYS` taken as "none to report".
+#[cfg(any(target_os = "none", test))]
+fn attr_add_thread_affinity(buf: &mut PthreadAttrT, thread: PthreadT) -> i32 {
+    let mut size = 32usize;
+    loop {
+        let mut set = [0u8; 10 * 1024];
+        let Some(room) = set.get_mut(..size) else {
+            return errno::EINVAL;
+        };
+        match pthread_getaffinity_np(thread, size, room.as_mut_ptr().cast()) {
+            0 => {
+                // SAFETY: an object `encode_attr` just made (no extension).
+                return match unsafe { attr_set_cpuset(buf, room) } {
+                    Ok(()) => 0,
+                    Err(e) => e,
+                };
+            }
+            e if e == errno::EINVAL && size < 10 * 1024 => size = size.wrapping_mul(2),
+            e if e == errno::ENOSYS => return 0,
+            e => return e,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4126,6 +4597,48 @@ pub extern "C" fn pthread_rwlockattr_getpshared(
     0
 }
 
+/// `pthread_rwlockattr_setkind_np(attr, pref)` (GNU): whom locks made with
+/// the object prefer -- [`PTHREAD_RWLOCK_PREFER_READER_NP`] (the default),
+/// [`PTHREAD_RWLOCK_PREFER_WRITER_NP`] (which glibc takes as the first), or
+/// [`PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`].  Any other is
+/// `EINVAL`, judged before the object, as glibc judges it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlockattr_setkind_np(attr: *mut PthreadRwlockattrT, pref: i32) -> i32 {
+    if !matches!(
+        pref,
+        PTHREAD_RWLOCK_PREFER_READER_NP
+            | PTHREAD_RWLOCK_PREFER_WRITER_NP
+            | PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP
+    ) {
+        return errno::EINVAL;
+    }
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(a) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    if let Some(slot) = a.get_mut(RWLOCKATTR_OFF_KIND..RWLOCKATTR_OFF_KIND + 4) {
+        slot.copy_from_slice(&pref.to_ne_bytes());
+    }
+    0
+}
+
+/// `pthread_rwlockattr_getkind_np(attr, &pref)` (GNU): the kind the object
+/// holds, [`PTHREAD_RWLOCK_PREFER_READER_NP`] until it is set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_rwlockattr_getkind_np(
+    attr: *const PthreadRwlockattrT,
+    pref: *mut i32,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object and pointer.
+    match unsafe { (attr.as_ref(), pref.as_mut()) } {
+        (Some(a), Some(out)) => {
+            *out = rwlockattr_kind(a);
+            0
+        }
+        _ => errno::EFAULT,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // pthread_setname_np / pthread_getname_np (GNU extensions)
 // ---------------------------------------------------------------------------
@@ -4826,11 +5339,6 @@ fn with_default_attr<R>(f: impl FnOnce(&mut PthreadAttrT) -> R) -> R {
     r
 }
 
-/// A copy of the default attributes.
-fn default_attr_copy() -> PthreadAttrT {
-    with_default_attr(|a| *a)
-}
-
 /// The concurrency level last set, 0 until then.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_getconcurrency() -> i32 {
@@ -4856,8 +5364,16 @@ pub extern "C" fn pthread_getattr_default_np(attr: *mut PthreadAttrT) -> i32 {
     let Some(out) = (unsafe { attr.as_mut() }) else {
         return errno::EFAULT;
     };
-    *out = default_attr_copy();
-    0
+    // A copy with a CPU set of its own, as glibc's `__pthread_attr_copy`
+    // makes it: `ENOMEM` if there is no memory for one.
+    // SAFETY: the defaults' extension is live while they are locked.
+    match with_default_attr(|d| unsafe { attr_deep_copy(d) }) {
+        Ok(copy) => {
+            *out = copy;
+            0
+        }
+        Err(e) => e,
+    }
 }
 
 /// Make `attr` the attributes a NULL-attribute `pthread_create` uses (GNU),
@@ -4881,15 +5397,26 @@ pub extern "C" fn pthread_setattr_default_np(attr: *const PthreadAttrT) -> i32 {
     {
         return errno::EINVAL;
     }
-    with_default_attr(|d| {
+    // The defaults get a CPU set of their own (`ENOMEM` if there is no
+    // memory for it), and the one they had is freed once they are replaced.
+    // SAFETY: the caller's attribute object.
+    let copy = match unsafe { attr_deep_copy(new) } {
+        Ok(copy) => copy,
+        Err(e) => return e,
+    };
+    let mut old = with_default_attr(|d| {
         let keep = attr_read_stacksize(d);
-        *d = *new;
+        let old = *d;
+        *d = copy;
         if size == 0 {
             if let Some(slot) = d.get_mut(ATTR_OFF_STACKSIZE..ATTR_OFF_STACKSIZE + 8) {
                 slot.copy_from_slice(&keep.to_ne_bytes());
             }
         }
+        old
     });
+    // SAFETY: the old defaults' extension, now no one's but this copy's.
+    unsafe { attr_free_ext(&mut old) };
     0
 }
 
@@ -6280,11 +6807,19 @@ mod tests {
             state: AtomicI32::new(42),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0xFF; 44],
+            prefer_writer: AtomicI32::new(7),
+            writers_waiting: AtomicI32::new(7),
+            _pad: [0xFF; 36],
         };
         let ret = pthread_rwlock_init(&mut rwlock, core::ptr::null());
         assert_eq!(ret, 0);
         assert_eq!(rwlock.state.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            rwlock.prefer_writer.load(Ordering::Relaxed),
+            0,
+            "readers, by default"
+        );
+        assert_eq!(rwlock.writers_waiting.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -6301,7 +6836,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         assert_eq!(pthread_rwlock_destroy(&mut rwlock), 0);
     }
@@ -7246,7 +7783,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         // Read-lock.
         assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
@@ -7266,7 +7805,9 @@ mod tests {
             state: AtomicI32::new(0),
             waiters: AtomicI32::new(0),
             writer: AtomicI32::new(0),
-            _pad: [0; 44],
+            prefer_writer: AtomicI32::new(0),
+            writers_waiting: AtomicI32::new(0),
+            _pad: [0; 36],
         };
         // Write-lock.
         assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
@@ -7975,6 +8516,7 @@ mod tests {
                 stack_addr: None,
                 detached: true,
                 explicit_sched: None,
+                affinity: None,
             }
         );
         assert_eq!(
@@ -8006,6 +8548,7 @@ mod tests {
             stack_addr: None,
             detached: false,
             explicit_sched: None,
+            affinity: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, page, "the guard rounds up to a page");
@@ -8044,6 +8587,7 @@ mod tests {
             stack_addr: Some(0x7000_0008),
             detached: false,
             explicit_sched: None,
+            affinity: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, 0);
@@ -8684,6 +9228,191 @@ mod tests {
         assert_eq!(unsafe { pthread_mutex_unlock(&raw mut m) }, 0);
     }
 
+    // -- the rwlock's kinds: glibc's pthread_rwlockattr_setkind_np --
+
+    /// A lock as `pthread_rwlock_init` would find one: every byte 0xAA.
+    fn scribbled_rwlock() -> PthreadRwlockT {
+        PthreadRwlockT {
+            state: AtomicI32::new(0),
+            waiters: AtomicI32::new(0),
+            writer: AtomicI32::new(0),
+            prefer_writer: AtomicI32::new(0x5555),
+            writers_waiting: AtomicI32::new(0x5555),
+            _pad: [0xAA; 36],
+        }
+    }
+
+    fn rwlock_of_kind(kind: i32) -> PthreadRwlockT {
+        let mut a: PthreadRwlockattrT = [0; 8];
+        assert_eq!(pthread_rwlockattr_init(&mut a), 0);
+        assert_eq!(pthread_rwlockattr_setkind_np(&mut a, kind), 0);
+        let mut rw = scribbled_rwlock();
+        assert_eq!(pthread_rwlock_init(&mut rw, &a), 0);
+        rw
+    }
+
+    #[test]
+    fn rwlockattr_kinds_are_glibcs() {
+        assert_eq!(
+            (
+                PTHREAD_RWLOCK_PREFER_READER_NP,
+                PTHREAD_RWLOCK_PREFER_WRITER_NP,
+                PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP,
+                PTHREAD_RWLOCK_DEFAULT_NP
+            ),
+            (0, 1, 2, 0)
+        );
+        let mut a: PthreadRwlockattrT = [0xAA; 8];
+        assert_eq!(pthread_rwlockattr_init(&mut a), 0);
+        let mut k = -1;
+        assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+        assert_eq!(k, PTHREAD_RWLOCK_PREFER_READER_NP, "the default");
+        for kind in [2, 1, 0, 2] {
+            assert_eq!(pthread_rwlockattr_setkind_np(&mut a, kind), 0);
+            assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+            assert_eq!(k, kind);
+        }
+        for bad in [3, -1, i32::MAX, i32::MIN] {
+            assert_eq!(pthread_rwlockattr_setkind_np(&mut a, bad), errno::EINVAL);
+            assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+            assert_eq!(k, 2, "a refusal changes nothing");
+        }
+        // The kind and the process-shared flag are apart.
+        assert_eq!(
+            pthread_rwlockattr_setpshared(&mut a, PTHREAD_PROCESS_PRIVATE),
+            0
+        );
+        assert_eq!(pthread_rwlockattr_getkind_np(&a, &mut k), 0);
+        assert_eq!(k, 2);
+        let mut shared = -1;
+        assert_eq!(pthread_rwlockattr_getpshared(&a, &mut shared), 0);
+        assert_eq!(shared, PTHREAD_PROCESS_PRIVATE);
+        // The kind is judged before the object, as glibc's; NULLs, where
+        // glibc's fault, are EFAULT.
+        assert_eq!(
+            pthread_rwlockattr_setkind_np(core::ptr::null_mut(), 9),
+            errno::EINVAL
+        );
+        assert_eq!(
+            pthread_rwlockattr_setkind_np(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_rwlockattr_getkind_np(core::ptr::null(), &mut k),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_rwlockattr_getkind_np(&a, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    /// Writers are preferred for the non-recursive kind alone -- glibc takes
+    /// PREFER_WRITER_NP as PREFER_READER_NP -- and a NULL attribute is the
+    /// default; C's `PTHREAD_RWLOCK_WRITER_NONRECURSIVE_INITIALIZER_NP`,
+    /// `{{{0, 0, 0, 1}}}`, is a writer-preferring lock.
+    #[test]
+    fn only_the_nonrecursive_kind_prefers_writers() {
+        for (kind, prefers) in [(0, 0), (1, 0), (2, 1)] {
+            let rw = rwlock_of_kind(kind);
+            assert_eq!(
+                rw.prefer_writer.load(Ordering::Relaxed),
+                prefers,
+                "kind {kind}"
+            );
+            assert_eq!(rw.writers_waiting.load(Ordering::Relaxed), 0);
+        }
+        let mut rw = scribbled_rwlock();
+        assert_eq!(pthread_rwlock_init(&mut rw, core::ptr::null()), 0);
+        assert_eq!(rw.prefer_writer.load(Ordering::Relaxed), 0);
+        assert_eq!(core::mem::offset_of!(PthreadRwlockT, prefer_writer), 12);
+        let mut ints = [0i32; 14];
+        ints[3] = 1;
+        // SAFETY: 56 bytes of integers, which every field of the lock is.
+        let c_init: PthreadRwlockT = unsafe { core::mem::transmute(ints) };
+        assert_eq!(c_init.prefer_writer.load(Ordering::Relaxed), 1);
+        assert_eq!(c_init.state.load(Ordering::Relaxed), 0, "and unlocked");
+    }
+
+    /// While a writer waits, a writer-preferring lock takes no new reader --
+    /// not even one that already holds it, which is why glibc calls the kind
+    /// non-recursive -- and the other kinds do.
+    #[test]
+    fn a_waiting_writer_holds_readers_back_only_where_writers_are_preferred() {
+        for (kind, held_back) in [(0, false), (1, false), (2, true)] {
+            let mut rw = rwlock_of_kind(kind);
+            assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+            let rp = Shared(&raw mut rw);
+            let writer = std::thread::spawn(move || {
+                let rw = rp.get();
+                let got = pthread_rwlock_wrlock(rw);
+                assert_eq!(pthread_rwlock_unlock(rw), 0);
+                got
+            });
+            if held_back {
+                // SAFETY: the lock outlives both threads; an atomic read.
+                while unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) } == 0 {
+                    std::thread::yield_now();
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let again = pthread_rwlock_tryrdlock(&raw mut rw);
+            let soon = in_ms(crate::time::CLOCK_REALTIME, 20);
+            let timed = pthread_rwlock_timedrdlock(&raw mut rw, &raw const soon);
+            if held_back {
+                assert_eq!(
+                    again,
+                    errno::EBUSY,
+                    "kind {kind}: busy while the writer waits"
+                );
+                assert_eq!(
+                    timed,
+                    errno::ETIMEDOUT,
+                    "kind {kind}: a reader waits with it"
+                );
+            } else {
+                assert_eq!((again, timed), (0, 0), "kind {kind}: readers go first");
+                assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+                assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+            }
+            assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+            assert_eq!(writer.join().unwrap(), 0, "kind {kind}: the writer's turn");
+        }
+    }
+
+    /// A writer that gives up waiting lets in the readers it held back.
+    #[test]
+    fn a_writer_that_gives_up_lets_the_readers_it_held_back_in() {
+        let mut rw = rwlock_of_kind(PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+        assert_eq!(pthread_rwlock_rdlock(&raw mut rw), 0);
+        let rp = Shared(&raw mut rw);
+        let writer = std::thread::spawn(move || {
+            let later = in_ms(crate::time::CLOCK_MONOTONIC, 400);
+            pthread_rwlock_clockwrlock(rp.get(), crate::time::CLOCK_MONOTONIC, &raw const later)
+        });
+        // SAFETY: the lock outlives both threads; an atomic read.
+        while unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) } == 0 {
+            std::thread::yield_now();
+        }
+        let reader = std::thread::spawn(move || {
+            let rw = rp.get();
+            let got = pthread_rwlock_rdlock(rw);
+            assert_eq!(pthread_rwlock_unlock(rw), 0);
+            got
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!reader.is_finished(), "held back while the writer waits");
+        assert_eq!(writer.join().unwrap(), errno::ETIMEDOUT);
+        assert_eq!(reader.join().unwrap(), 0, "in once the writer gave up");
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { (*rp.get()).writers_waiting.load(Ordering::Acquire) },
+            0
+        );
+        assert_eq!(pthread_rwlock_unlock(&raw mut rw), 0);
+    }
+
     /// `pthread_mutex_clocklock` judges its clock before the mutex.
     #[test]
     fn futex_mutex_clocklock_clock_first() {
@@ -9072,5 +9801,342 @@ mod tests {
             errno::EAGAIN
         );
         assert_eq!(t, 0);
+    }
+
+    // -- glibc's affinity and stack-address attributes, and clockjoin --
+
+    /// A CPU set comes back as it was given -- zero-extended into a larger
+    /// buffer, refused (`EINVAL`) into one too small for a CPU it holds --
+    /// and an object with none answers every bit set, glibc's "no
+    /// information".
+    #[test]
+    fn attr_affinity_is_kept_and_given_back_as_glibcs() {
+        let mut a = fresh_attr();
+        let mut big = [0x5au8; 128];
+        let mut small = [0x5au8; 8];
+        let mut set = [0u8; 16];
+        set[0] = 0b101;
+        set[9] = 0x80;
+        let low: [u8; 4] = [1, 0, 0, 0];
+        // SAFETY: every buffer is at least the size passed with it.
+        unsafe {
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 128, big.as_mut_ptr().cast()),
+                0
+            );
+            assert!(big.iter().all(|&b| b == 0xff), "no set: every bit");
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 16, set.as_ptr().cast()),
+                0
+            );
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 128, big.as_mut_ptr().cast()),
+                0
+            );
+            assert_eq!(&big[..16], &set);
+            assert!(big[16..].iter().all(|&b| b == 0), "zero-extended");
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 8, small.as_mut_ptr().cast()),
+                errno::EINVAL,
+                "CPU 79 does not fit in 8 bytes"
+            );
+            // A set of another size replaces it.
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 4, low.as_ptr().cast()),
+                0
+            );
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 8, small.as_mut_ptr().cast()),
+                0
+            );
+            assert_eq!(small, [1, 0, 0, 0, 0, 0, 0, 0]);
+            // A size of 0, or NULL, takes it back.
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 0, low.as_ptr().cast()),
+                0
+            );
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 8, small.as_mut_ptr().cast()),
+                0
+            );
+            assert_eq!(small, [0xff; 8]);
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 4, low.as_ptr().cast()),
+                0
+            );
+            assert_eq!(pthread_attr_setaffinity_np(&mut a, 4, core::ptr::null()), 0);
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 8, small.as_mut_ptr().cast()),
+                0
+            );
+            assert_eq!(small, [0xff; 8]);
+            // NULLs, where glibc's fault.
+            assert_eq!(
+                pthread_attr_setaffinity_np(core::ptr::null_mut(), 4, low.as_ptr().cast()),
+                errno::EFAULT
+            );
+            assert_eq!(
+                pthread_attr_getaffinity_np(core::ptr::null(), 8, small.as_mut_ptr().cast()),
+                errno::EFAULT
+            );
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 8, core::ptr::null_mut()),
+                errno::EFAULT
+            );
+            assert_eq!(pthread_attr_getaffinity_np(&a, 0, core::ptr::null_mut()), 0);
+        }
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
+        assert!(attr_read_ext(&a).is_null(), "destroyed: nothing held");
+        assert_eq!(pthread_attr_destroy(&mut a), 0, "twice: nothing to free");
+    }
+
+    /// `pthread_create` keeps a set of every CPU and refuses any other --
+    /// `ENOSYS`, or `EINVAL` for one of no CPU there is -- before a thread
+    /// is made, as a thread's affinity can be nothing else here.
+    #[test]
+    fn a_created_threads_affinity_is_every_cpu_or_refused() {
+        extern "C" fn nothing(_: *mut u8) -> *mut u8 {
+            core::ptr::null_mut()
+        }
+        let ncpus = crate::sched::online_cpus();
+        let mut all = [0u8; 128];
+        for cpu in 0..ncpus.min(1024) {
+            all[cpu / 8] |= 1 << (cpu % 8);
+        }
+        let mut a = fresh_attr();
+        // SAFETY: a buffer of the size passed.
+        unsafe {
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 128, all.as_ptr().cast()),
+                0
+            )
+        };
+        assert_eq!(CreateAttr::read(&a).affinity, None);
+        let mut beyond = [0u8; 128];
+        beyond[127] = 0x80;
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 128, beyond.as_ptr().cast()),
+                0
+            )
+        };
+        assert_eq!(
+            CreateAttr::read(&a).affinity,
+            Some(errno::EINVAL),
+            "CPU 1023"
+        );
+        let mut t: PthreadT = 0;
+        assert_eq!(
+            pthread_create(&mut t, &a, Some(nothing), core::ptr::null_mut()),
+            errno::EINVAL
+        );
+        assert_eq!(t, 0, "no thread");
+        if ncpus > 1 {
+            let mut one = [0u8; 128];
+            one[0] = 1;
+            // SAFETY: as above.
+            unsafe {
+                assert_eq!(
+                    pthread_attr_setaffinity_np(&mut a, 128, one.as_ptr().cast()),
+                    0
+                )
+            };
+            assert_eq!(CreateAttr::read(&a).affinity, Some(errno::ENOSYS));
+        }
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
+    }
+
+    /// The default attributes carry a CPU set of their own: copied in by
+    /// `pthread_setattr_default_np`, out by `pthread_getattr_default_np`,
+    /// read by a NULL-attribute `pthread_create`, and freed when replaced.
+    #[test]
+    fn the_default_attributes_carry_a_cpu_set_of_their_own() {
+        let mut a = fresh_attr();
+        let set: [u8; 8] = [1, 0, 0, 0, 0, 0, 0, 0];
+        // SAFETY: a buffer of the size passed.
+        unsafe {
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 8, set.as_ptr().cast()),
+                0
+            )
+        };
+        assert_eq!(pthread_setattr_default_np(&a), 0);
+        assert_eq!(
+            pthread_attr_destroy(&mut a),
+            0,
+            "the defaults' set is a copy"
+        );
+        let mut d: PthreadAttrT = [0; 56];
+        assert_eq!(pthread_getattr_default_np(&mut d), 0);
+        assert!(!attr_read_ext(&d).is_null());
+        assert_ne!(
+            attr_read_ext(&d),
+            with_default_attr(|x| attr_read_ext(x)),
+            "and so is this"
+        );
+        let mut got = [0u8; 8];
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                pthread_attr_getaffinity_np(&d, 8, got.as_mut_ptr().cast()),
+                0
+            )
+        };
+        assert_eq!(got, set);
+        assert_eq!(pthread_attr_destroy(&mut d), 0);
+        let want = if crate::sched::online_cpus() == 1 {
+            None
+        } else {
+            Some(errno::ENOSYS)
+        };
+        assert_eq!(CreateAttr::read(core::ptr::null()).affinity, want);
+        let fresh = fresh_attr();
+        assert_eq!(pthread_setattr_default_np(&fresh), 0);
+        assert!(with_default_attr(|x| attr_read_ext(x).is_null()));
+        assert_eq!(CreateAttr::read(core::ptr::null()).affinity, None);
+    }
+
+    /// `pthread_getattr_np` reports the thread's CPUs, as glibc's does: 32
+    /// bytes of them, every online CPU here.
+    #[test]
+    fn getattr_reports_the_threads_cpus_as_glibcs_does() {
+        let mut a: PthreadAttrT = [0; 56];
+        encode_attr(&mut a, main_thread_stack_attr());
+        assert_eq!(attr_add_thread_affinity(&mut a, 0), 0);
+        let ncpus = crate::sched::online_cpus();
+        let mut got = [0u8; 128];
+        // SAFETY: a buffer of the size passed.
+        unsafe {
+            assert_eq!(
+                pthread_attr_getaffinity_np(&a, 128, got.as_mut_ptr().cast()),
+                0
+            )
+        };
+        for cpu in 0..1024 {
+            assert_eq!(
+                (got[cpu / 8] >> (cpu % 8)) & 1 == 1,
+                cpu < ncpus,
+                "CPU {cpu}"
+            );
+        }
+        // SAFETY: the extension `attr_add_thread_affinity` made.
+        assert_eq!(unsafe { attr_cpuset(&a) }.map(<[u8]>::len), Some(32));
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
+    }
+
+    /// glibc keeps a stack by its top: `pthread_attr_setstackaddr` takes the
+    /// top and `pthread_attr_getstackaddr` gives it back -- after
+    /// `pthread_attr_setstack`, its address plus its size -- and a size set
+    /// afterwards moves the bottom, not the top.
+    #[test]
+    fn a_stack_is_kept_by_its_top_as_glibcs() {
+        use core::ffi::c_void;
+        let mut a = fresh_attr();
+        let mut top: *mut c_void = core::ptr::dangling_mut();
+        assert_eq!(pthread_attr_getstackaddr(&a, &mut top), 0);
+        assert!(top.is_null(), "none");
+        assert_eq!(
+            pthread_attr_setstack(&mut a, 0x4000_0000usize as *mut c_void, 0x10_0000),
+            0
+        );
+        assert_eq!(pthread_attr_getstackaddr(&a, &mut top), 0);
+        assert_eq!(top as usize, 0x4010_0000);
+        assert_eq!(pthread_attr_setstacksize(&mut a, 0x8_0000), 0);
+        let (mut addr, mut size): (*mut c_void, usize) = (core::ptr::null_mut(), 0);
+        assert_eq!(pthread_attr_getstack(&a, &mut addr, &mut size), 0);
+        assert_eq!(
+            (addr as usize, size),
+            (0x4008_0000, 0x8_0000),
+            "the top stays"
+        );
+        assert_eq!(CreateAttr::read(&a).stack_addr, Some(0x4008_0000));
+        assert_eq!(
+            pthread_attr_setstackaddr(&mut a, 0x5000_0000usize as *mut c_void),
+            0
+        );
+        assert_eq!(pthread_attr_getstack(&a, &mut addr, &mut size), 0);
+        assert_eq!(addr as usize, 0x5000_0000 - 0x8_0000);
+        assert_eq!(pthread_attr_setstackaddr(&mut a, core::ptr::null_mut()), 0);
+        assert_eq!(CreateAttr::read(&a).stack_addr, None, "NULL takes it back");
+        assert_eq!(
+            pthread_attr_setstack(&mut a, (usize::MAX - 0x100) as *mut c_void, 0x10_0000),
+            errno::EINVAL,
+            "past the end of memory"
+        );
+        assert_eq!(
+            pthread_attr_setstackaddr(core::ptr::null_mut(), core::ptr::null_mut()),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getstackaddr(core::ptr::null(), &mut top),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getstackaddr(&a, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
+    }
+
+    /// `pthread_clockjoin_np` takes `CLOCK_REALTIME` and `CLOCK_MONOTONIC`,
+    /// judging the clock before the thread, and otherwise answers as
+    /// `pthread_timedjoin_np` does, against the clock named.
+    #[test]
+    fn clockjoin_takes_the_two_clocks_and_judges_the_clock_first() {
+        use crate::stat::Timespec;
+        use crate::time::{CLOCK_MONOTONIC, CLOCK_REALTIME};
+        let mut rv: *mut u8 = core::ptr::null_mut();
+        let at = |tv_sec, tv_nsec| Timespec { tv_sec, tv_nsec };
+        let later = at(i64::MAX, 0);
+        // SAFETY: each `abstime` is this frame's.
+        unsafe {
+            for clock in [2, 3, 7, -1, 99] {
+                assert_eq!(
+                    pthread_clockjoin_np(0x5100_00fe, &raw mut rv, clock, &later),
+                    errno::EINVAL,
+                    "clock {clock}, before the thread"
+                );
+            }
+            assert_eq!(
+                pthread_clockjoin_np(0x5100_00fe, &raw mut rv, CLOCK_MONOTONIC, &later),
+                errno::ESRCH
+            );
+        }
+        let tid: u64 = 0x5100_0040;
+        let slot = track(tid, 0, DEFAULT_THREAD_STACK_SIZE, false);
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                pthread_clockjoin_np(tid, &raw mut rv, CLOCK_MONOTONIC, &at(0, 0)),
+                errno::ETIMEDOUT,
+                "boot time has passed"
+            );
+            assert_eq!(
+                pthread_clockjoin_np(tid, &raw mut rv, CLOCK_MONOTONIC, &at(0, 1_000_000_000)),
+                errno::EINVAL
+            );
+        }
+        let mut now = Timespec::default();
+        assert_eq!(crate::time::clock_gettime(CLOCK_MONOTONIC, &raw mut now), 0);
+        let soon = if now.tv_nsec < 970_000_000 {
+            at(now.tv_sec, now.tv_nsec + 30_000_000)
+        } else {
+            at(now.tv_sec + 1, now.tv_nsec - 970_000_000)
+        };
+        let started = std::time::Instant::now();
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { pthread_clockjoin_np(tid, &raw mut rv, CLOCK_MONOTONIC, &soon) },
+            errno::ETIMEDOUT
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(25));
+        slot.state.store(STATE_EXITED, Ordering::Release);
+        // SAFETY: as above.
+        let r = unsafe { pthread_clockjoin_np(tid, &raw mut rv, CLOCK_REALTIME, &at(0, -1)) };
+        assert_eq!(r, pthread_join(tid, &raw mut rv), "gone already: joined");
+        if let Some(s) = find_slot(tid) {
+            release_slot(s);
+        }
     }
 }

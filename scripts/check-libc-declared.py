@@ -133,9 +133,11 @@ UNDECLARED_OK: dict[str, str] = {
 # GCC, and this compiler has no _Float128 to declare them with.
 FLOAT16_128 = re.compile(r"[a-z_]+f(?:16|128)")
 
-# Every feature-test macro on, so that whatever any header can declare, it does.
+# Every feature-test macro on, so that whatever any header can declare, it does
+# -- <regex.h>'s _REGEX_RE_COMP among them, for BSD's re_comp and re_exec,
+# which glibc's header declares under nothing else.
 ALL_FEATURES = ["-std=gnu17", "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE",
-                "-D__STDC_WANT_IEC_60559_EXT__"]
+                "-D__STDC_WANT_IEC_60559_EXT__", "-D_REGEX_RE_COMP"]
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)
 # `int (name)(...)`: a parenthesised declarator, which keeps a function-like
@@ -147,6 +149,19 @@ NOT_NAMES = {"__attribute__", "sizeof", "__typeof__", "_Static_assert", "void", 
 
 
 FN_RETURNING_FN_PTR = re.compile(r"\*\s*([A-Za-z_]\w*)\s*\(")
+
+# `int pthread_yield(void) __asm__("sched_yield");`: a declaration whose calls
+# link to another symbol -- glibc's __REDIRECT, and the overlay's
+# pthread_yield, which is sched_yield as glibc's header makes it. What the
+# library must define is the label.
+ASM_LABEL = re.compile(r'__asm(?:__)?\s*\(\s*"([A-Za-z_]\w*)"\s*\)')
+
+
+def linked_name(d: str, name: str) -> str:
+    """The symbol a call to the function declaration `d` of `name` links
+    to: its asm label if it has one, else its name."""
+    m = ASM_LABEL.search(d)
+    return m.group(1) if m else name
 
 
 def decl_name(d: str) -> str | None:
@@ -198,7 +213,7 @@ def names_in(text: str) -> set[str]:
             continue
         n = decl_name(d)
         if n and n not in NOT_NAMES:
-            names.add(n)
+            names.add(linked_name(d, n))
     return names
 
 
@@ -237,7 +252,7 @@ def declarations_by_file(text: str) -> dict[str, str]:
         n = decl_name(d)
         if n and n not in NOT_NAMES:
             at = bisect.bisect_right(starts, decl.end() - 1) - 1
-            out.setdefault(n, files[at] if at >= 0 else "")
+            out.setdefault(linked_name(d, n), files[at] if at >= 0 else "")
     return out
 
 
@@ -255,7 +270,8 @@ def declared(zig: str, inc: Path, overlay: Path | None = None) -> dict[str, str]
         for h in headers:
             src.write_text(f"#include <{h}>\n", encoding="utf-8", newline="")
             r = subprocess.run([zig, "cc", "--target=x86_64-linux-musl", "-E", *first,
-                                "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE", str(src)],
+                                "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE",
+                                "-D_REGEX_RE_COMP", str(src)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=120)
             if r.returncode != 0:
@@ -358,10 +374,12 @@ def self_test() -> int:
     failures = []
     got = names_in("int foo(int);\nvoid bar(void) __attribute__((noreturn));\n"
                    "typedef int (*fp)(int);\nint (*table)(void);\nstatic int x;\n"
-                   "int (qux)(int);\nvoid (*sigset(int, void (*)(int)))(int);\n")
-    if got != {"foo", "bar", "qux", "sigset"}:
+                   "int (qux)(int);\nvoid (*sigset(int, void (*)(int)))(int);\n"
+                   'int old(void) __asm__("new_one") __attribute__((__deprecated__("x")));\n')
+    if got != {"foo", "bar", "qux", "sigset", "new_one"}:
         failures.append(f"declaration pattern: {sorted(got)} -- a function returning a "
-                        "function pointer is a function, a pointer to one is not")
+                        "function pointer is a function, a pointer to one is not; an asm "
+                        "label is the symbol a call links to")
     decl = {"foo": "a.h", "bar": "b.h", "baz": "c.h", "return": "tgmath.h", "__internal": "d.h"}
     if verdict(decl, {"foo", "bar", "baz"}, frozenset()) != []:
         failures.append("a complete library was not clean")

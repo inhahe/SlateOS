@@ -439,6 +439,19 @@ pub extern "C" fn fstatfs64(fd: i32, buf: *mut Statfs) -> i32 {
     fstatfs(fd, buf)
 }
 
+/// `statvfs64` -- [`statvfs`] by glibc's large-file name: its
+/// `struct statvfs64` is `struct statvfs` on x86_64.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn statvfs64(path: *const u8, buf: *mut Statvfs) -> i32 {
+    statvfs(path, buf)
+}
+
+/// `fstatvfs64` -- [`fstatvfs`] by glibc's large-file name.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fstatvfs64(fd: i32, buf: *mut Statvfs) -> i32 {
+    fstatvfs(fd, buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +833,63 @@ mod tests {
         assert_eq!(ret1, ret2);
         assert_eq!(buf1.f_type, buf2.f_type);
         assert_eq!(buf1.f_bsize, buf2.f_bsize);
+        close_test_fd(fd);
+    }
+
+    /// Every field of a `statvfs`, spare words too.
+    fn fields(b: &Statvfs) -> ([u64; 11], [u32; 6]) {
+        (
+            [
+                b.f_bsize,
+                b.f_frsize,
+                b.f_blocks,
+                b.f_bfree,
+                b.f_bavail,
+                b.f_files,
+                b.f_ffree,
+                b.f_favail,
+                b.f_fsid,
+                b.f_flag,
+                b.f_namemax,
+            ],
+            b.__f_spare,
+        )
+    }
+
+    #[test]
+    fn statvfs64_and_fstatvfs64_are_their_bases() {
+        let fd = alloc_test_fd();
+        for path in [b"/\0".as_ptr(), b"\0".as_ptr(), core::ptr::null()] {
+            // SAFETY: all-zero is a valid Statvfs (integers only).
+            let (mut a, mut b) = unsafe { (mem::zeroed::<Statvfs>(), mem::zeroed::<Statvfs>()) };
+            crate::errno::set_errno(0);
+            let r64 = (statvfs64(path, &raw mut a), crate::errno::get_errno());
+            crate::errno::set_errno(0);
+            assert_eq!(r64, (statvfs(path, &raw mut b), crate::errno::get_errno()));
+            assert_eq!(fields(&a), fields(&b));
+            crate::errno::set_errno(0);
+            let r64 = (
+                statvfs64(path, core::ptr::null_mut()),
+                crate::errno::get_errno(),
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(
+                r64,
+                (
+                    statvfs(path, core::ptr::null_mut()),
+                    crate::errno::get_errno()
+                )
+            );
+        }
+        for d in [fd, -1, 900] {
+            // SAFETY: as above.
+            let (mut a, mut b) = unsafe { (mem::zeroed::<Statvfs>(), mem::zeroed::<Statvfs>()) };
+            crate::errno::set_errno(0);
+            let r64 = (fstatvfs64(d, &raw mut a), crate::errno::get_errno());
+            crate::errno::set_errno(0);
+            assert_eq!(r64, (fstatvfs(d, &raw mut b), crate::errno::get_errno()));
+            assert_eq!(fields(&a), fields(&b));
+        }
         close_test_fd(fd);
     }
 

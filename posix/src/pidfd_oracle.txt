@@ -1,0 +1,22 @@
+# glibc 2.39's pidfd_getpid, process_madvise, process_mrelease and pidfd_spawn
+# on Linux (posix/tools/oracle/pidfd_harness.py): <call> = <-1 or ok> <errno>
+pidfd_getpid(-1) = -1 EBADF
+pidfd_getpid(0) = -1 EBADF
+pidfd_getpid(900) = -1 EBADF
+process_madvise(-1, &iov, 1, MADV_COLD, 0) = -1 EBADF
+process_madvise(-1, &iov, 1, MADV_COLD, 1) = -1 EINVAL
+process_madvise(0, &iov, 1, MADV_COLD, 0) = -1 EBADF
+process_madvise(-1, &iov, 1025, MADV_COLD, 0) = -1 EINVAL
+process_madvise(-1, &iov, 1024, MADV_COLD, 1) = -1 EINVAL
+process_madvise(-1, NULL, 1, MADV_COLD, 0) = -1 EFAULT
+process_madvise(-1, NULL, 0, MADV_COLD, 0) = -1 EBADF
+process_madvise(-1, NULL, 0, 12345, 0) = -1 EBADF
+process_mrelease(-1, 0) = -1 EBADF
+process_mrelease(-1, 1) = -1 EINVAL
+process_mrelease(0, 0) = -1 EBADF
+pidfd_getpid(a live child's pidfd) = its pid
+process_madvise(a live child's pidfd, &iov, 1, MADV_DONTNEED, 0) = -1 EINVAL
+process_mrelease(a live child's pidfd, 0) = -1 EINVAL
+pidfd_getpid(a reaped child's pidfd) = -1 ESRCH
+pidfd_spawnp(true) = 0 0, a pidfd
+pidfd_spawn(/nonexistent) = 2 ENOENT

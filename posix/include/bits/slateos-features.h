@@ -68,9 +68,13 @@
 #if defined(__GNUC__) || defined(__clang__)
 #define _SLATEOS_DEPRECATED(msg) __attribute__((__deprecated__(msg)))
 #define _SLATEOS_PRINTF(fmt, first) __attribute__((__format__(__printf__, fmt, first)))
+/* glibc's __attribute_deprecated__: a deprecation with no message, as its
+ * <arpa/nameser.h> gives BIND's utilities. */
+#define _SLATEOS_ATTRIBUTE_DEPRECATED __attribute__((__deprecated__))
 #else
 #define _SLATEOS_DEPRECATED(msg)
 #define _SLATEOS_PRINTF(fmt, first)
+#define _SLATEOS_ATTRIBUTE_DEPRECATED
 #endif
 
 #endif /* _SLATEOS_FEATURES_H */

@@ -168,6 +168,13 @@
 #      handing another a red main -- twice in one day, from the same lane,
 #      through the same hole.
 #
+#  51. Refuse a warning in the libc's own sources, compiled as they ship:
+#      toolchain/build-sysroot.ps1's crates, with its settings, for its
+#      target. That build and gate 40's compile of posix both judge by exit
+#      status, which a warning leaves at 0, and the host's tests and clippy
+#      never compile `cfg(target_os = "none")` -- so a function dead there
+#      sat in every sysroot build's output for six commits, read by nothing.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -3746,7 +3753,10 @@ fi
 [ -f "$abicheck" ] || skip_abi=1
 # The checker and the table it reads are in scope alongside the types, per
 # gate 8's rule: a change to either changes every verdict it gives.
-touches posix/src/ scripts/check-libc-abi.py || skip_abi=1
+# ... and since 2026-09-30 the overlay's headers and glibc_constants.txt, which
+# its constants are compared with too.
+touches posix/src/ posix/include/ posix/tools/oracle/glibc_constants.txt \
+    scripts/check-libc-abi.py || skip_abi=1
 note_gate libc-abi "$skip_abi"
 
 if [ "$skip_abi" != "1" ]; then
@@ -5844,6 +5854,88 @@ gate is distinguishing, and it is the case it was added for.
 
 To push anyway:
     ALLOW_WRITE_ONLY_FIELDS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 51 -- libc-target-warnings.  The libc's own sources compiled as they
+# ship, without a warning.
+#
+# `check-libc-target-warnings.py`: each crate toolchain/build-sysroot.ps1
+# builds -- posix, whose archive is libc.a, and toolchain/stubs -- checked
+# with that script's own settings, for its target spec, read out of the
+# script rather than copied, so the two cannot drift.
+#
+# WHAT IT CATCHES.  On 2026-09-30 lane D found `signal::dispatch_delivered`
+# dead on the target: the posix crate's one warning, printed by every
+# sysroot build for six commits and read by nothing.  Every place that
+# compiles posix for bare metal judges by exit status, and a warning exits
+# 0 -- build-sysroot.ps1 does, and so does gate 40, which prints the
+# warning among a whole push's output and passes.  The host's tests and
+# clippy, which do refuse warnings, never compile the code these are about:
+# `cfg(target_os = "none")`.
+#
+# WHY NOT IN GATE 40.  That gate compiles posix for its pinned
+# x86_64-unknown-none, not the spec libc.a is built for, and eight crates
+# in one verdict -- lane A's services/netstack among them, over a `touches`
+# that includes netproto/.  A posix warning refused there would refuse lane
+# A's push over lane D's code.  This one is scoped to the trees whose
+# warnings it counts, so a refusal lands on the push that caused it.
+#
+# NOT COUNTED: the vendored libm's warnings (upstream's, 32 on 2026-09-30)
+# and the toolchain's own crates -- printed as a count, not refused.  An
+# error in any crate is refused: the libc then does not build.
+#
+# COST.  ~11 s when posix has changed, ~2 s when not; a cold run checks core
+# and compiler_builtins from rust-src first.  Needs the nightly toolchain
+# with rust-src that build-sysroot.ps1 needs; without it the checker exits
+# 3 and run_checker reports the gate SKIPPED, loudly.
+#
+# `touches` names the script it reads its plan from and the checker itself,
+# per gate 8's rule: a change to either changes every verdict it gives.
+# ---------------------------------------------------------------------------
+
+tgtwarn="${repo_root:-.}/scripts/check-libc-target-warnings.py"
+skip_tgtwarn=0
+# Bypass: ALLOW_LIBC_TARGET_WARNINGS=1 git push origin <branch>
+if [ "${ALLOW_LIBC_TARGET_WARNINGS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_LIBC_TARGET_WARNINGS=1 set - skipping the libc-target-warnings gate." >&2
+    skip_tgtwarn=1
+fi
+[ -n "$py" ] || skip_tgtwarn=1
+[ -f "$tgtwarn" ] || skip_tgtwarn=1
+touches posix/ tzrules/ toolchain/stubs/ toolchain/build-sysroot.ps1 \
+        scripts/check-libc-target-warnings.py || skip_tgtwarn=1
+# No `pushed_shas` guard: one run over the worktree, as gate 40's is.
+note_gate libc-target-warnings "$skip_tgtwarn"
+
+tgtwarn_failed=0
+if [ "$skip_tgtwarn" != "1" ]; then
+    if ! run_checker libc-target-warnings-selftest "$py" "$tgtwarn" --selftest; then
+        echo "pre-push: check-libc-target-warnings.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        tgtwarn_failed=1
+    elif ! run_checker libc-target-warnings "$py" "$tgtwarn"; then
+        tgtwarn_failed=1
+    fi
+fi
+if [ "$tgtwarn_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - the libc's own sources warn when compiled for
+the target they ship to.
+
+Each warning is shown above, with its file and line.  They are in code the
+host's tests and clippy do not compile -- \`cfg(target_os = "none")\` -- so
+nothing else here would have shown them: the sysroot build prints them and
+passes.  Fix each one.  A dead item the target does not use is usually
+test-only (\`#[cfg(test)]\`) or target-only (\`#[cfg(target_os = "none")]\`);
+say which, rather than allowing it dead everywhere.
+
+    python scripts/check-libc-target-warnings.py
+
+To push anyway:
+    ALLOW_LIBC_TARGET_WARNINGS=1 git push $remote_name ...
 
 EOF
     exit 1

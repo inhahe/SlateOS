@@ -28,6 +28,8 @@ isctype = 65:101010110001 122:011000110001 53:000110110001 102:011010110001 32:0
 isctype-masks = upper=0x100 lower=0x200 alpha=0x400 digit=0x800 xdigit=0x1000 space=0x2000 print=0x4000 graph=0x8000 blank=0x1 cntrl=0x2 punct=0x4 alnum=0x8
 isfdtype = 1 0 1 1 0 -1!0
 dysize = 365 366 365 366 365 366 365 366 366 366 365
+vlimit = 0 100 0 4096 0 -1 -1!EINVAL -1!EINVAL -1!EINVAL
+rpmatch = 1 1 1 0 0 0 -1 -1 -1 1 0 -1
 execveat-badf = -1!EBADF
 execveat-flags = -1!EINVAL
 execveat-missing = -1!ENOENT

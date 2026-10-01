@@ -9,7 +9,9 @@ For each name the overlay adds to musl's headers: the overlay header that
 declares it, the feature-macro configurations (check-libc-overlay.py's
 CONFIGS) in which glibc's header of that name declares it, and its type as
 glibc declares it, typedefs resolved -- all read out of glibc's headers by
-clang, through libclang's Python bindings, in WSL.
+clang, through libclang's Python bindings, in WSL. A declaration under a
+macro renaming it is the name it declares, in both: `__res_ninit` for
+<resolv.h>'s `#define res_ninit __res_ninit`.
 
 One line a name, tab-separated:
 
@@ -76,7 +78,7 @@ json.dump(out, open(sys.argv[4], "w"))
 # Run in WSL: argv = types file (JSON: C type -> header), flags (JSON: C type ->
 # the flags its layout is read with), output.
 LAYOUT_READER = r'''
-import json, sys
+import json, re, sys
 import clang.cindex as ci
 ci.Config.set_library_file(LIBCLANG)
 types = json.load(open(sys.argv[1]))
@@ -85,10 +87,19 @@ idx = ci.Index.create()
 out = {}
 def named_fields(t):
     # An anonymous struct's or union's members are the outer type's, as C
-    # names them (Dl_serinfo's dls_serpath); the member itself has no name.
+    # names them (Dl_serinfo's dls_serpath); the member itself has no name --
+    # libclang 18 spells it as its type, "union Dl_serinfo::(anonymous at
+    # ...)". Not a named member of an untagged type -- struct obstack's
+    # `temp` -- which the bindings' is_anonymous() also answers yes for,
+    # asking only whether the member's type has a tag: offsetof names
+    # `temp`, and has no `tempint` to name.
     for f in t.get_fields():
-        if f.is_anonymous():
+        if f.is_anonymous() and not re.fullmatch(r"[A-Za-z_]\w*", f.spelling):
             yield from named_fields(f.type.get_canonical())
+        elif f.is_bitfield():
+            # No offsetof names a bit-field, and the size holds them
+            # (regex_t's seven).
+            continue
         else:
             yield f.spelling
 for cty, h in types.items():
@@ -104,10 +115,17 @@ json.dump(out, open(sys.argv[3], "w"))
 '''.replace("LIBCLANG", repr(LIBCLANG))
 
 
-def declaring_header(name: str, texts: dict[str, str]) -> str:
+def declaring_header(name: str, texts: dict[str, str], renamed: dict[str, set[str]]) -> str:
     """The overlay header that declares `name` (its text, comments and
-    preprocessor lines aside, has the name as a word)."""
-    found = [h for h, t in texts.items() if re.search(r"\b" + re.escape(name) + r"\b", t)]
+    preprocessor lines aside, has the name as a word -- or, where none has,
+    a macro that expands to it: <resolv.h>'s `res_ninit` declares
+    `__res_ninit`)."""
+    def having(word: str) -> list[str]:
+        return [h for h, t in texts.items() if re.search(r"\b" + re.escape(word) + r"\b", t)]
+
+    found = having(name)
+    if not found:
+        found = sorted({h for m, to in renamed.items() if name in to for h in having(m)})
     if len(found) != 1:
         sys.exit(f"{name}: declared in {found or 'no overlay header'}; expected exactly one")
     return found[0]
@@ -121,8 +139,12 @@ def main() -> None:
     texts = {}
     for h in overlay.overlay_headers(overlay.OVERLAY):
         t = re.sub(r"/\*.*?\*/", " ", (overlay.OVERLAY / h).read_text(encoding="utf-8"), flags=re.S)
+        # A string's words are no declaration: <resolv.h>'s res_randomid is
+        # deprecated "use getentropy instead", which names getentropy.
+        t = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', t)
         texts[h] = "\n".join(line for line in t.splitlines() if not line.lstrip().startswith("#"))
-    where = {n: declaring_header(n, texts) for n in names}
+    renamed = overlay.renaming_macros(overlay.OVERLAY)
+    where = {n: declaring_header(n, texts, renamed) for n in names}
     with workdir() as t:
         d = Path(t)
         (d / "names.txt").write_text("\n".join(names) + "\n", encoding="utf-8", newline="\n")

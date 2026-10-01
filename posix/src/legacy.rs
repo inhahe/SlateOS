@@ -17,6 +17,8 @@
 //! | `isctype` | a character's classes as glibc's `<ctype.h>` masks (`_ISupper` ...) |
 //! | `isfdtype` | whether a descriptor's file is of a type |
 //! | `dysize` | the days in a year |
+//! | `vlimit` | 4.2BSD's soft limit: `setrlimit` of the resource one below, `EINVAL` outside `LIM_CPU` to `LIM_MAXRSS` |
+//! | `rpmatch` | an answer's verdict by the locale's `YESEXPR` and `NOEXPR`: 1 yes, 0 no, -1 neither |
 //! | `execveat` | `execve` of a file named relative to a directory's descriptor, or of the descriptor itself |
 //!
 //! Written from the BSD, System V and Linux manuals; glibc run only for its
@@ -317,19 +319,20 @@ fn decimal(mut n: u32, digits: &mut [u8; 10]) -> &[u8] {
 /// glibc's `<ctype.h>` class bits, the ones `isctype`'s `mask` is made of:
 /// on a little-endian machine a class's bit is its number past 8, or before
 /// it for the four from 8 up.
+#[allow(non_upper_case_globals)] // glibc's names, as the header spells them
 pub mod class {
-    pub const UPPER: i32 = 0x100;
-    pub const LOWER: i32 = 0x200;
-    pub const ALPHA: i32 = 0x400;
-    pub const DIGIT: i32 = 0x800;
-    pub const XDIGIT: i32 = 0x1000;
-    pub const SPACE: i32 = 0x2000;
-    pub const PRINT: i32 = 0x4000;
-    pub const GRAPH: i32 = 0x8000;
-    pub const BLANK: i32 = 0x1;
-    pub const CNTRL: i32 = 0x2;
-    pub const PUNCT: i32 = 0x4;
-    pub const ALNUM: i32 = 0x8;
+    pub const _ISupper: i32 = 0x100;
+    pub const _ISlower: i32 = 0x200;
+    pub const _ISalpha: i32 = 0x400;
+    pub const _ISdigit: i32 = 0x800;
+    pub const _ISxdigit: i32 = 0x1000;
+    pub const _ISspace: i32 = 0x2000;
+    pub const _ISprint: i32 = 0x4000;
+    pub const _ISgraph: i32 = 0x8000;
+    pub const _ISblank: i32 = 0x1;
+    pub const _IScntrl: i32 = 0x2;
+    pub const _ISpunct: i32 = 0x4;
+    pub const _ISalnum: i32 = 0x8;
 }
 
 /// `isctype` (GNU): `c`'s classes that are in `mask` -- nonzero if it is of
@@ -343,18 +346,18 @@ pub extern "C" fn isctype(c: i32, mask: i32) -> i32 {
     }
     use crate::ctype::*;
     let classes = [
-        (isupper(c), class::UPPER),
-        (islower(c), class::LOWER),
-        (isalpha(c), class::ALPHA),
-        (isdigit(c), class::DIGIT),
-        (isxdigit(c), class::XDIGIT),
-        (isspace(c), class::SPACE),
-        (isprint(c), class::PRINT),
-        (isgraph(c), class::GRAPH),
-        (isblank(c), class::BLANK),
-        (iscntrl(c), class::CNTRL),
-        (ispunct(c), class::PUNCT),
-        (isalnum(c), class::ALNUM),
+        (isupper(c), class::_ISupper),
+        (islower(c), class::_ISlower),
+        (isalpha(c), class::_ISalpha),
+        (isdigit(c), class::_ISdigit),
+        (isxdigit(c), class::_ISxdigit),
+        (isspace(c), class::_ISspace),
+        (isprint(c), class::_ISprint),
+        (isgraph(c), class::_ISgraph),
+        (isblank(c), class::_ISblank),
+        (iscntrl(c), class::_IScntrl),
+        (ispunct(c), class::_ISpunct),
+        (isalnum(c), class::_ISalnum),
     ]
     .iter()
     .filter(|(is, _)| *is != 0)
@@ -383,6 +386,90 @@ pub extern "C" fn dysize(year: i32) -> i32 {
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
     if leap { 366 } else { 365 }
 }
+
+// ---------------------------------------------------------------------------
+// Limits, and answers
+// ---------------------------------------------------------------------------
+
+/// `<sys/vlimit.h>`'s first and last resource that is one: `LIM_CPU` and
+/// `LIM_MAXRSS`, each one past its `RLIMIT_` (`LIM_NORAISE`, 0, is none).
+const LIM_CPU: i32 = 1;
+const LIM_MAXRSS: i32 = 6;
+
+/// `vlimit(resource, value)` (4.2BSD): set `resource`'s soft limit to
+/// `value` -- `setrlimit` of the resource one below it, the hard limit as it
+/// was -- as glibc's does; `EINVAL` for `LIM_NORAISE` and anything outside
+/// `LIM_CPU` to `LIM_MAXRSS`. A negative `value` is the `rlim_t` it converts
+/// to, so -1 is `RLIM_INFINITY`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn vlimit(resource: i32, value: i32) -> i32 {
+    if !(LIM_CPU..=LIM_MAXRSS).contains(&resource) {
+        return fail(EINVAL);
+    }
+    let which = resource.saturating_sub(1);
+    let mut lim = crate::resource::Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if crate::resource::getrlimit(which, &raw mut lim) < 0 {
+        return -1;
+    }
+    // C's conversion of an `int` to `rlim_t`: sign-extended.
+    lim.rlim_cur = i64::from(value).cast_unsigned();
+    crate::resource::setrlimit(which, &raw const lim)
+}
+
+/// Own archive member -- gnulib's `rpmatch` module defines it wherever the C
+/// library lacks it, as musl does. See string.rs's module header.
+mod gnu_rpmatch {
+    /// `rpmatch(response)` (glibc): 1 if `response` is a yes by the
+    /// locale's `YESEXPR`, else 0 if a no by its `NOEXPR`, else -1 --
+    /// each an extended regular expression, compiled for the call (glibc
+    /// keeps them; this is safe to call from two threads at once). -1 as
+    /// well when `YESEXPR` does not compile, as glibc's; a `NOEXPR` that
+    /// does not is no answer.
+    ///
+    /// # Safety
+    ///
+    /// `response` must be a C string.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn rpmatch(response: *const u8) -> i32 {
+        // SAFETY: the caller's C string.
+        match unsafe { matches(response, crate::langinfo::YESEXPR) } {
+            Some(true) => 1,
+            None => -1,
+            // SAFETY: as above.
+            Some(false) => match unsafe { matches(response, crate::langinfo::NOEXPR) } {
+                Some(true) => 0,
+                _ => -1,
+            },
+        }
+    }
+
+    /// Does `response` match the locale's expression `item`? `None` when it
+    /// does not compile.
+    ///
+    /// # Safety
+    ///
+    /// `response` must be a C string.
+    unsafe fn matches(response: *const u8, item: i32) -> Option<bool> {
+        let pattern = crate::langinfo::nl_langinfo(item);
+        let mut re = crate::regex::RegexT::new();
+        // SAFETY: a regex_t of this frame's and a C string, the locale's.
+        if unsafe { crate::regex::regcomp(&raw mut re, pattern, crate::regex::REG_EXTENDED) } != 0 {
+            return None;
+        }
+        // SAFETY: the compiled expression and the caller's C string; no
+        // match offsets are asked for.
+        let hit =
+            unsafe { crate::regex::regexec(&raw const re, response, 0, core::ptr::null_mut(), 0) }
+                == 0;
+        // SAFETY: compiled above, freed once.
+        unsafe { crate::regex::regfree(&raw mut re) };
+        Some(hit)
+    }
+}
+pub use gnu_rpmatch::rpmatch;
 
 // ---------------------------------------------------------------------------
 // execveat
@@ -717,12 +804,13 @@ mod tests {
     fn isctype_is_glibcs() {
         use class::*;
         let masks = [
-            UPPER, LOWER, ALPHA, DIGIT, XDIGIT, SPACE, PRINT, GRAPH, BLANK, CNTRL, PUNCT, ALNUM,
+            _ISupper, _ISlower, _ISalpha, _ISdigit, _ISxdigit, _ISspace, _ISprint, _ISgraph,
+            _ISblank, _IScntrl, _ISpunct, _ISalnum,
         ];
         let got = format!(
-            " upper={UPPER:#x} lower={LOWER:#x} alpha={ALPHA:#x} digit={DIGIT:#x} xdigit={XDIGIT:#x} \
-             space={SPACE:#x} print={PRINT:#x} graph={GRAPH:#x} blank={BLANK:#x} cntrl={CNTRL:#x} \
-             punct={PUNCT:#x} alnum={ALNUM:#x}"
+            " upper={_ISupper:#x} lower={_ISlower:#x} alpha={_ISalpha:#x} digit={_ISdigit:#x} xdigit={_ISxdigit:#x} \
+             space={_ISspace:#x} print={_ISprint:#x} graph={_ISgraph:#x} blank={_ISblank:#x} cntrl={_IScntrl:#x} \
+             punct={_ISpunct:#x} alnum={_ISalnum:#x}"
         );
         assert_eq!(got, oracle("isctype-masks"));
         let mut got = String::new();
@@ -734,8 +822,8 @@ mod tests {
         }
         assert_eq!(got, oracle("isctype"));
         assert_eq!(
-            isctype(b'A'.into(), UPPER | DIGIT),
-            UPPER,
+            isctype(b'A'.into(), _ISupper | _ISdigit),
+            _ISupper,
             "the classes in the mask"
         );
         assert_eq!(isctype(1000, !0), 0);
@@ -759,6 +847,51 @@ mod tests {
             .collect::<Vec<_>>()
             .concat();
         assert_eq!(got, oracle("dysize"));
+    }
+
+    #[test]
+    fn vlimit_is_glibcs() {
+        use crate::resource::{RLIMIT_CPU, RLIMIT_FSIZE, Rlimit, getrlimit};
+        let soft = |r| {
+            let mut l = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(getrlimit(r, &raw mut l), 0);
+            format!(" {}", l.rlim_cur.cast_signed())
+        };
+        let rc = |r: i32| {
+            if r == -1 {
+                format!(" -1!{}", en(crate::errno::get_errno()))
+            } else {
+                format!(" {r}")
+            }
+        };
+        let mut got = String::new();
+        got += &rc(vlimit(LIM_CPU, 100));
+        got += &soft(RLIMIT_CPU);
+        got += &rc(vlimit(2, 4096));
+        got += &soft(RLIMIT_FSIZE);
+        got += &rc(vlimit(LIM_CPU, -1));
+        got += &soft(RLIMIT_CPU);
+        got += &rc(vlimit(0, 0));
+        got += &rc(vlimit(LIM_MAXRSS + 1, 0));
+        got += &rc(vlimit(-1, 0));
+        assert_eq!(got, oracle("vlimit"));
+    }
+
+    #[test]
+    fn rpmatch_is_glibcs() {
+        let rs: [&[u8]; 12] = [
+            b"y\0", b"Y\0", b"yes\0", b"n\0", b"N\0", b"no\0", b"x\0", b"\0", b" y\0", b"yn\0",
+            b"ny\0", b"\xff\0",
+        ];
+        let mut got = String::new();
+        for r in rs {
+            // SAFETY: a C string.
+            got += &format!(" {}", unsafe { rpmatch(r.as_ptr()) });
+        }
+        assert_eq!(got, oracle("rpmatch"));
     }
 
     #[test]

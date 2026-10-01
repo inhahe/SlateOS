@@ -26,16 +26,29 @@
 //!   dotted quad.
 //! - **`inet_network`, `inet_makeaddr`, `inet_lnaof`, `inet_netof`** are the
 //!   classful (pre-CIDR) helpers, kept because old programs still call them.
+//! - **`inet_net_pton`, `inet_net_ntop`, `inet_neta`** (network numbers:
+//!   `10`, `192.168.1/24`, `0x0a0b`) and **`inet_nsap_addr`,
+//!   `inet_nsap_ntoa`** (NSAP addresses in hex) are BIND's, in glibc's
+//!   libresolv (`resolv/inet_net_pton.c`, `inet_net_ntop.c`, `inet_neta.c`,
+//!   `nsap_addr.c`); a program here links them from libc.a, as `-lresolv`
+//!   names nothing else. Ported to the byte, what a failing call wrote
+//!   before it failed included, and with BIND's answers where they are
+//!   odd: a width past `int` wraps as the C one does (`1/4294967295` is no
+//!   width at all), a class D network is 4 bits however many bytes are
+//!   given, five dotted parts are 40 bits, and `inet_neta` drops the zero
+//!   bytes inside a number (`0x0a000001` is `10.1`).
 //! - **`ether_aton`, `ether_ntoa`** and their `_r` forms, and
 //!   **`ether_line`**, read and write `xx:xx:xx:xx:xx:xx`.
 //!
 //! The functions that hand back a pointer to library storage (`inet_ntoa`,
 //! `ether_aton`, `ether_ntoa`) use the calling thread's block
-//! ([`crate::perthread`]), so two threads never overwrite each other's
-//! answer; glibc shares one buffer between them.
+//! ([`crate::perthread`]), and `inet_nsap_ntoa` the thread's netdb block
+//! ([`crate::netdb`]), so two threads never overwrite each other's answer;
+//! glibc shares one buffer between them.
 //!
 //! A NULL string is refused (0, `INADDR_NONE`, NULL) where glibc would read
-//! through it -- the same answer as for text that is not an address.
+//! through it -- the same answer as for text that is not an address -- and
+//! a NULL buffer is `EFAULT` at the write where glibc's would fault.
 
 use crate::errno;
 use crate::socket::{AF_INET, AF_INET6, InAddr};
@@ -691,6 +704,506 @@ pub extern "C" fn inet_netof(addr: InAddr) -> u32 {
     } else {
         (i & IN_CLASSC_NET) >> IN_CLASSC_NSHIFT
     }
+}
+
+// ---------------------------------------------------------------------------
+// Network numbers and NSAP addresses: BIND's, libresolv's in glibc
+// ---------------------------------------------------------------------------
+
+/// What is left of a caller's buffer, written as BIND's code writes it:
+/// `sprintf` into the next bytes -- the text and its NUL, the NUL being
+/// overwritten by whatever follows -- or one byte at a time, each checked
+/// by the caller against the size it counts down.
+struct Out {
+    dst: *mut u8,
+    at: usize,
+}
+
+impl Out {
+    /// `bytes` at the next position, which then moves past them; `EFAULT`
+    /// for a NULL buffer, where glibc would fault at the same write.
+    fn put(&mut self, bytes: &[u8]) -> Result<(), i32> {
+        if self.dst.is_null() {
+            return Err(errno::EFAULT);
+        }
+        // SAFETY: the caller's size checks, which are glibc's, keep every
+        // write inside the buffer it described.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), self.dst.add(self.at), bytes.len())
+        };
+        self.at += bytes.len();
+        Ok(())
+    }
+
+    /// A NUL at the next position, which does not move.
+    fn nul(&mut self) -> Result<(), i32> {
+        self.put(&[0])?;
+        self.at -= 1;
+        Ok(())
+    }
+
+    /// `sprintf (dst, "%u", v)`: the digits and a NUL, moving past the
+    /// digits.
+    fn decimal(&mut self, v: u32) -> Result<(), i32> {
+        let mut digits = [0u8; 10];
+        let mut n = digits.len();
+        let mut v = v;
+        loop {
+            n -= 1;
+            digits[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        self.put(&digits[n..])?;
+        self.nul()
+    }
+}
+
+/// `src`'s byte `i`; `EFAULT` for a NULL `src`, where glibc would fault.
+fn byte_at(src: *const u8, i: usize) -> Result<u8, i32> {
+    if src.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // SAFETY: the caller's contract: `src` holds the bytes the width asks for.
+    Ok(unsafe { src.add(i).read() })
+}
+
+/// `inet_net_pton`'s destination: `if (size-- <= 0) goto emsgsize;
+/// *dst++ = b;` a byte at a time, and the first byte, which its class
+/// rule reads back.
+struct Counted {
+    out: Out,
+    size: usize,
+    first: u8,
+}
+
+impl Counted {
+    fn push(&mut self, b: u8) -> Result<(), i32> {
+        if self.size == 0 {
+            return Err(errno::EMSGSIZE);
+        }
+        self.size -= 1;
+        if self.out.at == 0 {
+            self.first = b;
+        }
+        self.out.put(&[b])
+    }
+}
+
+/// glibc's `inet_net_pton_ipv4`: the bits it answers, or the error number.
+fn net_pton4(src: &[u8], dst: *mut u8, size: usize) -> Result<i32, i32> {
+    let at = |i: usize| src.get(i).copied().unwrap_or(0);
+    let mut w = Counted {
+        out: Out { dst, at: 0 },
+        size,
+        first: 0,
+    };
+    let mut ch = at(0);
+    let mut i = 1;
+    if ch == b'0' && matches!(at(i), b'x' | b'X') && at(i + 1).is_ascii_hexdigit() {
+        // Hexadecimal: a byte from each two digits, a last odd one the
+        // high half of one more.
+        if w.size == 0 {
+            return Err(errno::EMSGSIZE);
+        }
+        let mut dirty = 0;
+        let mut tmp = 0u32;
+        i += 1;
+        loop {
+            ch = at(i);
+            i += 1;
+            let Some(n) = hex_value(ch) else { break };
+            tmp = if dirty == 0 { n } else { (tmp << 4) | n };
+            dirty += 1;
+            if dirty == 2 {
+                w.push(tmp as u8)?;
+                dirty = 0;
+            }
+        }
+        if dirty != 0 {
+            w.push((tmp << 4) as u8)?;
+        }
+    } else if ch.is_ascii_digit() {
+        // Decimal: dotted parts, each at most 255, each written as it ends.
+        loop {
+            let mut tmp = 0u32;
+            loop {
+                tmp = tmp * 10 + u32::from(ch - b'0');
+                if tmp > 255 {
+                    return Err(errno::ENOENT);
+                }
+                ch = at(i);
+                i += 1;
+                if !ch.is_ascii_digit() {
+                    break;
+                }
+            }
+            w.push(tmp as u8)?;
+            if ch == 0 || ch == b'/' {
+                break;
+            }
+            if ch != b'.' {
+                return Err(errno::ENOENT);
+            }
+            ch = at(i);
+            i += 1;
+            if !ch.is_ascii_digit() {
+                return Err(errno::ENOENT);
+            }
+        }
+    } else {
+        return Err(errno::ENOENT);
+    }
+    let mut bits: i32 = -1;
+    if ch == b'/' && at(i).is_ascii_digit() && w.out.at > 0 {
+        // The width. glibc's is a C `int` with no bound until it has read
+        // every digit, and it wraps as one does: `1/4294967295` is -1, which
+        // it then takes for no width given.
+        ch = at(i);
+        i += 1;
+        bits = 0;
+        loop {
+            bits = bits.wrapping_mul(10).wrapping_add(i32::from(ch - b'0'));
+            ch = at(i);
+            i += 1;
+            if !ch.is_ascii_digit() {
+                break;
+            }
+        }
+        if ch != 0 {
+            return Err(errno::ENOENT);
+        }
+        if bits > 32 {
+            return Err(errno::EMSGSIZE);
+        }
+    }
+    if ch != 0 || w.out.at == 0 {
+        return Err(errno::ENOENT);
+    }
+    let have = i32::try_from(w.out.at.saturating_mul(8)).unwrap_or(i32::MAX);
+    if bits == -1 {
+        // No width: the class's, by the first byte -- but a class D
+        // network's 4 bits are not widened to the bytes given, only the
+        // others' (glibc's `bits >= 8` test).
+        bits = match w.first {
+            240.. => 32,
+            224.. => 4,
+            192.. => 24,
+            128.. => 16,
+            _ => 8,
+        };
+        if bits >= 8 && bits < have {
+            bits = have;
+        }
+    }
+    // Zero bytes out to the width.
+    let mut have = have;
+    while bits > have {
+        w.push(0)?;
+        have += 8;
+    }
+    Ok(bits)
+}
+
+/// Convert a network number from text to binary: `af` must be `AF_INET`,
+/// and `src` is a dotted decimal network (`10`, `192.168.1`), a `0x` hex
+/// string, either with a `/width` -- written to `dst`, at most `size`
+/// bytes, as many as the width covers.
+///
+/// The width, or -1 with `errno`: `EAFNOSUPPORT` for another family,
+/// `ENOENT` for text that is not a network number, `EMSGSIZE` when `size`
+/// is too small or the width over 32. Without a width, the network's class
+/// gives it -- 8, 16 or 24, widened to the bytes given, but 4 for class D
+/// and 32 for class E -- and the bytes are glibc's to the last: five parts
+/// make 40 bits. A NULL `src` is `ENOENT`, a NULL `dst` `EFAULT` at its
+/// first write, where glibc would fault.
+///
+/// # Safety
+///
+/// `src` is NULL or a NUL-terminated string; `dst` is NULL or holds `size`
+/// bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn inet_net_pton(af: i32, src: *const u8, dst: *mut u8, size: usize) -> i32 {
+    if af != AF_INET {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return -1;
+    }
+    // SAFETY: the caller's contract.
+    let Some(text) = (unsafe { c_str(src) }) else {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    };
+    match net_pton4(text, dst, size) {
+        Ok(bits) => bits,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// glibc's `inet_net_ntop_ipv4`.
+fn net_ntop4(src: *const u8, bits: i32, dst: *mut u8, size: usize) -> Result<(), i32> {
+    if !(0..=32).contains(&bits) {
+        return Err(errno::EINVAL);
+    }
+    let mut size = size;
+    let mut out = Out { dst, at: 0 };
+    if bits == 0 {
+        if size < 2 {
+            return Err(errno::EMSGSIZE);
+        }
+        out.put(b"0")?;
+        size -= 1;
+        out.nul()?;
+    }
+    // Whole bytes, dotted.
+    let mut i = 0usize;
+    for b in (1..=bits / 8).rev() {
+        if size < 5 {
+            return Err(errno::EMSGSIZE);
+        }
+        let start = out.at;
+        out.decimal(u32::from(byte_at(src, i)?))?;
+        i += 1;
+        if b > 1 {
+            out.put(b".")?;
+            out.nul()?;
+        }
+        size -= out.at - start;
+    }
+    // The byte the width ends in, its bits past the width cleared.
+    let b = bits % 8;
+    if b > 0 {
+        if size < 5 {
+            return Err(errno::EMSGSIZE);
+        }
+        let start = out.at;
+        if out.at != 0 {
+            out.put(b".")?;
+        }
+        let m = ((1u32 << b) - 1) << (8 - b);
+        out.decimal(u32::from(byte_at(src, i)?) & m)?;
+        size -= out.at - start;
+    }
+    if size < 4 {
+        return Err(errno::EMSGSIZE);
+    }
+    out.put(b"/")?;
+    out.decimal(bits.cast_unsigned())
+}
+
+/// Convert a network number from binary to text, the width after it:
+/// `192.168.1.128` at 25 bits is `192.168.1.128/25`, at 20 `192.168.0/20`
+/// -- the bytes the width covers, the last with its bits past the width
+/// cleared.
+///
+/// `dst`, or NULL with `errno`: `EAFNOSUPPORT` for a family but `AF_INET`,
+/// `EINVAL` for a width outside 0..=32, `EMSGSIZE` when `size` is too small
+/// -- judged a part at a time, as glibc's is, which leaves the parts before
+/// the one that did not fit in `dst`. A NULL `src` or `dst` is `EFAULT` at
+/// its first use, where glibc would fault.
+///
+/// # Safety
+///
+/// `src` is NULL or holds the bytes `bits` covers; `dst` is NULL or holds
+/// `size` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn inet_net_ntop(
+    af: i32,
+    src: *const u8,
+    bits: i32,
+    dst: *mut u8,
+    size: usize,
+) -> *mut u8 {
+    if af != AF_INET {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return core::ptr::null_mut();
+    }
+    match net_ntop4(src, bits, dst, size) {
+        Ok(()) => dst,
+        Err(e) => {
+            errno::set_errno(e);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// glibc's `inet_neta`.
+fn neta(net: u32, dst: *mut u8, size: usize) -> Result<(), i32> {
+    let mut size = size;
+    let mut out = Out { dst, at: 0 };
+    let mut src = net;
+    while src != 0 {
+        let b = (src >> 24) as u8;
+        src <<= 8;
+        if b != 0 {
+            if size < 5 {
+                return Err(errno::EMSGSIZE);
+            }
+            let start = out.at;
+            out.decimal(u32::from(b))?;
+            if src != 0 {
+                out.put(b".")?;
+                out.nul()?;
+            }
+            size -= out.at - start;
+        }
+    }
+    if out.at == 0 {
+        if size < 8 {
+            return Err(errno::EMSGSIZE);
+        }
+        out.put(b"0.0.0.0")?;
+        out.nul()?;
+    }
+    Ok(())
+}
+
+/// Convert a network number, host byte order as `inet_network` answers
+/// it, to text: its bytes that are not zero, dotted -- `0x0a000001` is
+/// `10.1` -- or `0.0.0.0` for none.
+///
+/// `dst`, or NULL with `errno` `EMSGSIZE` when `size` is too small (judged
+/// a part at a time, as glibc's is); a NULL `dst` is `EFAULT` at its first
+/// write. Deprecated by glibc for `inet_ntop`, as `posix/include`'s
+/// declaration says.
+///
+/// # Safety
+///
+/// `dst` is NULL or holds `size` bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn inet_neta(net: u32, dst: *mut u8, size: usize) -> *mut u8 {
+    match neta(net, dst, size) {
+        Ok(()) => dst,
+        Err(e) => {
+            errno::set_errno(e);
+            core::ptr::null_mut()
+        }
+    }
+}
+
+/// `inet_nsap_ntoa`'s buffer when it is given none: glibc's `tmpbuf`, room
+/// for 255 bytes' hex digits and their dots.
+pub(crate) const NSAP_NTOA_MAX: usize = 255 * 2 + 128;
+
+/// Convert an NSAP address from hex text to binary: pairs of hex digits,
+/// either case, each a byte, with `.`, `+` and `/` ignored between pairs --
+/// at most `maxlen` bytes, a negative `maxlen` being no limit (glibc's
+/// `(u_int)maxlen`).
+///
+/// The bytes written, or 0 for text that is not an address: an odd digit
+/// out, a separator inside a pair, anything else -- the bytes before it
+/// written all the same, as glibc's are. A NULL `ascii` is 0, as text that
+/// is not one; a NULL `binary` is 0 with `errno` `EFAULT` at its first
+/// write, where glibc would fault.
+///
+/// # Safety
+///
+/// `ascii` is NULL or a NUL-terminated string; `binary` is NULL or holds
+/// the bytes `maxlen` allows.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn inet_nsap_addr(ascii: *const u8, binary: *mut u8, maxlen: i32) -> u32 {
+    // SAFETY: the caller's contract.
+    let Some(s) = (unsafe { c_str(ascii) }) else {
+        return 0;
+    };
+    // glibc's `xtob` on an upper-case hex digit.
+    let xtob = |c: u8| {
+        if c.is_ascii_digit() {
+            c - b'0'
+        } else {
+            c - b'7'
+        }
+    };
+    let at = |i: usize| s.get(i).copied().unwrap_or(0);
+    let max = maxlen.cast_unsigned();
+    let mut out = Out { dst: binary, at: 0 };
+    let mut len = 0u32;
+    let mut i = 0;
+    loop {
+        let c = at(i);
+        i += 1;
+        if c == 0 || len >= max {
+            return len;
+        }
+        if matches!(c, b'.' | b'+' | b'/') {
+            continue;
+        }
+        let c = c.to_ascii_uppercase();
+        if !c.is_ascii_hexdigit() {
+            return 0;
+        }
+        let nib = xtob(c);
+        let c = at(i).to_ascii_uppercase();
+        i += 1;
+        if !c.is_ascii_hexdigit() {
+            return 0;
+        }
+        if let Err(e) = out.put(&[(nib << 4) | xtob(c)]) {
+            errno::set_errno(e);
+            return 0;
+        }
+        len += 1;
+    }
+}
+
+/// Convert an NSAP address from binary to hex text: upper-case digits, a
+/// dot after the first byte and after every second one after it
+/// (`47.0005.80FF`), at most 255 bytes of it.
+///
+/// Into `ascii`, which must hold [`NSAP_NTOA_MAX`] bytes for the longest,
+/// or with NULL into the calling thread's buffer, which its next call
+/// overwrites (glibc shares one between threads); that pointer, or NULL
+/// when the thread's buffer cannot be had. A NULL `binary` is the empty
+/// text, with `errno` `EFAULT`, where glibc would fault.
+///
+/// # Safety
+///
+/// `binary` is NULL or holds `binlen` bytes (at most 255 are read); `ascii`
+/// is NULL or holds the text and its NUL.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn inet_nsap_ntoa(binlen: i32, binary: *const u8, ascii: *mut u8) -> *mut u8 {
+    let start = if ascii.is_null() {
+        crate::netdb::nsap_ntoa_buffer()
+    } else {
+        ascii
+    };
+    if start.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return start;
+    }
+    let n = usize::try_from(binlen.min(255)).unwrap_or(0);
+    let n = if n > 0 && binary.is_null() {
+        errno::set_errno(errno::EFAULT);
+        0
+    } else {
+        n
+    };
+    let digit = |nib: u8| if nib < 10 { b'0' + nib } else { b'7' + nib };
+    let mut text = [0u8; NSAP_NTOA_MAX];
+    let mut len = 0;
+    for i in 0..n {
+        // SAFETY: `binary` is non-null and holds `binlen` bytes, `n` at most.
+        let b = unsafe { binary.add(i).read() };
+        text[len] = digit(b >> 4);
+        text[len + 1] = digit(b & 0x0f);
+        len += 2;
+        if i % 2 == 0 && i + 1 < n {
+            text[len] = b'.';
+            len += 1;
+        }
+    }
+    // SAFETY: `start` is non-null and holds the text and its NUL -- the
+    // thread's buffer `NSAP_NTOA_MAX` bytes, which 255 bytes' text and its
+    // NUL fill exactly, or the caller's by contract.
+    unsafe {
+        core::ptr::copy_nonoverlapping(text.as_ptr(), start, len);
+        start.add(len).write(0);
+    }
+    start
 }
 
 // ---------------------------------------------------------------------------
@@ -1815,5 +2328,233 @@ mod tests {
         assert_eq!(unsafe { (*e).ether_addr_octet }, [1, 2, 3, 4, 5, 6]);
         // SAFETY: `e` is readable.
         assert_eq!(text(unsafe { ether_ntoa(e) }), "1:2:3:4:5:6");
+    }
+
+    /// glibc 2.39's `inet_net_pton`, `inet_net_ntop`, `inet_neta`,
+    /// `inet_nsap_addr` and `inet_nsap_ntoa`, one line a call
+    /// (`posix/tools/oracle/inetnet_harness.py`, which says the forms).
+    const INETNET_ORACLE: &str = include_str!("inetnet_oracle.txt");
+
+    /// A text as the harness writes it: `\xHH` for a byte, `\x` for none.
+    fn untoken(t: &str) -> Vec<u8> {
+        if t == "\\x" {
+            return Vec::new();
+        }
+        let b = t.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+                out.push(u8::from_str_radix(&t[i + 2..i + 4], 16).unwrap());
+                i += 4;
+            } else {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn errno_name(e: i32) -> &'static str {
+        match e {
+            0 => "0",
+            errno::ENOENT => "ENOENT",
+            errno::EMSGSIZE => "EMSGSIZE",
+            errno::EINVAL => "EINVAL",
+            errno::EAFNOSUPPORT => "EAFNOSUPPORT",
+            _ => "other",
+        }
+    }
+
+    /// What the harness's C prints after ` = ` for `call`, from this
+    /// crate's functions.
+    fn inetnet_ours(call: &str) -> String {
+        let f: Vec<&str> = call.split(' ').collect();
+        match f[0] {
+            "P" => {
+                let s = cstring(&untoken(f[2]));
+                let mut buf = [0xaau8; 16];
+                errno::set_errno(0);
+                // SAFETY: `s` is NUL-terminated; `buf` holds the sizes asked.
+                let r = unsafe {
+                    inet_net_pton(
+                        f[1].parse().unwrap(),
+                        s.as_ptr(),
+                        buf.as_mut_ptr(),
+                        f[3].parse().unwrap(),
+                    )
+                };
+                let e = if r == -1 { errno::get_errno() } else { 0 };
+                format!("{r} {} {}", errno_name(e), hex(&buf))
+            }
+            "N" | "A" => {
+                let mut buf = [0xaau8; 24];
+                errno::set_errno(0);
+                let r = if f[0] == "N" {
+                    let src = unhex(f[2]);
+                    // SAFETY: `src` holds four bytes; `buf` the sizes asked.
+                    unsafe {
+                        inet_net_ntop(
+                            f[1].parse().unwrap(),
+                            src.as_ptr(),
+                            f[3].parse().unwrap(),
+                            buf.as_mut_ptr(),
+                            f[4].parse().unwrap(),
+                        )
+                    }
+                } else {
+                    // SAFETY: `buf` holds the sizes asked.
+                    unsafe {
+                        inet_neta(
+                            u32::from_str_radix(f[1], 16).unwrap(),
+                            buf.as_mut_ptr(),
+                            f[2].parse().unwrap(),
+                        )
+                    }
+                };
+                let (ok, e) = if r.is_null() {
+                    ("NULL", errno::get_errno())
+                } else if r == buf.as_mut_ptr() {
+                    ("ok", 0)
+                } else {
+                    ("other", 0)
+                };
+                format!("{ok} {} {}", errno_name(e), hex(&buf))
+            }
+            "S" => {
+                let s = cstring(&untoken(f[1]));
+                let mut buf = [0xaau8; 40];
+                // SAFETY: `s` is NUL-terminated; every text the harness has
+                // makes fewer than 40 bytes, whatever `maxlen` allows.
+                let r =
+                    unsafe { inet_nsap_addr(s.as_ptr(), buf.as_mut_ptr(), f[2].parse().unwrap()) };
+                format!("{r} {}", hex(&buf))
+            }
+            "T" => {
+                let bytes: Vec<u8> = match f[1] {
+                    "-" => std::vec![0],
+                    w if w.starts_with("seq") => (0..300u32).map(|i| (i * 7 + 3) as u8).collect(),
+                    w => unhex(w),
+                };
+                let own = f[3] == "buf";
+                let mut buf = [0xaau8; 1024];
+                let dst = if own {
+                    buf.as_mut_ptr()
+                } else {
+                    core::ptr::null_mut()
+                };
+                // SAFETY: `bytes` holds what `binlen` reads (300 for the
+                // longest, 255 of them read); `buf` holds the longest text.
+                let r = unsafe { inet_nsap_ntoa(f[2].parse().unwrap(), bytes.as_ptr(), dst) };
+                let ok = if own {
+                    r == buf.as_mut_ptr()
+                } else {
+                    !r.is_null() && r != buf.as_mut_ptr()
+                };
+                format!("{} {}", if ok { "ok" } else { "other" }, text(r))
+            }
+            other => panic!("unknown line kind {other}"),
+        }
+    }
+
+    #[test]
+    fn network_numbers_and_nsap_addresses_answer_as_glibcs() {
+        let mut wrong = Vec::new();
+        let mut n = 0;
+        for line in INETNET_ORACLE
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let (call, want) = line.split_once(" = ").unwrap();
+            n += 1;
+            let got = inetnet_ours(call);
+            if got != want {
+                wrong.push(format!("{call}\n  glibc: {want}\n  ours:  {got}"));
+            }
+        }
+        assert!(n > 250, "the oracle has {n} lines");
+        assert!(
+            wrong.is_empty(),
+            "{} of {n}:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    /// Where glibc would read or write through NULL, these refuse: as text
+    /// that is not a number, or `EFAULT` at the first write.
+    #[test]
+    fn network_numbers_refuse_null_where_glibc_would_fault() {
+        let mut buf = [0xaau8; 16];
+        errno::set_errno(0);
+        // SAFETY: a NULL text is refused before it is read.
+        assert_eq!(
+            unsafe { inet_net_pton(AF_INET, core::ptr::null(), buf.as_mut_ptr(), 4) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+        // SAFETY: NUL-terminated text; a NULL destination is refused.
+        assert_eq!(
+            unsafe { inet_net_pton(AF_INET, c"10".as_ptr().cast(), core::ptr::null_mut(), 4) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // ... but a size of 0 is refused before the destination is.
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { inet_net_pton(AF_INET, c"0x0a".as_ptr().cast(), core::ptr::null_mut(), 0) },
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EMSGSIZE);
+
+        // SAFETY: a NULL source or destination is refused at its first use.
+        assert!(
+            unsafe { inet_net_ntop(AF_INET, core::ptr::null(), 8, buf.as_mut_ptr(), 16) }.is_null()
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let a = [10u8, 0, 0, 1];
+        // SAFETY: as above.
+        assert!(
+            unsafe { inet_net_ntop(AF_INET, a.as_ptr(), 8, core::ptr::null_mut(), 16) }.is_null()
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // SAFETY: as above.
+        assert!(unsafe { inet_neta(1, core::ptr::null_mut(), 16) }.is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        // SAFETY: a NULL text is 0; a NULL destination 0 with `EFAULT`.
+        assert_eq!(
+            unsafe { inet_nsap_addr(core::ptr::null(), buf.as_mut_ptr(), 4) },
+            0
+        );
+        errno::set_errno(0);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { inet_nsap_addr(c"4700".as_ptr().cast(), core::ptr::null_mut(), 4) },
+            0
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // SAFETY: a NULL source is the empty text.
+        let r = unsafe { inet_nsap_ntoa(2, core::ptr::null(), buf.as_mut_ptr()) };
+        assert_eq!(text(r), "");
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn inet_nsap_ntoa_without_a_buffer_answers_in_the_threads_own() {
+        let bytes = [0x47u8, 0x00, 0x05];
+        // SAFETY: `bytes` holds three bytes; no buffer asks for the thread's.
+        let a = unsafe { inet_nsap_ntoa(3, bytes.as_ptr(), core::ptr::null_mut()) };
+        let other = std::thread::spawn(|| {
+            let b = [0xffu8];
+            // SAFETY: as above.
+            let p = unsafe { inet_nsap_ntoa(1, b.as_ptr(), core::ptr::null_mut()) };
+            (p as usize, text(p))
+        })
+        .join()
+        .unwrap();
+        assert_ne!(a as usize, other.0);
+        assert_eq!(other.1, "FF");
+        assert_eq!(text(a), "47.0005", "not overwritten by the other thread");
     }
 }

@@ -443,7 +443,7 @@ pub unsafe fn va_arg_int(va: &mut VaList) -> u64 {
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`].
-unsafe fn va_arg_double(va: &mut VaList) -> u64 {
+pub(crate) unsafe fn va_arg_double(va: &mut VaList) -> u64 {
     if (va.fp_offset as usize) < 176 && !va.reg_save_area.is_null() {
         // SAFETY: fp_offset < 176 stays within the XMM save area.
         let p = unsafe { va.reg_save_area.add(va.fp_offset as usize) };
@@ -477,7 +477,7 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
 ///
 /// # Safety
 /// Same contract as [`va_arg_int`], except the argument occupies 16 bytes.
-unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
+pub(crate) unsafe fn va_arg_long_double(va: &mut VaList) -> crate::x87::LongDouble {
     let area = va.overflow_arg_area;
     if area.is_null() {
         return crate::x87::LongDouble::from_bits(0, 0);
@@ -970,6 +970,84 @@ mod gnu_vasprintf {
 }
 pub use gnu_vasprintf::vasprintf;
 
+/// Own archive member -- gnulib's `obstack-printf` module defines
+/// `obstack_vprintf` where the C library has none.
+mod gnu_obstack_vprintf {
+    use super::{Args, Sink, VaList, format_to_sink};
+    use crate::obstack::Obstack;
+    use core::ffi::c_void;
+
+    // A new chunk by `_obstack_newchunk`'s C name, as glibc's obstack_printf
+    // has one -- through `obstack_grow` -- so that a program with obstacks of
+    // its own (gnulib's) has this use its `_obstack_newchunk`, and nothing
+    // here brings in obstack's member beside it. On the host the library's
+    // names are not the C ones, and there is no other.
+    #[cfg(target_os = "none")]
+    unsafe extern "C" {
+        fn _obstack_newchunk(h: *mut Obstack, length: i32);
+    }
+    #[cfg(not(target_os = "none"))]
+    use crate::obstack::_obstack_newchunk;
+
+    /// `len` bytes from `src` added to the end of the object growing in the
+    /// obstack at `h`, as `obstack_grow` adds them: `false`, and nothing
+    /// added, when no room could be had -- a failure handler that returns.
+    ///
+    /// # Safety
+    /// `h` is a begun obstack; `src` holds `len` bytes.
+    unsafe fn grow(h: *mut c_void, src: *const u8, len: usize) -> bool {
+        let h = h.cast::<Obstack>();
+        let Ok(n) = i32::try_from(len) else {
+            return false;
+        };
+        // SAFETY: the caller's obstack, whose next_free and chunk_limit are
+        // in (or one past) its current chunk.
+        let room = |h: *mut Obstack| unsafe { (*h).chunk_limit.offset_from((*h).next_free) };
+        let wanted = isize::try_from(n).unwrap_or(isize::MAX);
+        if room(h) < wanted {
+            // SAFETY: per the contract.
+            unsafe { _obstack_newchunk(h, n) };
+            if room(h) < wanted {
+                return false;
+            }
+        }
+        // SAFETY: room for `len` bytes at next_free, made above.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, (*h).next_free, len);
+            (*h).next_free = (*h).next_free.add(len);
+        }
+        true
+    }
+
+    /// `obstack_vprintf(h, fmt, ap)` -- `fmt` formatted onto the end of the
+    /// object growing in `h`, as `obstack_grow` adds bytes to it, with no
+    /// NUL after: the number of bytes added, or -1.
+    ///
+    /// # Safety
+    /// `h` is an initialised obstack; `fmt` and `ap` as for `vprintf`.
+    #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+    pub unsafe extern "C" fn obstack_vprintf(
+        h: *mut Obstack,
+        fmt: *const u8,
+        ap: *mut VaList,
+    ) -> i32 {
+        if h.is_null() || ap.is_null() {
+            return -1;
+        }
+        // SAFETY: as for `vprintf`.
+        let mut args = unsafe { Args::new(Some(&mut *ap)) };
+        format_to_sink(Sink::Append(h.cast(), grow), fmt, &mut args)
+    }
+}
+pub use gnu_obstack_vprintf::obstack_vprintf;
+
+/// Own archive member -- gnulib's `obstack-printf` module defines
+/// `obstack_printf` too.
+#[cfg(target_os = "none")]
+mod gnu_obstack_printf {
+    va_trampoline!("obstack_printf", "obstack_vprintf", "16", "rdx");
+}
+
 // ---------------------------------------------------------------------------
 // Core formatting engine
 // ---------------------------------------------------------------------------
@@ -991,6 +1069,17 @@ enum Sink {
     Stream(*mut u8),
     /// A file descriptor (`dprintf`): each full buffer is written to it.
     Fd(i32),
+    /// A destination of the caller's (`obstack_printf`'s growing object):
+    /// each full buffer is handed to the function, with the context, and
+    /// `false` from it fails the call.  A function the caller passes, not
+    /// one named here: this member is every printf's, and naming the
+    /// obstack code would bring obstack's member into every program that
+    /// prints -- a program with gnulib's obstacks would then have two
+    /// (scripts/check-libc-shape.py, CHECK 5).
+    Append(
+        *mut core::ffi::c_void,
+        unsafe fn(*mut core::ffi::c_void, *const u8, usize) -> bool,
+    ),
     /// Host tests: each full buffer is appended to this vector.
     #[cfg(test)]
     Capture(*mut std::vec::Vec<u8>),
@@ -1053,6 +1142,9 @@ impl FmtOutput {
                 usize::try_from(r).is_ok_and(|r| r == pending)
             }
             Sink::Fd(fd) => write_all(fd, self.buf, pending),
+            // SAFETY: the context and the function the caller paired with
+            // it, both live for the call; `buf` holds `pending` bytes.
+            Sink::Append(ctx, append) => unsafe { append(ctx, self.buf, pending) },
             #[cfg(test)]
             Sink::Capture(out) => {
                 // SAFETY: the test owns `out` for the call, and `buf` holds
@@ -1777,7 +1869,7 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
 /// every digit of it, where this printed the value's nearest `double`
 /// (`TD-POSIX-LONG-DOUBLE-PRECISION`).
 #[derive(Clone, Copy)]
-enum FloatArg {
+pub(crate) enum FloatArg {
     /// A `double` (and a `float`, promoted to one).
     Double(f64),
     /// A `long double`: x87's 80-bit format, integer bit explicit.
@@ -1807,6 +1899,22 @@ impl FloatArg {
             Self::Long(l) => l.is_sign_negative(),
         }
     }
+
+    /// `x < 0` as C compares it: false for a zero, `-0.0` too, and a NaN.
+    pub(crate) fn below_zero(self) -> bool {
+        match self {
+            Self::Double(v) => v < 0.0,
+            Self::Long(l) => l.is_sign_negative() && !l.is_nan() && !l.is_zero(),
+        }
+    }
+
+    /// `-x`.
+    pub(crate) fn negated(self) -> Self {
+        match self {
+            Self::Double(v) => Self::Double(-v),
+            Self::Long(l) => Self::Long(l.negate()),
+        }
+    }
 }
 
 /// The exact expansion of a finite `long double`'s magnitude: its
@@ -1814,7 +1922,7 @@ impl FloatArg {
 /// reading as 1 (the subnormals, and the pseudo-denormals the unit reads as
 /// their value). On the stack for a value within about a `double`'s range;
 /// `None` when the blocks one far outside it needs cannot be allocated.
-fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
+pub(crate) fn long_expansion(l: crate::x87::LongDouble) -> Option<Decimal<DigitBuf>> {
     // A 15-bit field less the bias and the significand's 63 places: no wrap.
     let e = i32::from(l.biased_exponent().max(1)).wrapping_sub(16383 + 63);
     Decimal::of_parts(l.significand, e)
@@ -2116,6 +2224,122 @@ pub(crate) unsafe fn format_g_into(buf: *mut u8, val: f64, precision: usize) -> 
     // SAFETY: the caller's buffer has room for the terminator after `n`.
     unsafe { buf.add(n).write(0) };
     n
+}
+
+/// `sprintf(buf, "%.*Lg", precision, val)`, for `qgcvt`: [`format_g_into`]
+/// of a `long double`. A value whose digits cannot get the memory they need
+/// leaves what was written before the failure, terminated.
+///
+/// # Safety
+///
+/// `buf` has room for the conversion and its terminator -- at most 32 bytes
+/// for a precision of 21 or less.
+pub(crate) unsafe fn format_lg_into(
+    buf: *mut u8,
+    val: crate::x87::LongDouble,
+    precision: usize,
+) -> usize {
+    let mut out = FmtOutput::new(buf, usize::MAX);
+    // `%.0Lg` is `%.1Lg`, as the dispatcher treats it.
+    let prec = if precision == 0 { 1 } else { precision };
+    format_float_general(
+        &mut out,
+        FloatArg::Long(val),
+        false,
+        &FormatFlags::new(),
+        0,
+        prec,
+    );
+    let n = out.pos;
+    // SAFETY: the caller's buffer has room for the terminator after `n`.
+    unsafe { buf.add(n).write(0) };
+    n
+}
+
+/// A number's `%f` text for this library's own callers that sign and pad it
+/// themselves (`strfmon`): `head`, then `zeros` zeros, then `tail` -- the
+/// zeros past what the value's expansion holds are counted, not written, so
+/// that a precision of a million costs no million bytes. For a value that is
+/// not finite, `head` is `inf` or `nan`.
+pub(crate) struct FixedText<'a> {
+    pub(crate) head: &'a [u8],
+    pub(crate) zeros: usize,
+    pub(crate) tail: &'a [u8],
+    /// Not `inf` or `nan`: `printf` pads those with spaces whatever the pad.
+    pub(crate) finite: bool,
+    /// The value's sign bit, which `printf` would print as `-` -- for `-0.0`
+    /// and a negative NaN too.
+    pub(crate) negative: bool,
+}
+
+impl FixedText<'_> {
+    /// The text's length, without a sign.
+    pub(crate) fn len(&self) -> usize {
+        self.head
+            .len()
+            .saturating_add(self.zeros)
+            .saturating_add(self.tail.len())
+    }
+}
+
+/// `%.*f` of `arg` -- `%.*Lf` of a `long double` -- without its sign, rounded
+/// to `precision` places in the current direction, handed to `f`: `printf`'s
+/// own digits, so that `strfmon` rounds as `printf` does. `None` when a
+/// `long double`'s digits cannot get the memory they need.
+pub(crate) fn with_fixed_text<R>(
+    arg: FloatArg,
+    precision: usize,
+    f: impl FnOnce(&FixedText<'_>) -> R,
+) -> Option<R> {
+    let negative = arg.is_sign_negative();
+    if arg.is_nan() || arg.is_infinite() {
+        let head: &[u8] = if arg.is_nan() { b"nan" } else { b"inf" };
+        return Some(f(&FixedText {
+            head,
+            zeros: 0,
+            tail: b"",
+            finite: false,
+            negative,
+        }));
+    }
+    match arg {
+        FloatArg::Double(v) => fixed_text_of(Decimal::new(v.abs()), precision, negative, f),
+        FloatArg::Long(l) => fixed_text_of(long_expansion(l)?, precision, negative, f),
+    }
+}
+
+/// [`with_fixed_text`] of a finite value's expansion.
+fn fixed_text_of<D: AsRef<[u8]> + AsMut<[u8]>, R>(
+    mut dec: Decimal<D>,
+    precision: usize,
+    negative: bool,
+    f: impl FnOnce(&FixedText<'_>) -> R,
+) -> Option<R> {
+    dec.round_to_place_in(
+        i32::try_from(precision).unwrap_or(i32::MAX),
+        Rounding::current(),
+        negative,
+    );
+    let run = |buf: &mut [u8]| {
+        let text = render_fixed(&dec, precision, buf);
+        let written = buf.get(..text.len).unwrap_or(&[]);
+        let (head, tail) = written.split_at(text.zeros_at.min(written.len()));
+        f(&FixedText {
+            head,
+            zeros: text.zeros,
+            tail,
+            finite: true,
+            negative,
+        })
+    };
+    let need = fixed_len(&dec, precision);
+    if need <= FLOAT_BUF {
+        let mut buf = [0u8; FLOAT_BUF];
+        Some(run(&mut buf))
+    } else {
+        let mut heap = MallocBuf::<u8>::zeroed(need)?;
+        Some(run(heap.as_mut()))
+    }
 }
 
 /// Format a floating-point value as a C99 hexadecimal float (`%a`/`%A`).
@@ -2812,7 +3036,7 @@ pub use strfrom_forms::{__slate_ld_strfroml, strfromd, strfromf};
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
@@ -2863,7 +3087,11 @@ mod tests {
     /// register-save layout is the one thing in this file that must match the
     /// ABI exactly, and a second copy of it is the shape the module header
     /// warns about -- "a fix to one silently missed the other".
-    fn with_valist<R>(ints: &[u64], floats: &[u64], f: impl FnOnce(*mut VaList) -> R) -> R {
+    pub(crate) fn with_valist<R>(
+        ints: &[u64],
+        floats: &[u64],
+        f: impl FnOnce(*mut VaList) -> R,
+    ) -> R {
         assert!(
             ints.len() <= 6 || floats.len() <= 8,
             "with_args cannot lay out overflowing integers and floats together; \

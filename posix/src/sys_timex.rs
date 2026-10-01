@@ -580,6 +580,112 @@ pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// ntp_gettime, ntp_gettimex: the time and its error bounds
+// ---------------------------------------------------------------------------
+
+/// `struct ntptimeval`, glibc's: the clock's time and error bounds as
+/// [`ntp_gettimex`] reads them.  musl's has only the first three fields --
+/// the struct as it was before the TAI offset -- and the overlay's
+/// `<sys/timex.h>` gives C this one in its place.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NtpTimeval {
+    /// The time: seconds, and microseconds -- nanoseconds when the clock's
+    /// status has [`STA_NANO`].
+    pub time: crate::time::Timeval,
+    /// The maximum error, in microseconds.
+    pub maxerror: i64,
+    /// The estimated error, in microseconds.
+    pub esterror: i64,
+    /// The TAI offset, in seconds.
+    pub tai: i64,
+    /// glibc's four reserved words, which [`ntp_gettimex`] zeroes.
+    pub reserved: [i64; 4],
+}
+
+/// The clock as `adjtimex` reads it with no modes, which needs no
+/// privilege: its state (`TIME_OK` ... `TIME_ERROR`), or -1 with `errno`
+/// set; and what it filled in.
+fn clock_reading() -> (i32, Timex) {
+    let mut tx = Timex::zeroed();
+    let rc = clock_adjtime(CLOCK_REALTIME_ID, &raw mut tx);
+    (rc, tx)
+}
+
+/// The time and its error bounds in the struct as it was before the TAI
+/// offset -- `time`, `maxerror` and `esterror`, all of it -- as glibc's
+/// `ntp_gettime` symbol fills it: the clock's state (`TIME_OK` ...
+/// `TIME_ERROR`), or -1 with `errno` set (`EFAULT` for a NULL `ntv`, where
+/// glibc's, declared `nonnull`, would fault).
+///
+/// A program compiled against `<sys/timex.h>` does not call this: the
+/// header sends the name to [`ntp_gettimex`], as glibc's does, since the
+/// struct it declares is the newer one.  This is the library's symbol, for
+/// what calls it by name -- a `configure` link test, a program with its own
+/// declaration.
+///
+/// # Safety
+///
+/// `ntv` is NULL or writable for the older struct's 32 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ntp_gettime(ntv: *mut NtpTimeval) -> i32 {
+    if ntv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let (rc, tx) = clock_reading();
+    if rc < 0 {
+        return -1;
+    }
+    let time = crate::time::Timeval {
+        tv_sec: tx.time_tv_sec,
+        tv_usec: tx.time_tv_usec,
+    };
+    // SAFETY: the older struct's three fields, its first 32 bytes, which
+    // the caller's `ntv` has room for.
+    unsafe {
+        (&raw mut (*ntv).time).write_unaligned(time);
+        (&raw mut (*ntv).maxerror).write_unaligned(tx.maxerror);
+        (&raw mut (*ntv).esterror).write_unaligned(tx.esterror);
+    }
+    rc
+}
+
+/// The time, its error bounds and the TAI offset -- every field of
+/// [`NtpTimeval`], the reserved ones 0 -- as glibc's `ntp_gettimex` fills
+/// them, and what `<sys/timex.h>` sends `ntp_gettime` to: the clock's state
+/// (`TIME_OK` ... `TIME_ERROR`), or -1 with `errno` set (`EFAULT` for a
+/// NULL `ntv`).
+///
+/// # Safety
+///
+/// `ntv` is NULL or writable for an [`NtpTimeval`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn ntp_gettimex(ntv: *mut NtpTimeval) -> i32 {
+    if ntv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let (rc, tx) = clock_reading();
+    if rc < 0 {
+        return -1;
+    }
+    let value = NtpTimeval {
+        time: crate::time::Timeval {
+            tv_sec: tx.time_tv_sec,
+            tv_usec: tx.time_tv_usec,
+        },
+        maxerror: tx.maxerror,
+        esterror: tx.esterror,
+        tai: i64::from(tx.tai),
+        reserved: [0; 4],
+    };
+    // SAFETY: writable for an `NtpTimeval`, by contract.
+    unsafe { ntv.write_unaligned(value) };
+    rc
+}
+
+// ---------------------------------------------------------------------------
 // clock_adjtime clock-id dispatch table
 // ---------------------------------------------------------------------------
 //
@@ -893,6 +999,138 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(adjtimex(0xFFFF_8000_0000_0000_usize as *mut Timex), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// glibc 2.39's `ntp_gettime` and `ntp_gettimex`
+    /// (`posix/tools/oracle/ntp_harness.py`).
+    const NTP_ORACLE: &str = include_str!("ntp_oracle.txt");
+
+    /// The harness's `probe`: which of the struct's nine words `f` writes
+    /// (it is filled with 0x55 first), and whether what it wrote is
+    /// adjtimex's, read just before and after.
+    fn ntp_probe(what: &str, f: unsafe extern "C" fn(*mut NtpTimeval) -> i32) -> String {
+        let size = size_of::<NtpTimeval>();
+        let mut v = core::mem::MaybeUninit::<NtpTimeval>::uninit();
+        // SAFETY: `size` bytes of `v`'s own storage.
+        unsafe { v.as_mut_ptr().cast::<u8>().write_bytes(0x55, size) };
+        let mut before = Timex::zeroed();
+        let mut after = Timex::zeroed();
+        let want = adjtimex(&mut before);
+        errno::set_errno(12345);
+        // SAFETY: `v` is writable for a whole `NtpTimeval`.
+        let rc = unsafe { f(v.as_mut_ptr()) };
+        let err = errno::get_errno();
+        adjtimex(&mut after);
+        // SAFETY: every byte of `v` is initialised: 0x55, or written.
+        let (bytes, v) = unsafe {
+            (
+                core::slice::from_raw_parts(v.as_ptr().cast::<u8>(), size),
+                v.assume_init(),
+            )
+        };
+        let written: String = bytes
+            .chunks(8)
+            .map(|w| {
+                if w.iter().all(|&b| b == 0x55) {
+                    '-'
+                } else {
+                    'w'
+                }
+            })
+            .collect();
+        let judge = |ok: bool| if ok { "adjtimex's" } else { "other" };
+        let time_ok = (before.time_tv_sec..=after.time_tv_sec).contains(&v.time.tv_sec);
+        let max_ok = (before.maxerror..=after.maxerror).contains(&v.maxerror);
+        let est_ok = v.esterror == before.esterror || v.esterror == after.esterror;
+        let mut line = format!(
+            "{what} = {} written={written} errno={} time={} maxerror={} esterror={}",
+            judge(rc == want),
+            if err == 12345 { "kept" } else { "changed" },
+            judge(time_ok),
+            judge(max_ok),
+            judge(est_ok)
+        );
+        if written.as_bytes().get(4) == Some(&b'w') {
+            let tai_ok = v.tai == i64::from(before.tai) || v.tai == i64::from(after.tai);
+            let [a, b, c, d] = v.reserved;
+            line += &format!(" tai={} reserved={a},{b},{c},{d}", judge(tai_ok));
+        }
+        line
+    }
+
+    /// Every line of glibc's: the struct's size and layout, and which words
+    /// each function writes -- `ntp_gettime`, the library's symbol, the
+    /// older struct's four; `ntp_gettimex` all nine, the reserved ones 0.
+    /// `header ntp_gettime` is a C program's call, which `<sys/timex.h>`
+    /// sends to `ntp_gettimex` (`check-libc-overlay.py` holds its label to
+    /// glibc's); here it is that call.
+    #[test]
+    fn ntp_gettime_and_ntp_gettimex_are_glibcs() {
+        let ours = [
+            format!("sizeof(struct ntptimeval) = {}", size_of::<NtpTimeval>()),
+            format!(
+                "offsetof tai = {}, __glibc_reserved1 = {}",
+                core::mem::offset_of!(NtpTimeval, tai),
+                core::mem::offset_of!(NtpTimeval, reserved)
+            ),
+            ntp_probe("ntp_gettime", ntp_gettime),
+            ntp_probe("ntp_gettimex", ntp_gettimex),
+            ntp_probe("header ntp_gettime", ntp_gettimex),
+        ];
+        let glibc: std::vec::Vec<&str> =
+            NTP_ORACLE.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(glibc, ours);
+    }
+
+    /// The TAI offset and the error bounds are the clock's: what
+    /// `ADJ_TAI`, `ADJ_MAXERROR` and `ADJ_ESTERROR` set, `ntp_gettimex`
+    /// reads back, and `ntp_gettime` the two bounds of.
+    #[test]
+    fn ntp_gettimex_reads_what_adjtimex_set() {
+        let mut set = Timex::zeroed();
+        set.modes = ADJ_TAI | ADJ_MAXERROR | ADJ_ESTERROR;
+        set.tai = 37;
+        set.maxerror = 1_234;
+        set.esterror = 56;
+        assert!(adjtimex(&mut set) >= 0, "errno {}", errno::get_errno());
+        let mut v = NtpTimeval {
+            time: crate::time::Timeval::default(),
+            maxerror: 0,
+            esterror: 0,
+            tai: 0,
+            reserved: [9; 4],
+        };
+        // SAFETY: a whole `NtpTimeval`.
+        let rc = unsafe { ntp_gettimex(&mut v) };
+        assert!(rc >= 0);
+        assert_eq!(
+            (v.tai, v.maxerror, v.esterror, v.reserved),
+            (37, 1_234, 56, [0; 4])
+        );
+        let mut old = NtpTimeval { tai: -1, ..v };
+        old.maxerror = 0;
+        // SAFETY: as above.
+        assert!(unsafe { ntp_gettime(&mut old) } >= 0);
+        assert_eq!(
+            (old.maxerror, old.esterror, old.tai),
+            (1_234, 56, -1),
+            "tai untouched"
+        );
+        let mut reset = Timex::zeroed();
+        reset.modes = ADJ_TAI | ADJ_MAXERROR | ADJ_ESTERROR;
+        reset.maxerror = 16_000_000;
+        reset.esterror = 16_000_000;
+        assert!(adjtimex(&mut reset) >= 0);
+    }
+
+    #[test]
+    fn ntp_gettime_refuses_null() {
+        for f in [ntp_gettime, ntp_gettimex] {
+            errno::set_errno(0);
+            // SAFETY: NULL is the input under test.
+            assert_eq!(unsafe { f(core::ptr::null_mut()) }, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
     }
 
     #[test]

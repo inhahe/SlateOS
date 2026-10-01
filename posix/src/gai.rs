@@ -44,6 +44,7 @@
 
 use crate::errno;
 use crate::hosts::{self, NETDB_INTERNAL, Status, Tuple};
+use crate::list::List;
 use crate::socket::{
     AF_INET, AF_INET6, AF_UNSPEC, Addrinfo, EAI_ADDRFAMILY, EAI_AGAIN, EAI_BADFLAGS, EAI_FAMILY,
     EAI_MEMORY, EAI_NODATA, EAI_NONAME, EAI_SERVICE, EAI_SOCKTYPE, EAI_SYSTEM, IPPROTO_TCP,
@@ -85,78 +86,43 @@ const IPPROTO_SCTP: i32 = 132;
 const SCOPE_DELIMITER: u8 = b'%';
 
 // ---------------------------------------------------------------------------
-// A small growable list, for the addresses a lookup finds
+// What a lookup gathers
 // ---------------------------------------------------------------------------
 
-/// A `malloc`-backed list of `Copy` values.
-struct List<T: Copy> {
-    ptr: *mut T,
-    len: usize,
-    cap: usize,
-    /// A `realloc` failed: the list is no longer complete.
+/// A list of what a lookup finds, which remembers a growth that failed: the
+/// lookup goes on gathering -- its callbacks have no error to return -- and
+/// answers `EAI_MEMORY` at the end if anything was lost.
+struct Gathered<T: Copy> {
+    items: List<T>,
+    /// A growth failed: the list is no longer complete.
     failed: bool,
 }
 
-impl<T: Copy> List<T> {
+impl<T: Copy> Gathered<T> {
     const fn new() -> Self {
         Self {
-            ptr: core::ptr::null_mut(),
-            len: 0,
-            cap: 0,
+            items: List::new(),
             failed: false,
         }
     }
 
     fn push(&mut self, v: T) {
-        if self.failed {
-            return;
+        if !self.failed && self.items.push(v).is_err() {
+            self.failed = true;
         }
-        if self.len == self.cap {
-            let cap = if self.cap == 0 { 4 } else { self.cap * 2 };
-            let Some(bytes) = cap.checked_mul(size_of::<T>()) else {
-                self.failed = true;
-                return;
-            };
-            // SAFETY: `ptr` is NULL or this list's block.
-            let p = unsafe { crate::malloc::realloc(self.ptr.cast(), bytes) }.cast::<T>();
-            if p.is_null() {
-                self.failed = true;
-                return;
-            }
-            self.ptr = p;
-            self.cap = cap;
-        }
-        // SAFETY: `len < cap`, inside the block.
-        unsafe { self.ptr.add(self.len).write(v) };
-        self.len += 1;
     }
 
     fn as_slice(&self) -> &[T] {
-        if self.ptr.is_null() {
-            return &[];
-        }
-        // SAFETY: `len` values are written.
-        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+        &self.items
     }
 
     fn as_mut_slice(&mut self) -> &mut [T] {
-        if self.ptr.is_null() {
-            return &mut [];
-        }
-        // SAFETY: as above.
-        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+        &mut self.items
     }
 
     fn clear(&mut self) {
-        self.len = 0;
+        self.items.clear();
         self.failed = false;
-    }
-}
-
-impl<T: Copy> Drop for List<T> {
-    fn drop(&mut self) {
-        // SAFETY: NULL or this list's block.
-        unsafe { crate::malloc::free(self.ptr.cast()) };
     }
 }
 
@@ -329,7 +295,11 @@ fn serv_tuple(service: &Service, tp: &TypeProto, req: &Req) -> Result<ServTuple,
 }
 
 /// `get_servtuples`: the socket types and ports the answer is given for.
-fn servtuples(service: Option<&Service>, req: &Req, out: &mut List<ServTuple>) -> Result<(), i32> {
+fn servtuples(
+    service: Option<&Service>,
+    req: &Req,
+    out: &mut Gathered<ServTuple>,
+) -> Result<(), i32> {
     // The hints narrow the table to one entry, when they say anything.
     let mut chosen: Option<&TypeProto> = None;
     if req.protocol != 0 || req.socktype != 0 {
@@ -384,7 +354,7 @@ fn add_numeric(
     num: Option<i32>,
     chosen: Option<&TypeProto>,
     req: &Req,
-    out: &mut List<ServTuple>,
+    out: &mut Gathered<ServTuple>,
 ) -> Result<(), i32> {
     let port = num.map_or(0, |n| (n as u16).to_be());
     if let Some(tp) = chosen {
@@ -515,7 +485,7 @@ fn numeric_host(name: &[u8], req: &Req) -> Result<Option<Tuple>, i32> {
 
 /// `get_local_addresses`: for no name, the loopback -- or, with
 /// `AI_PASSIVE`, the wildcard -- IPv6 first.
-fn local_addresses(req: &Req, out: &mut List<Tuple>) {
+fn local_addresses(req: &Req, out: &mut Gathered<Tuple>) {
     let mut add = |family: i32, loopback: [u8; 16]| {
         out.push(Tuple {
             family,
@@ -547,7 +517,7 @@ fn local_addresses(req: &Req, out: &mut List<Tuple>) {
 /// string, or NULL), and whether an IPv6 address is among them -- glibc's
 /// `gaih_result`.
 struct Found {
-    at: List<Tuple>,
+    at: Gathered<Tuple>,
     canon: *mut u8,
     got_ipv6: bool,
 }
@@ -555,7 +525,7 @@ struct Found {
 impl Found {
     fn new() -> Self {
         Self {
-            at: List::new(),
+            at: Gathered::new(),
             canon: core::ptr::null_mut(),
             got_ipv6: false,
         }
@@ -620,14 +590,14 @@ fn gethosts(
     res: &mut Found,
     herr: &mut i32,
 ) -> (Status, i32) {
-    let mut canon: Option<List<u8>> = None;
-    let mut added = List::<Tuple>::new();
+    let mut canon: Option<Gathered<u8>> = None;
+    let mut added = Gathered::<Tuple>::new();
     let status = (m.by3)(
         name,
         family,
         herr,
         &mut |c| {
-            let mut l = List::new();
+            let mut l = Gathered::new();
             for &b in c {
                 l.push(b);
             }
@@ -682,13 +652,13 @@ fn nss_addresses(name: &[u8], req: &Req, res: &mut Found) -> Result<(), i32> {
         res.reset();
         no_data = 0;
         if req.family == AF_UNSPEC {
-            let mut canon: Option<List<u8>> = None;
-            let mut all = List::<Tuple>::new();
+            let mut canon: Option<Gathered<u8>> = None;
+            let mut all = Gathered::<Tuple>::new();
             status = (m.by4)(
                 name,
                 &mut herr,
                 &mut |c| {
-                    let mut l = List::new();
+                    let mut l = Gathered::new();
                     for &b in c {
                         l.push(b);
                     }
@@ -780,7 +750,7 @@ fn simple_lookup(name: &[u8], req: &Req, res: &mut Found) -> Result<bool, i32> {
     if req.family != AF_INET || req.flags & AI_CANONNAME != 0 {
         return Ok(false);
     }
-    let mut cname = List::<u8>::new();
+    let mut cname = Gathered::<u8>::new();
     for &b in name {
         cname.push(b);
     }
@@ -1094,9 +1064,9 @@ const DEFAULT_SCOPES: [ScopeEntry; 3] = [
 
 /// The tables in force: glibc's, or `/etc/gai.conf`'s.
 struct Tables {
-    labels: List<PrefixEntry>,
-    precedence: List<PrefixEntry>,
-    scopes: List<ScopeEntry>,
+    labels: Gathered<PrefixEntry>,
+    precedence: Gathered<PrefixEntry>,
+    scopes: Gathered<ScopeEntry>,
     /// `reload yes`: look at the file's modification time on every call.
     reload: bool,
     /// The file's modification time when it was read (seconds,
@@ -1107,9 +1077,9 @@ struct Tables {
 impl Tables {
     const fn new() -> Self {
         Self {
-            labels: List::new(),
-            precedence: List::new(),
-            scopes: List::new(),
+            labels: Gathered::new(),
+            precedence: Gathered::new(),
+            scopes: Gathered::new(),
             reload: false,
             mtime: None,
         }
@@ -1366,8 +1336,8 @@ fn source_address(dest: &Sa) -> Option<Sa> {
 /// `list` is the answer's head; the new head is returned, the canonical
 /// name moved to it.
 fn sort(list: *mut Addrinfo, t: &Tables) -> Result<*mut Addrinfo, i32> {
-    let mut nodes = List::<*mut Addrinfo>::new();
-    let mut entries = List::<SortEntry>::new();
+    let mut nodes = Gathered::<*mut Addrinfo>::new();
+    let mut entries = Gathered::<SortEntry>::new();
     let mut canon: *mut u8 = core::ptr::null_mut();
     let mut p = list;
     let mut last: Option<SortEntry> = None;
@@ -1405,7 +1375,7 @@ fn sort(list: *mut Addrinfo, t: &Tables) -> Result<*mut Addrinfo, i32> {
         return Err(EAI_MEMORY);
     }
     let n = entries.as_slice().len();
-    let mut order = List::<usize>::new();
+    let mut order = Gathered::<usize>::new();
     for i in 0..n {
         order.push(i);
     }
@@ -1476,7 +1446,7 @@ fn strtoul_field(s: &[u8]) -> Option<u64> {
 /// `add_prefixlist`: `prefix[/bits] value` into `list`, when it reads.  A
 /// prefix with no `/bits` is 128 bits long (glibc reads an uninitialised
 /// pointer there; this is what it means to do).
-fn add_prefix(list: &mut List<PrefixEntry>, nullbits: &mut bool, val1: &[u8], val2: &[u8]) {
+fn add_prefix(list: &mut Gathered<PrefixEntry>, nullbits: &mut bool, val1: &[u8], val2: &[u8]) {
     let (text, bits) = match val1.iter().position(|&b| b == b'/') {
         Some(i) => (&val1[..i], Some(&val1[i + 1..])),
         None => (val1, None),
@@ -1508,7 +1478,7 @@ fn add_prefix(list: &mut List<PrefixEntry>, nullbits: &mut bool, val1: &[u8], va
 /// `add_scopelist`, after `scopev4`'s own parsing: an IPv4 prefix -- as an
 /// IPv4-mapped IPv6 one of 96 to 128 bits, or plain of up to 32 -- and its
 /// scope.
-fn add_scope(list: &mut List<ScopeEntry>, nullbits: &mut bool, val1: &[u8], val2: &[u8]) {
+fn add_scope(list: &mut Gathered<ScopeEntry>, nullbits: &mut bool, val1: &[u8], val2: &[u8]) {
     let (text, bits_text) = match val1.iter().position(|&b| b == b'/') {
         Some(i) => (&val1[..i], Some(&val1[i + 1..])),
         None => (val1, None),
@@ -1568,7 +1538,7 @@ fn load_tables() -> Tables {
         return t;
     };
     t.mtime = gaiconf_mtime();
-    let (mut labels, mut prec, mut scopes) = (List::new(), List::new(), List::new());
+    let (mut labels, mut prec, mut scopes) = (Gathered::new(), Gathered::new(), Gathered::new());
     let (mut lnull, mut pnull, mut snull) = (false, false, false);
     for line in text.bytes().split_inclusive(|&b| b == b'\n') {
         // A comment runs to the end of the line; a NUL ends it as in C.
@@ -1726,7 +1696,7 @@ fn gaih_inet(
     req: &Req,
     head: *mut *mut Addrinfo,
 ) -> Result<usize, i32> {
-    let mut st = List::<ServTuple>::new();
+    let mut st = Gathered::<ServTuple>::new();
     servtuples(service, req, &mut st)?;
     if st.failed {
         return Err(EAI_MEMORY);

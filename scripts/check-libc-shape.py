@@ -47,7 +47,19 @@ moment we are trying to port something, which is the worst possible time and
 the furthest possible point from the change that caused it.
 
 Hence an assertion on the artifact itself. It is cheap: it reads the archive's
-symbol index and nothing else.
+symbol index, and for CHECKs 4 and 5 the members' own symbol tables.
+
+A MEMBER IS EXTRACTED FOR ANY NAME IT DEFINES -- SEE CHECK 5
+=============================================================
+
+CHECK 1 holds a family's member to defining no other *C* name. A linker does
+not care what a name looks like: a member is extracted to resolve any
+undefined symbol it defines, a Rust helper's mangled one included. So when
+`err`'s member called a helper that lived in `error`'s module, every program
+using `warn` extracted `error`'s member -- and with gnulib's own `error`
+linked in beside it, got two. CHECK 5 is the other half of the property: no
+member outside a family refers to anything the family's member defines but
+the family's own names.
 
 GRANULARITY IS NOT THE WHOLE STORY -- SEE CHECK 3
 =================================================
@@ -136,9 +148,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 # --- what we assert -----------------------------------------------------------
 #
-# Four checks. The first three are about which names share a member, and
+# Five checks. The first three are about which names share a member, and
 # they fail for different reasons and generalise differently; CHECK 4, below
-# them, is about names that must be one variable.
+# them, is about names that must be one variable; CHECK 5 about what else
+# can bring a family's member into a link.
 #
 # CHECK 1 (strict, narrow): for each family below, the member defining it must
 # define *nothing else*. This is the exact property glibc has, and it is the
@@ -154,13 +167,13 @@ for _stream in (sys.stdout, sys.stderr):
 # reported as an intruder the moment we implement it.
 #
 # Some listed names are in fact absent today, deliberately: `optreset` is a
-# BSD-ism we do not provide, `__getopt_initialized` is glibc-internal, and
-# `glob64`/`globfree64` are the large-file aliases (our off_t is already 64-bit,
-# so there is nothing for them to alias). Listing them anyway means that if any
-# is added later it must land in its family's member, which is the correct
-# constraint -- an LFS alias in a different object file from the function it
-# aliases would be a duplicate-definition hazard of exactly the kind this
-# script exists to catch.
+# BSD-ism we do not provide, and `__getopt_initialized` is glibc-internal.
+# Listing them anyway means that if either is added later it must land in its
+# family's member. `glob64`/`globfree64`, the large-file names, were absent
+# until 2026-09-30 and are in glob's member now, as glibc's are aliases in the
+# objects of `glob` and `globfree`: a program that brings its own `glob` and
+# still calls `glob64` fails to link, instead of running this library's
+# `glob64` over its own `glob`.
 #
 # Data symbols are listed alongside the functions on purpose: `optarg` and
 # friends are as much a duplicate-definition hazard as `getopt` itself, and
@@ -195,6 +208,24 @@ STRICT_FAMILIES: dict[str, frozenset[str]] = {
             "error_print_progname",
             "verror",
             "verror_at_line",
+        }
+    ),
+    # gnulib's obstack module defines what glibc's obstack.c does, glibc's
+    # <obstack.h> being the older interface gnulib's configure refuses
+    # (2026-09-30). Its printf, `obstack_printf`, reaches this member only by
+    # `_obstack_newchunk`'s name, so that a program with gnulib's obstacks
+    # and this library's `obstack_printf` uses its own `_obstack_newchunk`.
+    "obstack": frozenset(
+        {
+            "_obstack_begin",
+            "_obstack_begin_1",
+            "_obstack_newchunk",
+            "_obstack_free",
+            "obstack_free",
+            "_obstack_memory_used",
+            "_obstack_allocated_p",
+            "obstack_alloc_failed_handler",
+            "obstack_exit_failure",
         }
     ),
 }
@@ -244,10 +275,19 @@ REPLACEABLE = frozenset(
         "optarg", "opterr", "optind", "optopt", "optreset",
         "__getopt_initialized",
         "glob", "globfree", "glob64", "globfree64", "fnmatch",
+        # gnulib's glob module defines this plainly where the C library lacks
+        # it, as musl does; it is its own member, as in glibc (2026-09-29)
+        "glob_pattern_p",
+        # gnulib's rpmatch module, for yesno(): musl has none (2026-09-30)
+        "rpmatch",
         "error", "error_at_line", "verror", "verror_at_line",
         "error_message_count", "error_one_per_line", "error_print_progname",
-        # regex: gnulib vendors the whole engine
+        # regex: gnulib vendors the whole engine, the GNU interface with it
+        # (lane D, 2026-09-30: all in posix::regex, glibc's re_comp and
+        # re_exec too)
         "regcomp", "regexec", "regfree", "regerror", "re_compile_pattern",
+        "re_compile_fastmap", "re_search", "re_search_2", "re_match", "re_match_2",
+        "re_set_registers", "re_set_syntax", "re_syntax_options", "re_comp", "re_exec",
         # string/memory helpers gnulib routinely replaces
         "strverscmp", "strndup", "strnlen", "memrchr", "rawmemchr",
         "stpcpy", "stpncpy", "strchrnul", "strcasestr", "mempcpy",
@@ -282,7 +322,14 @@ REPLACEABLE = frozenset(
         "__freading", "__fwriting", "__flbf", "__fbufsize", "__fsetlocking",
         # misc POSIX-fillers
         "mkstemp", "mkostemp", "mkstemps", "mkostemps", "mkdtemp",
-        "canonicalize_file_name", "obstack_free",
+        "canonicalize_file_name",
+        # obstacks (lane D, 2026-09-30): the obstack module's functions and
+        # variables, posix::obstack's member -- a STRICT_FAMILIES entry --
+        # and the obstack-printf module's two, each its own member
+        "_obstack_begin", "_obstack_begin_1", "_obstack_newchunk", "_obstack_free",
+        "obstack_free", "_obstack_memory_used", "_obstack_allocated_p",
+        "obstack_alloc_failed_handler", "obstack_exit_failure",
+        "obstack_printf", "obstack_vprintf",
         "argp_parse", "getsubopt", "timegm", "strptime",
         "qsort_r", "timespec_get",
     }
@@ -376,6 +423,32 @@ ALIASES: list[tuple[str, ...]] = [
     ("__progname_full", "program_invocation_name"),
 ]
 
+# CHECK 5: a family's member is extracted for the family's names alone.
+#
+# CHECK 1 says a STRICT_FAMILIES member defines no C name but the family's, so
+# that a program bringing its own copy declines the member and loses nothing.
+# That holds only if nothing else pulls the member in -- and a linker extracts
+# a member to resolve ANY undefined symbol it defines, a Rust helper's mangled
+# name as much as a C one. is_collidable is right that a program cannot
+# *define* `_RNvNtC..5posix5error8put_cstr`; it can still *need* it, through a
+# libc function that calls it.
+#
+# Measured 2026-09-30 on the archive then on main: `err`'s member referenced
+# `posix::error::put_cstr`, which lived in `error`'s member, so any program
+# calling `warn` extracted `error`'s definitions -- a program with gnulib's
+# `error` module (which defines `error` plainly, musl having none) and a
+# `warn` call could not link; and `glob`'s member referenced `fnmatch`'s
+# `do_match`, so a program with its own `fnmatch` could not use libc's `glob`.
+# Both are fixed by moving what is shared into a module of its own (an
+# inline `mod`: its own member, with no C name in it).
+#
+# So: no member other than the family's own may reference, with a strong
+# (STB_GLOBAL) undefined symbol, anything the family's member defines except
+# the family's names -- a reference to `getopt` itself is resolved by the
+# program's `getopt` when it has one, and a weak reference extracts nothing.
+# (A member that only the family's member itself pulls in would be a false
+# alarm; none exists, and one that did would be worth knowing about anyway.)
+
 #: ELF symbol bindings, as `st_info >> 4` holds them.
 STB_GLOBAL, STB_WEAK = 1, 2
 
@@ -422,6 +495,21 @@ SELFTEST_MUTANTS = [
     ("aliases of the wrong binding pass",
      "        if binds != want:\n",
      "        if False:\n"),
+
+    # CHECK 5: does it run, and does it spare exactly what it should -- the
+    # family's own names, weak references, the member itself?
+    ("the reach check never runs",
+     "    for off in sorted(members):\n        body = member_body(data, off)\n",
+     "    for off in []:\n        body = member_body(data, off)\n"),
+    ("a reference to the family's own name counts",
+     "    private = {off: members[off] - STRICT_FAMILIES[family] for off, family in family_of.items()}",
+     "    private = {off: members[off] for off, family in family_of.items()}"),
+    ("a weak reference counts",
+     "            if shndx == 0 and name and info >> 4 == STB_GLOBAL}",
+     "            if shndx == 0 and name and info >> 4 in (STB_GLOBAL, STB_WEAK)}"),
+    ("the family's member reaching itself counts",
+     "            hit = sorted(wanted & private[host]) if host != off else []",
+     "            hit = sorted(wanted & private[host])"),
 
     # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
     # "the checker found something" and prints a refusal naming code that is
@@ -530,11 +618,12 @@ def member_body(data: bytes, offset: int) -> bytes:
     return data[offset + 60 : offset + 60 + size]
 
 
-def elf_defined_symbols(obj: bytes) -> dict[str, tuple[int, int, int]]:
-    """name -> (section index, value, binding) for each symbol an ELF64
-    little-endian object defines -- what `nm` would print, read straight out
-    of the object's symbol table, for the same no-external-tools reason as the
-    index reader."""
+def elf_symbols(obj: bytes) -> list[tuple[str, int, int, int]]:
+    """(name, st_info, section index, value) for each entry of an ELF64
+    little-endian object's symbol table -- what `nm` reads, read straight out
+    of the object, for the same no-external-tools reason as the index reader.
+    Section index 0 is an undefined symbol: one the object refers to and
+    another must define."""
     if obj[:4] != b"\x7fELF" or len(obj) < 64 or obj[4] != 2 or obj[5] != 1:
         raise ArchiveError("a member is not an ELF64 little-endian object")
     (shoff,) = struct.unpack_from("<Q", obj, 0x28)
@@ -542,7 +631,7 @@ def elf_defined_symbols(obj: bytes) -> dict[str, tuple[int, int, int]]:
     try:
         sections = [struct.unpack_from("<IIQQQQIIQQ", obj, shoff + i * shentsize)
                     for i in range(shnum)]
-        out: dict[str, tuple[int, int, int]] = {}
+        out: list[tuple[str, int, int, int]] = []
         for _name, sh_type, _fl, _addr, off, size, link, _info, _al, _ent in sections:
             if sh_type != 2:  # SHT_SYMTAB
                 continue
@@ -550,14 +639,28 @@ def elf_defined_symbols(obj: bytes) -> dict[str, tuple[int, int, int]]:
             for k in range(size // 24):
                 st_name, st_info, _other, st_shndx, st_value, _size = struct.unpack_from(
                     "<IBBHQQ", obj, off + 24 * k)
-                if st_shndx == 0:  # undefined here
-                    continue
                 start = str_off + st_name
                 name = obj[start : obj.index(b"\0", start)].decode("utf-8", "replace")
-                out[name] = (st_shndx, st_value, st_info >> 4)
+                out.append((name, st_info, st_shndx, st_value))
         return out
     except (struct.error, IndexError, ValueError) as exc:
         raise ArchiveError(f"a member's ELF symbol table is malformed: {exc}") from exc
+
+
+def elf_defined_symbols(obj: bytes) -> dict[str, tuple[int, int, int]]:
+    """name -> (section index, value, binding) for each symbol an ELF64
+    object defines."""
+    return {name: (shndx, value, info >> 4)
+            for name, info, shndx, value in elf_symbols(obj) if shndx != 0}
+
+
+def elf_strong_references(obj: bytes) -> set[str]:
+    """The names an ELF64 object refers to with a strong undefined symbol --
+    each one a reason for a linker to extract whichever member defines it. (A
+    weak undefined symbol extracts nothing: it is left 0 if no one else
+    defines it.)"""
+    return {name for name, info, shndx, _value in elf_symbols(obj)
+            if shndx == 0 and name and info >> 4 == STB_GLOBAL}
 
 
 def member_name(path: Path, offset: int) -> str:
@@ -573,6 +676,7 @@ def member_name(path: Path, offset: int) -> str:
 def check(path: Path, verbose: bool) -> list[str]:
     """Return a list of human-readable violations; empty means the shape is good."""
     members = parse_symbol_index(path)
+    data = path.read_bytes()
     violations: list[str] = []
 
     if verbose:
@@ -658,7 +762,6 @@ def check(path: Path, verbose: bool) -> list[str]:
 
     # --- CHECK 4: a variable's names are one variable -----------------------
     where = {sym: off for off, syms in members.items() for sym in syms}
-    data = path.read_bytes()
     for group in ALIASES:
         defined = [n for n in group if n in where]
         if not defined:
@@ -705,6 +808,39 @@ def check(path: Path, verbose: bool) -> list[str]:
             )
         elif verbose:
             print(f"  ok  {', '.join(group)}: one variable")
+
+    # --- CHECK 5: a family's member is extracted for the family's names alone -
+    family_of = {off: family for family, expected in STRICT_FAMILIES.items()
+                 for off, syms in members.items() if syms & expected}
+    private = {off: members[off] - STRICT_FAMILIES[family] for off, family in family_of.items()}
+    reached: set[int] = set()
+    for off in sorted(members):
+        body = member_body(data, off)
+        if not body:
+            continue  # an index-only fixture member: it refers to nothing
+        wanted = elf_strong_references(body)
+        for host, family in sorted(family_of.items()):
+            hit = sorted(wanted & private[host]) if host != off else []
+            if not hit:
+                continue
+            reached.add(host)
+            names = sorted(s for s in members[off] if is_collidable(s))[:4]
+            defines = f" (which defines {', '.join(names)})" if names else ""
+            more = f" and {len(hit) - 1} more" if len(hit) > 1 else ""
+            violations.append(
+                f"[reached] member {member_name(path, off)}{defines} refers to {hit[0]}{more}, "
+                f"which the {family} family's member {member_name(path, host)} defines beside "
+                f"the family: a program using {member_name(path, off)} extracts the {family} "
+                f"member with it, and one that brings its own {family} then has two definitions "
+                f"(design-decisions.md S339). Move what the two share out of the family's "
+                f"module into one of its own -- an inline `mod`, its own member -- so that "
+                f"the family's member is extracted for the family's names alone."
+            )
+    if verbose:
+        for host, family in sorted(family_of.items()):
+            if host not in reached:
+                print(f"  ok  {family:<8} -> {member_name(path, host)} is reached by its "
+                      f"names alone")
 
     return violations
 
@@ -1046,6 +1182,33 @@ def _selftest() -> int:
         check_("the ELF reader reads what synth_elf wrote",
                elf_defined_symbols(synth_elf(good_layout))[env[1]] == (1, 0, STB_WEAK))
 
+        # CHECK 5 [reached]: a member outside a family refers to something the
+        # family's member defines beside the family -- a Rust helper, which no
+        # program can define and any may need, through a libc function.
+        helper = f"_RNvNtC5posix{len(first)}{first}6helper"
+        hosted = [(n, s + [helper] if n == first else s) for n, s in clean]
+
+        def user(refs, bind=STB_GLOBAL):
+            """A member defining one C function and referring to `refs`."""
+            return ("user", ["user_function"],
+                    synth_elf([("user_function", 1, 0, STB_GLOBAL)]
+                              + [(r, 0, 0, bind) for r in refs]))
+
+        vs = graded(hosted + [user([helper])])
+        check_(f"[reached] a member reaching the {first} member through its helper is caught",
+               tags(vs) == ["[reached]"] and helper in vs[0])
+        check_("...but not one referring to the family's own name, which the program's "
+               "copy answers", graded(hosted + [user([fam[0]])]) == [])
+        check_("...nor a weak reference, which extracts nothing",
+               graded(hosted + [user([helper], STB_WEAK)]) == [])
+        itself = [(n, s, synth_elf([(helper, 0, 0, STB_GLOBAL)])) if n == first else (n, s)
+                  for n, s in hosted]
+        check_("...nor the family's member referring to what it defines itself",
+               graded(itself) == [])
+        check_("the ELF reader reads a strong undefined symbol as a reference",
+               elf_strong_references(synth_elf([("x", 1, 0, STB_GLOBAL), ("y", 0, 0, STB_GLOBAL),
+                                                ("z", 0, 0, STB_WEAK)])) == {"y"})
+
         # --- is_collidable, which the two above depend on ----------------
         check_("C names are collidable", is_collidable("getopt"))
         check_("Rust-mangled names are not",
@@ -1236,7 +1399,15 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         for v in violations:
             print(f"  - {v}\n", file=sys.stderr)
-        if any(v.startswith("[rider]") for v in violations):
+        kinds = {v.split("]")[0] + "]" for v in violations}
+        if kinds <= {"[reached]", "[alias]"}:
+            print("Neither of these is about codegen-units. A [reached] is one member calling",
+                  file=sys.stderr)
+            print("into a family's member through a helper the two share, and an [alias] a",
+                  file=sys.stderr)
+            print("variable whose names came apart: each message above says what to move.",
+                  file=sys.stderr)
+        elif any(v.startswith("[rider]") for v in violations):
             print("A [rider] means one module exports a replaceable name next to names a",
                   file=sys.stderr)
             print("program may reference. Raising codegen-units will NOT split it: rustc",

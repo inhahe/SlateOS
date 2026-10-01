@@ -176338,7 +176338,7 @@ defining one of them itself could notice; none is known to matter.
 `sys/random.h`; `scripts/check-libc-overlay.py`;
 `posix/tools/oracle/header_audit.py`.
 
-## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`; and `<dlfcn.h>`'s `dladdr1`, `dlmopen`, `dlvsym` and `_dl_find_object`, the rest of it made glibc's static one on the way -- `dl_iterate_phdr` never called back, so no C++ exception could be caught, D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT)**
+## D-POSIX-LIBC-LACKS-WHAT-GLIBCS-HEADERS-DECLARE — about 380 functions glibc 2.39 exports and declares that `libc.a` does not define: C23's `<stdbit.h>`, the `*_r` random-number families, `strfromd`, `getaddrinfo_a`, argz and envz, gshadow, the new mount API (lane D, 2026-09-29) — **Status: OPEN (C23's `<stdbit.h>`, 70 of them, done 2026-09-29: `posix/src/stdbit.rs` and `posix/include/stdbit.h`, every value of the two narrow types and a sample of the wide ones replayed against glibc's; the same day glibc's string and signal names -- `strerrorname_np`, `strerrordesc_np`, `sigabbrev_np`, `sigdescr_np` for every number glibc's are replayed at -- `memfrob`, `strfry`, `wcschrnul`, `wcslcpy`, `wcslcat`, the `_l` conversions and the BSD `q` names, 25 more; and `strerror` and `strsignal` with glibc's numbered texts for unknown numbers, the error texts one table that `sys_errlist` is built from; and the reentrant random-number families, 13, over `random` and the `rand48` family made POSIX's and glibc's -- `random` was a linear congruential generator and `initstate` and `setstate` stubs, D-POSIX-RANDOM-WAS-AN-LCG-AND-INITSTATE-A-STUB; and C23's `strfromd`, `strfromf`, `strfroml` and `timespec_getres`; and `<uchar.h>`'s `mbrtoc8` and `c8rtomb`, the four older ones made UTF-8 on the way, D-POSIX-UCHAR-WAS-ASCII-AND-THE-STRING-CONVERSIONS-MISCOUNTED; and the old BSD and System V calls, 20, with `execveat`, in `posix/src/legacy.rs`; and argz and envz, 18, `posix/src/argz.rs`; and `<netinet/in.h>`'s 23 -- the IPv6 option and Routing header builders, `bindresvport`, and the multicast source filters, refused -- `posix/src/inet6.rs`; and `<dlfcn.h>`'s `dladdr1`, `dlmopen`, `dlvsym` and `_dl_find_object`, the rest of it made glibc's static one on the way -- `dl_iterate_phdr` never called back, so no C++ exception could be caught, D-POSIX-DL-ITERATE-PHDR-NEVER-CALLED-BACK-SO-NO-CXX-THROW-COULD-BE-CAUGHT; and on 2026-09-30 `glob_pattern_p`, with `glob` and `fnmatch` rewritten; `addseverity`, with `fmtmsg` rewritten (D-POSIX-FMTMSG-KNEW-NONE-OF-ITS-VARIABLES); libutil's `login`, `logout` and `logwtmp` and glibc's `getutmp` and `getutmpx` (`posix/src/utmpx.rs`); `vlimit`, `rpmatch`, `getpt` and `getdirentries`; and the `long double` forms of `ecvt`, `fcvt` and `gcvt`, `qecvt` ... `qfcvt_r`: 16 more; and glibc's large-file names, all 40 -- `mkstemp64` ... `mkostemps64` and `tmpfile64` with the temporary-file functions made glibc's, D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS; and `aio_init`, with <aio.h>'s `struct aioinit`; and `pthread_attr_setaffinity_np`, `pthread_attr_getaffinity_np`, `pthread_attr_setstackaddr`, `pthread_attr_getstackaddr`, `pthread_clockjoin_np` and `pthread_yield`; and `pthread_rwlockattr_setkind_np` and `_getkind_np`, with the writer-preferring lock they ask for; and `<gshadow.h>`, all eleven, `posix/src/gshadow.rs`; and `<fstab.h>`'s five and `<ttyent.h>`'s four; and `<rpc/netdb.h>`'s eight, the RPC program database, in `posix/src/netdb.rs`; and `ntp_gettime` and `ntp_gettimex`, with glibc's `struct ntptimeval`, `posix/src/sys_timex.rs`; and `<aliases.h>`'s six, the mail aliases database, `posix/src/aliases.rs`; and the five netgroup functions, `posix/src/netgroup.rs`; and `mallopt` and `malloc_info`, with glibc's `MALLOC_*_` variables, `posix/src/malloc.rs`; and `<mcheck.h>`'s six, as glibc's libc answers them, `posix/src/mcheck.rs`; and the asynchronous lookups, `getaddrinfo_a` and its three, `posix/src/gai_a.rs`)**
 
 **In short:** a program written for glibc can call anything glibc's headers
 declare. This library already has most of it -- every function musl's
@@ -176348,7 +176348,13 @@ definition here (besides about 500 `_Float32`, `_Float64` ... aliases the
 compiler has no types for). A port that calls one fails to link, or -- where
 the overlay does not declare it either -- to compile, and a port that
 probes for one (`configure`) takes its fallback. Measured by
-`posix/tools/oracle/header_audit.py --missing`; rerun it to see what is left.
+`posix/tools/oracle/header_audit.py --missing`; rerun it to see what is left. Since 2026-09-30 it
+also reads glibc's libresolv.so.2 -- a library of its own in glibc, but one a
+program here finds in libc.a, `-lresolv` naming nothing else -- and counts an
+export glibc's header renames by macro (`#define p_class __p_class`) under
+the name a program writes. That found the 45 names marked *found
+2026-09-30* below, which it could not see before, and five more this table
+had left out.
 
 | Family | Names | Header |
 |---|---|---|
@@ -176358,13 +176364,14 @@ probes for one (`configure`) takes its fallback. Measured by
 | locale-taking conversions | `strtol_l` `strtoul_l` `strtoll_l` `strtoull_l`, `wcstol_l` ... `wcstold_l`, `strptime_l`; and 4.4BSD's `strtoq` `strtouq` `wcstoq` `wcstouq` | `<stdlib.h>`, `<wchar.h>`, `<time.h>` -- **done 2026-09-29** |
 | glibc's string and signal names | `strerrorname_np` `strerrordesc_np` `sigabbrev_np` `sigdescr_np` `memfrob` `strfry`; `wcschrnul` `wcslcpy` `wcslcat` | `<string.h>`, `<wchar.h>` -- **done 2026-09-29** |
 | old BSD and System V calls | `sigblock` `sigsetmask` `siggetmask` `sigstack` `sigreturn` `gsignal` `ssignal`; `getwd` `group_member` `revoke` `setlogin` `ttyslot` `profil`; `getpw`; `gtty` `stty`; `isctype` `isfdtype` `dysize` | `<signal.h>`, `<unistd.h>` ... -- **done 2026-09-29** (`posix/src/legacy.rs`) |
-| Linux calls | `execveat` (**done 2026-09-29**) `tgkill` `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
-| threads | `pthread_attr_{get,set}affinity_np` `pthread_attr_{get,set}sigmask_np` `pthread_clockjoin_np` `pthread_rwlockattr_{get,set}kind_np` `pthread_yield` `pthread_attr_{get,set}stackaddr` | `<pthread.h>` |
-| name services | `getaddrinfo_a` `gai_suspend` `gai_error` `gai_cancel`; netgroups; the RPC database; `rcmd` `rexec` `ruserok` and their `_af` forms; `res_nquery` and the reentrant resolver; `ns_name_*`; mail aliases (`<aliases.h>`) | `<netdb.h>`, `<resolv.h>` ... |
+| Linux calls | `execveat` (**done 2026-09-29**) `tgkill` (**done 2026-09-30**, `posix/src/signal.rs`) `pthread_sigqueue`; the new mount API (`fsopen` `fsconfig` `fsmount` `fspick` `move_mount` `open_tree` `mount_setattr`); memory protection keys (`pkey_*`; **done 2026-09-30**, `posix/src/mman.rs` -- there are none, so the answers are Linux's on a processor without them); `process_madvise` `process_mrelease`; `pidfd_spawn` `pidfd_spawnp` `pidfd_getpid` (**done 2026-09-30**, `posix/src/process.rs`, `posix/src/spawn.rs` -- refused as the native ABI refuses `pidfd_open`: it has no pidfds); `posix_spawnattr_getcgroup_np` `posix_spawnattr_setcgroup_np` `posix_spawn_file_actions_addtcsetpgrp_np` (glibc 2.35's; this table had left them out) | `<unistd.h>`, `<sys/mount.h>`, `<sys/mman.h>`, `<spawn.h>` ... |
+| threads | `pthread_attr_{get,set}affinity_np` `pthread_clockjoin_np` `pthread_yield` `pthread_attr_{get,set}stackaddr` `pthread_rwlockattr_{get,set}kind_np` -- **done 2026-09-30** (`posix/src/pthread.rs`); `pthread_attr_{get,set}sigmask_np`, which wait on per-thread signal masks (a thread's mask is the process's here: `pthread_sigmask` is `sigprocmask`) | `<pthread.h>` |
+| name services | `getaddrinfo_a` `gai_suspend` `gai_error` `gai_cancel` (**done 2026-09-30**, `posix/src/gai_a.rs`); netgroups (**done 2026-09-30**, `posix/src/netgroup.rs`); the RPC database (**done 2026-09-30**, `posix/src/netdb.rs`); `rcmd` `rexec` `ruserok` and their `_af` forms; `res_nquery` and the reentrant resolver (**done 2026-09-30**, `posix/src/resolv.rs`); `ns_name_*` (**done 2026-09-30**, `posix/src/resolv.rs`, with `res_hnok` `res_ownok` `res_mailok` `res_dnok`); mail aliases (`<aliases.h>`, **done 2026-09-30**, `posix/src/aliases.rs`) | `<netdb.h>`, `<resolv.h>` ... |
+| libresolv's own *(found 2026-09-30)* | `inet_net_pton` `inet_net_ntop` `inet_neta`, with `inet_nsap_addr` `inet_nsap_ntoa` (libc's in glibc; this table had left them out) -- **done 2026-09-30** (`posix/src/inet.rs`); `<arpa/nameser.h>`'s other twelve -- `ns_sprintrr` `ns_sprintrrf` `ns_format_ttl` `ns_parse_ttl` `ns_datetosecs` `ns_makecanon` `ns_samedomain` `ns_samename` `ns_subdomain` `ns_msg_getflag` `ns_name_ntol` `ns_name_rollback` -- all **done 2026-09-30** (`posix/src/nameser.rs` -- the two printers as glibc's June 2026 fixes left them -- and `ns_name_ntol` and `ns_name_rollback` in `posix/src/resolv.rs`); and `<resolv.h>`'s printers and helpers, 30, each an export glibc's header gives a public name by macro -- `p_class` `p_type` `p_rcode` `p_query` `p_cdname` `p_cdnname` `p_fqname` `p_fqnname` `p_option` `p_time` `fp_query` `fp_nquery` `fp_resstat` `sym_ntos` `sym_ntop` `sym_ston` `b64_ntop` `b64_pton` `loc_aton` `loc_ntoa` `dn_count_labels` `putlong` `putshort` `hostalias` `res_hostalias` `res_close` `res_isourserver` `res_nameinquery` `res_queriesmatch` `res_randomid` -- the ten helpers of them, `dn_count_labels` `putlong` `putshort` `res_close` `res_randomid` `res_isourserver` `res_nameinquery` `res_queriesmatch` `hostalias` `res_hostalias`, **done 2026-09-30** (`posix/src/resolv.rs`, and `res_search` asking for `HOSTALIASES`'s alias); and twelve more, `b64_ntop` `b64_pton` `sym_ntos` `sym_ntop` `sym_ston` `p_class` `p_type` `p_rcode` `p_option` `p_time` `loc_aton` `loc_ntoa`, with the tables `__p_class_syms` and `__p_type_syms`, **done 2026-09-30** (`posix/src/res_debug.rs`); and the last eight, the message and name printers `p_query` `p_cdname` `p_cdnname` `p_fqname` `p_fqnname` `fp_query` `fp_nquery` `fp_resstat`, **done 2026-09-30** (`posix/src/res_print.rs`), so all thirty are | `<arpa/inet.h>`, `<arpa/nameser.h>`, `<resolv.h>` |
 | IPv6 socket options | `inet6_opt_*` `inet6_rth_*` `inet6_option_*`, source filters, `bindresvport` | `<netinet/in.h>` -- **done 2026-09-29** (`posix/src/inet6.rs`; the source filters refused) |
-| GNU libraries in libc | argz (12) and envz (6) -- **done 2026-09-29** (`posix/src/argz.rs`) -- argp (10), obstack's four, the old GNU regex API (`re_compile_pattern` ... 9), printf's registration (7), `mcheck` and `mtrace` (6) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
-| system databases | `/etc/gshadow` (`getsgnam` ... 11), `/etc/fstab` (`getfsent` ... 5), `/etc/ttys` (`getttyent` ... 4), `getutmp`, `login` `logout` `logwtmp` | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
-| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s, `rpmatch`, `getpt`, `malloc_info` `mallopt`, `ntp_gettime` `ntp_gettimex`, `dladdr1` `dlmopen` `dlvsym` (**done 2026-09-29**, `posix/src/dlfcn.rs`), `glob_pattern_p`, `getdirentries`, `addseverity`, `monstartup` `sprofil` `vlimit`, and some twenty LFS64 names musl's headers have only as macros (`mkstemp64`, `pread64` ...) | |
+| GNU libraries in libc | argz (12) and envz (6) -- **done 2026-09-29** (`posix/src/argz.rs`) -- argp (10), obstack's five (`obstack_free`, `obstack_printf` and `obstack_vprintf`, and the two failure hooks, with the `_obstack_*` functions its macros call: **done 2026-09-30**, `posix/src/obstack.rs` and `<obstack.h>`, glibc's -- design-decisions §1162), the old GNU regex API (`re_compile_pattern` ... 9, with BSD's `re_comp` and `re_exec`: **done 2026-09-30**, `posix/src/regex.rs`, `regex_t` made glibc's -- design-decisions §1161), printf's registration (7), `mcheck` and `mtrace` (6, **done 2026-09-30**, `posix/src/mcheck.rs`) | `<argz.h>`, `<envz.h>`, `<argp.h>`, `<obstack.h>`, `<regex.h>`, `<printf.h>`, `<mcheck.h>` |
+| system databases | `/etc/gshadow` (`getsgnam` ... 11) -- **done 2026-09-30** (`posix/src/gshadow.rs`); `/etc/fstab` (`getfsent` ... 5) and `/etc/ttys` (`getttyent` ... 4) -- **done 2026-09-30** (`posix/src/fstab.rs`, `posix/src/ttyent.rs`); `getutmp` `getutmpx` and `login` `logout` `logwtmp` -- **done 2026-09-30** (`posix/src/utmpx.rs`) | `<gshadow.h>`, `<fstab.h>`, `<ttyent.h>`, `<utmpx.h>`, `<utmp.h>` |
+| the rest | `qecvt` `qfcvt` `qgcvt` and their `_r`s (**done 2026-09-30**, `posix/src/stdlib.rs`), `rpmatch` `getpt` `getdirentries` `vlimit` (**done 2026-09-30**), `malloc_info` `mallopt` (**done 2026-09-30**, `posix/src/malloc.rs`), `ntp_gettime` `ntp_gettimex` (**done 2026-09-30**, `posix/src/sys_timex.rs`), `dladdr1` `dlmopen` `dlvsym` (**done 2026-09-29**, `posix/src/dlfcn.rs`), `glob_pattern_p` and `addseverity` (**done 2026-09-30**), `monstartup` `sprofil`, and the forty large-file names musl's headers have only as macros (`mkstemp64`, `pread64` ...) -- **done 2026-09-30** | |
 
 **The proper fix, family by family:** each written from its specification
 -- the C standard, POSIX, the Linux man pages -- with glibc 2.39 as the
@@ -176741,3 +176748,830 @@ redirected program's are, and the tests replay it through two streams over
 one sink.
 
 **Where:** `posix/src/error.rs`, `posix/src/err.rs`.
+
+## D-POSIX-FNMATCH-KNEW-HALF-ITS-FLAGS-AND-NO-EQUIVALENCE-CLASSES — `fnmatch` ignored `FNM_LEADING_DIR`, `FNM_CASEFOLD` and `FNM_EXTMATCH`, failed an unterminated `[` instead of taking it literally, and read `[=a=]` and `[.a.]` as sets of their punctuation: 16,603 of 2,017,500 answers were not glibc's (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/fnmatch.rs`)**
+
+**In short:** `fnmatch` decides whether a name fits a wildcard pattern like
+`*.c` -- `find -name`, `tar --wildcards`, `.gitignore`-style filters and
+`glob` itself all depend on it. Ours handled the common patterns and got
+the rest wrong: three of glibc's six flags did nothing (so "ignore case"
+still cared about case, and ksh-style `@(a|b)` patterns were read as plain
+text), a lone `[` failed to match itself, and the standard's equivalence
+classes and collating symbols (`[[=a=]]`, `[[.-.]]`) matched the wrong
+characters. Measured against glibc 2.39 over two million cases, about one
+answer in 120 differed.
+
+| | Was | Is |
+|---|---|---|
+| `FNM_LEADING_DIR` | ignored: `a` did not match `a/b` | a pattern matching a leading directory matches |
+| `FNM_CASEFOLD` | ignored | letters without their case, as glibc folds them (classes and equivalence classes see the byte as it is) |
+| `FNM_EXTMATCH` | ignored, and not defined in `<fnmatch.h>` | ksh's `?(..)` `*(..)` `+(..)` `@(..)` `!(..)`; `posix/include/fnmatch.h` defines it |
+| `[` with no `]` | no match | an ordinary character, as POSIX says |
+| `[=a=]`, `[.a.]`, `[a-[.c.]]` | sets of `[`, `=`, `.`, `a` ... | the C locale's single-character classes and symbols |
+| an unknown class, `[[:foo:]]` | a set of its characters | matches nothing -- unless an element before it already took the character, as glibc |
+| many `*` against a long string | exponential backtracking | the last star only: linear for each |
+
+**Three answers are deliberately not glibc's**, where glibc's contradicts
+POSIX or its own manual (design-decisions §1148):
+`*\/` under `FNM_PATHNAME` matches `a/`; a `*` before an extended group
+misses no match at the string's end; `FNM_LEADING_DIR` applies to the whole
+pattern, not inside groups. `posix/src/fnmatch_deviations.txt` lists all
+1,443 such cases of the oracle's.
+
+**Tests:** `posix/tools/oracle/fnmatch_harness.py` records glibc's answer
+for 42,828 patterns and flag sets against 50 strings each
+(`fnmatch_oracle.txt`, 2,141,400 cases, replayed), and
+`fnmatch_model.py` -- the same rules written a second way, in Python --
+answers the 1,443 where this departs; the tests reason out one of each
+class by hand besides.
+
+**Where:** `posix/src/fnmatch.rs`; `posix/include/fnmatch.h`.
+
+## D-POSIX-GLOB-READ-ONE-DIRECTORY-AND-KEPT-512-NAMES — `glob` matched only the last component of a pattern, kept at most 512 names and dropped the rest without saying so, knew four of POSIX's seven flags and none of glibc's, and never called its `errfunc` (lane D, 2026-09-29) — **Status: FIXED 2026-09-29 (`posix/src/glob.rs`)**
+
+**In short:** `glob` turns a pattern like `src/*/*.rs` into the list of
+files it names -- it is how C programs expand wildcards without a shell
+(`find`, `make`'s `$(wildcard)`, `tar`, `rsync`'s filters, every "open
+these files" argument). Ours read a single directory: the pattern's
+directory part was taken as a literal name, so `src/*/*.rs` looked for a
+directory called `*`, and `*/x` found nothing. It kept the first 512 names
+and silently dropped the rest, ignored `GLOB_NOSORT`, `GLOB_DOOFFS` and
+`GLOB_NOESCAPE`, had none of glibc's flags (`GLOB_BRACE`, `GLOB_TILDE`,
+`GLOB_ONLYDIR`, `GLOB_ALTDIRFUNC` ...), and never told the caller's
+`errfunc` about a directory it could not read. Its `<glob.h>` was musl's,
+which hides the `glob_t` fields a glibc program sets.
+
+| | Was | Is |
+|---|---|---|
+| a wildcard in a directory part (`*/x`, `src/*/*.rs`) | taken literally: no match | each directory it matches, at every level |
+| more than 512 names | the first 512, the rest dropped | all of them |
+| a directory part of 4,096 bytes or more | cut short in a 4,096-byte stack buffer, left without its terminator, and read past the buffer's end | any length |
+| `GLOB_NOSORT`, `GLOB_DOOFFS`, `GLOB_NOESCAPE` | ignored | POSIX's |
+| `errfunc`, `GLOB_ERR` | never called; any unreadable directory stopped | told of each unreadable directory; a nonzero answer, or `GLOB_ERR`, is `GLOB_ABORTED` |
+| glibc's `GLOB_PERIOD`, `GLOB_BRACE`, `GLOB_NOMAGIC`, `GLOB_TILDE`, `GLOB_TILDE_CHECK`, `GLOB_ONLYDIR`, `GLOB_ALTDIRFUNC`, `GLOB_MAGCHAR` | none | all, as glibc's |
+| `glob_pattern_p` | missing | glibc's, in its own archive member |
+| a NULL argument, an unknown flag | `GLOB_ABORTED` | -1 with `errno` `EINVAL`, as glibc |
+| `<glob.h>` | musl's: `glob_t`'s last fields `__dummy1`, `__dummy2` | `posix/include/glob.h`: glibc's names (`gl_flags`, `gl_opendir` ...) and flags |
+
+**Two answers are deliberately not glibc's** (design-decisions §1149):
+glibc reads `*/` and `?/` -- one character before a trailing slash -- by a
+path of its own, so that `GLOB_MARK` doubles their slash, `GLOB_PERIOD`
+does not apply and `GLOB_MAGCHAR` is not set, unlike `**/` and `[!x]/`,
+which match the same names; and for `GLOB_NOCHECK` it answers `??/` with
+`??`, where POSIX's answer is the pattern. `posix/src/glob_deviations.txt`
+lists the 23 probes.
+
+**Tests:** `posix/tools/oracle/glob_harness.py` runs glibc 2.39's `glob`
+over a directory tree of its own through `GLOB_ALTDIRFUNC` -- with `*`,
+`?`, a backslash and names differing only in case, which Windows cannot
+hold -- for 98 patterns under 16 flag sets (`glob_oracle.txt`, 1,568
+probes: return, `GLOB_MAGCHAR`, the names in order, each `errfunc` call),
+and 50 `glob_pattern_p` cases; the tests build the same tree from the
+oracle's own `# tree:` line and replay every probe through the same
+callbacks. `glob_model.py`, the rules written a second way in Python,
+writes the deviations. Besides: `GLOB_DOOFFS` with `GLOB_APPEND`, 3,000
+names in one directory, a 5,024-byte path, overflowing `gl_offs`,
+`EINVAL`, and the C library's own directory calls.
+
+**Also:** `fnmatch` moved into an archive member of its own
+(`mod gnu_fnmatch`), so that `glob`, which calls the matcher directly,
+does not bring `fnmatch`'s definition into a program that has its own.
+
+**Where:** `posix/src/glob.rs`; `posix/include/glob.h`;
+`posix/src/fnmatch.rs` (the member split).
+
+## D-POSIX-WARN-BROUGHT-ERRORS-DEFINITIONS-WITH-IT — `warn` and `err` called a helper that lived in `error`'s archive member, so a program with its own `error` (gnulib's) that called `warn` linked two; and the libc.a shape gate could not see it (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/error.rs`, `scripts/check-libc-shape.py`)**
+
+**In short:** a static link copies a library's pieces whole, so a program
+that brings its own copy of a libc function must be able to leave the
+library's copy out. GNU programs bring their own `error()` -- gnulib's
+`error` module defines it wherever the C library has none, as musl has
+none -- and ours could be left out only until the program also called
+`warn()` or `err()`: those called a helper stored in the same piece as
+`error()`, so using them pulled our `error()` in beside the program's, and
+the link failed with two definitions. It came in with commit c6d33285a
+(2026-09-29), which made `err()` print through `error.rs`'s code.
+
+The shape gate missed it because it looked only at the C names a piece
+defines. A linker also pulls a piece in for a Rust helper's mangled name,
+which no program can define but any may need. The same blind spot hid an
+older case: `glob`'s piece called `fnmatch`'s matcher directly, so a
+program with its own `fnmatch` could not use the library's `glob` (fixed in
+11a8d6d6b by giving `fnmatch()` a piece of its own).
+
+**Fix:** `put` and `put_cstr` are in `mod output` inside `error.rs` -- an
+archive member of their own, with no C name in it -- and both families call
+them there. `scripts/check-libc-shape.py`'s new CHECK 5 holds the archive to
+the property: no member outside a `STRICT_FAMILIES` family refers, with a
+strong undefined symbol, to anything the family's member defines but the
+family's own names. On the archive then on main it reported exactly the two
+paths above; on this tree it passes, all four families reached by their
+names alone. Five self-test cases and four mutants (all killed).
+
+**Where:** `posix/src/error.rs` (`mod output`); `scripts/check-libc-shape.py`
+(CHECK 5, `elf_symbols`, `elf_strong_references`).
+
+## D-POSIX-THE-CONSTANTS-OF-78-HEADERS-WERE-NEVER-COMPARED — `check-libc-abi.py` compared the library's constants with 105 of musl's 183 headers; in the other 78, sixteen of its numbers were not the header's (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** a C program passes the library the numbers its header defines
+-- flags, `ioctl` requests, option bits -- so the library's own copies of
+those numbers must be the header's. A gate compares them on every push, but
+it read a fixed list of headers written on 2026-09-27, and 78 of musl's
+headers were not on it. Reading all of them, as it does now, found sixteen
+numbers that were wrong, and reading around those found one more that no
+musl header has.
+
+| Where | Was | Is | What it meant |
+|---|---|---|---|
+| `<stropts.h>`: `I_NREAD`, `I_SRDOPT`, `I_GRDOPT`, `I_SETSIG`, `I_GETSIG`, `I_RECVFD`, `I_CANPUT` | seven other numbers, `I_NREAD` being musl's `I_SRDOPT` | musl's, `('S' << 8) \| n`, and the other ten requests and the event, mode and band constants musl has | no code read them (the STREAMS calls are glibc's stubs); wrong for any that would |
+| `<stropts.h>`: `RMSGD`, `RMSGN` | swapped | 1, 2 | the same |
+| `<fmtmsg.h>`: `MM_RECOVER`, `MM_NRECOV` | 0x10000, 0x20000 | 0x40, 0x80; `MM_APPL`, `MM_UTIL`, `MM_OPSYS`, `MM_NULLMC`, `MM_NULLSEV` added | `fmtmsg` reads only `MM_PRINT` and `MM_CONSOLE` today |
+| `<sys/param.h>`: `MAXHOSTNAMELEN` | 256 | 64, `HOST_NAME_MAX` | glibc and musl both say 64 |
+| `<sys/user.h>`: `PAGE_MASK` | `PAGE_SIZE - 1`, the offset bits | `~(PAGE_SIZE - 1)`, the page-number bits, as the header defines it | the complement of the header's mask |
+| `<resolv.h>`: `RES_DEFAULT` | glibc's, without `RES_NOIP6DOTINT` | musl's, with it (`RES_NOIP6DOTINT` added; accepted, never acted on) | `_res.options` after `res_init` now equals the header's `RES_DEFAULT` |
+| `<resolv.h>`: `RES_NOTLDQUERY` (no musl header has it) | 0x0010_0000, which is `RES_USE_EDNS0` in both headers | 0x0100_0000, glibc's | a program asking for EDNS0 got no-TLD-query instead |
+| `legacy::class` | `UPPER`, `SPACE` ... | `_ISupper`, `_ISspace` ..., the names `posix/include/ctype.h` declares | `SPACE` met `<scsi/scsi.h>`'s SCSI opcode of that name; the gate now checks the twelve against the overlay |
+
+Three differences are deliberate and join design-decisions §1119's table and
+the gate's `KNOWN_DIFFERENT`: `NGROUPS` (65536, as `NGROUPS_MAX`), `NBPG` and
+`PAGE_MASK` (16 KiB pages, as `PAGE_SIZE`).
+
+**Fix:** `scripts/check-libc-abi.py` reads its oracle headers out of musl's
+include directory and the overlay's at run time -- every header, not a list
+-- which all compile together with `_GNU_SOURCE`: 1,816 constants compared
+where it was 1,646. **Compared since:** a constant no musl header and no overlay
+header defines, like `RES_NOTLDQUERY` above -- against glibc's and the
+kernel's headers, through a table (the next entry,
+`D-POSIX-CONSTANTS-NO-MUSL-HEADER-NAMES-HAD-NO-ORACLE`).
+
+**Where:** `posix/src/stropts.rs`, `fmtmsg.rs`, `sys_param.rs`, `resolv.rs`,
+`legacy.rs`; `scripts/check-libc-abi.py`.
+
+## D-POSIX-CONSTANTS-NO-MUSL-HEADER-NAMES-HAD-NO-ORACLE — a constant whose name no musl header defines, and every enum constant, was compared with nothing; four `UFFD_FEATURE_*` bits and `IORING_OP_LAST` were wrong (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** the library copies the numbers C headers define so that what
+a program passes means the same on both sides. The gate that compares them
+(`scripts/check-libc-abi.py`) asked musl's headers only, and only for
+macros. So a number musl has no name for -- one of glibc's own, or one of
+the Linux kernel's interface -- and every number a header gives as an enum
+constant rather than a macro was never compared with anything. Of the
+library's 2,845 public constants, 1,029 were in that state. Comparing them
+found six that disagree, four of them bugs.
+
+| Constant | Was | Is |
+|---|---|---|
+| `UFFD_FEATURE_EVENT_UNMAP`, `_MISSING_HUGETLBFS`, `_MISSING_SHMEM` | bits 4, 5, 6 | 6, 4, 5, as `<linux/userfaultfd.h>` |
+| `UFFD_FEATURE_WP_ASYNC` | bit 14 (`UFFD_FEATURE_POISON`'s) | bit 15; `_WP_UNPOPULATED`, `_POISON`, `_MOVE` added |
+| `IORING_OP_LAST` | 64, "generous" | 55, Linux 6.8's |
+| `IORING_OP_CANCEL` | 48, a name Linux has not got, with `IORING_OP_SENDMSG_ZC`'s number | gone; the eighteen missing opcodes added |
+| `PAGE_SHIFT` | 14 | 14 -- this kernel's 16 KiB pages; `KNOWN_DIFFERENT_GLIBC` |
+
+None of them was read by the library's own code (userfaultfd and io_uring
+are validators that refuse, having no kernel behind them), so no call
+misbehaved; each was wrong for any program that would use it.
+
+**Fix:** two more comparisons in the gate. A name no musl macro accounts for
+is tried in musl's headers as an integer constant expression -- one probe
+line each, which compiles only for an enum constant -- and compared as the
+macros are: 30 more. And a name no musl or overlay header defines is
+compared with `posix/tools/oracle/glibc_constants.txt`, the values a glibc
+system's headers give it -- glibc 2.39's, then Linux 6.8's uapi headers,
+each header alone -- written by `posix/tools/oracle/glibc_constants.py`
+under WSL, so the gate needs no WSL: 521 more. A constant the table has not
+looked up is refused until it is regenerated (39 seconds).
+
+**Where:** `scripts/check-libc-abi.py` (`probe_source`, `probed_constants`,
+`read_glibc_constants`, `glibc_verdict`, `KNOWN_DIFFERENT_GLIBC`);
+`posix/tools/oracle/glibc_constants.py` and `.txt`;
+`posix/src/linux_userfaultfd.rs`, `posix/src/linux_io_uring.rs`.
+
+## D-POSIX-FMTMSG-KNEW-NONE-OF-ITS-VARIABLES — `fmtmsg` ignored `MSGVERB` and `SEV_LEVEL`, never wrote to the console, accepted any label and printed an unknown severity, and `addseverity` did not exist (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/fmtmsg.rs`)**
+
+**In short:** `fmtmsg` prints a structured diagnostic -- `UX:cat: ERROR:
+can't open` and a `TO FIX:` line -- to standard error, the system console,
+or both. POSIX lets the user choose which parts appear (`MSGVERB`), and
+glibc lets the user and the program define extra severity levels
+(`SEV_LEVEL`, `addseverity`). Ours had none of that: it printed every part
+always, wrote nothing to the console (the `MM_CONSOLE` flag went to standard
+error instead), printed a severity it did not know rather than refusing it,
+accepted a label of any shape, and laid the second line out differently.
+`addseverity` was missing, so a program that calls it could not link.
+
+| | Was | Is |
+|---|---|---|
+| `MSGVERB` | ignored | the parts it names, on standard error; unset, empty or malformed: all |
+| `SEV_LEVEL`, `addseverity` | ignored; missing | levels above `MM_INFO`, defined, redefined, removed, as glibc's |
+| `MM_CONSOLE` | written to standard error | `/dev/console`, every part |
+| an unknown severity | printed with no name | `MM_NOTOK`, nothing printed |
+| a label not `10-byte:14-byte` | printed | `MM_NOTOK` |
+| the layout | a first line, then `TO FIX:` and the action and tag when either was given: `UX:cat`, `TO FIX: tag` for a label and a tag | glibc's: `UX:cat: tag`; a tag goes after `TO FIX: action` when there is an action, alone on the second line after a text, on the first line otherwise |
+| standard error | descriptor 2, around the stream | the `stderr` stream, one write; `MM_NOMSG`, `MM_NOCON`, `MM_NOTOK` as POSIX has them |
+
+**One answer is not glibc's** (design-decisions §1150): glibc reads
+`MSGVERB` and `SEV_LEVEL` at a process's first `fmtmsg`, so an `addseverity`
+made before it is undone by `SEV_LEVEL`; here they are read at the first
+call of either function, so a program's `addseverity` always has the last
+word. `posix/src/fmtmsg_deviations.txt` lists the three cases.
+
+**Tests:** `posix/tools/oracle/fmtmsg_harness.py` records glibc 2.39's
+answers for 804 cases, each in a process of its own (`fmtmsg_oracle.txt`):
+labels, every combination of the parts, severities, `MSGVERB` and
+`SEV_LEVEL` values, `addseverity` sequences, standard error closed. The
+tests replay them, and check each console message against the same case's
+standard error with every part selected. `fmtmsg_model.py`, the rules
+written a second way, agrees with glibc on all 804 in glibc's order and
+writes the deviations in this library's.
+
+**Where:** `posix/src/fmtmsg.rs`; `posix/include/fmtmsg.h` (`addseverity`).
+
+## D-POSIX-TMPFILE-WAS-NEVER-REMOVED-AND-MKSTEMP-WAS-NOT-GLIBCS — `tmpfile` never removed its file; `mkstemp` and its family drew six letters from 36 with a bias and gave up after 100; `mkostemp` or'd the caller's access mode into `O_RDWR`; `mktemp` never checked its name was free (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/tempname.rs`), but for one difference the kernel forces: see "Still open"**
+
+**In short:** these are the functions a program calls for a scratch file or
+a name for one. `tmpfile` must make a file that disappears when it is
+closed or the program exits; ours left every one in `/tmp` for good, so a
+program calling it in a loop filled the disk. `mkstemp` and its relatives
+must pick an unused name from the template's `XXXXXX`; ours picked from
+fewer letters than glibc (36, not 62), slightly unevenly, and gave up after
+100 tries where glibc tries 238,328; and a failed draw of random bytes
+(ignored) made every try the same name. `mkostemp(t, O_WRONLY)` asked
+`open` for an access mode that does not exist. `mktemp` returned a name
+without checking that nothing had it, and NULL where glibc and SUSv2
+return the template emptied.
+
+| | Was | Is (glibc 2.39's) |
+|---|---|---|
+| `tmpfile` | `/tmp/tmpXXXXXX`, never removed | `O_TMPFILE` if the kernel has it (it does not yet), else `/tmp/tmpfXXXXXX`, removed when the stream is closed, `freopen`ed onto another file, or at `exit` -- by the process that made it |
+| a name's six bytes | `[0-9a-z]`, `byte % 36` (the first four digits a little likelier), from `getrandom`, its failure ignored | `[a-zA-Z0-9]` in glibc's order, drawn from `arc4random` without bias |
+| names tried | 100, then `EEXIST` | 62 cubed (glibc's `ATTEMPTS_MIN`), then `EEXIST` |
+| `mkostemp`'s flags | or'd with `O_RDWR | O_CREAT | O_EXCL` | their access mode replaced by `O_RDWR`, as glibc's `try_file` |
+| `mktemp` | a name, not checked; NULL for a bad template | a name `lstat` says is free; the template always, emptied on any failure |
+| `errno` after a success | whatever `open` left | as it was |
+| `mkstemp64`, `mkostemp64`, `mkstemps64`, `mkostemps64`, `tmpfile64` | missing | glibc's large-file names for the same functions |
+
+`tmpnam`, `tmpnam_r` and `tempnam` were glibc's already (the stdio rewrite,
+`D-POSIX-STDIO-WAS-SIXTEEN-UNLOCKED-SLOTS`); their name generator and directory search moved into
+`posix/src/tempname.rs` with the rest, so that there is one of each.
+
+**Still open -- `tmpfile`'s file has a name while it is open.** glibc
+unlinks it at once and the file lives on through the descriptor. This
+kernel's descriptors reach a file through its name (`kernel/src/fs/handle.rs`
+re-resolves the path on every read and write), so an unlinked open file is
+lost to its own descriptor; and `O_TMPFILE` is refused
+(`posix/src/file.rs`, `EOPNOTSUPP`). So the name stays until the stream lets
+go of the file. What differs from glibc: another process can see
+`/tmp/tmpfXXXXXX` while it is open; `fstat` says one link, not none; and a
+program that ends without `exit` (`_exit`, a fault) leaves the file, which
+ISO C allows ("whether an open temporary file is removed is
+implementation-defined"). A stream a child inherits across `fork` is not
+removed by the child. **The proper fix** is the kernel's: a descriptor that
+outlives its file's name (an inode or object reference, orphan inodes
+reclaimed at last close), or a working `O_TMPFILE` -- lane A's, recorded
+in `todo.txt` under the `O_TMPFILE` entry. When either lands, `tmpfile`
+needs no change for `O_TMPFILE` (it is tried first), or one line to unlink
+at once. design-decisions.md §1151.
+
+**Tests:** `posix/tools/oracle/tempfile_harness.py` records glibc 2.39's
+answers (`tempfile_oracle.txt`, 554 probes): 34 template shapes through the
+ten functions, each run eight times so that the bytes a name replaces are
+told from those it keeps; the flags the `o` forms take and what the
+descriptor has; the modes under three umasks; `tmpfile` with and without
+`$TMPDIR`; `tempnam` over nine directories, six prefixes and four
+`$TMPDIR`s; `tmpnam` and `tmpnam_r`. The tests replay them through the
+functions themselves over a filesystem in memory (`tempname::fake`), and
+check that `exit` and `freopen` remove what they should, once.
+
+**Where:** `posix/src/tempname.rs` (new); `posix/src/stdlib.rs`
+(`mkstemp` ... `mkdtemp`, `mktemp`, `tmpfile`); `posix/src/stdio.rs`
+(`tmpnam`, `tempnam`, the stream's hold on a temporary name).
+
+## D-POSIX-FUTEX-WAITS-DISCARD-EINTR — libc's futex waits throw the kernel's answer away, so no wait of this library's ends early for a signal handler (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/interrupt.rs`)**
+
+**In short:** when a signal handler runs while a thread is blocked in
+`sem_wait`, POSIX says the call returns -1 with `errno` `EINTR` -- and
+`gai_suspend` returns `EAI_INTR`. Here the thread goes back to waiting once
+the handler returns, because this library's futex wait
+(`posix/src/lowlevellock.rs`, `futex_wait` and `futex_wait_timeout`) ignores
+what the `SYS_FUTEX_WAIT` system call answered. The kernel does report the
+interruption: `sys_futex_wait` (`kernel/src/syscall/handlers.rs`) hands the
+signal-delivery checkpoint a restart sentinel (`ERESTARTSYS`) that becomes a
+restart or a user-visible `EINTR`.
+
+**Who sees it:** a program that breaks a thread out of `sem_wait`,
+`sem_timedwait` or `sem_clockwait` with a signal -- a common way to stop a
+worker -- waits on instead; and `gai_suspend` never answers `EAI_INTR`
+(`posix/src/gai_a.rs` says so in its module comment).
+
+**The proper fix:** a futex wait in `lowlevellock` that returns the
+kernel's `EINTR`, used exactly where POSIX requires the interruption to show
+-- `sem_wait`, `sem_timedwait`, `sem_clockwait`, `gai_suspend` -- and not
+where it forbids it (`pthread_cond_wait` and `pthread_mutex_lock` never
+return `EINTR`). Three things to settle first. Which interruption each
+function reports: Linux's signal(7) has `sem_wait` restarted when the
+handler was installed with `SA_RESTART` but the System V semaphore and
+message calls never restarted -- to be confirmed against glibc, not
+copied from the manual. How to honour `SA_RESTART` at all, since the native
+kernel cannot see it: libc's own dispositions are the only record of it. And
+an interruption by a signal that ran no handler -- one this library
+ignores, or one another thread took -- must not end the wait, which the
+kernel's answer alone cannot tell apart. Plus a ring-3 test that signals a
+thread blocked in `sem_wait`, since the host tests have no signals to send.
+
+**Where:** `posix/src/lowlevellock.rs` (`futex_wait`, `futex_wait_timeout`),
+`posix/src/semaphore.rs`, `posix/src/gai_a.rs` (`gai_suspend`).
+
+**Fixed 2026-09-30.** Every call that waits in this library now asks what
+the signal did (`posix/src/interrupt.rs`). The trampoline's dispatch counts,
+in the thread's `PerThread` block, each handler it runs and those installed
+without `SA_RESTART`; a wait the kernel ends for a signal compares the counts
+with a mark taken before it slept, so a signal that ran no handler on the
+thread -- ignored, ignored by default, or handled on another thread -- ends
+nothing, which the kernel's answer alone could not tell. Which calls end for
+which handlers is glibc's on Linux: 115 cases recorded by
+`posix/tools/oracle/interrupt_harness.py` and replayed by
+`interrupt::tests::every_interruption_is_glibcs`. `sem_wait`, the four
+message-queue calls, and `aio_suspend`, `gai_suspend` and `futex(FUTEX_WAIT)`
+without a timeout end for a handler without `SA_RESTART`; `sem_timedwait`,
+`sem_clockwait`, System V's `msgsnd`, `msgrcv`, `semop` and `semtimedop`,
+`io_getevents`, and the timed `aio_suspend`, `gai_suspend` and `futex` for
+any handler (design-decisions §1156, which records why `SA_RESTART` does not
+restart the second group). The thread functions and `getaddrinfo_a(GAI_WAIT)`
+still end for none, as glibc's do. Two things came with it: `io_pgetevents`
+now holds its signal mask for the call -- it read it and ignored it, which
+was harmless only while nothing could interrupt the call -- and reads its
+timeout before the mask, as Linux does; and Linux's `futex()`, which had the
+opposite fault (`EINTR` for every signal, ignored or `SA_RESTART` alike),
+restarts as Linux's kernel does, to the same deadline. A ring-3 fixture,
+`services/ctest-eintr`, runs the kernel's half -- a real signal ending a real
+futex wait -- for `sem_wait`, `sem_timedwait`, `mq_receive` and `msgrcv`; its
+rung is lane A's (`requests/d-a-run-the-ctest-eintr-fixture.md`). The same
+fault in the calls the kernel itself sleeps in is
+`D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL`.
+
+## D-POSIX-KERNEL-WAITS-END-WITH-EINTR-FOR-EVERY-SIGNAL — a native program's blocking system call fails with EINTR for any signal its trampoline takes: one it ignores, a child's exit, one whose handler asked for SA_RESTART (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/interrupt.rs`, `posix/src/lowlevellock.rs`)**
+
+**In short:** a program here that is blocked in a system call the kernel
+itself sleeps in -- `read` from a terminal or a pipe, `waitpid`, `accept`,
+`recv` -- has it fail with -1 and `errno` `EINTR` whenever a signal reaches
+its process, whatever the signal does: one the program ignores; `SIGCHLD`,
+which every child's exit sends and which is ignored by default; one whose
+handler was installed with `SA_RESTART`; one another thread handles. On
+Linux none of those ends the call -- an ignored signal is never delivered,
+and `SA_RESTART` restarts the call. A program that retries on `EINTR` does
+not notice, but one that takes it for an error fails where on Linux it
+would have waited on.
+
+**Why:** a native process's dispositions are this library's
+(`posix/src/signal.rs`). The kernel knows only that the process registered a
+trampoline, so it hands the trampoline every catchable signal, and as it
+builds the trampoline's frame it turns any restart sentinel into
+`KernelError::Interrupted` (`deliver_pending_signal`,
+`kernel/src/syscall/handlers.rs`: "native handlers cannot request
+SA_RESTART"). The call returns that when the trampoline is done, and the
+library's wrapper answers `EINTR`. The calls that wait inside the library
+had the same fault and no longer do (`D-POSIX-FUTEX-WAITS-DISCARD-EINTR`).
+
+**The proper fix:** the same one, in the library's wrappers of the kernel's
+blocking calls, with no change to the kernel, which must still end the sleep
+and still cannot see a disposition. The dispatch already counts, per thread,
+the handlers it runs and those without `SA_RESTART`
+(`posix/src/interrupt.rs`). A wrapper whose call comes back `Interrupted`
+compares the counts with a mark taken before the call, and issues the call
+again when no handler ran on the thread -- or, for a call Linux restarts
+under `SA_RESTART`, when only such handlers ran. Which calls those are is
+signal(7)'s two lists: `read`, `write` and `ioctl` on slow devices, `open` of
+a FIFO, `wait4` and the other waits, the socket calls without a timeout,
+`flock` and `fcntl(F_SETLKW)` restart; `poll`, `select`, `epoll_wait`, the
+sleeps, `sigsuspend`, `pause` and `sigtimedwait`, and the socket calls with
+a timeout never do, and answer `EINTR` for any handler -- but must still go
+on for a signal that ran none. A restarted timed call needs its remaining
+time, as Linux's restart block keeps it. glibc on Linux is the oracle here as
+it was for the waits: `interrupt_harness.py`'s shape, over those calls.
+
+**Where:** the wrappers of the blocking system calls in `posix/src/`
+(`unistd.rs`'s `read` and `write`, `process.rs`'s `waitpid`, `socket.rs`,
+...); the kernel's side is `deliver_pending_signal` in
+`kernel/src/syscall/handlers.rs`.
+
+**Fixed 2026-09-30.** The library's wrappers of the kernel's blocking calls
+restart as Linux's kernel restarts them (`interrupt::restarting`): `read`
+and `write` on a pipe, a socket pair, the terminal and a pty, the eventfd
+read, and every wait for a child (`process.rs`'s `wait_common`) are issued
+again for as long as the kernel ends them for a signal that ran no handler
+on the thread, or only handlers installed with `SA_RESTART`. The loops the
+library builds from the kernel's non-blocking calls count handlers from the
+call's start and ask after each look: `poll`, `ppoll`, `select`, `pselect`,
+`epoll_wait` and its two end for any handler; the TCP and UDP waits,
+`accept` and `flock` for one without `SA_RESTART` -- or for any, on a socket
+with a timeout; the timerfd and inotify reads as `read` does. Their slices,
+and every sleep (`sleep`, `nanosleep`, `usleep`, `clock_nanosleep`), are
+timed futex waits on a word of their own, which the kernel ends for a signal
+where `SYS_SLEEP` sleeps its full time: a handler ends a sleep at once, with
+the time left (design-decisions §1157). `pause` and `sigsuspend` wait for a
+handler on their own thread the same way instead of polling a process-wide
+count every 2 ms; `sigsuspend` counts from before it sets its mask, which
+closed a lost wake-up. And `ppoll`, `pselect` and `epoll_pwait` hold their
+signal masks for the call, which they had ignored (`signal::under_mask`).
+glibc's answers for 25 more calls -- 240 cases in all -- are in
+`interrupt_oracle.txt`: the host replays the sleeps, `pause` and
+`sigsuspend`, and holds a table of the other calls' rules to glibc's lines;
+`services/ctest-eintr` gained six ring-3 checks (a pipe read through an
+`SA_RESTART` handler and through a child's `SIGCHLD`, `nanosleep`, `poll`,
+`waitpid`, `pause`). Still to do: `sigwait`, `sigtimedwait` and `sigwaitinfo`
+are stubs (`D-POSIX-SIGWAIT-AND-SIGTIMEDWAIT-ARE-STUBS`). Moot for now: a
+FIFO and a signalfd cannot be made here, and a record lock is granted at
+once, so nothing waits in `F_SETLKW`.
+
+## D-POSIX-SIGWAIT-AND-SIGTIMEDWAIT-ARE-STUBS — `sigwait` sleeps a second and answers EINTR, `sigtimedwait` and `sigwaitinfo` answer EAGAIN at once; none takes a signal (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/signal.rs`)**
+
+**In short:** a program that blocks a signal and waits for it with
+`sigwait` -- the usual way a multithreaded server handles `SIGTERM` or
+`SIGHUP`, on a thread of its own -- never gets it here. `sigwait` sleeps
+for a second and returns `EINTR` without having taken anything, and
+`sigtimedwait` and `sigwaitinfo` return -1 with `EAGAIN` at once. Their
+comments still say the system delivers no signals, which stopped being true
+when the trampoline arrived.
+
+**Why it is not simply done:** the native kernel has no call that takes a
+pending signal off the pending set without delivering it, and its signal
+mask is the process's, not the thread's.
+
+**The proper fix:** in the library, beside the trampoline's dispatch. A
+thread in `sigwait` registers the set it accepts -- lock-free, since the
+dispatch runs in signal context and must never wait on a lock the thread it
+interrupted holds -- and lets the set through the mask. The dispatch, on
+whichever thread the kernel delivers to, hands a signal of a registered set
+to its waiter instead of running a handler, and wakes it with a futex wake;
+the waiter blocks the set again. A handler for a signal outside the set ends
+`sigtimedwait` with `EINTR`, `SA_RESTART` or not, and one that runs no handler
+does not end it -- glibc's answers (`interrupt_oracle.txt`, "sigtimedwait").
+The siginfo it can fill is the signal's number: the native frame carries no
+more.
+
+**Where:** `posix/src/signal.rs` (`sigwait`, `sigtimedwait`,
+`sigwaitinfo`, `dispatch_self_signal`).
+
+**Fixed 2026-09-30.** `sigtimedwait` takes a signal of its set: one pending,
+at once, or the next to come, to whichever thread the kernel delivers it. A
+waiting thread publishes its set in a lock-free table; the kernel's mask
+lets the set through for as long as one waits; and the trampoline's
+dispatch, on whichever thread the signal lands, hands it to the waiter
+instead of running its disposition, and wakes it. The program's own mask --
+what `sigprocmask` reports, and what a handler sets and restores -- is not
+touched, so a handler ending on another thread mid-wait cannot close the set
+again; the kernel's mask is recomputed from the two at every change
+(design-decisions §1158). A handler for a signal outside the set ends the
+wait with `EINTR`, `SA_RESTART` or not, and a signal that runs no handler
+does not -- glibc's answers, replayed on the host
+(`interrupt::tests::every_interruption_is_glibcs`, 145 lines). `sigwait`
+begins again after one, as glibc's does, and `sigwaitinfo` is `sigtimedwait`
+with no timeout. The siginfo carries the signal's number and nothing else:
+the native frame brings no more. On the way, the dispatch stopped leaving a
+blocked signal pending while the kernel's mask might still let it through --
+it would have been delivered straight back into the same dispatch -- and a
+child of `fork` forgets its parent's waiters. `services/ctest-eintr` gained
+two ring-3 checks: `sigwait` taking a blocked signal its child sends, and
+`sigtimedwait` ending for an `SA_RESTART` handler.
+
+## D-POSIX-SA-ONSTACK-HANDLER-MOVED-TO-THE-TOP-TWICE — a handler the kernel started on the alternate stack was moved to its top again, over the kernel's saved context and libc's own dispatch (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/signal.rs`)**
+
+**In short:** a program that registers an alternate signal stack
+(`sigaltstack`) and installs a handler with `SA_ONSTACK` had that handler
+crash, or return into garbage, whenever the signal came through the kernel
+-- another process's `kill`, a timer, `^C` at the terminal -- and the
+handler used more than a few words of stack. The kernel builds such a
+signal's frame on the alternate stack, as it should since lane A's
+87ef09d0b; libc, not noticing it was there already, moved the handler to the
+top of that same stack a second time, where its frames overwrote the
+kernel's saved registers, the trampoline's saved pointer to them and the
+dispatch's return address.
+
+**Why:** `altstack_entry` decided "already on it" by a flag that only
+libc's own switch sets, and nothing of libc's runs before a handler the
+kernel starts there. The kernel's `altstack_top_for` asks the stack pointer,
+and its comment says the two must agree. `ctest-altstack` could not see it:
+it sent every signal with `raise`, which dispatches in-process and never
+meets the kernel's frame -- written when the kernel still built every frame
+on the interrupted stack, as its header said.
+
+**Fixed 2026-09-30.** "On the alternate stack" is the flag or the stack
+pointer being inside the region, as the kernel asks it
+(`on_the_alt_stack`): `altstack_entry` no longer moves a handler that is
+already there, and `sigaltstack` reports `SS_ONSTACK`, and refuses a change
+with `EPERM`, while one the kernel started there runs. `ctest-altstack`
+gained checks 43-49, which send their signals with `kill(0, sig)` in a
+process group of their own -- the kernel delivers them as the call returns
+-- to a handler using 8 KiB of stack.
+
+**Where:** `posix/src/signal.rs` (`altstack_entry`, `on_the_alt_stack`,
+`sigaltstack`); `services/ctest-altstack/main.c`.
+
+## D-POSIX-SA-SIGINFO-HANDLERS-WERE-CALLED-WITH-ONE-ARGUMENT — a handler installed with `SA_SIGINFO` was called as `handler(sig)`, and read its `siginfo_t *` and `ucontext_t *` from whatever was left in two registers (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (`posix/src/signal.rs`)**
+
+**In short:** a C program that installs a signal handler with `SA_SIGINFO`
+declares it `void handler(int sig, siginfo_t *info, void *context)` and may
+read `info->si_code`, `info->si_pid` or the interrupted registers through
+`context`. This library called every handler with the signal number alone,
+so those two pointers were whatever the dispatch happened to leave in the
+`rsi` and `rdx` registers: a handler that read them read garbage, or
+crashed.
+
+**Why:** the dispatch (`dispatch_self_signal`) stored `SA_SIGINFO` with the
+rest of the action and never consulted it; `run_handler` took an
+`extern "C" fn(i32)`. The kernel side was not involved -- the trampoline was
+handed the frame of the interrupted registers all along, and passed only
+the number on.
+
+**Fixed 2026-09-30.** An `SA_SIGINFO` handler is called with a `siginfo_t`
+and a `ucontext_t`, on the alternate stack when it asked for it. The
+`siginfo_t` says what the dispatch knows: `SI_TKILL` with this process's
+pid and uid for `raise`, `abort` and `pthread_kill`, `SI_USER` likewise for
+`kill` of its own pid, `SI_USER` with no sender for a signal the kernel
+delivered (`D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE`). The
+`ucontext_t` holds the mask as the signal came, the alternate stack as
+registered, the floating-point control state its `fpregs` points at, and
+-- from the kernel's frame -- the interrupted registers, which the handler
+may change: they are resumed as it leaves them, and so is `uc_sigmask`, as
+Linux's `rt_sigreturn` has it.
+
+**Where:** `posix/src/signal.rs` (`run_siginfo_handler`, `siginfo_for`,
+`call_handler`, `__call_on_alt_stack`).
+
+## D-POSIX-SIGINFO-FROM-THE-KERNEL-IS-THE-NUMBER-ALONE — for a signal the kernel delivers, a native `siginfo_t` says `SI_USER` and names no sender: the kernel's record of the signal does not reach the trampoline (lane D, 2026-09-30) — **Status: OPEN (waiting on lane A)**
+
+**In short:** a program that asks who sent a signal -- in an `SA_SIGINFO`
+handler, or from `sigwaitinfo` -- is told "a user process, pid 0" for every
+signal that came from outside it: another process's `kill`, a child's exit,
+a timer. A `SIGCHLD` handler that reaps the child `si_pid` names, a daemon
+that logs who sent it `SIGTERM`, a POSIX-timer handler that finds its timer
+through `si_value`, all get nothing to go on. Signals the program raises
+itself are described correctly.
+
+**Why:** the kernel keeps the record for every pending signal
+(`kernel/src/proc/signal.rs`, `SigInfo`: code, sender pid and uid, value)
+and hands it to Linux-ABI programs, but the native path takes the signal
+with `take_deliverable`, which drops it, and the native frame
+(`SignalContext`) carries the number alone.
+
+**The proper fix:** a native frame that carries the record, opted into at
+`SYS_SIGNAL_REGISTER` so libc and kernel need not change together; libc then
+reads it into the `siginfo_t` (`siginfo_for`) and the waits' answer.
+Requested of lane A, with a proposed layout, in
+`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`; also that
+`SIGCHLD`'s record carry the exit status, and a native call that posts a
+signal with a value, which `sigqueue` -- a stub answering `ENOSYS` -- needs
+to send one.
+
+**Where:** `posix/src/signal.rs` (`siginfo_for`, `hand_to_a_waiter`);
+`kernel/src/syscall/handlers.rs` (`deliver_pending_signal`).
+
+## D-EXEC-CLEARS-THE-SIGNAL-MASK — a program started by `exec` begins with no signals blocked, whatever the program that exec'd it had blocked; POSIX and Linux keep the mask (lane D, 2026-09-30) — **Status: OPEN (waiting on lane A)**
+
+**In short:** shells and supervisors block a signal -- `SIGCHLD`, `SIGINT`
+-- around starting a command, and the command is meant to start with it
+still blocked until it says otherwise. Here every program that `exec`
+starts, native or Linux, starts with nothing blocked, so a signal the
+parent meant to hold back reaches the new program's default action at once.
+
+**Why:** `proc::signal::on_exec` (`kernel/src/proc/signal.rs`) sets
+`state.blocked = 0` under a comment saying POSIX asks for it; POSIX, and
+Linux, keep the mask across `exec` and reset only the dispositions.
+
+**The proper fix:** keep `blocked` in `on_exec` -- requested of lane A in
+`requests/d-a-exec-must-keep-the-signal-mask.md`. libc's half is done: a
+native image takes the mask it inherited at start-up (`init_signals`,
+`adopt_inherited_mask`), which reads 0 until the kernel keeps it.
+
+**Where:** `kernel/src/proc/signal.rs` (`on_exec`); `posix/src/signal.rs`
+(`init_signals`).
+
+## D-LINUX-RT-SIGTIMEDWAIT-SLEEPS-THROUGH-A-HANDLED-SIGNAL — a Linux program in `sigtimedwait` is not woken by a signal outside its set that it has a handler for; Linux ends the wait with `EINTR` at once (lane D, 2026-09-30) — **Status: OPEN (waiting on lane A)**
+
+**In short:** a Linux program (glibc, run through the Linux ABI) that waits
+in `sigtimedwait` for one set of signals, and is sent another it has a
+handler for, should see the wait end at once with `EINTR` and the handler
+run -- Python's `signal.sigtimedwait` interrupted by `^C`, for one. Here
+the wait goes on to its timeout, or for ever, and only then does the
+handler run. Found by reading the kernel, not by running a program.
+
+**Why:** `sys_rt_sigtimedwait` (`kernel/src/syscall/linux.rs`) parks as a
+signal waiter for its set only, and `set_pending_info` wakes only waiters
+whose mask holds the posted signal; the loop has no way out with `EINTR`.
+glibc's answers (`posix/src/interrupt_oracle.txt`, "sigtimedwait"): a
+handler ends the wait, `SA_RESTART` or not; a signal that runs no handler
+does not.
+
+**The proper fix:** park for the set and for the signals a handler would
+take, and answer `-EINTR` when one of those, not one of the set, is what
+ended the sleep -- requested of lane A in
+`requests/d-a-rt-sigtimedwait-sleeps-through-a-handled-signal.md`. The
+native `sigtimedwait` is libc's and does not have the fault
+(design-decisions §1158).
+
+**Where:** `kernel/src/syscall/linux.rs` (`sys_rt_sigtimedwait`).
+
+## D-POSIX-TGKILL-READ-A-REFUSED-PROC-LOOK-AS-NO-SUCH-THREAD — `tgkill` of another process's thread answered `ESRCH` in any process without a File capability, and the pgroup rung went red (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** `tgkill` sends a signal to one thread of one process, and
+refuses with "no such thread" when the thread is not that process's. For
+another process, the C library checks by looking for
+`/proc/<pid>/task/<tid>` -- and a process started without the right to look
+at files (a File capability with METADATA rights) is refused that look. The
+refusal was read as "no such thread", so such a process could never
+`tgkill` a thread of its own child. The boot test's process-groups rung
+starts its fixture with no capabilities, and its check 84 failed: the first
+boot of commits 119-126 was red.
+
+**Why:** `proc_task_exists` (`posix/src/signal.rs`) returned `false` for
+any failing `access`, the capability refusal (`EACCES`) with the rest. The
+host tests could not see it: the host has no `/proc/<pid>/task` at all, so
+they only checked that a path that cannot exist is not found.
+
+**The fix:** a refusal is not an answer about the thread. `tgkill` then
+signals nothing and answers `EPERM` -- or `ESRCH` when
+`SYS_PROCESS_IS_READY` says the process is not there at all -- rather than
+guessing, since `tgkill` exists so that a thread id reused since the caller
+learnt it is not hit. The fixture checks that branch when it may not look
+(84-87) and the full checks when it may; 88 checks a missing process either
+way. The check belongs in the kernel, capability-free: asked of lane A as
+item 5 of `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`,
+now with this case.
+
+**Where:** `posix/src/signal.rs` (`tgkill`, `proc_task_exists`);
+`services/ctest-pgroup/main.c` (checks 84-88).
+
+## D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED — glibc's 2024-2026 security fixes checked against this C library: none of their bugs is here, but looking found five of our functions far short of glibc's (lane D, 2026-09-30) — **Status: FIXED 2026-09-30 (all five of ours; `posix_spawn`'s attributes, brought up again below, stay with TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES)**
+
+**In short:** glibc fixed a run of security bugs in 2024-2026, and the
+oracle's glibc -- Ubuntu's 2.39, `2.39-0ubuntu8.9` -- carries the fixes.
+Each was checked against this library's own version of the function. None
+of the bugs is here: ours were written differently, and where a fix came
+with a test, its case now runs against ours. But reading the functions
+beside glibc's found five of ours that do far less than glibc's, in ways a
+program ported from Linux will notice: `getopt` and `getopt_long`,
+`regcomp`, `wordexp`, `strfmon`, and `memalign`'s rounding (fixed) --
+and brought up again `posix_spawn`'s attributes, already recorded.
+
+**The fixes, one by one:**
+
+| glibc's fix | What glibc got wrong | Here |
+|---|---|---|
+| CVE-2026-5435, CVE-2026-6238, bug 34289 | `ns_sprintrrf` read past a record's data (CERT, TKEY, TSIG, LOC, A6) | ported with the fixes, glibc's own test swept (`posix/src/nameser.rs`) |
+| CVE-2026-0861 | `memalign`'s padded size wrapped for a huge alignment | dlmalloc's check holds for every alignment; the `PTRDIFF_MAX` cap glibc has is added, and `tst-malloc-too-large` is mirrored (`posix/src/malloc.rs`) |
+| CVE-2025-0395 | the assertion message's buffer was a struct short | no buffer here; the message is now glibc's (`posix/src/assert.rs`) |
+| CVE-2026-5450 | `%mc` grew its buffer one byte short | capacity is checked before each byte; the test is mirrored, `%mlc` too (`posix/src/scanf.rs`) |
+| CVE-2026-5928 | `ungetwc` compared against the byte stream | the character's own bytes are pushed back; the test is mirrored (`posix/src/wchar.rs`) |
+| CVE-2026-19542 | `tdelete`'s parent stack overflowed | a fixed 128-entry stack, each push checked -- the size glibc's fix chose (`posix/src/search.rs`) |
+| CVE-2026-4437 | DNS answers read on past the answer section | lookups go to the kernel's resolver, whose parsers loop over ANCOUNT only (`kernel/src/net/dns.rs`) |
+| CVE-2026-0915 | `getnetbyaddr`'s DNS query built from uninitialised bytes | `getnetbyaddr` reads files only (`posix/src/netdb.rs`) |
+| CVE-2025-8058 | `regcomp` freed twice after an allocation failed | nothing freed by hand: every table is dropped once, and glibc's test -- each allocation failed in turn -- is mirrored (`posix/src/regex.rs`) |
+| CVE-2026-19499 | `strfmon` right-justified over its own padding | ours ignores widths altogether -- see `strfmon` below |
+| CVE-2025-15281, CVE-2026-6368, CVE-2026-6791 | `wordexp`'s `WRDE_REUSE`, `WRDE_APPEND` and `~user` | ours has none of the three -- see `wordexp` below |
+| CVE-2024-2961, CVE-2026-4046, CVE-2026-77117, CVE-2026-80489 | iconv's ISO-2022-CN-EXT, IBM1364, SHIFT_JISX0213 and EUC-JISX0213 converters | none of those charsets is here |
+
+**What reading them found instead** -- each to be rewritten from the
+standard with glibc as the oracle, as the rest of this library is:
+
+- **`getopt`, `getopt_long`, `getopt_long_only`** (`posix/src/getopt.rs`):
+  no error message is ever printed (`opterr` is read by nothing); argv is
+  never permuted, so `prog file -v` does not see `-v` as glibc's does; no
+  `-` or `+` optstring prefix, no `POSIXLY_CORRECT`, no `::` optional
+  argument, no `-W`, no `optind = 0` restart; long options match only
+  whole, never by an unambiguous prefix, and there is no "ambiguous"
+  error. Nearly every C command-line program leans on some of this.
+  **Fixed 2026-09-30**: glibc's, all 2,571 of its parses in
+  `posix/src/getopt_oracle.txt` answered alike.
+- **`regcomp`** (`posix/src/regex.rs`): no interval expressions (`\{m,n\}`,
+  `{m,n}`) and no back-references (`\1`), both of which POSIX requires;
+  patterns past 1024 bytes, programs past 512 instructions and more than 9
+  groups are refused. The userland's own tools use `userspace/ere`, which
+  has both; C programs that call `regcomp` get this. **Fixed 2026-09-30**:
+  intervals, back-references, every GNU operator glibc's `regcomp` reads,
+  REG_STARTEND, and no fixed limit; glibc's answers to some 544,000 cases
+  given alike but for the 16,444 where they contradict the standard or
+  glibc's own (design-decisions section 1160). What is bounded still:
+  D-POSIX-REGEX-BOUNDS-AND-WORST-CASES.
+- **`posix_spawn`'s attributes** (`posix/src/spawn.rs`): the flags are
+  stored, and a child asked for with a signal mask, default signal actions,
+  a new session or a scheduler gets none of them. Already known:
+  `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`, waiting on the kernel record
+  asked of lane A in
+  `requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`.
+- **`wordexp`** (`posix/src/wordexp.rs`): input past 4096 bytes is cut
+  off, more than 256 words are not kept, `WRDE_APPEND` and `WRDE_DOOFFS`
+  are ignored (an append leaks the list it replaces), command substitution
+  gives back its own text, and there is no arithmetic, no `${...}` form but
+  the plain one, no `IFS` splitting, no pathname expansion, no `~user`.
+  **Fixed 2026-09-30**: every POSIX expansion, glibc's answers to 320 cases
+  (`posix/src/wordexp_oracle.txt`) given alike but for 15 where it
+  contradicts POSIX, each recorded in `posix/src/wordexp.rs`.
+- **`strfmon`** (`posix/src/monetary.rs`): not variadic (it takes one
+  `double`, so a second conversion prints the first value again); the
+  field width, the `-` and `#` flags and `%L` are not honoured; output
+  that does not fit is cut short and counted as success, where glibc
+  answers -1 with `E2BIG` -- glibc's own test of CVE-2026-19499 gets 4
+  back here. **Fixed 2026-09-30**: glibc's in the C locale, all 1,572
+  calls in `posix/src/strfmon_oracle.txt` answered alike.
+- **`memalign`** (`posix/src/malloc.rs`) refused 0, 3 or 24 as an
+  alignment, being `aligned_alloc`; glibc's takes 0 as `malloc` and rounds
+  the others up to a power of two. **Fixed 2026-09-30.**
+
+**Where:** the modules named above; the patches are in
+`glibc_2.39-0ubuntu8.9.debian.tar.xz` (Launchpad), `debian/patches/`.
+
+## D-POSIX-PRIVATE-GROWABLE-ARRAYS — glob.rs, gai.rs and wordexp.rs each carry a private growable array of their own, beside the crate's `list::List` (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** the C library has no `Vec` (it is built without an allocator
+crate; its own `malloc` is the allocator), so code that has to grow a table
+writes its own. Three modules did, each slightly differently: `glob.rs`'s
+and `gai.rs`'s `List`, `wordexp.rs`'s `List`/`Bytes`. The regex rewrite
+added `posix/src/list.rs`, one tested `List` for the whole crate. Three
+copies of the same unsafe code are three places for the same bug to hide.
+
+**The fix:** move the three onto `crate::list::List`, each mapping `NoMem`
+into its own error (`GLOB_NOSPACE`, `EAI_MEMORY`, `WRDE_NOSPACE`), and
+delete the private copies. **Done 2026-09-30**: gai's sticky failure flag
+is kept, over the crate's list, as `Gathered`; `List` gained `append`,
+`into_raw` and `IntoIterator` for glob's and wordexp's needs.
+
+**Where:** `posix/src/glob.rs`, `posix/src/gai.rs`, `posix/src/wordexp.rs`;
+`posix/src/list.rs`.
+
+## D-POSIX-REGEX-BOUNDS-AND-WORST-CASES — the rewritten `regcomp`/`regexec` bounds two things glibc does not, and has inputs that cost it quadratic time (lane D, 2026-09-30) — **Status: OPEN (limits, by design; the costs measured)**
+
+**In short:** the new regular-expression engine (`posix/src/regex.rs`,
+design-decisions §1160) answers every case of its oracle as the standard
+does. It is not unbounded, though, and some patterns cost it more than they
+should. None of this is a wrong answer on an input that fits; each is where
+it stops, or slows.
+
+- **A program past two million instructions is refused** (REG_ESPACE from
+  `regcomp`). Bounded repetitions are written out, as glibc writes them
+  out: `(a{1000}){1000}` is a million copies. glibc stops only when
+  `malloc` does.
+- **A back-referencing match past four million table entries answers
+  REG_NOMATCH**, as glibc answers a `regexec` whose memory ran out. Typical
+  patterns are nowhere near it -- `(.*)\1` over 4,000 bytes, `(a|b)*\1`
+  over 8,000 (5.8 s in glibc, measured) are near-linear -- but a pattern
+  built so that every position leaves a different set of group spans can
+  reach it.
+- **Quadratic in the span, not linear:** taking apart a repetition whose
+  body has variable width runs the body forwards once per iteration, and a
+  body whose threads live long (`(a|a*b)*` over a long run of `a`) makes
+  each run long; a bounded repetition holding a group keeps a table of
+  span x count bits (capped at `min + span` counts); and a back-reference
+  pattern whose relaxed form matches at every start but whose exact form
+  does not retries each start.
+- **No lazy DFA.** The search is a Thompson simulation, the program's size
+  a byte; glibc caches DFA states, and is faster on long subjects for big
+  patterns without submatches.
+
+**The fixes, if these ever bite:** a lazy DFA for the search and for
+`dissect.rs`'s forward runs (states cached per byte, as glibc and RE2 do);
+the iterations of a variable-width repetition found from one backward and
+one forward pass rather than one pass each; the back-reference engine's
+states keyed on only the spans a later back-reference can still reach.
+
+**Where:** `posix/src/regex/prog.rs` (`MAX_INSTS`), `posix/src/regex/backref.rs`
+(`MAX_ENTRIES`), `posix/src/regex/dissect.rs`.
+
+## D-POSIX-GAI-A-TEST-HOLD-RACED-ITS-OWN-THREADS — `gai_suspend_times_out` failed once: a lookup thread could take the request the test meant to find still waiting (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** the `getaddrinfo_a` tests hold the library's lookup threads
+back with a flag, `PAUSED`, so that a request stays queued while the test
+asks about it. A thread read the flag *before* taking the queue's lock. A
+thread left over from the test before, on its way out, could read the flag
+just before this test set it, then take the lock and find this test's new
+request -- and answer it, while the test asserted that `gai_suspend` times
+out waiting on it. Seen once in 9,251 (`left: 0, right: -3`), on a machine
+also running a boot test. Only the tests' hold was wrong; the library's
+queue was not.
+
+**The fix:** a thread reads the flag under the queue's lock, the lock the
+test's request is queued under -- so a thread that takes the lock after
+the request was queued sees the flag the test set before queuing it.
+
+**Where:** `posix/src/gai_a.rs`, `worker`.
+
+## D-FIXTURES-C-FIXTURES-WERE-BLIND-TO-THE-HEADER-OVERLAY — a C fixture read as current after an edit to the `posix/include` headers it is compiled against (lane D, 2026-09-30) — **Status: FIXED 2026-09-30**
+
+**In short:** every `services/ctest-*` fixture compiles its `main.c` with
+`-I posix/include`, so the overlay's macros and declarations are in its
+ELF. The two gates that decide whether a fixture must be rebuilt --
+`scripts/ctest-fixtures.py` (`is_stale`, which the pipeline's build step
+uses) and `scripts/create-ext4-rootfs.sh` (which refuses to pack a stale
+one) -- counted `build.py`, `main.c`, headers beside it and `libc.a`, but
+not the overlay. An edit to a header alone moved none of those, so a
+fixture went on running what the old header compiled to, and both gates
+called it current: the same silent false-green as the stale fixtures of
+2026-08-12/13. `ctest-obstack`, whose whole subject is `<obstack.h>`'s
+macros, made it plain.
+
+**The fix:** the newest file under `posix/include` is an input of every C
+fixture in both gates, as the newest fastpy compiler source is of every
+fastpy fixture; `scripts/test-ctest-fixtures.py` checks that a header
+newer than the ELF makes it stale, and that a fastpy fixture does not take
+the overlay.
+
+**Where:** `scripts/ctest-fixtures.py` (`_inputs`,
+`_newest_overlay_header`); `scripts/create-ext4-rootfs.sh`
+(`OVERLAY_NEWEST`).

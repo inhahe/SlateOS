@@ -54,7 +54,16 @@ OUT_IMG="${1:-$ROOT_DIR/rootfs.ext4}"
 # Not larger: block groups are 32768 blocks at 4 KiB, so 384M is 3 of them —
 # enough that the driver's multi-group descriptor walk is exercised, without
 # adding image to hold nothing.
-IMG_SIZE="${IMG_SIZE:-384M}"
+#
+# SIZED FROM WHAT IS STAGED since 2026-09-30, when the 384M image had filled
+# again -- 362.6 MiB of files staged, the fonts, eSpeak NG and 73 native
+# utilities having come after CPython -- and `mke2fs -d` gave up partway, as
+# the paragraph above says it does. Each size here was right when it was chosen
+# and wrong a few ports later, so the rule it kept to is now what decides: the
+# image is the staged tree at most 60% full (~40% free), in whole block groups,
+# never under the 3 groups above (see "the image's size", just before mke2fs).
+# IMG_SIZE, given, still wins -- with a warning when it holds less headroom.
+IMG_SIZE="${IMG_SIZE:-}"
 
 # --- standard Ubuntu/Debian glibc locations ----------------------------------
 LD_SO="/lib64/ld-linux-x86-64.so.2"          # PT_INTERP of every x86-64 glibc exe
@@ -62,7 +71,7 @@ LIBC="/lib/x86_64-linux-gnu/libc.so.6"        # the C library itself
 LIBC_DIR="/lib/x86_64-linux-gnu"
 
 echo "[rootfs] repo root : $ROOT_DIR"
-echo "[rootfs] output    : $OUT_IMG ($IMG_SIZE)"
+echo "[rootfs] output    : $OUT_IMG (${IMG_SIZE:-sized from what is staged})"
 
 # --- sanity: required tools + glibc artifacts present ------------------------
 for tool in mke2fs gcc cp; do
@@ -1908,6 +1917,58 @@ else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
 fi
 
+# The kernel's generic rung runs each C fixture services/ctest-generic.list
+# names, from /tests/ctest-generic.list (requests/d-a-one-rung-for-every-c-
+# fixture.md). A line the rung cannot read, or a fixture with no recipe, is
+# refused here rather than found at boot: three blank-separated fields, a
+# fixture with a services/<name>/build.py, a grant of `-` or `file`, and
+# 1 to 600 seconds.
+GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
+if [ -f "$GENERIC_LIST" ]; then
+    _bad=0
+    _listed=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line="${_line%%#*}"
+        # Fields by `read`, not `set --`, which would take the script's own
+        # arguments; and no glob is expanded.
+        _name="" _grant="" _secs="" _more=""
+        read -r _name _grant _secs _more <<<"$_line" || true
+        if [ -z "$_name" ]; then
+            continue
+        fi
+        if [ -z "$_secs" ] || [ -n "$_more" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: '$_line' is not <name> <grants> <seconds>"
+            _bad=1
+            continue
+        fi
+        if [ ! -f "$ROOT_DIR/services/$_name/build.py" ]; then
+            echo "[rootfs] ERROR: ctest-generic.list names $_name, which has no services/$_name/build.py"
+            _bad=1
+        fi
+        case "$_grant" in
+            -|file) ;;
+            *) echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is neither - nor file"
+               _bad=1 ;;
+        esac
+        _secs_ok=0
+        case "$_secs" in
+            *[!0-9]*) ;;
+            *) if [ "$_secs" -ge 1 ] && [ "$_secs" -le 600 ]; then _secs_ok=1; fi ;;
+        esac
+        if [ "$_secs_ok" -ne 1 ]; then
+            echo "[rootfs] ERROR: ctest-generic.list: $_name's '$_secs' seconds is not 1 to 600"
+            _bad=1
+        fi
+        _listed=$((_listed + 1))
+    done < "$GENERIC_LIST"
+    if [ "$_bad" -ne 0 ]; then
+        echo "[rootfs] ERROR: services/ctest-generic.list is malformed; the image is not written"
+        exit 1
+    fi
+    cp "$GENERIC_LIST" "$STAGE/tests/ctest-generic.list"
+    echo "[rootfs] staged ctest-generic.list: $_listed fixture(s) for the kernel's generic rung"
+fi
+
 # Same rule for bash (flagged further up, enforced here so that both artifact
 # families answer to one gate and neither can be stale in a shipped image).
 #
@@ -2323,14 +2384,20 @@ if [ "$SLATE_COUNT" -gt 0 ]; then
     # `$(( 1G / 4 ))` is "value too great for base". A size this cannot parse
     # skips the check rather than failing, because the budget is advice and
     # advice must never be what breaks a build.
+    #
+    # Only for a given IMG_SIZE, since 2026-09-30: otherwise the image is sized
+    # from the whole staged tree just before mke2fs, which is the free-space
+    # accounting this comment says nothing did.
     SLATE_BUDGET=""
-    case "$IMG_SIZE" in
-        *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
-        *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
-        *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
-           echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
-           echo "[rootfs]       still accurate; only the comparison was skipped." ;;
-    esac
+    if [ -n "$IMG_SIZE" ]; then
+        case "$IMG_SIZE" in
+            *[0-9][Mm]) SLATE_BUDGET=$(( ${IMG_SIZE%?} / 4 )) ;;
+            *[0-9][Gg]) SLATE_BUDGET=$(( ${IMG_SIZE%?} * 1024 / 4 )) ;;
+            *) echo "[rootfs] NOTE: IMG_SIZE=$IMG_SIZE has no M or G suffix this can read, so the"
+               echo "[rootfs]       staged-size budget was NOT checked. The $SLATE_MIB MiB above is"
+               echo "[rootfs]       still accurate; only the comparison was skipped." ;;
+        esac
+    fi
     if [ -n "$SLATE_BUDGET" ] && [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
         echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
         echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
@@ -2701,6 +2768,15 @@ if [ -z "$FASTPY_NEWEST" ]; then
     echo "[rootfs] NOTE: no fastpy checkout found — a fastpy fixture built by an"
     echo "[rootfs]       older compiler cannot be detected as stale by this gate."
 fi
+# The header overlay is the C fixtures' as the compiler is the fastpy ones':
+# every ctest-* recipe compiles main.c with -I posix/include, so its macros
+# and declarations are in the ELF, and an edit to a header alone moves none
+# of the files above -- ctest-obstack, which exists to run <obstack.h>'s
+# macros, would go on testing the old ones. The newest file stands for the
+# directory, as in scripts/ctest-fixtures.py::_newest_overlay_header, which
+# must agree with this.
+OVERLAY_NEWEST="$(find "$ROOT_DIR/posix/include" -type f -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1 | cut -d' ' -f2- || true)"
 
 for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy-*/build.py; do
     [ -e "$_recipe" ] || continue
@@ -2723,12 +2799,17 @@ for _recipe in "$ROOT_DIR"/services/ctest-*/build.py "$ROOT_DIR"/services/fastpy
         [ "$_src" -nt "$_elf" ] || continue
         _behind="${_behind:+$_behind, }$(basename "$_src")"
     done
-    # The compiler that generated it — fastpy fixtures only; a ctest fixture is
-    # C compiled by zig and has no such input.
+    # The compiler that generated a fastpy fixture; the headers a C fixture is
+    # compiled against (OVERLAY_NEWEST, above).
     case "$_name" in
         fastpy-*)
             if [ -n "$FASTPY_NEWEST" ] && [ "$FASTPY_NEWEST" -nt "$_elf" ]; then
                 _behind="${_behind:+$_behind, }fastpy $(basename "$FASTPY_NEWEST")"
+            fi
+            ;;
+        ctest-*)
+            if [ -n "$OVERLAY_NEWEST" ] && [ "$OVERLAY_NEWEST" -nt "$_elf" ]; then
+                _behind="${_behind:+$_behind, }${OVERLAY_NEWEST#"$ROOT_DIR"/}"
             fi
             ;;
     esac
@@ -2850,6 +2931,40 @@ fi
 
 echo "[rootfs] staged tree:"
 ( cd "$STAGE" && find . -type f -printf '  %-52p %10s bytes\n' )
+
+# --- the image's size ----------------------------------------------------------
+# What the staged tree takes on disk -- `du`'s blocks, each file rounded up to
+# the 4 KiB block the image allocates it in -- at most 60% of the image, which
+# is whole 128 MiB block groups (32768 blocks of 4 KiB) and never fewer than
+# three. ext4's own tables come out of the other 40%: the inode tables, the
+# largest, are 1/64 of the image at mke2fs's default of one 256-byte inode per
+# 16 KiB. A given IMG_SIZE is used as it is; a warning says when it leaves less
+# than that headroom, since mke2fs -d fails partway through on a full image and
+# leaves none (see the header).
+STAGED_KIB=$(du -s -k "$STAGE" | cut -f1)
+STAGED_MIB=$(( (STAGED_KIB + 1023) / 1024 ))
+GROUP_MIB=128
+NEED_MIB=$(( (STAGED_KIB * 10 / 6 + 1023) / 1024 ))
+if [ -z "$IMG_SIZE" ]; then
+    # Not GROUPS: bash's own, the user's group list, ignores being assigned.
+    IMG_GROUPS=$(( (NEED_MIB + GROUP_MIB - 1) / GROUP_MIB ))
+    if [ "$IMG_GROUPS" -lt 3 ]; then
+        IMG_GROUPS=3
+    fi
+    IMG_SIZE="$(( IMG_GROUPS * GROUP_MIB ))M"
+    echo "[rootfs] image size: $IMG_SIZE -- $STAGED_MIB MiB staged, at most 60% of the image, in whole $GROUP_MIB MiB block groups"
+else
+    echo "[rootfs] image size: $IMG_SIZE, as IMG_SIZE gives it -- $STAGED_MIB MiB staged"
+    GIVEN_MIB=""
+    case "$IMG_SIZE" in
+        *[0-9][Mm]) GIVEN_MIB=${IMG_SIZE%?} ;;
+        *[0-9][Gg]) GIVEN_MIB=$(( ${IMG_SIZE%?} * 1024 )) ;;
+    esac
+    if [ -n "$GIVEN_MIB" ] && [ "$GIVEN_MIB" -lt "$NEED_MIB" ]; then
+        echo "[rootfs] WARNING: that leaves less than 40% free: $NEED_MIB MiB would. If mke2fs"
+        echo "[rootfs]          stops with \"Could not allocate block\", it is this; unset IMG_SIZE."
+    fi
+fi
 
 # --- pack into a driver-compatible ext4 image --------------------------------
 # -b 4096 : the driver reads/writes at 4 KiB ext4-block granularity.

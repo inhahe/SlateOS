@@ -3,7 +3,8 @@
 //! `iovec_from_user` and `import_iovec` for a vector of them.
 //!
 //! One copy, used by every call that takes a caller's I/O vector -- kernel
-//! AIO's `IOCB_CMD_PREADV`/`PWRITEV` and `process_vm_readv`/`writev` so far.
+//! AIO's `IOCB_CMD_PREADV`/`PWRITEV`, `process_vm_readv`/`writev` and
+//! `process_madvise` so far.
 //! They had grown their own, and the copies differed: one judged the vector's
 //! count at 64 bits where upstream's `import_iovec` takes an `unsigned`, one
 //! never asked `access_ok` of the array it was about to read.

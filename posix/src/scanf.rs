@@ -3540,6 +3540,60 @@ mod tests {
         unsafe { crate::malloc::free(e) };
     }
 
+    /// glibc's stdio-common/tst-vfscanf-bz34008.c (CVE-2026-5450): a `%mc`
+    /// -- and a `%mlc` -- wider than the first allocation, 1024 elements,
+    /// grows to hold every character; glibc's grew one element short and
+    /// wrote past its buffer.
+    #[test]
+    fn m_c_wider_than_the_first_allocation_grows_to_fit() {
+        for width in [1024usize, 1025, 1040, 2049] {
+            let mut input = std::vec![b'A'; width];
+            input.push(0);
+            let fmt = std::format!("%{width}mc\0");
+            let mut buf: *mut u8 = core::ptr::null_mut();
+            assert_eq!(
+                sscanf_va(input.as_ptr(), fmt.as_ptr(), &[&raw mut buf as u64]),
+                1,
+                "{fmt}"
+            );
+            // SAFETY: the conversion stored `width` bytes.
+            assert!(
+                unsafe { core::slice::from_raw_parts(buf, width) }
+                    .iter()
+                    .all(|&c| c == b'A')
+            );
+            // SAFETY: a block `sscanf` allocated.
+            assert!(
+                unsafe { crate::malloc::malloc_usable_size(buf) } >= width,
+                "{fmt}"
+            );
+            // SAFETY: as above.
+            unsafe { crate::malloc::free(buf) };
+
+            let fmt = std::format!("%{width}mlc\0");
+            let mut wide: *mut crate::wchar::WcharT = core::ptr::null_mut();
+            assert_eq!(
+                sscanf_va(input.as_ptr(), fmt.as_ptr(), &[&raw mut wide as u64]),
+                1,
+                "{fmt}"
+            );
+            // SAFETY: the conversion stored `width` wide characters.
+            let got = unsafe { core::slice::from_raw_parts(wide, width) };
+            assert!(
+                got.iter().all(|&c| c == crate::wchar::WcharT::from(b'A')),
+                "{fmt}"
+            );
+            let bytes = width * core::mem::size_of::<crate::wchar::WcharT>();
+            // SAFETY: as above.
+            assert!(
+                unsafe { crate::malloc::malloc_usable_size(wide.cast()) } >= bytes,
+                "{fmt}"
+            );
+            // SAFETY: as above.
+            unsafe { crate::malloc::free(wide.cast()) };
+        }
+    }
+
     #[test]
     fn p_reads_a_pointer_and_nil() {
         let mut p: usize = 99;

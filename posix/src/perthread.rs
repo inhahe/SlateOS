@@ -204,6 +204,17 @@ pub struct PerThread {
     /// failing `dl*` call left, and the one the last `dlerror` returned,
     /// which the caller may read until the next. Freed as the thread exits.
     pub dlerror: crate::dlfcn::DlErrorSlot,
+
+    /// Signal handlers this thread has run, counted by the signal dispatch
+    /// just before it calls each one ([`crate::interrupt::note_handler`]).  A
+    /// wait the kernel ends for a signal compares it with what it was when
+    /// the wait began, to learn whether a handler ran here at all.  Only
+    /// this thread and its handlers touch it, and only atomically.
+    pub handlers_run: u32,
+
+    /// Of [`Self::handlers_run`], those installed without `SA_RESTART` --
+    /// the ones that interrupt even the calls such a flag restarts.
+    pub handlers_run_without_restart: u32,
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -271,6 +282,8 @@ impl PerThread {
         seed48: [0; 3],
         mbstate: [crate::wchar::MbstateT::new(); crate::wchar::internal::COUNT],
         dlerror: crate::dlfcn::DlErrorSlot::ZERO,
+        handlers_run: 0,
+        handlers_run_without_restart: 0,
     };
 }
 

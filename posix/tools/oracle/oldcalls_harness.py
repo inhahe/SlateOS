@@ -1,7 +1,8 @@
 """glibc 2.39's old BSD and System V calls -- sigblock, sigsetmask, siggetmask,
 sigstack, sigreturn, gsignal, ssignal; getwd, group_member, revoke, setlogin,
-ttyslot, profil; getpw; gtty, stty; isctype, isfdtype, dysize; execveat's
-refusals -- as the oracle for the modules that define them.
+ttyslot, profil; getpw; gtty, stty; isctype, isfdtype, dysize; vlimit,
+rpmatch; execveat's refusals -- as the oracle for the modules that define
+them.
 
     python posix/tools/oracle/oldcalls_harness.py   # writes posix/src/oldcalls_oracle.txt
 
@@ -32,8 +33,10 @@ PROGRAM = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <sgtty.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/vlimit.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -215,6 +218,23 @@ int main(void)
     PROBE("dysize", {
         const int ys[] = {1900, 1996, 1999, 2000, 2023, 2024, 2100, 2400, 0, -4, -100};
         for (size_t i = 0; i < sizeof ys / sizeof ys[0]; i++) printf(" %d", dysize(ys[i]));
+    });
+
+    /* 4.2BSD's vlimit: a soft limit, the resource one past setrlimit's. */
+    PROBE("vlimit", {
+        struct rlimit r;
+        RC(vlimit(LIM_CPU, 100)); getrlimit(RLIMIT_CPU, &r); printf(" %ld", (long)r.rlim_cur);
+        RC(vlimit(LIM_FSIZE, 4096)); getrlimit(RLIMIT_FSIZE, &r); printf(" %ld", (long)r.rlim_cur);
+        RC(vlimit(LIM_CPU, -1)); getrlimit(RLIMIT_CPU, &r); printf(" %ld", (long)r.rlim_cur);
+        RC(vlimit(LIM_NORAISE, 0));
+        RC(vlimit(LIM_MAXRSS + 1, 0));
+        RC(vlimit(-1, 0));
+    });
+
+    /* rpmatch in the C locale: ^[yY] is 1, ^[nN] 0, anything else -1. */
+    PROBE("rpmatch", {
+        const char *rs[] = {"y", "Y", "yes", "n", "N", "no", "x", "", " y", "yn", "ny", "\377"};
+        for (size_t i = 0; i < sizeof rs / sizeof rs[0]; i++) printf(" %d", rpmatch(rs[i]));
     });
 
     /* execveat's refusals, where it returns. */

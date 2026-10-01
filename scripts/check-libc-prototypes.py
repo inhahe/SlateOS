@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import functools
 import hashlib
 import json
 import os
@@ -76,6 +77,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import rustlex  # noqa: E402  (beside this file)
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "posix" / "src"
@@ -97,9 +101,6 @@ EXCEPTIONS: dict[str, str] = {
     "membarrier": "takes Linux's third argument, `cpu_id`, which musl does not declare: it is "
                   "read only with MEMBARRIER_CMD_FLAG_CPU, which only the RSEQ command accepts, "
                   "and that fails EINVAL here before the argument is used",
-    "strfmon": "variadic in C; defined taking one `double` (`monetary.rs`): a variadic call "
-               "passes it in %xmm0 as a fixed argument is passed, so one value formats",
-    "strfmon_l": "as `strfmon`",
 }
 
 # Declared functions whose definition this reading cannot find, as of when
@@ -128,11 +129,14 @@ RECORDS_C = {
     "union sigval": ("i64",), "struct in_addr": ("i32",),
     "struct mallinfo": ("mem:mallinfo",), "struct mallinfo2": ("mem:mallinfo2",),
     "cookie_io_functions_t": ("mem:cookie",), "struct _IO_cookie_io_functions_t": ("mem:cookie",),
+    # A parsed DNS message's handle, 80 bytes: ns_msg_getflag takes it whole.
+    "ns_msg": ("mem:ns_msg",), "struct __ns_msg": ("mem:ns_msg",),
 }
 RECORDS_RUST = {
     "DivT": ("i64",), "LdivT": ("i64", "i64"), "LldivT": ("i64", "i64"), "ImaxdivT": ("i64", "i64"),
     "Entry": ("i64", "i64"), "Sigval": ("i64",), "InAddr": ("i32",), "Semun": ("i64",),
     "Mallinfo": ("mem:mallinfo",), "Mallinfo2": ("mem:mallinfo2",), "CookieIoFunctions": ("mem:cookie",),
+    "NsMsg": ("mem:ns_msg",),
     "Complex64": ("f64", "f64"), "Complex32": ("cf32",), "i128": ("i64", "i64"), "u128": ("i64", "i64"),
 }
 
@@ -286,7 +290,10 @@ def declarations_in(ast: dict) -> dict[str, tuple]:
         ret = c_class(return_type(ftype), typedefs)
         params = ftype[len(return_type(ftype)):]
         variadic = "..." in params
-        out.setdefault(node["name"], (tuple(args), ret, variadic))
+        # Keyed by the symbol a call links to: clang's `mangledName`, which
+        # in C is the name but for an asm label -- glibc's __REDIRECT, and the
+        # overlay's pthread_yield, which is sched_yield.
+        out.setdefault(node.get("mangledName") or node["name"], (tuple(args), ret, variadic))
     return out
 
 
@@ -306,6 +313,9 @@ def c_declarations(zig: str, inc: Path, overlay: Path | None) -> dict[str, tuple
         # behind the musl ones they extend.
         flags += ["-I", str(overlay)]
     key = hashlib.sha256()
+    # This script's text too: a change to how a declaration is read is a
+    # change to what the cache holds.
+    key.update(Path(__file__).read_bytes())
     key.update(subprocess.run([zig, "version"], capture_output=True, text=True).stdout.encode())
     key.update(" ".join(flags).encode())
     for base in [b for b in (overlay, inc) if b and b.is_dir()]:
@@ -378,12 +388,23 @@ SHAPES = {
     # from one (`i_l`: `ilogbl`, `lrintl`): `None` means "the shim's".
     "x_ll": (["x87", "x87"], None), "x_lll": (["x87", "x87", "x87"], None),
     "i_l": (["x87"], None), "n_lii": (["x87", "i32", "i32"], None),
+    # glibc's q forms of ecvt, fcvt and gcvt (stdlib.rs): a pointer back, and
+    # the _r forms' int.
+    "p_lipp": (["x87", "i32", "i64", "i64"], "i64"), "p_lip": (["x87", "i32", "i64"], "i64"),
+    "i_lipppn": (["x87", "i32", "i64", "i64", "i64", "i64"], "i32"),
 }
 
 
+@functools.lru_cache(maxsize=None)
 def strip_comments(text: str) -> str:
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-    return re.sub(r"//[^\n]*", "", text)
+    """The text with Rust's comments blanked and its literals kept, as
+    `rustlex` reads them: a `/*` inside a `//` comment or a string -- a glob
+    pattern like `src/*/*.rs` -- is not a comment. The regexes this replaced
+    took it for one and deleted everything up to the next `*/` anywhere later,
+    definitions included; posix/src/glob.rs's patterns hid three that way on
+    2026-09-30 ("declared, and no definition this reading can compare"). Kept
+    once a file: every reader here asks for the same text."""
+    return rustlex.strip_noise(text, keep_literals=True)
 
 
 def split_params(s: str) -> list[str]:
@@ -712,10 +733,25 @@ def self_test() -> int:
     check("a function returning a function pointer returns a pointer",
           c_class(return_type("void (*(int, void (*)(int)))(int)"), {}) == "i64")
     check("an attribute after the parameters", return_type("void (int) __attribute__((noreturn))") == "void")
+    ast = {"inner": [
+        {"kind": "FunctionDecl", "name": "old", "mangledName": "new_one",
+         "type": {"qualType": "int (void)"}},
+        {"kind": "FunctionDecl", "name": "plain", "type": {"qualType": "int (void)"}},
+    ]}
+    check("a declaration is its link name: an asm label's, or its own",
+          set(declarations_in(ast)) == {"new_one", "plain"})
     fns = rust_functions('pub extern "C" fn f(a: i32, // x\n cb: Option<extern "C" fn(i32, i32) -> i32>, '
                          'b: usize) -> i64 { 0 }')
     check("a callback's `->` and a comment do not split parameters",
           fns.get("f") == (["i32", 'Option<extern "C" fn(i32, i32) -> i32>', "usize"], "i64", False))
+    # A `/*` in a doc comment, and a `*/` in a string: no block comment, so
+    # neither definition between them is lost (glob.rs's, 2026-09-30).
+    fns = rust_functions('/// expands `src/*/*.rs`\npub extern "C" fn g(a: i32) -> i32 { 0 }\n'
+                         'const P: &[u8] = b"*/";\npub unsafe extern "C" fn h(b: i64) {}\n'
+                         '/* a real /* nested */ comment: pub extern "C" fn gone(c: u8) {} */\n')
+    check("a `/*` in a line comment or a string opens no comment",
+          fns.get("g") == (["i32"], "i32", False) and fns.get("h") == (["i64"], "()", False))
+    check("...and a real, nested block comment still hides what is in it", "gone" not in fns)
     decls = {"timer_delete": (("i64",), "i32", False, "time.h"),
              "open": (("i64", "i32"), "i32", True, "fcntl.h"),
              "printf": (("i64",), "i32", True, "stdio.h"),

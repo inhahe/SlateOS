@@ -8,7 +8,9 @@ lacks some of them (`-I posix/include` -- zig's driver searches its own libc
 headers before any `-isystem` directory); the overlay header includes musl's
 (`#include_next`) and declares the rest, under the feature macros
 glibc declares them under. It also has whole headers for the families musl
-has none of (<fts.h>, <error.h>, <execinfo.h> ...). A C program written for
+has none of (<fts.h>, <error.h>, <execinfo.h> ...), and one in place of musl's:
+<glob.h>, whose glob_t must name the fields musl's hides (a struct is declared
+once, so it cannot be musl's with more after it). A C program written for
 glibc compiles against it, then, as it does against glibc -- which is the
 claim this gate holds it to.
 
@@ -18,16 +20,23 @@ What it checks
    -- with `-Wall -Wextra -Werror`, in each of CONFIGS and in EXTRA_BUILDS
    (older C, C++), so that no feature-macro setting a program might use
    breaks it; and <stdbit.h>'s type-generic macros, expanded on each type
-   they take, choose the function for its type (`macro_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
+   they take, choose the function for its type (`macro_uses`); and each
+   large-file alias the overlay defines as a macro (`#define fts64_open
+   fts_open`), expanded where the large-file names are visible, names
+   something declared there (`lfs64_uses`). (Not `-Wpedantic`, which objects to `#include_next` itself.) The headers are system headers to
    a program, as musl's are, and their warnings not its business;
    `_SLATEOS_OVERLAY_WARNINGS` makes them ordinary ones here, to be held to
-   these warnings themselves.
+   these warnings themselves. Where musl's own header does not compile --
+   MUSL_UNCOMPILABLE, each with its reason, each confirmed on every run --
+   the overlay's, which includes it, cannot either, and is left out.
 2. **The overlay declares exactly the reference's names** -- those it adds to
    musl's headers, and those musl's headers declare under narrower feature
    macros than glibc's, which it declares again under glibc's: nothing glibc
    2.39 does not declare (a name no glibc program expects is a name a program
    may itself be using), and nothing the reference lists that the overlay has
-   lost.
+   lost. A declaration written under a macro that renames it (<resolv.h>'s
+   `#define res_ninit __res_ninit`, as glibc's is) is of the name it
+   declares, `__res_ninit`.
 3. **Each name is declared where glibc declares it** -- after including the
    header glibc declares it in, in exactly the CONFIGS glibc's is (KNOWN
    lists where musl's own headers make the difference) -- **with glibc's
@@ -123,6 +132,22 @@ KNOWN: dict[tuple[str, str], str] = {
        for cfg in ("c17", "c23", "bfp", "ext", "lfs64")},
 }
 
+# (header, setting) -> why musl's own header does not compile there. The
+# overlay's includes it, so cannot either: it is left out of that setting's
+# builds, and declares nothing there -- which is compared with glibc's, as any
+# visibility is. Each entry is confirmed on every run (`stale_uncompilable`):
+# one whose musl header has come to compile is refused, to be deleted.
+#
+# All are strict ISO C compilations -- no POSIX feature macro -- of a POSIX
+# header that uses a type musl's headers give only to POSIX. (Not C++: the
+# compiler defines _GNU_SOURCE for it.)
+_STRICT_ISO = ("c17", "c23", "bfp", "ext", "lfs64", "c99")
+MUSL_UNCOMPILABLE: dict[tuple[str, str], str] = {
+    ("aio.h", cfg): "musl's <aio.h> embeds struct sigevent in struct aiocb, and musl's "
+                    "<signal.h> defines struct sigevent only for a POSIX compilation"
+    for cfg in _STRICT_ISO
+}
+
 # The types the overlay defines itself -- musl's headers have none of them, so
 # their layouts are the overlay's to get right -- and the header each is in.
 # Check 4 holds each to glibc's; `defined_types` sees that none is missing.
@@ -139,6 +164,33 @@ OVERLAY_TYPES: dict[str, str] = {
     "Dl_serpath": "dlfcn.h",
     "Dl_serinfo": "dlfcn.h",
     "struct dl_find_object": "dlfcn.h",
+    "glob_t": "glob.h",
+    "struct aioinit": "aio.h",
+    "struct sgrp": "gshadow.h",
+    "struct fstab": "fstab.h",
+    "struct ttyent": "ttyent.h",
+    "struct rpcent": "rpc/netdb.h",
+    "struct ntptimeval": "sys/timex.h",
+    "struct aliasent": "aliases.h",
+    "struct gaicb": "netdb.h",
+    "struct re_pattern_buffer": "regex.h",
+    "struct re_registers": "regex.h",
+    "regmatch_t": "regex.h",
+    "struct obstack": "obstack.h",
+    "struct _obstack_chunk": "obstack.h",
+}
+
+# C type -> (glibc's layout as the reference has it, the overlay's, why), each
+# layout (size, {field: offset}): a type the overlay lays out otherwise on
+# purpose. The overlay's is held to the second; the first is held to the
+# reference, so an entry glibc has moved on from is refused.
+LAYOUT_OVERRIDES: dict[str, tuple[tuple[int, dict[str, int]], tuple[int, dict[str, int]], str]] = {
+    "regmatch_t": (
+        (8, {"rm_so": 0, "rm_eo": 4}),
+        (16, {"rm_so": 0, "rm_eo": 8}),
+        "regoff_t is as wide as ssize_t, as POSIX requires -- glibc's own <regex.h> with "
+        "_REGEX_LARGE_OFFSETS, and musl's; glibc's default is an int (design-decisions 1161)",
+    ),
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -147,9 +199,13 @@ FIELD_NAMES: dict[tuple[str, str], str] = {("femode_t", "__glibc_reserved"): "__
 # Where the layouts are read, both sides: C23, for femode_t; not _GNU_SOURCE,
 # so that <stdio.h>'s cookie types are the overlay's own and not musl's.
 LAYOUT_FLAGS = ["-std=gnu2x"]
-# ... and what a header's types need besides: <dlfcn.h>'s are _GNU_SOURCE's
-# alone, in glibc's header and the overlay's alike.
-LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"]}
+# ... and what a header's types need besides: <dlfcn.h>'s, <aio.h>'s and
+# <netdb.h>'s struct gaicb are _GNU_SOURCE's alone, in glibc's header and the
+# overlay's alike.
+LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"],
+                                            "aio.h": ["-D_GNU_SOURCE"],
+                                            "netdb.h": ["-D_GNU_SOURCE"],
+                                            "regex.h": ["-D_GNU_SOURCE"]}
 
 
 def layout_flags(header: str) -> list[str]:
@@ -160,7 +216,67 @@ def layout_flags(header: str) -> list[str]:
 # `__sigset_t` is glibc's unnamed struct behind sigset_t; musl's has the tag
 # `struct __sigset_t` and no typedef of that name. `__mbstate_t` is the same
 # for mbstate_t (<uchar.h>'s mbrtoc8 and c8rtomb).
-TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t"}
+# `utmp` is `utmpx`: musl's <utmp.h> defines `struct utmp` as `struct utmpx`
+# (`#define utmp utmpx`), so glibc's `getutmp (const struct utmpx *, struct
+# utmp *)` is the overlay's with `struct utmpx *` twice -- in a unit that has
+# not included <utmp.h> there is no `struct utmp` to name.
+TYPE_NAMES = {"__sigset_t": "sigset_t", "__mbstate_t": "mbstate_t", "utmp": "utmpx"}
+
+# ... and the tagged names glibc's typedefs are of, where musl's are of
+# untagged types: glibc's pthread_attr_t is `union pthread_attr_t`, which
+# clang writes out; musl's is an untagged struct, named only pthread_attr_t.
+#
+# A `va_list` parameter, which clang writes out as the pointer it is adjusted
+# to, `struct __va_list_tag *`, is said here as `va_list`: the tag is the
+# compiler's own record, and a probe that names `struct __va_list_tag`
+# declares a new, incomplete struct of that name instead, which no `va_list`
+# is compatible with. (<stdio.h>'s obstack_vprintf was the overlay's first
+# declaration with one, 2026-09-30.)
+TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t", "struct __va_list_tag *": "va_list"}
+
+# name -> (glibc's type as the reference has it, the overlay's in musl's
+# names, why they differ): where the two libraries' typedefs are of different
+# types, for the same 8 bytes passed the same way, so that glibc's cannot be
+# spelt in musl's names -- or, as for regoff_t below, of different widths on
+# purpose. The overlay's declaration is held to the second; the first is held
+# to the reference, so an entry glibc has moved on from is refused.
+TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
+    "pthread_clockjoin_np": (
+        "int (unsigned long, void **, int, const struct timespec *)",
+        "int (pthread_t, void **, clockid_t, const struct timespec *)",
+        "glibc's pthread_t is `unsigned long`, musl's `struct __pthread *`: a thread's "
+        "8-byte handle either way",
+    ),
+    # And the GNU regex calls, whose regoff_t is wider on purpose: POSIX's,
+    # as wide as ssize_t, where glibc's default is an int -- glibc's own
+    # <regex.h> with _REGEX_LARGE_OFFSETS (design-decisions 1161).
+    **{name: (glibc, ours, "regoff_t is as wide as ssize_t, as POSIX requires: glibc's "
+                            "<regex.h> with _REGEX_LARGE_OFFSETS (design-decisions 1161)")
+       for name, glibc, ours in (
+           ("re_search",
+            "int (struct re_pattern_buffer *, const char *, int, int, int, struct re_registers *)",
+            "long (struct re_pattern_buffer *, const char *, long, long, long, "
+            "struct re_registers *)"),
+           ("re_search_2",
+            "int (struct re_pattern_buffer *, const char *, int, const char *, int, int, int, "
+            "struct re_registers *, int)",
+            "long (struct re_pattern_buffer *, const char *, long, const char *, long, long, "
+            "long, struct re_registers *, long)"),
+           ("re_match",
+            "int (struct re_pattern_buffer *, const char *, int, int, struct re_registers *)",
+            "long (struct re_pattern_buffer *, const char *, long, long, struct re_registers *)"),
+           ("re_match_2",
+            "int (struct re_pattern_buffer *, const char *, int, const char *, int, int, "
+            "struct re_registers *, int)",
+            "long (struct re_pattern_buffer *, const char *, long, const char *, long, long, "
+            "struct re_registers *, long)"),
+           ("re_set_registers",
+            "void (struct re_pattern_buffer *, struct re_registers *, unsigned int, int *, "
+            "int *)",
+            "void (struct re_pattern_buffer *, struct re_registers *, unsigned long, long *, "
+            "long *)"),
+       )},
+}
 
 # How clang says a name is not declared -- for a library function it knows
 # the type of, "undeclared library function".
@@ -235,7 +351,24 @@ def visible(zig: str, header: str | list[str], names: list[str], flags: list[str
 
 def c_type(glibc_type: str) -> str:
     """A reference type in musl's names."""
+    for glibc, musl in TYPE_PHRASES.items():
+        glibc_type = glibc_type.replace(glibc, musl)
     return re.sub(r"\b\w+\b", lambda m: TYPE_NAMES.get(m.group(0), m.group(0)), glibc_type)
+
+
+def expected_type(name: str, glibc_type: str) -> str:
+    """The type the overlay's `name` is held to: glibc's, but where
+    TYPE_OVERRIDES says musl's typedefs make it another."""
+    over = TYPE_OVERRIDES.get(name)
+    return over[1] if over is not None else glibc_type
+
+
+def stale_overrides(ref: dict[str, tuple[str, frozenset[str], str]]) -> list[str]:
+    """Each TYPE_OVERRIDES entry whose glibc type is not the reference's."""
+    return [f"TYPE_OVERRIDES[{n!r}] records glibc's type as `{glibc}`, but the reference "
+            f"has `{ref[n][2] if n in ref else 'no such name'}`: look again"
+            for n, (glibc, _, _) in TYPE_OVERRIDES.items()
+            if n not in ref or ref[n][2] != glibc]
 
 
 def mistyped(zig: str, header: str, entries: list[tuple[str, str]], flags: list[str],
@@ -258,11 +391,31 @@ def mistyped(zig: str, header: str, entries: list[tuple[str, str]], flags: list[
     return bad
 
 
+def renaming_macros(overlay: Path) -> dict[str, set[str]]:
+    """Each object-like macro of the overlay's headers whose expansion is one
+    identifier (`#define res_ninit __res_ninit`, `#define glob64 glob`):
+    macro -> what it expands to (more than one if headers differ)."""
+    out: dict[str, set[str]] = {}
+    for p in sorted(overlay.rglob("*.h")):
+        text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
+        for macro, name in re.findall(
+                r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z_]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*$",
+                text, flags=re.M):
+            out.setdefault(macro, set()).add(name)
+    return out
+
+
 def candidates(overlay: Path) -> list[str]:
     """Every identifier the overlay's headers might declare: each written
     before a parenthesis or as the name of an extern object, less keywords,
     reserved names and the overlay's own macros -- a superset, which the
-    probe narrows to what is declared."""
+    probe narrows to what is declared.
+
+    But a declaration written under a macro that renames it -- <resolv.h>'s
+    `#define res_ninit __res_ninit` and then `int res_ninit(res_state);`, as
+    glibc's own header has it -- declares the name the macro expands to,
+    reserved or not, and that is its candidate. (Until 2026-09-30 such a
+    declaration was no candidate at all, as a macro, and went unchecked.)"""
     names: set[str] = set()
     macros: set[str] = set()
     for p in overlay.rglob("*.h"):
@@ -271,8 +424,18 @@ def candidates(overlay: Path) -> list[str]:
         text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
         names |= set(re.findall(r"\b([A-Za-z_]\w*)\s*\(", text))
         names |= set(re.findall(r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(", text))
-        names |= set(re.findall(r"\bextern\b[^;(]*?\b([A-Za-z_]\w*)\s*;", text))
-    return sorted(n for n in names - macros - C_WORDS if not n.startswith("_"))
+        # A declaration whose name is in parentheses, which a function-like
+        # macro of the name does not expand: `int (ns_msg_getflag)(ns_msg,
+        # int);` beside musl's macro. (A cast before a parenthesis matches
+        # too -- `(uint32_t)(x)` -- and the probe finds it no object.)
+        names |= set(re.findall(r"\(\s*([A-Za-z_]\w*)\s*\)\s*\(", text))
+        # Not past a `{`: `extern "C" {` opens a block, and the first field
+        # of a struct after it -- <sys/timex.h>'s `struct timeval time;` --
+        # is no extern object, though a function may have its name.
+        names |= set(re.findall(r"\bextern\b[^;({]*?\b([A-Za-z_]\w*)\s*;", text))
+    renamed = renaming_macros(overlay)
+    through = {to for n in names & set(renamed) for to in renamed[n]}
+    return sorted(({n for n in names if not n.startswith("_")} | through) - macros - C_WORDS)
 
 
 def overlay_names(zig: str, overlay: Path) -> set[str]:
@@ -341,12 +504,19 @@ def mislaid(zig: str, overlay: Path,
         src = f"#include <{hdr}>\n#include <stddef.h>\n"
         for cty in types:
             _, size, fields = layouts[cty]
+            if cty in LAYOUT_OVERRIDES:
+                (gsize, gfields), (size, ours_at), _why = LAYOUT_OVERRIDES[cty]
+                if (size_now := layouts[cty][1]) != gsize or dict(fields) != gfields:
+                    problems.append(f"{cty}: glibc's layout is no longer the one LAYOUT_OVERRIDES "
+                                    f"gives ({size_now}, {dict(fields)}): look again")
+                fields = list(ours_at.items())
+            whose = "LAYOUT_OVERRIDES's" if cty in LAYOUT_OVERRIDES else "glibc's"
             src += f"_Static_assert(sizeof({cty}) == {size}, \"@{len(what)}@\");\n"
-            what.append(f"sizeof({cty}) is not glibc's {size}")
+            what.append(f"sizeof({cty}) is not {whose} {size}")
             for f, off in fields:
                 ours = FIELD_NAMES.get((cty, f), f)
                 src += f"_Static_assert(offsetof({cty}, {ours}) == {off}, \"@{len(what)}@\");\n"
-                what.append(f"{cty}'s {ours} is not at glibc's offset {off}")
+                what.append(f"{cty}'s {ours} is not at {whose} offset {off}")
         _, diag = compile_c(zig, src, layout_flags(hdr) + ["-w", "-ferror-limit=0"], overlay)
         for line in errors_of(diag):
             m = FAILED_ASSERT.search(line)
@@ -403,17 +573,67 @@ def macro_uses() -> str:
     return "\n".join(src) + "\n"
 
 
+def lfs64_aliases(overlay: Path) -> list[tuple[str, str]]:
+    """The large-file aliases the overlay's headers define as macros, as
+    musl's headers do (`#define glob64 glob`, `#define FTS64 FTS`): each
+    `#define` of a name with 64 in it to another name, sorted."""
+    found: set[tuple[str, str]] = set()
+    for p in overlay.rglob("*.h"):
+        text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
+        for alias, name in re.findall(
+                r"^[ \t]*#[ \t]*define[ \t]+([A-Za-z]\w*)[ \t]+([A-Za-z_]\w*)[ \t]*$",
+                text, flags=re.M):
+            if "64" in alias:
+                found.add((alias, name))
+    return sorted(found)
+
+
+def lfs64_uses(overlay: Path) -> str:
+    """A translation unit that includes every overlay header and names each
+    large-file alias through `__typeof__`, which takes a type or an
+    expression alike: an alias whose standard name is not declared where
+    the alias is visible -- a misspelling, a feature macro missed -- does not
+    compile. A header that only defines a macro never expands it; this
+    expands every one."""
+    src = [f"#include <{h}>" for h in overlay_headers(overlay)]
+    for i, (alias, _) in enumerate(lfs64_aliases(overlay)):
+        src.append(f"typedef __typeof__({alias}) *lfs64_use{i};")
+    return "\n".join(src) + "\n"
+
+
+def stale_uncompilable(zig: str) -> list[str]:
+    """Each MUSL_UNCOMPILABLE entry whose musl header compiles after all."""
+    settings = {**CONFIGS, **EXTRA_BUILDS}
+
+    def compiles(entry):
+        (h, cfg) = entry
+        rc, _ = compile_c(zig, f"#include <{h}>\n", settings[cfg] + ["-w"], None)
+        return entry, rc == 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
+        return [f"MUSL_UNCOMPILABLE[{h!r}, {cfg!r}]: musl's <{h}> compiles in the {cfg} setting "
+                f"now: delete the entry" for (h, cfg), ok in pool.map(compiles, MUSL_UNCOMPILABLE)
+                if ok]
+
+
 def check_builds(zig: str, overlay: Path) -> list[str]:
-    """Check 1: the headers compile, alone and together, everywhere."""
+    """Check 1: the headers compile, alone and together, everywhere (but
+    where MUSL_UNCOMPILABLE says musl's own header does not)."""
     heads = overlay_headers(overlay)
-    together = "".join(f"#include <{h}>\n" for h in heads)
+
+    def together(cfg: str) -> str:
+        return "".join(f"#include <{h}>\n" for h in heads if (h, cfg) not in MUSL_UNCOMPILABLE)
+
     jobs = [(f"<{h}> alone ({cfg})", f"#include <{h}>\n", flags)
-            for h in heads for cfg, flags in (("gnu", CONFIGS["gnu"]), ("c17", CONFIGS["c17"]))]
-    jobs += [(f"every header together ({cfg})", together, flags)
+            for h in heads for cfg, flags in (("gnu", CONFIGS["gnu"]), ("c17", CONFIGS["c17"]))
+            if (h, cfg) not in MUSL_UNCOMPILABLE]
+    jobs += [(f"every header together ({cfg})", together(cfg), flags)
              for cfg, flags in {**CONFIGS, **EXTRA_BUILDS}.items()]
     jobs += [(f"<stdbit.h>'s type-generic macros ({cfg})", macro_uses(), flags)
              for cfg, flags in (("c11", ["-std=c11"]), ("c23", CONFIGS["c23"]),
                                 ("gnu", CONFIGS["gnu"]))]
+    jobs.append(("the large-file aliases (gnu+lfs64)", lfs64_uses(overlay),
+                 EXTRA_BUILDS["gnu+lfs64"]))
     strict = ["-D_SLATEOS_OVERLAY_WARNINGS", "-Wall", "-Wextra", "-Werror"]
 
     def run(job):
@@ -421,7 +641,7 @@ def check_builds(zig: str, overlay: Path) -> list[str]:
         rc, diag = compile_c(zig, src, flags + strict, overlay)
         return what, rc, diag
 
-    problems = []
+    problems = stale_uncompilable(zig)
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
         for what, rc, diag in pool.map(run, jobs):
             if rc != 0:
@@ -448,12 +668,15 @@ def check_declarations(zig: str, overlay: Path,
 
     def probe(job):
         h, cfg = job
+        if (h, cfg) in MUSL_UNCOMPILABLE:
+            return h, cfg, set()  # nothing declared where nothing compiles
         return h, cfg, visible(zig, h, by_header[h], CONFIGS[cfg], overlay)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, os.cpu_count() or 4)) as pool:
         seen = list(pool.map(probe, jobs))
         typed = dict(zip(sorted(by_header), pool.map(
-            lambda h: mistyped(zig, h, [(n, ref[n][2]) for n in by_header[h]], WIDEST, overlay),
+            lambda h: mistyped(zig, h, [(n, expected_type(n, ref[n][2])) for n in by_header[h]],
+                               WIDEST, overlay),
             sorted(by_header))))
     for h, cfg, vis in seen:
         for n in by_header[h]:
@@ -470,7 +693,8 @@ def check_declarations(zig: str, overlay: Path,
     for h, bad in typed.items():
         for n in sorted(bad):
             problems.append(f"<{h}> declares {n} with a type incompatible with glibc's "
-                            f"`{ref[n][2]}`")
+                            f"`{expected_type(n, ref[n][2])}`")
+    problems += stale_overrides(ref)
     return problems, len(names & set(ref))
 
 
@@ -486,6 +710,20 @@ def self_test() -> int:
     check("a glibc type name maps to musl's",
           c_type("int (int, const __sigset_t *)") == "int (int, const sigset_t *)")
     check("an unrelated name is left alone", c_type("__sigset_tx *") == "__sigset_tx *")
+    check("glibc's tagged pthread_attr_t is musl's",
+          c_type("int (const union pthread_attr_t *, void **)")
+          == "int (const pthread_attr_t *, void **)")
+    # A reference with every override's name, each as its entry says glibc
+    # has it.
+    over = {n: ("h.h", frozenset({"gnu"}), glibc) for n, (glibc, _o, _w) in TYPE_OVERRIDES.items()}
+    check("an override matching the reference stands", stale_overrides(over) == [])
+    check("and is what the overlay is held to",
+          expected_type("pthread_clockjoin_np", "anything").startswith("int (pthread_t,"))
+    moved = dict(over)
+    moved["pthread_clockjoin_np"] = ("pthread.h", frozenset(), "int (long)")
+    check("an override the reference has moved on from is refused",
+          len(stale_overrides(moved)) == 1)
+    check("a name without one is held to glibc's type", expected_type("f", "int (int)") == "int (int)")
     with tempfile.TemporaryDirectory() as t:
         d = Path(t)
         (d / "a.h").write_text(
@@ -499,6 +737,29 @@ def self_test() -> int:
         check("a comment's words are not", "comment" not in c)
         check("a macro is not", "M" not in c)
         check("a reserved name is not", "_r" not in c)
+        (d / "paren").mkdir()
+        (d / "paren" / "p.h").write_text("int (pg)(int, int);\nint (*fp)(void);\n",
+                                         encoding="utf-8", newline="")
+        c = candidates(d / "paren")
+        check("a declaration with its name in parentheses is a candidate",
+              "pg" in c and "fp" in c)
+        (d / "ren").mkdir()
+        (d / "ren" / "r.h").write_text(
+            "#define rn __rn\nint rn(int);\n#define alias64 alias\n#define N 1\n"
+            "#define ev __ev\nextern int ev;\n",
+            encoding="utf-8", newline="")
+        c = candidates(d / "ren")
+        check("a declaration under a renaming macro is the name it declares",
+              "__rn" in c and "rn" not in c)
+        check("an extern object's too", "__ev" in c and "ev" not in c)
+        check("and a renaming macro no declaration uses adds nothing", "alias" not in c)
+        check("the renaming macros are found, and nothing else is",
+              renaming_macros(d / "ren") == {"rn": {"__rn"}, "alias64": {"alias"},
+                                             "ev": {"__ev"}})
+        (d / "cxx.h").write_text('extern "C" {\nstruct t {\n\tlong time;\n};\n}\n',
+                                 encoding="utf-8", newline="")
+        check("a field after extern \"C\" { is not", "time" not in candidates(d))
+        (d / "cxx.h").unlink()
         (d / "r.txt").write_text("# x\nf\ta.h\tgnu,c17\tint (int)\n", encoding="utf-8", newline="")
         ref = read_reference(d / "r.txt")
         check("the reference is read", ref == {"f": ("a.h", frozenset({"gnu", "c17"}), "int (int)")})
@@ -522,6 +783,13 @@ def self_test() -> int:
         check("the layouts are read",
               read_layouts(d / "l.txt") == {"femode_t": ("fenv.h", 8, [("__control_word", 0),
                                                                      ("__mxcsr", 4)])})
+        (d / "lfs").mkdir()
+        (d / "lfs" / "c.h").write_text(
+            "#define f64 f\n  #  define T64 T\n#define __NEED_off64_t\n#define N64 1\n"
+            "/* #define gone64 gone */\n#define g64(x) g(x)\n#define h h64\n",
+            encoding="utf-8", newline="")
+        check("a large-file alias is found, and nothing else is",
+              lfs64_aliases(d / "lfs") == [("T64", "T"), ("f64", "f")])
     zig = find_zig()
     if zig and musl_include(zig):
         with tempfile.TemporaryDirectory() as t:
@@ -538,6 +806,30 @@ def self_test() -> int:
             check("a wrong type is caught, a right one passes", bad == {"printf"})
             check("the overlay's names are what it adds to musl's",
                   overlay_names(zig, d) == {"fcloseall"})
+            saved_unc = dict(MUSL_UNCOMPILABLE)
+            try:
+                MUSL_UNCOMPILABLE.clear()
+                MUSL_UNCOMPILABLE[("aio.h", "c17")] = "a header musl cannot compile there"
+                check("an entry for a musl header that does not compile stands",
+                      stale_uncompilable(zig) == [])
+                MUSL_UNCOMPILABLE[("stdio.h", "c17")] = "a header musl compiles everywhere"
+                check("an entry for one that compiles is refused",
+                      [e for e in stale_uncompilable(zig) if "'stdio.h'" in e] != []
+                      and all("'aio.h'" not in e for e in stale_uncompilable(zig)))
+            finally:
+                MUSL_UNCOMPILABLE.clear()
+                MUSL_UNCOMPILABLE.update(saved_unc)
+            lfs = d / "lfs"
+            (lfs / "sys").mkdir(parents=True)
+            (lfs / "sys" / "al.h").write_text(
+                "#include <sys/stat.h>\n#include <glob.h>\n#define fstatx64 fstat\n"
+                "#define globx64_t glob_t\n", encoding="utf-8", newline="")
+            ok, _ = compile_c(zig, lfs64_uses(lfs), EXTRA_BUILDS["gnu+lfs64"] + ["-Werror"], lfs)
+            check("an alias for a declared function or type compiles", ok == 0)
+            (lfs / "sys" / "al.h").write_text(
+                "#include <sys/stat.h>\n#define fstatx64 fstatt\n", encoding="utf-8", newline="")
+            bad, _ = compile_c(zig, lfs64_uses(lfs), EXTRA_BUILDS["gnu+lfs64"] + ["-Werror"], lfs)
+            check("an alias for an undeclared name does not", bad != 0)
             (d / "sys").mkdir()
             (d / "sys" / "lay.h").write_text("typedef struct { int a; long b; } lay_t;\n",
                                              encoding="utf-8", newline="")
@@ -550,6 +842,26 @@ def self_test() -> int:
                 check("a layout that is glibc's passes", mislaid(zig, d, good) == [])
                 check("an offset that is not is caught",
                       any("b is not at glibc's offset 4" in p for p in mislaid(zig, d, bad)))
+                # A layout otherwise on purpose: glibc's lay_t taken to be 8
+                # bytes with b at 4, the overlay's 16 with b at 8.
+                saved_lo = dict(LAYOUT_OVERRIDES)
+                try:
+                    LAYOUT_OVERRIDES.clear()
+                    glibc_lay = {"lay_t": ("sys/lay.h", 8, [("a", 0), ("b", 4)])}
+                    LAYOUT_OVERRIDES["lay_t"] = ((8, {"a": 0, "b": 4}), (16, {"a": 0, "b": 8}),
+                                                 "on purpose")
+                    check("a layout LAYOUT_OVERRIDES gives passes", mislaid(zig, d, glibc_lay) == [])
+                    moved = {"lay_t": ("sys/lay.h", 12, [("a", 0), ("b", 4)])}
+                    check("an override glibc has moved on from is refused",
+                          any("no longer" in p for p in mislaid(zig, d, moved)))
+                    LAYOUT_OVERRIDES["lay_t"] = ((8, {"a": 0, "b": 4}), (16, {"a": 0, "b": 4}),
+                                                 "kept wrong")
+                    check("an override the overlay does not keep is caught",
+                          any("b is not at LAYOUT_OVERRIDES's offset 4" in p
+                              for p in mislaid(zig, d, glibc_lay)))
+                finally:
+                    LAYOUT_OVERRIDES.clear()
+                    LAYOUT_OVERRIDES.update(saved_lo)
                 OVERLAY_TYPES.clear()
                 check("a struct OVERLAY_TYPES does not list is caught",
                       any("lay_t" in p and "does not list" in p for p in mislaid(zig, d, good)))
@@ -600,9 +912,11 @@ def main(argv: list[str] | None = None) -> int:
     if problems:
         return 1
     print(f"check-libc-overlay: {len(overlay_headers(overlay))} headers compile in "
-          f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings; {compared} declarations appear where "
+          f"{len(CONFIGS) + len(EXTRA_BUILDS)} settings (but {len(MUSL_UNCOMPILABLE)} where "
+          f"musl's own does not); {compared} declarations appear where "
           f"glibc 2.39's do ({len(CONFIGS)} settings each), with glibc's types; "
-          f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts")
+          f"{len(OVERLAY_TYPES)} types it defines have glibc's layouts; "
+          f"{len(lfs64_aliases(overlay))} large-file aliases name what they alias")
     return 0
 
 

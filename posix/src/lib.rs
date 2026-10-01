@@ -85,8 +85,8 @@
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
 //!   (C locale date/time formats, day/month names, codeset, etc.)
-//! - **Monetary Formatting**: `strfmon`, `strfmon_l` (C locale
-//!   decimal formatting with `%n`/`%i` specifiers)
+//! - **Monetary Formatting**: `strfmon`, `strfmon_l` (glibc's in the C
+//!   locale: widths, left and right precisions, `(`, `=f`, `L`)
 //! - **Search / Data Structures** (`<search.h>`): red-black tree `tsearch`,
 //!   `tfind`, `tdelete`, `twalk`, `twalk_r`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
@@ -347,6 +347,7 @@ mod abi_layout;
 mod accounts_oracle;
 
 pub mod aio;
+pub mod aliases;
 pub mod alloca;
 pub mod argz;
 pub mod assert;
@@ -383,12 +384,15 @@ pub mod fmtmsg;
 pub mod fnmatch;
 pub mod fortify;
 pub mod fortify_printf;
+pub mod fstab;
 pub mod fts;
 pub mod ftw;
 pub mod gai;
+pub mod gai_a;
 pub mod getopt;
 pub mod getpass;
 pub mod glob;
+pub mod gshadow;
 pub mod hosts;
 pub mod iconv;
 pub(crate) mod iconv_8bit;
@@ -397,6 +401,7 @@ pub(crate) mod iconv_prefix;
 pub(crate) mod iconv_translit;
 pub mod inet;
 pub mod inet6;
+pub(crate) mod interrupt;
 pub mod inttypes;
 pub mod ioctl;
 pub mod langinfo;
@@ -437,21 +442,26 @@ pub mod linux_time;
 pub mod linux_tty_user_types;
 pub mod linux_userfaultfd;
 pub mod linux_utsname_types;
+pub(crate) mod list;
 pub mod locale;
 pub mod lowlevellock;
 pub mod malloc;
 pub mod math;
 pub mod mathl;
+pub mod mcheck;
 pub mod md5;
 pub mod mman;
 pub mod mntent;
 pub mod monetary;
 pub mod mqueue;
+pub mod nameser;
 pub mod narrow;
 pub mod netdb;
+pub mod netgroup;
 pub mod nl_types;
 pub(crate) mod nss_files;
 pub(crate) mod objtable;
+pub mod obstack;
 pub mod paths;
 pub(crate) mod perprocess;
 pub mod perthread;
@@ -467,6 +477,8 @@ pub mod pwd;
 pub mod random;
 pub mod regex;
 pub(crate) mod rem_pio2_large;
+pub mod res_debug;
+pub mod res_print;
 pub mod resolv;
 pub mod resource;
 pub mod scanf;
@@ -511,9 +523,11 @@ pub(crate) mod sysv_ipc;
 pub mod sysv_msg;
 pub mod sysv_sem;
 pub mod sysv_shm;
+pub(crate) mod tempname;
 pub mod threads;
 pub mod time;
 pub mod tls;
+pub mod ttyent;
 pub mod types;
 pub mod tz;
 pub mod uchar;

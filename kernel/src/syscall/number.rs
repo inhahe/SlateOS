@@ -3077,31 +3077,44 @@ pub const SYS_FS_STATVFS: u64 = 608;
 /// Size of the output buffer for `SYS_FS_STATVFS`.
 pub const FS_STATVFS_SIZE: usize = 64;
 
-/// Acquire an advisory file lock (flock).
+/// Take an advisory whole-file lock (`flock`) by path, for the calling
+/// process, without waiting.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
 /// `arg2`: lock type (0 = shared/read, 1 = exclusive/write).
-/// `arg3`: owner ID (typically the process/task ID of the caller).
+/// `arg3`: ignored since 2026-10-01.
 ///
 /// ## Semantics
 ///
+/// - The lock is the **calling process's**. It ends at
+///   [`SYS_FS_FUNLOCK`] or the process's exit.
 /// - Shared locks are compatible with other shared locks but not
 ///   exclusive locks.
 /// - Exclusive locks are incompatible with all other locks.
-/// - If the owner already holds a lock, it is upgraded or downgraded.
+/// - Asking for the other type converts the lock, and, as on Linux, a
+///   conversion first gives up the lock held. So a refused upgrade leaves
+///   the process with none.
+///
+/// `arg3` was the owner, taken from the caller as given. A process could
+/// take a lock in another's name, and through `SYS_FS_FUNLOCK` release
+/// anyone's. libc passed its own pid, which is what the kernel uses now, so
+/// its calls are unchanged. A lock that belongs to an open file description,
+/// as BSD and Linux `flock` locks do, and that can wait, is
+/// [`SYS_FS_FLOCK_HANDLE`]'s.
 ///
 /// Returns: 0 on success, `WOULD_BLOCK` if the lock is held by
-/// another process, or negative error code.
+/// another owner, or negative error code.
 pub const SYS_FS_FLOCK: u64 = 609;
 
 /// Release an advisory file lock.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
-/// `arg2`: owner ID.
+/// `arg2`: ignored since 2026-10-01: the lock released is the calling
+/// process's own (see [`SYS_FS_FLOCK`]).
 ///
-/// If the owner doesn't hold a lock on this file, this is a no-op.
+/// If the caller doesn't hold a lock on this file, this is a no-op.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_FUNLOCK: u64 = 640;
@@ -5948,6 +5961,52 @@ pub const RECORD_LOCK_SET: u64 = 1;
 /// [`SYS_FS_RECORD_LOCK`] op: `F_SETLKW`. Take the lock, waiting while
 /// another process's lock is in the way.
 pub const RECORD_LOCK_SET_WAIT: u64 = 2;
+
+// ---------------------------------------------------------------------------
+// flock on an open file (1094)
+// ---------------------------------------------------------------------------
+
+/// BSD `flock(2)` on an open file: `fs_flock_handle(handle, op) -> 0`.
+///
+/// A whole-file advisory lock that belongs to the **open file
+/// description**, as BSD and Linux `flock` locks do: every descriptor
+/// sharing the handle (a `dup`, a `fork`) shares the lock. It ends at
+/// `FLOCK_UN` or at the description's final close. Two separate opens of
+/// one file are separate owners, even in one process. The table is the
+/// Linux `flock(2)`'s, so native and Linux programs exclude each other.
+///
+/// - `handle`: a file handle the caller holds. Any open mode will do, as
+///   on Linux.
+/// - `op`: [`FLOCK_SH`], [`FLOCK_EX`] or [`FLOCK_UN`], optionally with
+///   [`FLOCK_NB`]. Linux's values.
+///
+/// Without `FLOCK_NB`, a request another owner's lock is in the way of
+/// **waits** until it is free. A signal ends the wait (`Interrupted`, so
+/// libc's `EINTR`), or restarts it under `SA_RESTART`, as Linux restarts
+/// `flock`. With `FLOCK_NB` it is `WouldBlock` (`EWOULDBLOCK`) at once.
+/// Asking for the other type converts the lock, and a conversion first gives
+/// up the lock held, as on Linux.
+///
+/// Errors: `InvalidArgument` (`EINVAL`) for an op that is not exactly one of
+/// the three, optionally with `FLOCK_NB`, checked first; `InvalidHandle`
+/// (`EBADF`) for a handle the caller does not hold; `ResourceExhausted` for
+/// a full table (POSIX's `ENOLCK`; libc maps the code to `ENOMEM`
+/// generally).
+///
+/// The path-based [`SYS_FS_FLOCK`] locks for the calling process instead and
+/// never waits; it stays for callers built against it.
+///
+/// Chosen number 1094, next free slot after 1093.
+pub const SYS_FS_FLOCK_HANDLE: u64 = 1094;
+
+/// [`SYS_FS_FLOCK_HANDLE`] op: a shared lock (Linux `LOCK_SH`).
+pub const FLOCK_SH: u64 = 1;
+/// [`SYS_FS_FLOCK_HANDLE`] op: an exclusive lock (Linux `LOCK_EX`).
+pub const FLOCK_EX: u64 = 2;
+/// [`SYS_FS_FLOCK_HANDLE`] op flag: do not wait (Linux `LOCK_NB`).
+pub const FLOCK_NB: u64 = 4;
+/// [`SYS_FS_FLOCK_HANDLE`] op: release (Linux `LOCK_UN`).
+pub const FLOCK_UN: u64 = 8;
 
 // ---------------------------------------------------------------------------
 // Version info

@@ -6533,7 +6533,9 @@ fn destroy_process_resources(
     // Release any advisory file locks (flock) held by this process.
     // Locks are owner-keyed by PID; without this a crashed lock holder
     // would block every other waiter on that path until reboot.
-    crate::fs::Vfs::funlock_all(pid);
+    // As a process owner: a flock lock held through a handle belongs to the
+    // open file description and ends at its final close, not here.
+    crate::fs::Vfs::funlock_all(crate::fs::vfs::flock_process_owner(pid));
     // And the byte-range record locks (fcntl F_SETLK), which are a separate
     // table from flock because POSIX makes them separate lock spaces. Same
     // reason, same moment: a dead owner's write lock on a range would refuse

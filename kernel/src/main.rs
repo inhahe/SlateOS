@@ -5879,6 +5879,19 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 syscall::record_lock::self_test(),
             );
+            // flock without LOCK_NB: a waiter parks and the unlock wakes it,
+            // and two sharers upgrading do not wait on each other.
+            selftest::dispatch_debug(
+                "flock waiting",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_flock_wait(),
+            );
+            // /proc/locks: both kinds of lock, in Linux's format.
+            selftest::dispatch_debug(
+                "/proc/locks",
+                selftest::Severity::Diagnostic,
+                fs::procfs::self_test_locks(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking

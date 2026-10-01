@@ -657,7 +657,8 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // lock release.
         // `p` is the resolved host path captured at open; use the _resolved
         // worker so we don't re-apply namespace translation (double-jail).
-        let _ = crate::fs::Vfs::funlock_resolved(p, handle);
+        let _ =
+            crate::fs::Vfs::funlock_resolved(p, crate::fs::vfs::flock_description_owner(handle));
         // And the fcntl OFD record locks. An OFD lock belongs to the open
         // file description, so the final close of that description is
         // exactly when it ends -- that is what distinguishes it from a

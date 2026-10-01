@@ -1234,10 +1234,14 @@ pub enum LockType {
 /// A single advisory lock held on a file.
 #[derive(Debug, Clone)]
 struct FileLock {
-    /// Owning process/task ID (0 = kernel).
+    /// Who holds it: a process ([`flock_process_owner`]) or an open file
+    /// description ([`flock_description_owner`]).
     owner: u64,
     /// Lock type.
     lock_type: LockType,
+    /// The process that took it, for `/proc/locks` (0 for a kernel task).
+    /// For a description's lock this is who asked; the description holds it.
+    pid: u64,
 }
 
 /// Per-path lock table entry.
@@ -1296,6 +1300,49 @@ static LOCK_TABLE: Mutex<Vec<PathLockEntry>> = Mutex::new(Vec::new());
 
 /// Maximum number of distinct file paths that can be locked.
 const MAX_LOCKED_PATHS: usize = 1024;
+
+/// Tag bit marking a `flock` owner that is a **process**, as against an open
+/// file description.
+///
+/// Locks taken through a handle -- Linux `flock(2)`, the native
+/// `SYS_FS_FLOCK_HANDLE` -- belong to the open file description, as BSD and
+/// Linux `flock` locks do. The native path-based `SYS_FS_FLOCK` takes them
+/// for the calling process. Pids and handles are both small counters from 1,
+/// and until 2026-10-01 they were one owner space: pid 57's lock and handle
+/// 57's never conflicted, and process 57's exit released handle 57's locks.
+const FLOCK_PROCESS_TAG: u64 = 1 << 63;
+
+/// The `flock` owner for a process: the native path-based `SYS_FS_FLOCK`.
+/// Released when the process exits.
+#[must_use]
+pub fn flock_process_owner(pid: u64) -> u64 {
+    pid | FLOCK_PROCESS_TAG
+}
+
+/// The `flock` owner for an open file description, by handle: Linux
+/// `flock(2)` and the native `SYS_FS_FLOCK_HANDLE`. Released at the
+/// description's final close (`fs::handle::close`).
+#[must_use]
+pub fn flock_description_owner(handle: u64) -> u64 {
+    handle & !FLOCK_PROCESS_TAG
+}
+
+/// A task parked in [`Vfs::flock_wait_resolved`], and the file it waits on.
+struct FlockWaiter {
+    task: crate::sched::task::TaskId,
+    path: PathBuf,
+    id: Option<FileId>,
+}
+
+/// Tasks waiting for a `flock`. A list of its own, never held with
+/// `LOCK_TABLE`: a waiter registers here before each attempt (see
+/// `flock_wait_resolved`), which keeps a release between its attempt and its
+/// park from being lost.
+static FLOCK_WAITERS: Mutex<Vec<FlockWaiter>> = Mutex::new(Vec::new());
+
+/// Tasks that may wait for a `flock` at once. Each is a parked task; the
+/// bound is on heap use.
+const MAX_FLOCK_WAITERS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // VFS path resolution cache (dcache)
@@ -1876,6 +1923,10 @@ impl Vfs {
         LOCK_TABLE
             .lock()
             .retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
+        // Whoever waited for one of those locks tries again, and finds the
+        // file gone or free. After the table lock: the two are never held
+        // together.
+        wake_all_flock_waiters();
 
         // And the state kept about its files outside it: no identity on this
         // filesystem can match again (`super::perfile`). After the lock above
@@ -5612,31 +5663,36 @@ impl Vfs {
 
     // ----- Advisory file locking -----
 
-    /// Acquire an advisory lock on a file.
+    /// Take a `flock` lock on a file, without waiting.
     ///
-    /// `path` is resolved (symlinks followed) before locking.
-    /// `owner` identifies the lock holder (typically a process/task ID).
+    /// `path` is resolved (symlinks followed) before locking. `owner` is the
+    /// holder: a process ([`flock_process_owner`]) or an open file
+    /// description ([`flock_description_owner`]).
     ///
-    /// ## Semantics
+    /// ## Semantics (Linux's `flock_lock_inode`)
     ///
     /// - **Shared lock**: compatible with other shared locks, incompatible
     ///   with exclusive locks from other owners.
     /// - **Exclusive lock**: incompatible with any lock from another owner.
-    /// - If the owner already holds a lock on this path, the lock is
-    ///   upgraded or downgraded atomically.
+    /// - **Conversion is not atomic.** An owner asking for the other type
+    ///   first loses the lock it holds, then asks as anyone would. So two
+    ///   holders of a shared lock that both ask for exclusive do not wait on
+    ///   each other forever: one gets it. A refused conversion leaves the
+    ///   owner with no lock, as on Linux.
     ///
-    /// Returns `WouldBlock` if the lock cannot be acquired (non-blocking).
+    /// `WouldBlock` while another owner's lock is in the way;
+    /// [`flock_wait_resolved`](Self::flock_wait_resolved) waits instead.
+    /// `ResourceExhausted` when the table is full (`ENOLCK`).
     pub fn flock(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::flock_resolved(&path, owner, lock_type)
     }
 
-    /// Acquire an advisory lock on an already-resolved host path.
+    /// [`flock`](Self::flock) on an already-resolved host path.
     ///
-    /// Like [`flock_resolved`](Self::flock_resolved) for `read_at_resolved`:
-    /// handle-backed callers already hold a resolved host path (captured at
-    /// `open`), so they must NOT re-run namespace translation — doing so would
+    /// Handle-backed callers already hold a resolved host path (captured at
+    /// `open`), so they must NOT re-run namespace translation -- doing so would
     /// re-apply the chroot jail prefix a second time (double-jail) and key the
     /// lock on the wrong path. This worker operates directly on `path`.
     pub fn flock_resolved(
@@ -5657,69 +5713,67 @@ impl Vfs {
         // against an advisory lock on any procfs file). The table lock never
         // kept a rename out anyway, so nothing is lost by looking first.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
-        let mut table = LOCK_TABLE.lock();
+        flock_attempt(path, id, owner, lock_type)
+    }
 
-        // Find or create the entry for this path.
-        let entry_idx = table.iter().position(|e| lock_entry_matches(e, path, id));
+    /// [`flock_resolved`](Self::flock_resolved), waiting while another
+    /// owner's lock is in the way: `flock` without `LOCK_NB`.
+    ///
+    /// Woken by every change that can let it in: an unlock, a release at a
+    /// close or an exit, a conversion. It then tries again, and parks again
+    /// if it lost the race.
+    ///
+    /// # Errors
+    ///
+    /// - `Interrupted` when a deliverable signal arrives during the wait. The
+    ///   syscall layers restart it under `SA_RESTART`, as Linux restarts
+    ///   `flock`, and answer `EINTR` otherwise. Kernel tasks have no signals
+    ///   and wait uninterruptibly.
+    /// - `ResourceExhausted` when the table, or the list of waiters, is full.
+    pub fn flock_wait_resolved(
+        path: impl AsRef<Path>,
+        owner: u64,
+        lock_type: LockType,
+    ) -> KernelResult<()> {
+        use crate::ipc::waiters;
 
-        if let Some(idx) = entry_idx {
-            let entry = &mut table[idx];
-
-            // Check if this owner already has a lock (upgrade/downgrade).
-            if let Some(pos) = entry.locks.iter().position(|l| l.owner == owner) {
-                // Re-lock: upgrade/downgrade.
-                match lock_type {
-                    LockType::Exclusive => {
-                        // Can only upgrade to exclusive if no other locks exist.
-                        if entry.locks.len() > 1 {
-                            return Err(KernelError::WouldBlock);
-                        }
-                        entry.locks[pos].lock_type = LockType::Exclusive;
-                    }
-                    LockType::Shared => {
-                        // Downgrade is always allowed.
-                        entry.locks[pos].lock_type = LockType::Shared;
-                    }
-                }
-                return Ok(());
-            }
-
-            // New lock on this path.
-            match lock_type {
-                LockType::Shared => {
-                    // Compatible only if no exclusive lock exists.
-                    if entry
-                        .locks
-                        .iter()
-                        .any(|l| l.lock_type == LockType::Exclusive)
-                    {
-                        return Err(KernelError::WouldBlock);
-                    }
-                }
-                LockType::Exclusive => {
-                    // Incompatible with any existing lock.
-                    if !entry.locks.is_empty() {
-                        return Err(KernelError::WouldBlock);
-                    }
-                }
-            }
-
-            entry.locks.push(FileLock { owner, lock_type });
-        } else {
-            // No existing entry — create one.
-            if table.len() >= MAX_LOCKED_PATHS {
-                return Err(KernelError::OutOfMemory);
-            }
-            table.push(PathLockEntry {
-                // Stored so a later lookup by a DIFFERENT name for the same
-                // file finds this entry rather than creating a second one.
-                id,
-                path: path.to_path_buf(),
-                locks: alloc::vec![FileLock { owner, lock_type }],
-            });
+        let path = path.as_ref();
+        // Resolved once, before any lock, as in `flock_resolved`.
+        let id = Self::file_identity_resolved(path).unwrap_or(None);
+        // The uncontended case takes no lock on the waiter list at all.
+        match flock_attempt(path, id, owner, lock_type) {
+            Err(KernelError::WouldBlock) => {}
+            other => return other,
         }
-
-        Ok(())
+        let task = crate::sched::current_task_id();
+        let pid = waiters::current_user_pid();
+        loop {
+            // Registered BEFORE each attempt: a release that follows the
+            // attempt finds this task to wake, and one that precedes it is
+            // seen by the attempt. Never with `LOCK_TABLE` held.
+            {
+                let mut list = FLOCK_WAITERS.lock();
+                if list.len() >= MAX_FLOCK_WAITERS {
+                    return Err(KernelError::ResourceExhausted);
+                }
+                list.push(FlockWaiter {
+                    task,
+                    path: path.to_path_buf(),
+                    id,
+                });
+            }
+            let attempt = flock_attempt(path, id, owner, lock_type);
+            if attempt != Err(KernelError::WouldBlock) {
+                remove_flock_waiter(task);
+                return attempt;
+            }
+            if waiters::deliverable_signal_pending(pid) {
+                remove_flock_waiter(task);
+                return Err(KernelError::Interrupted);
+            }
+            waiters::park_interruptible(pid, task);
+            remove_flock_waiter(task);
+        }
     }
 
     /// Release an advisory lock on a file.
@@ -5731,49 +5785,59 @@ impl Vfs {
         Self::funlock_resolved(&path, owner)
     }
 
-    /// Release an advisory lock on an already-resolved host path.
+    /// Release an advisory lock on an already-resolved host path, waking
+    /// whoever was waiting for it.
     ///
     /// Worker for [`funlock`](Self::funlock); handle-backed callers pass the
     /// resolved host path directly to avoid double-jailing (see
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn funlock_resolved(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
         let path = path.as_ref();
-        // Identity of the file this path names, resolved per call. Not
-        // cached: if the name is repointed between operations the identity
-        // should differ, which is the whole reason for keying on it.
-        //
-        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
-        // locks the mounted filesystem, and procfs's `/proc/locks` takes
-        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
-        // under the table was the reverse order, an AB/BA deadlock lockdep
-        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
-        // against an advisory lock on any procfs file). The table lock never
-        // kept a rename out anyway, so nothing is lost by looking first.
+        // Resolved before `LOCK_TABLE` is taken, never under it: see
+        // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
-        let mut table = LOCK_TABLE.lock();
-        if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) {
-            let entry = &mut table[idx];
-            entry.locks.retain(|l| l.owner != owner);
-
-            // Clean up empty entries to prevent unbounded growth.
-            if entry.locks.is_empty() {
-                table.swap_remove(idx);
+        let released = {
+            let mut table = LOCK_TABLE.lock();
+            let mut released = false;
+            if let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id))
+                && let Some(entry) = table.get_mut(idx)
+            {
+                let before = entry.locks.len();
+                entry.locks.retain(|l| l.owner != owner);
+                released = entry.locks.len() != before;
+                // Clean up empty entries to prevent unbounded growth.
+                if entry.locks.is_empty() {
+                    table.swap_remove(idx);
+                }
             }
+            released
+        };
+        if released {
+            wake_flock_waiters(path, id);
         }
-
         Ok(())
     }
 
-    /// Release all advisory locks held by a given owner (process cleanup).
-    ///
-    /// Called during process exit to avoid leaked locks.
+    /// Release every advisory lock one owner holds: a process's at its
+    /// exit. Wakes the waiters of every file it held.
     pub fn funlock_all(owner: u64) {
-        let mut table = LOCK_TABLE.lock();
-        // Remove this owner from every entry, then clean up empties.
-        table.retain_mut(|entry| {
-            entry.locks.retain(|l| l.owner != owner);
-            !entry.locks.is_empty()
-        });
+        let freed: Vec<(PathBuf, Option<FileId>)> = {
+            let mut table = LOCK_TABLE.lock();
+            let mut freed = Vec::new();
+            // Remove this owner from every entry, then clean up empties.
+            table.retain_mut(|entry| {
+                let before = entry.locks.len();
+                entry.locks.retain(|l| l.owner != owner);
+                if entry.locks.len() != before {
+                    freed.push((entry.path.clone(), entry.id));
+                }
+                !entry.locks.is_empty()
+            });
+            freed
+        };
+        for (path, id) in &freed {
+            wake_flock_waiters(path, *id);
+        }
     }
 
     /// Query the lock state of a file.
@@ -5793,17 +5857,8 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn lock_query_resolved(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
         let path = path.as_ref();
-        // Identity of the file this path names, resolved per call. Not
-        // cached: if the name is repointed between operations the identity
-        // should differ, which is the whole reason for keying on it.
-        //
-        // Resolved BEFORE `LOCK_TABLE` is taken, never under it: resolving
-        // locks the mounted filesystem, and procfs's `/proc/locks` takes
-        // `LOCK_TABLE` while its own filesystem lock is held -- so resolving
-        // under the table was the reverse order, an AB/BA deadlock lockdep
-        // reported on the 2026-09-26 integration boot (a `/proc/locks` read
-        // against an advisory lock on any procfs file). The table lock never
-        // kept a rename out anyway, so nothing is lost by looking first.
+        // Resolved before `LOCK_TABLE` is taken, never under it: see
+        // `flock_resolved`.
         let id = Self::file_identity_resolved(path).unwrap_or(None);
         let table = LOCK_TABLE.lock();
         if let Some(entry) = table.iter().find(|e| lock_entry_matches(e, path, id)) {
@@ -5826,22 +5881,296 @@ impl Vfs {
     }
 }
 
+/// One `flock` attempt, with the file's identity already looked up: the
+/// table half of [`Vfs::flock_resolved`] and [`Vfs::flock_wait_resolved`].
+///
+/// A conversion removes the owner's old lock before anything else (see
+/// [`Vfs::flock`]), and that removal can let a waiter in, so it wakes the
+/// file's waiters -- after the table lock is dropped, whatever the attempt's
+/// own answer.
+fn flock_attempt(
+    path: &Path,
+    id: Option<FileId>,
+    owner: u64,
+    lock_type: LockType,
+) -> KernelResult<()> {
+    // Which process took it, for `/proc/locks`. Asked before the table lock:
+    // it takes the thread table's.
+    let pid = crate::ipc::waiters::current_user_pid();
+    let (result, converted) = {
+        let mut table = LOCK_TABLE.lock();
+        flock_in_table(&mut table, path, id, owner, lock_type, pid)
+    };
+    if converted {
+        wake_flock_waiters(path, id);
+    }
+    result
+}
+
+/// The decision itself, under the table lock: Linux's `flock_lock_inode`.
+///
+/// - The owner's own lock of the asked type: nothing to do.
+/// - Its lock of the other type: removed first, and the request goes on as
+///   a new one. The second value says this happened.
+/// - A new lock: refused with `WouldBlock` while another owner's lock
+///   conflicts, else added.
+fn flock_in_table(
+    table: &mut Vec<PathLockEntry>,
+    path: &Path,
+    id: Option<FileId>,
+    owner: u64,
+    lock_type: LockType,
+    pid: u64,
+) -> (KernelResult<()>, bool) {
+    let Some(idx) = table.iter().position(|e| lock_entry_matches(e, path, id)) else {
+        if table.len() >= MAX_LOCKED_PATHS {
+            return (Err(KernelError::ResourceExhausted), false);
+        }
+        table.push(PathLockEntry {
+            // Stored so a later lookup by a DIFFERENT name for the same
+            // file finds this entry rather than creating a second one.
+            id,
+            path: path.to_path_buf(),
+            locks: alloc::vec![FileLock {
+                owner,
+                lock_type,
+                pid,
+            }],
+        });
+        return (Ok(()), false);
+    };
+    let Some(entry) = table.get_mut(idx) else {
+        return (Err(KernelError::InternalError), false);
+    };
+    let mut converted = false;
+    if let Some(pos) = entry.locks.iter().position(|l| l.owner == owner) {
+        if entry
+            .locks
+            .get(pos)
+            .is_some_and(|l| l.lock_type == lock_type)
+        {
+            return (Ok(()), false);
+        }
+        entry.locks.remove(pos);
+        converted = true;
+    }
+    let conflict = match lock_type {
+        LockType::Shared => entry
+            .locks
+            .iter()
+            .any(|l| l.lock_type == LockType::Exclusive),
+        LockType::Exclusive => !entry.locks.is_empty(),
+    };
+    if conflict {
+        // Not empty: something conflicts. The converted owner's lock is gone.
+        return (Err(KernelError::WouldBlock), converted);
+    }
+    entry.locks.push(FileLock {
+        owner,
+        lock_type,
+        pid,
+    });
+    (Ok(()), converted)
+}
+
+/// Wake the tasks waiting for a `flock` on one file, taking them off the
+/// list: each tries again, and re-registers if it loses.
+fn wake_flock_waiters(path: &Path, id: Option<FileId>) {
+    let woken: Vec<crate::sched::task::TaskId> = {
+        let mut list = FLOCK_WAITERS.lock();
+        let mut woken = Vec::new();
+        list.retain(|w| {
+            let same = match (w.id, id) {
+                (Some(a), Some(b)) => a == b,
+                _ => w.path.as_path() == path,
+            };
+            if same {
+                woken.push(w.task);
+            }
+            !same
+        });
+        woken
+    };
+    crate::ipc::waiters::wake_all(woken);
+}
+
+/// Wake every task waiting for a `flock`: the files under an unmounted
+/// filesystem lose their locks all at once.
+fn wake_all_flock_waiters() {
+    let woken: Vec<crate::sched::task::TaskId> =
+        FLOCK_WAITERS.lock().drain(..).map(|w| w.task).collect();
+    crate::ipc::waiters::wake_all(woken);
+}
+
+/// Take `task` off the waiter list, on every way out of a wait.
+fn remove_flock_waiter(task: crate::sched::task::TaskId) {
+    FLOCK_WAITERS.lock().retain(|w| w.task != task);
+}
+
 // ---------------------------------------------------------------------------
 // Lock table dump (for procfs)
 // ---------------------------------------------------------------------------
 
-/// Dump all active advisory locks for display in `/proc/locks`.
-///
-/// Returns `(path, lock_type, owner)` for each active lock.
-pub fn lock_table_dump() -> Vec<(PathBuf, LockType, u64)> {
+/// One `flock` lock, as `/proc/locks` reports it.
+#[derive(Debug, Clone)]
+pub struct FlockInfo {
+    /// The resolved path it was taken on.
+    pub path: PathBuf,
+    /// The file's identity, where its filesystem has one.
+    pub id: Option<FileId>,
+    pub lock_type: LockType,
+    /// The process that took it (0 for a kernel task).
+    pub pid: u64,
+}
+
+/// Every `flock` lock held, for `/proc/locks`.
+pub fn lock_table_dump() -> Vec<FlockInfo> {
     let table = LOCK_TABLE.lock();
     let mut result = Vec::new();
     for entry in table.iter() {
         for lock in &entry.locks {
-            result.push((entry.path.clone(), lock.lock_type, lock.owner));
+            result.push(FlockInfo {
+                path: entry.path.clone(),
+                id: entry.id,
+                lock_type: lock.lock_type,
+                pid: lock.pid,
+            });
         }
     }
     result
+}
+
+/// What [`flock_wait_task`] returned: 0 while still waiting, 1 for `Ok`,
+/// `0x100 | -code` for an error.
+static FLOCK_WAIT_RESULT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The file [`self_test_flock_wait`] locks: a real one, so it has an identity.
+const FLOCK_WAIT_TEST_PATH: &str = "/tmp/_vfs_flock_wait_test";
+
+/// [`Vfs::flock_wait_resolved`] on the rungs' file, in a task of its own:
+/// `arg` is the owner, with bit 32 set for an exclusive lock.
+extern "C" fn flock_wait_task(arg: u64) {
+    let lock_type = if arg & (1 << 32) != 0 {
+        LockType::Exclusive
+    } else {
+        LockType::Shared
+    };
+    let got = match Vfs::flock_wait_resolved(FLOCK_WAIT_TEST_PATH, arg & 0xFFFF_FFFF, lock_type) {
+        Ok(()) => 1,
+        Err(e) => 0x100 | u64::from(e.code().unsigned_abs()),
+    };
+    FLOCK_WAIT_RESULT.store(got, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Start [`flock_wait_task`] and give it time to park.
+fn spawn_flock_waiter(arg: u64) -> KernelResult<()> {
+    FLOCK_WAIT_RESULT.store(0, core::sync::atomic::Ordering::SeqCst);
+    crate::sched::spawn(b"flock-wait", 16, flock_wait_task, arg, 0)?;
+    crate::sched::sleep_ns_interruptible(20_000_000);
+    Ok(())
+}
+
+/// Whether the waiter is parked: registered, and not yet returned.
+fn flock_waiter_parked() -> bool {
+    let registered = FLOCK_WAITERS
+        .lock()
+        .iter()
+        .filter(|w| w.path.as_path() == Path::new(FLOCK_WAIT_TEST_PATH))
+        .count();
+    registered == 1 && FLOCK_WAIT_RESULT.load(core::sync::atomic::Ordering::SeqCst) == 0
+}
+
+/// [`FLOCK_WAIT_RESULT`] once it is set, or 0 after about a second without.
+fn await_flock_wait_result() -> u64 {
+    let deadline = crate::hrtimer::now_ns().saturating_add(1_000_000_000);
+    loop {
+        let got = FLOCK_WAIT_RESULT.load(core::sync::atomic::Ordering::SeqCst);
+        if got != 0 || crate::hrtimer::now_ns() >= deadline {
+            return got;
+        }
+        crate::sched::yield_now();
+    }
+}
+
+/// `flock` without `LOCK_NB` waits, and is woken.
+///
+/// Run once interrupts are on (`main.rs`, beside `fs::reclock`'s waiting
+/// rungs): a waiter that cannot park is not tested.
+///
+/// 1. A waiter for an exclusive lock parks behind another owner's, and the
+///    unlock wakes it into the lock.
+/// 2. Two holders of a shared lock both upgrading. The one that waits gives
+///    its shared lock up first, so the other's upgrade is granted, and that
+///    one's unlock lets the waiter in. With an atomic upgrade, as this table
+///    had before 2026-10-01, each would wait on the other forever.
+///
+/// # Errors
+///
+/// `InternalError` when a rung answers wrongly; the setup's own otherwise.
+pub fn self_test_flock_wait() -> KernelResult<()> {
+    const A: u64 = 9301;
+    const B: u64 = 9302;
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(FLOCK_WAIT_TEST_PATH);
+    Vfs::write_file(FLOCK_WAIT_TEST_PATH, b"flock wait")?;
+    let outcome = flock_wait_rungs(A, B);
+    // A waiter a failing rung left parked is woken by these releases, and
+    // takes its lock; the second release of B returns it.
+    Vfs::funlock_all(A);
+    Vfs::funlock_all(B);
+    let _ = await_flock_wait_result();
+    Vfs::funlock_all(B);
+    // Best effort: the file is this test's own scratch.
+    let _ = Vfs::remove(FLOCK_WAIT_TEST_PATH);
+    outcome?;
+    crate::serial_println!("[vfs] flock waiting: PASSED");
+    Ok(())
+}
+
+/// [`self_test_flock_wait`]'s rungs, as owners `a` and `b`.
+fn flock_wait_rungs(a: u64, b: u64) -> KernelResult<()> {
+    const EXCLUSIVE: u64 = 1 << 32;
+    let path = FLOCK_WAIT_TEST_PATH;
+
+    // 1. Parked behind an exclusive lock; the unlock lets it in.
+    Vfs::flock_resolved(path, a, LockType::Exclusive)?;
+    spawn_flock_waiter(b | EXCLUSIVE)?;
+    let parked = flock_waiter_parked();
+    Vfs::funlock_resolved(path, a)?;
+    let woke = await_flock_wait_result();
+    let held = Vfs::lock_query_resolved(path)?;
+    Vfs::funlock_resolved(path, b)?;
+    if !parked || woke != 1 || !matches!(held, Some((LockType::Exclusive, 1))) {
+        crate::serial_println!(
+            "[vfs]   FAIL: flock wait: parked {}, returned {:#x}, then {:?}",
+            parked,
+            woke,
+            held
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[vfs]     a waiter parks, and the unlock wakes it into the lock OK");
+
+    // 2. Two sharers upgrading: B waits, A's upgrade is granted.
+    Vfs::flock_resolved(path, a, LockType::Shared)?;
+    Vfs::flock_resolved(path, b, LockType::Shared)?;
+    spawn_flock_waiter(b | EXCLUSIVE)?;
+    let parked = flock_waiter_parked();
+    let upgraded = Vfs::flock_resolved(path, a, LockType::Exclusive);
+    Vfs::funlock_resolved(path, a)?;
+    let woke = await_flock_wait_result();
+    Vfs::funlock_resolved(path, b)?;
+    if !parked || upgraded.is_err() || woke != 1 {
+        crate::serial_println!(
+            "[vfs]   FAIL: two upgrading sharers: B parked {}, A's upgrade {:?}, B returned {:#x}",
+            parked,
+            upgraded,
+            woke
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[vfs]     two sharers upgrading do not wait on each other OK");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -6940,6 +7269,44 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[vfs]     downgrade exclusive→shared OK");
+
+        // A process and a description are different owners even when their
+        // numbers match: process 300's exclusive request is refused by the
+        // shared lock 300 -- a handle number -- holds. Until 2026-10-01 they
+        // were one owner, so it was a conversion and was granted.
+        let as_process = Vfs::flock(test_path, flock_process_owner(300), LockType::Exclusive);
+        if as_process != Err(KernelError::WouldBlock) {
+            serial_println!(
+                "[vfs]   FAIL: process 300 and handle 300 were one flock owner: {:?}",
+                as_process
+            );
+            Vfs::funlock_all(flock_process_owner(300));
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     a process and a handle with one number are two owners OK");
+
+        // A conversion is not atomic, as Linux's is not: asking for the other
+        // type first gives up the lock held. So a refused upgrade leaves its
+        // owner with nothing -- the price of two sharers that both upgrade
+        // never waiting on each other forever (`self_test_flock_wait`).
+        Vfs::flock(test_path, 400, LockType::Shared)?;
+        let refused = Vfs::flock(test_path, 400, LockType::Exclusive);
+        let after = Vfs::lock_query(test_path)?;
+        Vfs::funlock_all(400);
+        if refused != Err(KernelError::WouldBlock) || !matches!(after, Some((LockType::Shared, 1)))
+        {
+            serial_println!(
+                "[vfs]   FAIL: a refused upgrade answered {:?} and left {:?} (want WouldBlock, then 300's Shared alone)",
+                refused,
+                after
+            );
+            Vfs::funlock_all(300);
+            let _ = Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     a refused upgrade gives up the lock held OK");
 
         // funlock_all cleanup.
         Vfs::funlock_all(300);

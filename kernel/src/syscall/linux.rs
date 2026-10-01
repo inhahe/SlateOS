@@ -43426,33 +43426,31 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Each call resolves the fd through `lookup_caller_fd`, asks `fs::handle`
 /// for the underlying VFS path, then either acquires or releases an
-/// advisory lock via `Vfs::flock` / `Vfs::funlock` using the kernel
-/// handle ID as the owner.  That choice of owner makes auto-release on
-/// close cost-free — `fs::handle::close()` already calls `funlock(path,
-/// handle_id)` when the last reference goes away — and gives forked
-/// children that share an open file description a single shared lock,
-/// matching Linux's flock-on-OFD semantics.
+/// advisory lock via the `Vfs` flock workers, owned by the open file
+/// description (`vfs::flock_description_owner` of the kernel handle). That
+/// choice of owner makes auto-release on close cost-free --
+/// `fs::handle::close()` releases the description's lock when the last
+/// reference goes away -- and gives forked children that share an open file
+/// description a single shared lock, matching Linux's flock-on-OFD
+/// semantics. The native `SYS_FS_FLOCK_HANDLE` is the same lock.
 ///
 /// Console / Pipe fds don't have a backing VFS path; we return EBADF
 /// for them (matches Linux's "flock on a non-file descriptor is not
 /// meaningful").
 ///
+/// Without `LOCK_NB` a contended request **waits** (`Vfs::flock_wait_resolved`)
+/// until the lock is free. A signal ends the wait with `ERESTARTSYS`, so
+/// `SA_RESTART` restarts it, as Linux restarts `flock`. Until 2026-10-01 it
+/// answered `EWOULDBLOCK` at once, `LOCK_NB` or not.
+///
 /// Errors:
 ///   - EBADF   — fd not open, or it's a console/pipe fd.
 ///   - EINVAL  — malformed op (mutually exclusive type bits, or unknown
 ///     bits set).
-///   - EWOULDBLOCK — conflicting lock held by another owner.  Returned
-///     regardless of whether LOCK_NB was set; see the limitation
-///     below.
-///
-/// Limitation: real Linux blocks (sleeps) on a contended lock when
-/// LOCK_NB is absent.  Our IPC layer doesn't yet expose a wait queue
-/// hook for the VFS lock table, so we return EWOULDBLOCK for every
-/// conflict.  Editors and lockfile probes that already pass LOCK_NB get
-/// the correct answer; the (uncommon) blocking-flock case sees a
-/// premature failure that callers should retry.  This is tracked as a
-/// follow-up; the path is straightforward once `proc::wait_queue::flock`
-/// (or equivalent) lands.
+///   - EWOULDBLOCK — `LOCK_NB`, and a conflicting lock is held by another
+///     owner.
+///   - EINTR   — a signal ended the wait, with no `SA_RESTART`.
+///   - ENOLCK  — the lock table is full.
 fn sys_flock(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     let op = args.arg1 as u32;
@@ -43493,17 +43491,20 @@ fn sys_flock(args: &SyscallArgs) -> SyscallResult {
     // `handle_path` returns the resolved host path captured at open, so use
     // the _resolved workers — re-resolving here would double-apply a chroot
     // jail prefix and key the lock on the wrong path.
-    match lock_type {
-        Some(lt) => match crate::fs::Vfs::flock_resolved(&path, handle, lt) {
-            Ok(()) => SyscallResult::ok(0),
-            // EWOULDBLOCK == EAGAIN on Linux (same errno value).
-            Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
-            Err(e) => linux_err(linux_errno_for(e)),
-        },
-        None => match crate::fs::Vfs::funlock_resolved(&path, handle) {
-            Ok(()) => SyscallResult::ok(0),
-            Err(e) => linux_err(linux_errno_for(e)),
-        },
+    let owner = crate::fs::vfs::flock_description_owner(handle);
+    let result = match lock_type {
+        Some(lt) if op & LOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
+        None => crate::fs::Vfs::funlock_resolved(&path, owner),
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        // EWOULDBLOCK == EAGAIN on Linux (same errno value).
+        Err(KernelError::WouldBlock) => linux_err(errno::EAGAIN),
+        // Restartable under SA_RESTART, as Linux's `flock` is.
+        Err(KernelError::Interrupted) => restart::restart_result(restart::ERESTARTSYS),
+        Err(KernelError::ResourceExhausted) => linux_err(errno::ENOLCK),
+        Err(e) => linux_err(linux_errno_for(e)),
     }
 }
 

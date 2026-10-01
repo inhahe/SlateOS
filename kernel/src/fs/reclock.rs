@@ -799,6 +799,19 @@ pub fn release_process(pid: u64) {
     crate::ipc::waiters::wake_all(woken);
 }
 
+/// Every record lock held, with the file it is on: `/proc/locks`.
+#[must_use]
+pub fn dump() -> Vec<(LockKey, RecordLock)> {
+    let table = TABLE.lock();
+    let mut out = Vec::new();
+    for file in &table.files {
+        for lock in &file.locks {
+            out.push((file.key.clone(), lock.clone()));
+        }
+    }
+    out
+}
+
 /// Locks currently held on a file, for tests and `/proc`.
 #[must_use]
 pub fn list(key: &LockKey) -> Vec<RecordLock> {

@@ -4109,7 +4109,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Content hash (SHA-256 via Vfs::content_hash)
   - [x] Filesystem space query (statvfs: FsInfo struct, block/inode counts, FAT scan, ext4 superblock, memfs node count)
   - [x] Hard links (VFS link() with same-mount enforcement, ext4 impl with i_links_count, nlinks in FileMeta, comprehensive self-test)
-  - [x] Advisory file locking (flock: per-path shared/exclusive locks, owner tracking, upgrade/downgrade, process cleanup, 3 syscalls)
+  - [x] Advisory file locking (flock: per-path shared/exclusive locks, owner tracking, upgrade/downgrade, process cleanup, 3 syscalls). **2026-10-01:** owners are the process or the open file description, never a caller-named value; without `LOCK_NB` a contended lock waits; conversion gives up the held lock first, as Linux's; `SYS_FS_FLOCK_HANDLE` (1094) gives native programs BSD semantics; `/proc/locks` is in Linux's format and lists record locks too (design-decisions §1506)
   - [x] Filesystem sync (VFS sync/sync_path, ext4 driver flush, FAT cache flush, SYS_FS_SYNC syscall, kshell `sync` command)
   - [x] Syscalls: SYS_FS_LINK (607), SYS_FS_STATVFS (608), SYS_FS_FLOCK (609), SYS_FS_FUNLOCK (640), SYS_FS_SYNC (641)
   - [x] Kshell filesystem commands: stat, ln, cp, mv, chmod, chown, touch, tree, du, find, df, sync, mount, umount, wc, head, tail, hexdump

@@ -1361,33 +1361,129 @@ fn gen_cacheinfo() -> Vec<u8> {
     text.into_bytes()
 }
 
-/// `/proc/locks` — advisory file lock information.
+/// `/proc/locks` — every advisory lock held, in Linux's format, which
+/// `lslocks` and `lsof` parse:
+///
+/// ```text
+/// 1: POSIX  ADVISORY  WRITE 1234 00:03:131074 0 EOF
+/// 2: OFDLCK ADVISORY  READ -1 00:03:131074 100 199
+/// 3: FLOCK  ADVISORY  WRITE 5678 00:03:131075 0 EOF
+/// ```
+///
+/// - the class: `POSIX` (a process's `fcntl` lock), `OFDLCK` (an open file
+///   description's), or `FLOCK` (whole-file);
+/// - `READ` or `WRITE`;
+/// - the holder's pid: the process for a POSIX lock, the process that took
+///   it for a `FLOCK`, -1 for an OFD lock, as Linux reports one;
+/// - the file as `major:minor:inode`. The device is the filesystem's id
+///   under major 0, as Linux numbers its anonymous filesystems. A file with
+///   no stable identity is `00:00:0`, and a memfd shows its id as the inode;
+/// - the first and last byte locked, `EOF` for an open end; `0 EOF` for a
+///   `FLOCK`, which is whole-file.
+///
+/// Empty when nothing is locked, as on Linux. Until 2026-10-01 it had a
+/// format of its own and listed `flock` locks only.
 fn gen_locks() -> Vec<u8> {
-    // Query the lock table directly via Vfs internal.
-    // We can use lock_query for individual paths, but for a full dump
-    // we need to access the table.  Use a simpler approach: just report
-    // that the lock subsystem is active.
-    let mut text = String::from("LOCK  TYPE       OWNER    PATH\n");
+    use crate::fs::reclock::{LockKey, RecordLockType};
 
-    // Access the global lock table through a helper on Vfs.
-    let lock_info = super::vfs::lock_table_dump();
-    if lock_info.is_empty() {
-        text.push_str("(no active locks)\n");
-    } else {
-        for (path, lock_type, owner) in &lock_info {
-            let type_str = match lock_type {
-                super::vfs::LockType::Shared => "SHARED   ",
-                super::vfs::LockType::Exclusive => "EXCLUSIVE",
-            };
-            text.push_str(&format!(
-                "FLOCK {} {:>8}  {}\n",
-                type_str,
-                owner,
-                path.display()
-            ));
-        }
+    let mut text = String::new();
+    let mut n: u64 = 0;
+    let file = |id: Option<super::vfs::FileId>| id.map_or((0, 0), |f| (f.fs_id, f.ino));
+    for (key, lock) in crate::fs::reclock::dump() {
+        n = n.saturating_add(1);
+        let ofd = crate::fs::reclock::owner_is_ofd(lock.owner);
+        let class = if ofd { "OFDLCK" } else { "POSIX " };
+        let kind = match lock.lock_type {
+            RecordLockType::Read => "READ",
+            RecordLockType::Write => "WRITE",
+        };
+        let pid = if ofd {
+            -1
+        } else {
+            i64::try_from(lock.owner).unwrap_or(-1)
+        };
+        let (fs, ino) = match key {
+            LockKey::File { id, .. } => file(id),
+            LockKey::MemFd(id) => (0, id),
+        };
+        let last = if lock.len == 0 {
+            String::from("EOF")
+        } else {
+            format!("{}", lock.end().saturating_sub(1))
+        };
+        text.push_str(&format!(
+            "{}: {} ADVISORY  {} {} 00:{:02x}:{} {} {}\n",
+            n, class, kind, pid, fs, ino, lock.start, last
+        ));
+    }
+    for info in super::vfs::lock_table_dump() {
+        n = n.saturating_add(1);
+        let kind = match info.lock_type {
+            super::vfs::LockType::Shared => "READ",
+            super::vfs::LockType::Exclusive => "WRITE",
+        };
+        let (fs, ino) = file(info.id);
+        text.push_str(&format!(
+            "{}: FLOCK  ADVISORY  {} {} 00:{:02x}:{} 0 EOF\n",
+            n, kind, info.pid, fs, ino
+        ));
     }
     text.into_bytes()
+}
+
+/// `/proc/locks` lists record locks and `flock` locks in Linux's format.
+///
+/// Takes one of each on a scratch file, as owners no process uses, and
+/// checks the two lines; residue-free on every path.
+///
+/// # Errors
+///
+/// `InternalError` when a line is missing or malformed.
+pub fn self_test_locks() -> KernelResult<()> {
+    use crate::fs::reclock::{self, LockKey, RecordLockType};
+
+    const PATH: &str = "/tmp/_procfs_locks_test";
+    const RECORD_PID: u64 = 9401;
+    let flock_owner = super::vfs::flock_description_owner(9402);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = super::Vfs::remove(PATH);
+    super::Vfs::write_file(PATH, b"proc locks")?;
+    let key = LockKey::for_path(PATH);
+    let owner = reclock::posix_owner(RECORD_PID);
+    let taken = reclock::set(&key, owner, 10, 5, RecordLockType::Write)
+        .and_then(|()| super::Vfs::flock(PATH, flock_owner, super::vfs::LockType::Shared));
+    let text = gen_locks();
+    reclock::release_all(owner);
+    super::Vfs::funlock_all(flock_owner);
+    // Best effort: the file is this test's own scratch.
+    let _ = super::Vfs::remove(PATH);
+    taken?;
+
+    let ino = match &key {
+        LockKey::File { id: Some(id), .. } => id.ino,
+        _ => 0,
+    };
+    // Every byte of it is this function's own ASCII; anything else is a fault.
+    let text = core::str::from_utf8(&text).map_err(|_| KernelError::InternalError)?;
+    let posix = format!("POSIX  ADVISORY  WRITE {} ", RECORD_PID);
+    let flock = "FLOCK  ADVISORY  READ ";
+    let posix_ok = text
+        .lines()
+        .any(|l| l.contains(&posix) && l.ends_with(&format!(":{} 10 14", ino)));
+    let flock_ok = text
+        .lines()
+        .any(|l| l.contains(flock) && l.ends_with(&format!(":{} 0 EOF", ino)));
+    if !posix_ok || !flock_ok {
+        crate::serial_println!(
+            "[procfs]   FAIL: /proc/locks (POSIX line {}, FLOCK line {}):\n{}",
+            posix_ok,
+            flock_ok,
+            text
+        );
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[procfs] /proc/locks: record and flock locks, Linux's format: OK");
+    Ok(())
 }
 
 /// `/proc/diskstats` — block device statistics.

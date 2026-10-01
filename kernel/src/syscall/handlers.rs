@@ -13331,12 +13331,14 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FLOCK` — acquire an advisory file lock.
+/// `SYS_FS_FLOCK` — take a `flock` lock by path, for the calling process,
+/// without waiting. See the number's doc.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
 /// `arg2`: lock type (0 = shared, 1 = exclusive).
-/// `arg3`: owner ID.
+/// `arg3`: ignored. It was the owner, taken as given, so any process could
+/// lock in another's name.
 pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
@@ -13353,7 +13355,8 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    let owner = args.arg3;
+    // The caller's own: never a value the caller chose.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::flock(&path, owner, lock_type) {
         Ok(()) => SyscallResult::ok(0),
@@ -13361,21 +13364,68 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_FS_FUNLOCK` — release an advisory file lock.
+/// `SYS_FS_FUNLOCK` — release the calling process's `flock` lock on a path.
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
-/// `arg2`: owner ID.
+/// `arg2`: ignored. It was the owner, taken as given, so any process could
+/// release any lock.
 pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
     let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
 
-    let owner = args.arg2;
+    // The caller's own lock: a process releases nothing but what it holds.
+    let owner = crate::fs::vfs::flock_process_owner(caller_pid().unwrap_or(0));
 
     match crate::fs::Vfs::funlock(&path, owner) {
         Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FLOCK_HANDLE` — BSD `flock(2)` on an open file: a whole-file lock
+/// that belongs to the open file description, waiting unless `FLOCK_NB`.
+/// See the number's doc.
+pub fn sys_fs_flock_handle(args: &SyscallArgs) -> SyscallResult {
+    use super::number::{FLOCK_EX, FLOCK_NB, FLOCK_SH, FLOCK_UN};
+    use crate::fs::LockType;
+
+    let handle = args.arg0;
+    let op = args.arg1;
+    // The op before the handle, as Linux's `flock` checks them.
+    if op & !(FLOCK_SH | FLOCK_EX | FLOCK_NB | FLOCK_UN) != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let lock_type = match op & !FLOCK_NB {
+        FLOCK_SH => Some(LockType::Shared),
+        FLOCK_EX => Some(LockType::Exclusive),
+        FLOCK_UN => None,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    // The host path captured at open: the `_resolved` workers, so a jailed
+    // caller's jail is not applied twice.
+    let path = match crate::fs::handle::handle_path(handle) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let owner = crate::fs::vfs::flock_description_owner(handle);
+    let result = match lock_type {
+        None => crate::fs::Vfs::funlock_resolved(&path, owner),
+        Some(lt) if op & FLOCK_NB != 0 => crate::fs::Vfs::flock_resolved(&path, owner, lt),
+        Some(lt) => crate::fs::Vfs::flock_wait_resolved(&path, owner, lt),
+    };
+    match result {
+        Ok(()) => SyscallResult::ok(0),
+        // Restartable, as Linux's `flock` is: the signal-delivery checkpoint
+        // restarts it under `SA_RESTART` and otherwise answers `Interrupted`.
+        Err(KernelError::Interrupted) => crate::syscall::linux::restart::restart_result(
+            crate::syscall::linux::restart::ERESTARTSYS,
+        ),
         Err(e) => SyscallResult::err(e),
     }
 }

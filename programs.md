@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**450 programs; 88 on the image, 6 carried inside the kernel.**
+**451 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 295
+## Userland utilities and services (`userspace/`, lane B) -- 296
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -253,7 +253,7 @@ two disagree.
 | `strings` | Print the printable character sequences in a file. | yes | `coreutils` |  |
 | `stty` | Terminal Settings Utility |  |  |  |
 | `su` | User Switching Utility (`su`) |  |  |  |
-| `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)*, `visudo` *(not installed)* |
+| `sudo` | Privileged Command Execution Utility |  |  | `sudoedit` *(not installed)* |
 | `sum` | Checksum and count the blocks in a file. |  | `coreutils` |  |
 | `swapoff` | Disable devices and files for paging and swapping. |  | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. |  |  |  |
@@ -296,6 +296,7 @@ two disagree.
 | `uuencode` | GNU sharutils 4.15.2's, checked against Ubuntu 24.04's build of it by `scripts/uu-diff.sh`. |  |  |  |
 | `vdir` | List directory contents in the long format. |  | `coreutils` |  |
 | `vi` | Modal terminal text editor for SlateOS. |  |  |  |
+| `visudo` | Edit the sudoers file with syntax checking. |  | `sudo` |  |
 | `vmstat` | Virtual Memory Statistics Utility |  |  |  |
 | `wall` | Terminal messaging utilities for Slate OS |  |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically |  |  |  |

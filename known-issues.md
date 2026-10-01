@@ -2536,6 +2536,13 @@ manifest, and `visudo` and `sudoreplay` on the split into crates of their own.
 records sudo sessions -- `log_input` and `log_output` are accepted and record
 nothing, which `visudo -c` says -- so it could only ever report that there
 were none. **The ledger stands at 56**; `visudo` alone waits on its crate.
+**`visudo` is a program of its own** (2026-10-01): the `sudo` package is now
+a library -- the sudoers file's model, parser and check, and the editor
+both programs launch -- with two binaries, `sudo` (answering to `sudoedit`
+too, as upstream links it) and `visudo`, as upstream builds `visudo` apart
+from `sudo` from one tree. `visudo` holds none of the right to change
+identity. **The ledger stands at 55, and every name in it is a kept name
+waiting on lane D's manifest.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

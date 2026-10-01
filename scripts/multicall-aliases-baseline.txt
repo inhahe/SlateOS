@@ -46,7 +46,6 @@ ntpd:ntpdate
 ntpd:sntp
 ss:sockstat
 sudo:sudoedit
-sudo:visudo
 sysstat:mpstat
 sysstat:pidstat
 systemctl:systemd-cat

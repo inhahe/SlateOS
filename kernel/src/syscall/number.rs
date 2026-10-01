@@ -3251,19 +3251,26 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// If the buffer is too small, entries are truncated (not an error).
 pub const SYS_FS_READDIR_AT: u64 = 647;
 
-/// Create a temporary file with no directory entry -- **refused with
-/// `NotSupported`** until an open file can outlive its name.
+/// Open a regular file with no name in a directory, as Linux's `O_TMPFILE`
+/// does: it exists only through the handle returned, and goes at its last
+/// close unless [`SYS_FS_LINK_HANDLE`] names it first.
 ///
-/// `arg0`: pointer to directory path string (where to create).
+/// `arg0`: pointer to the directory's path.
 /// `arg1`: path length (bytes).
-/// `arg2`: open flags bitfield.
+/// `arg2`: open flags: the access mode, which must allow writing; `APPEND`;
+/// `EXCL`, which forbids naming it (Linux's `O_TMPFILE | O_EXCL`). The file's
+/// mode is 0600.
+///
+/// Errors: `InvalidArgument` for flags that do not allow writing;
+/// `NotADirectory`; `NotSupported` on a filesystem that cannot keep a file
+/// with no name (FAT, the pseudo filesystems), as Linux answers
+/// `EOPNOTSUPP`.
 ///
 /// Until 2026-10-01 it created a *named* file that nothing deleted and
-/// returned a handle its caller could not use (see `handlers::sys_fs_tmpfile`).
-/// The promised file -- unnamed, gone at its last close -- needs handles that
-/// hold files rather than paths.
+/// returned a handle its caller could not use, then refused until handles
+/// held files rather than names (design-decisions §1508).
 ///
-/// Returns: `NotSupported`.
+/// Returns: the file handle.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
 /// Pre-allocate disk space for a file.
@@ -6035,6 +6042,32 @@ pub const FLOCK_UN: u64 = 8;
 ///
 /// Chosen number 1095, the next free slot after 1094.
 pub const SYS_FS_SET_STATUS_FLAGS: u64 = 1095;
+
+// ---------------------------------------------------------------------------
+// Naming the file a handle holds (1096)
+// ---------------------------------------------------------------------------
+
+/// Give the file a handle holds a name, as Linux's
+/// `linkat(fd, "", newdirfd, newpath, AT_EMPTY_PATH)` does:
+/// `fs_link_handle(handle, path, path_len) -> 0`.
+///
+/// - A file made by [`SYS_FS_TMPFILE`] without `EXCL` gets its first name,
+///   and no longer goes at its last close: the way to write a file fully
+///   and then publish it in one step.
+/// - A file with a name gets another, as `SYS_FS_LINK` gives one.
+/// - A file deleted while open, or made with `EXCL`, is `NotFound`, as
+///   Linux answers `ENOENT`.
+///
+/// The new name is asked as `SYS_FS_LINK` asks it: File WRITE, write access
+/// to its directory, the same filesystem (`CrossDevice`), not taken
+/// (`AlreadyExists`).
+///
+/// Errors: `InvalidHandle` for a handle the caller does not hold;
+/// `IsADirectory`; `NotSupported` for a file on a filesystem without
+/// hard links.
+///
+/// Chosen number 1096, the next free slot after 1095.
+pub const SYS_FS_LINK_HANDLE: u64 = 1096;
 
 // ---------------------------------------------------------------------------
 // Version info

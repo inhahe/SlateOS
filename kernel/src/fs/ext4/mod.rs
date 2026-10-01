@@ -249,6 +249,71 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // A file made with no name (`O_TMPFILE`, `handle::open_tmpfile`): its
+    // inode is allocated while held -- on the orphan list from the start, so
+    // a crash leaves it to the next mount -- and freed at the last close;
+    // named first (`link_handle`), it stays, with what was written.
+    {
+        use crate::fs::handle::{self, OpenFlags};
+        let free_inodes =
+            |p: &crate::fs::path::Path| crate::fs::Vfs::statvfs(p).map(|i| i.free_inodes);
+        let rw = OpenFlags::READ.union(OpenFlags::WRITE);
+        let named_owned = mount_path.join("tmpfile-named.tmp");
+        let named = named_owned.as_path();
+        // Best effort: a leftover from an earlier boot's failure.
+        let _ = crate::fs::Vfs::remove(named);
+        let before = free_inodes(&mount_path)?;
+
+        let h = handle::open_tmpfile(&mount_path, rw, 0o600)?;
+        let wrote = handle::write_at(h, 0, b"scratch");
+        let while_held = free_inodes(&mount_path);
+        let meta = handle::fstat(h).map(|m| (m.nlinks, m.permissions & 0o7777));
+        let closed = handle::close(h);
+        let after_close = free_inodes(&mount_path);
+
+        let h = handle::open_tmpfile(&mount_path, rw, 0o640)?;
+        let published =
+            handle::write_at(h, 0, b"published").and_then(|_| handle::link_handle(h, named));
+        let reclosed = handle::close(h);
+        let kept = crate::fs::Vfs::read_file(named);
+        let kept_meta = crate::fs::Vfs::metadata(named).map(|m| (m.nlinks, m.permissions & 0o7777));
+        let removed = crate::fs::Vfs::remove(named);
+        let after_all = free_inodes(&mount_path);
+        let ok = wrote == Ok(7)
+            && while_held == Ok(before.saturating_sub(1))
+            && meta == Ok((0, 0o600))
+            && closed.is_ok()
+            && after_close == Ok(before)
+            && published.is_ok()
+            && reclosed.is_ok()
+            && kept.as_deref() == Ok(b"published".as_slice())
+            && kept_meta == Ok((1, 0o640))
+            && removed.is_ok()
+            && after_all == Ok(before);
+        if !ok {
+            serial_println!(
+                "[ext4]   FAIL: unnamed file: write {:?}, free inodes {} then {:?} then {:?} \
+                 then {:?}, meta {:?}, close {:?}; named: {:?} {:?} {:?} (close {:?}, remove {:?})",
+                wrote,
+                before,
+                while_held,
+                after_close,
+                after_all,
+                meta,
+                closed,
+                published,
+                kept,
+                kept_meta,
+                reclosed,
+                removed
+            );
+            return Err(crate::error::KernelError::IoError);
+        }
+        serial_println!(
+            "[ext4]   unnamed file (O_TMPFILE): freed at its close, or named and kept: OK"
+        );
+    }
+
     let root_stat = crate::fs::Vfs::stat(&root)?;
     serial_println!(
         "[ext4]   Root stat: type={:?}, size={}",

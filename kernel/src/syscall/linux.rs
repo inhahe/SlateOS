@@ -767,6 +767,12 @@ pub mod oflags {
     pub const O_DIRECTORY: u32 = 0o200_000;
     pub const O_NOFOLLOW: u32 = 0o400_000;
     pub const O_CLOEXEC: u32 = 0o2_000_000;
+    /// `__O_TMPFILE`, the bit that alone means nothing: `O_TMPFILE` is it
+    /// together with `O_DIRECTORY`, so a kernel that ignores the bit still
+    /// refuses an open of a directory for writing.
+    pub const O_TMPFILE_BIT: u32 = 0o20_000_000;
+    /// `O_TMPFILE`: a file with no name, in the directory the path names.
+    pub const O_TMPFILE: u32 = O_TMPFILE_BIT | O_DIRECTORY;
 }
 
 /// Linux `fcntl` command numbers (subset).
@@ -5578,6 +5584,35 @@ fn linux_create_mode(mode: u64) -> u16 {
     u16::try_from(mode & 0o7777).unwrap_or(0) & !umask
 }
 
+/// What `O_TMPFILE` asks, checked as Linux's `build_open_flags` checks it.
+///
+/// `Ok(None)` without it. `Ok(Some(native flags))` with it: the access mode,
+/// `O_APPEND`, and `O_EXCL` (the file may never be given a name), for
+/// `fs::handle::open_tmpfile`. `EINVAL` for `__O_TMPFILE` without
+/// `O_DIRECTORY`, with `O_CREAT`, or without write access.
+fn linux_tmpfile_flags(flags: u32) -> Result<Option<u32>, i32> {
+    use crate::fs::handle::OpenFlags;
+    if flags & oflags::O_TMPFILE_BIT == 0 {
+        return Ok(None);
+    }
+    if flags & (oflags::O_TMPFILE | oflags::O_CREAT) != oflags::O_TMPFILE {
+        return Err(errno::EINVAL);
+    }
+    let access = flags & oflags::O_ACCMODE;
+    let mut bits = match access {
+        oflags::O_WRONLY => OpenFlags::WRITE.bits(),
+        oflags::O_RDWR => OpenFlags::READ.bits() | OpenFlags::WRITE.bits(),
+        _ => return Err(errno::EINVAL),
+    };
+    if flags & oflags::O_APPEND != 0 {
+        bits |= OpenFlags::APPEND.bits();
+    }
+    if flags & oflags::O_EXCL != 0 {
+        bits |= OpenFlags::EXCL.bits();
+    }
+    Ok(Some(bits))
+}
+
 fn translate_open_flags(linux_flags: u32) -> u32 {
     use crate::fs::handle::OpenFlags;
     let access = linux_flags & oflags::O_ACCMODE;
@@ -5921,12 +5956,34 @@ fn open_common(
     // name.  Linux's `getname()` copies bytes and validates nothing either.
     let canon_path = Path::new(canon.as_slice());
 
-    let mut kernel_flags = translate_open_flags(flags);
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
-    if no_symlinks {
-        kernel_flags |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
-    }
-    let r = handlers::fs_open_kernel_path_mode(canon_path, kernel_flags, linux_create_mode(mode));
+    let no_symlinks_bit = if no_symlinks {
+        crate::fs::handle::OpenFlags::NO_SYMLINKS.bits()
+    } else {
+        0
+    };
+    let r = match linux_tmpfile_flags(flags) {
+        Err(e) => return linux_err(e),
+        // O_TMPFILE: a file with no name, in the directory the path names.
+        // EOPNOTSUPP where one cannot be kept, as Linux answers: glibc's
+        // `tmpfile` falls back on it.
+        Ok(Some(file_flags)) => {
+            let r = handlers::fs_open_tmpfile_kernel_path(
+                canon_path,
+                file_flags | no_symlinks_bit,
+                linux_create_mode(mode),
+            );
+            if r.value == SyscallResult::err(KernelError::NotSupported).value {
+                return linux_err(errno::EOPNOTSUPP);
+            }
+            r
+        }
+        Ok(None) => handlers::fs_open_kernel_path_mode(
+            canon_path,
+            translate_open_flags(flags) | no_symlinks_bit,
+            linux_create_mode(mode),
+        ),
+    };
     if r.value < 0 {
         return linux_from_native(r);
     }
@@ -6165,7 +6222,18 @@ fn open_kernel_path_install(
         return linux_err(linux_errno_for(e));
     }
 
-    let mut kernel_bits = translate_open_flags(flags);
+    let tmpfile = match linux_tmpfile_flags(flags) {
+        Ok(t) => t,
+        Err(e) => return linux_err(e),
+    };
+    // Making a file with no name asks for File WRITE, as every create does.
+    if tmpfile.is_some()
+        && let Err(e) =
+            handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE)
+    {
+        return linux_err(linux_errno_for(e));
+    }
+    let mut kernel_bits = tmpfile.unwrap_or_else(|| translate_open_flags(flags));
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
     if no_symlinks {
         kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
@@ -6177,12 +6245,20 @@ fn open_kernel_path_install(
     // implementations of openat2 drifting apart; a second install path here
     // would be the same mistake one layer down.
     let create_mode = linux_create_mode(mode);
-    let opened = match beneath {
-        Some(b) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
-        None => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
+    let opened = match (beneath, tmpfile.is_some()) {
+        (Some(b), false) => crate::fs::handle::open_beneath_with_mode(b, kernel_flags, create_mode),
+        (None, false) => crate::fs::handle::open_with_mode(path, kernel_flags, create_mode),
+        // O_TMPFILE: a file with no name, in the directory the path names.
+        (Some(b), true) => crate::fs::handle::open_tmpfile_beneath(b, kernel_flags, create_mode),
+        (None, true) => crate::fs::handle::open_tmpfile(path, kernel_flags, create_mode),
     };
     let raw_handle = match opened {
         Ok(h) => h,
+        // A filesystem that cannot keep a file with no name: EOPNOTSUPP, as
+        // Linux answers, which glibc's `tmpfile` falls back on.
+        Err(KernelError::NotSupported) if tmpfile.is_some() => {
+            return linux_err(errno::EOPNOTSUPP);
+        }
         Err(e) => return linux_err(linux_errno_for(e)),
     };
 
@@ -22594,6 +22670,13 @@ fn link_common(
         Ok(p) => p,
         Err(r) => return r,
     };
+    // A followed `/proc/self/fd/N` is the descriptor's file itself.
+    if follow
+        && let Some(pid) = caller_pid()
+        && let Some(fd) = proc_self_fd(&oldpath, pid)
+    {
+        return link_fd(fd, &newpath);
+    }
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -22658,9 +22741,77 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
     let olddirfd = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let newdirfd = args.arg2 as i32;
+    // AT_EMPTY_PATH with an empty oldpath: the file `olddirfd` holds.
+    if flags & AT_EMPTY_PATH != 0 {
+        let mut first = 0u8;
+        // SAFETY: copy_from_user validates the one-byte user read; the
+        // pointer was checked readable above.
+        if let Err(e) = unsafe { crate::mm::user::copy_from_user(args.arg1, &raw mut first, 1) } {
+            return linux_err(linux_errno_for(e));
+        }
+        if first == 0 {
+            if caller_pid().is_none() {
+                return linux_err(errno::EROFS);
+            }
+            let new_path = match resolve_at_path(newdirfd, args.arg3) {
+                Ok(p) => p,
+                Err(r) => return r,
+            };
+            return link_fd(olddirfd, &new_path);
+        }
+    }
     // linkat follows a trailing symlink in oldpath only with AT_SYMLINK_FOLLOW.
     let follow = flags & 0x400 != 0;
     link_common(olddirfd, args.arg1, newdirfd, args.arg3, follow)
+}
+
+/// The descriptor a `/proc/self/fd/N` path names (also `/proc/<own pid>/fd/N`
+/// and `/proc/thread-self/fd/N`), for `linkat`'s `AT_SYMLINK_FOLLOW`. Linux
+/// follows that "magic link" to the open file itself, so a program can name
+/// an `O_TMPFILE` file without `AT_EMPTY_PATH`'s privilege: gnulib's and
+/// systemd's `link_tmpfile` do exactly that.
+fn proc_self_fd(path: &Path, pid: u64) -> Option<i32> {
+    let bytes = path.as_bytes();
+    let own = alloc::format!("/proc/{pid}/fd/");
+    let rest = bytes
+        .strip_prefix(b"/proc/self/fd/".as_slice())
+        .or_else(|| bytes.strip_prefix(b"/proc/thread-self/fd/".as_slice()))
+        .or_else(|| bytes.strip_prefix(own.as_bytes()))?;
+    if rest.is_empty() || !rest.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    core::str::from_utf8(rest).ok()?.parse::<i32>().ok()
+}
+
+/// `linkat` of a descriptor's file: `AT_EMPTY_PATH`, or a followed
+/// `/proc/self/fd/N`. Through the file the descriptor holds
+/// (`fs::handle::link_handle`): an `O_TMPFILE` file opened without `O_EXCL`
+/// gets its first name, a file with one another; a file deleted while open,
+/// or made with `O_EXCL`, is `ENOENT`, as on Linux.
+///
+/// Until 2026-10-01 both forms answered `ENOENT` for every descriptor, so an
+/// `O_TMPFILE` file could not be published.
+fn link_fd(fd: i32, new_path: &Path) -> SyscallResult {
+    let entry = match lookup_caller_fd(fd) {
+        Ok(e) => e,
+        Err(r) => return r,
+    };
+    // Not a file of a filesystem: no name can be made for it there, as
+    // Linux answers for a pipe's inode.
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::EXDEV);
+    }
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::handle::link_handle(entry.raw_handle, new_path) {
+        Ok(()) => SyscallResult::ok(0),
+        // A directory takes no second name, as `link(2)` answers.
+        Err(KernelError::IsADirectory) => linux_err(errno::EPERM),
+        // A filesystem without hard links, as Linux's vfat answers.
+        Err(KernelError::NotSupported) => linux_err(errno::EPERM),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -51700,9 +51851,93 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
         return fail("a read-only open of a directory did not open it");
     }
 
+    // O_TMPFILE: the flags as Linux's `build_open_flags` takes them, an
+    // unnamed file in /tmp (a kernel caller gives its handle back: EBADF),
+    // and EOPNOTSUPP where one cannot be kept.
+    {
+        use crate::fs::handle::OpenFlags;
+        let rw_bits = OpenFlags::READ.bits() | OpenFlags::WRITE.bits();
+        let flag_cases = [
+            (oflags::O_TMPFILE | oflags::O_RDWR, Ok(Some(rw_bits))),
+            (
+                oflags::O_TMPFILE | oflags::O_WRONLY | oflags::O_EXCL,
+                Ok(Some(OpenFlags::WRITE.bits() | OpenFlags::EXCL.bits())),
+            ),
+            (oflags::O_TMPFILE | oflags::O_RDONLY, Err(errno::EINVAL)),
+            (oflags::O_TMPFILE_BIT | oflags::O_RDWR, Err(errno::EINVAL)),
+            (
+                oflags::O_TMPFILE | oflags::O_CREAT | oflags::O_RDWR,
+                Err(errno::EINVAL),
+            ),
+            (oflags::O_RDWR, Ok(None)),
+        ];
+        for (flags, want) in flag_cases {
+            if linux_tmpfile_flags(flags) != want {
+                serial_println!(
+                    "[syscall/linux]   O_TMPFILE flags {:o} -> {:?}, want {:?}",
+                    flags,
+                    linux_tmpfile_flags(flags),
+                    want
+                );
+                return fail("O_TMPFILE's flags were not taken as Linux takes them");
+            }
+        }
+        let tmp = b"/tmp\0";
+        let made = dispatch_linux(
+            nr::OPEN,
+            &args(
+                tmp.as_ptr() as u64,
+                u64::from(oflags::O_TMPFILE | oflags::O_RDWR),
+                0o600,
+            ),
+        )
+        .value;
+        let read_only = dispatch_linux(
+            nr::OPEN,
+            &args(tmp.as_ptr() as u64, u64::from(oflags::O_TMPFILE), 0o600),
+        )
+        .value;
+        if made != ebadf || read_only != i64::from(errno::EINVAL).wrapping_neg() {
+            serial_println!(
+                "[syscall/linux]   open(/tmp, O_TMPFILE|O_RDWR) -> {}, O_TMPFILE|O_RDONLY -> {}",
+                made,
+                read_only
+            );
+            return fail("O_TMPFILE did not open an unnamed file");
+        }
+        if crate::fs::selftest::is_mounted("/proc") {
+            let proc_dir = b"/proc\0";
+            let r = dispatch_linux(
+                nr::OPEN,
+                &args(
+                    proc_dir.as_ptr() as u64,
+                    u64::from(oflags::O_TMPFILE | oflags::O_RDWR),
+                    0o600,
+                ),
+            )
+            .value;
+            if r != i64::from(errno::EOPNOTSUPP).wrapping_neg() {
+                serial_println!("[syscall/linux]   open(/proc, O_TMPFILE|O_RDWR) -> {}", r);
+                return fail("O_TMPFILE where no unnamed file can be kept was not EOPNOTSUPP");
+            }
+        }
+        // linkat's `/proc/self/fd/N`: which paths name a descriptor.
+        let proc_fd = |p: &[u8]| proc_self_fd(Path::new(p), 42);
+        if proc_fd(b"/proc/self/fd/3") != Some(3)
+            || proc_fd(b"/proc/42/fd/17") != Some(17)
+            || proc_fd(b"/proc/thread-self/fd/0") != Some(0)
+            || proc_fd(b"/proc/43/fd/3").is_some()
+            || proc_fd(b"/proc/self/fd/").is_some()
+            || proc_fd(b"/proc/self/fd/3x").is_some()
+            || proc_fd(b"/tmp/self/fd/3").is_some()
+        {
+            return fail("a /proc/self/fd path was misread");
+        }
+    }
+
     crate::fs::Vfs::remove_recursive(DIR)?;
     serial_println!(
-        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes; open(dir, O_RDONLY): OK"
+        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes; open(dir, O_RDONLY); O_TMPFILE: OK"
     );
     Ok(())
 }

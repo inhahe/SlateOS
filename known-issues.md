@@ -180483,7 +180483,7 @@ user path, beside the gates it calls. `syscall::dispatch`'s
 `test_dispatch_fs_gates` checks each, as a scratch process with no
 capability.
 
-### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-4 of the plan below; design-decisions §1508); step 5, `O_TMPFILE`, open (lane A)
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- FIXED the same day for memfs and ext4 (steps 1-5 of the plan below; design-decisions §1508, §1509) (lane A)
 
 **In short:** opening a file here gives a program a handle to the file's
 *name*, not to the file. Every read and write looks the name up again. So a
@@ -180571,11 +180571,18 @@ data stays readable through the handle, and nowhere else, until the close.
   - Test: `ext4::self_test`'s held-file rung, on the boot test's `/mnt`.
     The free-inode count shows the inode kept while held and freed at the
     last close.
-- **Still open:**
-  - Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`. They are now buildable as
-    create, hold, unlink, but still refuse.
-  - On FAT and the pseudo filesystems a handle still goes by name, so
-    everything above applies to them as before.
+- **Step 5, `O_TMPFILE` and `SYS_FS_TMPFILE`** (design-decisions §1509):
+  - A file is made with no name at the filesystem: on ext4, an inode on
+    the orphan list from birth.
+  - It goes at its last close, or is named first: `linkat` of a descriptor
+    by `AT_EMPTY_PATH` or `/proc/self/fd/N`, and the native
+    `SYS_FS_LINK_HANDLE` (1096).
+  - Tests: `test_held_files` rung 14; `ext4::self_test`'s unnamed-file
+    rung on `/mnt`; `dispatch`'s `test_dispatch_tmpfile`; the Linux flags
+    in `test_linux_create_modes`.
+- **Still open:** on FAT and the pseudo filesystems a handle still goes by
+  name, so everything above applies to them as before, and `O_TMPFILE`
+  there is `EOPNOTSUPP`.
 
 **Second pass, 2026-10-01** -- what steps 1-4 left, found while building
 step 5:

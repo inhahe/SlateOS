@@ -277,10 +277,11 @@ impl MemFsNode {
     /// Build a fresh node of `kind` with mode `permissions`, a newly
     /// allocated inode number and **one** link.
     ///
-    /// One link, not zero, because a node is only ever created in order to
-    /// be named: the three callers below each insert it under exactly one
-    /// name in the same operation.  Additional names go through
-    /// [`MemFs::add_link`], which is the only other place `links` grows.
+    /// One link, not zero, because a node is almost always created in order
+    /// to be named: the three callers below each insert it under exactly one
+    /// name in the same operation.  The exception, `create_unnamed`, sets it
+    /// to 0 itself.  Additional names go through [`MemFs::add_link`], which
+    /// is the only other place `links` grows.
     fn new(kind: MemFsNodeKind, permissions: u16) -> Self {
         let now = metadata_now_ns();
         Self {
@@ -1157,6 +1158,33 @@ impl FileSystem for MemFs {
         // `fstat` does; SQLite checks for exactly that.
         let nlinks = self.nlink_of(ino);
         Ok(self.node(ino)?.to_file_meta(nlinks))
+    }
+
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let dir_ino = self.resolve_ino(dir)?;
+        let parent = self.node(dir_ino)?;
+        if !parent.is_dir() {
+            return Err(KernelError::NotADirectory);
+        }
+        // Nothing is made in an immutable directory, named or not.
+        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+        let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
+        // No name, and one hold: the caller's (`pin_ino`'s count).
+        node.links = 0;
+        node.opens = 1;
+        let ino = node.ino;
+        self.inodes.insert(ino, node);
+        Ok(ino)
+    }
+
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        // Held, as the trait asks: a node with no name and no hold is gone.
+        if self.node(ino)?.opens == 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.link_ino(ino, new_path)
     }
 
     fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {

@@ -10685,6 +10685,29 @@ pub fn fs_open_kernel_path_mode(
     }
 }
 
+/// A file with no name in directory `dir` (`fs::handle::open_tmpfile`), its
+/// handle registered to the caller: the Linux `O_TMPFILE` and the native
+/// `SYS_FS_TMPFILE`. Making a file asks for the File capability with WRITE,
+/// as the other creating calls do.
+pub fn fs_open_tmpfile_kernel_path(
+    dir: impl AsRef<crate::fs::path::Path>,
+    flags_raw: u32,
+    create_mode: u16,
+) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    match crate::fs::handle::open_tmpfile(dir, flags, create_mode) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::File, handle);
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(handle as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are
@@ -13980,27 +14003,57 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(result as i64)
 }
 
-/// `SYS_FS_TMPFILE` — a temporary file with no directory entry: refused,
-/// `NotSupported`, until an open file can outlive its name.
+/// `SYS_FS_TMPFILE` — a regular file with no name in a directory, as
+/// Linux's `O_TMPFILE` opens one (`fs::handle::open_tmpfile`): it exists only
+/// through the handle returned, and goes at its last close unless
+/// `SYS_FS_LINK_HANDLE` names it first.
 ///
-/// A handle here reaches its file by path (`fs::handle` re-resolves it on
-/// every read and write), so a file with no name cannot be read through its
-/// own handle. Until 2026-10-01 this call created a *named* file,
-/// `.tmp_<timestamp>` in the given directory, and returned a handle to it,
-/// which broke all three of its promises:
-/// - the file had a name anyone could open;
-/// - nothing ever deleted it, so every call left one behind;
-/// - the handle was never registered to the caller, so the caller's own
-///   reads, writes and close were refused as not its handle, and the open
-///   file leaked until reboot.
+/// `arg0`/`arg1`: the directory's path and its length. `arg2`: native open
+/// flags: the access mode, which must allow writing; `APPEND`; `EXCL`, which
+/// forbids naming it. The file's mode is 0600: the call has no mode
+/// argument, and a file no one else can name has no one else to share with.
 ///
-/// Nothing in the tree calls it: libc's `tmpfile` makes a named file and
-/// removes it itself (`posix/src/tempname.rs`). An honest refusal beats a
-/// door that leaks a file per call. It becomes real with the VFS redesign
-/// that lets a handle hold its file rather than its name (known-issues,
-/// lane B's tmpfile entry and lane A's `O_TMPFILE` todo).
-pub fn sys_fs_tmpfile(_args: &SyscallArgs) -> SyscallResult {
-    SyscallResult::err(KernelError::NotSupported)
+/// Until 2026-10-01 this made a *named* file that nothing deleted and
+/// returned a handle its caller could not use; it then refused
+/// (`NotSupported`) until handles held files rather than names
+/// (design-decisions §1508). It still refuses on a filesystem that cannot
+/// hold a file with no name (FAT, the pseudo filesystems).
+pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
+    let path_len = args.arg1 as usize;
+    if args.arg0 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let dir = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = args.arg2 as u32;
+    fs_open_tmpfile_kernel_path(&dir, flags, 0o600)
+}
+
+/// `SYS_FS_LINK_HANDLE` — give the file a handle holds a name: Linux's
+/// `linkat(fd, "", .., AT_EMPTY_PATH)`. See the number's doc.
+pub fn sys_fs_link_handle(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let path_len = args.arg2 as usize;
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+    if args.arg1 == 0 || path_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let path = match read_user_path(args.arg1, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::fs::handle::link_handle(handle, &path) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_FS_SET_STATUS_FLAGS` — set an open description's status flags, as

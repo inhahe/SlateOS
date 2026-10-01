@@ -734,6 +734,80 @@ impl FileSystem for Ext4Fs {
         self.meta_from_ino(ext4_ino(ino)?)
     }
 
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let dir_ino = self.driver.resolve_path(dir)?;
+        let dir_inode = self.driver.read_inode(dir_ino)?;
+        if dir_inode.i_mode & file_type::S_IFMT != file_type::S_IFDIR {
+            return Err(KernelError::NotADirectory);
+        }
+        // Nothing is made in an immutable directory, named or not.
+        if dir_inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            return Err(KernelError::PermissionDenied);
+        }
+        // In the directory's group, as a named file would be.
+        let group = self.driver.superblock().inode_group(dir_ino);
+        let (ino, inode) = self
+            .driver
+            .create_inode(file_type::S_IFREG | (mode & 0o7777), group)?;
+        // Born unnamed, as Linux's `ext4_tmpfile` makes one: link count 0 and
+        // on the orphan list from the start, so a crash before its last close
+        // -- or before a `linkat` names it -- leaves it for the next mount to
+        // free (`reclaim_orphans`). Held once: the caller's.
+        self.pins.insert(ino, 1);
+        if let Err(e) = self.list_unnamed(ino, inode) {
+            self.pins.remove(&ino);
+            // Undo the create. On the list, reclaiming frees it; off it, it is
+            // freed directly. A failure here leaves it for `fsck`.
+            let undone = if self.orphans.remove(&ino) {
+                self.reclaim_orphan(ino)
+            } else {
+                self.driver
+                    .read_inode(ino)
+                    .and_then(|i| self.free_unlinked_inode(ino, i))
+            };
+            if let Err(u) = undone {
+                crate::serial_println!(
+                    "[ext4] WARNING: inode {} made with no name, not freed after {:?}: {:?}",
+                    ino,
+                    e,
+                    u
+                );
+            }
+            return Err(e);
+        }
+        Ok(u64::from(ino))
+    }
+
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        let ino = ext4_ino(ino)?;
+        if !self.pins.contains_key(&ino) {
+            return Err(KernelError::InvalidArgument);
+        }
+        self.link_ino_checked(ino, new_path)?;
+        // Named now: off the orphan list, so its last close does not free
+        // it. The name first, then the list: a failure between leaves it
+        // listed with a name, which the next mount only takes off the list.
+        if self.orphans.remove(&ino) {
+            let unlisted = self.unlist_orphan(ino).and_then(|()| {
+                let mut inode = self.driver.read_inode(ino)?;
+                // `i_dtime` held the list's next link; a live inode has none.
+                inode.i_dtime = 0;
+                self.driver.write_inode(ino, &inode)
+            });
+            if let Err(e) = unlisted {
+                crate::serial_println!(
+                    "[ext4] WARNING: inode {} named but left on the orphan list: {:?}; \
+                     the next mount takes it off",
+                    ino,
+                    e
+                );
+            }
+        }
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
+    }
+
     fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
         self.set_permissions_ino(ext4_ino(ino)?, permissions)
     }
@@ -1571,6 +1645,15 @@ impl Ext4Fs {
         self.driver.superblock_mut().raw.s_last_orphan = ino;
         self.orphans.insert(ino);
         Ok(())
+    }
+
+    /// A file just made with no name (`create_unnamed`): link count 0, at the
+    /// head of the orphan list, written out.
+    fn list_unnamed(&mut self, ino: u32, inode: super::ondisk::Ext4Inode) -> KernelResult<()> {
+        self.orphan_inode(ino, inode)?;
+        self.driver.write_superblock()?;
+        self.driver.write_group_descs()?;
+        self.driver.flush()
     }
 
     /// An orphan's last hold has gone: take it off the orphan list and free

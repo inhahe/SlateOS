@@ -359,6 +359,108 @@ pub fn set_status_flags(handle: u64, flags: OpenFlags) -> KernelResult<()> {
     Ok(())
 }
 
+/// Open a regular file with no name in directory `dir`: Linux's
+/// `O_TMPFILE`, the native `SYS_FS_TMPFILE`.
+///
+/// The file exists only through the handle and its duplicates: no one can
+/// open it by a name, nothing of it is left behind by a crash or a holder
+/// that never cleans up, and it goes at the last close -- unless
+/// [`link_handle`] names it first. That is allowed unless `flags` has
+/// `EXCL`, as `O_EXCL` forbids it on Linux. It is shown under `dir/#ino`
+/// (`handle_name`), as Linux shows one.
+///
+/// `flags`: the access mode, which must allow writing, as Linux requires;
+/// `APPEND`; `EXCL`; `NO_SYMLINKS` for the walk to `dir`. `mode` is the
+/// file's permission bits, already less the caller's umask.
+///
+/// # Errors
+///
+/// - `InvalidArgument`: `flags` does not allow writing.
+/// - `NotADirectory`: `dir` is not a directory.
+/// - `NotSupported`: the filesystem cannot keep a file with no name (FAT,
+///   the pseudo filesystems: no inode numbers), as Linux answers
+///   `EOPNOTSUPP`.
+/// - The walk's and the create's own.
+pub fn open_tmpfile(dir: impl AsRef<Path>, flags: OpenFlags, mode: u16) -> KernelResult<u64> {
+    open_tmpfile_impl(dir.as_ref(), flags, mode, None)
+}
+
+/// [`open_tmpfile`] in a directory reached under `openat2`'s
+/// `RESOLVE_BENEATH`: the walk to it may not leave `b.base`.
+///
+/// # Errors
+///
+/// As [`open_tmpfile`]; `CrossDevice` for a walk that would leave.
+pub fn open_tmpfile_beneath(b: Beneath<'_>, flags: OpenFlags, mode: u16) -> KernelResult<u64> {
+    open_tmpfile_impl(b.rel, flags, mode, Some(b))
+}
+
+fn open_tmpfile_impl(
+    dir: &Path,
+    flags: OpenFlags,
+    mode: u16,
+    beneath: Option<Beneath<'_>>,
+) -> KernelResult<u64> {
+    if !flags.is_writable() {
+        return Err(KernelError::InvalidArgument);
+    }
+    let no_symlinks = flags.contains(OpenFlags::NO_SYMLINKS);
+    // Resolved as a write open's path is, and in the same order (`open_impl`).
+    let resolved = match beneath {
+        Some(b) => {
+            let resolved = crate::fs::Vfs::resolve_beneath(b.base, b.rel, true, no_symlinks)?;
+            crate::ipc::namespace::check_writable(&resolved)?;
+            resolved
+        }
+        None => {
+            crate::ipc::namespace::check_writable(dir)?;
+            if no_symlinks {
+                crate::fs::Vfs::resolve_no_symlinks(dir)?
+            } else {
+                crate::fs::Vfs::resolve_path(dir)?
+            }
+        }
+    };
+    if crate::fs::Vfs::stat_resolved(&resolved)?.entry_type != crate::fs::EntryType::Directory {
+        return Err(KernelError::NotADirectory);
+    }
+    let linkable = !flags.contains(OpenFlags::EXCL);
+    let hold = crate::fs::Vfs::create_unnamed_object(&resolved, mode & 0o7777, linkable)?;
+    let shown_as = resolved.join(alloc::format!("#{}", hold.id().ino));
+    let file_flags = OpenFlags::from_bits(
+        flags.bits()
+            & (OpenFlags::READ.bits() | OpenFlags::WRITE.bits() | OpenFlags::APPEND.bits()),
+    );
+    allocate_handle_holding(shown_as, 0, 0, file_flags, Some(Arc::new(hold)))
+}
+
+/// Give the file `handle` holds the name `new_path`: `linkat` of a
+/// descriptor (`AT_EMPTY_PATH`, or `/proc/self/fd/N` followed), the native
+/// `SYS_FS_LINK_HANDLE`. See [`crate::fs::Vfs::link_object`] for which files
+/// may be named: one made by [`open_tmpfile`] without `EXCL` gets its first
+/// name, one with a name another.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that is not open; `IsADirectory` for a
+/// directory, which takes no second name; `NotSupported` for a file held by
+/// name (a filesystem without inode numbers, which have no hard links
+/// either); `link_object`'s own.
+pub fn link_handle(handle: u64, new_path: impl AsRef<Path>) -> KernelResult<()> {
+    let object = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        file.object.clone()
+    };
+    match &object {
+        Some(held) => crate::fs::Vfs::link_object(held, new_path),
+        None => Err(KernelError::NotSupported),
+    }
+}
+
 /// A request to open under `openat2`'s `RESOLVE_BENEATH`.
 ///
 /// The two halves travel together in one type on purpose: a base without
@@ -2284,6 +2386,83 @@ fn test_held_files(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         skips.record(
             "held files: a jailed process",
             "no /tmp to build a jail under",
+        );
+    }
+
+    // 14. A file made with no name (`open_tmpfile`): read and written through
+    // its handle, in no directory, shown as `dir/#ino`; named by
+    // `link_handle` it stays, and may take a second name; one made with
+    // `EXCL` may not be named; gone with the last close, its mount busy
+    // until then.
+    if Vfs::stat("/tmp").is_ok() {
+        crate::fs::memfs::mount(MNT)?;
+        let inodes = || Vfs::statvfs(MNT).map(|i| i.total_inodes);
+        let before = inodes();
+        let h = open_tmpfile(MNT, rw, 0o640)?;
+        let wrote = write(h, b"unnamed");
+        let read_back = read_at(h, 0, &mut buf);
+        let listed = Vfs::readdir(MNT).map(|e| e.len());
+        let shown = handle_name(h);
+        let checked = handle_path(h);
+        let meta = fstat(h).map(|m| (m.nlinks, m.permissions & 0o7777));
+        let while_held = inodes();
+        let busy = Vfs::unmount(MNT);
+        let named = link_handle(h, "/tmp/held_mnt/named");
+        let second = link_handle(h, "/tmp/held_mnt/second");
+        let links = fstat(h).map(|m| m.nlinks);
+        let _ = close(h);
+        let kept = Vfs::read_file("/tmp/held_mnt/named");
+        let _ = Vfs::remove("/tmp/held_mnt/named");
+        let _ = Vfs::remove("/tmp/held_mnt/second");
+        let h = open_tmpfile(MNT, rw.union(OpenFlags::EXCL), 0o600)?;
+        let refused = link_handle(h, "/tmp/held_mnt/never");
+        let _ = close(h);
+        let after = inodes();
+        let read_only = open_tmpfile(MNT, OpenFlags::READ, 0o600);
+        Vfs::write_file("/tmp/held_mnt/plain", b"")?;
+        let not_dir = open_tmpfile("/tmp/held_mnt/plain", rw, 0o600);
+        let _ = Vfs::remove("/tmp/held_mnt/plain");
+        let freed = Vfs::unmount(MNT);
+        let shown_ok = shown
+            .as_ref()
+            .is_ok_and(|n| n.as_bytes().starts_with(b"/tmp/held_mnt/#"));
+        let ok = wrote == Ok(7)
+            && read_back == Ok(7)
+            && buf.get(..7) == Some(b"unnamed".as_slice())
+            && listed == Ok(0)
+            && shown_ok
+            && checked == Err(KernelError::NotFound)
+            && meta == Ok((0, 0o640))
+            && while_held.is_ok_and(|n| before == Ok(n.saturating_sub(1)))
+            && busy == Err(KernelError::DeviceBusy)
+            && named == Ok(())
+            && second == Ok(())
+            && links == Ok(2)
+            && kept.as_deref() == Ok(b"unnamed".as_slice())
+            && refused == Err(KernelError::NotFound)
+            && after == before
+            && read_only == Err(KernelError::InvalidArgument)
+            && not_dir == Err(KernelError::NotADirectory)
+            && freed == Ok(());
+        if !ok {
+            // Best effort, so a failure does not leave the scratch mount.
+            let _ = Vfs::unmount(MNT);
+            return fail(
+                "a file made with no name",
+                &(
+                    (wrote, read_back, listed, shown, checked, meta),
+                    (before, while_held, busy, named, second, links),
+                    (kept, refused, after, read_only, not_dir, freed),
+                ),
+            );
+        }
+        crate::serial_println!(
+            "[fs::handle]   unnamed (O_TMPFILE): in no directory, named on request, gone at its close: OK"
+        );
+    } else {
+        skips.record(
+            "held files: a file made with no name",
+            "no /tmp to mount a scratch filesystem under",
         );
     }
     Ok(())

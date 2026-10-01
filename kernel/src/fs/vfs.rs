@@ -738,6 +738,26 @@ pub trait FileSystem: Send {
         Ok(())
     }
 
+    /// Make a regular file with no name in directory `dir`, held once as
+    /// [`pin_ino`](Self::pin_ino) holds one, and return its inode: Linux's
+    /// `->tmpfile`, behind `O_TMPFILE`. It goes at the matching
+    /// [`unpin_ino`](Self::unpin_ino) unless
+    /// [`link_held_ino`](Self::link_held_ino) names it first. `mode` is its
+    /// permission bits. `NotSupported` where a file cannot be held unnamed.
+    fn create_unnamed(&mut self, dir: &Path, mode: u16) -> KernelResult<u64> {
+        let _ = (dir, mode);
+        Err(KernelError::NotSupported)
+    }
+
+    /// Give held inode `ino` the name `new_path`, as [`link`](Self::link)
+    /// gives an existing file another: a file
+    /// [`create_unnamed`](Self::create_unnamed) made is named by it, and no
+    /// longer goes at its last unpin. `AlreadyExists` if the name is taken.
+    fn link_held_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        let _ = (ino, new_path);
+        Err(KernelError::NotSupported)
+    }
+
     /// Rename or move a file or directory.
     ///
     /// Both `from` and `to` are paths relative to the filesystem root.
@@ -1349,6 +1369,9 @@ fn check_writable_fs(fs_id: u64) -> KernelResult<()> {
 struct Held {
     holds: usize,
     unlinked_as: Option<PathBuf>,
+    /// Made with no name to be given one (`O_TMPFILE` without `O_EXCL`):
+    /// Linux's `I_LINKABLE`. Cleared when it is named.
+    linkable: bool,
 }
 
 static HELD: Mutex<alloc::collections::BTreeMap<FileId, Held>> =
@@ -1360,6 +1383,7 @@ fn note_hold(id: FileId) {
     let entry = held.entry(id).or_insert(Held {
         holds: 0,
         unlinked_as: None,
+        linkable: false,
     });
     entry.holds = entry.holds.saturating_add(1);
 }
@@ -1376,6 +1400,37 @@ fn note_release(id: FileId) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// A file made with no name (`Vfs::create_unnamed_object`): its one hold,
+/// the name it is shown under, and whether it may be given a real one.
+fn note_unnamed(id: FileId, shown_as: PathBuf, linkable: bool) {
+    HELD.lock().insert(
+        id,
+        Held {
+            holds: 1,
+            unlinked_as: Some(shown_as),
+            linkable,
+        },
+    );
+}
+
+/// Held file `id` has been given a name (`Vfs::link_object`): it no longer
+/// goes with its last hold.
+fn note_named(id: FileId) {
+    if let Some(entry) = HELD.lock().get_mut(&id) {
+        entry.unlinked_as = None;
+        entry.linkable = false;
+    }
+}
+
+/// Whether held file `id` may be given a name: it has one already (and gets
+/// another, as `link` gives one), or it was made with none to be given one.
+/// A file deleted while open may not, as on Linux.
+fn may_link(id: FileId) -> bool {
+    HELD.lock()
+        .get(&id)
+        .is_some_and(|h| h.unlinked_as.is_none() || h.linkable)
 }
 
 /// `id`'s last name, `path`, has gone. If the file is held open it lives
@@ -3763,6 +3818,98 @@ impl Vfs {
                 Err(e)
             }
         }
+    }
+
+    /// Make a regular file with no name in already-resolved directory `dir`,
+    /// held: Linux's `O_TMPFILE` (`fs::handle::open_tmpfile`).
+    ///
+    /// The file exists only through the hold: no one can open it by a name,
+    /// and it goes when the last reference to the hold does -- unless
+    /// [`link_object`](Self::link_object) names it first, which `linkable`
+    /// allows (`O_TMPFILE` without `O_EXCL`). It is shown under `dir/#ino`,
+    /// as Linux shows one.
+    ///
+    /// Asked as a create in `dir` is: write access to it, a writable mount,
+    /// an interceptor, quota. No event and no journal entry: there is no name
+    /// to report, as Linux reports none.
+    ///
+    /// # Errors
+    ///
+    /// `NotSupported` on a filesystem that cannot hold a file with no name
+    /// (FAT, the pseudo filesystems); `NotADirectory`; the checks' and the
+    /// filesystem's own.
+    pub fn create_unnamed_object(dir: &Path, mode: u16, linkable: bool) -> KernelResult<FileHold> {
+        check_path_access(dir, PathAccess::Write)?;
+        check_writable(dir)?;
+        super::intercept::pre_check(super::intercept::FsOp::Write, dir, None)?;
+        enforce_quota_create(dir)?;
+        // The hold is counted on the mount first, as `open_object` counts
+        // one, so an unmount racing this create cannot take the filesystem
+        // away under it.
+        let (fs, fs_id, relative) = {
+            let mut vfs = VFS.lock();
+            let (mp, relative) = find_mount(&mut vfs, dir)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id, relative.to_path_buf())
+        };
+        let made = fs.lock().create_unnamed(&relative, mode);
+        let ino = match made {
+            Ok(ino) => ino,
+            Err(e) => {
+                release_mount_hold(fs_id);
+                return Err(e);
+            }
+        };
+        note_unnamed(
+            FileId { fs_id, ino },
+            dir.join(alloc::format!("#{ino}")),
+            linkable,
+        );
+        Ok(FileHold(FileObject { fs, fs_id, ino }))
+    }
+
+    /// Give held file `obj` the name `new_path` (not yet resolved): `linkat`
+    /// of a descriptor, by `AT_EMPTY_PATH` or a followed `/proc/self/fd/N`,
+    /// and the native `SYS_FS_LINK_HANDLE`.
+    ///
+    /// A file made with no name is named if it was made to be (`O_TMPFILE`
+    /// without `O_EXCL`), as Linux's `I_LINKABLE` allows, and then no longer
+    /// goes with its last hold. A file with a name gets another, as `link`
+    /// gives one. A file deleted while open, or made with `O_EXCL`, is
+    /// `NotFound`, as Linux answers `ENOENT`. Asked as `link` asks the new
+    /// name: write access, a writable mount, an interceptor, quota, the same
+    /// mount (`CrossDevice`).
+    ///
+    /// # Errors
+    ///
+    /// As above; `AlreadyExists` for a name taken; the filesystem's own.
+    pub fn link_object(obj: &FileObject, new_path: impl AsRef<Path>) -> KernelResult<()> {
+        let new_path = new_path.as_ref();
+        crate::ipc::namespace::check_writable(new_path)?;
+        let new_path = Self::resolve_no_follow(new_path)?;
+        check_path_access(&new_path, PathAccess::Write)?;
+        check_writable(&new_path)?;
+        super::intercept::pre_check(super::intercept::FsOp::Link, &new_path, None)?;
+        enforce_quota_create(&new_path)?;
+        if !may_link(obj.id()) {
+            return Err(KernelError::NotFound);
+        }
+        {
+            let (_fs, fs_id, _opts, rel_new) = resolve_mount(&new_path)?;
+            if fs_id != obj.fs_id {
+                return Err(KernelError::CrossDevice);
+            }
+            obj.fs.lock().link_held_ino(obj.ino, &rel_new)?;
+        }
+        note_named(obj.id());
+        // A name is counted as `link_inner` counts one.
+        super::quota::charge_inode(0, 0);
+        VFS_DCACHE.lock().invalidate_negative_prefix(&new_path);
+        super::notify::emit_created(&new_path);
+        super::index::on_file_changed(&new_path);
+        super::journal::record(super::journal::JournalEventType::Created, &new_path);
+        super::audit::log_ok(super::audit::AuditOp::Link, 0, &new_path);
+        Ok(())
     }
 
     /// The file's metadata now, its device included. `nlinks` is 0 once its

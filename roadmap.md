@@ -5004,7 +5004,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wait3/wait4: waitpid wrappers with zeroed rusage
   - [x] mkstemp/tmpfile: temporary file creation with unique name generation
   - [x] glob/globfree: pathname pattern expansion using fnmatch + opendir/readdir, sorted results, GLOB_APPEND/GLOB_NOCHECK/GLOB_MARK/GLOB_ERR flags
-  - [x] syslog: openlog/syslog/closelog/setlogmask (writes to stderr with priority prefix, LOG_PID support, mask filtering); `syslog`/`vsyslog` printf-expand the format string via asm-trampoline + snprintf engine (previously printed the format literally and dropped args) and accept a real va_list
+  - [x] syslog: openlog/syslog/closelog/setlogmask -- since 2026-10-01 glibc 2.39's `syslog.c` (to `/dev/log`, and to the journal while `AF_UNIX` is unsupported; design-decisions §1166), before that to stderr with a priority prefix; `syslog`/`vsyslog` printf-expand the format string via asm-trampoline + snprintf engine (previously printed the format literally and dropped args) and accept a real va_list
   - [x] string additions: stpcpy, stpncpy, strsep, strverscmp
   - [x] regex: regcomp/regexec/regfree/regerror — compiled regex with BRE and ERE (REG_EXTENDED), case-insensitive (REG_ICASE), anchors, character classes, groups, alternation, quantifiers (*+?), REG_NEWLINE support
   - [x] stdio additions: fdopen, freopen, ungetc (per-fd pushback buffer), getc/putc, setvbuf/setbuf (stubs), popen/pclose (stubs), BUFSIZ/_IONBF/_IOLBF/_IOFBF constants

@@ -2957,6 +2957,7 @@ dependencies = [
 name = "posix"
 version = "0.1.0"
 dependencies = [
+ "journalrec",
  "libm",
  "tzrules",
 ]

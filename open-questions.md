@@ -162,9 +162,10 @@ conversions), `posix/src/ctype.rs` (`MB_CUR_MAX`), `posix/src/iconv.rs`
 does, several parts of it were written by translating glibc's own source
 code into Rust, line by line -- most recently the Tamil character set,
 the new C23 maths functions and `clog10` -- and `<obstack.h>`'s macros
-follow glibc's header's, macro for macro, and argp and the timezone
-code glibc's source, function for function. glibc's licence (the LGPL)
-allows that, on a condition: anyone who receives a program containing it
+follow glibc's header's, macro for macro, and argp, the timezone code
+and the system logger glibc's source, function for function. glibc's
+licence (the LGPL) allows that, on a condition: anyone who receives a
+program containing it
 must be able to rebuild that program with their own copy of the library.
 The C library is built into *every* program on SlateOS, so the condition
 reaches every program, ours and anyone else's. An earlier decision
@@ -194,6 +195,7 @@ What is translated, as far as lane D knows:
 | `posix/include/obstack.h`: the macros, macro for macro -- C, in a header a program compiles into itself | the installed `<obstack.h>` (`malloc/obstack.h`) | 2026-09-30 |
 | `posix/src/argp/`: the parse, the help's order and layout, the line filler -- function for function | `argp/argp-parse.c`, `argp-help.c`, `argp-fmtstream.c` | 2026-10-01 |
 | `posix/src/tz.rs`: `tzset`, the POSIX rule engine, the zoneinfo reader and `mktime`'s search -- function for function, read from the source | `time/tzset.c`, `time/tzfile.c`, `time/mktime.c` | 2026-10-01 |
+| `posix/src/syslog.rs`: the logger -- connecting, building the record, sending it and trying again -- function for function, read from the source | `misc/syslog.c`, BSD's in origin (the University of California's licence) with glibc's changes under the LGPL | 2026-10-01 |
 
 One more part, since this was raised, was written with glibc's source
 open, though not translated from it: `posix/src/regex/parse.rs`
@@ -241,6 +243,19 @@ alone (`posix/tools/oracle/tz_harness.py`, 57 scenarios), which fix every
 behaviour they exercise, though not glibc's state after sequences of
 calls they do not.
 
+The system logger, `posix/src/syslog.rs`, is glibc's `misc/syslog.c`
+translated function by function with its source open (2026-10-01):
+what a record looks like, when the connection is made again, which
+copies stop at a NUL -- a program logging through glibc sees all of it.
+Under **B** it would be written again from the oracle's answers alone
+(`posix/tools/oracle/syslog_harness.py`, 44 scenarios, with daemons
+that restart, vanish and change kind), which fix every record, copy and
+retry they exercise. That file began as BSD's, and under **A** its
+notice -- the University of California's licence -- travels with the
+translation as well; glibc's changes since are the LGPL's. The journal
+that stands in for the daemon on SlateOS (design-decisions §1166) owes
+glibc nothing.
+
 (The character tables themselves -- which byte means which letter -- are
 facts read from glibc's data files and from running its converters, not
 code; they are not in question. And not everything follows glibc's
@@ -262,8 +277,10 @@ wanted.
 every program contains; keeping it free of conditions is worth a few hours
 of rewriting, and the glibc comparison tests -- the part that actually
 guarantees glibc's behaviour -- stay unchanged, so the rewrites cannot drift
-from what the translations do today. Until you answer, new lane D work is
-written from the standards with glibc as the oracle only.
+from what the translations do today. Until you answer, lane D writes from
+the standards with glibc as the oracle, and where it has read glibc's
+source after all -- the timezone code and the logger, both 2026-10-01 --
+the table above says so.
 
 **Where it bites:** the six places above; `design-decisions.md` §1133 (the
 earlier assumption); and every future port where glibc's behaviour is the

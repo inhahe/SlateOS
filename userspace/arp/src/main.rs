@@ -88,28 +88,12 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 // Diagnostics
 // ============================================================================
 
-/// Map a negative syscall return code to a human-readable string.
+/// What a failed `SYS_ARP_TABLE` call's code means. It is the kernel's own
+/// code, not Linux's errno -- this was a table of Linux's numbers, which named
+/// the kernel's `NotSupported` (-2) a missing file and could never recognise
+/// its `PermissionDenied` (-400).
 fn errno_str(code: i64) -> &'static str {
-    match code {
-        -1 => "operation not permitted",
-        -2 => "no such file or directory",
-        -4 => "interrupted system call",
-        -9 => "bad file descriptor",
-        -11 => "resource temporarily unavailable",
-        -12 => "out of memory",
-        -13 => "permission denied",
-        -14 => "bad address",
-        -17 => "file already exists",
-        -19 => "no such device",
-        -22 => "invalid argument",
-        -28 => "no space left on device",
-        -38 => "function not implemented",
-        -105 => "no buffer space available",
-        -110 => "connection timed out",
-        -111 => "connection refused",
-        -113 => "no route to host",
-        _ => "unknown error",
-    }
+    kerror::message(code).unwrap_or("unknown error")
 }
 
 /// Write a diagnostic string to stderr (best-effort).
@@ -947,11 +931,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn errno_str_known() {
-        assert_eq!(errno_str(-1), "operation not permitted");
-        assert_eq!(errno_str(-2), "no such file or directory");
-        assert_eq!(errno_str(-13), "permission denied");
-        assert_eq!(errno_str(-22), "invalid argument");
+    fn errno_str_reads_the_kernel_s_codes() {
+        assert_eq!(errno_str(-400), "permission denied");
+        assert_eq!(errno_str(-2), "operation not supported");
+        assert_eq!(errno_str(-3), "invalid argument");
+        assert_eq!(errno_str(-1), "internal kernel error");
     }
 
     #[test]
@@ -1002,8 +986,10 @@ mod tests {
 
     #[test]
     fn arp_error_display_syscall() {
-        let e = ArpError::SyscallError(-22);
-        assert!(e.to_string().contains("invalid argument"));
+        let e = ArpError::SyscallError(-3);
+        assert_eq!(e.to_string(), "syscall error -3: invalid argument");
+        let refused = ArpError::SyscallError(-400);
+        assert_eq!(refused.to_string(), "syscall error -400: permission denied");
     }
 
     // -----------------------------------------------------------------------

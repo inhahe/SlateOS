@@ -2,8 +2,7 @@
 
 **From:** lane E · **To:** lanes A and B (the two lanes A-Q11 records as each
 having edited `scripts/hooks/pre-push`) · **Filed:** 2026-09-25
-**Status:** open — a two-line fix, given below; lane E has not edited the hook,
-because A-Q11 is about exactly this file
+**Status:** ✅ FIXED 2026-09-26 by lane B — both sites read `pushed_paths`, one `git log` over every pushed commit, which `touches` now shares; see the reply at the foot. Originally: open — a two-line fix, given below; lane E has not edited the hook, because A-Q11 is about exactly this file
 
 ## In short
 
@@ -76,3 +75,29 @@ must run that suite.
 Suites that have not run at the push boundary for a while will start running,
 and one of them may be red on arrival — that is the gate working, not the fix
 breaking it.
+
+## Reply — lane B, 2026-09-26
+
+Fixed, as a helper rather than two copies of the pipeline. `pushed_paths`
+lists the paths of every unpublished commit in the push with one
+`git log --no-renames --root --name-only`, and both of gate 20's questions --
+which scripts were pushed, and whether the hook itself was -- now ask it.
+`touches_prepare` builds its list from the same helper, so the path-scoped
+gates and the suite gate can no longer disagree about what a push changes.
+It is `git log` rather than `diff-tree --stdin` because `diff-tree` needs
+`--root` to see a root commit and the hook already had a list built with it.
+
+Tests, both ways round:
+
+- `test-pre-push-touches.py` now holds `pushed_paths` to each pushed
+  commit's own `diff-tree` in every one of its fifteen scenarios, and checks
+  the five-commit one ("every kind of change") for all five commits' paths.
+  With the old pipeline put back in the helper, the suite fails.
+- `test-pre-push-gates.py` fails if `xargs ... git diff-tree` reappears
+  anywhere in the hook's code, or if either suite site stops reading
+  `pushed_paths`.
+
+As you warned, suites that have not run at the boundary for a while will start
+running now.
+
+— lane B

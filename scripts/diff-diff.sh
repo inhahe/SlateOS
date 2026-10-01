@@ -77,6 +77,11 @@ DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables `diff` runs with, on both sides, and nothing else does:
+# `POSIXLY_CORRECT` changes where option parsing stops, and exported it would
+# reach this harness's own tools too. Empty unless a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -133,6 +138,12 @@ printf 'alpha\n\nbravo\ncharlie\ndelta\n'        > blanks.txt
 # A tab inside a line, which the normal format prints raw and which must not be
 # expanded.
 printf 'alpha\tX\nbravo\ncharlie\ndelta\n'       > tabbed.txt
+# For -y: lines longer than a half, tabs at every phase -- one after exactly
+# eight columns, where tab packing and column arithmetic disagree most --
+# carriage returns, backspaces, form feeds, and characters wider and narrower
+# than a byte each.
+printf 'short\na line that is much longer than any half of the output is going to be wide\ntab\there\tand\tthere\n12345678\tafter eight\nx\ty\tz\ncaf\303\251 na\303\257ve \346\274\242\345\255\227 wide\nback\bspace\ncarriage\rreturn\nform\ffeed\nsame line\nextra one\n' > sbs1.txt
+printf 'short\na line that is much longer than any half of the output is going to be WIDE\ntab\there\tand\tTHERE\n12345678\tafter eight\nx\ty\tz!\ncaf\303\251 na\303\257ve \346\274\242\345\255\227 WIDE\nback\bSPACE\ncarriage\rRETURN\nform\fFEED\nsame line\n' > sbs2.txt
 # Bytes that are not text. `diff` calls these binary and says so rather than
 # printing them, and the sentence it says is part of the contract.
 printf 'alpha\n\x80\xff\nbravo\n'                > bytes.txt
@@ -228,7 +239,7 @@ compare() {
 # pinned so the `-u` and `-c` headers format identically on both sides.
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 30 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" diff "$@"
+  diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" diff "$@"
 }
 
 report() {
@@ -243,7 +254,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "diff $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }diff $*"; }
 run_stdin() { local i="$1"; shift; compare "$i" "$@"; report "printf '$i' | diff $*"; }
 
 # A case expected to differ, with the reason. Counted apart so that one which
@@ -414,6 +425,56 @@ run_case --side-by-side base.txt mid.txt
 run_case -y -W 40 base.txt mid.txt
 run_case --width=40 -y base.txt mid.txt
 run_case -y --suppress-common-lines base.txt mid.txt
+# Identical files still print under -y, unless nothing common is to be shown.
+run_case -y base.txt same.txt
+run_case -y -s base.txt same.txt
+run_case -y -q base.txt same.txt
+run_case -y --suppress-common-lines base.txt same.txt
+run_case -y base.txt added.txt
+run_case -y base.txt removed.txt
+run_case -y base.txt allnew.txt
+run_case -y first.txt last.txt
+run_case -y empty.txt base.txt
+run_case -y base.txt empty.txt
+run_case -y blankline.txt empty.txt
+# A missing final newline: `\` or `/` in the gutter, and no newline at the end.
+run_case -y nonl.txt base.txt
+run_case -y base.txt nonl.txt
+run_case -y nonl.txt nonl2.txt
+run_case -y nonl.txt nonl.txt
+# Each column shows its own file's copy of a line the options call common.
+run_case -y -i base.txt upper.txt
+run_case -y -b base.txt trailws.txt
+run_case -y -w base.txt interws.txt
+# Ignored hunks are printed as common lines, paired off in order.
+run_case -y -I '^#' iga.txt igb.txt
+run_case -y -I '^#' igc.txt ige.txt
+run_case -y -B base.txt blanks.txt
+run_case -y --left-column base.txt mid.txt
+run_case -y --left-column base.txt added.txt
+run_case -y --left-column -I '^#' iga.txt igb.txt
+# Tabs, widths and the characters print_half_line treats specially.
+run_case -y -t base.txt tabbed.txt
+run_case -y tabbed.txt base.txt
+run_case -y --tabsize=4 tabbed.txt base.txt
+run_case -y sbs1.txt sbs2.txt
+run_case -y -t sbs1.txt sbs2.txt
+run_case -y --tabsize=3 -W 50 sbs1.txt sbs2.txt
+run_case -y -W 21 sbs1.txt sbs2.txt
+run_case -y -W 33 sbs1.txt sbs2.txt
+run_case -y -W 60 -t sbs1.txt sbs2.txt
+run_case -y -W 1 base.txt mid.txt
+run_case -y -W 2 base.txt mid.txt
+run_case -y -W 7 base.txt mid.txt
+# -W and --tabsize values, and the two refusals upstream words differently.
+run_case -W 0 -y base.txt mid.txt
+run_case -W x -y base.txt mid.txt
+run_case -W 40 -W 50 -y base.txt mid.txt
+run_case -W 40 -W 40 -y base.txt mid.txt
+run_case --tabsize=0 base.txt mid.txt
+run_case --tabsize=x base.txt mid.txt
+run_case --tabsize=4 --tabsize=8 base.txt mid.txt
+run_case -t --tabsize=4 base.txt tabbed.txt
 
 # --- refusals and operand errors ------------------------------------------------
 run_case
@@ -492,6 +553,38 @@ run_case base.txt .
 # --- the two whose text is ours -------------------------------------------------
 xfail_case "our help text, not the GNU project's" --help
 xfail_case "our version string, not the GNU project's" --version
+
+# --- the command line, as diffutils 3.10 reads it --------------------------------
+# On the shared parser since 2026-09-25; the ladder of exact spellings it
+# replaced took the last of two styles, the last of two context lengths, and no
+# abbreviation at all.
+run_case --unif base.txt mid.txt
+run_case --side base.txt mid.txt
+run_case -u -c base.txt mid.txt
+run_case -y --normal base.txt mid.txt
+run_case -U 5 -U 1 base.txt mid.txt
+run_case -u -U 1 base.txt mid.txt
+run_case -u2 base.txt mid.txt
+run_case -1 -2 -u base.txt mid.txt
+run_case -U 0 -2 base.txt mid.txt
+run_case --context=1 base.txt mid.txt
+run_case -U '' base.txt mid.txt
+run_case base.txt -u
+run_case -- -u base.txt
+run_case --no-color base.txt mid.txt
+run_case --color=alw base.txt mid.txt
+run_case --color=never base.txt mid.txt
+run_case --horizon-lines=x base.txt mid.txt
+run_case -d base.txt mid.txt
+run_case --bogus --help
+xfail_case 'ifdef output is not implemented; ours refuses the option by name' -D X base.txt mid.txt
+xfail_case 'labels are not implemented; ours refuses the option by name' -L one -u base.txt mid.txt
+# POSIXLY_CORRECT: the first operand ends option parsing, so the `-u` after two
+# operands is a third one.
+ENVV=(POSIXLY_CORRECT=1)
+run_case base.txt mid.txt -u
+run_case -u base.txt mid.txt
+ENVV=()
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

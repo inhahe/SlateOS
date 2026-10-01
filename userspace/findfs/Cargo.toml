@@ -1,0 +1,20 @@
+[package]
+name = "findfs"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's findfs, ported: find a filesystem by label or UUID, through the libblkid port"
+
+[lints]
+workspace = true
+
+[dependencies]
+# glibc's getopt_long.
+getoptlong = { path = "../getoptlong" }
+# argv is bytes; a name in a diagnostic is escaped.
+quoting = { path = "../quoting" }
+# libblkid's tag evaluation.
+ulblkid = { path = "../ulblkid" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor findfs was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

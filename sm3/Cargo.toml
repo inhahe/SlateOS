@@ -1,0 +1,17 @@
+[package]
+name = "sm3"
+version = "0.1.0"
+edition = "2024"
+description = "SM3 (GB/T 32905-2016), ported from RustCrypto's sm3."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like the other hash crates. The one dependency is
+# `blockbuf`, which is itself dependency-free: SM3's padding is SHA-256's, a
+# 0x80, zeros and a big-endian 64-bit bit count, and that logic has one copy.
+[dependencies]
+blockbuf = { path = "../blockbuf" }
+
+[lints]
+workspace = true

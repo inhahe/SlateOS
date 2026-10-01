@@ -89,6 +89,10 @@ DIFF_PROG='bc'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does: only `prog_trailing` applies it. Empty unless a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
 
 # The tracker key attached to the next comparison, if any. Set by `known_bug`
@@ -129,6 +133,15 @@ compare() {
       >"$o_bin" 2>"$o_err"; o_rc=$?
     timeout -k 2 30 env PATH="$bindir/gnu"  bc -q "$@" prog.bc </dev/null \
       >"$g_bin" 2>"$g_err"; g_rc=$?
+  elif [ "$mode" = trailing ]; then
+    # The file first and the arguments after it, with no `-q` of our own: the
+    # arguments are the question, and where option parsing stops decides it.
+    # With standard input not a terminal neither side prints its banner.
+    printf '%b' "$text" > prog.bc
+    timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" bc prog.bc "$@" \
+      </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu"  bc prog.bc "$@" \
+      </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$text" | timeout -k 2 30 env PATH="$bindir/ours" bc -q "$@" \
       >"$o_bin" 2>"$o_err"; o_rc=$?
@@ -219,6 +232,11 @@ prog() {
 # One route only, for a case whose other route is not the same question.
 prog_file()  { local l="$1" t="$2"; shift 2; compare file  "$t" "$@"; report "[file]  $l"; }
 prog_stdin() { local l="$1" t="$2"; shift 2; compare stdin "$t" "$@"; report "[stdin] $l"; }
+# `prog_trailing LABEL TEXT ARGS…` — `bc prog.bc ARGS…`, under `$ENVV`.
+prog_trailing() {
+  local l="$1" t="$2"; shift 2
+  compare trailing "$t" "$@"; report "[trailing] ${ENVV[*]:+${ENVV[*]} }$l"
+}
 
 # A case expected to differ, with the reason. Counted apart so that one which
 # starts agreeing is reported too: a stale xfail is a claim nobody rechecked.
@@ -452,6 +470,18 @@ prog_file 'a file that is not there' '' nosuch.bc
 # deviation nothing exercises is a deviation nobody will notice losing.
 differs_by_design 'a name needing quotes is quoted, so it cannot forge a diagnostic line'
 prog_file 'an unavailable name with a space' '' 'no such.bc'
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set, so a
+# `-q` after the file is a second file -- `File -q is unavailable.` -- where
+# without it the `-q` is an option. Measured against GNU bc 1.07.1 on
+# 2026-09-25; `coreutils::getopt`'s module docs, "Where option parsing stops".
+ENVV=(POSIXLY_CORRECT=1)
+prog_trailing 'a -q after the file is a second file' '1+1\n' -q
+prog_trailing 'a -- after the file is a file too'    '1+1\n' -- -q
+ENVV=()
+prog_trailing 'a -q after the file is an option'     '1+1\n' -q
+prog_trailing 'a -- after the file ends the options' '1+1\n' -- -q
 
 # ==============================================================================
 # Differences on purpose

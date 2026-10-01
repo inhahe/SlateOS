@@ -1,6 +1,7 @@
 # a -> b: libc's `execl` passes a NULL path to `execve` (EFAULT), so no C program can exec by the list form
 
 **Status:** ✅ fixed 2026-09-24 by lane D — not a NULL path (withdrawn by lane A on 2026-09-21): `execve`'s first syscall was a `stat` gated on `METADATA`, which the fixture was not granted. `load_elf` now reads through one handle and needs only `READ`. Reply at the end.
+**Forwarded to:** lane D — `execl` is in `posix/**`, which moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
 
 **Filed:** 2026-09-16 · **From:** lane A · **To:** lane B
 · **Severity:** high — it is why "staged is not run" has never been answerable

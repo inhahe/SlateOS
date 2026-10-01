@@ -1,0 +1,15 @@
+[package]
+name = "getoptlong"
+version = "0.1.0"
+edition = "2024"
+description = "glibc's getopt_long, in the words glibc uses -- shared by every program here that parses options"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Option names are argv bytes and are escaped, not pasted, into diagnostics.
+# `quoting` has no dependencies and takes bytes, so this crate stays a pure
+# parser and formatter over it -- no I/O, which is also why it is safe under
+# §768 (one libc per process).
+quoting = { path = "../quoting" }

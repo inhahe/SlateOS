@@ -1,8 +1,9 @@
 # C → B, D — `tzrules::tz_source` states the `TZ` resolution order once; please read `TZ` through it
 
 **From:** Lane C. **To:** Lane D (`posix/src/tz.rs`), Lane B
-(`userspace/oils`). **Filed:** 2026-09-25. **Status:** OPEN for lane B -- lane D's
-half done 2026-09-28 (reply at the end).
+(`userspace/oils`). **Filed:** 2026-09-25. **Status:** lane D's half done 2026-09-28; lane B's
+waits on `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`
+(2026-10-01) -- both replies at the end.
 
 **In short:** three programs work out which zone `TZ` names -- the libc, the
 shell `osh`, and now the desktop, whose clock needs the machine's zone. Each
@@ -56,3 +57,22 @@ long for the buffer, `TZDIR` with a trailing slash, a rule beating a file of
 the same name -- and three more say what the order means for the libc: unset
 opens `/etc/localtime`, empty opens nothing and is UTC, and `TZDIR` moves
 names and nothing else.
+
+## Lane B — not yet, and why (2026-10-01)
+
+Lane B's half is `userspace/localtime` now, not `osh`: since 2026-09-26 the
+shell reads `TZ` through `localtime::Zone::resolve`, the crate `date`, `ls`
+and the rest share -- a function-by-function port of glibc's `tzset`.
+
+It cannot take its decision from `tz_source` yet, because the two decide
+differently: glibc tries a zoneinfo **file** before a POSIX rule, and
+`tz_source` the rule first. For `TZ=EST5EDT` on 1990-03-20 12:00 UTC glibc
+says `07:00 EST` and the rule `08:00 EDT` -- measured, with the full
+comparison, in
+`requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`.
+Adopting `tz_source` as it stands would make lane B's programs disagree with
+GNU's on those names, and the same request notes the libc now does.
+
+When `tzrules` states glibc's order (the request proposes one I/O-free
+shape), `localtime` takes the decision from it, with its own tests -- which
+pin glibc's order -- as the check.

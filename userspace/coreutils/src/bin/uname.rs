@@ -70,8 +70,8 @@ const DEFAULT_KERNEL_RELEASE: &[u8] = b"6.6.0-slateos";
 /// Kernel version, matching `sys_uname`.
 const DEFAULT_KERNEL_VERSION: &[u8] = b"#1 SMP";
 
-/// Machine hardware name. The only target we build.
-const MACHINE: &[u8] = b"x86_64";
+// Machine hardware name, shared with `arch` -- see `coreutils::utsname`.
+use coreutils::utsname::MACHINE;
 
 /// The operating system as distinct from the kernel ABI it presents.
 ///

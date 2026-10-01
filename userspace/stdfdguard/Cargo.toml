@@ -1,0 +1,13 @@
+[package]
+name = "stdfdguard"
+version = "0.1.0"
+edition = "2024"
+description = "Descriptors 0-2 as the process was given them, undoing the runtime's /dev/null substitution"
+
+[lints]
+workspace = true
+
+# No dependencies: two libc calls and an atomic. It was the descriptor half of
+# coreutils' src/stdfd.rs until 2026-09-26, and moved out so that programs
+# outside coreutils (the util-linux ports) can see a closed stdout too.
+[dependencies]

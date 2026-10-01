@@ -2,7 +2,30 @@
 name = "findmnt"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS findmnt utility"
+description = "findmnt, util-linux 2.39.3's, ported: mount tables read through ulmount and printed through smartcols"
+
+[lints]
+workspace = true
+
 [dependencies]
+# glibc's getopt_long, with util-linux's mutually exclusive options.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
 quoting = { path = "../quoting" }
-procinfo = { path = "../../procinfo" }
+# libsmartcols: the table, the tree, and the newline-wrapped SOURCES cells.
+smartcols = { path = "../smartcols" }
+# libmount's tables, cache and tags.
+ulmount = { path = "../ulmount" }
+# libblkid's device cache, which findmnt holds for -o SOURCES, as upstream's
+# findmnt links libblkid for it.
+ulblkid = { path = "../ulblkid" }
+# string_to_idarray for -o and --poll, strtou32/strtos32 for -N and -w,
+# size_to_human_string for SIZE.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor findmnt was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

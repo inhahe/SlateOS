@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for SlateOS (86 binaries)"
+description = "Coreutils for SlateOS: one binary per program, most of them ports of GNU coreutils 9.4"
 
 [build-dependencies]
 # Tells cargo that the hand-built sysroot libc.a is an input, so a
@@ -29,6 +29,30 @@ ere = { path = "../ere" }
 # 777 utility crates that do not depend on this bundle had 1798 diagnostics
 # doing exactly that, with no way to call the fix. See design-decisions.md §370.
 quoting = { path = "../quoting" }
+# glibc's getopt_long, which lived here as `src/getopt.rs` until 2026-09-26 and
+# is now shared with the programs outside coreutils. `coreutils::getopt`
+# re-exports it, so the binaries' imports did not change.
+getoptlong = { path = "../getoptlong" }
+# util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
+# operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
+# the util-linux ports outside coreutils (logger's -S and --id=).
+ulstrutils = { path = "../ulstrutils" }
+# strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
+# until 2026-09-26; `coreutils::errmsg` re-exports it.
+errmsg = { path = "../errmsg" }
+# gnulib's base64.c, which `basenc`, `base64` and `cksum --base64` build on --
+# its own crate since 2026-09-27, shared with sharutils' uuencode and uudecode,
+# which bundle an older copy of the same decoder.
+gnubase64 = { path = "../gnubase64" }
+# `sh -c` the one way (`coreutils::shell` re-exports it): `awk`'s `system()`
+# and pipes, `sed`'s `e`, `split --filter`. It lived here as `src/shell.rs`
+# until 2026-09-27 and moved out when autoopts' pager needed it too.
+shellcmd = { path = "../shellcmd" }
+# The `.init_array` guard that sees a standard descriptor the process started
+# without, before the runtime reopens it on /dev/null -- `guard_std_fds!` and
+# `stdfd::restore`, which lived in src/stdfd.rs until 2026-09-26 and are
+# re-exported from there, so no binary changed.
+stdfdguard = { path = "../stdfdguard" }
 # One definition of an exact integer, shared with `bc`, `dc` and `genius-cli`.
 # GNU `expr` is arbitrary-precision — `expr 9223372036854775807 + 1` answers
 # 9223372036854775808 — and a shell script reaches those sizes by accident.
@@ -50,6 +74,24 @@ modechange = { path = "../modechange" }
 # private copy: the whole output of that utility is a digest another machine
 # will compare against its own.
 sha2 = { path = "../../sha2" }
+# The shared SHA-1, for `sha1sum`. Not a trust decision -- that crate says why
+# nothing should use SHA-1 to decide what to trust -- but reproducing a checksum
+# somebody else published, which is the job its documentation names first. Not
+# a new hand-written primitive either (design-decisions.md §539): the crate
+# already existed for `apps/diskimager` and the WebSocket handshake.
+sha1 = { path = "../../sha1" }
+# The rest of what `cksum -a` names, and the three programs of the family
+# that are one algorithm each: MD5 for `md5sum` (which carried a private
+# copy until 2026-09-25, beside the shared crate `apps/diskimager` already
+# used), BLAKE2b for `b2sum`, SM3 for `cksum -a sm3`. `sha2` above also
+# serves `sha224sum`, `sha384sum` and `sha512sum`. All three are ports of
+# vetted implementations, not new primitives: design-decisions.md §539.
+md5 = { path = "../../md5" }
+blake2 = { path = "../../blake2" }
+sm3 = { path = "../../sm3" }
+# The kernel CSPRNG, for `shred` without `--random-source`: see
+# `coreutils::randint` for why it replaces the ISAAC generator upstream seeds.
+randrange = { path = "../../randrange" }
 # One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su` and
 # the login path. A utility that prints a *name* for a uid has to agree with the
 # utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops
@@ -78,6 +120,12 @@ localtime = { path = "../localtime" }
 # and the crate is a pure record parser, the same exemption `charwidth` and
 # `quoting` hold.
 utmpfile = { path = "../../utmpfile" }
+
+# A file whose absence is normal but whose unreadability is not. `users` reads
+# `/var/run/utmp`, which a system with nobody logged in may simply not have;
+# one that is there and cannot be read is a different answer, and
+# `unwrap_or_default` gave it as "nobody". Std only, so §768 does not apply.
+optionalfile = { path = "../../optionalfile" }
 
 # `sed`'s `w`/`W`/`R` tests write to a real file, because those commands take a
 # file name as an argument and there is no way to exercise them otherwise. They

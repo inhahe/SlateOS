@@ -3,8 +3,16 @@ name = "powerctl"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS power management — shutdown, reboot, suspend, hibernate"
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks these binaries instead of silently leaving them
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
 [dependencies]
 libcall = { path = "../../libcall" }
+# The service manager is reached over the service bus.
+libservicebus = { path = "../libservicebus" }
 # It interpolates `other` into "error: unknown action {} (expected shutdown
 # or reboot)". That value is an argv word, so it is whatever the user typed
 # and not text this program chose.

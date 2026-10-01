@@ -26,14 +26,11 @@ userspace/arp/src/main.rs:argv-as-string
 userspace/at/src/main.rs:argv-as-string
 userspace/audit/src/main.rs:argv-as-string
 userspace/backup/src/main.rs:argv-as-string
-userspace/base64/src/main.rs:argv-as-string
-userspace/blkid/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
-userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/cpupower/src/main.rs:argv-as-string
@@ -50,11 +47,9 @@ userspace/dmesg/src/main.rs:argv-as-string
 userspace/dmidecode/src/main.rs:argv-as-string
 userspace/efibootmgr/src/main.rs:argv-as-string
 userspace/file/src/main.rs:argv-as-string
-userspace/findmnt/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string
 userspace/fio/src/main.rs:argv-as-string
 userspace/firejail/src/main.rs:argv-as-string
-userspace/flock/src/main.rs:argv-as-string
 userspace/fmt/src/main.rs:argv-as-string
 userspace/fsck/src/main.rs:argv-as-string
 userspace/ftp/src/main.rs:argv-as-string
@@ -63,8 +58,6 @@ userspace/fuser/src/main.rs:argv-as-string
 userspace/fw/src/main.rs:argv-as-string
 userspace/fwupd/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
-userspace/getopt/src/main.rs:argv-as-string
-userspace/getopt/src/main.rs:env-as-string
 userspace/grub2/src/main.rs:argv-as-string
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
@@ -96,10 +89,6 @@ userspace/loginctl/src/main.rs:argv-as-string
 userspace/logind/src/main.rs:argv-as-string
 userspace/losetup/src/main.rs:argv-as-string
 userspace/lp/src/main.rs:argv-as-string
-userspace/lsblk/src/main.rs:argv-as-string
-userspace/lscpu/src/main.rs:argv-as-string
-userspace/lsirq/src/main.rs:argv-as-string
-userspace/lsmem/src/main.rs:argv-as-string
 userspace/lsmod/src/main.rs:argv-as-string
 userspace/lsof/src/main.rs:argv-as-string
 userspace/lspci/src/main.rs:argv-as-string
@@ -119,7 +108,6 @@ userspace/nc/src/main.rs:argv-as-string
 userspace/netstat/src/main.rs:argv-as-string
 userspace/nftables/src/main.rs:argv-as-string
 userspace/nmap/src/main.rs:argv-as-string
-userspace/nproc/src/main.rs:argv-as-string
 userspace/nsenter/src/main.rs:argv-as-string
 userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
@@ -132,7 +120,6 @@ userspace/pkg/src/main.rs:argv-as-string
 userspace/plymouth/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
 userspace/powerctl/src/main.rs:argv-as-string
-userspace/prlimit/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
@@ -141,7 +128,6 @@ userspace/rfkill/src/main.rs:argv-as-string
 userspace/route/src/main.rs:argv-as-string
 userspace/rsync/src/main.rs:argv-as-string
 userspace/sanitize/src/main.rs:argv-as-string
-userspace/sbctl/src/main.rs:argv-as-string
 userspace/scp/src/main.rs:argv-as-string
 userspace/screen/src/main.rs:argv-as-string
 userspace/selinux/src/main.rs:argv-as-string
@@ -153,7 +139,6 @@ userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
 userspace/stty/src/main.rs:argv-as-string
-userspace/swapon/src/main.rs:argv-as-string
 userspace/sysctl/src/main.rs:argv-as-string
 userspace/sysinfo/src/main.rs:argv-as-string
 userspace/syslogd/src/main.rs:argv-as-string
@@ -181,7 +166,6 @@ userspace/watch/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
-userspace/wipefs/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string
 userspace/xattr/src/main.rs:argv-as-string
 userspace/xdg/src/main.rs:argv-as-string

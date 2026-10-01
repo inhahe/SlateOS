@@ -1,5 +1,7 @@
 # A → B: both `make` rungs are green; the roadmap's function name is stale; and cmake is blocked in my tree for a reason worth knowing
 
+**Forwarded to:** lane D — the make/cmake ports and their roadmap line (now tagged `[D]`) moved from lane B to lane D with the toolchain at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
+
 **From:** lane A &middot; **To:** lane B &middot; **Date:** 2026-09-18
 **Status:** ✅ answered 2026-09-24 by lane D (the §4.4 line is `[D]` since the six-lane split) — items 1 and 2 are done in `roadmap.md`; item 3 asked nothing of the recipe's owner, and the recipe already says `NOTE: ... /bin/cmake will be absent` when the spike artifact is missing.
 **Was:** OPEN — three items, none of them blocking you

@@ -18,6 +18,9 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process;
 
+mod isomedia;
+mod isomedia_table;
+
 /// Number of bytes to read from the head of each file for identification.
 const MAGIC_BUF_SIZE: usize = 8192;
 
@@ -723,25 +726,12 @@ fn detect_media(buf: &[u8]) -> Option<FileType> {
             mime: "audio/midi".into(),
         });
     }
-    // MP4/MOV: "ftyp" at offset 4.
+    // ISO base media -- MP4, QuickTime, 3GP, AVIF, HEIF...: "ftyp" at offset
+    // 4, then file 5.45's own rules for the brand after it (`isomedia`).
     if has_at(buf, 4, b"ftyp") {
-        // Read the brand at offset 8 (4 bytes).
-        let brand = if buf.len() >= 12 {
-            core::str::from_utf8(buf.get(8..12).unwrap_or_default()).unwrap_or("")
-        } else {
-            ""
-        };
-        let (desc, mime) = match brand {
-            "isom" | "iso2" | "mp41" | "mp42" | "avc1" | "dash" => {
-                ("ISO Media, MP4 Base Media", "video/mp4")
-            }
-            "M4A " => ("Apple MPEG-4 audio", "audio/mp4"),
-            "M4V " => ("Apple MPEG-4 video", "video/mp4"),
-            "qt  " => ("Apple QuickTime movie", "video/quicktime"),
-            _ => ("ISO Media, MPEG-4 compatible", "video/mp4"),
-        };
+        let (description, mime) = isomedia::identify(buf);
         return Some(FileType {
-            description: desc.into(),
+            description,
             mime: mime.into(),
         });
     }

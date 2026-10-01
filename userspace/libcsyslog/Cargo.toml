@@ -1,0 +1,12 @@
+[package]
+name = "libcsyslog"
+version = "0.1.0"
+edition = "2024"
+description = "The C library's syslog(3) -- openlog, syslog, closelog -- for Rust programs"
+
+[lints]
+workspace = true
+
+# `examples/log_args.rs` logs its arguments, so that
+# `scripts/syslog-client-check.sh` can watch what the libc makes of awkward
+# messages at a private `/dev/log`.

@@ -311,17 +311,32 @@ def mask(text: str) -> str:
     is the "skip heredocs whose body is another language" rule in its
     load-bearing form: it is not a guess about the body, it is the shell's own
     quoting telling us the body is not shell.
+
+    A `$(` inside double quotes starts a context of its own, with quoting of
+    its own: in `"$(printf "'%.0s" {1..9})"` the inner `"` opens a new
+    double-quoted span rather than closing the outer one, and the `'` inside
+    it is a literal. Reading it with one flag for "inside double quotes" got
+    that backwards -- the inner `"` closed the span, the `'` opened a
+    single-quoted one, and every quote after it in the file was read
+    inverted, until prose in `#` comments came out as backquote
+    substitutions calling `appears`, `and` and `listen`. So the
+    open contexts are a stack: `"dq"` for a double-quoted span, a one-element
+    list holding the parenthesis depth for a command substitution, and at
+    the bottom (an empty stack) the script's own unquoted text.
     """
     lines = text.split("\n")
     out: list[str] = []
     sq = False          # inside a single-quoted span (persists across lines)
-    dq = False          # inside a double-quoted span (persists across lines)
+    # The contexts open around the scanner, innermost last (persists across
+    # lines): "dq", or [depth] for a `$(` opened inside double quotes.
+    stack: list = []
     i = 0
     n = len(lines)
     while i < n:
         raw = lines[i]
         buf: list[str] = []
         pending: list[tuple[str, bool, bool]] = []   # (delim, quoted, strip)
+        opened_at = 0       # len(stack) at this line's first heredoc opener
         j = 0
         ln = len(raw)
         while j < ln:
@@ -332,7 +347,8 @@ def mask(text: str) -> str:
                 buf.append(" ")
                 j += 1
                 continue
-            if dq:
+            top = stack[-1] if stack else None
+            if top == "dq":
                 if c == "\\" and j + 1 < ln:
                     # Blank both, never copy through. An escaped character is
                     # literal text, so it is not syntax and must not be left
@@ -347,11 +363,17 @@ def mask(text: str) -> str:
                     j += 2
                     continue
                 if c == '"':
-                    dq = False
+                    stack.pop()
+                elif raw.startswith("$(", j) and not raw.startswith("$((", j):
+                    # A command substitution: unquoted inside, until its `)`.
+                    stack.append([1])
+                    buf.append("$(")
+                    j += 2
+                    continue
                 buf.append(c)
                 j += 1
                 continue
-            # unquoted
+            # unquoted -- the script's own text, or a `$(` inside quotes
             if c == "\\" and j + 1 < ln:
                 buf.append("  ")   # literal, therefore not syntax -- see above
                 j += 2
@@ -362,7 +384,17 @@ def mask(text: str) -> str:
                 j += 1
                 continue
             if c == '"':
-                dq = True
+                stack.append("dq")
+                buf.append(c)
+                j += 1
+                continue
+            if isinstance(top, list) and c in "()":
+                # Parentheses inside a substitution opened within quotes: the
+                # one that balances its `$(` ends it. A nested `$(` counts
+                # here too, by its `(`.
+                top[0] += 1 if c == "(" else -1
+                if top[0] == 0:
+                    stack.pop()
                 buf.append(c)
                 j += 1
                 continue
@@ -397,6 +429,8 @@ def mask(text: str) -> str:
                     word = m.group(2)
                     quoted = word[0] in "\"'"
                     delim = word.strip("\"'")
+                    if not pending:
+                        opened_at = len(stack)
                     pending.append((delim, quoted, m.group(1) == "-"))
                     buf.append(raw[j:m.end()])
                     j = m.end()
@@ -417,9 +451,12 @@ def mask(text: str) -> str:
                     break
                 out.append(" " * len(body) if quoted else _unquoted_body(body))
                 i += 1
-        # A heredoc body cannot leave us inside a quote.
+        # A heredoc body cannot leave us inside a quote: back to the context
+        # the first opener on the line was read in -- the script's own text,
+        # or the substitution (`"$(cat <<EOF`) it sits inside.
         if pending:
-            sq = dq = False
+            sq = False
+            del stack[opened_at:]
     return "\n".join(out)
 
 
@@ -824,6 +861,25 @@ def self_test() -> int:
          "QEMU_ARGS" in mask('read -r -a A <<< "$X"\nQEMU_ARGS=1\n'), True),
         ("a shift inside arithmetic is not read as a heredoc",
          "KEEPME" in mask("n=$(( 1 << 3 ))\nKEEPME=1\n"), True),
+
+        # -- `$(` inside double quotes has quoting of its own
+        ("a quote inside a quoted substitution does not invert the rest",
+         [m.group(1) for m in CALLEE_RE.finditer(mask(
+             'x "$(printf "\'%.0s" {1..9})" y\n'
+             '# prose: `appears` and `listen()` are words\n'))],
+         ["printf"]),
+        ("a substitution in quotes still yields its callee",
+         [m.group(1) for m in CALLEE_RE.finditer(mask(
+             'y="$(dirname "$0")/lib"\nz="a $(inner "q") b"\n'))],
+         ["dirname", "inner"]),
+        ("a parenthesis quoted inside it does not end the substitution",
+         [m.group(1) for m in CALLEE_RE.finditer(mask(
+             'v="$(echo ")" "$(nested x)")"\n# `not` code\n'))],
+         ["echo", "nested"]),
+        ("a heredoc inside a quoted substitution returns to it",
+         [m.group(1) for m in CALLEE_RE.finditer(mask(
+             'w="$(cat <<EOF\nbody\nEOF\n)"\n# `still` prose\nq=$(after)\n'))],
+         ["cat", "after"]),
     ]
 
     failed = 0

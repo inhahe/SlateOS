@@ -23,8 +23,10 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
+
+mod records;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -54,8 +56,8 @@ const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 // reading them was reading a copy -- and, worse, reading *two* copies, which is
 // what created the "in `/etc/passwd` but not `/etc/shadow`" case this file
 // used to need a whole branch for.
+/// util-linux's `_PATH_LASTLOG`: binary records indexed by uid (`records`).
 const LASTLOG_FILE: &str = "/var/log/lastlog";
-const FAILLOG_FILE: &str = "/var/log/faillog";
 const MAIL_DIR: &str = "/var/mail";
 /// logind's name on the service bus, as `bus::SERVICE_NAME` declares it.
 const LOGIND_SERVICE: &str = "system.logind";
@@ -511,27 +513,6 @@ fn check_mail(writer: &mut dyn Write, username: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Record login in lastlog
-fn record_lastlog(username: &str, tty: &str, host: &str) {
-    // Write a lastlog entry — in real system this would be a binary format
-    let entry = format!("{username}:{tty}:{host}\n");
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LASTLOG_FILE)
-        .and_then(|mut f| f.write_all(entry.as_bytes()));
-}
-
-/// Record failed login attempt
-fn record_faillog(username: &str, tty: &str) {
-    let entry = format!("FAILED:{username}:{tty}\n");
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(FAILLOG_FILE)
-        .and_then(|mut f| f.write_all(entry.as_bytes()));
-}
-
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -635,6 +616,25 @@ fn refuse_attempt(auth: &mut authlib::Authenticator, username: &str) -> &'static
     "Login incorrect"
 }
 
+/// What a successful authentication produced.
+///
+/// A struct rather than the `(user, env)` tuple it replaces because the third
+/// member is a *decision* -- whether the session may start at all before the
+/// password is changed -- and a bare `bool` in a tuple position is exactly the
+/// kind of thing a caller reads past.
+struct Session {
+    user: PasswdEntry,
+    env: HashMap<OsString, OsString>,
+    /// The password is past its maximum age, or `passwd -e` has flagged it.
+    /// The session does not start until it has been changed.
+    must_change_password: bool,
+    /// The terminal the login is on, as the login records name it, or `None`
+    /// if `ttyname` could not name one.
+    terminal: Option<records::Terminal>,
+    /// The remote host `-h` named, for the records; `None` for a local login.
+    host: Option<Vec<u8>>,
+}
+
 /// Run the console login conversation.
 ///
 /// `auth` is the shared failure tally, passed in rather than built here so that
@@ -653,20 +653,6 @@ fn refuse_attempt(auth: &mut authlib::Authenticator, username: &str) -> &'static
 /// respawn because it is a file. The per-process cap stays, because it is what
 /// stops a *single* invocation spinning; the tally is what makes the next one
 /// slower.
-/// What a successful authentication produced.
-///
-/// A struct rather than the `(user, env)` tuple it replaces because the third
-/// member is a *decision* -- whether the session may start at all before the
-/// password is changed -- and a bare `bool` in a tuple position is exactly the
-/// kind of thing a caller reads past.
-struct Session {
-    user: PasswdEntry,
-    env: HashMap<OsString, OsString>,
-    /// The password is past its maximum age, or `passwd -e` has flagged it.
-    /// The session does not start until it has been changed.
-    must_change_password: bool,
-}
-
 fn do_login(
     cfg: &Config,
     auth: &mut authlib::Authenticator,
@@ -675,6 +661,18 @@ fn do_login(
     writer: &mut dyn Write,
 ) -> Result<Session, LoginError> {
     let mut attempts = 0u32;
+    // Named once, before the first prompt, so a failed attempt is recorded
+    // against the real terminal -- an unknown name used to be logged as
+    // "console" whatever the terminal was.
+    let tty_name = controlling_tty();
+    let terminal = tty_name
+        .as_deref()
+        .map(|path| records::Terminal::from_path(path.as_bytes()));
+    let host: Option<Vec<u8>> = cfg
+        .hostname
+        .as_deref()
+        .map(|h| h.as_encoded_bytes().to_vec());
+    let pid = i32::try_from(process::id()).unwrap_or(i32::MAX);
 
     loop {
         // Get username. A name given on the command line that is not text
@@ -721,7 +719,13 @@ fn do_login(
                 }
                 let line = refuse_attempt(auth, &username);
                 writeln!(writer, "{line}").map_err(|e| LoginError::SystemError(e.to_string()))?;
-                record_faillog(&username, "console");
+                records::log_btmp(
+                    terminal.as_ref(),
+                    username.as_bytes(),
+                    host.as_deref(),
+                    pid,
+                    records::now(),
+                );
 
                 if attempts >= MAX_LOGIN_ATTEMPTS {
                     return Err(LoginError::AuthFailed(
@@ -739,11 +743,7 @@ fn do_login(
         check_nologin(user.uid)?;
 
         // Check securetty for root
-        let tty_name = controlling_tty();
         check_securetty(user.uid, tty_name.as_deref())?;
-        // The audit records take the same answer. A terminal nobody could name
-        // is recorded as `?` rather than as the console it might not be.
-        let tty = tty_name.unwrap_or_else(|| "?".to_string());
 
         // The account's own policy -- locked, expired, dead after expiry --
         // refuses before a password is asked for.
@@ -778,7 +778,13 @@ fn do_login(
                 attempts = attempts.saturating_add(1);
                 let line = refuse_attempt(auth, &username);
                 writeln!(writer, "{line}").map_err(|e| LoginError::SystemError(e.to_string()))?;
-                record_faillog(&username, &tty);
+                records::log_btmp(
+                    terminal.as_ref(),
+                    username.as_bytes(),
+                    host.as_deref(),
+                    pid,
+                    records::now(),
+                );
 
                 // The user is told only "Login incorrect", whatever the
                 // reason — but an entry nothing can verify is a broken
@@ -834,16 +840,25 @@ fn do_login(
         // Build environment
         let env_map = build_environment(&user, cfg.preserve_env);
 
-        // Record successful login
-        let host = cfg
-            .hostname
-            .as_deref()
-            .and_then(OsStr::to_str)
-            .unwrap_or("localhost");
-        record_lastlog(&username, &tty, host);
+        // The last-login record, and the line util-linux prints from the one
+        // it replaces -- both before the motd, and the line not at all under
+        // a hushlogin, as util-linux's `log_lastlog` has it.
+        let quiet = is_hushlogin(&user);
+        let record =
+            records::LastLog::new(records::now().tv_sec, terminal.as_ref(), host.as_deref());
+        match records::log_lastlog(Path::new(LASTLOG_FILE), user.uid, &record, quiet) {
+            Ok(Some(previous)) => {
+                let line = records::last_login_line(&previous, &localtime::Zone::from_env());
+                // The login has happened; a terminal that cannot take this line
+                // cannot take the session either, and the shell will say so.
+                let _ = writer.write_all(&line);
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("login: cannot record this login in {LASTLOG_FILE}: {e}"),
+        }
 
         // Display motd and mail check (unless hushlogin)
-        if !is_hushlogin(&user) {
+        if !quiet {
             let _ = display_motd(writer);
             let _ = check_mail(writer, &username);
         }
@@ -852,6 +867,8 @@ fn do_login(
             must_change_password: password_change_required(&creds.aging, userdb::today()),
             user,
             env: env_map,
+            terminal,
+            host,
         });
     }
 }
@@ -1051,7 +1068,7 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
     let mut conn = match libservicebus::Connection::connect(LOGIND_SERVICE) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("login: no session registered: cannot reach {LOGIND_SERVICE}: {e:?}");
+            eprintln!("login: no session registered: cannot reach {LOGIND_SERVICE}: {e}");
             return None;
         }
     };
@@ -1066,7 +1083,7 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
     let uid = user.uid.to_string();
     let pid = std::process::id().to_string();
     let tty = tty.unwrap_or("");
-    let payload = libservicebus::fields::encode(&[
+    let args: [&[u8]; 12] = [
         uid.as_bytes(),
         name.as_bytes(),
         b"tty",
@@ -1079,18 +1096,51 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
         b"login",
         b"",
         pid.as_bytes(),
-    ]);
+    ];
 
-    match conn.call("CreateSession", &payload) {
-        Ok(reply) => libservicebus::fields::decode_exact(&reply.payload, 1)
-            .and_then(|f| f.first().and_then(|b| core::str::from_utf8(b).ok()))
-            .map(ToOwned::to_owned),
+    match conn.call_fields("CreateSession", &args, LOGIND_TIMEOUT_NS) {
+        Ok(libservicebus::Outcome::Done(fields)) => match fields.as_slice() {
+            [id] => {
+                let id = core::str::from_utf8(id).ok().map(ToOwned::to_owned);
+                if id.is_none() {
+                    eprintln!(
+                        "login: no session registered: {LOGIND_SERVICE} returned a session \
+                         id that is not text"
+                    );
+                }
+                id
+            }
+            _ => {
+                eprintln!(
+                    "login: no session registered: {LOGIND_SERVICE} answered CreateSession \
+                     with {} fields where one session id was expected",
+                    fields.len()
+                );
+                None
+            }
+        },
+        // logind answered, and the answer was no; its error's name says why.
+        Ok(libservicebus::Outcome::Refused { error, .. }) => {
+            eprintln!(
+                "login: no session registered: {LOGIND_SERVICE} refused CreateSession: {error}"
+            );
+            None
+        }
         Err(e) => {
-            eprintln!("login: no session registered: CreateSession failed: {e:?}");
+            eprintln!("login: no session registered: CreateSession failed: {e}");
             None
         }
     }
 }
+
+/// How long `login` waits for `logind` to answer: 25 seconds, D-Bus's
+/// default method-call timeout and so what `pam_systemd` waits.
+///
+/// Bounded because the alternative is worse than no session: a logind that is
+/// running but wedged would otherwise hold every login at the prompt for ever,
+/// turning a bookkeeping outage into the lockout `register_with_logind` is
+/// best-effort to avoid.
+const LOGIND_TIMEOUT_NS: u64 = libservicebus::secs_to_ns(25);
 
 /// Tell `logind` the session is over.
 ///
@@ -1099,22 +1149,56 @@ fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String>
 /// users who left hours ago as present -- which is a fabricated reading, and
 /// a worse outcome than not registering at all.
 fn release_from_logind(session_id: &str) {
-    let Ok(mut conn) = libservicebus::Connection::connect(LOGIND_SERVICE) else {
-        eprintln!("login: session {session_id} left registered: cannot reach {LOGIND_SERVICE}");
-        return;
+    let mut conn = match libservicebus::Connection::connect(LOGIND_SERVICE) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "login: session {session_id} left registered: cannot reach {LOGIND_SERVICE}: {e}"
+            );
+            return;
+        }
     };
-    let payload = libservicebus::fields::encode(&[session_id.as_bytes()]);
-    if let Err(e) = conn.call("TerminateSession", &payload) {
-        eprintln!("login: session {session_id} left registered: {e:?}");
+    match conn.call_fields(
+        "TerminateSession",
+        &[session_id.as_bytes()],
+        LOGIND_TIMEOUT_NS,
+    ) {
+        Ok(libservicebus::Outcome::Done(_)) => {}
+        Ok(libservicebus::Outcome::Refused { error, .. }) => eprintln!(
+            "login: session {session_id} left registered: {LOGIND_SERVICE} refused \
+             TerminateSession: {error}"
+        ),
+        Err(e) => eprintln!("login: session {session_id} left registered: {e}"),
     }
 }
 
+/// Run the user's shell, with the session recorded for as long as it lasts:
+/// in the login records (`utmp`, `wtmp`) and with `logind`.
 #[cfg_attr(test, allow(dead_code))]
-fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32 {
+fn run_session(login: &Session) -> i32 {
+    let user = &login.user;
+    let pid = i32::try_from(process::id()).unwrap_or(i32::MAX);
+
+    // util-linux's `log_utmp`, after authentication and before the shell, so
+    // `who` and `w` list the session and `last` has its start.
+    let (record, written) = records::log_utmp(
+        login.terminal.as_ref(),
+        user.username.as_bytes(),
+        login.host.as_deref(),
+        pid,
+        records::now(),
+    );
+    if let Err(e) = written {
+        eprintln!(
+            "login: this session is not in the login records (/var/run/utmp): {}",
+            io::Error::from_raw_os_error(e)
+        );
+    }
+
     // Registered before the shell starts and released after it exits, so the
     // session exists for exactly as long as the user does.
     let session = register_with_logind(user, controlling_tty().as_deref());
-    let code = match spawn_login_shell(user, env_map) {
+    let code = match spawn_login_shell(user, &login.env) {
         Ok(mut child) => match child.wait() {
             Ok(status) => status.code().unwrap_or(1),
             Err(e) => {
@@ -1136,6 +1220,15 @@ fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32
     // nobody is in.
     if let Some(id) = session {
         release_from_logind(&id);
+    }
+    // The end of the session, which util-linux's `login` leaves to `init`
+    // because it execs the shell. This one waits for it, so it can say
+    // itself that the session ended -- or `who` lists the user for ever.
+    if let Err(e) = records::log_logout(&record, records::now()) {
+        eprintln!(
+            "login: the end of this session is not in the login records (/var/run/utmp): {}",
+            io::Error::from_raw_os_error(e)
+        );
     }
     code
 }
@@ -1191,7 +1284,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
                     return 1;
                 }
             }
-            run_session(&session.user, &session.env)
+            run_session(&session)
         }
         Err(e) => {
             eprintln!("login: {e}");

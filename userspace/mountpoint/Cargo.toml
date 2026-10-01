@@ -1,0 +1,20 @@
+[package]
+name = "mountpoint"
+version = "0.1.0"
+edition = "2024"
+description = "mountpoint, util-linux 2.39.3's, ported: a path looked up in the kernel's mount table through ulmount"
+
+[lints]
+workspace = true
+
+[dependencies]
+# glibc's getopt_long.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
+quoting = { path = "../quoting" }
+# libmount's table, its target lookup and its cache.
+ulmount = { path = "../ulmount" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor mountpoint was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }

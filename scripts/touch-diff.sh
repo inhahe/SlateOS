@@ -48,15 +48,11 @@
 #
 # ## Cases that differ on purpose
 #
-# The family's two — `--help` omits the GNU project's `Report bugs to:` block
-# (and the `-d`/`-t` lines, which this implementation does not have), and
-# `--version` names SlateOS — and then one per option GNU has and this `touch`
-# has not. That second group is an inventory, not a permission: `xfail_case`
-# reports an XPASS the moment one starts agreeing, which is what will force it
-# to be promoted to a real case when `-d` and `-t` land. `touch.rs`'s module
-# docs explain why those two are *refused* rather than ignored — ignoring `-d`
-# stamps the file with now instead of with the time that was asked for, which
-# is precisely the state the caller was trying to leave.
+# The family's two: `--help` omits the GNU project's `Report bugs to:` block,
+# and `--version` names SlateOS. There were once more -- one per option GNU
+# had and this `touch` did not -- and each was an `xfail_case` so that it
+# would XPASS, and be promoted to a real case, the moment it started agreeing.
+# `-t` and `-d` both have; none is left.
 #
 # ## The reference is built, not found
 #
@@ -219,7 +215,12 @@ contents() {
 
 # Shell run inside the case directory to build the fixture.
 TREE=
-reset_knobs() { TREE='mktree'; }
+# Variables `touch` runs with, on both sides, and nothing else does:
+# `_POSIX2_VERSION` decides whether a date-shaped first operand is a date, and
+# `POSIXLY_CORRECT` whether that is warned about. Exported, they would reach
+# this harness's own tools too.
+ENVV=()
+reset_knobs() { TREE='mktree'; ENVV=(); }
 reset_knobs
 
 scrub() { sed -e "s|$1|<DIR>|g"; }
@@ -237,7 +238,7 @@ run_one() {
     # `set_program_name` takes `argv[0]` whole, so GNU invoked by a long path
     # prefixes every diagnostic with that path while ours prints `touch:`.
     PATH="$bindir/$side:$PATH"
-    diff_run timeout -k 2 30 touch "$@" >"$out" 2>"$err"
+    diff_run timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} touch "$@" >"$out" 2>"$err"
   ) </dev/null
   echo $? >"$rcf"
   return 0
@@ -276,7 +277,7 @@ compare() {
   local o_out=$work/oo$case_no g_out=$work/go$case_no
   local o_err=$work/oe$case_no g_err=$work/ge$case_no
   local o_rc=$work/or$case_no g_rc=$work/gr$case_no
-  local label="touch $*"
+  local label="${ENVV[*]:+${ENVV[*]} }touch $*"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
@@ -315,7 +316,6 @@ xfail_case() {
   return 0
 }
 
-missing() { xfail_case "not implemented by this touch" "$@"; }
 
 echo "touch-diff:"
 echo "  ours: $OURS"
@@ -554,32 +554,109 @@ run_case -r file -- newfile
 run_case -a -- -m
 
 # =============================================================================
-# 11. Options this touch does not have
+# 11. -t, the obsolete operand, *now*, and the one option still missing
 # =============================================================================
-# An inventory rather than a permission: each entry names the option, and a
-# case that starts agreeing is reported as an XPASS, which is what will force
-# it to be promoted when `-d` and `-t` land. Both are blocked on a date parser
-# this crate genuinely lacks — `-d` on `parse_datetime`, `-t` on
-# civil-time-to-epoch conversion in the local zone including its history.
-#
-# The value is passed even though the option is refused, because `-d` is
-# declared as taking one: that is what makes `touch -d` answer `option requires
-# an argument` rather than jumping to the refusal, and what stops the
-# `2001-01-01` in `touch -d 2001-01-01 f` being left behind to be created as a
-# file.
+# `-t` is `[[CC]YY]MMDDhhmm[.ss]` in the local zone, which both sides read from
+# the same environment. The snapshot shows the times written, so a stamp read a
+# day or an hour out is a difference, not a pass.
 
-missing -d now file
-missing --date=now file
-missing --date now file
-missing -d '@1000000000' newfile
-missing -t 202001010000 file
-missing -t 202001010000.30 newfile
+run_case -t 202001010000 file
+run_case -t 202001010000.30 newfile
+run_case -t 2001020304.05 file
+# No year is this year; 69-99 are 1969-1999 and 00-68 are 2000-2068.
+run_case -t 01020304 file
+run_case -t 6901010000 file
+run_case -t 6801010000 file
+# A sixtieth second is the one after the fifty-ninth, as POSIX requires.
+run_case -t 202001010000.60 file
+run_case -a -t 202001010000 file
+run_case -m -t 202001010000 file
+# The last `-t` counts.
+run_case -t 199901010000 -t 202001010000 file
+# Not stamps: the length, the seconds, a day that does not exist, a stray byte.
+run_case -t 2020 file
+run_case -t 202001010000.5 file
+run_case -t 202009310000 file
+run_case -t 20200101x000 file
+# Reported where `-t` appears, before the option after it is looked at.
+run_case -t 2020 --bogus file
+# Two sources of a time, in either order.
+run_case -t 202001010000 -r file newfile
+run_case -r file -t 202001010000 newfile
+# Where daylight saving makes local time ambiguous, `-t` is glibc's `mktime`
+# with `tm_isdst` -1: a time a spring-forward skipped does not come back as
+# asked for, and is refused; one a fall-back repeated is whichever instant the
+# search finds first in a fresh process. `AAA3BBB` borrows `posixrules`'
+# history, which `mktime`'s own `tzset` anchors -- the case the order of
+# glibc's zone reads decides.
+ENVV=(TZ=America/New_York); run_case -t 202003080230 file
+ENVV=(TZ=America/New_York); run_case -t 202011010130 file
+ENVV=(TZ=America/New_York); run_case -t 202011010159.60 file
+ENVV=(TZ=AAA3BBB); run_case -t 202011010130 file
+ENVV=(TZ=AAA3BBB); run_case -t 202003080330 file
+ENVV=(TZ=AAA3BBB); run_case -t 11010130 file
+
+# The obsolete `MMDDhhmm[YY] FILE…`: a date only before the 2001 edition, only
+# with a second operand, only when no other source of a time was given, and
+# warned about unless POSIXLY_CORRECT is set. Otherwise it is a file name.
+ENVV=(_POSIX2_VERSION=199209); run_case 0101000070 file
+ENVV=(_POSIX2_VERSION=199209 POSIXLY_CORRECT=1); run_case 0101000070 file
+ENVV=(_POSIX2_VERSION=199209); run_case 01010000 file
+ENVV=(_POSIX2_VERSION=199209); run_case 0101000068 file
+ENVV=(_POSIX2_VERSION=199209); run_case 0101000070
+ENVV=(_POSIX2_VERSION=199209); run_case -t 202001010000 0101000070 file
+ENVV=(_POSIX2_VERSION=200112); run_case 0101000070 file
+run_case 0101000070 file
+
+# *Now* is asked of the kernel, which grants it to anyone who may write the
+# file: `/dev/null` is root's and writable by all. A chosen time needs the
+# owner, and so does *now* on one half only.
+run_case /dev/null
+run_case -c /dev/null
+run_case -a /dev/null
+run_case -m /dev/null
+run_case -t 202001010000 /dev/null
+
+# `-d` is gnulib's `parse_datetime`, ported as `coreutils::parse_datetime`.
+# The language itself is `parse-datetime-diff.sh`'s subject; these rows are
+# `touch`'s use of it. Both halves and one half; nanoseconds kept; relative to
+# `-r`'s times rather than the clock's, one half at a time; the last `-d`
+# winning; `-d` with `-t` refused; and `-d now`, which upstream turns back into
+# the kernel's *now* when both halves are set -- so that, like a bare `touch`,
+# it needs only write permission, and succeeds on `/dev/null` where an
+# explicit time, even one a second old, needs the owner.
+run_case -d now file
+run_case --date=now file
+run_case --date now file
+run_case -d '@1000000000' newfile
+run_case -d '@1000000000.123456789' file
+run_case -d '2001-02-03 04:05:06.5' file
+run_case -a -d '@1000000000' file
+run_case -m -d '@1000000000' file
+run_case -d '@1' -d '@1000000000' file
+run_case -r file -d '+1 day' newfile
+run_case -a -r file -d '1 hour ago' newfile
+run_case -m -r file -d '@1000000000' newfile
+run_case -d bogus file
+run_case -d bogus
+run_case -d now /dev/null
+run_case -d today /dev/null
+run_case -a -d now /dev/null
+run_case -d '1 second ago' /dev/null
+run_case -d now -t 202001010000 file
+run_case -t 202001010000 -d now file
+ENVV=(TZ=America/New_York); run_case -d '2021-11-07 01:30' file
+ENVV=(TZ=America/New_York); run_case -d '2021-03-14 02:30' file
+ENVV=(TZ=UTC0); run_case -d 'TZ="Asia/Tokyo" 2021-06-15 09:00' file
+# `-d now` beside the obsolete operand: *now* is not `date_set`, so the operand
+# is still read as a date.
+ENVV=(_POSIX2_VERSION=199209); run_case -d now 0101000070 file
 
 # =============================================================================
 # 12. --help and --version
 # =============================================================================
 
-xfail_case 'help omits the -d/-t lines and GNU bug-report block' --help
+xfail_case 'help omits the GNU bug-report block' --help
 xfail_case 'version names SlateOS' --version
 # Measured: an option *after* `--help` is never looked at, while one before it
 # is an error. Both sides agree on the second, so it is a real case.

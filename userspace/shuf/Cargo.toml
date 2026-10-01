@@ -2,7 +2,7 @@
 name = "shuf"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS shuf/factor/numfmt - randomization and number tools"
+description = "SlateOS shuf/factor - randomization and number tools"
 [dependencies]
 # File names and option values come from argv, and with -e the input lines
 # are themselves the words.

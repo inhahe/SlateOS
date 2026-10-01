@@ -24,9 +24,9 @@
 //!
 //! **The exit status**, because the two families disagree and both are
 //! right: coreutils exits **1** for a usage error, util-linux exits **64**
-//! (`EX_USAGE`). `flock` and `nproc` in this tree are measured against
-//! different references and must keep their own answers, so the caller
-//! picks. [`EX_USAGE`] is offered for the util-linux side rather than
+//! (`EX_USAGE`). `flock` in this tree is measured against util-linux and
+//! must keep 64, while the GNU wordings in the table above end in 1, so the
+//! caller picks. [`EX_USAGE`] is offered for the util-linux side rather than
 //! guessed at each call site.
 //!
 //! **Whether the program name prefixes the message.** Most callers already

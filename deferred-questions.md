@@ -86,6 +86,22 @@ whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
 living — most likely the settings surface rather than a build flag, since §108
 makes it a user choice.
 
+**The operator's remark, 2026-09-27** (made while answering lane B's B-Q21,
+§1053, and added here by lane B because it bears on this entry; it does not
+answer it -- the trigger above still stands):
+
+> As for the second question, I guess there's no point in having both a fastpy
+> and a Rust implementation of anything. Wait, yes there is. We may determine
+> that the Rust implementation is better and make that the stock install, but
+> the user may find Python much easier to edit. And vice versa, they may prefer
+> Rust for some reason even if we think the Python version is better. Though
+> another option is to keep the alternative versions in the repo but not
+> included in the OS distribution.
+
+So both implementations may be kept, whichever becomes the default -- and a
+fourth option joins the three above: **D, ship one, keep the other in the
+repository only.**
+
 ---
 
 ## DQ2 (was D-Q2) — Install `clang` + `lld` and turn on LLVM CFI for C code?

@@ -94,6 +94,22 @@ RANDOM_ORDERS = 2
 # the 83 binaries. Unscoped it would build and shuffle all of them -- about
 # twenty minutes an order, an hour for the three -- to re-shuffle 353 lib
 # tests that take seventeen seconds.
+#
+# `vkloader` (`gui/vulkan`) since 2026-09-24: its messenger tests share six
+# statics behind an `Order` guard, which `raced-globals.py` found qualifying
+# the moment it learned to read that guard as a lock. Scoped to `--lib`
+# because that is where the statics are. Measured before adding it: 141 tests
+# pass under three shuffle seeds, including the pinned one, in under 0.1s each.
+#
+# `imagecodec` (`gui/imagecodec`, lane F's) since 2026-09-25: the counting
+# global allocator in `tests/decode_memory.rs` keeps `LIVE` and `PEAK`, and
+# both of that file's tests reset `PEAK` and read it back -- behind a lock,
+# which makes them safe to run together but, as the note above says, not
+# order-independent by itself. `raced-globals.py` found it qualifying once the
+# TIFF work landed on main, and refused every push carrying it. Scoped to that
+# one test target, because it is the only place the statics exist. Measured
+# before adding it: both tests pass under the pinned seed and two fresh ones,
+# 88s for the three including the build.
 CRATES = (
     ("posix", "posix", ()),
     ("authlib", "userspace/authlib", ()),
@@ -107,6 +123,7 @@ CRATES = (
     # behind. Each test calls `reset()` first, so the claim being checked here
     # is that it really does clear everything.
     ("vkloader", "gui/vulkan", ()),
+    ("imagecodec", "gui/imagecodec", ("--test", "decode_memory")),
 )
 
 HOST_TARGET = "x86_64-pc-windows-gnu"
@@ -234,6 +251,25 @@ def selftest():
         ck(declared == pkg,
            "package name for " + d + " should be " + pkg
            + ", manifest says " + str(declared))
+
+    # And every crate must be in the pre-push hook's `touches` line for this
+    # gate, or a push that changes only that crate skips the gate that exists
+    # to grade it. The tuple above and that line are two copies of one list,
+    # and this is what keeps them one: `gui/vulkan` joined CRATES on 2026-09-24
+    # and nothing would have noticed the hook line being missed -- the gate
+    # would simply never have run for the one lane that can break that crate.
+    hook = os.path.join(ROOT, "scripts", "hooks", "pre-push")
+    scope = None
+    if os.path.isfile(hook):
+        with open(hook, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.lstrip().startswith("touches ") and "skip_toi=1" in line:
+                    scope = line.split()
+                    break
+    ck(scope is not None, "the pre-push hook's gate-42 `touches` line must be findable")
+    for _pkg, d, _extra in CRATES:
+        ck(scope is not None and (d.rstrip("/") + "/") in scope,
+           "the pre-push gate-42 `touches` line should name " + d + "/")
 
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0

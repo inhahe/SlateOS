@@ -196,8 +196,10 @@ fn zone_file(name: &[u8]) -> Option<ZoneFile<'_>> {
 /// looking for `Universal`. See [`tz_plan`], which replaces it.
 ///
 /// Kept only while `posix/src/tz.rs` still calls it -- lane D's, asked to
-/// move in `requests/c-d-decide-tz-through-tz-plan.md` -- and to be deleted
-/// when nothing does. New code calls [`tz_plan`].
+/// move in
+/// `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`
+/// (lane C's answer, at its end) -- and to be deleted when nothing does. New
+/// code calls [`tz_plan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TzSource<'a> {
     /// UTC, because `TZ` asked for it by being set and empty.

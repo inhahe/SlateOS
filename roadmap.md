@@ -1804,6 +1804,13 @@ live.
   (`TD-C-THE-DESKTOP-STARTED-WITHOUT-THE-USERS-APPEARANCE`). Waiting on others:
   the Settings page (lane E), the relay that makes a change reach a running
   shell (lane F), and the libc and `osh` adopting `tz_source` (lanes D, B).
+  **Corrected 2026-10-01** (`design-decisions.md` §1458): `tz_source`'s order
+  was not glibc's -- it took a rule before a zoneinfo file of the same name, so
+  `TZ=EST5EDT` read an hour off from Linux for years under the old US rules
+  (lane B's report). `tzrules::tz_plan` is glibc's order and the clock reads
+  through it; the libc's move (lane D) and `localtime`'s (lane B) are in
+  `requests/b-cd-tz-source-tries-the-rule-before-the-file-and-glibc-does-the-opposite.md`,
+  after which `tz_source` is deleted.
 
 - `[C]` **"System (Auto)" switches between light and dark by the clock** --
   done 2026-09-25 (`design-decisions.md` §876). It had always meant dark. It is

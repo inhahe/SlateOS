@@ -178027,6 +178027,8 @@ through.
 
 ### [C] TD-C-YAMLDOC-PUTS-A-NEW-KEY-ABOVE-A-LONE-HEADER-COMMENT -- 2026-09-29
 
+**Status:** OPEN
+
 **In short:** when a settings file holds nothing but a comment -- a header
 such as `# my menus` -- and the first setting is saved into it, the new key
 is written *above* the comment instead of under it. Nothing is lost (the
@@ -178045,6 +178047,9 @@ i.e. treat a document of only comments as a header -- and add a test that
 `# header` then a saved key reads `# header` first.
 
 ### [C] TD-C-A-PROGRAM-ASKING-FOR-A-CAPABILITY-REACHES-NO-ONE -- 2026-09-30
+
+**Status:** OPEN -- waiting on lanes A, B and F
+(`requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`).
 
 **In short:** a program that needs more access than it was started with is
 meant to ask the user -- saying why -- and the user to answer Allow or Deny in

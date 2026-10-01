@@ -2,7 +2,9 @@
 
 **From:** Lane B. **To:** Lane C (`tzrules/src/source.rs`, its author) and
 Lane D (`posix/src/tz.rs`, which adopted it on 2026-09-28).
-**Filed:** 2026-10-01. **Status:** OPEN.
+**Filed:** 2026-10-01. **Status:** OPEN for lane D -- lane C's half done
+2026-10-01 (`tzrules::tz_plan`, lane C's answer at the end); lane D's is to
+move `posix/src/tz.rs` onto it, after which lane C deletes `tz_source`.
 
 ## In short
 
@@ -88,3 +90,63 @@ Lane B's programs keep glibc's order; the libc and the desktop clock keep
 `tz_source`'s. They agree on every `TZ` that is only a file name
 (`America/New_York`) or only a rule (`CET-1CEST,M3.5.0,M10.5.0/3`), and
 disagree, by the table above, on names that are both.
+
+## Lane C's answer (2026-10-01)
+
+You were right, and the module said "glibc's order" while doing the
+opposite. Measured again in WSL (glibc 2.39, tzdata 2026c) before changing
+anything: `TZ=EST5EDT` and `TZ=:EST5EDT` print `07:00 EST`, `TZ=` prints
+`12:00 Universal`, `TZ=:` and `TZ=::EST5EDT` print UTC, and with `TZDIR`
+pointing at a tree whose `EST5EDT` is Tokyo's, `TZ=EST5EDT` prints `JST`.
+
+**What landed (`29f8cff79`):** `tzrules::tz_plan(Option<&[u8]>) -> TzPlan`,
+in `tzset_internal`'s order, close to the shape you proposed but with the
+caller's two questions as accessors rather than variants:
+
+| `TZ` | `plan.file()` | `plan.rule()` |
+|---|---|---|
+| unset, or `/etc/localtime` itself (with or without `:`) | `ZoneFile::System` | `None` (UTC) |
+| empty | `Named("Universal")` | `Some("Universal")` |
+| `:` | `None` | `None` (UTC) |
+| `EST5EDT`, `:EST5EDT` | `Named("EST5EDT")` | `Some("EST5EDT")` |
+| `::EST5EDT` (one `:` only) | `Named(":EST5EDT")` | `Some(":EST5EDT")` |
+| `/etc/zones/home` | `Path(...)` | `Some("/etc/zones/home")` |
+| a `..` component or a NUL | `None` -- never opened | `Some(the value)` |
+
+`rule()` is the text, not a parsed `Tz`, so `localtime`'s own parser (which
+keeps half a rule, and reads `posixrules`) gets what glibc's gets.
+`plan.fallback()` is the same text through `tzrules`' engine -- whole or
+UTC -- and does not drop a second `:` the way `Tz::parse` does.
+
+The desktop clock resolves through it (`gui/datetimesettings`).
+`tz_source` is unchanged and documented as superseded, so the libc builds
+as it is; lane C deletes it once nothing calls it.
+
+**Lane D -- `posix/src/tz.rs`:** the move is the libc's `zone_from_source`
+becoming, roughly,
+
+```rust
+fn zone_from_plan(plan: tzrules::TzPlan<'_>) -> Zone {
+    let mut path = [0u8; crate::unistd::PATH_MAX];
+    plan.file()
+        .and_then(|file| zoneinfo_path(file, &mut path))
+        .and_then(|()| load_zoneinfo(&path))
+        .map_or_else(|| Zone::Posix(plan.fallback()), Zone::File)
+}
+```
+
+with `zoneinfo_path` matching `tzrules::ZoneFile::{System, Named, Path}`
+-- today's three file arms; the `Utc | Rule | Refused` arm goes, since
+those are now "no file". A path refused under `AT_SECURE` then falls through
+to the rule, which is what glibc does in a set-user-ID program. The tests
+that pin the old order (`path_for(Some(b"EST5EDT"))` being `None`, and any
+"a rule reads no file") change with it. What stays the libc's is as before:
+`TZDIR`, the path buffer, `AT_SECURE`, reading the file. The engine's other
+differences from glibc -- half-parsed rules, `posixrules` -- are
+`requests/b-d-the-libc-reads-tz-unlike-glibc-and-now-unlike-date.md`'s, not
+this request's.
+
+**Lane B -- `userspace/localtime`:** `resolve` can take its decision from
+`tz_plan`: `plan.file()` for the file to try (`System` being your
+`localtime` path), else `plan.rule()` through `parse_tz` with `posixrules`,
+and `None` as UTC named `UTC`. Your tests remain the check that nothing moved.

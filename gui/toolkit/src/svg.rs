@@ -18,7 +18,10 @@
 //! - Definitions (`defs`, `symbol`, gradients, clip paths, masks, `style`) are
 //!   not drawn where they stand; `use`, clip paths, masks, patterns and
 //!   filters are not applied
-//! - Container elements: svg (with viewBox), g (with inheritance)
+//! - Container elements: the outermost svg, its viewBox fitted to the pixels
+//!   as its `preserveAspectRatio` says; an svg inside it, placed in a
+//!   viewport of its own (what overflows that viewport is drawn, not cut);
+//!   g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //!
 //! # Rasterizing
@@ -39,6 +42,8 @@ use crate::color::Color;
 use core::f32::consts::PI;
 
 mod paint;
+#[cfg(test)]
+mod viewport_tests;
 
 use paint::{Defs, Gradient};
 
@@ -421,6 +426,114 @@ impl Transform {
         .all(|v| v.is_finite())
         .then_some(inverse)
     }
+}
+
+// ─── Viewports ───────────────────────────────────────────────────────────────
+
+/// How a `viewBox` is fitted to the viewport it is shown in: SVG's
+/// `preserveAspectRatio`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AspectRatio {
+    /// Where the box sits in the room left over along each axis -- 0 at the
+    /// start (`xMin`, `yMin`), 0.5 in the middle, 1 at the end -- or `None`
+    /// to stretch it to the viewport on both axes (`none`).
+    pub align: Option<(f32, f32)>,
+    /// Scale the box to cover the viewport (`slice`), cut where it overflows,
+    /// rather than to fit inside it (`meet`).
+    pub slice: bool,
+}
+
+impl AspectRatio {
+    /// SVG's initial value, `xMidYMid meet`: as large as fits, centred.
+    pub const DEFAULT: Self = Self {
+        align: Some((0.5, 0.5)),
+        slice: false,
+    };
+
+    /// A `preserveAspectRatio` value; one that is not one is the initial
+    /// value, as SVG has an invalid attribute ignored.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        let mut words = value.split_ascii_whitespace();
+        let mut word = words.next();
+        // `defer` means something only for an image; it is skipped.
+        if word == Some("defer") {
+            word = words.next();
+        }
+        let place = |name: &str| match name {
+            "Min" => Some(0.0),
+            "Mid" => Some(0.5),
+            "Max" => Some(1.0),
+            _ => None,
+        };
+        let align = match word {
+            Some("none") => None,
+            Some(align) => {
+                let x = align
+                    .strip_prefix('x')
+                    .and_then(|a| a.get(..3))
+                    .and_then(place);
+                let y = align
+                    .strip_prefix('x')
+                    .and_then(|a| a.get(3..))
+                    .and_then(|a| a.strip_prefix('Y').and_then(place));
+                let (Some(x), Some(y)) = (x, y) else {
+                    return Self::DEFAULT;
+                };
+                Some((x, y))
+            }
+            None => return Self::DEFAULT,
+        };
+        let slice = match words.next() {
+            None | Some("meet") => false,
+            Some("slice") => true,
+            Some(_) => return Self::DEFAULT,
+        };
+        if words.next().is_some() {
+            return Self::DEFAULT;
+        }
+        Self { align, slice }
+    }
+}
+
+/// The transform that shows the user-space box `view_box` (`x, y, width,
+/// height`) in `viewport` as `aspect` says -- or `None` for a box with no
+/// area, or a size that is not a number, for which SVG draws nothing.
+#[must_use]
+pub fn fit_view_box(
+    view_box: (f32, f32, f32, f32),
+    aspect: AspectRatio,
+    viewport: (f32, f32, f32, f32),
+) -> Option<Transform> {
+    let (vx, vy, vw, vh) = view_box;
+    let (x, y, w, h) = viewport;
+    // A size that is not a number is refused with one that is not positive.
+    if [vw, vh].iter().any(|side| side.is_nan() || *side <= 0.0) {
+        return None;
+    }
+    let (sx, sy) = (w / vw, h / vh);
+    let (sx, sy, ax, ay) = match aspect.align {
+        None => (sx, sy, 0.0, 0.0),
+        Some((ax, ay)) => {
+            let s = if aspect.slice { sx.max(sy) } else { sx.min(sy) };
+            (s, s, ax, ay)
+        }
+    };
+    // The box's corner, then the room left over shared out as `align` says.
+    let tx = x - vx * sx + (w - vw * sx) * ax;
+    let ty = y - vy * sy + (h - vh * sy) * ay;
+    let fit = Transform {
+        a: sx,
+        b: 0.0,
+        c: 0.0,
+        d: sy,
+        tx,
+        ty,
+    };
+    [sx, sy, tx, ty]
+        .iter()
+        .all(|v| v.is_finite())
+        .then_some(fit)
 }
 
 /// Parse an SVG transform attribute string.
@@ -1033,10 +1146,15 @@ impl Default for SvgStyle {
 /// A node in the SVG document tree.
 #[derive(Clone, Debug)]
 pub enum SvgNode {
+    /// The document's outermost `<svg>`, which the renderer fits to the
+    /// pixels it draws into. One inside it is a [`SvgNode::Group`] placed in
+    /// its own viewport.
     Svg {
         width: Option<f32>,
         height: Option<f32>,
         view_box: Option<(f32, f32, f32, f32)>,
+        /// How `view_box` is fitted to the pixels: `preserveAspectRatio`.
+        aspect: AspectRatio,
         children: Vec<SvgNode>,
     },
     Group {
@@ -1115,6 +1233,31 @@ fn shown_box(
     view_box.unwrap_or((0.0, 0.0, width.unwrap_or(300.0), height.unwrap_or(150.0)))
 }
 
+/// What the outermost `<svg>` says of its size, each part `None` where it is
+/// not said in a form this renderer reads. A percentage is of a page this
+/// renderer has none of, and is not read.
+#[derive(Clone, Copy)]
+struct DeclaredSize {
+    view_box: Option<(f32, f32, f32, f32)>,
+    width: Option<f32>,
+    height: Option<f32>,
+}
+
+impl DeclaredSize {
+    fn of(elem: &XmlElement) -> Self {
+        Self {
+            view_box: elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok()),
+            width: elem.attr("width").and_then(length),
+            height: elem.attr("height").and_then(length),
+        }
+    }
+
+    /// The user-space rectangle it shows ([`shown_box`]).
+    fn shown(self) -> (f32, f32, f32, f32) {
+        shown_box(self.view_box, self.width, self.height)
+    }
+}
+
 impl SvgDocument {
     /// Parse an SVG string into a document tree.
     pub fn parse(svg_data: &str) -> Result<Self, SvgError> {
@@ -1126,13 +1269,14 @@ impl SvgDocument {
             .ok_or_else(|| SvgError::MalformedXml("empty document".into()))?;
         // The gradients first, from the whole document: a shape may name one
         // defined after it. Their percentages are of the viewport.
-        let (_, _, view_w, view_h) = shown_box(
-            first.attr("viewBox").and_then(|s| parse_viewbox(s).ok()),
-            first.attr_f32("width"),
-            first.attr_f32("height"),
-        );
+        let (_, _, view_w, view_h) = DeclaredSize::of(first).shown();
         let defs = Defs::collect(first, (view_w, view_h));
-        let root = build_node(first, &defs)?;
+        let builder = Builder {
+            defs: &defs,
+            viewport: (view_w, view_h),
+            outermost: true,
+        };
+        let root = build_node(first, builder)?;
         Ok(Self { root, defs })
     }
 
@@ -1153,14 +1297,21 @@ impl SvgDocument {
     /// Render the SVG to a pixel buffer at the given dimensions: 4 bytes per
     /// pixel, `[r, g, b, a]`, straight alpha, row by row.
     /// Uses 4x supersampling for anti-aliased edges.
+    ///
+    /// The view box is fitted to the pixels as the document's
+    /// `preserveAspectRatio` says -- by default as large as fits, centred, so
+    /// a drawing asked for at another shape is not stretched. A view box with
+    /// no area draws nothing.
     pub fn render(&self, width: u32, height: u32) -> Vec<u8> {
         let mut renderer = SvgRenderer::new(width, height, &self.defs);
-        let (vb_x, vb_y, vb_w, vb_h) = self.viewbox();
-        let scale_x = width as f32 / vb_w;
-        let scale_y = height as f32 / vb_h;
-        let base_transform =
-            Transform::scale(scale_x, scale_y).then(Transform::translate(-vb_x, -vb_y));
-        renderer.render_node(&self.root, base_transform, &ResolvedStyle::default());
+        let aspect = match &self.root {
+            SvgNode::Svg { aspect, .. } => *aspect,
+            _ => AspectRatio::DEFAULT,
+        };
+        let pixels = (0.0, 0.0, width as f32, height as f32);
+        if let Some(fit) = fit_view_box(self.viewbox(), aspect, pixels) {
+            renderer.render_node(&self.root, fit, &ResolvedStyle::default());
+        }
         renderer.buffer
     }
 }
@@ -1585,6 +1736,44 @@ const NOT_DRAWN: &[&str] = &[
     "desc",
 ];
 
+/// What building an element's node needs beyond the element: what the whole
+/// document shares, and where in it the element stands.
+#[derive(Clone, Copy)]
+struct Builder<'b> {
+    /// The document's gradients, for a paint that names one.
+    defs: &'b Defs,
+    /// The width and height, in user units, of the viewport the element is
+    /// in: what its percentages are of.
+    viewport: (f32, f32),
+    /// Whether the element is the document's outermost, whose `<svg>` the
+    /// renderer places itself; an `<svg>` inside it is placed by its parent.
+    outermost: bool,
+}
+
+impl Builder<'_> {
+    /// The same, for the element's children.
+    fn inner(self) -> Self {
+        Self {
+            outermost: false,
+            ..self
+        }
+    }
+}
+
+/// A length for an element's place in its viewport: a number of user units,
+/// or a percentage of `extent`, the viewport's width or height.
+fn viewport_length(value: &str, extent: f32) -> Option<f32> {
+    match value.trim().strip_suffix('%') {
+        Some(percent) => percent
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|p| p.is_finite())
+            .map(|p| p / 100.0 * extent),
+        None => length(value),
+    }
+}
+
 /// An element that draws nothing.
 fn nothing() -> SvgNode {
     SvgNode::Group {
@@ -1594,7 +1783,7 @@ fn nothing() -> SvgNode {
     }
 }
 
-fn build_node(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     // `display: none` takes the element and everything in it out of the
     // drawing, and a definition is not drawn where it stands.
     if NOT_DRAWN.contains(&elem.tag.as_str())
@@ -1603,21 +1792,21 @@ fn build_node(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
         return Ok(nothing());
     }
     match elem.tag.as_str() {
-        "svg" => build_svg(elem, defs),
-        "g" => build_group(elem, defs),
-        "rect" => build_rect(elem, defs),
-        "circle" => build_circle(elem, defs),
-        "ellipse" => build_ellipse(elem, defs),
-        "line" => build_line(elem, defs),
-        "polyline" => build_polyline(elem, defs),
-        "polygon" => build_polygon(elem, defs),
-        "path" => build_path(elem, defs),
+        "svg" => build_svg(elem, b),
+        "g" => build_group(elem, b),
+        "rect" => build_rect(elem, b),
+        "circle" => build_circle(elem, b),
+        "ellipse" => build_ellipse(elem, b),
+        "line" => build_line(elem, b),
+        "polyline" => build_polyline(elem, b),
+        "polygon" => build_polygon(elem, b),
+        "path" => build_path(elem, b),
         _ => {
             // Unknown elements treated as groups (e.g., <defs>, <title>)
             let children: Result<Vec<_>, _> = elem
                 .children
                 .iter()
-                .map(|child| build_node(child, defs))
+                .map(|child| build_node(child, b.inner()))
                 .collect();
             Ok(SvgNode::Group {
                 transform: Transform::IDENTITY,
@@ -1628,15 +1817,23 @@ fn build_node(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     }
 }
 
-fn build_svg(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
-    let width = elem.attr_f32("width");
-    let height = elem.attr_f32("height");
-    let view_box = elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok());
-
+fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    let aspect = elem
+        .attr("preserveAspectRatio")
+        .map_or(AspectRatio::DEFAULT, AspectRatio::parse);
+    if !b.outermost {
+        return build_inner_svg(elem, b, aspect);
+    }
+    let declared = DeclaredSize::of(elem);
+    let (_, _, view_w, view_h) = declared.shown();
+    let inner = Builder {
+        viewport: (view_w, view_h),
+        ..b.inner()
+    };
     let children: Vec<SvgNode> = elem
         .children
         .iter()
-        .map(|child| build_node(child, defs))
+        .map(|child| build_node(child, inner))
         .collect::<Result<_, _>>()?;
     // Presentation attributes on the root element -- `fill="none"
     // stroke="currentColor"` is how most icon sets are written -- are inherited
@@ -1644,7 +1841,7 @@ fn build_svg(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     // such icon drew its outlines as solid black shapes: the default fill,
     // unstroked. A group carrying them gives them the inheritance a `<g>`
     // already has, without a second kind of node to walk.
-    let style = parse_style_attrs(elem, defs)?;
+    let style = parse_style_attrs(elem, b.defs)?;
     let children = if style == SvgStyle::default() {
         children
     } else {
@@ -1655,24 +1852,76 @@ fn build_svg(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
         }]
     };
     Ok(SvgNode::Svg {
-        width,
-        height,
-        view_box,
+        width: declared.width,
+        height: declared.height,
+        view_box: declared.view_box,
+        aspect,
         children,
     })
 }
 
-fn build_group(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+/// An `<svg>` inside another: a viewport of its own, `width` by `height` --
+/// all of its parent's by default -- at `x`, `y` in its parent's user space,
+/// with its `viewBox` fitted to it as `aspect` says. A group, so the
+/// renderer walks it as any other; what overflows it is drawn, not cut.
+fn build_inner_svg(
+    elem: &XmlElement,
+    b: Builder<'_>,
+    aspect: AspectRatio,
+) -> Result<SvgNode, SvgError> {
+    let (parent_w, parent_h) = b.viewport;
+    let at = |name: &str, extent: f32, default: f32| {
+        elem.attr(name)
+            .and_then(|value| viewport_length(value, extent))
+            .unwrap_or(default)
+    };
+    let (x, y) = (at("x", parent_w, 0.0), at("y", parent_h, 0.0));
+    let (width, height) = (
+        at("width", parent_w, parent_w),
+        at("height", parent_h, parent_h),
+    );
+    // SVG draws nothing for a viewport with no area.
+    if width.is_nan() || height.is_nan() || width <= 0.0 || height <= 0.0 {
+        return Ok(nothing());
+    }
+    let view_box = elem.attr("viewBox").and_then(|s| parse_viewbox(s).ok());
+    let (placement, viewport) = match view_box {
+        Some(view_box) => match fit_view_box(view_box, aspect, (x, y, width, height)) {
+            Some(fit) => (fit, (view_box.2, view_box.3)),
+            None => return Ok(nothing()),
+        },
+        None => (Transform::translate(x, y), (width, height)),
+    };
+    // SVG 2 lets an inner `<svg>` carry a `transform`, outside its placement.
+    let own = elem
+        .attr("transform")
+        .map(parse_transform)
+        .transpose()?
+        .unwrap_or(Transform::IDENTITY);
+    let inner = Builder { viewport, ..b };
+    let children = elem
+        .children
+        .iter()
+        .map(|child| build_node(child, inner))
+        .collect::<Result<_, _>>()?;
+    Ok(SvgNode::Group {
+        transform: own.then(placement),
+        style: parse_style_attrs(elem, b.defs)?,
+        children,
+    })
+}
+
+fn build_group(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     let transform = elem
         .attr("transform")
         .map(parse_transform)
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
-    let style = parse_style_attrs(elem, defs)?;
+    let style = parse_style_attrs(elem, b.defs)?;
     let children: Result<Vec<_>, _> = elem
         .children
         .iter()
-        .map(|child| build_node(child, defs))
+        .map(|child| build_node(child, b.inner()))
         .collect();
     Ok(SvgNode::Group {
         transform,
@@ -1681,7 +1930,7 @@ fn build_group(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
     })
 }
 
-fn build_rect(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_rect(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     // One radius given is both, as SVG has it: `rx="2"` alone rounds the
     // corners, where reading the missing `ry` as 0 left them square.
     let (rx, ry) = match (elem.attr_f32("rx"), elem.attr_f32("ry")) {
@@ -1701,11 +1950,11 @@ fn build_rect(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_circle(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_circle(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Circle {
         cx: elem.attr_f32("cx").unwrap_or(0.0),
         cy: elem.attr_f32("cy").unwrap_or(0.0),
@@ -1715,11 +1964,11 @@ fn build_circle(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_ellipse(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_ellipse(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Ellipse {
         cx: elem.attr_f32("cx").unwrap_or(0.0),
         cy: elem.attr_f32("cy").unwrap_or(0.0),
@@ -1730,11 +1979,11 @@ fn build_ellipse(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_line(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_line(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     Ok(SvgNode::Line {
         x1: elem.attr_f32("x1").unwrap_or(0.0),
         y1: elem.attr_f32("y1").unwrap_or(0.0),
@@ -1745,11 +1994,11 @@ fn build_line(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_polyline(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_polyline(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     let points = elem
         .attr("points")
         .map(parse_points)
@@ -1762,11 +2011,11 @@ fn build_polyline(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_polygon(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_polygon(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     let points = elem
         .attr("points")
         .map(parse_points)
@@ -1779,11 +2028,11 @@ fn build_polygon(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 
-fn build_path(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
+fn build_path(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     let d = elem.attr("d").unwrap_or("");
     let commands = parse_path_data(d)?;
     Ok(SvgNode::Path {
@@ -1793,7 +2042,7 @@ fn build_path(elem: &XmlElement, defs: &Defs) -> Result<SvgNode, SvgError> {
             .map(parse_transform)
             .transpose()?
             .unwrap_or(Transform::IDENTITY),
-        style: parse_style_attrs(elem, defs)?,
+        style: parse_style_attrs(elem, b.defs)?,
     })
 }
 

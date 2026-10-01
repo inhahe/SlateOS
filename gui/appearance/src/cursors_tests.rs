@@ -574,9 +574,11 @@ fn what_is_not_a_cursor_is_passed_over() {
     drop(big);
     assert_eq!(colour(&f.theme("T"), "default"), Some(13));
     // Names and themes that are not names, though each would reach a file
-    // if it were joined to a path: `T`'s own cursor, and one put where a
-    // theme named `..` would find it.
-    assert_eq!(colour(&f.theme("T"), "../T/cursors/left_ptr"), None);
+    // if it were joined to a path: `T`'s own `left_ptr` -- `share`'s copy,
+    // `cursors/../cursors/left_ptr` -- and a cursor put where a theme named
+    // `..` would find it.
+    assert_eq!(colour(&f.theme("T"), "left_ptr"), Some(13));
+    assert_eq!(colour(&f.theme("T"), "../cursors/left_ptr"), None);
     let above = f.scratch.dir().join(CURSORS_DIR);
     fs::create_dir_all(&above).unwrap();
     fs::write(above.join("default"), xcursor(&[img(24, 0xFF00_0011)])).unwrap();

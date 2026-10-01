@@ -111,7 +111,6 @@ userspace/powerctl/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
-userspace/resolvectl/src/main.rs:argv-as-string
 userspace/rfkill/src/main.rs:argv-as-string
 userspace/route/src/main.rs:argv-as-string
 userspace/rsync/src/main.rs:argv-as-string

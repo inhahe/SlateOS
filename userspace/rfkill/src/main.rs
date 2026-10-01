@@ -2,11 +2,10 @@
 
 //! rfkill — Slate OS wireless device control
 //!
-//! Multi-personality binary for enabling/disabling wireless devices.
-//! Detected via argv[0]:
-//!
-//! - `rfkill` (default) — wireless device block/unblock control
-//! - `rfkill-event` — monitor rfkill events
+//! Blocks and unblocks wireless devices (`list`, `block`, `unblock`,
+//! `toggle`) and watches their changes (`event`). It used to answer to
+//! `rfkill-event` too, a name util-linux does not ship for what is
+//! `rfkill event`; the name went in the §1045 triage (2026-10-01).
 
 use quoting::quoteaf_os;
 use std::env;
@@ -429,37 +428,6 @@ fn print_help() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("rfkill");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    if prog_name == "rfkill-event" {
-        // Took no options and listened regardless, so `rfkill-event --zzq`
-        // announced "Listening for rfkill events..." having not parsed the
-        // request.
-        if let Some(bad) = args
-            .iter()
-            .skip(1)
-            .find(|a| a.starts_with('-') && *a != "-")
-        {
-            eprintln!("rfkill-event: unknown option: {}", quoting::quoteaf_os(bad));
-            std::process::exit(1);
-        }
-        cmd_event();
-        return;
-    }
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let cmd = rest.first().cloned().unwrap_or_else(|| "list".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
@@ -551,28 +519,6 @@ mod tests {
         let t = RfkillType::from_str("zigbee");
         assert!(matches!(t, RfkillType::Unknown(_)));
         assert_eq!(t.type_id(), 255);
-    }
-
-    #[test]
-    fn test_prog_name_detection() {
-        let cases = vec![
-            ("rfkill", "rfkill"),
-            ("rfkill-event", "rfkill-event"),
-            ("/usr/sbin/rfkill", "rfkill"),
-            ("C:\\bin\\rfkill.exe", "rfkill"),
-        ];
-        for (input, expected) in cases {
-            let bytes = input.as_bytes();
-            let mut last_sep = 0;
-            for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' {
-                    last_sep = i + 1;
-                }
-            }
-            let base = &input[last_sep..];
-            let base = base.strip_suffix(".exe").unwrap_or(base);
-            assert_eq!(base, expected);
-        }
     }
 
     #[test]

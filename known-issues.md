@@ -2449,11 +2449,31 @@ of their own -- a split still to do. The ledger stood at **82**.
 deleted for fabricating: its counters came from "simulated"
 `/proc/<pid>/perf_events` files, and without them `perf stat` printed
 `0 cycles` as a measurement (its tests asserted the zero). **78.**
-**Still to judge:** `systemctl`'s
-eight, `sysstat`,
-`cpupower`, `thermald`, `resolvectl`, `hostnamectl`'s domain names, `ntpd`,
-`xdg`, and the single names of `coredumpctl`, `dmidecode`, `efibootmgr`,
-`eject`, `fio`, `hwinfo`, `inotify`, `loginctl`, `losetup`, `rfkill`, `ss`.
+
+**Third pass** (2026-10-01): names that only repeated a subcommand of their
+own program, under a name no upstream ships, went -- `coredump-extract`
+(`coredumpctl dump`), `lodetach` (`losetup -d`), `rfkill-event` (`rfkill
+event`), `fio-verify` (fio verifies through `verify=`). Names for Linux
+interfaces SlateOS will not have went too -- `cifsiostat` and `tapestat`
+(`sysstat`; `/proc/fs/cifs` and `/proc/scsi/tape`). Two printed another
+program's answer under a real tool's name and went: `turbostat`
+(`cpupower`, labelling the current and maximum frequency as turbostat's
+MSR averages) and `biosdecode` (`dmidecode`, printing DMI type 0 for a
+tool that decodes the BIOS's entry points). `fio`'s trim workload, which
+wrote zeros and counted them as trims, now refuses. And
+**`userspace/resolvectl`** (`host`, `resolvconf`, `systemd-resolve`) is
+deleted for fabricating: `resolvectl service` printed an invented SRV
+record, and `host` answered NXDOMAIN to every reverse lookup but
+localhost without sending a query, and ignored `-t`. **Kept, third
+batch:** `mpstat`, `pidstat` (sysstat, reading `/proc`), `sockstat` (ss,
+in BSD's format), `ntpdate`, `sntp` (ntpd, which really queries and sets
+the clock). **The ledger stands at 67.**
+**Still to judge:** `systemctl`'s eight; `cpufreq-info` and `cpufreq-set`
+(cpupower) and `thermal-monitor`, `thermal-conf` (thermald), which wait on
+the kernel's cpufreq and thermal modules reaching `/sys`; `hostnamectl`'s
+four domain names (which belong to `hostname`, if anywhere); `xdg`'s two;
+and `efivar`, `volname`, `lshw`, `inotifywatch`, `userdbctl`. `sudo`'s
+`visudo` and `sudoreplay` are to be split into crates.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

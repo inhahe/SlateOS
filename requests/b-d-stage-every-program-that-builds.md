@@ -124,3 +124,20 @@ kernel's print queue (`fs::printqueue`) -- `lp` refuses to queue, `lpstat`
 and `lprm` report what is really in the spool. If you would rather not
 stage refusing programs until their facility lands, leave those three
 groups out; the ledger keeps them either way.
+
+## The names lane B keeps -- third batch (2026-10-01)
+
+```
+mpstat = sysstat
+pidstat = sysstat
+sockstat = ss
+ntpdate = ntpd
+sntp = ntpd
+```
+
+All five work: `mpstat` and `pidstat` read `/proc`, `sockstat` prints BSD's
+layout from the same socket tables `ss` reads, and `ntpdate`/`sntp` really
+query an NTP server and set the clock through `clock_settime`. Seven other
+names left the ledger instead (deleted, not kept), and so did the whole of
+`userspace/resolvectl`; `known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN` has why.

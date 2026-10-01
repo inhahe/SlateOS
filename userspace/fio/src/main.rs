@@ -1,8 +1,9 @@
-//! Multi-personality flexible I/O tester for SlateOS.
+//! `fio` -- a flexible I/O tester for SlateOS.
 //!
-//! This binary detects the personality from `argv[0]`:
-//!   - `fio`        -> flexible I/O tester (main personality)
-//!   - `fio-verify` -> verify written data integrity
+//! It used to answer to `fio-verify` too, a name fio does not ship (it
+//! verifies through its `verify=` options, which this keeps); the name went
+//! in the §1045 triage (2026-10-01). A trim workload is refused rather than
+//! simulated with writes (see `execute_job`).
 //!
 //! Supports job definitions via command-line flags or INI-style job files,
 //! with statistics collection, multiple output formats (normal, terse, JSON,
@@ -195,15 +196,6 @@ impl VerifyMethod {
             "sha256" => Some(Self::Sha256),
             "pattern" => Some(Self::Pattern),
             _ => None,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Md5 => "md5",
-            Self::Crc32 => "crc32",
-            Self::Sha256 => "sha256",
-            Self::Pattern => "pattern",
         }
     }
 }
@@ -969,6 +961,18 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     if job.bs == 0 {
         return Err("block size cannot be zero".to_string());
     }
+    // A trim discards blocks -- `BLKDISCARD` on a device, a punched hole in a
+    // file -- and this build has neither. Until 2026-10-01 it wrote zeros
+    // over each block instead and counted every write as a trim, so a trim
+    // benchmark reported the speed of something it did not do. Refused before
+    // the file is touched.
+    if job.rw == IoPattern::Trim {
+        return Err(
+            "rw=trim: this build cannot discard blocks (no BLKDISCARD and no hole punching), \
+             and writing zeros instead would report trims that never happened"
+                .to_string(),
+        );
+    }
 
     let num_blocks = job.num_blocks();
     if num_blocks == 0 {
@@ -1061,19 +1065,7 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
 
         let op_start = Instant::now();
 
-        if job.rw == IoPattern::Trim {
-            // Simulate trim: seek to offset, write zeros
-            file.seek(SeekFrom::Start(offset))
-                .map_err(|e| format!("seek error: {e}"))?;
-            let zeros = vec![0u8; buf_size];
-            file.write_all(&zeros)
-                .map_err(|e| format!("trim write error: {e}"))?;
-            let lat = op_start.elapsed().as_micros() as u64;
-            stats.write_lat.record(lat);
-            stats.trim_ios += 1;
-            stats.write_bytes = stats.write_bytes.saturating_add(job.bs);
-            stats.io_depth_dist[depth_bucket] += 1;
-        } else if do_read {
+        if do_read {
             file.seek(SeekFrom::Start(offset))
                 .map_err(|e| format!("seek error: {e}"))?;
             file.read_exact(&mut read_buf)
@@ -1667,130 +1659,6 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Personality: fio-verify
-// ---------------------------------------------------------------------------
-
-fn run_verify(args: &[String]) -> i32 {
-    let mut filename = String::new();
-    let mut method = VerifyMethod::Crc32;
-    let mut pattern: u8 = 0xAA;
-    let mut bs: u64 = 4096;
-    let mut show_help = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--help" || arg == "-h" {
-            show_help = true;
-            break;
-        }
-        if let Some(kv) = arg.strip_prefix("--") {
-            if let Some((key, value)) = kv.split_once('=') {
-                match key {
-                    "filename" => filename = value.to_string(),
-                    "verify" => {
-                        method = VerifyMethod::parse(value).unwrap_or(VerifyMethod::Crc32);
-                    }
-                    "verify_pattern" => {
-                        let hex = value.strip_prefix("0x").unwrap_or(value);
-                        pattern = u8::from_str_radix(hex, 16).unwrap_or(0xAA);
-                    }
-                    "bs" | "blocksize" => {
-                        bs = parse_size(value).unwrap_or(4096);
-                    }
-                    _ => {
-                        eprintln!("fio-verify: unknown option: {key}");
-                        return 1;
-                    }
-                }
-            }
-        } else if filename.is_empty() {
-            filename = arg.clone();
-        }
-        i += 1;
-    }
-
-    if show_help {
-        println!("fio-verify: verify written data integrity");
-        println!();
-        println!("Usage: fio-verify [OPTIONS] [FILE]");
-        println!();
-        println!("Options:");
-        println!("  --filename=<file>       File to verify");
-        println!("  --verify=<method>       md5, crc32, sha256, pattern");
-        println!("  --verify_pattern=<hex>  Pattern byte (default 0xAA)");
-        println!("  --bs=<size>             Block size (default 4k)");
-        println!("  --help                  Show this help");
-        return 0;
-    }
-
-    if filename.is_empty() {
-        eprintln!("fio-verify: no filename specified");
-        return 1;
-    }
-
-    let file_size = match fs::metadata(&filename) {
-        Ok(m) => m.len(),
-        Err(e) => {
-            eprintln!("fio-verify: cannot stat {filename}: {e}");
-            return 1;
-        }
-    };
-
-    let mut file = match File::open(&filename) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("fio-verify: cannot open {filename}: {e}");
-            return 1;
-        }
-    };
-
-    let num_blocks = file_size / bs;
-    let mut buf = vec![0u8; bs as usize];
-    let mut errors = 0u64;
-    let mut blocks_checked = 0u64;
-
-    for block_idx in 0..num_blocks {
-        let offset = block_idx * bs;
-        if file.seek(SeekFrom::Start(offset)).is_err() {
-            errors += 1;
-            continue;
-        }
-        if file.read_exact(&mut buf).is_err() {
-            errors += 1;
-            continue;
-        }
-
-        // For pattern verification, check that each byte matches pattern ^ offset_seed
-        if method == VerifyMethod::Pattern {
-            let seed_bytes = offset.to_le_bytes();
-            let mut mismatch = false;
-            for (j, &b) in buf.iter().enumerate() {
-                let expected = pattern ^ seed_bytes[j % 8];
-                if b != expected {
-                    mismatch = true;
-                    break;
-                }
-            }
-            if mismatch {
-                errors += 1;
-            }
-        }
-        // For hash methods, we can't verify without the original checksums.
-        // Print a summary of what we found.
-
-        blocks_checked += 1;
-    }
-
-    println!(
-        "fio-verify: {filename}: {blocks_checked} blocks checked, {errors} errors, method={m}",
-        m = method.name()
-    );
-
-    if errors > 0 { 1 } else { 0 }
-}
-
-// ---------------------------------------------------------------------------
 // Help text
 // ---------------------------------------------------------------------------
 
@@ -1837,31 +1705,8 @@ fn print_help() {
 // ---------------------------------------------------------------------------
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("fio");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "fio-verify" => {
-            process::exit(run_verify(&rest));
-        }
-        _ => {
-            process::exit(run_fio(&rest));
-        }
-    }
+    let rest: Vec<String> = env::args().skip(1).collect();
+    process::exit(run_fio(&rest));
 }
 
 fn run_fio(args: &[String]) -> i32 {
@@ -3333,7 +3178,7 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_job_trim() {
+    fn a_trim_job_is_refused_and_the_file_is_not_touched() {
         let f = temp_file("exec_trim");
         let mut job = JobDef::default();
         job.name = "test_trim".to_string();
@@ -3341,8 +3186,13 @@ mod tests {
         job.rw = IoPattern::Trim;
         job.size = 4096 * 4;
         job.bs = 4096;
-        let stats = execute_job(&job).unwrap();
-        assert_eq!(stats.trim_ios, 4);
+        let err = execute_job(&job).expect_err("trim cannot be done here");
+        assert!(
+            err.starts_with("rw=trim: this build cannot discard"),
+            "{err}"
+        );
+        // Refused before prepare_file: no file of zeros left behind.
+        assert!(!std::path::Path::new(&f).exists());
         cleanup(&f);
     }
 
@@ -3459,67 +3309,5 @@ mod tests {
         let stats = execute_job(&job).unwrap();
         assert_eq!(stats.io_depth_dist[5], 5); // 17-32 bucket
         cleanup(&f);
-    }
-
-    // === Personality detection tests ===
-
-    #[test]
-    fn test_personality_fio() {
-        let s = "fio";
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        assert_eq!(base, "fio");
-    }
-
-    #[test]
-    fn test_personality_fio_verify() {
-        let s = "/usr/bin/fio-verify";
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        assert_eq!(base, "fio-verify");
-    }
-
-    #[test]
-    fn test_personality_with_exe_suffix() {
-        let s = "C:\\bin\\fio.exe";
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        assert_eq!(base, "fio");
-    }
-
-    #[test]
-    fn test_personality_forward_slash() {
-        let s = "/opt/slateos/bin/fio-verify.exe";
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        assert_eq!(base, "fio-verify");
     }
 }

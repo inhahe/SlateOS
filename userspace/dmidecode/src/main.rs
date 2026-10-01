@@ -1,8 +1,11 @@
-//! Slate OS SMBIOS/DMI system information utility.
+//! Slate OS SMBIOS/DMI system information utility: `dmidecode`, the DMI
+//! table decoder (SMBIOS data from firmware).
 //!
-//! Multi-personality binary providing:
-//! - **dmidecode** — DMI table decoder (SMBIOS data from firmware)
-//! - **biosdecode** — BIOS information decoder
+//! It also answered to `biosdecode` until 2026-10-01 (the §1045 triage) and
+//! printed this decoder's type-0 entries under that name -- but biosdecode
+//! decodes the BIOS's own structures (the SMBIOS and ACPI entry points, PnP,
+//! the PCI IRQ routing table), not DMI records. `dmidecode -t bios` is what
+//! the name used to print.
 //!
 //! Reads system information from /sys/firmware/dmi/tables/ or
 //! /dev/mem to display BIOS, system, baseboard, chassis, CPU,
@@ -266,61 +269,8 @@ struct DmiOpts {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("dmidecode");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "biosdecode" => cmd_biosdecode(&rest),
-        _ => cmd_dmidecode(&rest),
-    }
-}
-
-fn cmd_biosdecode(args: &[String]) {
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: biosdecode [options]");
-                println!("Decode BIOS information.");
-                process::exit(0);
-            }
-            "--version" => {
-                println!("biosdecode {VERSION}");
-                process::exit(0);
-            }
-            _ => {}
-        }
-    }
-
-    let entries = match read_dmi_tables() {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("biosdecode: {e}");
-            process::exit(1);
-        }
-    };
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    for entry in &entries {
-        if entry.entry_type == TYPE_BIOS {
-            print_entry(&mut out, entry);
-        }
-    }
+    let rest: Vec<String> = env::args().skip(1).collect();
+    cmd_dmidecode(&rest);
 }
 
 fn cmd_dmidecode(args: &[String]) {

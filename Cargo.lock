@@ -3231,13 +3231,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "resolvectl"
-version = "0.1.0"
-dependencies = [
- "usageerror",
-]
-
-[[package]]
 name = "reversi"
 version = "0.1.0"
 dependencies = [

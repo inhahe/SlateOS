@@ -5635,7 +5635,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] efibootmgr/efivar: EFI boot variable manager (boot entry CRUD, boot order, UCS-2 label parsing)
   - [x] inotifywait/inotifywatch: filesystem event monitoring (14 event types, glob filtering, CSV/custom output, statistics)
   - [x] cgcreate/cgdelete/cgexec/cgset/cgget/cgclassify/lscgroup/lssubsys: cgroup v2 management (8 personalities)
-  - [x] resolvectl/resolvconf/systemd-resolve/nslookup/host: DNS resolution management (5 personalities, status/query/statistics)
+  - [ ] resolvectl/resolvconf/systemd-resolve/nslookup/host: DNS resolution management (5 personalities, status/query/statistics) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `resolvectl service` printed an invented SRV record, `host` answered NXDOMAIN to every reverse lookup but localhost without asking anyone and ignored `-t`
   - [x] fio/fio-verify: flexible I/O benchmarking (7 IO patterns, 5 engines, built-in MD5/SHA256/CRC32, INI job files, JSON output, 184 tests)
   - [ ] socat/filan/procan: bidirectional data relay (16 address types, TCP/UDP/UNIX/EXEC, CRLF conversion, 161 tests)
   - [x] fail2ban-server/client/regex: intrusion prevention (custom regex engine, IPv4/IPv6 CIDR matching, INI jail config, 6 built-in filters, 144 tests)
@@ -5690,7 +5690,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [~] sbctl: Secure Boot status and the kernel's keys (2026-09-27, design-decisions §1049). `status` reads the firmware's `SecureBoot`/`SetupMode` variables where they are visible and says so where they are not, and counts the keys the kernel publishes in `/proc/secureboot`; `list-enrolled` lists them. `enroll-keys` and `reset` refuse until lane A's door to `fs::secureboot` lands (`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`). Deleted under §1006, needing cryptography nobody has planned: `create-keys`, `sign`, `rotate-keys`, `bundle`, the files database (`verify`, `list-files`, `remove-file`) and the `sbsign`/`sbverify`/`sbkeysync` personalities, all of which reported work they never did.
   - [ ] podman/buildah/skopeo: container runtime (full CRUD for containers/images/volumes/networks/pods, 4264 lines, 240 tests)
   - [x] snap/snapd/snap-confine: snap package manager (22+ subcommands, store/confinement/assertions, 3361 lines, 147 tests)
-  - [x] resolvectl/systemd-resolve/systemd-resolved: DNS resolver service (DNS/DoT/DoH, per-link config, cache stats, 1968 lines, 131 tests)
+  - [ ] resolvectl/systemd-resolve/systemd-resolved: DNS resolver service (DNS/DoT/DoH, per-link config, cache stats, 1968 lines, 131 tests) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- the same crate; see the line above
   - [x] rfkill/rfkill-event: wireless device control (soft/hard block, 10 device types, JSON output, 523 lines)
   - [ ] mcelog/mcelog-client: machine check exception logger (MCE decode, DIMM tracking, daemon/client, 601 lines)
   - [ ] rasdaemon/ras-mc-ctl: RAS event logger (memory/PCIe/disk errors, EDAC controller status, 654 lines)

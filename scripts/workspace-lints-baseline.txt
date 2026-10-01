@@ -126,7 +126,6 @@ userspace/powerctl
 userspace/pstree  # bare deny(clippy::all)
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
-userspace/resolvectl  # bare deny(clippy::all)
 userspace/rfkill  # bare deny(clippy::all)
 userspace/route
 userspace/rsync

@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**453 programs; 88 on the image, 6 carried inside the kernel.**
+**452 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 298
+## Userland utilities and services (`userspace/`, lane B) -- 297
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -49,10 +49,10 @@ two disagree.
 | `cmp` | Compare two files byte by byte. | yes | `coreutils` |  |
 | `column` | Columnate lists, or lay input out as a table. |  |  |  |
 | `comm` | Compare two sorted files line by line. | yes | `coreutils` |  |
-| `coredumpctl` | Slate OS core dump management |  |  | `coredump-extract` *(not installed)* |
+| `coredumpctl` | Slate OS core dump management |  |  |  |
 | `cp` | Copy files and directories. | yes | `coreutils` |  |
 | `cpio` | Cpio Archive Utility |  |  |  |
-| `cpupower` | Slate OS CPU frequency and power management |  |  | `cpufreq-info` *(not installed)*, `cpufreq-set` *(not installed)*, `turbostat` *(not installed)* |
+| `cpupower` | Slate OS CPU frequency and power management |  |  | `cpufreq-info` *(not installed)*, `cpufreq-set` *(not installed)* |
 | `crond` | Cron Daemon (`crond`) with anacron support |  |  | `anacron` *(not installed)* |
 | `crontab` | Per-user cron schedule management |  |  |  |
 | `csplit` | Output pieces of a file separated by patterns. | yes | `coreutils` |  |
@@ -72,7 +72,7 @@ two disagree.
 | `dirname` | Output each NAME with its last component removed. | yes | `coreutils` |  |
 | `diskutil` | Disk Utility |  |  |  |
 | `dmesg` | Kernel Message Buffer Viewer |  |  |  |
-| `dmidecode` | SMBIOS/DMI system information utility. |  |  | `biosdecode` *(not installed)* |
+| `dmidecode` | SMBIOS/DMI system information utility: `dmidecode`, the DMI table decoder (SMBIOS data from firmware). |  |  |  |
 | `doas` | Lightweight Privilege Elevation |  |  |  |
 | `du` | Estimate file space usage. | yes | `coreutils` |  |
 | `earlyoom` | Slate OS early OOM (Out-of-Memory) daemon |  |  |  |
@@ -92,7 +92,7 @@ two disagree.
 | `findfs` | Find a filesystem by label or UUID. |  |  |  |
 | `findmnt` | Find a filesystem. |  |  |  |
 | `finger` | User information lookup |  |  |  |
-| `fio` | Multi-personality flexible I/O tester for SlateOS. |  |  | `fio-verify` *(not installed)* |
+| `fio` | A flexible I/O tester for SlateOS. |  |  |  |
 | `flock` | Manage file locks from shell scripts. |  |  |  |
 | `fmt` | `fmt` Utility -- Simple Text Formatter |  |  |  |
 | `fold` | Wrap each input line to fit in a given width. | yes | `coreutils` |  |
@@ -152,7 +152,7 @@ two disagree.
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
 | `look` | Display lines beginning with a given string for Slate OS |  |  |  |
-| `losetup` | Loop device management utility. |  |  | `lodetach` *(not installed)* |
+| `losetup` | Loop device management utility: `losetup`, to set up and control loop devices. |  |  |  |
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) |  |  | `cancel` *(not installed)*, `lpq` *(not installed)*, `lpr` *(not installed)*, `lprm` *(not installed)*, `lpstat` *(not installed)* |
 | `ls` | List directory contents. | yes | `coreutils` |  |
 | `lsblk` | List block devices. |  |  |  |
@@ -219,8 +219,7 @@ two disagree.
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |
 | `renice` | Alter the priority of running processes. | yes | `coreutils` |  |
-| `resolvectl` | DNS resolution management utility. |  |  | `host` *(not installed)*, `resolvconf` *(not installed)*, `systemd-resolve` *(not installed)* |
-| `rfkill` | Slate OS wireless device control |  |  | `rfkill-event` *(not installed)* |
+| `rfkill` | Slate OS wireless device control |  |  |  |
 | `rm` | Remove files or directories. | yes | `coreutils` |  |
 | `rmdir` | Remove empty directories. | yes | `coreutils` |  |
 | `route` | Routing Table Management |  |  |  |
@@ -262,7 +261,7 @@ two disagree.
 | `sysctl` | View and Modify Kernel Parameters |  |  |  |
 | `sysinfo` | System Information Utility |  |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) |  |  |  |
-| `sysstat` | Sysstat utility |  |  | `cifsiostat` *(not installed)*, `mpstat` *(not installed)*, `pidstat` *(not installed)*, `tapestat` *(not installed)* |
+| `sysstat` | Sysstat utility |  |  | `mpstat` *(not installed)*, `pidstat` *(not installed)* |
 | `systemctl` | Multi-personality service management utility for SlateOS. |  |  | `systemd-analyze` *(not installed)*, `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-notify` *(not installed)*, `systemd-path` *(not installed)*, `systemd-tmpfiles` *(not installed)* |
 | `tac` | Reverse line printer and character reverser for Slate OS |  |  |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |

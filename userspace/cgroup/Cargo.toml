@@ -3,6 +3,16 @@ name = "cgroup"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS cgroup management tools"
+
+# Built as `lscgroup` -- libcgroup's `lscgroup`, the command this is when run
+# by its own name -- not as `cgroup`, which nobody types: the image installs
+# each binary the workspace builds under the binary's name, and the names it
+# also answers to (`cgcreate`, `cgexec`, `cgset` and the rest) as further names
+# of the same file.
+[[bin]]
+name = "lscgroup"
+path = "src/main.rs"
+
 [dependencies]
 # It interpolates `group` into "cgset: {}: {name} = {value}". That value is
 # an argv word, so it is whatever the user typed and not text this program

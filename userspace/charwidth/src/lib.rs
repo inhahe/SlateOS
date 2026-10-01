@@ -33,6 +33,13 @@
 //! widthless character, while `wc -L` skips undecodable bytes and keeps
 //! counting — so each keeps its own loop over [`char_width`].
 
+// `core` only, and no dependencies -- keep it that way. SlateOS's C library
+// (`posix`) answers `wcwidth` and `wcswidth` from this table, so the crate is
+// built with the libc for `x86_64-slateos-libc` under `-Zbuild-std=core`, and
+// whatever it depends on is linked into every C program. Lane D's request,
+// 2026-10-01 (requests/b-d-libc-wcwidth-should-answer-from-the-one-width-table.md).
+// The tests may use std; the crate itself never does.
+#![cfg_attr(not(test), no_std)]
 #![deny(clippy::all)]
 
 /// The number of terminal columns `c` occupies, or `None` when it has none —

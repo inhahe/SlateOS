@@ -30,7 +30,6 @@ userspace/chattr/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
-userspace/cpupower/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string
 userspace/crontab/src/main.rs:argv-as-string
 userspace/ctags/src/main.rs:argv-as-string
@@ -133,7 +132,6 @@ userspace/systemctl/src/main.rs:argv-as-string
 userspace/tac/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
-userspace/thermald/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
 userspace/tput/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string

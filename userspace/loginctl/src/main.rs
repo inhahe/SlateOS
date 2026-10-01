@@ -2,11 +2,15 @@
 
 //! loginctl — Slate OS session and user management
 //!
-//! Multi-personality binary providing systemd-logind-compatible session,
-//! user, and seat management commands. Detected via argv[0]:
+//! systemd-logind-compatible session, user and seat management commands.
 //!
-//! - `loginctl` (default) — session/user/seat management
-//! - `userdbctl` — user/group database query tool
+//! Until 2026-10-01 it also answered to `userdbctl`, and made answers up
+//! (the design-decisions 1045 triage): `userdbctl services` listed
+//! io.systemd.NameServiceSwitch, Multiplexer and DynamicUser on a system
+//! with no varlink services at all, and `user` and `group` read a UID or
+//! GID that did not parse as 0 -- root. userdb is systemd's JSON user
+//! record service, which SlateOS does not have; `getent passwd` and
+//! `getent group` answer from the databases it does.
 
 use quoting::quoteaf_os;
 use std::collections::BTreeMap;
@@ -18,8 +22,6 @@ use std::process;
 const SESSION_DIR: &str = "/run/sessions";
 const SEAT_DIR: &str = "/run/seats";
 const USER_RUNTIME_DIR: &str = "/run/user";
-const PASSWD_FILE: &str = "/etc/passwd";
-const GROUP_FILE: &str = "/etc/group";
 
 // ── Data structures ────────────────────────────────────────────────────
 
@@ -118,23 +120,6 @@ struct Seat {
     sessions: Vec<String>,
     active_session: String,
     _devices: Vec<String>,
-}
-
-#[derive(Clone, Debug)]
-struct PasswdEntry {
-    name: String,
-    uid: u32,
-    gid: u32,
-    gecos: String,
-    home: String,
-    shell: String,
-}
-
-#[derive(Clone, Debug)]
-struct GroupEntry {
-    name: String,
-    gid: u32,
-    members: Vec<String>,
 }
 
 // ── Session management ─────────────────────────────────────────────────
@@ -852,189 +837,6 @@ fn show_system_hybrid_sleep() {
     power_not_implemented("hybrid sleep: not implemented");
 }
 
-// ── userdbctl personality ──────────────────────────────────────────────
-
-fn read_passwd() -> Vec<PasswdEntry> {
-    let content = match std::fs::read_to_string(PASSWD_FILE) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.splitn(7, ':').collect();
-        if fields.len() < 7 {
-            continue;
-        }
-        entries.push(PasswdEntry {
-            name: fields[0].to_string(),
-            uid: fields[2].parse().unwrap_or(0),
-            gid: fields[3].parse().unwrap_or(0),
-            gecos: fields[4].to_string(),
-            home: fields[5].to_string(),
-            shell: fields[6].to_string(),
-        });
-    }
-    entries
-}
-
-fn read_groups() -> Vec<GroupEntry> {
-    let content = match std::fs::read_to_string(GROUP_FILE) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.splitn(4, ':').collect();
-        if fields.len() < 4 {
-            continue;
-        }
-        let members = if fields[3].is_empty() {
-            Vec::new()
-        } else {
-            fields[3].split(',').map(|s| s.trim().to_string()).collect()
-        };
-        entries.push(GroupEntry {
-            name: fields[0].to_string(),
-            gid: fields[2].parse().unwrap_or(0),
-            members,
-        });
-    }
-    entries
-}
-
-fn userdbctl_user(args: &[String]) {
-    let users = read_passwd();
-    let json_mode = args.iter().any(|a| a == "--json" || a == "-j");
-
-    if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
-        let found = if let Ok(uid) = name.parse::<u32>() {
-            users.iter().find(|u| u.uid == uid)
-        } else {
-            users.iter().find(|u| u.name == name.as_str())
-        };
-
-        match found {
-            Some(u) => {
-                if json_mode {
-                    println!("{{");
-                    println!("  \"userName\": \"{}\",", u.name);
-                    println!("  \"uid\": {},", u.uid);
-                    println!("  \"gid\": {},", u.gid);
-                    println!("  \"realName\": \"{}\",", u.gecos);
-                    println!("  \"homeDirectory\": \"{}\",", u.home);
-                    println!("  \"shell\": \"{}\"", u.shell);
-                    println!("}}");
-                } else {
-                    println!("  User name: {}", u.name);
-                    println!("        UID: {}", u.uid);
-                    println!("        GID: {}", u.gid);
-                    println!("  Real name: {}", u.gecos);
-                    println!("       Home: {}", u.home);
-                    println!("      Shell: {}", u.shell);
-                }
-            }
-            None => {
-                eprintln!("User {} not found.", quoteaf_os(name));
-                process::exit(1);
-            }
-        }
-    } else {
-        // List all users
-        println!("{:<20} {:>5} {:>5} REALNAME", "NAME", "UID", "GID");
-        for u in &users {
-            println!("{:<20} {:>5} {:>5} {}", u.name, u.uid, u.gid, u.gecos);
-        }
-    }
-}
-
-fn userdbctl_group(args: &[String]) {
-    let groups = read_groups();
-    let json_mode = args.iter().any(|a| a == "--json" || a == "-j");
-
-    if let Some(name) = args.iter().find(|a| !a.starts_with('-')) {
-        let found = if let Ok(gid) = name.parse::<u32>() {
-            groups.iter().find(|g| g.gid == gid)
-        } else {
-            groups.iter().find(|g| g.name == name.as_str())
-        };
-
-        match found {
-            Some(g) => {
-                if json_mode {
-                    println!("{{");
-                    println!("  \"groupName\": \"{}\",", g.name);
-                    println!("  \"gid\": {},", g.gid);
-                    println!(
-                        "  \"members\": [{}]",
-                        g.members
-                            .iter()
-                            .map(|m| format!("\"{}\"", m))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    println!("}}");
-                } else {
-                    println!("Group name: {}", g.name);
-                    println!("       GID: {}", g.gid);
-                    println!("   Members: {}", g.members.join(", "));
-                }
-            }
-            None => {
-                eprintln!("Group {} not found.", quoteaf_os(name));
-                process::exit(1);
-            }
-        }
-    } else {
-        println!("{:<20} {:>5} MEMBERS", "NAME", "GID");
-        for g in &groups {
-            println!("{:<20} {:>5} {}", g.name, g.gid, g.members.join(","));
-        }
-    }
-}
-
-fn userdbctl_members(args: &[String]) {
-    let groups = read_groups();
-
-    if let Some(name) = args.first() {
-        match groups.iter().find(|g| g.name == name.as_str()) {
-            Some(g) => {
-                for m in &g.members {
-                    println!("{}", m);
-                }
-            }
-            None => {
-                eprintln!("Group {} not found.", quoteaf_os(name));
-                process::exit(1);
-            }
-        }
-    } else {
-        for g in &groups {
-            if !g.members.is_empty() {
-                println!("{}:", g.name);
-                for m in &g.members {
-                    println!("  {}", m);
-                }
-            }
-        }
-    }
-}
-
-fn userdbctl_services() {
-    println!("io.systemd.NameServiceSwitch");
-    println!("io.systemd.Multiplexer");
-    println!("io.systemd.DynamicUser");
-}
-
 // ── Help ───────────────────────────────────────────────────────────────
 
 fn print_loginctl_help() {
@@ -1078,22 +880,6 @@ fn print_loginctl_help() {
     println!();
     println!("Options:");
     println!("  --no-legend                Do not print table headers/footers");
-    println!("  -h, --help                 Show this help");
-}
-
-fn print_userdbctl_help() {
-    println!("userdbctl — User/group database query tool");
-    println!();
-    println!("Usage: userdbctl [COMMAND] [OPTIONS]");
-    println!();
-    println!("Commands:");
-    println!("  user [NAME|UID]            Show user or list all users");
-    println!("  group [NAME|GID]           Show group or list all groups");
-    println!("  members [GROUP]            Show group memberships");
-    println!("  services                   List available services");
-    println!();
-    println!("Options:");
-    println!("  -j, --json                 JSON output");
     println!("  -h, --help                 Show this help");
 }
 
@@ -1145,53 +931,9 @@ fn run_loginctl(args: Vec<String>) -> i32 {
     0
 }
 
-fn run_userdbctl(args: Vec<String>) -> i32 {
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "user".to_string());
-    let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
-
-    if cmd == "-h" || cmd == "--help" {
-        print_userdbctl_help();
-        return 0;
-    }
-
-    match cmd.as_str() {
-        "user" => userdbctl_user(&cmd_args),
-        "group" => userdbctl_group(&cmd_args),
-        "members" => userdbctl_members(&cmd_args),
-        "services" => userdbctl_services(),
-        _ => {
-            eprintln!("Unknown command: {}", cmd);
-            print_userdbctl_help();
-            return 1;
-        }
-    }
-    0
-}
-
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("loginctl");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let code = match prog_name.as_str() {
-        "userdbctl" => run_userdbctl(args),
-        _ => run_loginctl(args),
-    };
-
-    process::exit(code);
+    process::exit(run_loginctl(args));
 }
 
 #[cfg(test)]
@@ -1283,20 +1025,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_passwd_nonexistent() {
-        // On a system without /etc/passwd or on Windows, returns empty
-        let users = read_passwd();
-        // Just verify it doesn't panic
-        let _ = users;
-    }
-
-    #[test]
-    fn test_read_groups_nonexistent() {
-        let groups = read_groups();
-        let _ = groups;
-    }
-
-    #[test]
     fn test_read_sessions_nonexistent() {
         let sessions = read_sessions();
         assert!(sessions.is_empty());
@@ -1312,51 +1040,6 @@ mod tests {
     fn test_read_users_empty() {
         let users = read_users();
         assert!(users.is_empty());
-    }
-
-    #[test]
-    fn test_prog_name_detection() {
-        let test_cases = vec![
-            ("loginctl", "loginctl"),
-            ("userdbctl", "userdbctl"),
-            ("/usr/bin/loginctl", "loginctl"),
-            ("C:\\bin\\loginctl.exe", "loginctl"),
-            ("/sbin/userdbctl", "userdbctl"),
-        ];
-        for (input, expected) in test_cases {
-            let bytes = input.as_bytes();
-            let mut last_sep = 0;
-            for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' {
-                    last_sep = i + 1;
-                }
-            }
-            let base = &input[last_sep..];
-            let base = base.strip_suffix(".exe").unwrap_or(base);
-            assert_eq!(base, expected, "failed for input: {}", input);
-        }
-    }
-
-    #[test]
-    fn test_passwd_entry_parse() {
-        let line = "root:x:0:0:root:/root:/bin/bash";
-        let fields: Vec<&str> = line.splitn(7, ':').collect();
-        assert_eq!(fields.len(), 7);
-        assert_eq!(fields[0], "root");
-        assert_eq!(fields[2], "0");
-        assert_eq!(fields[5], "/root");
-        assert_eq!(fields[6], "/bin/bash");
-    }
-
-    #[test]
-    fn test_group_entry_parse() {
-        let line = "wheel:x:10:user1,user2,user3";
-        let fields: Vec<&str> = line.splitn(4, ':').collect();
-        assert_eq!(fields.len(), 4);
-        assert_eq!(fields[0], "wheel");
-        assert_eq!(fields[2], "10");
-        let members: Vec<&str> = fields[3].split(',').collect();
-        assert_eq!(members, vec!["user1", "user2", "user3"]);
     }
 
     #[test]

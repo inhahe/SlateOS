@@ -7,8 +7,6 @@ diff -d
 diff -l
 diff -p
 diff -x
-hostname -A
-hostname -a
 logger -P
 logger -S
 logger -T

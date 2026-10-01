@@ -1,0 +1,13 @@
+[package]
+name = "fnmatch"
+version = "0.1.0"
+edition = "2024"
+description = "POSIX fnmatch over bytes, measured case for case against glibc's"
+
+[lints]
+workspace = true
+
+# No dependencies: a byte-wise matcher. It lived in coreutils as src/fnmatch.rs
+# until 2026-10-01 and moved out when sudo needed it to match a sudoers rule's
+# arguments as sudoers does; `coreutils::fnmatch` re-exports it, so no
+# coreutils binary changed.

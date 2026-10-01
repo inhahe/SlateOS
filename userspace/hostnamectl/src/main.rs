@@ -1,10 +1,12 @@
-//! Slate OS hostname management utilities.
+//! `hostnamectl` -- query and set the system hostname and related settings.
 //!
-//! Multi-personality binary providing:
-//! - **hostnamectl** — query and set system hostname and related settings
-//! - **hostname** — show or set hostname (simple interface)
-//! - **domainname** — show or set NIS domain name
-//! - **dnsdomainname** — show the DNS domain name
+//! Until 2026-10-01 it also answered to `domainname`, `nisdomainname`,
+//! `ypdomainname` and `dnsdomainname`, each a few lines of its own that read
+//! and wrote `/proc/sys/kernel/domainname` and took the domain from
+//! `/etc/hosts` by hand. Those four names are net-tools `hostname`'s, which
+//! picks its default from the name it is run by, and they now go to the port
+//! of that program (`userspace/coreutils/src/bin/hostname`), installed under
+//! each of them.
 //!
 //! Manages hostname via `/etc/hostname`, `/proc/sys/kernel/hostname`,
 //! and machine info via `/etc/machine-info`.
@@ -25,7 +27,6 @@ use std::process;
 const VERSION: &str = "0.1.0";
 const ETC_HOSTNAME: &str = "/etc/hostname";
 const PROC_HOSTNAME: &str = "/proc/sys/kernel/hostname";
-const PROC_DOMAINNAME: &str = "/proc/sys/kernel/domainname";
 const ETC_MACHINE_INFO: &str = "/etc/machine-info";
 const OS_RELEASE: &str = "/etc/os-release";
 
@@ -65,48 +66,6 @@ fn get_hostname() -> String {
     let hostname = read_file_trimmed(PROC_HOSTNAME);
     if hostname.is_empty() {
         read_file_trimmed(ETC_HOSTNAME)
-    } else {
-        hostname
-    }
-}
-
-fn get_domainname() -> String {
-    let domain = read_file_trimmed(PROC_DOMAINNAME);
-    if domain == "(none)" {
-        String::new()
-    } else {
-        domain
-    }
-}
-
-fn get_fqdn() -> String {
-    let hostname = get_hostname();
-    // Try to read from /etc/hosts for the FQDN.
-    if let Ok(content) = fs::read_to_string("/etc/hosts") {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() >= 2 {
-                for &name in &fields[1..] {
-                    if name == hostname && fields.len() > 2 {
-                        // Find the first FQDN-looking name.
-                        for &n in &fields[1..] {
-                            if n.contains('.') {
-                                return n.to_string();
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let domain = get_domainname();
-    if !domain.is_empty() {
-        format!("{hostname}.{domain}")
     } else {
         hostname
     }
@@ -607,116 +566,12 @@ fn show_status_json() {
 }
 
 // ============================================================================
-// Personality: hostname
-// ============================================================================
-
-// ============================================================================
-// Personality: domainname
-// ============================================================================
-
-fn cmd_domainname(args: &[String]) {
-    // domainname accepts at most one operand/option; only the first is acted on.
-    if let Some(arg) = args.first() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: domainname [name]");
-                println!("Show or set the NIS/YP domain name.");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("domainname {VERSION}");
-                process::exit(0);
-            }
-            s if !s.starts_with('-') => {
-                if let Err(e) = fs::write(PROC_DOMAINNAME, s) {
-                    eprintln!("domainname: {e}");
-                    process::exit(1);
-                }
-                return;
-            }
-            other => {
-                eprintln!("domainname: unknown option: {other}");
-                process::exit(1);
-            }
-        }
-    }
-
-    let domain = get_domainname();
-    if domain.is_empty() {
-        println!("(none)");
-    } else {
-        println!("{domain}");
-    }
-}
-
-// ============================================================================
-// Personality: dnsdomainname
-// ============================================================================
-
-fn cmd_dnsdomainname(args: &[String]) {
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: dnsdomainname");
-                println!("Show the system's DNS domain name.");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("dnsdomainname {VERSION}");
-                process::exit(0);
-            }
-            // Used to be skipped, so `dnsdomainname --zzq` printed the
-            // domain and exited 0.
-            other if other.starts_with('-') && other.len() > 1 => {
-                eprintln!(
-                    "dnsdomainname: {}",
-                    usageerror::unknown_option(other.as_bytes())
-                );
-                eprintln!("Usage: dnsdomainname");
-                // 255, measured. net-tools' `dnsdomainname` is a
-                // personality of its `hostname`, and that is what the whole
-                // family exits with for a bad option -- not 1, and not the
-                // 64 util-linux uses elsewhere.
-                process::exit(255);
-            }
-            _ => {}
-        }
-    }
-
-    let fqdn = get_fqdn();
-    if let Some(dot_pos) = fqdn.find('.') {
-        println!("{}", &fqdn[dot_pos + 1..]);
-    }
-}
-
-// ============================================================================
 // Entry point
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("hostnamectl");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "domainname" | "nisdomainname" | "ypdomainname" => cmd_domainname(&rest),
-        "dnsdomainname" => cmd_dnsdomainname(&rest),
-        _ => cmd_hostnamectl(&rest),
-    }
+    let rest: Vec<String> = env::args().skip(1).collect();
+    cmd_hostnamectl(&rest);
 }
 
 // ============================================================================
@@ -747,13 +602,6 @@ mod tests {
     fn test_get_hostname_not_empty() {
         // May return empty string if neither /proc nor /etc exist.
         let _ = get_hostname();
-    }
-
-    #[test]
-    fn test_get_domainname() {
-        let domain = get_domainname();
-        // Should not contain "(none)" — our function filters that.
-        assert_ne!(domain, "(none)");
     }
 
     #[test]
@@ -823,30 +671,6 @@ mod tests {
     fn test_hostname_validation_trailing_dash() {
         let result = set_hostname("hostname-");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_personality_detection() {
-        let test_cases = [
-            ("/usr/bin/hostnamectl", "hostnamectl"),
-            ("hostname", "hostname"),
-            ("/bin/domainname", "domainname"),
-            ("dnsdomainname.exe", "dnsdomainname"),
-            ("C:\\bin\\hostname.exe", "hostname"),
-        ];
-
-        for (input, expected) in &test_cases {
-            let bytes = input.as_bytes();
-            let mut last_sep = 0;
-            for (i, &b) in bytes.iter().enumerate() {
-                if b == b'/' || b == b'\\' {
-                    last_sep = i + 1;
-                }
-            }
-            let base = &input[last_sep..];
-            let base = base.strip_suffix(".exe").unwrap_or(base);
-            assert_eq!(base, *expected, "Failed for input: {input}");
-        }
     }
 
     #[test]

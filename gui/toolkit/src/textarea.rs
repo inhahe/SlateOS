@@ -743,6 +743,7 @@ impl TextArea {
             history: true,
             can_undo: self.can_undo(),
             can_redo: self.can_redo(),
+            copies_line: false,
         })
     }
 

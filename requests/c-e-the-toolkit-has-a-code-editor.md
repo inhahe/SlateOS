@@ -31,6 +31,14 @@ work and gives both of them the rest.
   shared with every text field: Ctrl+C, Ctrl+X and Ctrl+V use it without
   you, and `CodeViewEvent::Copy(text)` / `Cut(text)` say what went on it.
   (`CodeViewEvent::Paste`, which asked you to paste, is gone.)
+- A right-click on the text (added 2026-10-01): put up a menu of
+  `view.edit_menu()` where it landed -- Undo, Redo, Cut, Copy, Paste,
+  Delete, Select all, each greyed when it would do nothing -- and hand the
+  chosen row's id to `view.edit_command(id)`, which answers as the key that
+  does the same would (`None` for an id that is not one of its rows, so
+  rows of your own can follow them). As with the keys, Cut and Copy with
+  nothing selected take the caret's line. The same pattern as every text
+  field's: `requests/c-e-text-fields-have-a-right-click-menu.md`.
 - `CodeViewEvent::Changed` is the moment to mark the document modified.
 - A file with `\r\n` line endings keeps its `\r`s as text; convert on open and
   back on save if the editor offers a line-ending setting.

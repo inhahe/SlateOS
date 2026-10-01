@@ -109,6 +109,10 @@ pub struct EditState {
     pub can_undo: bool,
     /// Whether there is anything to redo.
     pub can_redo: bool,
+    /// Whether Cut and Copy with nothing selected take the caret's whole
+    /// line, as a code editor's keys do -- so they are lit whenever there is
+    /// text, selected or not.
+    pub copies_line: bool,
 }
 
 /// The rows of a field's menu: Undo and Redo where it keeps a history, then
@@ -130,8 +134,10 @@ pub fn rows(state: EditState) -> Vec<MenuItem> {
         rows.push(row(EditCommand::Redo, state.editable && state.can_redo));
         rows.push(MenuItem::Separator);
     }
-    rows.push(row(EditCommand::Cut, state.editable && state.selected));
-    rows.push(row(EditCommand::Copy, state.selected));
+    // What Cut and Copy would take: the selection, or the caret's line.
+    let takes = state.selected || (state.copies_line && state.has_text);
+    rows.push(row(EditCommand::Cut, state.editable && takes));
+    rows.push(row(EditCommand::Copy, takes));
     rows.push(row(
         EditCommand::Paste,
         state.editable && !crate::clipboard::is_empty(),
@@ -227,6 +233,47 @@ mod tests {
                 .iter()
                 .any(|(l, _)| *l == "Undo"),
             "a field with no history offered Undo"
+        );
+    }
+
+    /// **A field whose Cut and Copy take the caret's line offers them with
+    /// nothing selected** -- while there is text to take; Delete still wants
+    /// a selection.
+    #[test]
+    fn a_field_that_copies_the_line_offers_cut_and_copy_unselected() {
+        let state = EditState {
+            editable: true,
+            has_text: true,
+            copies_line: true,
+            ..EditState::default()
+        };
+        let offered = rows(state);
+        let lit: Vec<(&str, bool)> = enabled(&offered)
+            .into_iter()
+            .filter(|(l, _)| matches!(*l, "Cut" | "Copy" | "Delete"))
+            .collect();
+        assert_eq!(lit, [("Cut", true), ("Copy", true), ("Delete", false)]);
+        let empty = rows(EditState {
+            has_text: false,
+            ..state
+        });
+        assert!(
+            enabled(&empty)
+                .iter()
+                .filter(|(l, _)| matches!(*l, "Cut" | "Copy"))
+                .all(|(_, on)| !on),
+            "an empty field offered a line to cut"
+        );
+        let read_only = rows(EditState {
+            editable: false,
+            ..state
+        });
+        assert_eq!(
+            enabled(&read_only)
+                .into_iter()
+                .filter(|(l, _)| matches!(*l, "Cut" | "Copy"))
+                .collect::<Vec<_>>(),
+            [("Cut", false), ("Copy", true)]
         );
     }
 

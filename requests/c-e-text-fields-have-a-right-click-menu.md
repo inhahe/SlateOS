@@ -38,6 +38,10 @@ match field.edit_command(id) {
 
 - **`TextArea::edit_command(id, &metrics)`** takes the box's metrics, as
   its keys do, so the caret stays in view after a paste.
+- **The code editor (`guitk::codeview::CodeView`)** has the same pair:
+  `edit_menu()` and `edit_command(id) -> Option<CodeViewEvent>`, answering
+  as its keys do. Its Cut and Copy are lit with nothing selected, since
+  Ctrl+X and Ctrl+C take the caret's line then.
 - **Your own rows beside them.** The rows' ids are far up the id space
   (`guitk::editmenu::EditCommand::id`), so a "Paste and go" or "Insert
   date" of yours can follow them in the same menu with your own small ids;

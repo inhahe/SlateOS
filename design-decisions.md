@@ -89130,6 +89130,7 @@ menu anywhere").
 | The rows | `guitk::editmenu::rows(EditState)`: Undo and Redo (a field with a history), Cut, Copy, Paste, Delete, Select all, each with its keys beside it |
 | Their ids | `EditCommand::id`, far up the id space (`0xED17` in the top bits), so a window can put rows of its own beside them without renumbering either |
 | A field's part | `TextInput::edit_menu` / `edit_command`, `TextArea::edit_menu` / `edit_command`: the field says which rows can act, and does what a row says as its key would. It draws nothing and holds no menu -- the window that draws the field puts the menu up |
+| The code editor's | `CodeView::edit_menu` / `edit_command`, the same pair. Its Cut and Copy are lit with nothing selected (`EditState::copies_line`), because Ctrl+X and Ctrl+C take the caret's line then; the menu's Delete takes only what is selected (`CodeEditor::delete_selected`), where the Delete key would take the character after the caret |
 | The shell's part | one menu for its four fields, `DesktopShell::field_menu`, captured with the field it was opened on (`MenuField`) as the pin menu captures its row |
 
 **Choices:**

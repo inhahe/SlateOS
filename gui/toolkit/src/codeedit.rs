@@ -863,6 +863,33 @@ impl CodeEditor {
         self.edit_keeping_selections(edits);
     }
 
+    /// Whether there is a step to take back ([`undo`](Self::undo)).
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    /// Whether there is a step taken back to make again
+    /// ([`redo`](Self::redo)).
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// Delete what is selected at every caret, leaving a caret with nothing
+    /// selected where it is -- a menu's Delete, which unlike the Delete key
+    /// reaches nothing past the caret.
+    pub fn delete_selected(&mut self) {
+        let edits: Vec<(Range<usize>, String)> = self
+            .selections
+            .iter()
+            .map(|s| (s.range(), String::new()))
+            .collect();
+        self.edit(edits, StepKind::Other, |_, start, _| {
+            Selection::caret(start)
+        });
+    }
+
     /// Take back the last step. Answers whether there was one.
     pub fn undo(&mut self) -> bool {
         let Some(step) = self.history.undo() else {
@@ -1938,6 +1965,26 @@ mod tests {
         assert_eq!(marked(&e), "|one\n|two\n|three");
         assert!(e.redo());
         assert_eq!(marked(&e), "> |one\n> |two\n> |three");
+    }
+
+    /// **Deleting what is selected takes the selections and nothing past a
+    /// caret**, as one step undo takes back; with nothing selected anywhere
+    /// it is no step at all.
+    #[test]
+    fn deleting_the_selection_takes_nothing_past_a_caret() {
+        let mut e = editor("[ab]c|d[e]f");
+        e.delete_selected();
+        assert_eq!(marked(&e), "|c|d|f");
+        assert!(e.can_undo());
+        assert!(e.undo());
+        assert_eq!(marked(&e), "[ab]c|d[e]f");
+        assert!(!e.can_undo());
+        assert!(e.can_redo());
+
+        let mut e = editor("a|b c|d");
+        e.delete_selected();
+        assert_eq!(marked(&e), "a|b c|d");
+        assert!(!e.can_undo(), "deleting nothing was a step");
     }
 
     /// **Undo puts back exactly what a batch changed, however its carets

@@ -2417,6 +2417,10 @@ D's to act on once answered).
       parsed its own uninitialised buffer (known-issues.md,
       `D-POSIX-STDIN-WAS-A-NULL-POINTER`; fixed 2026-09-27). The line stays
       until a run answers 42.
+      **It answers 42** (lane D's boot of `b876bf1d5`, 2026-10-01): isatty
+      true on the pty slave, the interactive branch taken, the typed line
+      delivered and `6*7` evaluated -- "CPython ran interactively on
+      SlateOS" in the serial log. Done.
       The expression is `6*7` rather than `1+1` because a pty echoes what is
       typed: a scan for `2` would match the echo of `print(1+1)` and pass
       without the interpreter evaluating anything.

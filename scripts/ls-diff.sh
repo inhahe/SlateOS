@@ -185,9 +185,10 @@ mkdir -p w
 # independently built GNU agreeing rules out the agreement being an artifact
 # of how we configure the reference. So they are ordinary cases now.
 #
-# This does not close `open-questions.md` "Which width table should `charwidth`
-# follow" -- it only shows this fixture does not discriminate between the two
-# tables, because `ls` reaches the same layout either way here.
+# That question (B-Q8, "which width table should `charwidth` follow") has since
+# been answered: design-decisions §1042 gives U+00AD zero columns, as gnulib
+# does, so the two tables now agree on it too. The fixture stays as the check
+# that the soft hyphen's width reaches `ls`'s layout at all.
 mkdir -p y
 : > "$(printf 'y/shy\u00ad')"
 : > y/AAAA

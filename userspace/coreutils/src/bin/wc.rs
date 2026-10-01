@@ -1099,10 +1099,18 @@ mod tests {
 
     #[test]
     fn a_soft_hyphen_and_a_private_use_character_are_ordinary_word_characters() {
-        // Measured 3 columns each: both are printable and one column wide,
-        // which is where `iswprint` and the Unicode category part company.
-        assert_eq!(count("a\u{ad}b\n".as_bytes()).max_line, 3);
+        // Both are printable, so neither splits a word -- which is where
+        // `iswprint` and the Unicode category part company.
+        assert_eq!(count("a\u{ad}b\n".as_bytes()).words, 1);
+        assert_eq!(count("a\u{e000}b\n".as_bytes()).words, 1);
+        // A private-use character is one column wide: measured, 3 columns.
         assert_eq!(count("a\u{e000}b\n".as_bytes()).max_line, 3);
+        // The soft hyphen takes none (design-decisions §1042: Unicode shows
+        // it only where a line breaks at it, and gnulib, which coreutils 9.5
+        // measures with, agrees). glibc's `wcwidth` gives it one, so
+        // Ubuntu's `wc -L` says 3 here; `scripts/wc-diff.sh` records that
+        // case as a difference on purpose.
+        assert_eq!(count("a\u{ad}b\n".as_bytes()).max_line, 2);
         // A zero-width space is printable but occupies nothing.
         assert_eq!(count("a\u{200b}b\n".as_bytes()).max_line, 2);
     }

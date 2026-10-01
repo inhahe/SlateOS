@@ -102,7 +102,13 @@ the survey and how each licence was read.
 manifests, so if your code ports one of these -- lane D and glibc or gnulib
 are the likely case -- do not add a second entry: file a request and lane B
 will add your crate to the comment above its entry (and widen the entry's
-licence, if your files carry one it does not list). One thing lane B did not
-settle: whether width or property tables generated from Unicode data owe
-the Unicode licence's notice. That is the same question in every lane that
-has such tables, so it wants one answer, not one per crate.
+licence, if your files carry one it does not list).
+
+One more, which other lanes may share: a table generated from the Unicode
+Character Database's files is a modified copy of them, and the Unicode
+licence lets those travel only with its notice. Lane B's width tables now
+come from the UCD's files (design-decisions §1042), so
+`userspace/charwidth/licenses/` names the Unicode Character Database 18.0.0
+(`Unicode-3.0`). A lane with its own UCD-derived tables at a *different*
+Unicode version names that version itself; at the same version, the
+two-manifests rule above applies.

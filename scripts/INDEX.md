@@ -45,6 +45,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/canary-load.py` | Hold the host CPU busy across a *named window* of a `--bench` run. |
 | `scripts/canary-spread-survey.py` | Survey the canary's observed spread across every recorded run. |
 | `scripts/cat-diff.sh` | Differential test: our cat against GNU coreutils' cat. |
+| `scripts/charwidth-gen.py` | Generate the terminal-column width tables of `userspace/charwidth`. |
 | `scripts/check-absent-operand-default.py` | Refuse a missing shell operand that silently becomes a number. |
 | `scripts/check-accidental-headings.py` | Refuse to build when a `---` separator has silently become an `<h2>`. |
 | `scripts/check-ansic-quoting-vs-bash.py` | Pin bash's `$'...'` (ANSI-C quoting) rules, for TD-SHELLQUOTE-NO-ANSI-C-QUOTING. |
@@ -474,4 +475,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_464 scripts._
+_465 scripts._

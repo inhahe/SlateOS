@@ -33,6 +33,15 @@ quoting = { path = "../quoting" }
 # is now shared with the programs outside coreutils. `coreutils::getopt`
 # re-exports it, so the binaries' imports did not change.
 getoptlong = { path = "../getoptlong" }
+# POSIX fnmatch over bytes, which lived here as `src/fnmatch.rs` until
+# 2026-10-01 and moved out when sudo needed it; `coreutils::fnmatch`
+# re-exports it.
+fnmatch = { path = "../fnmatch" }
+# The stateful half of the C library -- `gethostname`, `sethostname`,
+# `getdomainname`, `getaddrinfo`, `getifaddrs` -- reached through the one libc
+# a program links (design-decisions 768). `hostname` is upstream's calls to
+# those, and nothing else would give the answer every C program gets.
+libcall = { path = "../../libcall" }
 # util-linux's lib/strutils.c number parsing -- `cal -c`, `cal -n`, the year
 # operands -- which lived in bin/cal.rs until 2026-09-26 and is now shared with
 # the util-linux ports outside coreutils (logger's -S and --id=).

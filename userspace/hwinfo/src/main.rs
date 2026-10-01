@@ -1,8 +1,13 @@
-//! Slate OS hardware information utility.
+//! Slate OS hardware information utility: `hwinfo`, a comprehensive
+//! hardware inventory.
 //!
-//! Multi-personality binary providing:
-//! - **hwinfo** — comprehensive hardware inventory
-//! - **lshw** — list hardware (simplified)
+//! Until 2026-10-01 it also answered to `lshw`, as "list hardware
+//! (simplified)", and that answer was made up (the design-decisions 1045
+//! triage): its "H/W path" column was `/sys/device/<index>`, a path that
+//! names nothing on any system, where lshw's is the bus path to the
+//! device (`/0/100/1f.2`), and its XML was not lshw's. A script reading
+//! either would have been reading this program's invention under lshw's
+//! name. `lshw` comes back as a port of lshw.
 //!
 //! Probes system hardware by reading /sys, /proc, and DMI tables
 //! to produce a detailed hardware inventory report.
@@ -664,10 +669,9 @@ fn hwinfo_main(args: &[String]) -> i32 {
         }
     }
 
-    // hwinfo's own parser accepted anything; only its `lshw` personality had
-    // been fixed. `hwinfo --zzq` printed the full hardware inventory and
-    // exited 0. The single-dash long forms (`-short`, `-json`, `-xml`,
-    // `-class`) are lshw's spelling and are kept.
+    // hwinfo's own parser accepted anything: `hwinfo --zzq` printed the full
+    // hardware inventory and exited 0. The single-dash long forms (`-short`,
+    // `-json`, `-xml`, `-class`) are lshw's spelling and are kept.
     // `args` here is already past argv[0] -- `hwinfo_main` is called with
     // `&rest`. Slicing again skipped the first option, so the guard compiled,
     // read correctly, and examined nothing.
@@ -751,109 +755,6 @@ fn hwinfo_main(args: &[String]) -> i32 {
 }
 
 // ============================================================================
-// lshw personality
-// ============================================================================
-
-fn lshw_main(args: &[String]) -> i32 {
-    let mut format = OutputFormat::Normal;
-    let mut filter_class: Option<String> = None;
-
-    for arg in args {
-        match arg.as_str() {
-            "-short" => format = OutputFormat::Short,
-            "-json" => format = OutputFormat::Json,
-            "-xml" => format = OutputFormat::Xml,
-            "-class" => { /* Next arg is the class */ }
-            "--help" | "-h" => {
-                println!("Usage: lshw [-short] [-json] [-xml] [-class CLASS]");
-                println!();
-                println!("List hardware.");
-                return 0;
-            }
-            "--version" => {
-                println!("lshw (Slate OS) {VERSION}");
-                return 0;
-            }
-            s if !s.starts_with('-') => {
-                // Could be class name after -class.
-                filter_class = Some(s.to_string());
-            }
-            // Used to be skipped, so `lshw --zzq` listed the hardware and
-            // exited 0.
-            //
-            // The reference prints its banner and usage for anything it does
-            // not recognise and exits 1, *without* naming the option --
-            // measured, and reproduced rather than improved on. There is
-            // nothing indefensible in it to diverge from: the status is
-            // non-zero, so a script can tell, and the terseness is the
-            // reference's own choice about its interface.
-            _ => {
-                eprintln!("Usage: lshw [-short] [-json] [-xml] [-class CLASS]");
-                return 1;
-            }
-        }
-    }
-
-    let all_devices = probe_all();
-    let devices: Vec<&HwDevice> = if let Some(ref class) = filter_class {
-        all_devices.iter().filter(|d| d.class == *class).collect()
-    } else {
-        all_devices.iter().collect()
-    };
-
-    match format {
-        OutputFormat::Short => {
-            println!("{:<20} {:<16} {:<30}", "H/W path", "Class", "Description");
-            println!("{}", "=".repeat(66));
-            for (i, dev) in devices.iter().enumerate() {
-                println!(
-                    "/sys/device/{:<8} {:<16} {}",
-                    i,
-                    dev.class,
-                    if dev.model.is_empty() {
-                        &dev.description
-                    } else {
-                        &dev.model
-                    }
-                );
-            }
-        }
-        OutputFormat::Json => {
-            let owned: Vec<HwDevice> = devices.into_iter().cloned().collect();
-            print_devices_json(&owned);
-        }
-        OutputFormat::Xml => {
-            println!("<?xml version=\"1.0\"?>");
-            println!("<list>");
-            for dev in &devices {
-                println!("  <node class=\"{}\">", dev.class);
-                println!("    <description>{}</description>", dev.description);
-                println!("  </node>");
-            }
-            println!("</list>");
-        }
-        OutputFormat::Normal => {
-            for dev in &devices {
-                println!("  *-{}", dev.class);
-                println!("       description: {}", dev.description);
-                if !dev.vendor.is_empty() {
-                    println!("       vendor: {}", dev.vendor);
-                }
-                if !dev.model.is_empty() {
-                    println!("       product: {}", dev.model);
-                }
-                if !dev.driver.is_empty() {
-                    println!("       configuration: driver={}", dev.driver);
-                }
-                println!();
-            }
-        }
-    }
-
-    0
-}
-
-// ============================================================================
 // Main dispatch
 // ============================================================================
 
@@ -890,30 +791,8 @@ fn first_unknown_option<'a>(
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("hwinfo");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    let exit_code = match prog_name.as_str() {
-        "lshw" => lshw_main(&rest),
-        _ => hwinfo_main(&rest),
-    };
-
-    process::exit(exit_code);
+    let rest: Vec<String> = env::args().skip(1).collect();
+    process::exit(hwinfo_main(&rest));
 }
 
 // ============================================================================
@@ -927,8 +806,7 @@ mod tests {
     /// The hardware inventory is not printed for a request that was not
     /// parsed.
     ///
-    /// Only the `lshw` personality had been fixed; `hwinfo --zzq` still
-    /// printed the full inventory and exited 0.
+    /// `hwinfo --zzq` used to print the full inventory and exit 0.
     #[test]
     fn hwinfo_refuses_an_unknown_option() {
         let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };

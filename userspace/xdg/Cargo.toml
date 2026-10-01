@@ -3,6 +3,15 @@ name = "xdg"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS xdg-open/xdg-mime/mimeopen - file association tools"
+
+# Built as `xdg-open` -- xdg-utils' `xdg-open`, the command this is when run by
+# its own name -- not as `xdg`, which nobody types: the image installs each
+# binary the workspace builds under the binary's name, and the names it also
+# answers to (`xdg-mime` and `mimeopen`) as further names of the same file.
+[[bin]]
+name = "xdg-open"
+path = "src/main.rs"
+
 [dev-dependencies]
 # `contents_before_rewrite`'s three outcomes each need a real file.
 scratchdir = { path = "../scratchdir" }

@@ -1313,7 +1313,7 @@ That covers the formatter completely, since `date -d @0 +%F` exercises the same
 code as `date +%F`. What it does not cover is reading the clock, which is one
 line.
 
-## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11)
+## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11) — FIXED 2026-10-01
 
 `hostname -d` and `hostname -f` answer from the resolver's search domain and
 never consult `/etc/hosts`. net-tools resolves through nsswitch, so on this host:
@@ -1490,6 +1490,27 @@ code falls back to the old search-domain behaviour there, so nothing regressed
 
 The remaining 39 rows are other causes: `-i`/`-I` address formatting, `-a` and
 `-A`, and `-b`. They are not this entry.
+
+### FIXED 2026-10-01 — by the route this entry first named
+
+`hostname` is now a port of Debian's `hostname` 3.23
+(`userspace/coreutils/src/bin/hostname`) and resolves exactly as upstream
+does: `getaddrinfo` with `AI_CANONNAME` on what `gethostname` returns, by way
+of `libcall::netdb`. The obstacle above is gone from both ends -- the C library
+reads `/etc/hosts` first and takes the first name on the matching line as the
+canonical one (lane D's `D-POSIX-HOSTS-FILE-WAS-NEVER-READ`), and the kernel's
+resolver consults its hosts table -- so the hosts-file reading the 2026-09-16
+section added had become a second resolver that could only disagree with the
+first, and it is deleted with the rest of the file-based program.
+`scripts/hostname-diff.sh`: **123 passed, 0 differed** (it was 26 / 34), now
+also run under the four names the program answers to.
+
+**What is left is the library's, not this program's:** a host whose FQDN lives
+only in DNS. The kernel's resolver answers an address and no name, so the
+canonical name is the name asked (`posix/src/hosts.rs`'s module doc says so),
+where glibc would answer with the name the search list completed. `hostname -f`
+prints whatever `getaddrinfo` says, as on Linux, and will follow the library
+without a change here.
 
 ## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
 
@@ -2478,9 +2499,50 @@ cgroupfs) stay. **The ledger stands at 64.** **Still to judge:**
 `cpufreq-info` and `cpufreq-set`
 (cpupower) and `thermal-monitor`, `thermal-conf` (thermald), which wait on
 the kernel's cpufreq and thermal modules reaching `/sys`; `hostnamectl`'s
-four domain names (which belong to `hostname`, if anywhere); `xdg`'s two;
+four domain names (which belong to `hostname`, if anywhere -- **done**, see
+below); `xdg`'s two;
 and `efivar`, `volname`, `lshw`, `inotifywatch`, `userdbctl`. `sudo`'s
 `visudo` and `sudoreplay` are to be split into crates.
+`hostnamectl`'s `dnsdomainname`, `domainname`, `nisdomainname` and
+`ypdomainname` moved to `hostname`, now a port of Debian's `hostname` 3.23,
+which picks its default from those names as Debian installs them; they are
+**kept, fifth batch**, as further names of that binary, and the ledger now
+reads coreutils' binaries as well as the crates' so it can see them (the four
+rows are renamed, not added). **The ledger stands at 64.**
+
+**Fifth pass** (2026-10-01). Three names went for answering with something
+made up, or for something SlateOS does not have: `lshw` (hwinfo -- its "H/W
+path" column was `/sys/device/<index>`, a path that names nothing, and its XML
+was not lshw's), `userdbctl` (loginctl -- `services` listed three systemd
+varlink services SlateOS has none of, and `user`/`group` read a UID or GID that
+did not parse as 0, which is root), and `volname` (eject -- no current
+distribution ships it, SlateOS has no optical drive device, and it read the
+whole device to look at 32 bytes). Two crates went whole, under §1006 and
+§1049: **`userspace/cpupower`** (`cpufreq-info`, `cpufreq-set`), which reported
+2.4 GHz current, an 800 MHz to 4.5 GHz range and three governors as this
+machine's whenever sysfs had no cpufreq data -- every run here -- where no
+frequency source exists or is planned (roadmap's `/sys/devices` row); and
+**`userspace/thermald`** (`thermal-monitor`, `thermal-conf`), whose daemon
+printed "D-Bus interface enabled" and "daemon ready" and exited having managed
+nothing, under two tool names no upstream ships. **Kept, sixth batch:**
+`efivar` (efibootmgr: both read efivarfs and say so when it is absent),
+`sudoedit` (sudo, as upstream links it), `inotifywatch` (inotifywait), and
+`xdg-mime` and `mimeopen` (xdg-open). Four crates are now built under their
+command's name -- `lscgroup`, `sar`, `inotifywait`, `xdg-open` -- which also
+corrected the producers named in batches two and three. **The ledger stands at
+57, and every name left in it is decided:** the kept batches wait on lane D's
+manifest, and `visudo` and `sudoreplay` on the split into crates of their own.
+**`sudoreplay` was deleted instead** (2026-10-01, §1049): nothing on SlateOS
+records sudo sessions -- `log_input` and `log_output` are accepted and record
+nothing, which `visudo -c` says -- so it could only ever report that there
+were none. **The ledger stands at 56**; `visudo` alone waits on its crate.
+**`visudo` is a program of its own** (2026-10-01): the `sudo` package is now
+a library -- the sudoers file's model, parser and check, and the editor
+both programs launch -- with two binaries, `sudo` (answering to `sudoedit`
+too, as upstream links it) and `visudo`, as upstream builds `visudo` apart
+from `sudo` from one tree. `visudo` holds none of the right to change
+identity. **The ledger stands at 55, and every name in it is a kept name
+waiting on lane D's manifest.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
@@ -71788,7 +71850,7 @@ that could have caught this.
 
 ---
 
-## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — READ SIDE FIXED 2026-09-10; write side needs a syscall
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — FIXED: read side 2026-09-10, write side the same day (`b542b361b`)
 
 **In short:** `gethostname()` and `sethostname()` — the two C functions any
 program uses to ask or set what this machine is called — do not actually talk
@@ -71904,6 +71966,19 @@ write landed. All four now assert the refusal.
 only means of *varying* it, which `gethostid` needs -- it hashes the name.
 That is what `set_stored_hostname_for_test` is for: a test seam is the honest
 place for it, and a public function that half-works is not.
+
+### The write side, closed the same day — noted 2026-10-01
+
+The section above was overtaken within hours and never updated, which this
+note repairs. Lane A added the native pair -- `SYS_HOSTNAME_SET` (1072) and
+`SYS_DOMAINNAME_SET` (1073), `04ef99f35` -- and `b542b361b` wired `sethostname`
+and `setdomainname` to them, so both now change the system's names, under
+`Rights::SET_HOSTNAME`, refusing a name over 64 bytes with `EINVAL`.
+`gethostname` and `getdomainname` read `/proc/sys/kernel/hostname` and
+`.../domainname` and nothing else. `services/ctest-hostname` holds the
+round trip on the real kernel. The C functions are now what a ported program
+should call, and `hostname` does (2026-10-01): its file-based reading, which
+this entry recommended for as long as the functions were wrong, is gone.
 
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
@@ -151147,9 +151222,15 @@ exist: `/proc/net` is a **file**, not a directory — `procfs.rs`'s `ROOT_FILES`
 lists `net` and `gen_net()` writes a readable block — so nothing can live
 beneath it.
 
-    readers:  userspace/coreutils/src/bin/hostname.rs
+    readers:  userspace/coreutils/src/bin/hostname.rs  (until 2026-10-01)
               userspace/ifconfig/src/main.rs
     writers:  none
+
+**`hostname` is no longer a reader (2026-10-01).** It is a port of Debian's
+`hostname` now, and asks the C library: `-I` and `-A` walk `getifaddrs`, `-i`
+takes the addresses `getaddrinfo` gives for the host name. Which also settles
+the `-i` versus `-I` point at the end of this entry. `ifconfig` is the one
+reader left.
 
 This is the inverse of §946's publisher-with-no-subscriber: a **subscriber
 with no publisher**, and it is invisible to the compiler because the
@@ -179505,3 +179586,125 @@ in `DesktopShell::set_appearance`), lays its content out in the frame's
 `content` rectangle, draws the frame first, and treats the frame's close
 button as its own Cancel -- with a test that a theme's taller title bar moves
 its content down and its close button closes it.
+
+## B-SUDO-AUTHORISED-WHAT-ITS-RULES-REFUSED -- argument restrictions ignored, negation inverted, `..` through a pattern, sudoedit asked about running files, `-s` authorised the first word (lane B, 2026-10-01)
+
+**Status:** FIXED 2026-10-01
+
+**In short:** `sudo` decides who may run what as whom, from `/etc/sudoers`.
+Ours granted things its rules refused, five ways: a rule naming a program
+*with* arguments allowed it with any arguments; `!` (refuse this) granted
+everything else and did not refuse the thing it named; a pattern like
+`/usr/bin/*` let `/usr/bin/../../tmp/evil` through; permission to *run* a file
+was taken as permission to *edit* it with `sudoedit`; and `sudo -s CMD` checked
+only the first word, then handed the whole line to a shell. Found reading the
+crate for the `visudo`/`sudoreplay` split. None of it was live: the kernel has
+no set-user-ID path and identity changes need `SET_CREDENTIALS`, so `sudo`
+cannot yet lift a caller anywhere -- but it is the code that will decide once
+something can, and the staging request puts it on the image.
+
+| What | Rule | Granted | Upstream |
+|---|---|---|---|
+| arguments ignored | `alice ALL = /usr/bin/systemctl restart nginx` | `sudo systemctl stop sshd` | `command_args_match`: `""` = none, `^…$` = ERE, else `fnmatch` |
+| negation inverted | `alice ALL = !/usr/bin/passwd` | every command but passwd | a negated match DENIES |
+| negation unreached | `alice ALL = ALL, !/usr/bin/passwd` | passwd (the `!` "did not match", so `ALL` decided) | the last matching spec decides, either way |
+| prefix pattern | `alice ALL = /usr/bin/*` | `sudo /usr/bin/../../tmp/evil` | `glob` results + canonical dir + inode; `*` never crosses `/` |
+| sudoedit asked "may run" | `alice ALL = /etc/motd` | `sudoedit /etc/motd` | pseudo-command `sudoedit`, files as its arguments (`FNM_PATHNAME`) |
+| `-s` first word | `alice ALL = /usr/bin/id` | `sudo -s id '&& reboot'` ran `sh -c "id && reboot"` | the SHELL is authorised; the words reach it backslash-escaped |
+
+**The fix**, against sudo 1.9.15p5's `match.c`, `match_command.c` and
+`parse_args.c`: a command spec now answers ALLOW / DENY / UNSPEC
+(`cmnd_matches`), aliases recurse with a depth guard, and the first spec that
+names the request decides; arguments are compared as upstream compares them
+(the matcher is the shared `fnmatch` crate, out of coreutils for this, and
+`ere`); the caller's program is resolved on the secure path, made canonical,
+and matched -- a pattern with `FNM_PATHNAME`, a `dir/` spec as "directly in
+it", any other by canonical path (by name only where a side does not exist) --
+and the canonical program is what is executed, with the caller's name as
+`argv[0]` (`-sh` for `-i`, as upstream marks a login shell); `-s`/`-i` run
+`SHELL -c ESCAPED` and authorise exactly that; `! /cmd` with a space parses as
+one negated command. 17 new tests, each failing before the fix.
+
+**Still not upstream's, and why.** This is a reimplementation, not a port;
+sudo 1.9.15p5 is ~100,000 lines and a faithful port is the real end state.
+Divergences kept, deliberately: an unqualified command in a rule resolves on the
+secure path (upstream refuses the rule), which the 2026-09-12 entry above made
+safe; no `sha256:` digests, `fdexec` or `CWD`/`CHROOT`; `\,` escapes inside a
+rule's arguments are not unescaped (the list is split on every comma); `-s`
+uses the target's shell where upstream uses the caller's `$SHELL`. sudoedit's
+*execution* and `visudo`'s file handling had their own defects, fixed in the
+next entries.
+
+**Where:** `userspace/sudo/src/main.rs` (`check_authorization`, `cmnd_matches`,
+`args_match`, `command_matches`, `command_path_matches`, `invocation`,
+`shell_escaped_command`); `userspace/fnmatch`.
+
+## B-SUDOEDIT-RAN-THE-EDITOR-WITH-SUDOS-PRIVILEGE -- on copies at a predictable `/tmp` name, created through whatever symlink was there (lane B, 2026-10-01)
+
+**Status:** FIXED 2026-10-01
+
+**In short:** `sudoedit` exists so that a user allowed to edit one file is not
+given a root shell: the editor runs as *them*, on copies, and only the copy-back
+is privileged. Ours ran the editor with sudo's own privilege -- `:!sh` from vim
+was a shell with it -- on copies at `/tmp/sudoedit-<pid>-<name>`, a name anyone
+can predict, written with `fs::copy`, which follows a symlink planted there; and
+it wrote the copy back with no check of what the copy had become. Latent, as the
+entry above is: nothing can lift `sudo` today.
+
+**The fix**, after sudo 1.9.15p5's `sudo_edit.c`, `edit_open.c` and
+`copy_file.c`: originals are opened with `O_NOFOLLOW`, refused if any directory
+on the path is a symlink or writable by the caller ("editing files in a
+writable directory is not permitted"), and must be regular files; copies are
+created `O_EXCL`, mode 0600, under an unguessable name (upstream's
+`motdXXXXXXXX.conf` shape) in the first of `/var/tmp`, `/usr/tmp`, `/tmp` the
+caller can write, then `fchown`ed to the caller; one editor (the setting split
+into words) runs on all of them through `become_user`; each copy is reopened
+`O_NOFOLLOW` and must still be a regular file, 0600, the caller's, or its
+original is "left unmodified"; an unmoved size and time is "unchanged"; the rest
+are written over their originals (opened `O_NOFOLLOW`, then cut to length), and
+a copy that cannot be written back is kept and named. The exit status is the
+editor's, or 1 on a copy-back failure, as upstream's. 10 tests, the
+file-handling ones on Linux.
+
+**Still not upstream's:** only the caller's primary group counts when judging a
+directory writable -- `userdb` keeps supplementary memberships as names with no
+name-to-gid resolver (`TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS`),
+so a directory writable through one of those is not refused; the original is
+read and written with sudo's own identity rather than the target user's; no
+`sudoedit_follow`/`sudoedit_checkdir` settings.
+
+**Where:** `userspace/sudo/src/main.rs` (`edit_files`, `check_path_dirs`,
+`check_dir`, `open_original`, `prepare_edit`, `copy_back`).
+
+## B-VISUDO-COPIED-SUDOERS-THROUGH-TMP-AND-LOCKED-NOTHING -- a predictable `/tmp` copy, a lock two could take, an in-place write with no mode (lane B, 2026-10-01)
+
+**Status:** FIXED 2026-10-01
+
+**In short:** `visudo` is how root edits `/etc/sudoers`. Ours copied it to
+`/tmp/visudo-<pid>`, a name anyone can predict, writing through whatever symlink
+was planted there -- so another user could have root overwrite a file of their
+choosing with the sudoers text; its lock was a `.lck` file checked for and then
+written, so two `visudo`s could both take it, and one older than five minutes
+was "stale" and taken while its owner was still editing; it wrote the result
+over the file in place, with no mode or owner, so a crash mid-write left half a
+sudoers file; and at "What now?" the end of input meant "edit again", forever.
+
+**The fix**, after sudo 1.9.15p5's `visudo.c`: the file itself is opened
+(created 0440) and `flock`ed for the whole session -- "busy, try again later"
+when held, "Edit anyway? [y/N]" when locking fails otherwise; the copy is
+upstream's `<file>.tmp` beside it, opened `O_NOFOLLOW`, with a final newline
+added and the file's time set; the editor runs as `EDITOR -- file.tmp`; an
+emptied copy and an untouched one are refused and reported as upstream reports
+them; a copy that does not parse offers (e)dit / e(x)it / (Q)uit, end of input
+being `x`; a good copy is given to root:root, mode 0440, *then* renamed over the
+file. `visudo -c` says `FILE: parsed OK`, with upstream's colon. 9 tests; the
+Linux ones drive a real edit through `sh` as the editor.
+
+**Still not upstream's:** the parser is ours, not sudoers' grammar; the lock is
+`flock`, where upstream's `sudo_lock_file` uses `fcntl` record locks (the two do
+not exclude each other, which matters only if a real sudo's `visudo` ever runs
+on the same file); no `-o`/`-p` owner and mode checks, no `@include`d files, no
+`+LINE` jump to the error.
+
+**Where:** `userspace/sudo/src/main.rs` (`edit_sudoers`, `ask_what_now`,
+`sudoers_temp_path`); the `.lck` lock and `SudoError::LockError` are gone.

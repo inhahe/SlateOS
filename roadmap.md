@@ -5832,21 +5832,21 @@ _Port ext4 first. Don't write a custom filesystem._
     `authlib::check_stored` against the group's `/etc/gshadow` entry, with
     absent/empty/locked all closed.
   - [x] fuser/lsof: process-file identification (/proc scanning, cwd/exe/fd/mmap detection, socket matching)
-  - [x] eject/volname: removable media control (tray open/close/toggle, lock/unlock, ISO 9660 volume name, speed control)
+  - [x] eject/volname: removable media control (tray open/close/toggle, lock/unlock, ISO 9660 volume name, speed control) -- `volname` **removed 2026-10-01** (design-decisions §1045): no current distribution ships it, and SlateOS has no optical drive device
   - [x] sar/iostat/mpstat/pidstat/cifsiostat/tapestat: system activity monitoring (CPU/memory/disk/network/per-process, 3526 lines, 153 tests)
   - [ ] auditctl/auditd/ausearch/aureport/autrace: security audit framework (rule management, log search/report, 4069 lines, 207 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): the Linux audit framework (netlink rules, `/var/log/audit`), which SlateOS does not have -- its auditing is the kernel's own capability and filesystem audit rings; `auditctl` kept rules nothing enforced and `auditd` could not start
   - [ ] grub-install/grub-mkconfig/grub-editenv/grub-probe/update-grub: GRUB2 bootloader tools (EFI/BIOS detection, kernel scanning, env blocks, 3121 lines, 158 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS boots with Limine, and its part in a dual-boot GRUB is the installer's (`apps/installer` `--grub-*`); `grub-install` wrote no bootloader, and `grub-set-default`/`grub-reboot` wrote a grubenv no bootloader reads
-  - [x] sudo/sudoedit/visudo/sudoreplay: privilege escalation (sudoers parsing, timestamp caching, env handling, 4391 lines)
+  - [x] sudo/sudoedit/visudo/sudoreplay: privilege escalation (sudoers parsing, timestamp caching, env handling, 4391 lines) -- `sudoreplay` **removed 2026-10-01** (design-decisions §1049): nothing records sudo sessions (`log_input`/`log_output` are accepted and do nothing), so it could only report that there were none; `visudo` is a binary of its own since the same day, beside `sudo` in one package whose library is the sudoers file
   - [x] nft/nft-list: nftables packet filtering (tables/chains/rules/sets/maps, inet/ip/ip6/bridge families, 5040 lines)
   - [ ] upower/upowerd: power/battery management (11 device types, battery properties, history tracking, 2789 lines, 128 tests) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `upowerd` announced "daemon initialized (simulated mode)" and exited
   - [ ] mkinitramfs/update-initramfs/lsinitramfs: initramfs builder (CPIO newc format, kernel module inclusion, compression, 1124 lines) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS boots no initramfs -- Limine loads the kernel, which carries its services
   - [x] update-alternatives: symlink manager for package alternatives (Debian-compatible registry, priority-based auto mode, 960 lines)
   - [ ] plymouth/plymouthd/plymouth-set-default-theme: boot splash system (theme management, daemon mode, client commands, 637 lines) -- **deleted 2026-10-01** (design-decisions §1045, §1006): no plymouth daemon exists or is planned (a boot splash would be the compositor's); the client printed what it "would" show
-  - [x] hwinfo/lshw: hardware inventory (CPU/memory/PCI/USB/block/network/display/audio/input probing, JSON/XML/short output, 906 lines)
+  - [x] hwinfo/lshw: hardware inventory (CPU/memory/PCI/USB/block/network/display/audio/input probing, JSON/XML/short output, 906 lines) -- `lshw` **removed 2026-10-01** (design-decisions §1045): its H/W paths were invented (`/sys/device/<index>`) and its XML was not lshw's
   - [ ] udisksctl/udisksd/umount: disk management service (device discovery, mount/unmount, SMART data, loop devices, 896 lines) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- with no block devices found it listed an invented `/dev/sda` (UUID 12345678-abcd-...)
   - [x] bootctl: EFI boot manager (systemd-boot compatible, loader.conf, boot entry discovery, install/update/remove/set-default/set-oneshot, 598 lines)
   - [x] localectl: locale/keyboard config (set-locale/set-keymap/set-x11-keymap/list-locales/list-keymaps, 592 lines)
-  - [x] loginctl/userdbctl: session/user/seat management (list/show/lock/kill sessions, user linger, seat attach, power commands, passwd/group query, 1085 lines)
+  - [x] loginctl/userdbctl: session/user/seat management (list/show/lock/kill sessions, user linger, seat attach, power commands, passwd/group query, 1085 lines) -- `userdbctl` **removed 2026-10-01** (design-decisions §1045): it listed systemd varlink services SlateOS has none of, and read an unparsable UID as 0
   - [x] coredumpctl/coredump-extract: core dump management (list/info/dump/debug, config parsing, signal names, JSON output, 740 lines)
   - [ ] numactl/numastat/numademo/memhog: NUMA policy control (topology discovery, memory binding, interleave, per-node stats, 805 lines) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `numactl -m 0 CMD` printed the policy and never ran CMD, `memhog` printed "Allocation complete." having allocated nothing, `numademo` printed made-up MB/s
   - [ ] btrfs/mkfs.btrfs/btrfs-convert: btrfs filesystem tools (14 subcommands, RAID profiles, scrub/balance/quota/qgroup, 4517 lines, 248 tests)
@@ -5856,8 +5856,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] selinux (getenforce/setenforce/sestatus/semanage/setsebool/getsebool/restorecon/chcon/seinfo/sesearch/audit2allow): SELinux tools (11 personalities, policy query, context management, 3748 lines, 150 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS has no LSM, so every command acted on a /sys interface that does not exist
   - [ ] snapper/snapper-timeline/snapper-cleanup: filesystem snapshot management (pre/post pairs, timeline/number/empty-pre-post cleanup, 3174 lines, 145 tests)
   - [ ] tuned/tuned-adm/tuned-gui: system tuning daemon (10 builtin profiles, dynamic tuning, verify, 806 lines) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `tuned-adm verify` printed `... OK (simulated)` for every setting it never read
-  - [x] cpupower/cpufreq-info/cpufreq-set/turbostat: CPU frequency/power control (topology discovery, governor management, 661 lines)
-  - [x] thermald/thermal-monitor/thermal-conf: thermal management (zone monitoring, cooling devices, trip points, 678 lines)
+  - [ ] cpupower/cpufreq-info/cpufreq-set/turbostat: CPU frequency/power control (topology discovery, governor management, 661 lines) -- **deleted 2026-10-01** (design-decisions §1006, §1049): with no cpufreq data in sysfs -- every run here -- it reported 2.4 GHz current, 800 MHz to 4.5 GHz and three governors as this machine's, and no frequency source exists or is planned (the `/sys/devices` row above)
+  - [ ] thermald/thermal-monitor/thermal-conf: thermal management (zone monitoring, cooling devices, trip points, 678 lines) -- **deleted 2026-10-01** (design-decisions §1006, §1049): its daemon announced "D-Bus interface enabled" and "daemon ready" and exited having managed nothing, the two tool names are no upstream's, and `/sys/class/thermal` does not exist here
   - [ ] fwupdmgr/fwupd/fwupdtool: firmware update daemon (LVFS remotes, device discovery, HSI security, 740 lines) -- **deleted 2026-10-01** (design-decisions §1006): it fabricated -- `get-updates` offered firmware 1.1.0, "Bug fixes and security updates", for a device it never asked
   - [~] sbctl: Secure Boot status and the kernel's keys (2026-09-27, design-decisions §1049). `status` reads the firmware's `SecureBoot`/`SetupMode` variables where they are visible and says so where they are not, and counts the keys the kernel publishes in `/proc/secureboot`; `list-enrolled` lists them. `enroll-keys` and `reset` refuse until lane A's door to `fs::secureboot` lands (`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`). Deleted under §1006, needing cryptography nobody has planned: `create-keys`, `sign`, `rotate-keys`, `bundle`, the files database (`verify`, `list-files`, `remove-file`) and the `sbsign`/`sbverify`/`sbkeysync` personalities, all of which reported work they never did.
   - [ ] podman/buildah/skopeo: container runtime (full CRUD for containers/images/volumes/networks/pods, 4264 lines, 240 tests)
@@ -6491,8 +6491,8 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Batch 93 — Power management/boot tools (8 utilities, ~1172 lines):
   - [ ] powertop-cli: power monitor (powertop)
   - [ ] tlp-cli: power management (tlp, tlp-stat)
-  - [ ] cpupower-cli: CPU frequency tools (cpupower, cpufreq-info, cpufreq-set, turbostat)
-  - [ ] thermald-cli: thermal management (thermald, thermal-monitor)
+  - [ ] cpupower-cli: CPU frequency tools (cpupower, cpufreq-info, cpufreq-set, turbostat) -- the crate was deleted 2026-10-01 (see the line for it above); a port waits on a frequency source in the kernel
+  - [ ] thermald-cli: thermal management (thermald, thermal-monitor) -- the crate was deleted 2026-10-01 (see the line for it above); a port waits on `/sys/class/thermal`
   - [ ] grub-cli: GRUB bootloader (grub-install, grub-mkconfig, update-grub, grub-set-default, grub-editenv)
   - [ ] efibootmgr-cli: EFI boot manager (efibootmgr, efivar)
   - [ ] dracut-cli: initramfs generator (dracut, lsinitrd)

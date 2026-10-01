@@ -133,9 +133,11 @@ UNDECLARED_OK: dict[str, str] = {
 # GCC, and this compiler has no _Float128 to declare them with.
 FLOAT16_128 = re.compile(r"[a-z_]+f(?:16|128)")
 
-# Every feature-test macro on, so that whatever any header can declare, it does.
+# Every feature-test macro on, so that whatever any header can declare, it does
+# -- <regex.h>'s _REGEX_RE_COMP among them, for BSD's re_comp and re_exec,
+# which glibc's header declares under nothing else.
 ALL_FEATURES = ["-std=gnu17", "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE",
-                "-D__STDC_WANT_IEC_60559_EXT__"]
+                "-D__STDC_WANT_IEC_60559_EXT__", "-D_REGEX_RE_COMP"]
 
 DECL = re.compile(r"[^;{}]*\)\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*;", re.S)
 # `int (name)(...)`: a parenthesised declarator, which keeps a function-like
@@ -268,7 +270,8 @@ def declared(zig: str, inc: Path, overlay: Path | None = None) -> dict[str, str]
         for h in headers:
             src.write_text(f"#include <{h}>\n", encoding="utf-8", newline="")
             r = subprocess.run([zig, "cc", "--target=x86_64-linux-musl", "-E", *first,
-                                "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE", str(src)],
+                                "-D_GNU_SOURCE", "-D_BSD_SOURCE", "-D_LARGEFILE64_SOURCE",
+                                "-D_REGEX_RE_COMP", str(src)],
                                capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=120)
             if r.returncode != 0:

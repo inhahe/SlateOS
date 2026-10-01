@@ -74,9 +74,10 @@
 //! by-value copy is already wrong whatever the size.  `<=` states what
 //! matters for them and keeps firing if a field is ever added.
 //!
-//! Where an explicit `_reserved` tail *is* carried — `SemT`, `RegexT` and
+//! Where an explicit `_reserved` tail *is* carried — `SemT` and
 //! `PosixSpawnFileActionsT` — or every field of the header's is there by
-//! name, as in `GlobT` since 2026-09-29, the assertion is tightened to
+//! name, as in `GlobT` since 2026-09-29 and `RegexT` (glibc's `struct
+//! re_pattern_buffer`) since 2026-09-30, the assertion is tightened to
 //! `==`, which says strictly more: it catches a field *removal* as well as
 //! an addition, and a removal is what would silently shorten a by-value
 //! copy of one of those.  (See `TD-B-THREE-C-VISIBLE-TYPES-ARE-SMALLER-

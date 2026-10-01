@@ -694,7 +694,33 @@ pub(crate) fn abi_asserts() -> String {
     );
 
     // --- regex: `regex_t` is declared by value too ---------------------------
-    abi!(out, hdrs, crate::regex::RegexT, "regex_t", "regex.h");
+    // glibc's `struct re_pattern_buffer`, posix/include's; its seven
+    // bit-fields, which `offsetof` cannot name, are the `unsigned int` at 56
+    // that the size covers.
+    abi!(
+        out,
+        hdrs,
+        crate::regex::RegexT,
+        "regex_t",
+        "regex.h",
+        buffer,
+        allocated,
+        used,
+        syntax,
+        fastmap,
+        translate,
+        re_nsub,
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::regex::ReRegisters,
+        "struct re_registers",
+        "regex.h",
+        num_regs,
+        start,
+        end
+    );
     abi!(
         out,
         hdrs,

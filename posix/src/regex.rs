@@ -1,7 +1,9 @@
-//! POSIX regular expressions: `regcomp`, `regexec`, `regfree` and
-//! `regerror` (XSH; XBD chapter 9), read as glibc 2.39 reads patterns and
-//! matched as the standard says -- which glibc, in its choice of submatches,
-//! does not always do.
+//! Regular expressions: POSIX's `regcomp`, `regexec`, `regfree` and
+//! `regerror` (XSH; XBD chapter 9), and glibc's GNU interface beside them --
+//! `re_compile_pattern`, `re_search` and the rest, BSD's `re_comp` and
+//! `re_exec` -- read as glibc 2.39 reads patterns, and matched as the
+//! standard says, which glibc, in its choice of submatches, does not always
+//! do.
 //!
 //! ## What it reads
 //!
@@ -24,6 +26,19 @@
 //! Bytes, not characters: the C locale, which is the one this library
 //! reports (known-issues.md -> open-questions D-Q7).
 //!
+//! `re_compile_pattern` reads a pattern in any syntax glibc's
+//! `reg_syntax_t` can describe -- the twenty-six `RE_*` bits, which the
+//! programs' syntaxes (`RE_SYNTAX_GREP`, `_EGREP`, `_AWK`, `_GNU_AWK`,
+//! `_EMACS` and the rest) combine -- through the program's translate table
+//! if it set one; `re_search`, `re_search_2`, `re_match` and `re_match_2`
+//! search forwards or backwards over a range of starting places, report
+//! into a `struct re_registers` they allocate, grow or leave as they find
+//! it, and keep the pattern buffer's fastmap of the bytes a match can begin
+//! with (`regex/fastmap.rs`). `regex_t` is glibc's `struct
+//! re_pattern_buffer`, field for field, as programs written for the GNU
+//! interface fill and read it -- with POSIX's `regoff_t`, as wide as
+//! `ssize_t`, where glibc's is an `int` (design-decisions §1161).
+//!
 //! ## Which match
 //!
 //! The leftmost, and of those the longest (XBD 9.1). Then the submatches:
@@ -43,7 +58,7 @@
 //!
 //! And they are reported as regexec's page says: a group its last match, -1
 //! for one that took no part, and one inside another only within what that
-//! one reports.
+//! one reports. `re_search` reports by the same rule.
 //!
 //! **glibc does otherwise**, taking the first path its automaton finds to
 //! the longest match: the first alternative and the greedier loop wherever
@@ -58,16 +73,19 @@
 //! match nothing at all (`(^[a-c]{0,2}){0,2}.{2,}|[^a]{0,1}` against
 //! "aaa", though its second branch matches the empty string anywhere);
 //! REG_ICASE loses the case of `\a` and of range ends (`[Z-a]` is refused,
-//! `[a-Z]` accepted); back-references miss longer matches and report
-//! half-set pairs; and five patterns, `(){32767}` among them, crash it.
-//! design-decisions.md §1160 records the choice; `posix/src/regex_deviations.txt`
-//! lists every case of the oracle (`posix/tools/oracle/regex_harness.py`,
-//! `regex_oracle.txt`: some 544,000 answers -- every pair of 54 pieces
-//! against every string of `a` and `b` to length 4, every pair of 75 tokens
-//! as a BRE and an ERE, 1,200 patterns drawn at random against strings of
-//! `a`, `b` and `c`, glibc's own tests, and the flags' edges) where the
-//! answer here is the standard's, as `posix/tools/oracle/regex_model.py`
-//! computes it, and not glibc's: 16,444 of them.
+//! `[a-Z]` accepted), and a translate table the translation of `\a`;
+//! back-references miss longer matches and report half-set pairs; and five
+//! patterns, `(){32767}` among them, crash it. design-decisions.md §1160
+//! records the choice; `posix/src/regex_deviations.txt` lists every case of
+//! the oracle (`posix/tools/oracle/regex_harness.py`, `regex_oracle.txt`:
+//! some 544,000 answers -- every pair of 54 pieces against every string of
+//! `a` and `b` to length 4, every pair of 75 tokens as a BRE and an ERE,
+//! 1,200 patterns drawn at random against strings of `a`, `b` and `c`,
+//! glibc's own tests, and the flags' edges) where the answer here is the
+//! standard's, as `posix/tools/oracle/regex_model.py` computes it, and not
+//! glibc's: 16,444 of them. The GNU interface has an oracle of its own,
+//! `regex_gnu_harness.py`, `regex_gnu_oracle.txt`, and its deviations are
+//! listed by the same rule.
 //!
 //! ## How
 //!
@@ -93,13 +111,18 @@
 //! Until 2026-09-30 this had no intervals and no back-references, both of
 //! which POSIX requires, and refused patterns past 1024 bytes, programs past
 //! 512 instructions and more than nine groups (known-issues.md ->
-//! D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED).
+//! D-POSIX-GLIBC-2026-SECURITY-FIXES-AUDITED); and until later the same day
+//! its `regex_t` was musl's, and the GNU interface was missing.
 
 mod backref;
 mod dissect;
+mod fastmap;
 mod parse;
 mod prog;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::list::{List, NoMem};
 use crate::malloc;
 use crate::string;
 
@@ -123,6 +146,8 @@ pub const REG_NOTEOL: i32 = 2;
 /// begins, `rm_eo` where the string ends, NULs inside it ordinary bytes.
 pub const REG_STARTEND: i32 = 4;
 
+/// Not implemented (musl's and glibc's; nothing here returns it).
+pub const REG_ENOSYS: i32 = -1;
 /// Success (glibc's name for it).
 pub const REG_NOERROR: i32 = 0;
 /// No match.
@@ -155,47 +180,241 @@ pub const REG_BADRPT: i32 = 13;
 pub const REG_EEND: i32 = 14;
 /// glibc's: an interval's count past RE_DUP_MAX.
 pub const REG_ESIZE: i32 = 15;
-/// glibc's: an unmatched `)` (`regcomp` reports it as REG_EPAREN).
+/// glibc's: an unmatched `)` (`regcomp` reports it as REG_EPAREN,
+/// `re_compile_pattern` as itself).
 pub const REG_ERPAREN: i32 = 16;
 
 /// The largest count an interval may give, glibc's RE_DUP_MAX: what
 /// `sysconf(_SC_RE_DUP_MAX)` reports.
 pub(crate) const RE_DUP_MAX: u32 = parse::RE_DUP_MAX;
 
+// The syntax bits of glibc's `reg_syntax_t`, each the one before shifted
+// left: `<regex.h>` says what each means.
+
+/// `\` quotes the next byte inside a bracket expression.
+pub const RE_BACKSLASH_ESCAPE_IN_LISTS: u64 = 1;
+/// `\+` and `\?` are the operators, `+` and `?` literals.
+pub const RE_BK_PLUS_QM: u64 = RE_BACKSLASH_ESCAPE_IN_LISTS << 1;
+/// `[:alpha:]` and the other classes are recognised.
+pub const RE_CHAR_CLASSES: u64 = RE_BK_PLUS_QM << 1;
+/// `^` and `$` are anchors wherever they are.
+pub const RE_CONTEXT_INDEP_ANCHORS: u64 = RE_CHAR_CLASSES << 1;
+/// A repetition with nothing before it is passed over.
+pub const RE_CONTEXT_INDEP_OPS: u64 = RE_CONTEXT_INDEP_ANCHORS << 1;
+/// ... or is an error.
+pub const RE_CONTEXT_INVALID_OPS: u64 = RE_CONTEXT_INDEP_OPS << 1;
+/// `.` matches a newline.
+pub const RE_DOT_NEWLINE: u64 = RE_CONTEXT_INVALID_OPS << 1;
+/// `.` does not match a NUL.
+pub const RE_DOT_NOT_NULL: u64 = RE_DOT_NEWLINE << 1;
+/// `[^...]` does not match a newline.
+pub const RE_HAT_LISTS_NOT_NEWLINE: u64 = RE_DOT_NOT_NULL << 1;
+/// Intervals are recognised.
+pub const RE_INTERVALS: u64 = RE_HAT_LISTS_NOT_NEWLINE << 1;
+/// `+`, `?` and `|` are not operators.
+pub const RE_LIMITED_OPS: u64 = RE_INTERVALS << 1;
+/// A newline separates alternatives.
+pub const RE_NEWLINE_ALT: u64 = RE_LIMITED_OPS << 1;
+/// `{}` rather than `\{\}` make an interval.
+pub const RE_NO_BK_BRACES: u64 = RE_NEWLINE_ALT << 1;
+/// `()` rather than `\(\)` make a group.
+pub const RE_NO_BK_PARENS: u64 = RE_NO_BK_BRACES << 1;
+/// `\1` ... `\9` are literal digits.
+pub const RE_NO_BK_REFS: u64 = RE_NO_BK_PARENS << 1;
+/// `|` rather than `\|` separates alternatives.
+pub const RE_NO_BK_VBAR: u64 = RE_NO_BK_REFS << 1;
+/// A reversed range is an error, not an empty one.
+pub const RE_NO_EMPTY_RANGES: u64 = RE_NO_BK_VBAR << 1;
+/// A `)` with no `(` is an ordinary one.
+pub const RE_UNMATCHED_RIGHT_PAREN_ORD: u64 = RE_NO_EMPTY_RANGES << 1;
+/// Accepted and ignored, as glibc ignores it.
+pub const RE_NO_POSIX_BACKTRACKING: u64 = RE_UNMATCHED_RIGHT_PAREN_ORD << 1;
+/// GNU's `\w` and the rest are ordinary characters.
+pub const RE_NO_GNU_OPS: u64 = RE_NO_POSIX_BACKTRACKING << 1;
+/// glibc's debugging switch: no effect.
+pub const RE_DEBUG: u64 = RE_NO_GNU_OPS << 1;
+/// A malformed interval is literal text.
+pub const RE_INVALID_INTERVAL_ORD: u64 = RE_DEBUG << 1;
+/// Case is ignored.
+pub const RE_ICASE: u64 = RE_INVALID_INTERVAL_ORD << 1;
+/// `^` is an anchor after `\(` and `\|`.
+pub const RE_CARET_ANCHORS_HERE: u64 = RE_ICASE << 1;
+/// An interval is an error where a BRE's would be.
+pub const RE_CONTEXT_INVALID_DUP: u64 = RE_CARET_ANCHORS_HERE << 1;
+/// `re_search` and `re_match` report no subexpressions.
+pub const RE_NO_SUB: u64 = RE_CONTEXT_INVALID_DUP << 1;
+
+/// GNU Emacs's syntax: every bit clear.
+pub const RE_SYNTAX_EMACS: u64 = 0;
+/// awk's.
+pub const RE_SYNTAX_AWK: u64 = RE_BACKSLASH_ESCAPE_IN_LISTS
+    | RE_DOT_NOT_NULL
+    | RE_NO_BK_PARENS
+    | RE_NO_BK_REFS
+    | RE_NO_BK_VBAR
+    | RE_NO_EMPTY_RANGES
+    | RE_DOT_NEWLINE
+    | RE_CONTEXT_INDEP_ANCHORS
+    | RE_CHAR_CLASSES
+    | RE_UNMATCHED_RIGHT_PAREN_ORD
+    | RE_NO_GNU_OPS;
+/// GNU awk's.
+pub const RE_SYNTAX_GNU_AWK: u64 =
+    (RE_SYNTAX_POSIX_EXTENDED | RE_BACKSLASH_ESCAPE_IN_LISTS | RE_INVALID_INTERVAL_ORD)
+        & !(RE_DOT_NOT_NULL | RE_CONTEXT_INDEP_OPS | RE_CONTEXT_INVALID_OPS);
+/// POSIX awk's.
+pub const RE_SYNTAX_POSIX_AWK: u64 = RE_SYNTAX_POSIX_EXTENDED
+    | RE_BACKSLASH_ESCAPE_IN_LISTS
+    | RE_INTERVALS
+    | RE_NO_GNU_OPS
+    | RE_INVALID_INTERVAL_ORD;
+/// grep's.
+pub const RE_SYNTAX_GREP: u64 =
+    (RE_SYNTAX_POSIX_BASIC | RE_NEWLINE_ALT) & !(RE_CONTEXT_INVALID_DUP | RE_DOT_NOT_NULL);
+/// egrep's.
+pub const RE_SYNTAX_EGREP: u64 =
+    (RE_SYNTAX_POSIX_EXTENDED | RE_INVALID_INTERVAL_ORD | RE_NEWLINE_ALT)
+        & !(RE_CONTEXT_INVALID_OPS | RE_DOT_NOT_NULL);
+/// POSIX egrep's, which is egrep's.
+pub const RE_SYNTAX_POSIX_EGREP: u64 = RE_SYNTAX_EGREP;
+/// ed's: POSIX's BREs.
+pub const RE_SYNTAX_ED: u64 = RE_SYNTAX_POSIX_BASIC;
+/// sed's: POSIX's BREs.
+pub const RE_SYNTAX_SED: u64 = RE_SYNTAX_POSIX_BASIC;
+/// What POSIX's basic and extended syntaxes share.
+pub const _RE_SYNTAX_POSIX_COMMON: u64 =
+    RE_CHAR_CLASSES | RE_DOT_NEWLINE | RE_DOT_NOT_NULL | RE_INTERVALS | RE_NO_EMPTY_RANGES;
+/// POSIX's BREs: `regcomp`'s syntax without REG_EXTENDED.
+pub const RE_SYNTAX_POSIX_BASIC: u64 =
+    _RE_SYNTAX_POSIX_COMMON | RE_BK_PLUS_QM | RE_CONTEXT_INVALID_DUP;
+/// BREs without `\+`, `\?` and `\|`.
+pub const RE_SYNTAX_POSIX_MINIMAL_BASIC: u64 = _RE_SYNTAX_POSIX_COMMON | RE_LIMITED_OPS;
+/// POSIX's EREs: `regcomp`'s syntax with REG_EXTENDED.
+pub const RE_SYNTAX_POSIX_EXTENDED: u64 = _RE_SYNTAX_POSIX_COMMON
+    | RE_CONTEXT_INDEP_ANCHORS
+    | RE_CONTEXT_INDEP_OPS
+    | RE_NO_BK_BRACES
+    | RE_NO_BK_PARENS
+    | RE_NO_BK_VBAR
+    | RE_CONTEXT_INVALID_OPS
+    | RE_UNMATCHED_RIGHT_PAREN_ORD;
+/// EREs without back-references, and with a repetition with nothing before
+/// it an error.
+pub const RE_SYNTAX_POSIX_MINIMAL_EXTENDED: u64 = _RE_SYNTAX_POSIX_COMMON
+    | RE_CONTEXT_INDEP_ANCHORS
+    | RE_CONTEXT_INVALID_OPS
+    | RE_NO_BK_BRACES
+    | RE_NO_BK_PARENS
+    | RE_NO_BK_REFS
+    | RE_NO_BK_VBAR
+    | RE_UNMATCHED_RIGHT_PAREN_ORD;
+
+/// How many registers `re_search` allocates the first time, at least.
+pub const RE_NREGS: usize = 30;
+/// `regs_allocated`: `re_search` allocates a `struct re_registers`'s arrays.
+pub const REGS_UNALLOCATED: u32 = 0;
+/// ... grows them as it needs to.
+pub const REGS_REALLOCATE: u32 = 1;
+/// ... uses them as they are.
+pub const REGS_FIXED: u32 = 2;
+
 // ---------------------------------------------------------------------------
-// regex_t and regmatch_t
+// regex_t, struct re_registers and regmatch_t
 // ---------------------------------------------------------------------------
 
-/// Compiled regular expression (opaque `regex_t`).
-///
-/// Callers see this as an opaque struct; the POSIX API uses `regex_t*`
-/// pointers, and a caller may embed one in its own structs, so the program
-/// `regcomp` builds is allocated and only a pointer to it kept here.
+/// `regex_t`: glibc's `struct re_pattern_buffer`, 64 bytes, every field in
+/// glibc's place, since a program written for the GNU interface sets and
+/// reads them -- `buffer`, `allocated`, `fastmap` and `translate` before
+/// `re_compile_pattern`, `re_nsub` and the `not_bol`, `not_eol` and
+/// `newline_anchor` bits after it.
 #[repr(C)]
 pub struct RegexT {
-    /// Number of sub-expressions (set by regcomp).
+    /// The compiled pattern: a program, at the start of a block of
+    /// `allocated` bytes from `malloc` -- or NULL.
+    pub buffer: *mut core::ffi::c_void,
+    /// The size of that block, and how much of it the program uses.
+    pub allocated: usize,
+    pub used: usize,
+    /// The syntax the pattern was read in.
+    pub syntax: u64,
+    /// 256 bytes, each 1 if a match can begin with that byte -- or NULL.
+    pub fastmap: *mut u8,
+    /// 256 bytes, each byte's stand-in in pattern and string -- or NULL.
+    pub translate: *mut u8,
+    /// The number of subexpressions.
     pub re_nsub: usize,
-    /// Internal: the compiled program, or NULL.
-    program: *mut prog::Program,
-    /// The 48 bytes of musl's `regex_t` that our two fields do not use.
-    ///
-    /// Never read or written.  Present so that `size_of::<RegexT>()` equals
-    /// what `<regex.h>` declares — see the assertion below.
-    _reserved: [u8; 48],
+    /// glibc's seven bit-fields, from the low bit: `can_be_null`,
+    /// `regs_allocated` (two bits), `fastmap_accurate`, `no_sub`,
+    /// `not_bol`, `not_eol`, `newline_anchor` -- one `unsigned int` in C,
+    /// atomic here, since a search changes the first three while another
+    /// thread's `regexec` may be reading the rest.
+    pub bits: AtomicU32,
+    _tail: u32,
 }
 
+const CAN_BE_NULL: u32 = 1;
+const REGS_ALLOCATED_SHIFT: u32 = 1;
+const REGS_ALLOCATED_MASK: u32 = 3 << REGS_ALLOCATED_SHIFT;
+const FASTMAP_ACCURATE: u32 = 1 << 3;
+const NO_SUB: u32 = 1 << 4;
+const NOT_BOL: u32 = 1 << 5;
+const NOT_EOL: u32 = 1 << 6;
+const NEWLINE_ANCHOR: u32 = 1 << 7;
+
 impl RegexT {
-    /// An uncompiled `regex_t`: no sub-expressions, no program, zeroed tail.
-    ///
-    /// Constructed through this rather than with a struct literal so the
-    /// `_reserved` tail can track its header without touching a call site.
+    /// An empty pattern buffer, as a program zeroes one before
+    /// `re_compile_pattern`.
     #[must_use]
     pub const fn new() -> Self {
         Self {
+            buffer: core::ptr::null_mut(),
+            allocated: 0,
+            used: 0,
+            syntax: 0,
+            fastmap: core::ptr::null_mut(),
+            translate: core::ptr::null_mut(),
             re_nsub: 0,
-            program: core::ptr::null_mut(),
-            _reserved: [0; 48],
+            bits: AtomicU32::new(0),
+            _tail: 0,
         }
+    }
+
+    fn bits(&self) -> u32 {
+        self.bits.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, bit: u32, on: bool) {
+        if on {
+            self.bits.fetch_or(bit, Ordering::Relaxed);
+        } else {
+            self.bits.fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn regs_allocated(&self) -> u32 {
+        (self.bits() & REGS_ALLOCATED_MASK) >> REGS_ALLOCATED_SHIFT
+    }
+
+    fn set_regs_allocated(&self, v: u32) {
+        let field = (v << REGS_ALLOCATED_SHIFT) & REGS_ALLOCATED_MASK;
+        let mut cur = self.bits();
+        while let Err(now) = self.bits.compare_exchange_weak(
+            cur,
+            (cur & !REGS_ALLOCATED_MASK) | field,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            cur = now;
+        }
+    }
+
+    /// The program `buffer` holds, if it holds one.
+    fn program(&self) -> Option<&prog::Program> {
+        let p = self.buffer.cast::<prog::Program>();
+        // SAFETY: a non-NULL `buffer` holds the program the compile put
+        // there, alive until `regfree`, and no match changes it -- the
+        // pattern buffer's contract with its program.
+        (!p.is_null()).then(|| unsafe { &*p })
     }
 }
 
@@ -205,15 +424,11 @@ impl Default for RegexT {
     }
 }
 
-/// Our `regex_t` is exactly the one the caller's `<regex.h>` reserved.
-///
-/// See `pthread.rs`'s module note for why this is a `const` rather than a
-/// `#[test]`.  `re_nsub` is public and sits at offset 0 in musl and here
-/// alike -- it is the one field POSIX lets a caller read -- and the
-/// `_reserved` tail brings the whole object to musl's 64 bytes, so `==`
-/// holds and a by-value copy of a `regex_t` moves our bytes and only ours.
+/// glibc's `regex_t` is 64 bytes, its bit-fields one `unsigned int` at 56.
 const _: () = {
-    assert!(size_of::<RegexT>() == 64, "musl/glibc regex_t is 64 bytes");
+    assert!(size_of::<RegexT>() == 64, "glibc's regex_t is 64 bytes");
+    assert!(core::mem::offset_of!(RegexT, re_nsub) == 48);
+    assert!(core::mem::offset_of!(RegexT, bits) == 56);
     assert!(align_of::<RegexT>() <= 8);
 };
 
@@ -240,7 +455,9 @@ unsafe impl Sync for RegexT {}
 /// and got 80 bytes written into the front of it, with every element after the
 /// first landing at the wrong offset and every position truncated to 32 bits.
 /// Found by `scripts/check-libc-abi.py` on the day it was written; see
-/// `design-decisions.md` §1011 and §1010 for the family.
+/// `design-decisions.md` §1011 and §1010 for the family. Since 2026-09-30
+/// `<regex.h>` is posix's own, glibc's in its `_REGEX_LARGE_OFFSETS` form,
+/// and keeps `regoff_t` the width POSIX requires (§1161).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegMatch {
@@ -250,24 +467,95 @@ pub struct RegMatch {
     pub rm_eo: isize,
 }
 
+/// glibc's `struct re_registers`: where `re_search` and `re_match` report
+/// the subexpressions -- `num_regs` of each, `start[i]` and `end[i]` for
+/// subexpression `i`, -1 for one that took no part.
+#[repr(C)]
+#[derive(Debug)]
+pub struct ReRegisters {
+    pub num_regs: usize,
+    pub start: *mut isize,
+    pub end: *mut isize,
+}
+
+/// The syntax `re_compile_pattern` and `re_comp` read a pattern in: glibc's
+/// `re_syntax_options`, a C variable a program may assign to.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static mut re_syntax_options: u64 = 0;
+
+fn syntax_options() -> u64 {
+    // SAFETY: a plain read of a C variable; a program that assigns it from
+    // one thread while compiling in another races in C as in glibc.
+    unsafe { (&raw const re_syntax_options).read() }
+}
+
 // ---------------------------------------------------------------------------
-// regcomp
+// Compiling
 // ---------------------------------------------------------------------------
 
-/// The program for `pattern`, or `regcomp`'s error for it.
-fn compile(pattern: &[u8], cflags: i32) -> Result<prog::Program, i32> {
-    let tree = parse::parse(pattern, parse::Syntax::posix(cflags)).map_err(|c| c.0)?;
-    let mut p = prog::compile(tree, cflags & REG_ICASE != 0, cflags & REG_NEWLINE != 0)
-        .map_err(|_| REG_ESPACE)?;
-    p.nosub = cflags & REG_NOSUB != 0;
-    Ok(p)
+/// glibc's `re_compile_internal`: `pattern` compiled in `syntax`, through
+/// `preg`'s translate table, into `preg`'s buffer -- the one it has if it is
+/// big enough (a program may give `re_compile_pattern` a block of its own),
+/// else that one grown, which for NULL is a new one. 0, or the error. After
+/// an error, as after glibc's, the block is freed and `buffer` is NULL.
+///
+/// # Safety
+///
+/// `preg` is a pattern buffer whose `buffer` is NULL or `malloc`ed and
+/// `allocated` bytes long, and whose `translate` is NULL or 256 bytes.
+unsafe fn compile_into(preg: &mut RegexT, pattern: &[u8], syntax: u64) -> i32 {
+    let size = size_of::<prog::Program>();
+    preg.set(FASTMAP_ACCURATE, false);
+    preg.syntax = syntax;
+    preg.set(NOT_BOL, false);
+    preg.set(NOT_EOL, false);
+    preg.used = 0;
+    preg.re_nsub = 0;
+    preg.set(CAN_BE_NULL, false);
+    preg.set_regs_allocated(REGS_UNALLOCATED);
+    if preg.allocated < size || preg.buffer.is_null() {
+        // SAFETY: NULL or the block `malloc` gave, per the contract.
+        let grown = unsafe { malloc::realloc(preg.buffer.cast(), size) };
+        if grown.is_null() {
+            return REG_ESPACE;
+        }
+        preg.buffer = grown.cast();
+        preg.allocated = size;
+    }
+    preg.used = size;
+    // SAFETY: NULL or 256 bytes, per the contract.
+    let trans = unsafe { preg.translate.cast::<[u8; 256]>().as_ref() };
+    let syn = parse::Syntax(syntax);
+    let built = parse::parse(pattern, syn, trans)
+        .map_err(|c| c.0)
+        .and_then(|tree| prog::compile(tree, syn.icase()).map_err(|_| REG_ESPACE));
+    match built {
+        Ok(program) => {
+            preg.re_nsub = program.tree.nsub as usize;
+            // SAFETY: `buffer` is a block of at least the program's size
+            // from `malloc`, aligned for any object. Whatever it held is
+            // written over, not dropped: a program compiling into a buffer
+            // it never freed loses that pattern, as glibc's does.
+            unsafe { preg.buffer.cast::<prog::Program>().write(program) };
+            REG_NOERROR
+        }
+        Err(code) => {
+            // SAFETY: the block, from `malloc`; nothing is left in it.
+            unsafe { malloc::free(preg.buffer.cast()) };
+            preg.buffer = core::ptr::null_mut();
+            preg.allocated = 0;
+            code
+        }
+    }
 }
 
 /// Compile a regular expression.
 ///
 /// Returns 0 on success, or the error code: REG_BADPAT and the rest as
 /// glibc gives them, REG_ESPACE for a program past two million
-/// instructions or a heap with no room for it.
+/// instructions or a heap with no room for it. As glibc's does, it
+/// allocates a fastmap and fills it in, sets `newline_anchor` for
+/// REG_NEWLINE and `no_sub` for REG_NOSUB, and leaves no translate table.
 ///
 /// # Safety
 ///
@@ -277,48 +565,101 @@ pub unsafe extern "C" fn regcomp(preg: *mut RegexT, pattern: *const u8, cflags: 
     if preg.is_null() || pattern.is_null() {
         return REG_BADPAT;
     }
-    // SAFETY: `preg` is the caller's writable `regex_t`. As glibc does, it
-    // holds no program until one is built, so that a `regfree` after a
-    // failed `regcomp` frees nothing.
-    unsafe {
-        (*preg).program = core::ptr::null_mut();
-        (*preg).re_nsub = 0;
-    }
-    // SAFETY: `pattern` is a C string, per the contract.
-    let pat = unsafe { core::slice::from_raw_parts(pattern, string::strlen(pattern)) };
-    let program = match compile(pat, cflags) {
-        Ok(p) => p,
-        Err(code) => return code,
-    };
-    let nsub = program.tree.nsub as usize;
-    let mem = malloc::malloc(size_of::<prog::Program>()).cast::<prog::Program>();
-    if mem.is_null() {
+    // SAFETY: the caller's writable `regex_t`.
+    let r = unsafe { &mut *preg };
+    // As glibc does, it holds no program until one is built, so that a
+    // `regfree` after a failed `regcomp` frees nothing.
+    r.buffer = core::ptr::null_mut();
+    r.allocated = 0;
+    r.used = 0;
+    r.re_nsub = 0;
+    r.fastmap = malloc::malloc(256);
+    if r.fastmap.is_null() {
         return REG_ESPACE;
     }
-    // SAFETY: `mem` is a fresh block of the program's size from `malloc`,
-    // aligned for any object; the program moves into it and is owned by the
-    // `regex_t` from here, until `regfree` drops it.
-    unsafe {
-        mem.write(program);
-        (*preg).program = mem;
-        (*preg).re_nsub = nsub;
+    r.set(NEWLINE_ANCHOR, cflags & REG_NEWLINE != 0);
+    r.set(NO_SUB, cflags & REG_NOSUB != 0);
+    r.translate = core::ptr::null_mut();
+    // SAFETY: `pattern` is a C string, per the contract.
+    let pat = unsafe { core::slice::from_raw_parts(pattern, string::strlen(pattern)) };
+    // SAFETY: an empty buffer, and no translate table.
+    let mut code = unsafe { compile_into(r, pat, parse::Syntax::posix(cflags).0) };
+    // POSIX has no REG_ERPAREN: an unmatched `)` is REG_EPAREN, as an
+    // unmatched `(` is.
+    if code == REG_ERPAREN {
+        code = REG_EPAREN;
     }
+    if code == REG_NOERROR {
+        // Made now, since `regexec` cannot change the pattern buffer. One
+        // the heap had no room for is left not made (`fastmap_accurate`
+        // clear), which nothing here needs: glibc's cannot fail at all.
+        let _ = fill_fastmap(r);
+    } else {
+        // SAFETY: the fastmap this allocated.
+        unsafe { malloc::free(r.fastmap) };
+        r.fastmap = core::ptr::null_mut();
+    }
+    code
+}
+
+/// `preg`'s fastmap filled in from its program, `can_be_null` with it: 0, or
+/// -2 when the heap had no room to work it out. A buffer with no program or
+/// no fastmap is left alone. The caller has the buffer to itself, or holds
+/// its program's lock.
+fn fill_fastmap(preg: &RegexT) -> i32 {
+    let map = preg.fastmap;
+    if map.is_null() {
+        return 0;
+    }
+    let Some(p) = preg.program() else {
+        return 0;
+    };
+    let Ok((set, can_be_null)) = fastmap::fastmap(&p.tree) else {
+        return -2;
+    };
+    for b in 0..=255u8 {
+        // SAFETY: a fastmap is 256 bytes, the pattern buffer's contract.
+        unsafe { map.add(usize::from(b)).write(u8::from(set.contains(b))) };
+    }
+    preg.set(CAN_BE_NULL, can_be_null);
+    preg.set(FASTMAP_ACCURATE, true);
     0
 }
 
 // ---------------------------------------------------------------------------
-// regexec
+// Matching
 // ---------------------------------------------------------------------------
 
-/// The match of program `p` in `sub` at or after `from`, groups
-/// `0..=nsub`, or `None`; `want` of them asked for.
+/// A program's lock, held: glibc's `dfa->lock`, which its `re_search` and
+/// `re_compile_fastmap` hold throughout, since each may fill in the pattern
+/// buffer's fastmap and change its `regs_allocated` -- so two threads may
+/// search with one pattern buffer, and take turns. `regexec` does not take
+/// it: it changes nothing, and reads the bits atomically.
+struct Held<'a>(&'a core::sync::atomic::AtomicI32);
+
+impl<'a> Held<'a> {
+    fn take(p: &'a prog::Program) -> Self {
+        crate::lowlevellock::lll_lock(&p.lock);
+        Self(&p.lock)
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        crate::lowlevellock::lll_unlock(self.0);
+    }
+}
+
+/// The match of program `p` in `sub` beginning at `from` or after it but not
+/// after `last`, groups `0..=nsub`, or `None`; `want` of them asked for.
 fn execute(
     p: &prog::Program,
     sub: &prog::Subject<'_>,
     from: usize,
+    last: usize,
     want: usize,
-    pm: &mut crate::list::List<(isize, isize)>,
-) -> Result<bool, crate::list::NoMem> {
+    pm: &mut List<(isize, isize)>,
+) -> Result<bool, NoMem> {
     let nsub = p.tree.nsub as usize;
     pm.clear();
     pm.resize(nsub.wrapping_add(1), (-1, -1))?;
@@ -329,18 +670,18 @@ fn execute(
         // looks there, and past it only where the program finds the next.
         let mut m = backref::Matcher::new(p, sub)?;
         let mut pos = from;
-        while let Some((s, _)) = vm.search(p, sub, pos, false)? {
+        while let Some((s, _)) = vm.search(p, sub, pos, last, false)? {
             if m.at(s, pm)? {
                 return Ok(true);
             }
-            if s >= sub.end() {
+            if s >= sub.end() || s >= last {
                 break;
             }
             pos = s.wrapping_add(1);
         }
         return Ok(false);
     }
-    let Some((s, e)) = vm.search(p, sub, from, want == 0)? else {
+    let Some((s, e)) = vm.search(p, sub, from, last, want == 0)? else {
         return Ok(false);
     };
     if let Some(slot) = pm.get_mut(0) {
@@ -352,13 +693,85 @@ fn execute(
     Ok(true)
 }
 
+/// glibc's `re_search_internal`: a match of `preg` in `string`, `length`
+/// bytes, beginning at `start` or between it and `last_start` -- the first
+/// found scanning forwards, or, when `last_start` is the smaller, backwards
+/// -- and ending by `stop`; `want` of its groups in `pm`. The string is read
+/// through `preg`'s translate table; `^` and `$` see a newline as a line's
+/// edge under its `newline_anchor`.
+///
+/// No match begins or ends past `stop`. glibc's search goes on past it, and
+/// finds an empty match there -- `$` at the end of the second string, with
+/// `stop` at 2 -- though its header says the search stops at `stop`.
+///
+/// # Safety
+///
+/// `string` holds `length` bytes; `preg`'s `translate` is NULL or 256 bytes.
+#[allow(clippy::too_many_arguments)]
+unsafe fn search(
+    preg: &RegexT,
+    string: *const u8,
+    length: usize,
+    start: usize,
+    last_start: usize,
+    stop: usize,
+    want: usize,
+    eflags: i32,
+    pm: &mut List<(isize, isize)>,
+) -> Result<bool, NoMem> {
+    let Some(p) = preg.program() else {
+        return Ok(false);
+    };
+    // SAFETY: `length` bytes, per the contract.
+    let raw = unsafe { core::slice::from_raw_parts(string, length) };
+    let mut translated: List<u8> = List::new();
+    // SAFETY: NULL or 256 bytes, per the contract.
+    let s: &[u8] = if let Some(table) = unsafe { preg.translate.cast::<[u8; 256]>().as_ref() } {
+        translated.reserve(length)?;
+        for &c in raw {
+            translated.push(table.get(usize::from(c)).copied().unwrap_or(c))?;
+        }
+        translated.as_slice()
+    } else {
+        raw
+    };
+    let stop = stop.min(length);
+    let sub = prog::Subject {
+        s: s.get(..stop).unwrap_or(s),
+        after: s.get(stop).copied(),
+        notbol: eflags & REG_NOTBOL != 0,
+        noteol: eflags & REG_NOTEOL != 0,
+        newline: preg.bits() & NEWLINE_ANCHOR != 0,
+    };
+    if start <= last_start {
+        if start > stop {
+            return Ok(false);
+        }
+        return execute(p, &sub, start, last_start.min(stop), want, pm);
+    }
+    let mut pos = start.min(stop);
+    loop {
+        if pos < last_start {
+            return Ok(false);
+        }
+        if execute(p, &sub, pos, pos, want, pm)? {
+            return Ok(true);
+        }
+        if pos == 0 {
+            return Ok(false);
+        }
+        pos = pos.wrapping_sub(1);
+    }
+}
+
 /// Execute a compiled regular expression against a string.
 ///
 /// Returns 0 if the string matches, `REG_NOMATCH` otherwise -- also, as
 /// glibc answers them, when the heap runs out; REG_BADPAT for `eflags` it
 /// does not know. On a match, the first `nmatch` entries of `pmatch` get
 /// the match and its groups, those past `re_nsub` -1; on none, `pmatch` is
-/// left alone. A `regex_t` compiled with REG_NOSUB writes nothing there.
+/// left alone. A `regex_t` compiled with REG_NOSUB (its `no_sub` set)
+/// writes nothing there.
 ///
 /// # Safety
 ///
@@ -380,13 +793,7 @@ pub unsafe extern "C" fn regexec(
         return REG_NOMATCH;
     }
     // SAFETY: `preg` is a `regex_t`, per the contract.
-    let program = unsafe { (*preg).program };
-    if program.is_null() {
-        return REG_NOMATCH;
-    }
-    // SAFETY: a program `regcomp` installed, alive until `regfree`, and not
-    // changed by any `regexec`.
-    let p = unsafe { &*program };
+    let r = unsafe { &*preg };
     let (from, end) = if eflags & REG_STARTEND != 0 {
         if pmatch.is_null() {
             return REG_NOMATCH;
@@ -406,21 +813,15 @@ pub unsafe extern "C" fn regexec(
         // SAFETY: a C string, per the contract.
         (0, unsafe { string::strlen(string_arg) })
     };
-    // SAFETY: `end` bytes at `string_arg`, per the contract.
-    let s = unsafe { core::slice::from_raw_parts(string_arg, end) };
-    let sub = prog::Subject {
-        s,
-        notbol: eflags & REG_NOTBOL != 0,
-        noteol: eflags & REG_NOTEOL != 0,
-        newline: p.newline,
-    };
-    let want = if p.nosub || pmatch.is_null() {
+    let want = if r.bits() & NO_SUB != 0 || pmatch.is_null() {
         0
     } else {
         nmatch
     };
-    let mut pm = crate::list::List::new();
-    match execute(p, &sub, from, want, &mut pm) {
+    let mut pm = List::new();
+    // SAFETY: `end` bytes at `string_arg`, per the contract; the pattern
+    // buffer's translate table is NULL or 256 bytes.
+    match unsafe { search(r, string_arg, end, from, end, end, want, eflags, &mut pm) } {
         Ok(true) => {}
         Ok(false) | Err(_) => return REG_NOMATCH,
     }
@@ -432,8 +833,8 @@ pub unsafe extern "C" fn regexec(
             pmatch.add(k).write(RegMatch {
                 rm_so: so,
                 rm_eo: eo,
-            })
-        };
+            });
+        }
     }
     0
 }
@@ -442,31 +843,40 @@ pub unsafe extern "C" fn regexec(
 // regfree
 // ---------------------------------------------------------------------------
 
-/// Free a compiled regular expression.
-///
-/// The program is dropped and the pointer cleared, so a second `regfree`
-/// frees nothing; `re_nsub` is left as it was, as glibc leaves it.
+/// Free a compiled regular expression, as glibc's does: the program and its
+/// block, the fastmap and the translate table, each pointer cleared, so a
+/// second `regfree` frees nothing. `re_nsub` is left as it was.
 ///
 /// # Safety
 ///
-/// `preg` is NULL or a `regex_t` that `regcomp` has seen.
+/// `preg` is NULL or a `regex_t` that `regcomp` or `re_compile_pattern` has
+/// seen; its translate table, if any, is `malloc`ed, as glibc's header asks.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn regfree(preg: *mut RegexT) {
     if preg.is_null() {
         return;
     }
     // SAFETY: `preg` is a `regex_t`, per the contract.
-    let program = unsafe { (*preg).program };
+    let r = unsafe { &mut *preg };
+    let program = r.buffer.cast::<prog::Program>();
     if !program.is_null() {
-        // SAFETY: the program `regcomp` moved into this block: dropped once
-        // (its tables returned to the heap), then the block freed, and the
-        // pointer cleared so that nothing frees it again.
+        // SAFETY: the program the compile moved into this block: dropped
+        // once (its tables returned to the heap), then the block freed.
         unsafe {
             program.drop_in_place();
             malloc::free(program.cast::<u8>());
-            (*preg).program = core::ptr::null_mut();
         }
     }
+    r.buffer = core::ptr::null_mut();
+    r.allocated = 0;
+    // SAFETY: NULL or `malloc`ed, per the contract (and as `regcomp` and
+    // `re_comp` leave them).
+    unsafe {
+        malloc::free(r.fastmap);
+        malloc::free(r.translate);
+    }
+    r.fastmap = core::ptr::null_mut();
+    r.translate = core::ptr::null_mut();
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +903,16 @@ const MESSAGES: [&[u8]; 17] = [
     b"Regular expression too big\0",
     b"Unmatched ) or \\)\0",
 ];
+
+/// Error `code`'s message, as `re_compile_pattern` and `re_comp` return it:
+/// a static C string.
+fn message(code: i32) -> *const u8 {
+    usize::try_from(code)
+        .ok()
+        .and_then(|i| MESSAGES.get(i))
+        .or_else(|| MESSAGES.get(2))
+        .map_or(core::ptr::null(), |m| m.as_ptr())
+}
 
 /// Describe an error code, as glibc does.
 ///
@@ -536,6 +956,512 @@ pub extern "C" fn regerror(
     size
 }
 
+// ---------------------------------------------------------------------------
+// The GNU interface
+// ---------------------------------------------------------------------------
+
+/// `re_syntax_options` set to `syntax`; the old value returned.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn re_set_syntax(syntax: u64) -> u64 {
+    let old = syntax_options();
+    // SAFETY: a plain write of a C variable, as `syntax_options` reads it.
+    unsafe { (&raw mut re_syntax_options).write(syntax) };
+    old
+}
+
+/// `length` bytes of `pattern` compiled in `re_syntax_options`'s syntax
+/// into `buffer` -- whose `buffer` and `allocated` may give a block to
+/// compile into, whose `translate` table, if set, the pattern is read
+/// through, and whose `fastmap` is filled in at the first search. NULL, or
+/// what `regerror` would say of the error (REG_ERPAREN's own message for an
+/// unmatched `)`). `newline_anchor` is set, and `no_sub` as RE_NO_SUB says,
+/// as glibc's does.
+///
+/// # Safety
+///
+/// `pattern` holds `length` bytes; `buffer` is a pattern buffer as its doc
+/// says, its `buffer` NULL or `malloc`ed and `allocated` bytes long, its
+/// `translate` NULL or 256 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_compile_pattern(
+    pattern: *const u8,
+    length: usize,
+    buffer: *mut RegexT,
+) -> *const u8 {
+    if buffer.is_null() || (pattern.is_null() && length != 0) {
+        return message(REG_BADPAT);
+    }
+    // SAFETY: the caller's pattern buffer.
+    let b = unsafe { &mut *buffer };
+    let syntax = syntax_options();
+    b.set(NO_SUB, syntax & RE_NO_SUB != 0);
+    b.set(NEWLINE_ANCHOR, true);
+    let pat = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY: `length` bytes, per the contract.
+        unsafe { core::slice::from_raw_parts(pattern, length) }
+    };
+    // SAFETY: per the contract.
+    match unsafe { compile_into(b, pat, syntax) } {
+        REG_NOERROR => core::ptr::null(),
+        code => message(code),
+    }
+}
+
+/// `buffer`'s fastmap filled in from its pattern: 0, or -2 when the heap
+/// had no room to work it out.
+///
+/// # Safety
+///
+/// `buffer` is a compiled pattern buffer, its `fastmap` NULL or 256 bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_compile_fastmap(buffer: *mut RegexT) -> i32 {
+    if buffer.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's pattern buffer, shared: what this changes in it
+    // is atomic or under the program's lock.
+    let b = unsafe { &*buffer };
+    let Some(p) = b.program() else {
+        return 0;
+    };
+    let _held = Held::take(p);
+    fill_fastmap(b)
+}
+
+/// glibc's `re_copy_regs`: the `nregs` groups of `pm` into `regs`, which
+/// `how` says to allocate, to grow, or to use as they are -- one element
+/// more than the groups, -1 past them. What `regs_allocated` becomes:
+/// REGS_UNALLOCATED when the heap had no room.
+///
+/// # Safety
+///
+/// `regs`'s arrays are as `how` says: unallocated, or `malloc`ed and
+/// `num_regs` long (REGS_REALLOCATE), or `num_regs` long (REGS_FIXED, which
+/// is given no more groups than that).
+unsafe fn copy_regs(
+    regs: &mut ReRegisters,
+    pm: &List<(isize, isize)>,
+    nregs: usize,
+    how: u32,
+) -> u32 {
+    let need = nregs.saturating_add(1);
+    let bytes = need.saturating_mul(size_of::<isize>());
+    let mut rval = REGS_REALLOCATE;
+    if how == REGS_UNALLOCATED {
+        let start = malloc::malloc(bytes).cast::<isize>();
+        if start.is_null() {
+            return REGS_UNALLOCATED;
+        }
+        let end = malloc::malloc(bytes).cast::<isize>();
+        if end.is_null() {
+            // SAFETY: the block just allocated.
+            unsafe { malloc::free(start.cast()) };
+            return REGS_UNALLOCATED;
+        }
+        regs.start = start;
+        regs.end = end;
+        regs.num_regs = need;
+    } else if how == REGS_REALLOCATE {
+        if need > regs.num_regs {
+            // SAFETY: `malloc`ed arrays, per the contract.
+            let start = unsafe { malloc::realloc(regs.start.cast(), bytes) }.cast::<isize>();
+            if start.is_null() {
+                return REGS_UNALLOCATED;
+            }
+            // SAFETY: as above.
+            let end = unsafe { malloc::realloc(regs.end.cast(), bytes) }.cast::<isize>();
+            if end.is_null() {
+                // SAFETY: the grown block, which `regs` no longer points to
+                // (glibc's loses the original `start` the same way).
+                unsafe { malloc::free(start.cast()) };
+                return REGS_UNALLOCATED;
+            }
+            regs.start = start;
+            regs.end = end;
+            regs.num_regs = need;
+        }
+    } else {
+        rval = REGS_FIXED;
+    }
+    for i in 0..regs.num_regs {
+        let (so, eo) = if i < nregs {
+            pm.get(i).copied().unwrap_or((-1, -1))
+        } else {
+            (-1, -1)
+        };
+        // SAFETY: both arrays hold `num_regs` elements: allocated or grown
+        // to it above, or the caller's, per the contract.
+        unsafe {
+            regs.start.add(i).write(so);
+            regs.end.add(i).write(eo);
+        }
+    }
+    rval
+}
+
+/// glibc's `re_search_stub`: `re_search` and `re_match` -- `range` bytes of
+/// starting places from `start`, ending by `stop`; the match's start, or
+/// with `ret_len` its length -- -1 for no match, -2 for an internal error.
+///
+/// # Safety
+///
+/// `string` holds `length` bytes; `bufp` is a compiled pattern buffer;
+/// `regs` is NULL or as `copy_regs` asks.
+#[allow(clippy::too_many_arguments)]
+unsafe fn search_stub(
+    bufp: *mut RegexT,
+    string: *const u8,
+    length: isize,
+    start: isize,
+    range: isize,
+    stop: isize,
+    regs: *mut ReRegisters,
+    ret_len: bool,
+) -> isize {
+    if bufp.is_null() || (string.is_null() && length > 0) {
+        return -2;
+    }
+    // SAFETY: the caller's pattern buffer, shared: another thread's
+    // `regexec` may be reading it, and what a search changes in it is atomic
+    // or under the program's lock.
+    let b = unsafe { &*bufp };
+    let mut last_start = start.wrapping_add(range);
+    if start < 0 || start > length {
+        return -1;
+    }
+    if length < last_start || (range >= 0 && last_start < start) {
+        last_start = length;
+    } else if last_start < 0 || (range < 0 && start <= last_start) {
+        last_start = 0;
+    }
+    let Some(program) = b.program() else {
+        return -1;
+    };
+    let _held = Held::take(program);
+    let mut eflags = 0;
+    if b.bits() & NOT_BOL != 0 {
+        eflags |= REG_NOTBOL;
+    }
+    if b.bits() & NOT_EOL != 0 {
+        eflags |= REG_NOTEOL;
+    }
+    if start < last_start && !b.fastmap.is_null() && b.bits() & FASTMAP_ACCURATE == 0 {
+        // A failure is only a fastmap not made: the search does not need it.
+        let _ = fill_fastmap(b);
+    }
+    let mut regs = if b.bits() & NO_SUB != 0 {
+        core::ptr::null_mut()
+    } else {
+        regs
+    };
+    let nregs = if regs.is_null() {
+        1
+    } else {
+        // SAFETY: the caller's registers.
+        let n = unsafe { (*regs).num_regs };
+        if b.regs_allocated() == REGS_FIXED && n <= b.re_nsub {
+            if n < 1 {
+                regs = core::ptr::null_mut();
+                1
+            } else {
+                n
+            }
+        } else {
+            b.re_nsub.saturating_add(1)
+        }
+    };
+    let mut pm = List::new();
+    // All four are in [0, length] now, and so are no longer negative.
+    let (length, start, last_start, stop) = (
+        length.cast_unsigned(),
+        start.cast_unsigned(),
+        last_start.cast_unsigned(),
+        stop.max(0).cast_unsigned(),
+    );
+    // SAFETY: `length` bytes at `string`, per the contract.
+    let found = unsafe {
+        search(
+            b, string, length, start, last_start, stop, nregs, eflags, &mut pm,
+        )
+    };
+    match found {
+        Ok(true) => {}
+        Ok(false) => return -1,
+        Err(NoMem) => return -2,
+    }
+    if !regs.is_null() {
+        let how = b.regs_allocated();
+        // SAFETY: the caller's registers, as `how` says, per the contract.
+        let now = unsafe { copy_regs(&mut *regs, &pm, nregs, how) };
+        b.set_regs_allocated(now);
+        if now == REGS_UNALLOCATED {
+            return -2;
+        }
+    }
+    let (so, eo) = pm.get(0).copied().unwrap_or((-1, -1));
+    if ret_len {
+        eo.wrapping_sub(start.cast_signed())
+    } else {
+        so
+    }
+}
+
+/// glibc's `re_search_2_stub`: the two strings taken as one -- copied
+/// together when both have bytes -- and searched as `search_stub` does.
+///
+/// # Safety
+///
+/// Each string holds its length's bytes; the rest as `search_stub` asks.
+#[allow(clippy::too_many_arguments)]
+unsafe fn search_2_stub(
+    bufp: *mut RegexT,
+    string1: *const u8,
+    length1: isize,
+    string2: *const u8,
+    length2: isize,
+    start: isize,
+    range: isize,
+    regs: *mut ReRegisters,
+    stop: isize,
+    ret_len: bool,
+) -> isize {
+    if length1 < 0 || length2 < 0 || stop < 0 {
+        return -2;
+    }
+    let Some(len) = length1.checked_add(length2) else {
+        return -2;
+    };
+    if length2 > 0 && length1 > 0 {
+        let joined = malloc::malloc(len.cast_unsigned());
+        if joined.is_null() {
+            return -2;
+        }
+        // SAFETY: `joined` has `len` bytes; each string its length's.
+        unsafe {
+            core::ptr::copy_nonoverlapping(string1, joined, length1.cast_unsigned());
+            core::ptr::copy_nonoverlapping(
+                string2,
+                joined.add(length1.cast_unsigned()),
+                length2.cast_unsigned(),
+            );
+        }
+        // SAFETY: `len` bytes at `joined`; the rest per the contract.
+        let r = unsafe { search_stub(bufp, joined, len, start, range, stop, regs, ret_len) };
+        // SAFETY: the block allocated above.
+        unsafe { malloc::free(joined) };
+        r
+    } else if length2 > 0 {
+        // SAFETY: per the contract.
+        unsafe { search_stub(bufp, string2, len, start, range, stop, regs, ret_len) }
+    } else {
+        // SAFETY: per the contract.
+        unsafe { search_stub(bufp, string1, len, start, range, stop, regs, ret_len) }
+    }
+}
+
+/// The first match of `buffer` in `string` (`length` bytes) beginning at
+/// `start` or `range` bytes on at most -- before it, scanning backwards, if
+/// `range` is negative: where it begins, -1 for none, -2 for an internal
+/// error; and its subexpressions in `regs`, if neither it nor the pattern's
+/// `no_sub` says not to.
+///
+/// # Safety
+///
+/// `string` holds `length` bytes; `buffer` is a compiled pattern buffer;
+/// `regs` is NULL, or its arrays are as `buffer.regs_allocated` says --
+/// unallocated, `malloc`ed and `num_regs` long, or fixed at `num_regs`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_search(
+    buffer: *mut RegexT,
+    string: *const u8,
+    length: isize,
+    start: isize,
+    range: isize,
+    regs: *mut ReRegisters,
+) -> isize {
+    // SAFETY: per the contract.
+    unsafe { search_stub(buffer, string, length, start, range, length, regs, false) }
+}
+
+/// `re_search` in `string1` and `string2` taken as one, a match ending by
+/// `stop`.
+///
+/// # Safety
+///
+/// Each string holds its length's bytes; the rest as `re_search` asks.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_search_2(
+    buffer: *mut RegexT,
+    string1: *const u8,
+    length1: isize,
+    string2: *const u8,
+    length2: isize,
+    start: isize,
+    range: isize,
+    regs: *mut ReRegisters,
+    stop: isize,
+) -> isize {
+    // SAFETY: per the contract.
+    unsafe {
+        search_2_stub(
+            buffer, string1, length1, string2, length2, start, range, regs, stop, false,
+        )
+    }
+}
+
+/// A match beginning at `start` itself: how many bytes it matched, -1 for
+/// none, -2 for an internal error; and `regs` as `re_search` fills them.
+///
+/// # Safety
+///
+/// As `re_search`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_match(
+    buffer: *mut RegexT,
+    string: *const u8,
+    length: isize,
+    start: isize,
+    regs: *mut ReRegisters,
+) -> isize {
+    // SAFETY: per the contract.
+    unsafe { search_stub(buffer, string, length, start, 0, length, regs, true) }
+}
+
+/// `re_match` in `string1` and `string2` taken as one, a match ending by
+/// `stop`.
+///
+/// # Safety
+///
+/// As `re_search_2`.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_match_2(
+    buffer: *mut RegexT,
+    string1: *const u8,
+    length1: isize,
+    string2: *const u8,
+    length2: isize,
+    start: isize,
+    regs: *mut ReRegisters,
+    stop: isize,
+) -> isize {
+    // SAFETY: per the contract.
+    unsafe {
+        search_2_stub(
+            buffer, string1, length1, string2, length2, start, 0, regs, stop, true,
+        )
+    }
+}
+
+/// `regs` given the program's own arrays, `num_regs` long, which later
+/// searches with `buffer` fill and may grow (`malloc`ed, then) -- or, for
+/// 0, none, so that the next search allocates its own.
+///
+/// # Safety
+///
+/// `buffer` and `regs` are the caller's, writable.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_set_registers(
+    buffer: *mut RegexT,
+    regs: *mut ReRegisters,
+    num_regs: usize,
+    starts: *mut isize,
+    ends: *mut isize,
+) {
+    if buffer.is_null() || regs.is_null() {
+        return;
+    }
+    // SAFETY: the caller's, per the contract.
+    let (b, r) = unsafe { (&*buffer, &mut *regs) };
+    if num_regs != 0 {
+        b.set_regs_allocated(REGS_REALLOCATE);
+        r.num_regs = num_regs;
+        r.start = starts;
+        r.end = ends;
+    } else {
+        b.set_regs_allocated(REGS_UNALLOCATED);
+        r.num_regs = 0;
+        r.start = core::ptr::null_mut();
+        r.end = core::ptr::null_mut();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 4.2BSD's re_comp and re_exec
+// ---------------------------------------------------------------------------
+
+/// `re_comp`'s one pattern, which `re_exec` matches.
+static mut RE_COMP_BUF: RegexT = RegexT::new();
+/// Held while either uses it: glibc's has no lock, and two threads using
+/// these at once race there; here they take turns.
+static RE_COMP_LOCK: crate::perprocess::PoolLock = crate::perprocess::PoolLock::new();
+
+/// glibc's message for `re_comp(NULL)` before any pattern.
+const NO_PREVIOUS: &[u8] = b"No previous regular expression\0";
+
+/// 4.2BSD's: `s` compiled in `re_syntax_options`'s syntax, in place of the
+/// pattern before it -- NULL, or the error's message. `re_comp(NULL)` keeps
+/// the pattern there is, and says so if there is none.
+///
+/// # Safety
+///
+/// `s` is NULL or a C string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_comp(s: *const u8) -> *mut u8 {
+    // SAFETY: a static lock, alive for the process.
+    let _g = unsafe { crate::perprocess::lock_pool((&raw const RE_COMP_LOCK).cast_mut()) };
+    let buf = &raw mut RE_COMP_BUF;
+    // SAFETY: the lock is held, so this thread alone uses the buffer.
+    let b = unsafe { &mut *buf };
+    if s.is_null() {
+        return if b.buffer.is_null() {
+            NO_PREVIOUS.as_ptr().cast_mut()
+        } else {
+            core::ptr::null_mut()
+        };
+    }
+    if !b.buffer.is_null() {
+        // The pattern before freed, its fastmap kept.
+        let fastmap = b.fastmap;
+        b.fastmap = core::ptr::null_mut();
+        // SAFETY: a buffer `re_comp` compiled.
+        unsafe { regfree(b) };
+        *b = RegexT::new();
+        b.fastmap = fastmap;
+    }
+    if b.fastmap.is_null() {
+        b.fastmap = malloc::malloc(256);
+        if b.fastmap.is_null() {
+            return message(REG_ESPACE).cast_mut();
+        }
+    }
+    b.set(NEWLINE_ANCHOR, true);
+    // SAFETY: a C string, per the contract.
+    let pat = unsafe { core::slice::from_raw_parts(s, string::strlen(s)) };
+    // SAFETY: an empty buffer (or one `re_comp` emptied), no translate table.
+    match unsafe { compile_into(b, pat, syntax_options()) } {
+        REG_NOERROR => core::ptr::null_mut(),
+        code => message(code).cast_mut(),
+    }
+}
+
+/// 4.2BSD's: 1 if `s` matches `re_comp`'s pattern, else 0 (and 0 with none).
+///
+/// # Safety
+///
+/// `s` is a C string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn re_exec(s: *const u8) -> i32 {
+    // SAFETY: a static lock, alive for the process.
+    let _g = unsafe { crate::perprocess::lock_pool((&raw const RE_COMP_LOCK).cast_mut()) };
+    // SAFETY: the lock is held; a C string, per the contract.
+    let r = unsafe { regexec(&raw const RE_COMP_BUF, s, 0, core::ptr::null_mut(), 0) };
+    i32::from(r == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,23 +1473,47 @@ mod tests {
 
     // -- ABI layout --
 
-    /// `regex_t` is 64 bytes with `re_nsub` first, as musl declares it.
-    /// `re_nsub` is the only field POSIX lets a caller read.
+    /// `regex_t` is glibc's `struct re_pattern_buffer`, field for field,
+    /// its seven bit-fields the low bits of the `unsigned int` at 56 in
+    /// glibc's order -- measured from glibc's own header, a bit set at a
+    /// time.
     ///
-    /// The size is also a `const` assertion above; this test adds the offsets.
+    /// The size and two offsets are also `const` assertions above; this test
+    /// adds the rest.
     #[test]
-    fn test_regex_t_matches_musl_layout() {
-        use core::mem::{align_of, size_of};
-        assert_eq!(size_of::<RegexT>(), 64, "musl/glibc regex_t is 64 bytes");
+    fn test_regex_t_is_glibcs_pattern_buffer() {
+        use core::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<RegexT>(), 64);
         assert_eq!(align_of::<RegexT>(), 8);
+        let offsets = [
+            offset_of!(RegexT, buffer),
+            offset_of!(RegexT, allocated),
+            offset_of!(RegexT, used),
+            offset_of!(RegexT, syntax),
+            offset_of!(RegexT, fastmap),
+            offset_of!(RegexT, translate),
+            offset_of!(RegexT, re_nsub),
+            offset_of!(RegexT, bits),
+        ];
+        assert_eq!(offsets, [0, 8, 16, 24, 32, 40, 48, 56]);
+        assert_eq!(
+            [
+                CAN_BE_NULL,
+                REGS_ALLOCATED_MASK,
+                FASTMAP_ACCURATE,
+                NO_SUB,
+                NOT_BOL,
+                NOT_EOL,
+                NEWLINE_ANCHOR
+            ],
+            [0x01, 0x06, 0x08, 0x10, 0x20, 0x40, 0x80]
+        );
         let r = RegexT::new();
-        let base = (&raw const r).cast::<u8>() as usize;
-        assert_eq!((&raw const r.re_nsub).cast::<u8>() as usize - base, 0);
-        assert_eq!((&raw const r.program).cast::<u8>() as usize - base, 8);
-        assert_eq!((&raw const r._reserved).cast::<u8>() as usize - base, 16);
-        assert_eq!(r.re_nsub, 0);
-        assert!(r.program.is_null());
-        assert_eq!(r._reserved, [0u8; 48]);
+        assert!(r.buffer.is_null() && r.fastmap.is_null() && r.translate.is_null());
+        assert_eq!(
+            (r.allocated, r.used, r.syntax, r.re_nsub, r.bits()),
+            (0, 0, 0, 0, 0)
+        );
     }
 
     /// A null-terminated pattern's pointer, as `regcomp` expects.
@@ -840,7 +1790,7 @@ mod tests {
         let rc = unsafe { regcomp(&raw mut re, cstr(b"^a(b+)c$\0"), REG_EXTENDED) };
         assert_eq!(rc, 0, "pattern is valid");
         assert_eq!(re.re_nsub, 1, "one parenthesised sub-expression");
-        assert!(!re.program.is_null(), "regcomp installed a program");
+        assert!(!re.buffer.is_null(), "regcomp installed a program");
 
         let mut m = [RegMatch {
             rm_so: -1,
@@ -858,7 +1808,7 @@ mod tests {
 
         // SAFETY: `re` was compiled by `regcomp` and is freed exactly once here.
         unsafe { regfree(&raw mut re) };
-        assert!(re.program.is_null(), "regfree clears the program pointer");
+        assert!(re.buffer.is_null(), "regfree clears the program pointer");
     }
 
     /// `regfree` leaves the object safe to free again, and frees once.
@@ -872,7 +1822,7 @@ mod tests {
         unsafe { regfree(&raw mut re) };
         // SAFETY: `re` is a valid RegexT whose program is already null.
         unsafe { regfree(&raw mut re) };
-        assert!(re.program.is_null());
+        assert!(re.buffer.is_null());
         assert_eq!(
             crate::malloc::live_allocations::count(),
             before,
@@ -919,7 +1869,7 @@ mod tests {
             let rc = unsafe { regcomp(&raw mut re, cstr(pat), cflags) };
             assert_eq!(rc, want, "pattern {pat:?} under cflags {cflags}");
             assert!(
-                re.program.is_null(),
+                re.buffer.is_null(),
                 "a failed regcomp installs no program ({pat:?})"
             );
             assert_eq!(
@@ -989,7 +1939,7 @@ mod tests {
             unsafe { regcomp(&raw mut re, core::ptr::null(), 0) },
             REG_BADPAT
         );
-        assert!(re.program.is_null(), "nothing installed on rejection");
+        assert!(re.buffer.is_null(), "nothing installed on rejection");
         // SAFETY: a null `preg` is likewise the case under test.
         assert_eq!(
             unsafe { regcomp(core::ptr::null_mut(), cstr(b"a\0"), 0) },
@@ -1259,5 +2209,888 @@ mod tests {
         });
         // SAFETY: compiled above; every thread has finished with it.
         unsafe { regfree(&raw mut re) };
+    }
+
+    // -- the GNU interface ---------------------------------------------------
+
+    use std::boxed::Box;
+    use std::string::ToString;
+
+    const GNU_ORACLE: &str = include_str!("regex_gnu_oracle.txt");
+    const GNU_DEVIATIONS: &str = include_str!("regex_gnu_deviations.txt");
+
+    /// Serialises the tests that set `re_syntax_options` or use `re_comp`'s
+    /// pattern: each is the process's one.
+    static GNU_GLOBALS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn gnu_lock() -> std::sync::MutexGuard<'static, ()> {
+        GNU_GLOBALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The harness's translate tables, `malloc`ed, as `regfree` frees one.
+    fn table(name: &str) -> *mut u8 {
+        let map = |c: u8| -> u8 {
+            match name {
+                "fold" => c.to_ascii_lowercase(),
+                "upper" => c.to_ascii_uppercase(),
+                "swap" => match c {
+                    b'a' => b'b',
+                    b'b' => b'a',
+                    _ => c,
+                },
+                _ => c,
+            }
+        };
+        if name == "-" {
+            return core::ptr::null_mut();
+        }
+        let t = crate::malloc::malloc(256);
+        assert!(!t.is_null());
+        for c in 0..=255u8 {
+            // SAFETY: 256 bytes.
+            unsafe { t.add(usize::from(c)).write(map(c)) };
+        }
+        t
+    }
+
+    /// The code whose message `msg` is; -1 for none (NULL).
+    fn code_of(msg: *const u8) -> i32 {
+        if msg.is_null() {
+            return -1;
+        }
+        // SAFETY: one of MESSAGES, a C string.
+        let text = unsafe { core::ffi::CStr::from_ptr(msg.cast()) }.to_bytes_with_nul();
+        MESSAGES
+            .iter()
+            .position(|m| *m == text)
+            .map_or(-99, |i| i32::try_from(i).unwrap())
+    }
+
+    /// `p` compiled by `re_compile_pattern` in `syntax` through table
+    /// `trans` into a zeroed pattern buffer, as the harness's C side does:
+    /// the buffer, and the code of the message it returned. The caller holds
+    /// `gnu_lock`.
+    fn gnu_compile(syntax: u64, p: &[u8], trans: &str) -> (Box<RegexT>, Option<i32>) {
+        let mut re = Box::new(RegexT::new());
+        re.translate = table(trans);
+        re_set_syntax(syntax);
+        // SAFETY: `p.len()` bytes; a zeroed buffer with a malloc'ed table.
+        let msg = unsafe { re_compile_pattern(p.as_ptr(), p.len(), &raw mut *re) };
+        let err = (!msg.is_null()).then(|| code_of(msg));
+        (re, err)
+    }
+
+    fn compiled_text(re: &RegexT, err: Option<i32>) -> String {
+        err.map_or_else(|| format!("n{}", re.re_nsub), |c| format!("e{c}"))
+    }
+
+    fn two_digits(so: isize, eo: isize) -> String {
+        if so < 0 && eo < 0 {
+            String::from("__")
+        } else if (0..=9).contains(&so) && (0..=9).contains(&eo) {
+            format!("{so}{eo}")
+        } else {
+            String::from("?")
+        }
+    }
+
+    /// The deviations file, by oracle line: (subject, the model's answer).
+    fn gnu_deviations() -> HashMap<usize, Vec<(String, String)>> {
+        let mut out: HashMap<usize, Vec<(String, String)>> = HashMap::new();
+        for line in GNU_DEVIATIONS.lines().filter(|l| !l.starts_with('#')) {
+            let mut f = line.splitn(4, ' ');
+            let (Some(n), Some(subj), Some(rest)) = (f.next(), f.next(), f.next()) else {
+                continue;
+            };
+            // An M line's answers have spaces in them, so glibc's and the
+            // model's are kept together here, and `want` takes glibc's --
+            // which the oracle line has -- off the front.
+            let model = f.next().map_or_else(String::new, String::from);
+            out.entry(n.parse().unwrap())
+                .or_default()
+                .push((String::from(subj), format!("{rest} {model}")));
+        }
+        out
+    }
+
+    /// A G or M answer of ours, against glibc's -- or the model's, where the
+    /// deviations file has one -- for oracle line `n`, subject `subj`.
+    fn want<'a>(
+        dev: &'a HashMap<usize, Vec<(String, String)>>,
+        n: usize,
+        subj: &str,
+        glibc: &'a str,
+    ) -> std::borrow::Cow<'a, str> {
+        let Some(list) = dev.get(&n) else {
+            return std::borrow::Cow::Borrowed(glibc);
+        };
+        for (s, both) in list {
+            if s == subj {
+                // `both` is "<glibc's> <the model's>": the model's is what
+                // remains once glibc's, as this line has it, is taken off.
+                let g = glibc.trim();
+                if let Some(m) = both.strip_prefix(g) {
+                    return std::borrow::Cow::Owned(String::from(m.trim()));
+                }
+            }
+        }
+        std::borrow::Cow::Borrowed(glibc)
+    }
+
+    /// Every case of the GNU interface's oracle answered as glibc does, or
+    /// as the standard does where the deviations file says glibc does not.
+    #[test]
+    fn every_gnu_case_is_glibcs_or_the_standards() {
+        let _g = gnu_lock();
+        let dev = gnu_deviations();
+        let mut wrong = Vec::new();
+        let mut counts = [0usize; 4];
+        for (i, line) in GNU_ORACLE.lines().enumerate() {
+            let n = i + 1;
+            if line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = line.split(' ').collect();
+            match f[0] {
+                "G" => {
+                    counts[0] += 1;
+                    gnu_g(&f, n, &dev, &mut wrong);
+                }
+                "M" => {
+                    counts[1] += 1;
+                    gnu_m(&f, n, &dev, &mut wrong);
+                }
+                "F" => {
+                    counts[2] += 1;
+                    gnu_f(&f, n, &mut wrong);
+                }
+                "C" => {
+                    counts[3] += 1;
+                    gnu_c(&f, n, &mut wrong);
+                }
+                other => panic!("line {n}: {other}"),
+            }
+        }
+        for w in wrong.iter().take(25) {
+            std::eprintln!("{w}");
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} answers are not glibc's or the standard's",
+            wrong.len()
+        );
+        assert!(
+            counts[0] > 40_000 && counts[1] > 2_500 && counts[2] > 400 && counts[3] > 20,
+            "{counts:?}"
+        );
+    }
+
+    const GSTRINGS: [&[u8]; 20] = [
+        b"", b"a", b"b", b"A", b"ab", b"ba", b"aa", b"\n", b"a\nb", b"\0", b"(", b")", b"|", b"+",
+        b"?", b"*", b"{1}", b"1", b"\\", b"]a",
+    ];
+
+    fn gnu_g(
+        f: &[&str],
+        n: usize,
+        dev: &HashMap<usize, Vec<(String, String)>>,
+        wrong: &mut Vec<String>,
+    ) {
+        let syn = u64::from_str_radix(f[1], 16).unwrap();
+        let pat = unescape(f[2]);
+        let (mut re, err) = gnu_compile(syn, &pat, "-");
+        let comp = compiled_text(&re, err);
+        let want_comp = want(dev, n, "c", f[3]);
+        if comp != want_comp {
+            wrong.push(format!(
+                "line {n}: G {} {}: compiled {comp}, want {want_comp}",
+                f[1], f[2]
+            ));
+        }
+        if err.is_none() {
+            for (j, s) in GSTRINGS.iter().enumerate() {
+                let mut regs = ReRegisters {
+                    num_regs: 0,
+                    start: core::ptr::null_mut(),
+                    end: core::ptr::null_mut(),
+                };
+                re.set_regs_allocated(REGS_UNALLOCATED);
+                let len = isize::try_from(s.len()).unwrap();
+                // SAFETY: `len` bytes; a compiled buffer; unallocated registers.
+                let r = unsafe { re_search(&raw mut *re, s.as_ptr(), len, 0, len, &raw mut regs) };
+                let got = if r == -1 {
+                    String::from("!")
+                } else if r < 0 {
+                    format!("x{r}")
+                } else if regs.num_regs == 0 {
+                    format!("@{r}")
+                } else {
+                    (0..=re.re_nsub)
+                        .map(|k| {
+                            // SAFETY: re_search allocated num_regs > re_nsub.
+                            unsafe { two_digits(*regs.start.add(k), *regs.end.add(k)) }
+                        })
+                        .collect()
+                };
+                // SAFETY: NULL or what re_search allocated.
+                unsafe {
+                    crate::malloc::free(regs.start.cast());
+                    crate::malloc::free(regs.end.cast());
+                }
+                let glibc = f.get(4 + j).copied().unwrap_or("-");
+                let w = want(dev, n, &format!("{j}"), glibc);
+                if got != w {
+                    wrong.push(format!(
+                        "line {n}: G {} {} {:?}: {got}, want {w}",
+                        f[1], f[2], s
+                    ));
+                }
+            }
+        }
+        // SAFETY: compiled (or failed) above; its table malloc'ed.
+        unsafe { regfree(&raw mut *re) };
+    }
+
+    /// glibc's `regoff_t` is an int: the harness's starts and ranges reached
+    /// glibc cut to 32 bits.
+    fn as_c_int(s: &str) -> isize {
+        let v: i128 = s.parse().unwrap();
+        #[allow(clippy::cast_possible_truncation)]
+        let c = v as i32;
+        c as isize
+    }
+
+    fn gnu_m(
+        f: &[&str],
+        n: usize,
+        dev: &HashMap<usize, Vec<(String, String)>>,
+        wrong: &mut Vec<String>,
+    ) {
+        let syn = u64::from_str_radix(f[1], 16).unwrap();
+        let pat = unescape(f[2]);
+        let trans = f[3];
+        let bits: u32 = f[4].parse().unwrap();
+        let call = f[5];
+        let s1 = unescape(f[6]);
+        let s2 = unescape(f[7]);
+        let (start, range) = (as_c_int(f[8]), as_c_int(f[9]));
+        let stop: isize = f[10].parse().unwrap();
+        let mode = &f[11][..1];
+        let k: usize = f[11][1..].parse().unwrap();
+        let glibc = f[13..].join(" ");
+        let (mut re, err) = gnu_compile(syn, &pat, trans);
+        let comp = compiled_text(&re, err);
+        if comp != f[12] {
+            wrong.push(format!("line {n}: M compiled {comp}, want {}", f[12]));
+        }
+        if err.is_some() {
+            // SAFETY: as compiled.
+            unsafe { regfree(&raw mut *re) };
+            return;
+        }
+        if bits & 1 != 0 {
+            re.set(NOT_BOL, true);
+        }
+        if bits & 2 != 0 {
+            re.set(NOT_EOL, true);
+        }
+        if bits & 4 != 0 {
+            re.set(NEWLINE_ANCHOR, false);
+        }
+        if bits & 8 != 0 {
+            re.set(NO_SUB, true);
+        }
+        let mut regs = ReRegisters {
+            num_regs: 0,
+            start: core::ptr::null_mut(),
+            end: core::ptr::null_mut(),
+        };
+        let mut fixed_s = [-9isize; 64];
+        let mut fixed_e = [-9isize; 64];
+        let rp: *mut ReRegisters = match mode {
+            "u" | "U" => &raw mut regs,
+            "r" => {
+                let bytes = k * size_of::<isize>();
+                let s = crate::malloc::malloc(bytes).cast::<isize>();
+                let e = crate::malloc::malloc(bytes).cast::<isize>();
+                for i in 0..k {
+                    // SAFETY: k elements each.
+                    unsafe {
+                        s.add(i).write(-9);
+                        e.add(i).write(-9);
+                    }
+                }
+                // SAFETY: the buffer and registers above.
+                unsafe { re_set_registers(&raw mut *re, &raw mut regs, k, s, e) };
+                &raw mut regs
+            }
+            "f" => {
+                regs.num_regs = k;
+                regs.start = fixed_s.as_mut_ptr();
+                regs.end = fixed_e.as_mut_ptr();
+                re.set_regs_allocated(REGS_FIXED);
+                &raw mut regs
+            }
+            _ => core::ptr::null_mut(),
+        };
+        let mut got = String::new();
+        let times = if mode == "U" { 2 } else { 1 };
+        for _ in 0..times {
+            let (l1, l2) = (
+                isize::try_from(s1.len()).unwrap(),
+                isize::try_from(s2.len()).unwrap(),
+            );
+            // SAFETY: each string its length's bytes; the buffer compiled;
+            // the registers as their mode says.
+            let r = unsafe {
+                match call {
+                    "s" => re_search(&raw mut *re, s1.as_ptr(), l1, start, range, rp),
+                    "m" => re_match(&raw mut *re, s1.as_ptr(), l1, start, rp),
+                    "S" => re_search_2(
+                        &raw mut *re,
+                        s1.as_ptr(),
+                        l1,
+                        s2.as_ptr(),
+                        l2,
+                        start,
+                        range,
+                        rp,
+                        stop,
+                    ),
+                    "M" => re_match_2(
+                        &raw mut *re,
+                        s1.as_ptr(),
+                        l1,
+                        s2.as_ptr(),
+                        l2,
+                        start,
+                        rp,
+                        stop,
+                    ),
+                    _ => {
+                        let z = s1.iter().position(|&c| c == 0).unwrap_or(s1.len());
+                        let s = nul(&s1[..z]);
+                        let nm = (re.re_nsub + 1).min(16);
+                        let mut pm = [RegMatch {
+                            rm_so: -9,
+                            rm_eo: -9,
+                        }; 16];
+                        let eflags = i32::try_from(start).unwrap();
+                        let rc = regexec(&raw const *re, s.as_ptr(), nm, pm.as_mut_ptr(), eflags);
+                        got.push_str(&format!(" {rc}"));
+                        for (q, m) in pm.iter().take(nm).enumerate() {
+                            got.push_str(&format!(
+                                "{}{}:{}",
+                                if q == 0 { '=' } else { ',' },
+                                m.rm_so,
+                                m.rm_eo
+                            ));
+                        }
+                        continue;
+                    }
+                }
+            };
+            got.push_str(&format!(" {r}"));
+            if !rp.is_null() {
+                let shown = regs.num_regs.min(64);
+                // SAFETY: num_regs elements each, as re_search left them.
+                let (s, e): (Vec<String>, Vec<String>) = (0..shown)
+                    .map(|q| unsafe {
+                        (
+                            (*regs.start.add(q)).to_string(),
+                            (*regs.end.add(q)).to_string(),
+                        )
+                    })
+                    .unzip();
+                got.push_str(&format!(
+                    " {}:{}/{} {}",
+                    regs.num_regs,
+                    s.join(","),
+                    e.join(","),
+                    re.regs_allocated()
+                ));
+            }
+        }
+        if mode != "f" {
+            // SAFETY: NULL or malloc'ed, by re_search or above.
+            unsafe {
+                crate::malloc::free(regs.start.cast());
+                crate::malloc::free(regs.end.cast());
+            }
+        }
+        // SAFETY: compiled above.
+        unsafe { regfree(&raw mut *re) };
+        let w = want(dev, n, "0", &glibc);
+        if got.trim() != w.trim() {
+            wrong.push(format!(
+                "line {n}: {} -> {got}, want {w}",
+                &f[..13].join(" ")
+            ));
+        }
+    }
+
+    fn gnu_f(f: &[&str], n: usize, wrong: &mut Vec<String>) {
+        let syn = u64::from_str_radix(f[1], 16).unwrap();
+        let cf: i32 = f[2].parse().unwrap();
+        let pat = unescape(f[3]);
+        let want_rest = f[5..].join(" ");
+        let (mut re, comp) = if cf >= 0 {
+            let mut re = Box::new(RegexT::new());
+            let p = nul(&pat);
+            // SAFETY: a C string; a writable buffer.
+            let rc = unsafe { regcomp(&raw mut *re, p.as_ptr(), cf) };
+            let comp = if rc == 0 {
+                format!("n{}", re.re_nsub)
+            } else {
+                format!("e{rc}")
+            };
+            (re, comp)
+        } else {
+            let (mut re, err) = gnu_compile(syn, &pat, f[4]);
+            let comp = compiled_text(&re, err);
+            if err.is_none() {
+                re.fastmap = crate::malloc::malloc(256);
+                // SAFETY: compiled; a 256-byte fastmap.
+                assert_eq!(unsafe { re_compile_fastmap(&raw mut *re) }, 0);
+            }
+            (re, comp)
+        };
+        if comp != f[5] {
+            wrong.push(format!(
+                "line {n}: F {} {} {}: {comp}, want {}",
+                f[1], f[2], f[3], f[5]
+            ));
+        } else if comp.starts_with('n') {
+            let mut hex = String::new();
+            for b in (0..256).step_by(4) {
+                let mut d = 0;
+                for q in 0..4 {
+                    // SAFETY: the fastmap, 256 bytes.
+                    if unsafe { *re.fastmap.add(b + q) } != 0 {
+                        d |= 1 << q;
+                    }
+                }
+                hex.push(char::from_digit(d, 16).unwrap());
+            }
+            let fields = [
+                re.bits() & CAN_BE_NULL != 0,
+                false,
+                re.bits() & FASTMAP_ACCURATE != 0,
+                re.bits() & NO_SUB != 0,
+                re.bits() & NOT_BOL != 0,
+                re.bits() & NOT_EOL != 0,
+                re.bits() & NEWLINE_ANCHOR != 0,
+            ];
+            let mut ftext: String = fields.iter().map(|&b| if b { '1' } else { '0' }).collect();
+            ftext.replace_range(1..2, &format!("{}", re.regs_allocated()));
+            let got = format!("{comp} {hex} {ftext} {:x}", re.syntax);
+            if got != want_rest {
+                wrong.push(format!(
+                    "line {n}: F {} {} {} {}:\n   {got}\n   want {want_rest}",
+                    f[1], f[2], f[3], f[4]
+                ));
+            }
+        }
+        // SAFETY: compiled (or failed) above.
+        unsafe { regfree(&raw mut *re) };
+    }
+
+    fn gnu_c(f: &[&str], n: usize, wrong: &mut Vec<String>) {
+        let got = match f[1] {
+            "s" => {
+                re_set_syntax(u64::from_str_radix(f[2], 16).unwrap());
+                String::from("ok")
+            }
+            "c" => {
+                let arg = (f[2] != "-").then(|| nul(&unescape(f[2])));
+                // SAFETY: NULL or a C string.
+                let r = unsafe { re_comp(arg.as_ref().map_or(core::ptr::null(), |a| a.as_ptr())) };
+                if r.is_null() {
+                    String::from("-")
+                } else {
+                    // SAFETY: a static message.
+                    let text =
+                        unsafe { core::ffi::CStr::from_ptr(r.cast_const().cast()) }.to_bytes();
+                    text.iter()
+                        .map(|&c| {
+                            if c > 0x20 && c < 0x7f && c != b'\\' {
+                                String::from(char::from(c))
+                            } else {
+                                format!("\\x{c:02x}")
+                            }
+                        })
+                        .collect()
+                }
+            }
+            _ => {
+                let arg = nul(&unescape(f[2]));
+                // SAFETY: a C string.
+                format!("{}", unsafe { re_exec(arg.as_ptr()) })
+            }
+        };
+        if got != f[4] {
+            wrong.push(format!("line {n}: {}: {got}", f.join(" ")));
+        }
+    }
+
+    /// `re_compile_pattern` reads `re_syntax_options`, sets `newline_anchor`
+    /// and, from RE_NO_SUB, `no_sub`; returns glibc's messages -- an
+    /// unmatched `)` its own, which `regcomp` reports as REG_EPAREN; and
+    /// `re_set_syntax` answers the old syntax.
+    #[test]
+    fn re_compile_pattern_takes_the_global_syntax_and_says_why() {
+        let _g = gnu_lock();
+        let old = re_set_syntax(RE_SYNTAX_POSIX_BASIC);
+        let mut re = RegexT::new();
+        // SAFETY: three bytes; a zeroed buffer.
+        let m = unsafe { re_compile_pattern(b"a\\)".as_ptr(), 3, &raw mut re) };
+        assert_eq!(code_of(m), REG_ERPAREN);
+        assert!(re.buffer.is_null(), "a failed compile leaves no block");
+        assert_eq!(
+            re_set_syntax(RE_SYNTAX_POSIX_EXTENDED | RE_NO_SUB),
+            RE_SYNTAX_POSIX_BASIC
+        );
+        let mut re = RegexT::new();
+        // SAFETY: as above.
+        assert!(unsafe { re_compile_pattern(b"(a)".as_ptr(), 3, &raw mut re) }.is_null());
+        assert_eq!(re.re_nsub, 1);
+        assert_ne!(re.bits() & NEWLINE_ANCHOR, 0);
+        assert_ne!(re.bits() & NO_SUB, 0);
+        assert_eq!(re.syntax, RE_SYNTAX_POSIX_EXTENDED | RE_NO_SUB);
+        // SAFETY: compiled above.
+        unsafe { regfree(&raw mut re) };
+        re_set_syntax(old);
+        // An ERE's `)` with no `(` is an ordinary one; a BRE's `\)` is an
+        // error, which regcomp names as POSIX has it.
+        let mut posix = RegexT::new();
+        // SAFETY: a C string.
+        assert_eq!(
+            unsafe { regcomp(&raw mut posix, c"a)".as_ptr().cast(), REG_EXTENDED) },
+            0
+        );
+        // SAFETY: as compiled.
+        unsafe { regfree(&raw mut posix) };
+        let mut posix = RegexT::new();
+        // SAFETY: a C string.
+        assert_eq!(
+            unsafe { regcomp(&raw mut posix, c"a\\)".as_ptr().cast(), 0) },
+            REG_EPAREN
+        );
+    }
+
+    /// A program's own block, given in `buffer` and `allocated`, is compiled
+    /// into when big enough and grown when not; on an error it is freed and
+    /// `buffer` left NULL, as glibc's is.
+    #[test]
+    fn re_compile_pattern_uses_and_grows_the_programs_block() {
+        let _g = gnu_lock();
+        re_set_syntax(RE_SYNTAX_POSIX_BASIC);
+        let before = crate::malloc::live_allocations::count();
+        let size = size_of::<prog::Program>();
+        let mut re = RegexT::new();
+        let block = crate::malloc::malloc(size * 2);
+        re.buffer = block.cast();
+        re.allocated = size * 2;
+        // SAFETY: a malloc'ed block of `allocated` bytes.
+        assert!(unsafe { re_compile_pattern(b"ab".as_ptr(), 2, &raw mut re) }.is_null());
+        assert_eq!(
+            re.buffer,
+            block.cast(),
+            "a block big enough is used as it is"
+        );
+        assert_eq!((re.allocated, re.used), (size * 2, size));
+        // SAFETY: compiled above.
+        unsafe { regfree(&raw mut re) };
+        let mut re = RegexT::new();
+        re.buffer = crate::malloc::malloc(8).cast();
+        re.allocated = 8;
+        // SAFETY: as above.
+        assert!(unsafe { re_compile_pattern(b"ab".as_ptr(), 2, &raw mut re) }.is_null());
+        assert_eq!((re.allocated, re.used), (size, size));
+        // SAFETY: compiled above.
+        unsafe { regfree(&raw mut re) };
+        let mut re = RegexT::new();
+        re.buffer = crate::malloc::malloc(size).cast();
+        re.allocated = size;
+        // SAFETY: as above.
+        assert_eq!(
+            code_of(unsafe { re_compile_pattern(b"\\(".as_ptr(), 2, &raw mut re) }),
+            REG_EPAREN
+        );
+        assert!(re.buffer.is_null());
+        assert_eq!(re.allocated, 0);
+        assert_eq!(
+            crate::malloc::live_allocations::count(),
+            before,
+            "nothing left allocated"
+        );
+    }
+
+    /// Starts, ranges and stops a C caller can give that glibc's int
+    /// arithmetic cannot hold, here held: the full range of a `long`, and
+    /// the refusals.
+    #[test]
+    fn re_search_holds_every_long_start_and_range() {
+        let _g = gnu_lock();
+        let (mut re, err) = gnu_compile(RE_SYNTAX_POSIX_BASIC, b"b", "-");
+        assert_eq!(err, None);
+        let s = b"aab";
+        let p = &raw mut *re;
+        let none = core::ptr::null_mut();
+        // SAFETY: three bytes; a compiled buffer; no registers.
+        unsafe {
+            assert_eq!(re_search(p, s.as_ptr(), 3, 0, isize::MAX, none), 2);
+            assert_eq!(re_search(p, s.as_ptr(), 3, 3, isize::MIN, none), 2);
+            assert_eq!(re_search(p, s.as_ptr(), 3, 0, isize::MIN, none), -1);
+            assert_eq!(re_search(p, s.as_ptr(), 3, 4, 0, none), -1);
+            assert_eq!(re_search(p, s.as_ptr(), 3, -1, 5, none), -1);
+            assert_eq!(
+                re_search(p, s.as_ptr(), 3, isize::MAX, isize::MAX, none),
+                -1
+            );
+            assert_eq!(re_match(p, s.as_ptr(), 3, 2, none), 1);
+            assert_eq!(
+                re_search_2(p, s.as_ptr(), 1, s.as_ptr().add(1), 2, 0, 3, none, -1),
+                -2
+            );
+            assert_eq!(
+                re_search_2(p, s.as_ptr(), -1, s.as_ptr(), 2, 0, 3, none, 3),
+                -2
+            );
+            assert_eq!(
+                re_search_2(p, s.as_ptr(), isize::MAX, s.as_ptr(), 2, 0, 3, none, 3),
+                -2
+            );
+            assert_eq!(
+                re_search_2(p, s.as_ptr(), 2, s.as_ptr().add(2), 1, 0, 3, none, 99),
+                2
+            );
+            regfree(p);
+        }
+    }
+
+    /// The fastmap holds every byte a match can begin with: each byte that
+    /// begins a match of a pattern somewhere in a string of the alphabet is
+    /// in its fastmap, whatever the syntax.
+    #[test]
+    fn a_fastmap_holds_every_byte_a_match_begins_with() {
+        let _g = gnu_lock();
+        let alphabet = b"ab\n_A ";
+        let patterns: [&[u8]; 14] = [
+            b"a",
+            b"\\<a",
+            b"\\ba",
+            b"^a",
+            b"a*b",
+            b"\\(a\\)\\1",
+            b"\\(\\)\\1b",
+            b"[^a]",
+            b"\\W",
+            b"b\\|^",
+            b"\\`a",
+            b"\\>b",
+            b"a\\B",
+            b".",
+        ];
+        for syn in [
+            RE_SYNTAX_POSIX_BASIC,
+            RE_SYNTAX_POSIX_BASIC | RE_ICASE,
+            RE_SYNTAX_GREP,
+        ] {
+            for &p in &patterns {
+                let (mut re, err) = gnu_compile(syn, p, "-");
+                assert_eq!(err, None, "{p:?}");
+                re.fastmap = crate::malloc::malloc(256);
+                // SAFETY: compiled; a 256-byte fastmap.
+                assert_eq!(unsafe { re_compile_fastmap(&raw mut *re) }, 0);
+                for a in alphabet {
+                    for b in alphabet {
+                        let s = [*a, *b];
+                        for at in 0..2 {
+                            // SAFETY: two bytes; a compiled buffer.
+                            let len = unsafe {
+                                re_match(&raw mut *re, s.as_ptr(), 2, at, core::ptr::null_mut())
+                            };
+                            if len > 0 {
+                                let first = s[at as usize];
+                                // SAFETY: the fastmap.
+                                let in_map = unsafe { *re.fastmap.add(usize::from(first)) } != 0;
+                                assert!(
+                                    in_map,
+                                    "{p:?} in {syn:x}: {s:?} at {at}, {first} not in the fastmap"
+                                );
+                            }
+                        }
+                    }
+                }
+                // SAFETY: compiled above.
+                unsafe { regfree(&raw mut *re) };
+            }
+        }
+    }
+
+    /// `regfree` frees what the pattern buffer holds -- the program, the
+    /// fastmap and the translate table -- and clears each.
+    #[test]
+    fn regfree_frees_the_fastmap_and_the_table() {
+        let _g = gnu_lock();
+        let before = crate::malloc::live_allocations::count();
+        let (mut re, err) = gnu_compile(RE_SYNTAX_POSIX_BASIC, b"a*", "fold");
+        assert_eq!(err, None);
+        re.fastmap = crate::malloc::malloc(256);
+        // SAFETY: compiled; a fastmap.
+        assert_eq!(unsafe { re_compile_fastmap(&raw mut *re) }, 0);
+        // SAFETY: as compiled.
+        unsafe { regfree(&raw mut *re) };
+        assert!(re.buffer.is_null() && re.fastmap.is_null() && re.translate.is_null());
+        assert_eq!(crate::malloc::live_allocations::count(), before);
+    }
+
+    /// Every allocation of a GNU search failing in turn -- the translated
+    /// string, the joined one, the registers, the matcher's tables -- leaks
+    /// nothing, and is answered -2.
+    #[test]
+    fn every_allocation_of_a_search_failing_in_turn_leaks_nothing() {
+        let _g = gnu_lock();
+        let (mut re, err) = gnu_compile(RE_SYNTAX_POSIX_BASIC, b"\\(a*\\)\\(b\\)", "fold");
+        assert_eq!(err, None);
+        let mut completed = None;
+        for k in 1..10_000u64 {
+            let before = crate::malloc::live_allocations::count();
+            let mut regs = ReRegisters {
+                num_regs: 0,
+                start: core::ptr::null_mut(),
+                end: core::ptr::null_mut(),
+            };
+            re.set_regs_allocated(REGS_UNALLOCATED);
+            crate::malloc::live_allocations::fail_after(k);
+            // SAFETY: two strings; a compiled buffer; unallocated registers.
+            let r = unsafe {
+                re_search_2(
+                    &raw mut *re,
+                    b"xA".as_ptr(),
+                    2,
+                    b"Ab".as_ptr(),
+                    2,
+                    0,
+                    4,
+                    &raw mut regs,
+                    4,
+                )
+            };
+            crate::malloc::live_allocations::fail_after(0);
+            if r >= 0 {
+                assert_eq!(r, 1);
+                // SAFETY: re_search's arrays.
+                unsafe {
+                    crate::malloc::free(regs.start.cast());
+                    crate::malloc::free(regs.end.cast());
+                }
+            } else {
+                assert_eq!(r, -2, "allocation {k} failed");
+                assert!(regs.start.is_null() && regs.end.is_null());
+            }
+            assert_eq!(
+                crate::malloc::live_allocations::count(),
+                before,
+                "allocation {k} leaked"
+            );
+            if r >= 0 {
+                // Every allocation the search made has had its turn.
+                completed = Some(k);
+                break;
+            }
+        }
+        assert!(completed.is_some_and(|k| k > 3), "{completed:?}");
+        // SAFETY: compiled above.
+        unsafe { regfree(&raw mut *re) };
+    }
+
+    /// `re_comp` and `re_exec` from many threads at once take turns at the
+    /// one pattern instead of racing on it.
+    #[test]
+    fn re_comp_and_re_exec_from_many_threads_take_turns() {
+        let _g = gnu_lock();
+        re_set_syntax(RE_SYNTAX_POSIX_BASIC);
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for _ in 0..200 {
+                        let p = if t % 2 == 0 { c"a\\(b\\)*" } else { c"x" };
+                        // SAFETY: C strings.
+                        unsafe {
+                            assert!(re_comp(p.as_ptr().cast()).is_null());
+                            // Whichever pattern is there when it runs: what
+                            // is under test is that the two never race.
+                            let r = re_exec(c"zab".as_ptr().cast());
+                            assert!(r == 0 || r == 1);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
+    /// One pattern buffer searched by many threads at once -- its fastmap not
+    /// yet made, each with registers of its own -- while others match it
+    /// with `regexec`: every answer the one a thread alone gets, the searches
+    /// taking turns at what they change in the buffer.
+    #[test]
+    fn one_pattern_buffer_searched_by_many_threads_at_once() {
+        let _g = gnu_lock();
+        let (mut re, err) = gnu_compile(RE_SYNTAX_POSIX_BASIC, b"\\(a*\\)b", "-");
+        assert_eq!(err, None);
+        re.fastmap = crate::malloc::malloc(256);
+        let shared = (&raw mut *re) as usize;
+        let threads: Vec<_> = (0..6)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    let p = shared as *mut RegexT;
+                    for _ in 0..300 {
+                        if t % 2 == 0 {
+                            let mut regs = ReRegisters {
+                                num_regs: 0,
+                                start: core::ptr::null_mut(),
+                                end: core::ptr::null_mut(),
+                            };
+                            // SAFETY: four bytes; the buffer outlives the
+                            // threads; registers of this thread's own.
+                            let r =
+                                unsafe { re_search(p, b"xaab".as_ptr(), 4, 0, 4, &raw mut regs) };
+                            assert_eq!(r, 1);
+                            // SAFETY: what re_search allocated, then freed.
+                            unsafe {
+                                assert!(regs.num_regs >= 2);
+                                assert_eq!((*regs.start.add(1), *regs.end.add(1)), (1, 3));
+                                crate::malloc::free(regs.start.cast());
+                                crate::malloc::free(regs.end.cast());
+                            }
+                        } else {
+                            let mut m = [RegMatch {
+                                rm_so: -9,
+                                rm_eo: -9,
+                            }; 2];
+                            // SAFETY: a C string; two slots.
+                            let rc = unsafe {
+                                regexec(p, c"xaab".as_ptr().cast(), 2, m.as_mut_ptr(), 0)
+                            };
+                            assert_eq!(rc, 0);
+                            assert_eq!(m[1], RegMatch { rm_so: 1, rm_eo: 3 });
+                        }
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_ne!(re.bits() & FASTMAP_ACCURATE, 0, "a search made the fastmap");
+        // SAFETY: compiled above; no thread uses it now.
+        unsafe { regfree(&raw mut *re) };
     }
 }

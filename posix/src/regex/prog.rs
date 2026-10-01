@@ -69,10 +69,12 @@ pub(super) struct Program {
     /// consuming one -- if not, a search skips to the next such byte.
     pub(super) first: ByteSet,
     pub(super) may_be_empty: bool,
+    /// RE_ICASE: a back-reference matches its group's text in either
+    /// case.
     pub(super) icase: bool,
-    pub(super) newline: bool,
-    /// REG_NOSUB: `regexec` reports only whether there is a match.
-    pub(super) nosub: bool,
+    /// glibc's `dfa->lock`: held by the GNU searches, which may change the
+    /// pattern buffer (`regex.rs`'s `Held`).
+    pub(super) lock: core::sync::atomic::AtomicI32,
     /// The set of every byte, what the forward program reads a
     /// back-reference as: any string at all. With it that program matches
     /// wherever the pattern could, which is where `backref.rs` need look.
@@ -110,7 +112,7 @@ impl Program {
 }
 
 /// The tree, analysed and compiled.
-pub(super) fn compile(tree: Tree, icase: bool, newline: bool) -> Result<Program, NoMem> {
+pub(super) fn compile(tree: Tree, icase: bool) -> Result<Program, NoMem> {
     let n = tree.nodes.len();
     let mut info = List::with_capacity(n)?;
     let mut backrefs = false;
@@ -205,8 +207,7 @@ pub(super) fn compile(tree: Tree, icase: bool, newline: bool) -> Result<Program,
         first: ByteSet::EMPTY,
         may_be_empty: true,
         icase,
-        newline,
-        nosub: false,
+        lock: core::sync::atomic::AtomicI32::new(0),
         any: NONE,
     };
     if backrefs {
@@ -548,10 +549,16 @@ fn first_bytes(p: &Program) -> Result<(ByteSet, bool), NoMem> {
 pub(super) struct Subject<'s> {
     /// From the string's first byte: with REG_STARTEND a match begins no
     /// earlier than `pmatch[0].rm_so`, but what precedes it is still what
-    /// `^` and `\b` there see.
+    /// `^` and `\b` there see. It ends where a match must: for
+    /// `re_search_2`, at its `stop`, which can be short of the string's end.
     pub(super) s: &'s [u8],
+    /// The byte after `s`, when the string goes on past where a match may
+    /// end: what `$` and `\b` at the end of `s` see.
+    pub(super) after: Option<u8>,
     pub(super) notbol: bool,
     pub(super) noteol: bool,
+    /// `^` and `$` match at a newline: the pattern buffer's
+    /// `newline_anchor` (REG_NEWLINE's, and always `re_compile_pattern`'s).
     pub(super) newline: bool,
 }
 
@@ -562,8 +569,9 @@ impl Subject<'_> {
 
     /// Whether assertion `a` holds at position `p`, as glibc's contexts
     /// have it: before the string, no word and (unless REG_NOTBOL) a line's
-    /// start; after it, no word and (unless REG_NOTEOL) a line's end; a
-    /// newline is a line's end or start only under REG_NEWLINE.
+    /// start; after it -- the string's end, not `s`'s if `after` says it
+    /// goes on -- no word and (unless REG_NOTEOL) a line's end; a newline
+    /// is a line's end or start only under `newline`.
     pub(super) fn holds(&self, a: Assert, p: usize) -> bool {
         let (pw, pl, pb) = if p == 0 {
             (false, !self.notbol, true)
@@ -571,11 +579,14 @@ impl Subject<'_> {
             let c = self.s.get(p.wrapping_sub(1)).copied().unwrap_or(0);
             (is_word(c), self.newline && c == b'\n', false)
         };
-        let (nw, nl, nb) = if p >= self.s.len() {
-            (false, !self.noteol, true)
+        let next = if p >= self.s.len() {
+            self.after
         } else {
-            let c = self.s.get(p).copied().unwrap_or(0);
-            (is_word(c), self.newline && c == b'\n', false)
+            self.s.get(p).copied()
+        };
+        let (nw, nl, nb) = match next {
+            None => (false, !self.noteol, true),
+            Some(c) => (is_word(c), self.newline && c == b'\n', false),
         };
         match a {
             Assert::Bol => pl,
@@ -767,14 +778,16 @@ impl Vm {
         Ok(())
     }
 
-    /// The leftmost-longest match of the whole program at or after `from`,
-    /// as (start, end) -- or with `any`, the first match found, which is all
-    /// a caller asking for no submatches needs to know exists.
+    /// The leftmost-longest match of the whole program beginning at `from`
+    /// or after it but not after `last`, as (start, end) -- or with `any`,
+    /// the first match found, which is all a caller asking for no submatches
+    /// needs to know exists.
     pub(super) fn search(
         &mut self,
         p: &Program,
         sub: &Subject<'_>,
         from: usize,
+        last: usize,
         any: bool,
     ) -> Result<Option<(usize, usize)>, NoMem> {
         let root = p.info(p.tree.root);
@@ -791,7 +804,7 @@ impl Vm {
         let mut pos = from;
         self.a.len = 0;
         loop {
-            if best.is_none() {
+            if best.is_none() && pos <= last {
                 if self.a.len == 0 && !p.may_be_empty {
                     // Nothing under way, and a match must begin with one of
                     // `first`: skip to the next.
@@ -800,8 +813,8 @@ impl Vm {
                         .get(pos..)
                         .and_then(|rest| rest.iter().position(|&c| p.first.contains(c)));
                     match skip {
-                        Some(k) => pos = pos.wrapping_add(k),
-                        None => return Ok(None),
+                        Some(k) if pos.wrapping_add(k) <= last => pos = pos.wrapping_add(k),
+                        _ => return Ok(None),
                     }
                 }
                 let at = pos;
@@ -816,8 +829,9 @@ impl Vm {
             }
             if self.a.len == 0 {
                 // No thread alive: done if a match was found, or the string
-                // is; otherwise one may begin at the next byte.
-                if best.is_some() || pos >= end {
+                // is, or no match may begin further on; otherwise one may
+                // begin at the next byte.
+                if best.is_some() || pos >= end || pos >= last {
                     break;
                 }
                 pos = pos.wrapping_add(1);

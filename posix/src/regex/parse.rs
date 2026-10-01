@@ -1,20 +1,28 @@
-//! The pattern, read into a tree: glibc 2.39's grammar for
-//! RE_SYNTAX_POSIX_BASIC and RE_SYNTAX_POSIX_EXTENDED, the two syntaxes
-//! `regcomp` chooses between (regcomp.c's `peek_token`, `parse_reg_exp`,
-//! `parse_branch`, `parse_expression`, `parse_sub_exp`, `parse_dup_op`,
-//! `fetch_number` and `parse_bracket_exp`).
+//! The pattern, read into a tree: glibc 2.39's grammar, for every syntax a
+//! `reg_syntax_t` can describe -- the two `regcomp` chooses between,
+//! RE_SYNTAX_POSIX_BASIC and RE_SYNTAX_POSIX_EXTENDED, and whatever bits a
+//! program gives `re_compile_pattern` (regcomp.c's `peek_token`,
+//! `parse_reg_exp`, `parse_branch`, `parse_expression`, `parse_sub_exp`,
+//! `parse_dup_op`, `fetch_number` and `parse_bracket_exp`).
 //!
 //! POSIX leaves undefined most of what a parser has to decide -- what `a**`
 //! is, whether `^` in the middle of a BRE is an anchor, what an unmatched
-//! `)` means, which error a malformed interval earns -- and there glibc's
-//! answer is this one's, found out by the oracle
-//! (`posix/tools/oracle/regex_harness.py`, every pair of 75 tokens as an ERE
-//! and as a BRE). The one place this reads a pattern otherwise is REG_ICASE:
-//! glibc upper-cases the pattern before parsing it, which turns `[Z-a]` into
-//! the reversed range `[Z-A]` (refused) and `[a-Z]` into `[A-Z]` (accepted),
-//! and loses the case of `\a`; this parses the pattern as written and has
-//! each character match itself and its other case, which is what XBD 9.2
-//! says REG_ICASE means.
+//! `)` means, which error a malformed interval earns -- and the GNU syntaxes
+//! are glibc's own; there glibc's answer is this one's, found out by the
+//! oracles (`posix/tools/oracle/regex_harness.py`, every pair of 75 tokens as
+//! an ERE and as a BRE; `regex_gnu_harness.py`, every pair under each syntax
+//! bit and the programs' syntaxes). The one place this reads a pattern
+//! otherwise is the case of a letter: glibc upper-cases the pattern under
+//! RE_ICASE before parsing it, which turns `[Z-a]` into the reversed range
+//! `[Z-A]` (refused) and `[a-Z]` into `[A-Z]` (accepted), and leaves `\a`
+//! as written, so that it matches no `a` at all; this parses the pattern as
+//! written and has each letter match itself and its other case, which is
+//! what XBD 9.2 says REG_ICASE means. A translate table (`translate`, for
+//! `re_compile_pattern`) is applied as glibc applies it -- to every byte the
+//! grammar reads, before it decides what the byte is -- but for the same
+//! `\a`: glibc leaves an escaped letter untranslated, so that it can never
+//! match a translated subject, where this translates it, as glibc's header
+//! says the table is applied "to a pattern when it is compiled".
 //!
 //! glibc's parser recurses once a level of nesting, and so a pattern of a
 //! hundred thousand `(` can overflow its stack. This one keeps an explicit
@@ -23,9 +31,14 @@
 //! its nodes in order.
 
 use super::{
-    REG_BADBR, REG_BADPAT, REG_BADRPT, REG_EBRACE, REG_EBRACK, REG_ECOLLATE, REG_ECTYPE,
-    REG_EESCAPE, REG_EPAREN, REG_ERANGE, REG_ESIZE, REG_ESPACE, REG_ESUBREG, REG_EXTENDED,
-    REG_ICASE, REG_NEWLINE,
+    RE_BACKSLASH_ESCAPE_IN_LISTS, RE_BK_PLUS_QM, RE_CARET_ANCHORS_HERE, RE_CHAR_CLASSES,
+    RE_CONTEXT_INDEP_ANCHORS, RE_CONTEXT_INDEP_OPS, RE_CONTEXT_INVALID_DUP, RE_CONTEXT_INVALID_OPS,
+    RE_DOT_NEWLINE, RE_DOT_NOT_NULL, RE_HAT_LISTS_NOT_NEWLINE, RE_ICASE, RE_INTERVALS,
+    RE_INVALID_INTERVAL_ORD, RE_LIMITED_OPS, RE_NEWLINE_ALT, RE_NO_BK_BRACES, RE_NO_BK_PARENS,
+    RE_NO_BK_REFS, RE_NO_BK_VBAR, RE_NO_EMPTY_RANGES, RE_NO_GNU_OPS, RE_SYNTAX_POSIX_BASIC,
+    RE_SYNTAX_POSIX_EXTENDED, RE_UNMATCHED_RIGHT_PAREN_ORD, REG_BADBR, REG_BADPAT, REG_BADRPT,
+    REG_EBRACE, REG_EBRACK, REG_ECOLLATE, REG_ECTYPE, REG_EESCAPE, REG_EPAREN, REG_ERANGE,
+    REG_ERPAREN, REG_ESIZE, REG_ESPACE, REG_ESUBREG, REG_EXTENDED, REG_ICASE, REG_NEWLINE,
 };
 use crate::list::{List, NoMem};
 
@@ -207,59 +220,44 @@ pub(super) struct Tree {
     pub(super) root: u32,
     /// The number of groups: `re_nsub`.
     pub(super) nsub: u32,
+    /// The set every `.` matches, `NONE` for a pattern with none: glibc's
+    /// fastmap takes a `.` that can begin a match to mean any byte can.
+    pub(super) period: u32,
+    /// For a bracket expression under RE_ICASE, its set as glibc's fastmap
+    /// sees it, by set id, ascending (see `fastmap.rs`).
+    pub(super) views: List<(u32, ByteSet)>,
 }
 
-/// The syntax bits of glibc's `reg_syntax_t` that `regcomp`'s two syntaxes,
-/// and REG_NEWLINE and REG_ICASE, set differently. The rest are fixed for
-/// both: RE_CHAR_CLASSES, RE_INTERVALS, RE_NO_EMPTY_RANGES and
-/// RE_DOT_NOT_NULL set; RE_LIMITED_OPS, RE_NO_BK_REFS, RE_NO_GNU_OPS,
-/// RE_NEWLINE_ALT, RE_BACKSLASH_ESCAPE_IN_LISTS, RE_INVALID_INTERVAL_ORD and
-/// RE_CONTEXT_INDEP_OPS clear.
+/// A pattern's syntax: glibc's `reg_syntax_t`, the `RE_*` bits of
+/// `<regex.h>`, which the grammar below asks as glibc's does.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Syntax {
-    /// RE_BK_PLUS_QM: `\+` and `\?` are the operators, `+` and `?` literal.
-    bk_plus_qm: bool,
-    /// RE_CONTEXT_INDEP_ANCHORS: `^` and `$` are anchors wherever they are.
-    context_indep_anchors: bool,
-    /// RE_CONTEXT_INVALID_OPS: `*` `+` `?` `{` refused with nothing before.
-    context_invalid_ops: bool,
-    /// RE_CONTEXT_INVALID_DUP: `\{` refused with nothing before it, and a
-    /// `*` or `\{` straight after another repetition.
-    context_invalid_dup: bool,
-    /// RE_NO_BK_BRACES, _PARENS, _VBAR: `{}`, `()` and `|` bare, not after
-    /// a backslash.
-    no_bk_braces: bool,
-    no_bk_parens: bool,
-    no_bk_vbar: bool,
-    /// RE_UNMATCHED_RIGHT_PAREN_ORD: a `)` with no `(` is an ordinary one.
-    unmatched_right_paren_ord: bool,
-    /// RE_DOT_NEWLINE: `.` matches a newline.
-    dot_newline: bool,
-    /// RE_HAT_LISTS_NOT_NEWLINE: `[^...]` does not.
-    hat_lists_not_newline: bool,
-    /// RE_ICASE.
-    icase: bool,
-}
+pub(super) struct Syntax(pub(super) u64);
 
 impl Syntax {
-    /// `regcomp`'s: RE_SYNTAX_POSIX_EXTENDED or _BASIC, then REG_NEWLINE's
-    /// and REG_ICASE's changes.
+    /// `regcomp`'s: RE_SYNTAX_POSIX_EXTENDED or _BASIC, then REG_ICASE's and
+    /// REG_NEWLINE's changes, as glibc's `regcomp` makes them.
     pub(super) fn posix(cflags: i32) -> Self {
-        let ere = cflags & REG_EXTENDED != 0;
-        let newline = cflags & REG_NEWLINE != 0;
-        Self {
-            bk_plus_qm: !ere,
-            context_indep_anchors: ere,
-            context_invalid_ops: ere,
-            context_invalid_dup: !ere,
-            no_bk_braces: ere,
-            no_bk_parens: ere,
-            no_bk_vbar: ere,
-            unmatched_right_paren_ord: ere,
-            dot_newline: !newline,
-            hat_lists_not_newline: newline,
-            icase: cflags & REG_ICASE != 0,
+        let mut s = if cflags & REG_EXTENDED != 0 {
+            RE_SYNTAX_POSIX_EXTENDED
+        } else {
+            RE_SYNTAX_POSIX_BASIC
+        };
+        if cflags & REG_ICASE != 0 {
+            s |= RE_ICASE;
         }
+        if cflags & REG_NEWLINE != 0 {
+            s &= !RE_DOT_NEWLINE;
+            s |= RE_HAT_LISTS_NOT_NEWLINE;
+        }
+        Self(s)
+    }
+
+    fn has(self, bit: u64) -> bool {
+        self.0 & bit != 0
+    }
+
+    pub(super) fn icase(self) -> bool {
+        self.has(RE_ICASE)
     }
 }
 
@@ -356,6 +354,8 @@ struct Frame {
 struct Parser<'a> {
     p: &'a [u8],
     syn: Syntax,
+    /// The translate table, if any: each byte's stand-in.
+    trans: Option<&'a [u8; 256]>,
     pos: usize,
     tok: Tok,
     nsub: u32,
@@ -370,11 +370,14 @@ struct Parser<'a> {
     literal: [u32; 256],
 }
 
-/// `pattern` read as `syn` says, or the error `regcomp` gives it.
-pub(super) fn parse(pattern: &[u8], syn: Syntax) -> Result<Tree, Code> {
+/// `pattern` read as `syn` says, through `trans` if there is one -- or the
+/// error glibc's parser gives it (REG_ERPAREN for an unmatched `)`, which
+/// `regcomp` reports as REG_EPAREN and `re_compile_pattern` does not).
+pub(super) fn parse(pattern: &[u8], syn: Syntax, trans: Option<&[u8; 256]>) -> Result<Tree, Code> {
     let mut ps = Parser {
         p: pattern,
         syn,
+        trans,
         pos: 0,
         tok: Tok {
             kind: Kind::End,
@@ -389,6 +392,8 @@ pub(super) fn parse(pattern: &[u8], syn: Syntax) -> Result<Tree, Code> {
             sets: List::new(),
             root: NONE,
             nsub: 0,
+            period: NONE,
+            views: List::new(),
         },
         items: List::new(),
         alts: List::new(),
@@ -411,9 +416,22 @@ enum Expr {
 impl Parser<'_> {
     // -- tokens --------------------------------------------------------------
 
+    /// `c` through the translate table.
+    fn tr(&self, c: u8) -> u8 {
+        self.trans
+            .and_then(|t| t.get(usize::from(c)).copied())
+            .unwrap_or(c)
+    }
+
+    /// The pattern's byte at `i` as the grammar reads it: translated, as
+    /// glibc's `re_string` holds the pattern.
+    fn at(&self, i: usize) -> Option<u8> {
+        self.p.get(i).map(|&c| self.tr(c))
+    }
+
     fn peek(&self, i: usize, caret_here: bool) -> Tok {
         let s = self.syn;
-        let Some(&c) = self.p.get(i) else {
+        let Some(c) = self.at(i) else {
             return Tok {
                 kind: Kind::End,
                 c: 0,
@@ -421,58 +439,78 @@ impl Parser<'_> {
             };
         };
         if c == b'\\' {
-            let Some(&c2) = self.p.get(i.wrapping_add(1)) else {
+            // What an escaped byte is, is decided by the byte as written
+            // (glibc's `re_string_peek_byte_case`), so that a table cannot
+            // turn `\W` into `\w`...
+            let Some(&raw) = self.p.get(i.wrapping_add(1)) else {
                 return Tok {
                     kind: Kind::BackSlash,
                     c,
                     len: 1,
                 };
             };
-            let kind = match c2 {
-                b'|' if !s.no_bk_vbar => Kind::Alt,
-                b'1'..=b'9' => Kind::BackRef(c2.wrapping_sub(b'0')),
-                b'<' => Kind::Anchor(Assert::WordStart),
-                b'>' => Kind::Anchor(Assert::WordEnd),
-                b'b' => Kind::Anchor(Assert::WordBoundary),
-                b'B' => Kind::Anchor(Assert::NotWordBoundary),
-                b'w' => Kind::Word,
-                b'W' => Kind::NotWord,
-                b's' => Kind::Space,
-                b'S' => Kind::NotSpace,
-                b'`' => Kind::Anchor(Assert::BufStart),
-                b'\'' => Kind::Anchor(Assert::BufEnd),
-                b'(' if !s.no_bk_parens => Kind::Open,
-                b')' if !s.no_bk_parens => Kind::Close,
-                b'+' if s.bk_plus_qm => Kind::Plus,
-                b'?' if s.bk_plus_qm => Kind::Qmark,
-                b'{' if !s.no_bk_braces => Kind::OpenDup,
-                b'}' if !s.no_bk_braces => Kind::CloseDup,
+            let gnu = !s.has(RE_NO_GNU_OPS);
+            let ops = !s.has(RE_LIMITED_OPS);
+            let intervals = s.has(RE_INTERVALS) && !s.has(RE_NO_BK_BRACES);
+            let kind = match raw {
+                b'|' if ops && !s.has(RE_NO_BK_VBAR) => Kind::Alt,
+                b'1'..=b'9' if !s.has(RE_NO_BK_REFS) => Kind::BackRef(raw.wrapping_sub(b'0')),
+                b'<' if gnu => Kind::Anchor(Assert::WordStart),
+                b'>' if gnu => Kind::Anchor(Assert::WordEnd),
+                b'b' if gnu => Kind::Anchor(Assert::WordBoundary),
+                b'B' if gnu => Kind::Anchor(Assert::NotWordBoundary),
+                b'w' if gnu => Kind::Word,
+                b'W' if gnu => Kind::NotWord,
+                b's' if gnu => Kind::Space,
+                b'S' if gnu => Kind::NotSpace,
+                b'`' if gnu => Kind::Anchor(Assert::BufStart),
+                b'\'' if gnu => Kind::Anchor(Assert::BufEnd),
+                b'(' if !s.has(RE_NO_BK_PARENS) => Kind::Open,
+                b')' if !s.has(RE_NO_BK_PARENS) => Kind::Close,
+                b'+' if ops && s.has(RE_BK_PLUS_QM) => Kind::Plus,
+                b'?' if ops && s.has(RE_BK_PLUS_QM) => Kind::Qmark,
+                b'{' if intervals => Kind::OpenDup,
+                b'}' if intervals => Kind::CloseDup,
                 _ => Kind::Char,
             };
+            // ... and as a literal it stands for its translation, as every
+            // other byte of the pattern does (glibc's for itself: the
+            // module's doc says why not here).
             return Tok {
                 kind,
-                c: c2,
+                c: self.tr(raw),
                 len: 2,
             };
         }
+        let ops = !s.has(RE_LIMITED_OPS);
+        let intervals = s.has(RE_INTERVALS) && s.has(RE_NO_BK_BRACES);
         let kind = match c {
-            b'|' if s.no_bk_vbar => Kind::Alt,
+            b'\n' if s.has(RE_NEWLINE_ALT) => Kind::Alt,
+            b'|' if ops && s.has(RE_NO_BK_VBAR) => Kind::Alt,
             b'*' => Kind::Star,
-            b'+' if !s.bk_plus_qm => Kind::Plus,
-            b'?' if !s.bk_plus_qm => Kind::Qmark,
-            b'{' if s.no_bk_braces => Kind::OpenDup,
-            b'}' if s.no_bk_braces => Kind::CloseDup,
-            b'(' if s.no_bk_parens => Kind::Open,
-            b')' if s.no_bk_parens => Kind::Close,
+            b'+' if ops && !s.has(RE_BK_PLUS_QM) => Kind::Plus,
+            b'?' if ops && !s.has(RE_BK_PLUS_QM) => Kind::Qmark,
+            b'{' if intervals => Kind::OpenDup,
+            b'}' if intervals => Kind::CloseDup,
+            b'(' if s.has(RE_NO_BK_PARENS) => Kind::Open,
+            b')' if s.has(RE_NO_BK_PARENS) => Kind::Close,
             b'[' => Kind::Bracket,
             b'.' => Kind::Period,
-            // A BRE's `^` is an anchor first in the pattern, or first after
-            // `\(` or `\|` (glibc's RE_CARET_ANCHORS_HERE); a literal
-            // elsewhere.
-            b'^' if s.context_indep_anchors || caret_here || i == 0 => Kind::Anchor(Assert::Bol),
-            // A BRE's `$` is an anchor last in the pattern, or before `\)`
-            // or `\|`.
-            b'$' if s.context_indep_anchors
+            // `^` is an anchor where the syntax makes every one one; first
+            // in the pattern, or first after `(` or `|` (glibc's
+            // RE_CARET_ANCHORS_HERE, which its parser sets there and a
+            // program may set everywhere); and after a newline that
+            // separates alternatives. A literal elsewhere.
+            b'^' if s.has(RE_CONTEXT_INDEP_ANCHORS | RE_CARET_ANCHORS_HERE)
+                || caret_here
+                || i == 0
+                || (s.has(RE_NEWLINE_ALT) && self.at(i.wrapping_sub(1)) == Some(b'\n')) =>
+            {
+                Kind::Anchor(Assert::Bol)
+            }
+            // `$` is one where every one is; last in the pattern; or before
+            // a `)` or anything that separates alternatives.
+            b'$' if s.has(RE_CONTEXT_INDEP_ANCHORS)
                 || i.wrapping_add(1) == self.p.len()
                 || self.alt_or_close_at(i.wrapping_add(1)) =>
             {
@@ -483,19 +521,21 @@ impl Parser<'_> {
         Tok { kind, c, len: 1 }
     }
 
-    /// Whether the token at `i` is an alternation or a closing parenthesis --
+    /// Whether the token at `i` separates alternatives or closes a group --
     /// all a `$` needs to know of what follows it. (glibc asks `peek_token`
     /// itself, which asks again for every `$` of a run of them.)
     fn alt_or_close_at(&self, i: usize) -> bool {
         let s = self.syn;
-        match self.p.get(i) {
+        let ops = !s.has(RE_LIMITED_OPS);
+        match self.at(i) {
             Some(b'\\') => match self.p.get(i.wrapping_add(1)) {
-                Some(b'|') => !s.no_bk_vbar,
-                Some(b')') => !s.no_bk_parens,
+                Some(b'|') => ops && !s.has(RE_NO_BK_VBAR),
+                Some(b')') => !s.has(RE_NO_BK_PARENS),
                 _ => false,
             },
-            Some(b'|') => s.no_bk_vbar,
-            Some(b')') => s.no_bk_parens,
+            Some(b'\n') => s.has(RE_NEWLINE_ALT),
+            Some(b'|') => ops && s.has(RE_NO_BK_VBAR),
+            Some(b')') => s.has(RE_NO_BK_PARENS),
             _ => false,
         }
     }
@@ -506,19 +546,29 @@ impl Parser<'_> {
     }
 
     fn peek_bracket(&self, i: usize) -> BTok {
-        let Some(&c) = self.p.get(i) else {
+        let Some(c) = self.at(i) else {
             return BTok {
                 kind: BKind::End,
                 c: 0,
                 len: 0,
             };
         };
+        if c == b'\\' && self.syn.has(RE_BACKSLASH_ESCAPE_IN_LISTS) {
+            // `\` quotes the byte after it, which is then an ordinary one.
+            if let Some(c2) = self.at(i.wrapping_add(1)) {
+                return BTok {
+                    kind: BKind::Char,
+                    c: c2,
+                    len: 2,
+                };
+            }
+        }
         if c == b'[' {
-            let c2 = self.p.get(i.wrapping_add(1)).copied().unwrap_or(0);
+            let c2 = self.at(i.wrapping_add(1)).unwrap_or(0);
             let kind = match c2 {
                 b'.' => BKind::OpenColl,
                 b'=' => BKind::OpenEquiv,
-                b':' => BKind::OpenClass,
+                b':' if self.syn.has(RE_CHAR_CLASSES) => BKind::OpenClass,
                 _ => {
                     return BTok {
                         kind: BKind::Char,
@@ -565,7 +615,7 @@ impl Parser<'_> {
         let set = if cached == NONE {
             let mut s = ByteSet::EMPTY;
             s.insert(c);
-            if self.syn.icase {
+            if self.syn.icase() {
                 s = s.case_closed();
             }
             let id = u32::try_from(self.t.sets.len()).map_err(|_| Code(REG_ESPACE))?;
@@ -707,73 +757,109 @@ impl Parser<'_> {
     /// One of glibc's `parse_expression`s, for anything but `|`, the end, or
     /// a `)` closing a group.
     fn expression(&mut self) -> R<Expr> {
-        let t = self.tok;
-        let s = self.syn;
-        let node = match t.kind {
-            Kind::Char => self.literal(t.c)?,
-            Kind::Open => return Ok(Expr::Open),
-            Kind::Bracket => self.bracket()?,
-            Kind::BackRef(n) => {
-                if self.completed & 1u32.wrapping_shl(u32::from(n).wrapping_sub(1)) == 0 {
-                    return Err(Code(REG_ESUBREG));
+        loop {
+            let t = self.tok;
+            let s = self.syn;
+            let node = match t.kind {
+                Kind::Char => self.literal(t.c)?,
+                Kind::Open => return Ok(Expr::Open),
+                Kind::Bracket => self.bracket()?,
+                Kind::BackRef(n) => {
+                    if self.completed & 1u32.wrapping_shl(u32::from(n).wrapping_sub(1)) == 0 {
+                        return Err(Code(REG_ESUBREG));
+                    }
+                    self.node(Node::BackRef(u32::from(n)))?
                 }
-                self.node(Node::BackRef(u32::from(n)))?
-            }
-            Kind::OpenDup
-            | Kind::Star
-            | Kind::Plus
-            | Kind::Qmark
-            | Kind::Close
-            | Kind::CloseDup => {
-                if t.kind == Kind::OpenDup && s.context_invalid_dup {
-                    return Err(Code(REG_BADRPT));
+                Kind::OpenDup | Kind::Star | Kind::Plus | Kind::Qmark => {
+                    // A repetition with nothing before it is an error, is
+                    // passed over -- the next expression read in its place
+                    // -- or is a literal, as the syntax says, asked in
+                    // glibc's order.
+                    if t.kind == Kind::OpenDup && s.has(RE_CONTEXT_INVALID_DUP) {
+                        return Err(Code(REG_BADRPT));
+                    }
+                    if s.has(RE_CONTEXT_INVALID_OPS) {
+                        return Err(Code(REG_BADRPT));
+                    }
+                    if s.has(RE_CONTEXT_INDEP_OPS) {
+                        self.fetch(false);
+                        continue;
+                    }
+                    self.literal(t.c)?
                 }
-                if matches!(
-                    t.kind,
-                    Kind::OpenDup | Kind::Star | Kind::Plus | Kind::Qmark
-                ) && s.context_invalid_ops
-                {
-                    return Err(Code(REG_BADRPT));
+                Kind::Close => {
+                    // A `)` here is one no group is open for.
+                    if !s.has(RE_UNMATCHED_RIGHT_PAREN_ORD) {
+                        return Err(Code(REG_ERPAREN));
+                    }
+                    self.literal(t.c)?
                 }
-                // A `)` here is one no group is open for: glibc's
-                // REG_ERPAREN, which `regcomp` reports as REG_EPAREN.
-                if t.kind == Kind::Close && !s.unmatched_right_paren_ord {
-                    return Err(Code(REG_EPAREN));
+                Kind::CloseDup => self.literal(t.c)?,
+                Kind::Anchor(a) => {
+                    // No repetition applies to an anchor: glibc reads `^*`
+                    // as the anchor and then a `*` with nothing before it.
+                    let n = self.node(Node::Assert(a))?;
+                    self.fetch(false);
+                    return Ok(Expr::Atom(Some(n)));
                 }
-                self.literal(t.c)?
-            }
-            Kind::Anchor(a) => {
-                // No repetition applies to an anchor: glibc reads `^*` as
-                // the anchor and then a `*` with nothing before it.
-                let n = self.node(Node::Assert(a))?;
-                self.fetch(false);
-                return Ok(Expr::Atom(Some(n)));
-            }
-            Kind::Period => {
-                let mut set = ByteSet::EMPTY;
-                set.invert();
+                Kind::Period => self.period()?,
+                Kind::Word | Kind::NotWord | Kind::Space | Kind::NotSpace => {
+                    // glibc's `build_charclass_op`: the class's bytes
+                    // translated, `\w`'s `_` not, and no REG_ICASE.
+                    let word = matches!(t.kind, Kind::Word | Kind::NotWord);
+                    let class = if word {
+                        ByteSet::of(|b| b.is_ascii_alphanumeric())
+                    } else {
+                        class_set(b"space").unwrap_or(ByteSet::EMPTY)
+                    };
+                    let mut set = self.translated(class);
+                    if word {
+                        set.insert(b'_');
+                    }
+                    if matches!(t.kind, Kind::NotWord | Kind::NotSpace) {
+                        set.invert();
+                    }
+                    self.set_node(set)?
+                }
+                Kind::BackSlash => return Err(Code(REG_EESCAPE)),
+                Kind::Alt | Kind::End => return Ok(Expr::Atom(None)),
+            };
+            self.fetch(false);
+            return Ok(Expr::Atom(self.repetitions(Some(node))?));
+        }
+    }
+
+    /// The set a `.` matches -- every byte but a newline (unless
+    /// RE_DOT_NEWLINE) and a NUL (if RE_DOT_NOT_NULL) -- made once.
+    fn period(&mut self) -> R<u32> {
+        if self.t.period == NONE {
+            let mut set = ByteSet::EMPTY;
+            set.invert();
+            if self.syn.has(RE_DOT_NOT_NULL) {
                 set.remove(0);
-                if !s.dot_newline {
-                    set.remove(b'\n');
-                }
-                self.set_node(set)?
             }
-            Kind::Word | Kind::NotWord | Kind::Space | Kind::NotSpace => {
-                let mut set = if matches!(t.kind, Kind::Word | Kind::NotWord) {
-                    ByteSet::of(is_word)
-                } else {
-                    class_set(b"space").unwrap_or(ByteSet::EMPTY)
-                };
-                if matches!(t.kind, Kind::NotWord | Kind::NotSpace) {
-                    set.invert();
-                }
-                self.set_node(set)?
+            if !self.syn.has(RE_DOT_NEWLINE) {
+                set.remove(b'\n');
             }
-            Kind::BackSlash => return Err(Code(REG_EESCAPE)),
-            Kind::Alt | Kind::End => return Ok(Expr::Atom(None)),
-        };
-        self.fetch(false);
-        Ok(Expr::Atom(self.repetitions(Some(node))?))
+            let id = u32::try_from(self.t.sets.len()).map_err(|_| Code(REG_ESPACE))?;
+            self.t.sets.push(set)?;
+            self.t.period = id;
+        }
+        self.node(Node::Set(self.t.period))
+    }
+
+    /// `set`'s bytes through the translate table.
+    fn translated(&self, set: ByteSet) -> ByteSet {
+        if self.trans.is_none() {
+            return set;
+        }
+        let mut out = ByteSet::EMPTY;
+        for b in 0..=255u8 {
+            if set.contains(b) {
+                out.insert(self.tr(b));
+            }
+        }
+        out
     }
 
     /// Every repetition operator after an expression, applied in turn.
@@ -783,7 +869,11 @@ impl Parser<'_> {
             Kind::Star | Kind::Plus | Kind::Qmark | Kind::OpenDup
         ) {
             node = self.dup_op(node)?;
-            if self.syn.context_invalid_dup && matches!(self.tok.kind, Kind::Star | Kind::OpenDup) {
+            // In a BRE a `*` or an interval straight after another is
+            // refused.
+            if self.syn.has(RE_CONTEXT_INVALID_DUP)
+                && matches!(self.tok.kind, Kind::Star | Kind::OpenDup)
+            {
                 return Err(Code(REG_BADRPT));
             }
         }
@@ -821,6 +911,9 @@ impl Parser<'_> {
     /// One repetition operator applied to `elem`.
     fn dup_op(&mut self, elem: Option<u32>) -> R<Option<u32>> {
         let t = self.tok;
+        // Just after the `{`: where a malformed interval is read again from,
+        // as text, under RE_INVALID_INTERVAL_ORD.
+        let after_open = self.pos;
         let (start, end) = if t.kind == Kind::OpenDup {
             let mut start = self.fetch_number();
             if start == -1 {
@@ -842,11 +935,21 @@ impl Parser<'_> {
                 };
             }
             if start == -2 || end == -2 {
-                return Err(Code(if self.tok.kind == Kind::End {
-                    REG_EBRACE
-                } else {
-                    REG_BADBR
-                }));
+                if !self.syn.has(RE_INVALID_INTERVAL_ORD) {
+                    return Err(Code(if self.tok.kind == Kind::End {
+                        REG_EBRACE
+                    } else {
+                        REG_BADBR
+                    }));
+                }
+                // Not an interval: its `{` is an ordinary character, read
+                // next, and the text after it as it would have been.
+                self.pos = after_open;
+                self.tok = Tok {
+                    kind: Kind::Char,
+                    ..t
+                };
+                return Ok(elem);
             }
             if (end != -1 && start > end) || self.tok.kind != Kind::CloseDup {
                 return Err(Code(REG_BADBR));
@@ -905,6 +1008,10 @@ impl Parser<'_> {
             t.kind = BKind::Char;
         }
         let mut set = ByteSet::EMPTY;
+        // Under RE_ICASE, the set as glibc builds it from its upper-cased
+        // pattern, for the fastmap (`Tree::views`).
+        let icase = self.syn.icase();
+        let mut view = ByteSet::EMPTY;
         let mut first_round = true;
         loop {
             let start = self.bracket_element(t, first_round)?;
@@ -933,9 +1040,18 @@ impl Parser<'_> {
             if let Some(t2) = range_end {
                 let end = self.bracket_element(t2, true)?;
                 t = self.peek_bracket(self.pos);
-                add_range(&mut set, start, end)?;
+                add_range(&mut set, start, end, self.syn.has(RE_NO_EMPTY_RANGES))?;
+                if icase && let (Ok(lo), Ok(hi)) = (collation(start), collation(end)) {
+                    let (lo, hi) = (lo.to_ascii_uppercase(), hi.to_ascii_uppercase());
+                    if lo <= hi {
+                        view.insert_range(lo, hi);
+                    }
+                }
             } else {
-                add_element(&mut set, start)?;
+                self.add_element(&mut set, start)?;
+                if icase {
+                    self.add_view(&mut view, start);
+                }
             }
             if t.kind == BKind::End {
                 return Err(Code(REG_EBRACK));
@@ -945,16 +1061,81 @@ impl Parser<'_> {
             }
         }
         self.pos = self.pos.wrapping_add(usize::from(t.len));
-        if self.syn.icase {
+        let hat = self.syn.has(RE_HAT_LISTS_NOT_NEWLINE);
+        let mut fastmap_view = None;
+        if icase {
             set = set.case_closed();
+            // glibc's set, and the lower case of each of its letters: what
+            // its fastmap takes this one to let a match begin with.
+            let mut g = view;
+            if non_match {
+                g.invert();
+                if hat {
+                    g.remove(b'\n');
+                }
+            }
+            let mut fm = g;
+            for b in b'A'..=b'Z' {
+                if g.contains(b) {
+                    fm.insert(b.to_ascii_lowercase());
+                }
+            }
+            fastmap_view = Some(fm);
         }
         if non_match {
             set.invert();
-            if self.syn.hat_lists_not_newline {
+            if hat {
                 set.remove(b'\n');
             }
         }
-        self.set_node(set)
+        let id = u32::try_from(self.t.sets.len()).map_err(|_| Code(REG_ESPACE))?;
+        let node = self.set_node(set)?;
+        if let Some(fm) = fastmap_view {
+            self.t.views.push((id, fm))?;
+        }
+        Ok(node)
+    }
+
+    /// One element of a bracket expression as glibc reads it under
+    /// RE_ICASE, upper-cased, into `view`: a class of letters' case is all
+    /// of them (glibc's `[:upper:]` and `[:lower:]` are `[:alpha:]` there).
+    fn add_view(&self, view: &mut ByteSet, e: Elem) {
+        match e {
+            Elem::Char(c) => view.insert(c.to_ascii_uppercase()),
+            Elem::Coll(n) | Elem::Equiv(n) => {
+                if let [c] = n.get() {
+                    view.insert(c.to_ascii_uppercase());
+                }
+            }
+            Elem::Class(n) => {
+                let name = match n.get() {
+                    b"upper" | b"lower" => &b"alpha"[..],
+                    other => other,
+                };
+                if let Some(s) = class_set(name) {
+                    view.union(&self.translated(s));
+                }
+            }
+        }
+    }
+
+    /// One element of a bracket expression, added to `set`. A class's
+    /// bytes are translated, as glibc's `build_charclass` translates them.
+    fn add_element(&self, set: &mut ByteSet, e: Elem) -> R<()> {
+        match e {
+            Elem::Char(c) => set.insert(c),
+            // The C locale's collating elements and equivalence classes are
+            // single bytes, each its own class.
+            Elem::Coll(n) | Elem::Equiv(n) => match n.get() {
+                [c] => set.insert(*c),
+                _ => return Err(Code(REG_ECOLLATE)),
+            },
+            Elem::Class(n) => match class_set(n.get()) {
+                Some(s) => set.union(&self.translated(s)),
+                None => return Err(Code(REG_ECTYPE)),
+            },
+        }
+        Ok(())
     }
 
     fn bracket_element(&mut self, t: BTok, accept_hyphen: bool) -> R<Elem> {
@@ -976,9 +1157,12 @@ impl Parser<'_> {
         Ok(Elem::Char(t.c))
     }
 
-    /// The name inside `[: :]`, `[= =]` or `[. .]`, up to its closing pair.
+    /// The name inside `[: :]`, `[= =]` or `[. .]`, up to its closing pair:
+    /// a class's name as written, the others translated (glibc's
+    /// `re_string_fetch_byte_case` and `_fetch_byte`).
     fn bracket_symbol(&mut self, t: BTok) -> R<Elem> {
         let delim = t.c;
+        let as_written = t.kind == BKind::OpenClass;
         if self.pos >= self.p.len() {
             return Err(Code(REG_EBRACK));
         }
@@ -990,12 +1174,17 @@ impl Parser<'_> {
             if name.len >= 32 {
                 return Err(Code(REG_EBRACK));
             }
-            let ch = self.p.get(self.pos).copied().unwrap_or(0);
+            let ch = if as_written {
+                self.p.get(self.pos).copied()
+            } else {
+                self.at(self.pos)
+            }
+            .unwrap_or(0);
             self.pos = self.pos.wrapping_add(1);
             if self.pos >= self.p.len() {
                 return Err(Code(REG_EBRACK));
             }
-            if ch == delim && self.p.get(self.pos) == Some(&b']') {
+            if ch == delim && self.at(self.pos) == Some(b']') {
                 break;
             }
             if let Some(slot) = name.bytes.get_mut(name.len) {
@@ -1026,24 +1215,9 @@ fn collation(e: Elem) -> R<u8> {
     }
 }
 
-fn add_element(set: &mut ByteSet, e: Elem) -> R<()> {
-    match e {
-        Elem::Char(c) => set.insert(c),
-        // The C locale's collating elements and equivalence classes are
-        // single bytes, each its own class.
-        Elem::Coll(n) | Elem::Equiv(n) => match n.get() {
-            [c] => set.insert(*c),
-            _ => return Err(Code(REG_ECOLLATE)),
-        },
-        Elem::Class(n) => match class_set(n.get()) {
-            Some(s) => set.union(&s),
-            None => return Err(Code(REG_ECTYPE)),
-        },
-    }
-    Ok(())
-}
-
-fn add_range(set: &mut ByteSet, a: Elem, b: Elem) -> R<()> {
+/// The range `a`-`b` added to `set`. One whose end comes before its start is
+/// refused under RE_NO_EMPTY_RANGES, and matches nothing otherwise.
+fn add_range(set: &mut ByteSet, a: Elem, b: Elem, no_empty_ranges: bool) -> R<()> {
     // A class or an equivalence class at either end: REG_ERANGE before
     // anything else is looked at, as glibc's build_range_exp has it.
     if matches!(a, Elem::Equiv(_) | Elem::Class(_)) || matches!(b, Elem::Equiv(_) | Elem::Class(_))
@@ -1053,7 +1227,10 @@ fn add_range(set: &mut ByteSet, a: Elem, b: Elem) -> R<()> {
     let lo = collation(a)?;
     let hi = collation(b)?;
     if lo > hi {
-        return Err(Code(REG_ERANGE));
+        if no_empty_ranges {
+            return Err(Code(REG_ERANGE));
+        }
+        return Ok(());
     }
     set.insert_range(lo, hi);
     Ok(())

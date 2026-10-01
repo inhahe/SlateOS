@@ -144,18 +144,85 @@ def case_closed(s) -> frozenset:
     return frozenset(s) | frozenset(other_case(b) for b in s)
 
 
-class Parser:
-    """glibc's regcomp grammar over `pattern`, for BRE or ERE."""
+# glibc's reg_syntax_t bits (<regex.h>), each the one before shifted left.
+RE_BACKSLASH_ESCAPE_IN_LISTS = 1
+RE_BK_PLUS_QM = 1 << 1
+RE_CHAR_CLASSES = 1 << 2
+RE_CONTEXT_INDEP_ANCHORS = 1 << 3
+RE_CONTEXT_INDEP_OPS = 1 << 4
+RE_CONTEXT_INVALID_OPS = 1 << 5
+RE_DOT_NEWLINE = 1 << 6
+RE_DOT_NOT_NULL = 1 << 7
+RE_HAT_LISTS_NOT_NEWLINE = 1 << 8
+RE_INTERVALS = 1 << 9
+RE_LIMITED_OPS = 1 << 10
+RE_NEWLINE_ALT = 1 << 11
+RE_NO_BK_BRACES = 1 << 12
+RE_NO_BK_PARENS = 1 << 13
+RE_NO_BK_REFS = 1 << 14
+RE_NO_BK_VBAR = 1 << 15
+RE_NO_EMPTY_RANGES = 1 << 16
+RE_UNMATCHED_RIGHT_PAREN_ORD = 1 << 17
+RE_NO_POSIX_BACKTRACKING = 1 << 18
+RE_NO_GNU_OPS = 1 << 19
+RE_DEBUG = 1 << 20
+RE_INVALID_INTERVAL_ORD = 1 << 21
+RE_ICASE = 1 << 22
+RE_CARET_ANCHORS_HERE = 1 << 23
+RE_CONTEXT_INVALID_DUP = 1 << 24
+RE_NO_SUB = 1 << 25
 
-    def __init__(self, pattern: bytes, cflags: int):
+_RE_SYNTAX_POSIX_COMMON = (RE_CHAR_CLASSES | RE_DOT_NEWLINE | RE_DOT_NOT_NULL | RE_INTERVALS
+                           | RE_NO_EMPTY_RANGES)
+RE_SYNTAX_POSIX_BASIC = _RE_SYNTAX_POSIX_COMMON | RE_BK_PLUS_QM | RE_CONTEXT_INVALID_DUP
+RE_SYNTAX_POSIX_EXTENDED = (_RE_SYNTAX_POSIX_COMMON | RE_CONTEXT_INDEP_ANCHORS
+                            | RE_CONTEXT_INDEP_OPS | RE_NO_BK_BRACES | RE_NO_BK_PARENS
+                            | RE_NO_BK_VBAR | RE_CONTEXT_INVALID_OPS
+                            | RE_UNMATCHED_RIGHT_PAREN_ORD)
+
+
+def posix_syntax(cflags: int) -> int:
+    """regcomp's syntax for `cflags`, as glibc's regcomp makes it."""
+    s = RE_SYNTAX_POSIX_EXTENDED if cflags & REG_EXTENDED else RE_SYNTAX_POSIX_BASIC
+    if cflags & REG_ICASE:
+        s |= RE_ICASE
+    if cflags & REG_NEWLINE:
+        s = (s & ~RE_DOT_NEWLINE) | RE_HAT_LISTS_NOT_NEWLINE
+    return s
+
+
+class Parser:
+    """glibc's regcomp grammar over `pattern`, in syntax `syntax` (RE_*
+    bits), through translate table `trans` (256 bytes) if one is given.
+
+    Every byte is read through the table before what it is is decided, as
+    glibc's re_string holds the pattern -- but an escaped byte's kind is
+    decided by the byte as written (glibc's re_string_peek_byte_case), and a
+    class's name is read as written. As a literal, an escaped byte stands for
+    its translation here, where glibc's stands for itself (and so can never
+    match a translated subject)."""
+
+    def __init__(self, pattern: bytes, syntax: int, trans=None):
         self.p = pattern
-        self.ere = bool(cflags & REG_EXTENDED)
-        self.icase = bool(cflags & REG_ICASE)
-        self.newline = bool(cflags & REG_NEWLINE)
+        self.syn = syntax
+        self.trans = trans
+        self.icase = bool(syntax & RE_ICASE)
         self.pos = 0
         self.tok = None
         self.nsub = 0
         self.completed = 0
+
+    def has(self, bit: int) -> bool:
+        return bool(self.syn & bit)
+
+    def tr(self, c: int) -> int:
+        return self.trans[c] if self.trans is not None else c
+
+    def at(self, i: int):
+        return self.tr(self.p[i]) if 0 <= i < len(self.p) else None
+
+    def translated(self, s) -> frozenset:
+        return frozenset(self.tr(b) for b in s)
 
     # -- tokens -----------------------------------------------------------
 
@@ -163,77 +230,91 @@ class Parser:
         p = self.p
         if i >= len(p):
             return Tok(END, 0, None, 0)
-        c = p[i]
+        c = self.at(i)
         if c == 0x5C:
             if i + 1 >= len(p):
                 return Tok(BACKSLASH, c)
-            c2 = p[i + 1]
-            t = Tok(CHAR, c2, None, 2)
-            ch = chr(c2)
-            if ch == "|" and not self.ere:
-                t.type = ALT
+            raw = p[i + 1]
+            t = Tok(CHAR, self.tr(raw), None, 2)
+            ch = chr(raw)
+            gnu = not self.has(RE_NO_GNU_OPS)
+            ops = not self.has(RE_LIMITED_OPS)
+            iv = self.has(RE_INTERVALS) and not self.has(RE_NO_BK_BRACES)
+            if ch == "|":
+                if ops and not self.has(RE_NO_BK_VBAR):
+                    t.type = ALT
             elif "1" <= ch <= "9":
-                t.type, t.arg = BACKREF, c2 - 0x31
-            elif ch == "<":
-                t.type, t.arg = ANCHOR, "wstart"
-            elif ch == ">":
-                t.type, t.arg = ANCHOR, "wend"
-            elif ch == "b":
-                t.type, t.arg = ANCHOR, "wordb"
-            elif ch == "B":
-                t.type, t.arg = ANCHOR, "notwordb"
-            elif ch == "w":
-                t.type = WORD
-            elif ch == "W":
-                t.type = NOTWORD
-            elif ch == "s":
-                t.type = SPACE
-            elif ch == "S":
-                t.type = NOTSPACE
-            elif ch == "`":
-                t.type, t.arg = ANCHOR, "bufstart"
-            elif ch == "'":
-                t.type, t.arg = ANCHOR, "bufend"
-            elif ch == "(" and not self.ere:
-                t.type = OPEN
-            elif ch == ")" and not self.ere:
-                t.type = CLOSE
-            elif ch == "+" and not self.ere:
-                t.type = PLUS
-            elif ch == "?" and not self.ere:
-                t.type = QMARK
-            elif ch == "{" and not self.ere:
-                t.type = OPEN_DUP
-            elif ch == "}" and not self.ere:
-                t.type = CLOSE_DUP
+                if not self.has(RE_NO_BK_REFS):
+                    t.type, t.arg = BACKREF, raw - 0x31
+            elif ch in "<>bBwWsS`'":
+                if gnu:
+                    t.type, t.arg = {
+                        "<": (ANCHOR, "wstart"), ">": (ANCHOR, "wend"),
+                        "b": (ANCHOR, "wordb"), "B": (ANCHOR, "notwordb"),
+                        "w": (WORD, None), "W": (NOTWORD, None),
+                        "s": (SPACE, None), "S": (NOTSPACE, None),
+                        "`": (ANCHOR, "bufstart"), "'": (ANCHOR, "bufend"),
+                    }[ch]
+            elif ch == "(":
+                if not self.has(RE_NO_BK_PARENS):
+                    t.type = OPEN
+            elif ch == ")":
+                if not self.has(RE_NO_BK_PARENS):
+                    t.type = CLOSE
+            elif ch == "+":
+                if ops and self.has(RE_BK_PLUS_QM):
+                    t.type = PLUS
+            elif ch == "?":
+                if ops and self.has(RE_BK_PLUS_QM):
+                    t.type = QMARK
+            elif ch == "{":
+                if iv:
+                    t.type = OPEN_DUP
+            elif ch == "}":
+                if iv:
+                    t.type = CLOSE_DUP
             return t
         t = Tok(CHAR, c)
         ch = chr(c)
-        if ch == "|" and self.ere:
-            t.type = ALT
+        ops = not self.has(RE_LIMITED_OPS)
+        iv = self.has(RE_INTERVALS) and self.has(RE_NO_BK_BRACES)
+        if c == 0x0A:
+            if self.has(RE_NEWLINE_ALT):
+                t.type = ALT
+        elif ch == "|":
+            if ops and self.has(RE_NO_BK_VBAR):
+                t.type = ALT
         elif ch == "*":
             t.type = STAR
-        elif ch == "+" and self.ere:
-            t.type = PLUS
-        elif ch == "?" and self.ere:
-            t.type = QMARK
-        elif ch == "{" and self.ere:
-            t.type = OPEN_DUP
-        elif ch == "}" and self.ere:
-            t.type = CLOSE_DUP
-        elif ch == "(" and self.ere:
-            t.type = OPEN
-        elif ch == ")" and self.ere:
-            t.type = CLOSE
+        elif ch == "+":
+            if ops and not self.has(RE_BK_PLUS_QM):
+                t.type = PLUS
+        elif ch == "?":
+            if ops and not self.has(RE_BK_PLUS_QM):
+                t.type = QMARK
+        elif ch == "{":
+            if iv:
+                t.type = OPEN_DUP
+        elif ch == "}":
+            if iv:
+                t.type = CLOSE_DUP
+        elif ch == "(":
+            if self.has(RE_NO_BK_PARENS):
+                t.type = OPEN
+        elif ch == ")":
+            if self.has(RE_NO_BK_PARENS):
+                t.type = CLOSE
         elif ch == "[":
             t.type = BRACKET
         elif ch == ".":
             t.type = PERIOD
         elif ch == "^":
-            if self.ere or caret_here or i == 0:
+            if (self.has(RE_CONTEXT_INDEP_ANCHORS | RE_CARET_ANCHORS_HERE) or caret_here or i == 0
+                    or (self.has(RE_NEWLINE_ALT) and self.at(i - 1) == 0x0A)):
                 t.type, t.arg = ANCHOR, "bol"
         elif ch == "$":
-            if self.ere or i + 1 == len(p) or self.peek(i + 1, False).type in (ALT, CLOSE):
+            if (self.has(RE_CONTEXT_INDEP_ANCHORS) or i + 1 == len(p)
+                    or self.peek(i + 1, False).type in (ALT, CLOSE)):
                 t.type, t.arg = ANCHOR, "eol"
         return t
 
@@ -245,10 +326,14 @@ class Parser:
         p = self.p
         if i >= len(p):
             return Tok(B_END, 0, None, 0)
-        c = p[i]
+        c = self.at(i)
+        if c == 0x5C and self.has(RE_BACKSLASH_ESCAPE_IN_LISTS) and i + 1 < len(p):
+            return Tok(B_CHAR, self.at(i + 1), None, 2)
         if c == 0x5B:
-            c2 = p[i + 1] if i + 1 < len(p) else 0
-            kind = {0x2E: B_OPEN_COLL, 0x3D: B_OPEN_EQUIV, 0x3A: B_OPEN_CLASS}.get(c2)
+            c2 = self.at(i + 1) if i + 1 < len(p) else 0
+            kind = {0x2E: B_OPEN_COLL, 0x3D: B_OPEN_EQUIV}.get(c2)
+            if c2 == 0x3A and self.has(RE_CHAR_CLASSES):
+                kind = B_OPEN_CLASS
             if kind is not None:
                 return Tok(kind, c2, None, 2)
             return Tok(B_CHAR, c)
@@ -294,52 +379,67 @@ class Parser:
         return items[0] if len(items) == 1 else ("cat", items)
 
     def expression(self, nest: int):
-        t = self.tok
-        if t.type == CHAR:
-            tree = self.literal(t.c)
-        elif t.type == OPEN:
-            tree = self.sub_exp(nest + 1)
-        elif t.type == BRACKET:
-            tree = self.bracket()
-        elif t.type == BACKREF:
-            if not (self.completed >> t.arg) & 1:
-                raise Error(REG_ESUBREG)
-            tree = ("bref", t.arg + 1)
-        elif t.type in (OPEN_DUP, STAR, PLUS, QMARK, CLOSE, CLOSE_DUP):
-            if t.type == OPEN_DUP and not self.ere:
-                raise Error(REG_BADRPT)
-            if t.type in (OPEN_DUP, STAR, PLUS, QMARK) and self.ere:
-                raise Error(REG_BADRPT)
-            if t.type == CLOSE and not self.ere:
-                raise Error(REG_EPAREN)
-            tree = self.literal(t.c)
-        elif t.type == ANCHOR:
-            tree = ("assert", t.arg)
+        while True:
+            t = self.tok
+            if t.type == CHAR:
+                tree = self.literal(t.c)
+            elif t.type == OPEN:
+                tree = self.sub_exp(nest + 1)
+            elif t.type == BRACKET:
+                tree = self.bracket()
+            elif t.type == BACKREF:
+                if not (self.completed >> t.arg) & 1:
+                    raise Error(REG_ESUBREG)
+                tree = ("bref", t.arg + 1)
+            elif t.type in (OPEN_DUP, STAR, PLUS, QMARK):
+                # A repetition with nothing before it: an error, passed over
+                # (the next expression read in its place), or a literal, as
+                # the syntax says, asked in glibc's order.
+                if t.type == OPEN_DUP and self.has(RE_CONTEXT_INVALID_DUP):
+                    raise Error(REG_BADRPT)
+                if self.has(RE_CONTEXT_INVALID_OPS):
+                    raise Error(REG_BADRPT)
+                if self.has(RE_CONTEXT_INDEP_OPS):
+                    self.fetch()
+                    continue
+                tree = self.literal(t.c)
+            elif t.type == CLOSE:
+                if not self.has(RE_UNMATCHED_RIGHT_PAREN_ORD):
+                    raise Error(REG_ERPAREN)
+                tree = self.literal(t.c)
+            elif t.type == CLOSE_DUP:
+                tree = self.literal(t.c)
+            elif t.type == ANCHOR:
+                tree = ("assert", t.arg)
+                self.fetch()
+                return tree
+            elif t.type == PERIOD:
+                s = set(ALL)
+                if self.has(RE_DOT_NOT_NULL):
+                    s.discard(0)
+                if not self.has(RE_DOT_NEWLINE):
+                    s.discard(0x0A)
+                tree = ("set", frozenset(s))
+            elif t.type in (WORD, NOTWORD, SPACE, NOTSPACE):
+                if t.type in (WORD, NOTWORD):
+                    s = self.translated(CLASSES[b"alnum"]) | {0x5F}
+                else:
+                    s = self.translated(CLASSES[b"space"])
+                if t.type in (NOTWORD, NOTSPACE):
+                    s = ALL - s
+                tree = ("set", frozenset(s))
+            elif t.type in (ALT, END):
+                return None
+            elif t.type == BACKSLASH:
+                raise Error(REG_EESCAPE)
+            else:
+                raise AssertionError(t.type)
             self.fetch()
+            while self.tok.type in (STAR, PLUS, QMARK, OPEN_DUP):
+                tree = self.dup_op(tree)
+                if self.has(RE_CONTEXT_INVALID_DUP) and self.tok.type in (STAR, OPEN_DUP):
+                    raise Error(REG_BADRPT)
             return tree
-        elif t.type == PERIOD:
-            s = set(ALL)
-            s.discard(0)
-            if self.newline:
-                s.discard(0x0A)
-            tree = ("set", frozenset(s))
-        elif t.type in (WORD, NOTWORD, SPACE, NOTSPACE):
-            s = WORD_CHARS if t.type in (WORD, NOTWORD) else CLASSES[b"space"]
-            if t.type in (NOTWORD, NOTSPACE):
-                s = ALL - s
-            tree = ("set", frozenset(s))
-        elif t.type in (ALT, END):
-            return None
-        elif t.type == BACKSLASH:
-            raise Error(REG_EESCAPE)
-        else:
-            raise AssertionError(t.type)
-        self.fetch()
-        while self.tok.type in (STAR, PLUS, QMARK, OPEN_DUP):
-            tree = self.dup_op(tree)
-            if not self.ere and self.tok.type in (STAR, OPEN_DUP):
-                raise Error(REG_BADRPT)
-        return tree
 
     def literal(self, c: int):
         return ("set", case_closed({c}) if self.icase else frozenset({c}))
@@ -376,6 +476,7 @@ class Parser:
 
     def dup_op(self, elem):
         t = self.tok
+        after_open = self.pos
         if t.type == OPEN_DUP:
             start = self.fetch_number()
             if start == -1:
@@ -392,7 +493,13 @@ class Parser:
                 else:
                     end = -2
             if start == -2 or end == -2:
-                raise Error(REG_EBRACE if self.tok.type == END else REG_BADBR)
+                if not self.has(RE_INVALID_INTERVAL_ORD):
+                    raise Error(REG_EBRACE if self.tok.type == END else REG_BADBR)
+                # Not an interval: its `{` an ordinary character, read next,
+                # and the text after it as it would have been.
+                self.pos = after_open
+                self.tok = Tok(CHAR, t.c, None, t.len)
+                return elem
             if (end != -1 and start > end) or self.tok.type != CLOSE_DUP:
                 raise Error(REG_BADBR)
             if RE_DUP_MAX < (start if end == -1 else end):
@@ -455,7 +562,7 @@ class Parser:
             chars = set(case_closed(chars))
         if non_match:
             chars = set(ALL - chars)
-            if self.newline:
+            if self.has(RE_HAT_LISTS_NOT_NEWLINE):
                 chars.discard(0x0A)
         return ("set", frozenset(chars))
 
@@ -470,6 +577,7 @@ class Parser:
 
     def bracket_symbol(self, t: Tok):
         p, delim = self.p, t.c
+        as_written = t.type == B_OPEN_CLASS
         if self.pos >= len(p):
             raise Error(REG_EBRACK)
         name = bytearray()
@@ -477,11 +585,11 @@ class Parser:
         while True:
             if i >= 32:
                 raise Error(REG_EBRACK)
-            ch = p[self.pos]
+            ch = p[self.pos] if as_written else self.at(self.pos)
             self.pos += 1
             if self.pos >= len(p):
                 raise Error(REG_EBRACK)
-            if ch == delim and p[self.pos] == 0x5D:
+            if ch == delim and self.at(self.pos) == 0x5D:
                 break
             name.append(ch)
             i += 1
@@ -500,7 +608,7 @@ class Parser:
         s = CLASSES.get(v)
         if s is None:
             raise Error(REG_ECTYPE)
-        return set(s)
+        return set(self.translated(s))
 
     def range(self, a, b) -> set:
         if a[0] in ("equiv", "class") or b[0] in ("equiv", "class"):
@@ -515,7 +623,9 @@ class Parser:
 
         lo, hi = seq(a), seq(b)
         if lo > hi:
-            raise Error(REG_ERANGE)
+            if self.has(RE_NO_EMPTY_RANGES):
+                raise Error(REG_ERANGE)
+            return set()
         return set(range(lo, hi + 1))
 
 
@@ -523,21 +633,36 @@ EMPTY = ("empty",)
 
 
 class Regex:
-    def __init__(self, tree, nsub: int, cflags: int):
+    def __init__(self, tree, nsub: int, icase: bool, newline: bool):
         self.tree = EMPTY if tree is None else tree
         self.re_nsub = nsub
-        self.cflags = cflags
+        self.icase = icase
+        self.newline = newline
         self.refs = set()
         _refs(self.tree, self.refs)
         self.parent = {}
         self.inner = {}
         _nesting(self.tree, None, self.parent, self.inner)
 
-    def exec(self, s: bytes, eflags: int = 0, start: int = 0, end=None):
-        """The match's pmatch, groups 0..re_nsub, or None for no match."""
+    def exec(self, s: bytes, eflags: int = 0, start: int = 0, end=None, *, newline=None,
+             last=None, stop=None):
+        """The match's pmatch, groups 0..re_nsub, or None for no match: the
+        first found beginning at `start` or after it, up to `last` (the
+        string's end if None) -- or, when `last` is below `start`, the first
+        found scanning back from `start` to `last`. A match ends by `stop`
+        (the end if None), past which the anchors at it see the string go
+        on. `newline`: whether `^` and `$` match at a newline (REG_NEWLINE's
+        if None)."""
         n = len(s) if end is None else end
-        m = _Matcher(self, s, n, eflags)
-        for first in range(start, n + 1):
+        nl = self.newline if newline is None else newline
+        stop_ = n if stop is None else min(stop, n)
+        m = _Matcher(self, s, stop_, n, eflags, nl)
+        last_ = n if last is None else last
+        if last_ >= start:
+            firsts = range(start, min(last_, stop_) + 1)
+        else:
+            firsts = range(min(start, stop_), last_ - 1, -1)
+        for first in firsts:
             best = m.best(first)
             if best is not None:
                 e, tree = best
@@ -549,9 +674,26 @@ class Regex:
 
 
 def compile(pattern: bytes, cflags: int) -> Regex:
-    p = Parser(pattern, cflags)
+    """regcomp's reading of `pattern` under `cflags`."""
+    p = Parser(pattern, posix_syntax(cflags))
+    try:
+        tree = p.parse()
+    except Error as e:
+        # POSIX has no REG_ERPAREN: regcomp reports an unmatched `)` as
+        # REG_EPAREN.
+        if e.code == REG_ERPAREN:
+            raise Error(REG_EPAREN) from None
+        raise
+    return Regex(tree, p.nsub, bool(cflags & REG_ICASE), bool(cflags & REG_NEWLINE))
+
+
+def compile_syntax(pattern: bytes, syntax: int, trans=None) -> Regex:
+    """re_compile_pattern's reading of `pattern` in `syntax` (RE_* bits),
+    through translate table `trans` if given; its newline_anchor set, as
+    re_compile_pattern sets it."""
+    p = Parser(pattern, syntax, trans)
     tree = p.parse()
-    return Regex(tree, p.nsub, cflags)
+    return Regex(tree, p.nsub, bool(syntax & RE_ICASE), True)
 
 
 def _refs(node, out: set) -> None:
@@ -669,14 +811,16 @@ def _report(tree, pm: list, inner: dict) -> None:
 
 
 class _Matcher:
-    def __init__(self, rx: Regex, s: bytes, n: int, eflags: int):
+    def __init__(self, rx: Regex, s: bytes, n: int, total: int, eflags: int, newline: bool):
+        """Matches end by `n`; the string goes on to `total`."""
         self.rx = rx
         self.s = s
         self.n = n
+        self.total = total
         self.notbol = bool(eflags & REG_NOTBOL)
         self.noteol = bool(eflags & REG_NOTEOL)
-        self.newline = bool(rx.cflags & REG_NEWLINE)
-        self.icase = bool(rx.cflags & REG_ICASE)
+        self.newline = newline
+        self.icase = rx.icase
         self.memo = {}
 
     # The context glibc gives a position: what precedes it and what follows.
@@ -688,7 +832,7 @@ class _Matcher:
         return (c in WORD_CHARS, self.newline and c == 0x0A, False)
 
     def _next(self, p: int):
-        if p == self.n:
+        if p == self.n and self.n >= self.total:
             return (False, not self.noteol, True)
         c = self.s[p]
         return (c in WORD_CHARS, self.newline and c == 0x0A, False)

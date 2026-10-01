@@ -173,6 +173,22 @@ OVERLAY_TYPES: dict[str, str] = {
     "struct ntptimeval": "sys/timex.h",
     "struct aliasent": "aliases.h",
     "struct gaicb": "netdb.h",
+    "struct re_pattern_buffer": "regex.h",
+    "struct re_registers": "regex.h",
+    "regmatch_t": "regex.h",
+}
+
+# C type -> (glibc's layout as the reference has it, the overlay's, why), each
+# layout (size, {field: offset}): a type the overlay lays out otherwise on
+# purpose. The overlay's is held to the second; the first is held to the
+# reference, so an entry glibc has moved on from is refused.
+LAYOUT_OVERRIDES: dict[str, tuple[tuple[int, dict[str, int]], tuple[int, dict[str, int]], str]] = {
+    "regmatch_t": (
+        (8, {"rm_so": 0, "rm_eo": 4}),
+        (16, {"rm_so": 0, "rm_eo": 8}),
+        "regoff_t is as wide as ssize_t, as POSIX requires -- glibc's own <regex.h> with "
+        "_REGEX_LARGE_OFFSETS, and musl's; glibc's default is an int (design-decisions 1161)",
+    ),
 }
 
 # glibc's name for a field, where the overlay's differs: the overlay's.
@@ -186,7 +202,8 @@ LAYOUT_FLAGS = ["-std=gnu2x"]
 # overlay's alike.
 LAYOUT_EXTRA_FLAGS: dict[str, list[str]] = {"dlfcn.h": ["-D_GNU_SOURCE"],
                                             "aio.h": ["-D_GNU_SOURCE"],
-                                            "netdb.h": ["-D_GNU_SOURCE"]}
+                                            "netdb.h": ["-D_GNU_SOURCE"],
+                                            "regex.h": ["-D_GNU_SOURCE"]}
 
 
 def layout_flags(header: str) -> list[str]:
@@ -211,9 +228,9 @@ TYPE_PHRASES = {"union pthread_attr_t": "pthread_attr_t"}
 # name -> (glibc's type as the reference has it, the overlay's in musl's
 # names, why they differ): where the two libraries' typedefs are of different
 # types, for the same 8 bytes passed the same way, so that glibc's cannot be
-# spelt in musl's names. The overlay's declaration is held to the second; the
-# first is held to the reference, so an entry glibc has moved on from is
-# refused.
+# spelt in musl's names -- or, as for regoff_t below, of different widths on
+# purpose. The overlay's declaration is held to the second; the first is held
+# to the reference, so an entry glibc has moved on from is refused.
 TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
     "pthread_clockjoin_np": (
         "int (unsigned long, void **, int, const struct timespec *)",
@@ -221,6 +238,35 @@ TYPE_OVERRIDES: dict[str, tuple[str, str, str]] = {
         "glibc's pthread_t is `unsigned long`, musl's `struct __pthread *`: a thread's "
         "8-byte handle either way",
     ),
+    # And the GNU regex calls, whose regoff_t is wider on purpose: POSIX's,
+    # as wide as ssize_t, where glibc's default is an int -- glibc's own
+    # <regex.h> with _REGEX_LARGE_OFFSETS (design-decisions 1161).
+    **{name: (glibc, ours, "regoff_t is as wide as ssize_t, as POSIX requires: glibc's "
+                            "<regex.h> with _REGEX_LARGE_OFFSETS (design-decisions 1161)")
+       for name, glibc, ours in (
+           ("re_search",
+            "int (struct re_pattern_buffer *, const char *, int, int, int, struct re_registers *)",
+            "long (struct re_pattern_buffer *, const char *, long, long, long, "
+            "struct re_registers *)"),
+           ("re_search_2",
+            "int (struct re_pattern_buffer *, const char *, int, const char *, int, int, int, "
+            "struct re_registers *, int)",
+            "long (struct re_pattern_buffer *, const char *, long, const char *, long, long, "
+            "long, struct re_registers *, long)"),
+           ("re_match",
+            "int (struct re_pattern_buffer *, const char *, int, int, struct re_registers *)",
+            "long (struct re_pattern_buffer *, const char *, long, long, struct re_registers *)"),
+           ("re_match_2",
+            "int (struct re_pattern_buffer *, const char *, int, const char *, int, int, "
+            "struct re_registers *, int)",
+            "long (struct re_pattern_buffer *, const char *, long, const char *, long, long, "
+            "struct re_registers *, long)"),
+           ("re_set_registers",
+            "void (struct re_pattern_buffer *, struct re_registers *, unsigned int, int *, "
+            "int *)",
+            "void (struct re_pattern_buffer *, struct re_registers *, unsigned long, long *, "
+            "long *)"),
+       )},
 }
 
 # How clang says a name is not declared -- for a library function it knows
@@ -449,12 +495,19 @@ def mislaid(zig: str, overlay: Path,
         src = f"#include <{hdr}>\n#include <stddef.h>\n"
         for cty in types:
             _, size, fields = layouts[cty]
+            if cty in LAYOUT_OVERRIDES:
+                (gsize, gfields), (size, ours_at), _why = LAYOUT_OVERRIDES[cty]
+                if (size_now := layouts[cty][1]) != gsize or dict(fields) != gfields:
+                    problems.append(f"{cty}: glibc's layout is no longer the one LAYOUT_OVERRIDES "
+                                    f"gives ({size_now}, {dict(fields)}): look again")
+                fields = list(ours_at.items())
+            whose = "LAYOUT_OVERRIDES's" if cty in LAYOUT_OVERRIDES else "glibc's"
             src += f"_Static_assert(sizeof({cty}) == {size}, \"@{len(what)}@\");\n"
-            what.append(f"sizeof({cty}) is not glibc's {size}")
+            what.append(f"sizeof({cty}) is not {whose} {size}")
             for f, off in fields:
                 ours = FIELD_NAMES.get((cty, f), f)
                 src += f"_Static_assert(offsetof({cty}, {ours}) == {off}, \"@{len(what)}@\");\n"
-                what.append(f"{cty}'s {ours} is not at glibc's offset {off}")
+                what.append(f"{cty}'s {ours} is not at {whose} offset {off}")
         _, diag = compile_c(zig, src, layout_flags(hdr) + ["-w", "-ferror-limit=0"], overlay)
         for line in errors_of(diag):
             m = FAILED_ASSERT.search(line)
@@ -651,14 +704,16 @@ def self_test() -> int:
     check("glibc's tagged pthread_attr_t is musl's",
           c_type("int (const union pthread_attr_t *, void **)")
           == "int (const pthread_attr_t *, void **)")
-    over = {"pthread_clockjoin_np": ("pthread.h", frozenset({"gnu"}),
-                                     TYPE_OVERRIDES["pthread_clockjoin_np"][0])}
+    # A reference with every override's name, each as its entry says glibc
+    # has it.
+    over = {n: ("h.h", frozenset({"gnu"}), glibc) for n, (glibc, _o, _w) in TYPE_OVERRIDES.items()}
     check("an override matching the reference stands", stale_overrides(over) == [])
     check("and is what the overlay is held to",
           expected_type("pthread_clockjoin_np", "anything").startswith("int (pthread_t,"))
+    moved = dict(over)
+    moved["pthread_clockjoin_np"] = ("pthread.h", frozenset(), "int (long)")
     check("an override the reference has moved on from is refused",
-          len(stale_overrides({"pthread_clockjoin_np": ("pthread.h", frozenset(), "int (long)")}))
-          == 1)
+          len(stale_overrides(moved)) == 1)
     check("a name without one is held to glibc's type", expected_type("f", "int (int)") == "int (int)")
     with tempfile.TemporaryDirectory() as t:
         d = Path(t)
@@ -778,6 +833,26 @@ def self_test() -> int:
                 check("a layout that is glibc's passes", mislaid(zig, d, good) == [])
                 check("an offset that is not is caught",
                       any("b is not at glibc's offset 4" in p for p in mislaid(zig, d, bad)))
+                # A layout otherwise on purpose: glibc's lay_t taken to be 8
+                # bytes with b at 4, the overlay's 16 with b at 8.
+                saved_lo = dict(LAYOUT_OVERRIDES)
+                try:
+                    LAYOUT_OVERRIDES.clear()
+                    glibc_lay = {"lay_t": ("sys/lay.h", 8, [("a", 0), ("b", 4)])}
+                    LAYOUT_OVERRIDES["lay_t"] = ((8, {"a": 0, "b": 4}), (16, {"a": 0, "b": 8}),
+                                                 "on purpose")
+                    check("a layout LAYOUT_OVERRIDES gives passes", mislaid(zig, d, glibc_lay) == [])
+                    moved = {"lay_t": ("sys/lay.h", 12, [("a", 0), ("b", 4)])}
+                    check("an override glibc has moved on from is refused",
+                          any("no longer" in p for p in mislaid(zig, d, moved)))
+                    LAYOUT_OVERRIDES["lay_t"] = ((8, {"a": 0, "b": 4}), (16, {"a": 0, "b": 4}),
+                                                 "kept wrong")
+                    check("an override the overlay does not keep is caught",
+                          any("b is not at LAYOUT_OVERRIDES's offset 4" in p
+                              for p in mislaid(zig, d, glibc_lay)))
+                finally:
+                    LAYOUT_OVERRIDES.clear()
+                    LAYOUT_OVERRIDES.update(saved_lo)
                 OVERLAY_TYPES.clear()
                 check("a struct OVERLAY_TYPES does not list is caught",
                       any("lay_t" in p and "does not list" in p for p in mislaid(zig, d, good)))

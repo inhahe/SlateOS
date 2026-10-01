@@ -91,6 +91,10 @@ def named_fields(t):
     for f in t.get_fields():
         if f.is_anonymous():
             yield from named_fields(f.type.get_canonical())
+        elif f.is_bitfield():
+            # No offsetof names a bit-field, and the size holds them
+            # (regex_t's seven).
+            continue
         else:
             yield f.spelling
 for cty, h in types.items():

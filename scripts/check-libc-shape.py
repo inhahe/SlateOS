@@ -264,8 +264,12 @@ REPLACEABLE = frozenset(
         "rpmatch",
         "error", "error_at_line", "verror", "verror_at_line",
         "error_message_count", "error_one_per_line", "error_print_progname",
-        # regex: gnulib vendors the whole engine
+        # regex: gnulib vendors the whole engine, the GNU interface with it
+        # (lane D, 2026-09-30: all in posix::regex, glibc's re_comp and
+        # re_exec too)
         "regcomp", "regexec", "regfree", "regerror", "re_compile_pattern",
+        "re_compile_fastmap", "re_search", "re_search_2", "re_match", "re_match_2",
+        "re_set_registers", "re_set_syntax", "re_syntax_options", "re_comp", "re_exec",
         # string/memory helpers gnulib routinely replaces
         "strverscmp", "strndup", "strnlen", "memrchr", "rawmemchr",
         "stpcpy", "stpncpy", "strchrnul", "strcasestr", "mempcpy",

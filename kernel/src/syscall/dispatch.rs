@@ -1237,9 +1237,110 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_status_flags()?;
     test_dispatch_tmpfile()?;
     test_dispatch_dns_resolve2()?;
+    test_dispatch_xattr_buffers()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
+}
+
+/// `SYS_FS_GET_XATTR` and `SYS_FS_LIST_XATTRS` on a file in `/tmp`, and their
+/// buffers (lane D's `d-a-xattr-answers-only-the-filesystem-can-give`, items 1
+/// and 2):
+/// - a value or list that fits is copied, and its length returned;
+/// - one that does not is not copied at all: the length comes back and the
+///   buffer is as it was;
+/// - a capacity is not checked against the buffer before the lookup, nor
+///   past what is copied: a missing attribute is `NoAttribute`, and a
+///   present one is copied, under a capacity no buffer could have.
+fn test_dispatch_xattr_buffers() -> KernelResult<()> {
+    use crate::fs::Vfs;
+
+    const NAME: &str = "/tmp/xattr-dispatch-selftest";
+    // Far past any buffer: checked before the lookup, as it was, it was
+    // `InvalidAddress` whatever the lookup would have said.
+    const VAST: u64 = 1 << 40;
+    let path = NAME.as_bytes();
+    let get = |key: &[u8], buf: &mut [u8], capacity: u64| {
+        dispatch(
+            SYS_FS_GET_XATTR,
+            &SyscallArgs {
+                arg0: path.as_ptr() as u64,
+                arg1: path.len() as u64,
+                arg2: key.as_ptr() as u64,
+                arg3: buf.as_mut_ptr() as u64,
+                arg4: capacity,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let list = |buf: &mut [u8], capacity: u64| {
+        dispatch(
+            SYS_FS_LIST_XATTRS,
+            &SyscallArgs {
+                arg0: path.as_ptr() as u64,
+                arg1: path.len() as u64,
+                arg2: buf.as_mut_ptr() as u64,
+                arg3: capacity,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = Vfs::remove(NAME);
+    let outcome = (|| -> Result<(), &'static str> {
+        Vfs::write_file(NAME, b"x").map_err(|_| "could not make the file")?;
+        Vfs::set_xattr(NAME, b"user.k", b"value").map_err(|_| "could not set user.k")?;
+        let key = b"user.k\0";
+
+        let mut fits = [0xEEu8; 8];
+        if get(key, &mut fits, 8) != 5 || fits != *b"value\xEE\xEE\xEE" {
+            return Err("a value that fits was not copied, or more was written");
+        }
+        let mut small = [0xEEu8; 3];
+        if get(key, &mut small, 3) != 5 || small != [0xEE; 3] {
+            return Err("a value too big for the buffer was written into it");
+        }
+        if get(key, &mut [], 0) != 5 {
+            return Err("a size query did not give the length");
+        }
+        let mut vast = [0xEEu8; 8];
+        if get(key, &mut vast, VAST) != 5 || vast.get(..5) != Some(b"value".as_slice()) {
+            return Err("a vast capacity was checked past what was copied");
+        }
+        if get(b"user.none\0", &mut vast, VAST) != i64::from(KernelError::NoAttribute.code()) {
+            return Err("a missing attribute was not NoAttribute under a vast capacity");
+        }
+
+        // "user.k\0" is the whole list.
+        let mut fits = [0xEEu8; 8];
+        if list(&mut fits, 8) != 7 || fits != *b"user.k\0\xEE" {
+            return Err("a list that fits was not copied, or more was written");
+        }
+        let mut small = [0xEEu8; 4];
+        if list(&mut small, 4) != 7 || small != [0xEE; 4] {
+            return Err("a list too big for the buffer was written into it");
+        }
+        Ok(())
+    })();
+    // Best effort: this test's scratch file.
+    let _ = Vfs::remove(NAME);
+    match outcome {
+        Ok(()) => {
+            serial_println!(
+                "[syscall]   xattr buffers: a value or list copied only when it fits, \
+                 the capacity never checked past what is copied: OK"
+            );
+            Ok(())
+        }
+        Err(msg) => {
+            serial_println!("[syscall]   FAIL: xattr buffers: {}", msg);
+            Err(KernelError::InternalError)
+        }
+    }
 }
 
 /// `SYS_DNS_RESOLVE2` (1097), answered from the kernel's hosts table so no

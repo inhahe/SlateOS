@@ -460,6 +460,7 @@ pub mod winsnap;
 pub mod wintiling;
 pub mod wqstat;
 pub mod writeback;
+pub mod xattr_policy;
 pub mod xz;
 pub mod zfs;
 pub mod zip;

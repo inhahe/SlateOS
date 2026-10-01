@@ -916,6 +916,10 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
+    fn xattrs_supported(&self) -> bool {
+        true
+    }
+
     fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         self.get_xattr_ino(ino, key)

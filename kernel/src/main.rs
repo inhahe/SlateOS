@@ -5898,6 +5898,18 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Diagnostic,
                 fs::procfs::self_test_etc_mtab(),
             );
+            // Extended attributes: Linux's namespace and permission rules,
+            // alone and as every VFS call applies them.
+            selftest::dispatch_debug(
+                "xattr rules",
+                selftest::Severity::Diagnostic,
+                fs::xattr_policy::self_test(),
+            );
+            selftest::dispatch_debug(
+                "xattr rules through the VFS",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_xattr_rules(),
+            );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd
             // LISTEN :22, a browser ESTABLISHED to 93.184.216.34:443 with real-looking

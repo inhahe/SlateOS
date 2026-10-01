@@ -3251,9 +3251,14 @@ pub fn self_test() -> KernelResult<()> {
     //       link's own no-follow view,
     //   (c) remove_xattr_no_follow strips the link's attribute only.
     // Skipped gracefully if the root FS lacks symlink/xattr support.
+    //
+    // A `trusted.` name, which a link may carry: `user.` is refused on a link
+    // (`fs::xattr_policy`, as on Linux), and the setup below would read that
+    // refusal as "no xattr support" and skip the section. This test is a
+    // kernel task, which is privileged.
     let nfx_target = "/handle_nfx_target.txt";
     let nfx_link = "/handle_nfx_link";
-    let nfx_key: &[u8] = b"user.nfx";
+    let nfx_key: &[u8] = b"trusted.nfx";
     crate::fs::Vfs::remove(nfx_link).ok();
     crate::fs::Vfs::remove(nfx_target).ok();
     let nfx_ready = crate::selftest_setup!(

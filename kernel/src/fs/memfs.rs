@@ -1483,6 +1483,10 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
+    fn xattrs_supported(&self) -> bool {
+        true
+    }
+
     fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         node_get_xattr(self.resolve(path)?, key)
     }

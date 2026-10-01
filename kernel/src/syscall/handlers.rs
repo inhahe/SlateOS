@@ -13017,6 +13017,10 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: key pointer (null-terminated).  `arg3`: output buffer pointer.
 /// `arg4`: buffer capacity.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
 /// `lgetxattr` — read the link inode's own xattrs).
+///
+/// Returns the value's length. The value is written only when it all fits
+/// in `arg4` bytes; a capacity of 0 asks the length alone. Which names a file
+/// may carry and who may read them is `fs::xattr_policy`'s.
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
@@ -13033,15 +13037,14 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 
     let capacity = args.arg4 as usize;
     // capacity == 0 is a valid "size query" (POSIX getxattr): the caller
-    // wants the attribute length without copying, so don't require a buffer.
-    // Only validate the output buffer when one is actually provided.
-    if capacity > 0 {
-        if args.arg3 == 0 {
-            return SyscallResult::err(KernelError::InvalidArgument);
-        }
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
-            return SyscallResult::err(e);
-        }
+    // wants the attribute length without copying, so no buffer is needed.
+    // The buffer is not checked here: Linux answers from the lookup --
+    // `ENODATA` for a missing attribute, 0 for an empty one -- and touches the
+    // buffer only to copy, and `copy_to_user` checks what it copies to. It
+    // was checked here, before the lookup, until 2026-10-01 (lane D's
+    // `d-a-xattr-answers-only-the-filesystem-can-give`, item 2).
+    if capacity > 0 && args.arg3 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     // arg5 bit 0 = NO_FOLLOW (lgetxattr: read the link inode's own xattrs).
@@ -13052,17 +13055,20 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     };
     match xattr_res {
         Ok(val) => {
-            // Copy as much as fits, but always report the TRUE length so the
-            // caller can perform a size query or detect truncation (ERANGE).
-            let copy_len = val.len().min(capacity);
-            if copy_len > 0 {
-                // SAFETY: `val` is a live kernel-owned buffer of at least
-                // `copy_len` bytes.  `copy_to_user` re-validates the
-                // destination — the lookup above can block on the underlying
-                // filesystem, so the check made before it is not the one that
-                // matters — and brackets the store with STAC/CLAC.
+            // The value is copied only when all of it fits, and the TRUE
+            // length is returned either way: the caller's size query, or its
+            // `ERANGE` (the libc's, for a length over the capacity) with its
+            // buffer as it was, as Linux leaves it. Until 2026-10-01 as much
+            // as fitted was copied first (lane D's item 1), so a caller
+            // keeping a fallback in the buffer found it overwritten.
+            if capacity > 0 && val.len() <= capacity && !val.is_empty() {
+                // SAFETY: `val` is a live kernel-owned buffer of `val.len()`
+                // bytes. `copy_to_user` validates the destination -- the
+                // lookup above can block on the underlying filesystem, so no
+                // check made before it would be the one that matters -- and
+                // brackets the store with STAC/CLAC.
                 if let Err(e) =
-                    unsafe { crate::mm::user::copy_to_user(val.as_ptr(), args.arg3, copy_len) }
+                    unsafe { crate::mm::user::copy_to_user(val.as_ptr(), args.arg3, val.len()) }
                 {
                     return SyscallResult::err(e);
                 }
@@ -13185,15 +13191,11 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     };
     let capacity = args.arg3 as usize;
     // capacity == 0 is a valid "size query" (POSIX listxattr): return the
-    // total bytes needed without writing.  Validate the buffer only when one
-    // is provided.
-    if capacity > 0 {
-        if args.arg2 == 0 {
-            return SyscallResult::err(KernelError::InvalidArgument);
-        }
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
-            return SyscallResult::err(e);
-        }
+    // total bytes needed without writing. The buffer is not checked here, as
+    // in `sys_fs_get_xattr`: `copy_to_user` checks what it copies to, and only
+    // a list that fits is copied.
+    if capacity > 0 && args.arg2 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     // arg4 bit 0 = NO_FOLLOW (llistxattr: list the link inode's own xattrs).

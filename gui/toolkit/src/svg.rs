@@ -36,6 +36,11 @@
 //!   as its `preserveAspectRatio` says; an svg inside it, placed in a
 //!   viewport of its own; g (with inheritance)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
+//! - XML namespaces: an element is SVG's by its namespace, not by how it is
+//!   written -- `<svg:rect>` with `svg` bound to SVG's namespace is drawn,
+//!   another vocabulary's `<x:rect>` is not, and a document that never says
+//!   its namespace is read as SVG; XLink's `href` is read under any prefix
+//!   bound to XLink
 //!
 //! # Rasterizing
 //!
@@ -58,6 +63,8 @@ use std::collections::HashMap;
 mod clip;
 mod css;
 mod mask;
+#[cfg(test)]
+mod namespace_tests;
 mod paint;
 #[cfg(test)]
 mod use_tests;
@@ -1809,7 +1816,7 @@ fn parse_xml(input: &str) -> Result<Vec<XmlElement>, SvgError> {
         match c.peek_at(1) {
             Some(b'/') => break, // a closing tag — the caller's business
             Some(b'!' | b'?') => skip_special(&mut c),
-            _ => elements.push(parse_element(&mut c, 0)?),
+            _ => elements.push(parse_element(&mut c, 0, &Namespaces::default())?),
         }
     }
 
@@ -1884,7 +1891,111 @@ fn skip_special(c: &mut XmlCursor) {
 const MAX_NESTING: usize = 128;
 
 /// The element at the cursor, `depth` elements inside the document's first.
-fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError> {
+/// The SVG namespace: an element in it is drawn by its local name, however
+/// its prefix is written.
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// XLink's namespace, whose `href` names what a `<use>` or a gradient
+/// refers to.
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+
+/// The most namespace bindings honoured in scope at once. Real documents
+/// bind a dozen at most; one binding thousands at every level of its
+/// nesting would otherwise have each level copy all of them.
+const MAX_NAMESPACES: usize = 64;
+
+/// The XML namespaces in scope where an element stands: the default one, and
+/// the prefixes bound, the innermost first.
+///
+/// An element's name is read through them ([`Namespaces::element_name`]): a
+/// document written `<svg:rect>` with `svg` bound to SVG's namespace is drawn
+/// as one written `<rect>`, and an element of another namespace -- an
+/// editor's `<sodipodi:namedview>`, or a `<rect>` of some other vocabulary --
+/// is not drawn, whatever its local name.
+#[derive(Clone, Debug, Default)]
+struct Namespaces {
+    default: Option<String>,
+    prefixes: Vec<(String, String)>,
+}
+
+impl Namespaces {
+    /// The scope inside an element with `attrs`: this one with the element's
+    /// own `xmlns` declarations over it -- or `None` where it declares none,
+    /// and this one is the scope inside it as well.
+    fn within(&self, attrs: &[(String, String)]) -> Option<Self> {
+        let mut inner: Option<Self> = None;
+        for (name, value) in attrs {
+            let prefix = match name.strip_prefix("xmlns") {
+                Some("") => None,
+                Some(rest) => match rest.strip_prefix(':') {
+                    Some(prefix) => Some(prefix),
+                    None => continue,
+                },
+                None => continue,
+            };
+            let scope = inner.get_or_insert_with(|| self.clone());
+            let uri = value.trim().to_owned();
+            match prefix {
+                None => scope.default = Some(uri),
+                Some(prefix) if scope.prefixes.len() < MAX_NAMESPACES => {
+                    scope.prefixes.insert(0, (prefix.to_owned(), uri));
+                }
+                Some(_) => {}
+            }
+        }
+        inner
+    }
+
+    /// The namespace `prefix` is bound to here.
+    fn uri_of(&self, prefix: &str) -> Option<&str> {
+        self.prefixes
+            .iter()
+            .find(|(bound, _)| bound == prefix)
+            .map(|(_, uri)| uri.as_str())
+    }
+
+    /// The name an element written `tag` goes by: its local name if it is in
+    /// SVG's namespace -- or in none, so that a document which never says
+    /// its namespace is still drawn -- and otherwise `{namespace}local`,
+    /// which no SVG element's name is; as written where its prefix is bound
+    /// to nothing.
+    fn element_name(&self, tag: String) -> String {
+        let (uri, local) = match tag.split_once(':') {
+            Some((prefix, local)) => match self.uri_of(prefix) {
+                Some(uri) => (uri, local),
+                None => return tag,
+            },
+            None => match self.default.as_deref() {
+                Some(uri) => (uri, tag.as_str()),
+                None => return tag,
+            },
+        };
+        if uri == SVG_NS || uri.is_empty() {
+            local.to_owned()
+        } else {
+            format!("{{{uri}}}{local}")
+        }
+    }
+
+    /// The name an attribute written `name` goes by: one of XLink's under the
+    /// `xlink` prefix, whatever prefix binds XLink here; any other as written.
+    fn attribute_name(&self, name: String) -> String {
+        match name.split_once(':') {
+            Some((prefix, local)) if prefix != "xlink" && self.uri_of(prefix) == Some(XLINK_NS) => {
+                format!("xlink:{local}")
+            }
+            _ => name,
+        }
+    }
+}
+
+/// The element at the cursor, `depth` elements inside the document, in the
+/// namespaces `scope` binds.
+fn parse_element(
+    c: &mut XmlCursor,
+    depth: usize,
+    scope: &Namespaces,
+) -> Result<XmlElement, SvgError> {
     if depth >= MAX_NESTING {
         return Err(SvgError::MalformedXml(format!(
             "elements nested more than {MAX_NESTING} deep"
@@ -1917,9 +2028,19 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
         }
     }
 
+    // Its name and its attributes' in the namespaces it stands in, its own
+    // declarations among them.
+    let declared = scope.within(&attrs);
+    let scope = declared.as_ref().unwrap_or(scope);
+    let tag = scope.element_name(tag);
+    let attrs: Vec<(String, String)> = attrs
+        .into_iter()
+        .map(|(name, value)| (scope.attribute_name(name), value))
+        .collect();
+
     let mut children = Vec::new();
     // A style sheet is the one text this renderer reads.
-    let keeps_text = local_tag(&tag) == "style";
+    let keeps_text = tag == "style";
     let mut text = String::new();
     if c.eat(b'/') {
         // Self-closing, `<tag ... />`. If the document ends before the '>',
@@ -1954,7 +2075,7 @@ fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError
                     text.push('\n');
                 }
                 Some(b'!' | b'?') => skip_special(c),
-                _ => children.push(parse_element(c, depth.saturating_add(1))?),
+                _ => children.push(parse_element(c, depth.saturating_add(1), scope)?),
             }
         }
     }
@@ -2031,8 +2152,15 @@ fn decode_entities(text: &str) -> String {
     out
 }
 
-/// An element's name without a namespace prefix (`svg:style` is `style`).
+/// An element's local name, whatever its namespace: without the `{namespace}`
+/// [`Namespaces::element_name`] puts before a foreign element's, or a prefix
+/// bound to nothing. CSS's type selectors match by it, as CSS matches an
+/// element of any namespace where a sheet declares none.
 fn local_tag(tag: &str) -> &str {
+    let tag = tag
+        .strip_prefix('{')
+        .and_then(|rest| rest.split_once('}'))
+        .map_or(tag, |(_, local)| local);
     tag.rsplit_once(':').map_or(tag, |(_, local)| local)
 }
 

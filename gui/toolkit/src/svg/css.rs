@@ -289,7 +289,7 @@ impl Sheet {
 
 /// Every CSS sheet's text under `elem`, in document order.
 fn gather(elem: &XmlElement, out: &mut String) {
-    if local_tag(&elem.tag) == "style"
+    if elem.tag == "style"
         && elem
             .attr("type")
             .is_none_or(|t| t.trim().is_empty() || t.trim() == "text/css")

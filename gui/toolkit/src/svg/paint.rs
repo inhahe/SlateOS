@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 
-use super::{SvgPaint, Transform, XmlElement, declared, local_tag, parse_color, parse_transform};
+use super::{SvgPaint, Transform, XmlElement, declared, parse_color, parse_transform};
 use crate::color::Color;
 
 /// The most gradients a chain of `href`s is followed through: far more than
@@ -362,7 +362,7 @@ const RADIAL_ATTRS: [&str; 5] = ["cx", "cy", "r", "fx", "fy"];
 
 /// Every gradient element under `elem`, by its `id`.
 fn gather(elem: &XmlElement, out: &mut HashMap<String, Raw>) {
-    let tag = local_tag(&elem.tag);
+    let tag = elem.tag.as_str();
     if tag == "linearGradient" || tag == "radialGradient" {
         if let Some(id) = elem.attr("id").map(str::trim).filter(|id| !id.is_empty()) {
             out.entry(id.to_owned())
@@ -403,7 +403,7 @@ fn read_raw(elem: &XmlElement, tag: &str) -> Raw {
         .filter(|h| !h.is_empty());
     let mut stops: Vec<(f32, Color)> = Vec::new();
     for child in &elem.children {
-        if local_tag(&child.tag) == "stop" {
+        if child.tag == "stop" {
             let floor = stops.last().map_or(0.0, |&(at, _)| at);
             stops.push(read_stop(child, floor));
         }

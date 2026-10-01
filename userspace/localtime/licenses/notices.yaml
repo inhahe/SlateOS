@@ -1,0 +1,14 @@
+# The glibc code lane B carries (design-decisions 1433), read by
+# scripts/gather-notices.py. A component may be named by one manifest only: a
+# crate that ports more of glibc adds itself here, not a second entry.
+#
+# This crate: tzset (time/tzset.c, time/tzfile.c), the C locale's strftime and
+# mktime (time/mktime.c, the file glibc shares with gnulib). Elsewhere in lane
+# B: userspace/ere (posix/regcomp.c's error strings, `re_error_msgid`, and
+# `parse_dup_op`) and userspace/ulstrutils (string/strverscmp.c's state
+# machine).
+glibc:
+  version: 2.39
+  licence: LGPL-2.1-or-later
+  texts:
+    - LGPL-2.1

@@ -178993,29 +178993,56 @@ terminals' lines.
 2.39.3's `term-utils/agetty.c`, `update_utmp` -- `pututxline` of a
 `LOGIN_PROCESS` record and `updwtmpx` to `wtmp`, through `libcall::utmp`.
 
-## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: OPEN (next task)**
+## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: FIXED 2026-10-01**
 
-**In short:** much of lane B's userland is ported from other projects --
-GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later), util-linux 2.39.3
-(`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`, `logger`, `column`,
-`findmnt` and more, plus the `ulblkid`/`ulsysfs`/`smartcols`/`ulmount`
-library ports: GPL-2.0-or-later and LGPL-2.1-or-later), Oils (Apache-2.0)
-and others. An image may carry other people's code only with their licence
-notices, and `scripts/gather-notices.py` -- which builds the image's
+**Fixed:** five manifests now name every upstream lane B's code is ported
+from, eleven components in all, each with its licence texts beside it (the
+gatherer finds 108 notices, 41 from manifests, where it found 97):
+
+| Manifest | Components |
+|---|---|
+| `userspace/coreutils/licenses/` | GNU coreutils 9.4, gnulib, GNU findutils 4.9.0, GNU diffutils 3.10, GNU Time 1.9, procps-ng 4.0.4 |
+| `userspace/ulclosestream/licenses/` | util-linux 2.39.3 (every util-linux port links this crate) |
+| `userspace/localtime/licenses/` | glibc 2.39 (also `ere`'s regcomp messages, `ulstrutils`'s strverscmp) |
+| `userspace/oils/licenses/` | GNU Bash 5.2.37 |
+| `userspace/autoopts/licenses/` | AutoOpts (libopts 41.1), GNU sharutils 4.15.2 |
+
+The survey went past the module docs' "a port of": "transcription of",
+"transcribed from" and "ported from" found procps-ng (`free`, `uptime`),
+findutils (`find`, `xargs`), diffutils, GNU Time, sharutils and libopts, and
+util-linux's `cal` and `renice` inside `userspace/coreutils`. Each licence
+was read from the upstream files themselves, not assumed: gnulib's modules
+as coreutils 9.4 ships them are GPL-3.0-or-later, LGPL-3.0-or-later and
+LGPL-2.1-or-later by module (gnulib-tool did not relicense them);
+util-linux's are per file -- GPL-2.0-or-later by default, LGPL-2.1-or-later
+for the libraries, BSD-4-Clause-UC for `cal.c`, `column.c`, `logger.c` and
+`renice.c`, BSD-4.3TAHOE for `login.c`, MIT for `flock.c` -- and the BSD and
+MIT notices are each file's own, reproduced in `BSD-notices` and
+`MIT-flock`. The entry above was wrong in one respect: `userspace/oils`
+carries no upstream Oils code (it is written here, §72); what it carries is
+bash's. Each manifest's comments say which crates its components cover, and
+a crate that ports more of one adds itself there: the gatherer refuses a
+component named by two manifests.
+
+What remains open, deliberately: `userspace/charwidth`'s width tables are
+generated from Unicode data through Python's `unicodedata`. Whether a table
+of width ranges is a copy of the Unicode data files, owing the Unicode
+licence's notice, is a question for every lane's Unicode-derived tables at
+once, not for one crate, and nothing names it yet.
+
+**Original report.** Much of lane B's userland is ported from other
+projects -- GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later),
+util-linux 2.39.3 (`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`,
+`logger`, `column`, `findmnt` and more, plus the
+`ulblkid`/`ulsysfs`/`smartcols`/`ulmount` library ports) and others. An
+image may carry other people's code only with their licence notices, and
+`scripts/gather-notices.py` -- which builds the image's
 `/usr/share/licenses` and the notices page -- can find ported code only
 through a `licenses/notices.yaml` naming it (`design-decisions.md` §1433,
-`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B has
-none, except `userspace/file`'s (file 5.45, added 2026-10-01). So today the
-image carries those programs without the notices their licences require.
-
-**The fix:** one manifest for lane B's ports in `userspace/licenses/`, one
-entry per upstream project (name, version, licence, texts), with each
-project's licence texts beside it. Per project rather than per crate: the
-notices page lists components, and forty copies of the GPL would say
-nothing forty-one did not. Needs, per crate, the upstream it states and the
-version it was ported from -- most say so in their module docs ("a port of
-util-linux 2.39.3's ..."), which a survey of `userspace/` already finds for
-26 crates and 40 coreutils programs.
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B had
+none, except `userspace/file`'s (file 5.45). The fix first planned, one
+manifest in `userspace/licenses/`, cannot exist: the workspace's
+`userspace/*` member glob makes every directory there a crate.
 
 **One thing for the operator to know, not decide here:** code ported from
 GPL projects makes those programs GPL-licensed derived works, with the

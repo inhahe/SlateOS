@@ -86,3 +86,23 @@ machine-readable half.
 - **Lanes B and E:** any userland or application code ported from elsewhere.
 
 Nothing here needs doing for code this project wrote itself.
+
+## Lane B: done (2026-10-01)
+
+Lane B's ports are named, eleven components besides `file`, in five
+manifests: `userspace/coreutils/licenses/` (GNU coreutils 9.4, gnulib, GNU
+findutils 4.9.0, GNU diffutils 3.10, GNU Time 1.9, procps-ng 4.0.4),
+`userspace/ulclosestream/licenses/` (util-linux 2.39.3),
+`userspace/localtime/licenses/` (glibc 2.39), `userspace/oils/licenses/`
+(GNU Bash 5.2.37) and `userspace/autoopts/licenses/` (AutoOpts 41.1, GNU
+sharutils 4.15.2). `known-issues.md` B-PORTED-CODE-CARRIES-NO-NOTICES has
+the survey and how each licence was read.
+
+**For every other lane:** the gatherer refuses a component named by two
+manifests, so if your code ports one of these -- lane D and glibc or gnulib
+are the likely case -- do not add a second entry: file a request and lane B
+will add your crate to the comment above its entry (and widen the entry's
+licence, if your files carry one it does not list). One thing lane B did not
+settle: whether width or property tables generated from Unicode data owe
+the Unicode licence's notice. That is the same question in every lane that
+has such tables, so it wants one answer, not one per crate.

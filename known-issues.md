@@ -180604,6 +180604,25 @@ step 5:
   a file is `ENOTDIR` before its name is looked at, and `fchdir`'s
   directory check no longer applies a jailed caller's jail twice
   (`stat_resolved`).
+- **The Linux fd calls went by the descriptor's name.** `fchmod`,
+  `fchown`, `fchownat`/`fchmodat2` with `AT_EMPTY_PATH`, `futimens`,
+  `ftruncate`, `fallocate` and `fstatfs` looked the name up again, through
+  the path calls. So a file deleted while open could not be truncated or
+  grown through its own descriptor (SQLite's temporary files), a renamed
+  one was missed, and a jailed caller's jail was applied to the name twice.
+  They now act through `fs::handle::HandleFile`: the file the handle
+  holds, or for a file held by name the host path captured at open. New
+  inode-addressed calls back it: `FileSystem::chmod_ino`, `chown_ino`,
+  `utimes_ino`, `fallocate_ino` (memfs and ext4), `Vfs::object_set_*`,
+  `object_fallocate` and `object_statvfs`, and the `*_resolved` path calls.
+  A change through a handle opened in a read-only volume is refused
+  (`OpenFile::ro_volume`, taken at open, as Linux checks the mount a file
+  was opened on). Tests: `test_held_files` rungs 10-13; `linux`'s fallocate
+  range test now goes through a handle.
+- **Still open:** `fexecve` of a file renamed or deleted since it was
+  opened is `ENOENT`. Exec loads by name, and the name is now checked; Linux
+  execs the open file. The fix is an exec that reads its image through the
+  handle.
 
 ### A-LINUX-FSTAT-OF-A-FILE-WAS-MADE-UP -- 2026-10-01 -- FIXED the same day (lane A)
 
@@ -180667,6 +180686,65 @@ umask. A key file a program made 0600 was readable by every user, and a
 - the umask of a lent process;
 - a 270-byte path, and a 4099-byte one;
 - a name holding bytes 0xff and 0xfe.
+
+### A-JAILED-CREATE-WITH-A-MODE-FAILED-AFTER-CREATING -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a process in a chroot jail (a container) that created a file
+with any mode but 0644, or a directory with any but 0755, got an error,
+and the file or directory was left there anyway. `mkstemp` asks for 0600,
+so every temporary file a container made failed this way. A Linux create
+used 0644 whatever it asked for until the same day
+(A-LINUX-CREATE-DROPPED-MODE-AND-UMASK), which hid the fault for Linux
+programs; native ones met it whenever they gave a mode.
+
+**Where:** `fs::handle::open_resolved` and `Vfs::mkdir_mode` stamped the
+mode with `Vfs::set_permissions` on the path they had already resolved.
+`set_permissions` resolves again, and resolving applies the caller's jail,
+so the jail was applied twice: `/jail/made` became `/jail/jail/made`, and
+`NotFound`.
+
+**Fixed:** `Vfs::set_permissions_resolved`, with `set_owner_resolved`,
+`set_times_resolved`, `statvfs_resolved` and `fallocate_resolved` beside
+it, for a caller holding a resolved path. Test: `test_held_files` rung 13,
+in a jail of its own: a file made with mode 0600, a directory with 0700,
+and a read-only volume refusing a change through a handle opened in it.
+
+**Not fixed, the same mistake:** `Vfs::atomic_write` and
+`atomic_write_preserve` resolve the path, then call path calls with the
+result. Their callers are kernel tasks, which have no jail, so nothing goes
+wrong today. The fix, when a jailed caller appears, is the `*_resolved`
+calls.
+
+### A-LINUX-OPEN-OF-A-DIRECTORY-FOR-READING-WAS-EISDIR -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** a Linux program opening a directory with `open(dir, O_RDONLY)`
+and no `O_DIRECTORY` got `EISDIR`. Linux opens it. Programs do this to
+`fchdir` back later (`open(".", O_RDONLY)`), and SQLite does it to `fsync`
+the directory a journal is in. `opendir` passes `O_DIRECTORY` and was not
+affected.
+
+**Fixed:** `OpenFlags::DIRECTORY_ALLOWED` opens a directory or a regular
+file, whichever the path names. The Linux layer sets it for a read-only
+open without `O_CREAT` or `O_TRUNC`. A directory is still refused anything
+that would write it. Tests: `test_held_files` rung 12, and
+`test_linux_create_modes`.
+
+### A-UTIMES-SET-THE-CHANGE-TIME-WRONG -- 2026-10-01 -- FIXED the same day (lane A); its nanoseconds OPEN
+
+**In short:** changing a file's times (`touch`, `utimensat`) must set its
+change time (`ctime`) to now. ext4 set it to the new modification time, so
+`touch -d 2001-01-01 f` back-dated the change time as well. An access-time
+change left it alone. memfs never set it.
+
+**Fixed:** ext4's `set_times_ino` stamps the change time now; memfs's
+`node_set_times` does too.
+
+**Still open:** ext4's `set_times_ino` writes whole seconds into the inode
+core and leaves the extra fields (`i_mtime_extra`, `i_atime_extra`)
+alone. A time's nanoseconds and its epoch bits past 2038 are lost, and
+the old ones are left in place: a file stamped with a whole second reads
+back with the nanoseconds of its previous time. The fix is to write the
+extra fields as `write_crtime` writes the creation time.
 
 ## Lane B: new entries
 

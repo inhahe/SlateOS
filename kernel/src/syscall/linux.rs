@@ -3138,8 +3138,17 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         if entry.kind != HandleKind::File {
             return -i64::from(errno::EACCES);
         }
+        // The name the descriptor was opened under, checked to name its file
+        // still (`handle_path`): exec loads by name. That name is the host
+        // path captured at open, and the loader applies the caller's
+        // namespace to what it is given, so it goes back to the caller's
+        // view first. A jailed caller's `fexecve` applied its jail twice
+        // until 2026-10-01.
         match crate::fs::handle::handle_path(entry.raw_handle) {
-            Ok(p) => p,
+            Ok(p) => match caller_pid() {
+                Some(pid) => crate::ipc::namespace::unjail_path_for(pid, &p),
+                None => p,
+            },
             Err(e) => return -i64::from(linux_errno_for(e)),
         }
     } else {
@@ -5590,6 +5599,11 @@ fn translate_open_flags(linux_flags: u32) -> u32 {
     }
     if linux_flags & oflags::O_DIRECTORY != 0 {
         bits |= OpenFlags::DIRECTORY.bits();
+    } else if access == oflags::O_RDONLY && linux_flags & (oflags::O_CREAT | oflags::O_TRUNC) == 0 {
+        // A read-only open of a directory without O_DIRECTORY opens it, as
+        // on Linux: `open(".", O_RDONLY)`, SQLite opening a directory to
+        // fsync it. It was EISDIR until 2026-10-01.
+        bits |= OpenFlags::DIRECTORY_ALLOWED.bits();
     }
     // O_EXCL (with O_CREAT) demands exclusive creation; O_NOFOLLOW refuses to
     // open a final-component symlink. Both are enforced in `fs::handle::open`,
@@ -18732,17 +18746,17 @@ fn sys_fstatfs(args: &SyscallArgs) -> SyscallResult {
     // defaults are the honest answer there.
     let filled = if let Some(entry) = entry {
         if entry.kind == crate::proc::linux_fd::HandleKind::File {
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(path) => match crate::fs::Vfs::statvfs(&path) {
-                    Ok(info) => {
-                        fill_statfs_from_info(&mut buf, &info);
-                        true
-                    }
-                    Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                },
-                // Handle no longer resolvable — fall back to defaults.
-                Err(_) => false,
+            // The filesystem of the file the descriptor holds, whatever its
+            // name now (`fs::handle::HandleFile`).
+            match crate::fs::handle::HandleFile::of(entry.raw_handle).and_then(|f| f.statvfs()) {
+                Ok(info) => {
+                    fill_statfs_from_info(&mut buf, &info);
+                    true
+                }
+                // A descriptor closed in a race: the defaults.
+                Err(KernelError::InvalidHandle) => false,
+                Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
+                Err(e) => return linux_err(linux_errno_for(e)),
             }
         } else {
             false
@@ -21702,11 +21716,40 @@ fn sys_fchmod(args: &SyscallArgs) -> SyscallResult {
         // fchmod on a pipe/console fd has no backing inode → EINVAL.
         return linux_err(errno::EINVAL);
     }
-    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-        Ok(p) => p,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    chmod_apply(&path, args.arg1)
+    fchmod_fd(entry.raw_handle, args.arg1)
+}
+
+/// `fchmod`, and `fchmodat2(AT_EMPTY_PATH)` on a descriptor: through the file
+/// the descriptor holds, whatever its name now (`fs::handle::HandleFile`).
+///
+/// It went by the descriptor's name until 2026-10-01: a jailed caller's jail
+/// was applied to the name twice, and a file renamed while open was missed,
+/// or another file under its old name changed instead.
+fn fchmod_fd(raw_handle: u64, mode: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    let perms = u16::try_from(mode & 0o7777).unwrap_or(0);
+    match crate::fs::handle::HandleFile::of(raw_handle).and_then(|f| f.set_permissions(perms)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
+}
+
+/// `fchown`, and `fchownat(AT_EMPTY_PATH)` on a descriptor, as [`fchmod_fd`].
+/// An id of -1 leaves it as it is.
+fn fchown_fd(raw_handle: u64, uid_arg: u64, gid_arg: u64) -> SyscallResult {
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let uid = uid_arg as u32;
+    #[allow(clippy::cast_possible_truncation)]
+    let gid = gid_arg as u32;
+    match crate::fs::handle::HandleFile::of(raw_handle).and_then(|f| f.set_owner(uid, gid)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(linux_errno_for(e)),
+    }
 }
 
 /// `fchmodat(dirfd, path, mode)` — Linux syscall #268.
@@ -21830,11 +21873,7 @@ fn sys_fchown(args: &SyscallArgs) -> SyscallResult {
         // fchown on a pipe/console fd has no backing inode → EINVAL.
         return linux_err(errno::EINVAL);
     }
-    let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-        Ok(p) => p,
-        Err(e) => return linux_err(linux_errno_for(e)),
-    };
-    chown_apply(&path, args.arg1, args.arg2)
+    fchown_fd(entry.raw_handle, args.arg1, args.arg2)
 }
 
 /// `lchown(path, uid, gid)` — identical to chown without symlink
@@ -21896,16 +21935,8 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
             Some(p) => p,
             None => return linux_err(errno::EROFS),
         };
-        // AT_FDCWD with an empty path targets the cwd.
-        let path = if dirfd == AT_FDCWD {
-            // The cwd is stored as bytes and is used as bytes; the old
-            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
-            // ENOENT, i.e. "your current directory does not exist".
-            match pcb::get_cwd(pid) {
-                Some(c) => PathBuf::from(c),
-                None => return linux_err(errno::ENOENT),
-            }
-        } else {
+        // A descriptor: its file, whatever its name now (`fchown_fd`).
+        if dirfd != AT_FDCWD {
             let entry = match pcb::linux_fd_lookup(pid, dirfd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
@@ -21913,10 +21944,15 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != HandleKind::File {
                 return linux_err(errno::EINVAL);
             }
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
+            return fchown_fd(entry.raw_handle, args.arg2, args.arg3);
+        }
+        // AT_FDCWD with an empty path targets the cwd. The cwd is stored as
+        // bytes and is used as bytes; the old `String::from_utf8(..).ok()`
+        // here turned a non-UTF-8 cwd into ENOENT, i.e. "your current
+        // directory does not exist".
+        let path = match pcb::get_cwd(pid) {
+            Some(c) => PathBuf::from(c),
+            None => return linux_err(errno::ENOENT),
         };
         return chown_apply(&path, args.arg2, args.arg3);
     }
@@ -22313,15 +22349,19 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
             if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
                 return linux_err(e);
             }
-            let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            };
             if let Err(r) = require_fs_write() {
                 return r;
             }
-            match crate::fs::Vfs::truncate(&path, new_size) {
+            // Through the file the descriptor holds, whatever its name now
+            // (`fs::handle::ftruncate`). It went by the descriptor's name
+            // until 2026-10-01, so a file deleted while open -- SQLite's
+            // temporary files -- could not be truncated through its own
+            // descriptor, and a jailed caller's jail was applied twice.
+            match crate::fs::handle::ftruncate(entry.raw_handle, new_size) {
                 Ok(()) => SyscallResult::ok(0),
+                // Not a regular file: EINVAL, as Linux's `do_sys_ftruncate`
+                // answers for a directory.
+                Err(KernelError::IsADirectory) => linux_err(errno::EINVAL),
                 Err(e) => linux_err(linux_errno_for(e)),
             }
         }
@@ -22644,6 +22684,15 @@ fn sys_linkat(args: &SyscallArgs) -> SyscallResult {
 //     as "leave unchanged" rather than written.
 // ---------------------------------------------------------------------------
 
+/// What `utimensat` stamps: the file behind a descriptor (the `futimens`
+/// form, a NULL path), or a path.
+enum UtimeTarget {
+    /// A descriptor's file, whatever its name now (`fs::handle::HandleFile`).
+    Fd(u64),
+    /// A path, resolved against the descriptor or the cwd.
+    Path(PathBuf),
+}
+
 /// `utimensat(dirfd, path, times[2], flags)`.
 ///
 /// Linux's `fs/utimes.c::SYSCALL_DEFINE4(utimensat)` gate order:
@@ -22789,6 +22838,11 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
         if dirfd == AT_FDCWD {
             return linux_err(errno::EBADF);
         }
+        // The futimens form takes no flags: Linux's `do_utimes_fd` answers
+        // EINVAL for any, before it looks at the descriptor.
+        if flags != 0 {
+            return linux_err(errno::EINVAL);
+        }
         let entry = match lookup_caller_fd(dirfd) {
             Ok(e) => e,
             Err(r) => return r,
@@ -22797,13 +22851,12 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
             // futimens on a non-file fd (pipe/console) has no backing path.
             return linux_err(errno::EINVAL);
         }
-        match crate::fs::handle::handle_path(entry.raw_handle) {
-            Ok(p) => p,
-            Err(e) => return linux_err(linux_errno_for(e)),
-        }
+        // The descriptor's file, whatever its name now. It went by the name
+        // until 2026-10-01, as `fchmod` did.
+        UtimeTarget::Fd(entry.raw_handle)
     } else {
         match resolve_at_path(dirfd, args.arg1) {
-            Ok(p) => p,
+            Ok(p) => UtimeTarget::Path(p),
             Err(r) => return r,
         }
     };
@@ -22831,10 +22884,14 @@ fn sys_utimensat(args: &SyscallArgs) -> SyscallResult {
     }
     // AT_SYMLINK_NOFOLLOW: stamp the link inode itself rather than its
     // target (closes known-issues B-CHOWN1 gap #1 for utimensat).
-    let res = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        crate::fs::Vfs::set_times_no_follow(&target, atime_ns, mtime_ns)
-    } else {
-        crate::fs::Vfs::set_times(&target, atime_ns, mtime_ns)
+    let res = match &target {
+        UtimeTarget::Fd(raw) => {
+            crate::fs::handle::HandleFile::of(*raw).and_then(|f| f.set_times(atime_ns, mtime_ns))
+        }
+        UtimeTarget::Path(p) if flags & AT_SYMLINK_NOFOLLOW != 0 => {
+            crate::fs::Vfs::set_times_no_follow(p, atime_ns, mtime_ns)
+        }
+        UtimeTarget::Path(p) => crate::fs::Vfs::set_times(p, atime_ns, mtime_ns),
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -25593,13 +25650,21 @@ fn copy_file_range_overlaps(
 ) -> bool {
     use crate::proc::linux_fd::HandleKind;
     let same = match (in_kind, out_kind) {
-        (HandleKind::File, HandleKind::File) => matches!(
-            (
-                crate::fs::handle::handle_path(in_handle),
-                crate::fs::handle::handle_path(out_handle),
+        // The same file, whatever its names: by identity where the files
+        // have one, else by the names they were opened under.
+        (HandleKind::File, HandleKind::File) => match (
+            crate::fs::handle::file_identity(in_handle),
+            crate::fs::handle::file_identity(out_handle),
+        ) {
+            (Ok(Some(a)), Ok(Some(b))) => a == b,
+            _ => matches!(
+                (
+                    crate::fs::handle::handle_name(in_handle),
+                    crate::fs::handle::handle_name(out_handle),
+                ),
+                (Ok(a), Ok(b)) if a == b
             ),
-            (Ok(a), Ok(b)) if a == b
-        ),
+        },
         (HandleKind::MemFd, HandleKind::MemFd) => in_handle == out_handle,
         _ => false,
     };
@@ -42148,13 +42213,13 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 /// EOF grows the file to `end`, zero-filling any gap left by the
 /// extending `write_at`.
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_zero_vfs(
-    path: &Path,
+fn fallocate_zero_file(
+    file: &crate::fs::handle::HandleFile,
     offset: u64,
     end: u64,
     keep_size: bool,
 ) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+    let size = file.size()?;
     let zero_end = if keep_size { end.min(size) } else { end };
     if offset >= zero_end {
         return Ok(());
@@ -42170,13 +42235,13 @@ fn fallocate_zero_vfs(
         } else {
             remaining as usize
         };
-        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        file.write(pos, zeros.get(..this).unwrap_or(&[]))?;
         pos = pos.saturating_add(this as u64);
     }
     Ok(())
 }
 
-/// `MemFd` counterpart of [`fallocate_zero_vfs`]: zero `[offset, end)` of
+/// `MemFd` counterpart of [`fallocate_zero_file`]: zero `[offset, end)` of
 /// an in-memory file. Same `keep_size` semantics. The in-memory backing
 /// never reclaims space, so `PUNCH_HOLE`/`ZERO_RANGE` are likewise just
 /// "reads return zero" on a memfd.
@@ -42219,13 +42284,17 @@ fn fallocate_zero_memfd(
 /// The move is a forward (ascending) memmove of the tail: the destination
 /// (`offset`) is strictly below the source (`offset+len`), so copying low
 /// addresses first never overwrites a not-yet-copied source byte.  Chunked
-/// through `Vfs::read_at`/`write_at` (every backend overrides both
-/// efficiently) so the whole file is never resident at once.  Our backends
+/// through the descriptor's file (`HandleFile::read`/`write`; every backend
+/// does both by range) so the whole file is never resident at once.  Our backends
 /// are non-sparse, so this is a true content collapse, not an extent splice;
 /// the result a reader observes is identical.
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+fn fallocate_collapse_file(
+    file: &crate::fs::handle::HandleFile,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = file.size()?;
     // end = offset + len; both validated < size by the caller, so the add
     // cannot overflow a real on-disk size, but stay defensive.
     let end = offset
@@ -42244,12 +42313,12 @@ fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::K
         };
         let src = end.saturating_add(moved);
         let dst = offset.saturating_add(moved);
-        let buf = crate::fs::Vfs::read_at(path, src, this)?;
-        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        let buf = file.read(src, this)?;
+        file.write(dst, &buf)?;
         moved = moved.saturating_add(this as u64);
     }
     // Drop the now-duplicated tail: the file shrinks by exactly `len`.
-    crate::fs::Vfs::truncate(path, size.saturating_sub(len))
+    file.truncate(size.saturating_sub(len))
 }
 
 /// `FALLOC_FL_INSERT_RANGE`: insert a `len`-byte hole at `offset`, shifting
@@ -42267,14 +42336,18 @@ fn fallocate_collapse_vfs(path: &Path, offset: u64, len: u64) -> crate::error::K
 /// offset+len)` window is explicitly zeroed (the grow only zero-filled past
 /// the *old* EOF, not the interior hole the shift exposes).
 #[allow(clippy::cast_possible_truncation)]
-fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::KernelResult<()> {
-    let size = crate::fs::Vfs::file_size(path)?;
+fn fallocate_insert_file(
+    file: &crate::fs::handle::HandleFile,
+    offset: u64,
+    len: u64,
+) -> crate::error::KernelResult<()> {
+    let size = file.size()?;
     let new_size = size
         .checked_add(len)
         .ok_or(crate::error::KernelError::InvalidArgument)?;
     // Grow first so the destination range exists; the extension past the old
     // EOF is zero-filled by `truncate`.
-    crate::fs::Vfs::truncate(path, new_size)?;
+    file.truncate(new_size)?;
     // Slide the tail `[offset, size)` up to `[offset+len, new_size)`, copying
     // from the end backwards so a chunk's destination never overlaps an
     // un-copied source chunk.
@@ -42291,8 +42364,8 @@ fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::Ker
         let chunk_start = offset.saturating_add(remaining.saturating_sub(this as u64));
         let src = chunk_start;
         let dst = chunk_start.saturating_add(len);
-        let buf = crate::fs::Vfs::read_at(path, src, this)?;
-        crate::fs::Vfs::write_at(path, dst, &buf)?;
+        let buf = file.read(src, this)?;
+        file.write(dst, &buf)?;
         remaining = remaining.saturating_sub(this as u64);
     }
     // Zero the inserted hole `[offset, offset+len)` — the shift left stale
@@ -42307,7 +42380,7 @@ fn fallocate_insert_vfs(path: &Path, offset: u64, len: u64) -> crate::error::Ker
         } else {
             rem as usize
         };
-        crate::fs::Vfs::write_at(path, pos, zeros.get(..this).unwrap_or(&[]))?;
+        file.write(pos, zeros.get(..this).unwrap_or(&[]))?;
         pos = pos.saturating_add(this as u64);
     }
     Ok(())
@@ -42490,56 +42563,58 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
         }
         match entry.kind {
             HandleKind::File => {
-                let path = match crate::fs::handle::handle_path(entry.raw_handle) {
-                    Ok(p) => p,
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                };
                 if let Err(r) = require_fs_write() {
                     return r;
                 }
+                // Through the file the descriptor holds, whatever its name
+                // now (`fs::handle::HandleFile`). It went by the descriptor's
+                // name until 2026-10-01: a jailed caller's jail was applied
+                // to the name twice, and a file deleted while open could not
+                // be grown through its own descriptor.
+                let file = match crate::fs::handle::HandleFile::writable(entry.raw_handle) {
+                    Ok(f) => f,
+                    Err(e) => return linux_err(linux_errno_for(e)),
+                };
+                let done = |r: crate::error::KernelResult<()>| match r {
+                    Ok(()) => SyscallResult::ok(0),
+                    Err(e) => linux_err(linux_errno_for(e)),
+                };
                 if mode == 0 {
                     // posix_fallocate: ensure logical size >= end; never
                     // shrink a file that is already larger.
-                    let cur = match crate::fs::Vfs::file_size(&path) {
-                        Ok(s) => s,
-                        Err(e) => return linux_err(linux_errno_for(e)),
+                    return match file.size() {
+                        Ok(cur) if cur < end_u64 => done(file.truncate(end_u64)),
+                        Ok(_) => SyscallResult::ok(0),
+                        Err(e) => linux_err(linux_errno_for(e)),
                     };
-                    if cur < end_u64 {
-                        return match crate::fs::Vfs::truncate(&path, end_u64) {
-                            Ok(()) => SyscallResult::ok(0),
-                            Err(e) => linux_err(linux_errno_for(e)),
-                        };
-                    }
-                    return SyscallResult::ok(0);
                 }
                 if mode == KEEP_SIZE {
                     // Reserve blocks for [0, end) without touching the
-                    // logical size — the VFS fallocate is exactly this.
-                    return match crate::fs::Vfs::fallocate(&path, end_u64) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    // logical size.
+                    return done(file.fallocate(end_u64));
                 }
                 if mode & PUNCH_HOLE != 0 || mode & ZERO_RANGE != 0 {
                     // Zero the range so reads return zero. PUNCH_HOLE and
                     // ZERO_RANGE+KEEP_SIZE preserve i_size; ZERO_RANGE
                     // without KEEP_SIZE extends to `end` when past EOF.
-                    return match fallocate_zero_vfs(&path, offset_u64, end_u64, zero_keep_size) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    return done(fallocate_zero_file(
+                        &file,
+                        offset_u64,
+                        end_u64,
+                        zero_keep_size,
+                    ));
                 }
                 // COLLAPSE_RANGE / INSERT_RANGE: real extent-shifting modes
                 // (ext4/xfs/f2fs in Linux).  Both require `offset` and `len`
                 // to be multiples of the filesystem block size (EINVAL
                 // otherwise) and shift file contents; our non-sparse backends
-                // realise them as a chunked data memmove (fallocate_*_vfs).
+                // realise them as a chunked data memmove (fallocate_*_file).
                 if mode & COLLAPSE_RANGE != 0 || mode & INSERT_RANGE != 0 {
                     // Block size for the alignment gate.  A backend that can't
                     // report one (block_size == 0) can't validate the Linux
                     // alignment contract, so fall back to EOPNOTSUPP rather
                     // than guess — exactly what an unsupported fs returns.
-                    let bsize = match crate::fs::Vfs::statvfs(&path) {
+                    let bsize = match file.statvfs() {
                         Ok(info) if info.block_size > 0 => info.block_size,
                         Ok(_) => return linux_err(errno::EOPNOTSUPP),
                         Err(e) => return linux_err(linux_errno_for(e)),
@@ -42550,7 +42625,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     if !offset_u64.is_multiple_of(bsize) || !len_u64.is_multiple_of(bsize) {
                         return linux_err(errno::EINVAL);
                     }
-                    let size = match crate::fs::Vfs::file_size(&path) {
+                    let size = match file.size() {
                         Ok(s) => s,
                         Err(e) => return linux_err(linux_errno_for(e)),
                     };
@@ -42560,10 +42635,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                         if end_u64 >= size {
                             return linux_err(errno::EINVAL);
                         }
-                        return match fallocate_collapse_vfs(&path, offset_u64, len_u64) {
-                            Ok(()) => SyscallResult::ok(0),
-                            Err(e) => linux_err(linux_errno_for(e)),
-                        };
+                        return done(fallocate_collapse_file(&file, offset_u64, len_u64));
                     }
                     // INSERT_RANGE: the insertion point must lie strictly
                     // inside the file (Linux: offset >= size is EINVAL; extend
@@ -42580,10 +42652,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                     if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
                         return linux_err(e);
                     }
-                    return match fallocate_insert_vfs(&path, offset_u64, len_u64) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
+                    return done(fallocate_insert_file(&file, offset_u64, len_u64));
                 }
                 // UNSHARE_RANGE keeps the EOPNOTSUPP fallback (reflink/CoW
                 // concept our backends don't implement).
@@ -43397,10 +43466,9 @@ fn sys_chdir(args: &SyscallArgs) -> SyscallResult {
 ///   - ENOENT  — path no longer exists (rmdir between open and fchdir).
 ///
 /// Notes:
-///   - The fd does NOT have to have been opened with `O_DIRECTORY`; a
-///     plain `open("/dir", O_RDONLY)` succeeds with `IsADirectory`
-///     today, but if it ever stops doing that the stat check here is
-///     the source of truth.
+///   - The fd does NOT have to have been opened with `O_DIRECTORY`: a
+///     plain `open("/dir", O_RDONLY)` opens the directory
+///     (`OpenFlags::DIRECTORY_ALLOWED`).
 ///   - Kernel-context callers (no per-process fd table) see EBADF on
 ///     any valid fd — same shape as the rest of the Linux fd handlers.
 fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
@@ -45696,15 +45764,8 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
             Some(p) => p,
             None => return linux_err(errno::EROFS),
         };
-        let resolved = if dirfd == AT_FDCWD {
-            // The cwd is stored as bytes and is used as bytes; the old
-            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
-            // ENOENT, i.e. "your current directory does not exist".
-            match pcb::get_cwd(pid) {
-                Some(c) => PathBuf::from(c),
-                None => return linux_err(errno::ENOENT),
-            }
-        } else {
+        // A descriptor: its file, whatever its name now (`fchmod_fd`).
+        if dirfd != AT_FDCWD {
             let entry = match pcb::linux_fd_lookup(pid, dirfd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
@@ -45712,10 +45773,14 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != HandleKind::File {
                 return linux_err(errno::EINVAL);
             }
-            match crate::fs::handle::handle_path(entry.raw_handle) {
-                Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
+            return fchmod_fd(entry.raw_handle, args.arg2);
+        }
+        // The cwd is stored as bytes and is used as bytes; the old
+        // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
+        // ENOENT, i.e. "your current directory does not exist".
+        let resolved = match pcb::get_cwd(pid) {
+            Some(c) => PathBuf::from(c),
+            None => return linux_err(errno::ENOENT),
         };
         return chmod_apply(&resolved, args.arg2);
     }
@@ -49168,7 +49233,7 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 /// File/MemFd source helpers it drives.
 ///
 /// Runs after the `/tmp` memfs mount so it can stage real files.  Exercises
-/// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_vfs`]
+/// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_file`]
 /// / [`fallocate_zero_memfd`]) directly, since the syscall entry needs a
 /// per-process Linux fd table absent in kernel boot context.
 ///
@@ -49234,8 +49299,24 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
         }
     };
 
+    // Each call goes through a handle on the staged file, as the syscall's
+    // do (`HandleFile::writable`).
+    let through = |op: &dyn Fn(
+        &crate::fs::handle::HandleFile,
+    ) -> crate::error::KernelResult<()>|
+     -> crate::error::KernelResult<()> {
+        let h = crate::fs::handle::open(
+            path,
+            crate::fs::handle::OpenFlags::READ.union(crate::fs::handle::OpenFlags::WRITE),
+        )?;
+        let result = crate::fs::handle::HandleFile::writable(h).and_then(|f| op(&f));
+        // Best effort: this test's own scratch handle.
+        let _ = crate::fs::handle::close(h);
+        result
+    };
+
     // (1) ZERO_RANGE + KEEP_SIZE: zero [20,40), size stays 100.
-    fallocate_zero_vfs(path, 20, 40, true)?;
+    through(&|f| fallocate_zero_file(f, 20, 40, true))?;
     if !check(N, "ZERO_RANGE+KEEP", &|c| {
         c.get(..20).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49246,7 +49327,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     }
 
     // (2) PUNCH_HOLE: zero [50,60), size stays 100, range (1) still zero.
-    fallocate_zero_vfs(path, 50, 60, true)?;
+    through(&|f| fallocate_zero_file(f, 50, 60, true))?;
     if !check(N, "PUNCH_HOLE", &|c| {
         c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
             && c.get(50..60).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49257,7 +49338,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     }
 
     // (3) KEEP_SIZE range entirely past EOF → no-op, size unchanged.
-    fallocate_zero_vfs(path, 200, 250, true)?;
+    through(&|f| fallocate_zero_file(f, 200, 250, true))?;
     if !check(N, "past-EOF-keep-size", &|_| true) {
         let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
@@ -49274,7 +49355,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    fallocate_zero_vfs(path, 90, 150, false)?;
+    through(&|f| fallocate_zero_file(f, 90, 150, false))?;
     if !check(150, "ZERO_RANGE-grow", &|c| {
         c.get(..90).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(90..150).is_some_and(|h| h.iter().all(|&b| b == 0))
@@ -49342,7 +49423,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_collapse_vfs(path, 20, 20)?;
+    through(&|f| fallocate_collapse_file(f, 20, 20))?;
     let mut want_collapse = alloc::vec::Vec::new();
     want_collapse.extend_from_slice(seq.get(..20).unwrap_or(&[]));
     want_collapse.extend_from_slice(seq.get(40..).unwrap_or(&[]));
@@ -49357,7 +49438,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(path, 30, 20)?;
+    through(&|f| fallocate_insert_file(f, 30, 20))?;
     let mut want_insert = alloc::vec::Vec::new();
     want_insert.extend_from_slice(seq.get(..30).unwrap_or(&[]));
     want_insert.extend_from_slice(&[0u8; 20]);
@@ -49373,8 +49454,8 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(path, 40, 16)?;
-    fallocate_collapse_vfs(path, 40, 16)?;
+    through(&|f| fallocate_insert_file(f, 40, 16))?;
+    through(&|f| fallocate_collapse_file(f, 40, 16))?;
     if !expect(&seq, "INSERT+COLLAPSE-identity") {
         let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
@@ -51600,9 +51681,28 @@ fn test_linux_create_modes() -> crate::error::KernelResult<()> {
         return fail("a name that is not UTF-8 was not created with its mode");
     }
 
+    // A read-only open of a directory opens it (a kernel caller then gives
+    // the handle back: EBADF), as on Linux; one for writing is EISDIR. The
+    // first was EISDIR as well until 2026-10-01.
+    let dir = b"/tmp/linux-create-modes\0";
+    let ro = dispatch_linux(nr::OPEN, &args(dir.as_ptr() as u64, 0, 0)).value;
+    let rw = dispatch_linux(
+        nr::OPEN,
+        &args(dir.as_ptr() as u64, u64::from(oflags::O_RDWR), 0),
+    )
+    .value;
+    if ro != ebadf || rw != i64::from(errno::EISDIR).wrapping_neg() {
+        serial_println!(
+            "[syscall/linux]   open(dir, O_RDONLY) -> {}, open(dir, O_RDWR) -> {}",
+            ro,
+            rw
+        );
+        return fail("a read-only open of a directory did not open it");
+    }
+
     crate::fs::Vfs::remove_recursive(DIR)?;
     serial_println!(
-        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes: OK"
+        "[syscall/linux]   create modes: open/creat/mkdir take mode less the umask; paths to PATH_MAX, as bytes; open(dir, O_RDONLY): OK"
     );
     Ok(())
 }

@@ -704,6 +704,40 @@ pub trait FileSystem: Send {
         Err(KernelError::NotSupported)
     }
 
+    /// [`set_permissions`](Self::set_permissions) for a held inode:
+    /// `fchmod`, whatever the file's name now.
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        let _ = (ino, permissions);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`set_owner`](Self::set_owner) for a held inode: `fchown`. The ids are
+    /// concrete; the VFS resolves "leave unchanged" first.
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        let _ = (ino, uid, gid);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`set_times`](Self::set_times) for a held inode: `futimens`. A time of
+    /// 0 is left as it is.
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        let _ = (ino, accessed_ns, modified_ns);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`fallocate`](Self::fallocate) for a held inode. The default, as
+    /// `fallocate`'s, reserves nothing and reports success: the writes that
+    /// come allocate.
+    fn fallocate_ino(&mut self, ino: u64, size: u64) -> KernelResult<()> {
+        let _ = (ino, size);
+        Ok(())
+    }
+
     /// Rename or move a file or directory.
     ///
     /// Both `from` and `to` are paths relative to the filesystem root.
@@ -3249,7 +3283,9 @@ impl Vfs {
         // requested mode differs.
         let perm = mode & 0o1777;
         if perm != Self::DEFAULT_DIR_MODE {
-            match Self::set_permissions(&path, perm) {
+            // `_resolved`: `path` is resolved, and `set_permissions` would
+            // apply a jailed caller's jail to it a second time.
+            match Self::set_permissions_resolved(&path, perm) {
                 Ok(()) => {}
                 // `NotSupported` only, and for the same reason the open
                 // path tolerates it (see `handle.rs`, `open_resolved`): a
@@ -3852,6 +3888,100 @@ impl Vfs {
         Ok(())
     }
 
+    /// `fchmod` through a held file, whatever its name now. The open was the
+    /// access check, as for every call through a handle; what can refuse it
+    /// now is the mount turned read-only. `path` names it for events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_permissions(
+        obj: &FileObject,
+        path: &Path,
+        permissions: u16,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().chmod_ino(obj.ino, permissions)?;
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `fchown` through a held file, as
+    /// [`object_set_permissions`](Self::object_set_permissions). `u32::MAX`
+    /// leaves an id as it is, as for [`set_owner`](Self::set_owner).
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_owner(obj: &FileObject, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        {
+            let mut fs = obj.fs.lock();
+            let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
+                let meta = fs.metadata_ino(obj.ino)?;
+                (
+                    if uid == u32::MAX { meta.uid } else { uid },
+                    if gid == u32::MAX { meta.gid } else { gid },
+                )
+            } else {
+                (uid, gid)
+            };
+            fs.chown_ino(obj.ino, uid, gid)?;
+        }
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `futimens` through a held file, as
+    /// [`object_set_permissions`](Self::object_set_permissions). A time of 0
+    /// is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_set_times(
+        obj: &FileObject,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().utimes_ino(obj.ino, accessed_ns, modified_ns)
+        // No notify/journal — timestamp changes are metadata-only.
+    }
+
+    /// `fallocate(KEEP_SIZE)` through a held file: reserve space for its
+    /// first `size` bytes without changing its size.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_fallocate(obj: &FileObject, size: u64) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        obj.fs.lock().fallocate_ino(obj.ino, size)
+    }
+
+    /// `fstatfs` through a held file: the filesystem it is on, read-only if
+    /// the mount is, as [`statvfs_resolved`](Self::statvfs_resolved) reports.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` if the mount has gone; the filesystem's own.
+    pub fn object_statvfs(obj: &FileObject) -> KernelResult<FsInfo> {
+        let read_only = {
+            let vfs = VFS.lock();
+            vfs.mounts
+                .iter()
+                .find(|m| m.fs_id == obj.fs_id)
+                .map(|m| m.options.read_only)
+                .ok_or(KernelError::NotFound)?
+        };
+        let mut info = obj.fs.lock().statvfs()?;
+        info.read_only |= read_only;
+        Ok(info)
+    }
+
     /// What may refuse a write to a held file: the mount turned read-only,
     /// an interceptor, quota.
     fn object_write_checks(obj: &FileObject, path: &Path, len: usize) -> KernelResult<()> {
@@ -3880,9 +4010,19 @@ impl Vfs {
     pub fn fallocate(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::fallocate_resolved(&path, size)
+    }
+
+    /// [`fallocate`](Self::fallocate) on an already-resolved host path: an
+    /// open handle's (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`fallocate`](Self::fallocate).
+    pub fn fallocate_resolved(path: &Path, size: u64) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Write)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().fallocate(&relative, size)
     }
 
@@ -5220,12 +5360,23 @@ impl Vfs {
     pub fn set_owner(path: impl AsRef<Path>, uid: u32, gid: u32) -> KernelResult<()> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
+        Self::set_owner_resolved(&path, uid, gid)
+    }
+
+    /// [`set_owner`](Self::set_owner) on an already-resolved host path: an
+    /// open handle's, whose namespace was applied at its open
+    /// (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_owner`](Self::set_owner).
+    pub fn set_owner_resolved(path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         // Resolve "leave unchanged" sentinels before taking the VFS lock
-        // (metadata() takes the lock itself).
+        // (metadata_resolved() takes the lock itself).
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
-            let meta = Self::metadata(&path)?;
+            let meta = Self::metadata_resolved(path)?;
             (
                 if uid == u32::MAX { meta.uid } else { uid },
                 if gid == u32::MAX { meta.gid } else { gid },
@@ -5234,11 +5385,11 @@ impl Vfs {
             (uid, gid)
         };
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
             fs.lock().set_owner(&relative, uid, gid)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -5278,14 +5429,30 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
+        Self::set_permissions_resolved(&path, permissions)
+    }
+
+    /// [`set_permissions`](Self::set_permissions) on an already-resolved
+    /// host path: a create stamping the mode it was asked for, or an open
+    /// handle's path (`fs::handle::HandleFile`).
+    ///
+    /// The creates called `set_permissions` with the path they had resolved
+    /// until 2026-10-01, so a jailed process's jail was applied to it a
+    /// second time: `open(O_CREAT)` and `mkdir` with any mode but the
+    /// default made the file and then failed, `NotFound`, leaving it.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_permissions`](Self::set_permissions).
+    pub fn set_permissions_resolved(path: &Path, permissions: u16) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
         {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
             fs.lock().set_permissions(&relative, permissions)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
     }
 
@@ -5320,9 +5487,23 @@ impl Vfs {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Metadata)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+        Self::set_times_resolved(&path, accessed_ns, modified_ns)
+    }
+
+    /// [`set_times`](Self::set_times) on an already-resolved host path: an
+    /// open handle's (`fs::handle::HandleFile`).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_times`](Self::set_times).
+    pub fn set_times_resolved(
+        path: &Path,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        check_writable(path)?;
+        check_path_access(path, PathAccess::Metadata)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().set_times(&relative, accessed_ns, modified_ns)
         // No notify/journal — timestamp changes are metadata-only.
     }
@@ -5732,8 +5913,25 @@ impl Vfs {
     pub fn statvfs(path: impl AsRef<Path>) -> KernelResult<FsInfo> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
-        let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
-        fs.lock().statvfs()
+        Self::statvfs_resolved(&path)
+    }
+
+    /// [`statvfs`](Self::statvfs) on an already-resolved host path: an open
+    /// handle's (`fs::handle::HandleFile`).
+    ///
+    /// `read_only` is the mount's as well as the filesystem's: a writable
+    /// filesystem mounted read-only is read-only to its callers, and
+    /// `statvfs`'s `ST_RDONLY` says so, as Linux's does. It reported only the
+    /// filesystem's until 2026-10-01.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a path under no mount; the filesystem's own.
+    pub fn statvfs_resolved(path: &Path) -> KernelResult<FsInfo> {
+        let (fs, _id, opts, _relative) = resolve_mount(path)?;
+        let mut info = fs.lock().statvfs()?;
+        info.read_only |= opts.read_only;
+        Ok(info)
     }
 
     /// Discard (TRIM) the free space of the filesystem containing `path`.

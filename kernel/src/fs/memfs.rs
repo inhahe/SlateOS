@@ -207,6 +207,19 @@ fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
     node.xattrs.iter().map(|(k, _)| k.clone()).collect()
 }
 
+/// `utimensat` on a resolved node: each time that is not 0 is set, and the
+/// change time is now, as POSIX has it for any timestamp change. The change
+/// time was left as it was until 2026-10-01.
+fn node_set_times(node: &mut MemFsNode, accessed_ns: Timestamp, modified_ns: Timestamp) {
+    if accessed_ns != 0 {
+        node.accessed_ns = accessed_ns;
+    }
+    if modified_ns != 0 {
+        node.modified_ns = modified_ns;
+    }
+    node.changed_ns = metadata_now_ns();
+}
+
 impl MemFsNode {
     /// `len` bytes of the file from `offset`, fewer at its end; none past it.
     fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
@@ -1146,6 +1159,31 @@ impl FileSystem for MemFs {
         Ok(self.node(ino)?.to_file_meta(nlinks))
     }
 
+    fn chmod_ino(&mut self, ino: u64, permissions: u16) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.permissions = permissions;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn chown_ino(&mut self, ino: u64, uid: u32, gid: u32) -> KernelResult<()> {
+        let node = self.node_mut(ino)?;
+        node.uid = uid;
+        node.gid = gid;
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    fn utimes_ino(
+        &mut self,
+        ino: u64,
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+    ) -> KernelResult<()> {
+        node_set_times(self.node_mut(ino)?, accessed_ns, modified_ns);
+        Ok(())
+    }
+
     fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         // rename() does NOT follow the final component for either source
         // or destination — it moves the entry itself (including symlinks).
@@ -1380,13 +1418,7 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_mut(path)?, accessed_ns, modified_ns);
         Ok(())
     }
 
@@ -1419,13 +1451,7 @@ impl FileSystem for MemFs {
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
-        let node = self.resolve_no_follow_mut(path)?;
-        if accessed_ns != 0 {
-            node.accessed_ns = accessed_ns;
-        }
-        if modified_ns != 0 {
-            node.modified_ns = modified_ns;
-        }
+        node_set_times(self.resolve_no_follow_mut(path)?, accessed_ns, modified_ns);
         Ok(())
     }
 

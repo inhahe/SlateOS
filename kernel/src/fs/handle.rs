@@ -78,6 +78,13 @@ impl OpenFlags {
     /// program can only opt *into* stricter resolution (never weaker),
     /// making it safe even though it is honoured on any open path.
     pub const NO_SYMLINKS: Self = Self(1 << 8);
+    /// Open a directory if the path names one, a regular file otherwise:
+    /// what a Linux `open` without `O_DIRECTORY` does for a read-only open
+    /// (`open(".", O_RDONLY)`, a directory opened to `fsync` it). A
+    /// directory is still refused anything that would write it. With
+    /// neither this nor [`DIRECTORY`](Self::DIRECTORY), a directory is
+    /// `IsADirectory`.
+    pub const DIRECTORY_ALLOWED: Self = Self(1 << 9);
 
     /// Create from raw bits (for syscall argument parsing).
     #[must_use]
@@ -210,6 +217,14 @@ struct OpenFile {
     /// question cannot be answered at all.  The two cases are distinguished
     /// by `is_directory`, and neither is ever read as "verified".
     dir_pin: Option<crate::fs::FileId>,
+    /// The opener's view of the file was in a read-only volume
+    /// (`ipc::namespace::check_writable`), taken at open: a change made
+    /// through the handle later -- `fchmod`, `fchown`, `futimens` -- meets the
+    /// restriction of the volume it was opened through, as Linux's
+    /// `mnt_want_write_file` checks the mount a file was opened on
+    /// (`HandleFile`). A handle opened for writing never has it: such an open
+    /// is refused there.
+    ro_volume: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -403,6 +418,16 @@ fn open_impl(
         return Err(KernelError::InvalidArgument);
     }
 
+    // The opener's view of the file in a read-only volume, kept with the
+    // handle (`OpenFile::ro_volume`); a write open there is refused below.
+    let ro_volume = matches!(
+        match beneath {
+            Some(b) => crate::ipc::namespace::check_writable(b.base.join(b.rel)),
+            None => crate::ipc::namespace::check_writable(path),
+        },
+        Err(KernelError::ReadOnlyFilesystem)
+    );
+
     // RESOLVE_BENEATH takes its own route to `norm`, because the *order* of
     // the checks below is part of the guarantee.  A caller that asked for
     // containment must not be able to learn anything about a path outside
@@ -448,7 +473,7 @@ fn open_impl(
         } else {
             crate::fs::Vfs::resolve_beneath(b.base, b.rel, true, no_symlinks)?
         };
-        return open_resolved(norm, flags, create_mode);
+        return open_resolved(norm, flags, create_mode).map(|h| marked(h, ro_volume));
     }
 
     // Read-only volume enforcement: if this open would mutate the file
@@ -499,7 +524,17 @@ fn open_impl(
         crate::fs::Vfs::resolve_path(path)?
     };
 
-    open_resolved(norm, flags, create_mode)
+    open_resolved(norm, flags, create_mode).map(|h| marked(h, ro_volume))
+}
+
+/// `handle`, marked as opened in a read-only volume when `ro_volume`
+/// (`OpenFile::ro_volume`). Before the handle is returned, so nothing can
+/// use it unmarked.
+fn marked(handle: u64, ro_volume: bool) -> u64 {
+    if ro_volume && let Some(file) = OPEN_FILES.lock().get_mut(&handle) {
+        file.ro_volume = true;
+    }
+    handle
 }
 
 /// Everything an open does once the path has been resolved.
@@ -537,8 +572,11 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
                 return Err(KernelError::AlreadyExists);
             }
             if entry.entry_type == crate::fs::EntryType::Directory {
-                // Directory: only allowed if the caller asked for one.
-                if !flags.contains(OpenFlags::DIRECTORY) {
+                // Directory: only allowed if the caller asked for one, or
+                // for whatever the path names.
+                if !flags.contains(OpenFlags::DIRECTORY)
+                    && !flags.contains(OpenFlags::DIRECTORY_ALLOWED)
+                {
                     return Err(KernelError::IsADirectory);
                 }
                 // O_DIRECTORY combined with anything that would mutate a
@@ -627,7 +665,9 @@ fn open_resolved(norm: PathBuf, flags: OpenFlags, create_mode: u16) -> KernelRes
             // would not be.
             let perm = create_mode & 0o7777;
             if perm != DEFAULT_CREATE_MODE {
-                match crate::fs::Vfs::set_permissions(&norm, perm) {
+                // `_resolved`: `norm` is resolved, and `set_permissions`
+                // would apply a jailed caller's jail to it a second time.
+                match crate::fs::Vfs::set_permissions_resolved(&norm, perm) {
                     Ok(()) => {}
                     // A filesystem with no permission model must not make
                     // the create FAIL. FAT stores no mode bits and answers
@@ -1318,6 +1358,7 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
     let flags = file.flags;
     let is_directory = file.is_directory;
     let object = file.object.clone();
+    let ro_volume = file.ro_volume;
 
     // Need to drop the lock before calling allocate_handle (it
     // acquires the same lock).
@@ -1330,11 +1371,11 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
         // set_dir_cursor takes the same lock; safe now that allocate
         // already released it.
         set_dir_cursor(id, offset)?;
-        Ok(id)
+        Ok(marked(id, ro_volume))
     } else {
         // A second description of the same file shares its hold: the file
         // stays until the last of them, and every call through them, is done.
-        allocate_handle_holding(path, offset, size, flags, object)
+        allocate_handle_holding(path, offset, size, flags, object).map(|h| marked(h, ro_volume))
     }
 }
 
@@ -1435,6 +1476,229 @@ pub fn lock_key(handle: u64) -> KernelResult<(PathBuf, Option<crate::fs::vfs::Fi
     // inode numbers.
     let id = file_identity(handle).unwrap_or(None);
     Ok((path, id))
+}
+
+/// The file behind an open handle, taken for one call that acts on the file
+/// itself rather than on bytes at the cursor: its metadata (`fchmod`,
+/// `fchown`, `futimens`, `fstatfs`), or its contents in place (`fallocate`).
+///
+/// It is the file the handle holds, whatever its name now; or -- a file on a
+/// filesystem without inode numbers, or a directory -- the handle's name,
+/// the resolved host path captured at open, so no namespace is applied to it
+/// a second time. Before a change made by a directory's name, the name is
+/// checked to name what was opened still (`pinned_dir`). Holding one keeps a
+/// held file, and its mount, for the length of the call (`FileHold`).
+///
+/// Until 2026-10-01 the Linux layer made these calls by the handle's name,
+/// through the path calls: a jailed caller's jail was applied to the name
+/// twice, and a file renamed or deleted while open was missed -- or another
+/// file, under its old name, was changed instead.
+pub struct HandleFile {
+    object: Option<Arc<crate::fs::vfs::FileHold>>,
+    path: PathBuf,
+    /// For a directory, the identity it was opened onto
+    /// (`OpenFile::dir_pin`): checked before a change made by its name.
+    pin: Option<crate::fs::FileId>,
+    /// Opened in a read-only volume (`OpenFile::ro_volume`).
+    ro_volume: bool,
+    /// Taken by [`writable`](Self::writable): the contents may be changed.
+    writable: bool,
+}
+
+impl HandleFile {
+    /// The file or directory behind `handle`, for a query or a change of
+    /// its metadata. No access mode is asked of the handle: who may change a
+    /// file's mode, owner or times is a matter of ownership, not of how the
+    /// file was opened, as POSIX has it for `fchmod`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidHandle` for a handle that is not open.
+    pub fn of(handle: u64) -> KernelResult<Self> {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        Ok(Self {
+            object: file.object.clone(),
+            path: file.path.clone(),
+            pin: if file.is_directory {
+                file.dir_pin
+            } else {
+                None
+            },
+            ro_volume: file.ro_volume,
+            writable: false,
+        })
+    }
+
+    /// The regular file behind `handle`, opened for writing, for a call that
+    /// changes its contents in place (`fallocate`). The bytes such a call
+    /// moves are read without the handle's read access, as Linux moves them
+    /// under the inode.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidHandle` for a handle that is not open; `IsADirectory`;
+    /// `PermissionDenied` for a handle not opened for writing.
+    pub fn writable(handle: u64) -> KernelResult<Self> {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if file.is_directory {
+            return Err(KernelError::IsADirectory);
+        }
+        if !file.flags.is_writable() {
+            return Err(KernelError::PermissionDenied);
+        }
+        Ok(Self {
+            object: file.object.clone(),
+            path: file.path.clone(),
+            pin: None,
+            ro_volume: file.ro_volume,
+            writable: true,
+        })
+    }
+
+    /// What may refuse a change of metadata: a handle opened in a read-only
+    /// volume, and a directory whose name names something else now
+    /// (`NotFound`, rather than change that).
+    fn check_change(&self) -> KernelResult<()> {
+        if self.ro_volume {
+            return Err(KernelError::ReadOnlyFilesystem);
+        }
+        if let Some(id) = self.pin
+            && crate::fs::Vfs::file_identity_resolved(&self.path)? != Some(id)
+        {
+            return Err(KernelError::NotFound);
+        }
+        Ok(())
+    }
+
+    /// A change of contents needs a handle taken by
+    /// [`writable`](Self::writable).
+    fn check_writable(&self) -> KernelResult<()> {
+        if self.writable {
+            Ok(())
+        } else {
+            Err(KernelError::PermissionDenied)
+        }
+    }
+
+    /// `fchmod`.
+    ///
+    /// # Errors
+    ///
+    /// As `check_change`; the filesystem's own.
+    pub fn set_permissions(&self, permissions: u16) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_set_permissions(held, &self.path, permissions),
+            None => crate::fs::Vfs::set_permissions_resolved(&self.path, permissions),
+        }
+    }
+
+    /// `fchown`. `u32::MAX` leaves an id as it is.
+    ///
+    /// # Errors
+    ///
+    /// As `check_change`; the filesystem's own.
+    pub fn set_owner(&self, uid: u32, gid: u32) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_set_owner(held, &self.path, uid, gid),
+            None => crate::fs::Vfs::set_owner_resolved(&self.path, uid, gid),
+        }
+    }
+
+    /// `futimens`. A time of 0 is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// As `check_change`; the filesystem's own.
+    pub fn set_times(
+        &self,
+        accessed_ns: crate::fs::vfs::Timestamp,
+        modified_ns: crate::fs::vfs::Timestamp,
+    ) -> KernelResult<()> {
+        self.check_change()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_set_times(held, accessed_ns, modified_ns),
+            None => crate::fs::Vfs::set_times_resolved(&self.path, accessed_ns, modified_ns),
+        }
+    }
+
+    /// `fstatfs`: the filesystem the file is on.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn statvfs(&self) -> KernelResult<crate::fs::vfs::FsInfo> {
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_statvfs(held),
+            None => crate::fs::Vfs::statvfs_resolved(&self.path),
+        }
+    }
+
+    /// The file's size now.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn size(&self) -> KernelResult<u64> {
+        current_size(self.object.as_deref(), &self.path)
+    }
+
+    /// Up to `len` bytes at `offset`, fewer at the end of the file.
+    ///
+    /// # Errors
+    ///
+    /// `PermissionDenied` unless taken by [`writable`](Self::writable); the
+    /// filesystem's own.
+    pub fn read(&self, offset: u64, len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+        self.check_writable()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_read(held, &self.path, offset, len),
+            None => crate::fs::Vfs::read_at_resolved(&self.path, offset, len),
+        }
+    }
+
+    /// Write `data` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read).
+    pub fn write(&self, offset: u64, data: &[u8]) -> KernelResult<()> {
+        self.check_writable()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_write(held, &self.path, offset, data),
+            None => crate::fs::Vfs::write_at_resolved(&self.path, offset, data),
+        }
+    }
+
+    /// Cut or zero-extend the file to `size` bytes.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read).
+    pub fn truncate(&self, size: u64) -> KernelResult<()> {
+        self.check_writable()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_truncate(held, &self.path, size),
+            None => crate::fs::Vfs::truncate_resolved(&self.path, size),
+        }
+    }
+
+    /// Reserve space for the first `size` bytes, the size unchanged:
+    /// `fallocate(FALLOC_FL_KEEP_SIZE)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`read`](Self::read).
+    pub fn fallocate(&self, size: u64) -> KernelResult<()> {
+        self.check_writable()?;
+        match &self.object {
+            Some(held) => crate::fs::Vfs::object_fallocate(held, size),
+            None => crate::fs::Vfs::fallocate_resolved(&self.path, size),
+        }
+    }
 }
 
 /// Resolve the stable system-wide file identity of an open handle.
@@ -1570,6 +1834,7 @@ fn allocate_handle_holding(
             is_directory: false,
             dir_pin: None,
             object,
+            ro_volume: false,
         },
     );
 
@@ -1617,6 +1882,7 @@ fn allocate_dir_handle(path: PathBuf, flags: OpenFlags) -> KernelResult<u64> {
             dir_pin,
             // Directories go by name, and check their pin.
             object: None,
+            ro_volume: false,
         },
     );
 
@@ -1853,6 +2119,173 @@ fn test_held_files(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         other => return fail("flock on a file renamed while open", &other),
     }
     crate::serial_println!("[fs::handle]   held: flock follows the file, not its name: OK");
+
+    // 10. A change made through a handle reaches the file it holds, whatever
+    // its name now (`HandleFile`): a mode, an owner and times through a
+    // handle on a file since renamed, a new file under its old name left
+    // alone; then its contents, once it has no name at all.
+    Vfs::write_file(A, b"0123456789")?;
+    let h = open(A, rw)?;
+    Vfs::rename(A, B)?;
+    Vfs::write_file(A, b"")?;
+    let stranger_mode = Vfs::metadata(A).map(|m| m.permissions & 0o7777);
+    let changes = HandleFile::of(h).map(|file| {
+        (
+            file.set_permissions(0o600),
+            file.set_owner(1234, 5678),
+            file.set_times(1_000_000_000_000_000_000, 2_000_000_000_000_000_000),
+        )
+    });
+    let renamed = Vfs::metadata(B);
+    let left_alone = Vfs::metadata(A).map(|m| m.permissions & 0o7777);
+    Vfs::remove(B)?;
+    let body = HandleFile::writable(h).and_then(|f| {
+        f.truncate(4)?;
+        f.write(4, b"!")?;
+        f.fallocate(64)?;
+        Ok((f.size()?, f.read(0, 16)?))
+    });
+    let unnamed = fstat(h);
+    let _ = close(h);
+    let _ = Vfs::remove(A);
+    match (&changes, &renamed, &body, &unnamed) {
+        (Ok((Ok(()), Ok(()), Ok(()))), Ok(m), Ok((5, data)), Ok(u))
+            if m.permissions & 0o7777 == 0o600
+                && (m.uid, m.gid) == (1234, 5678)
+                && m.modified_ns / 1_000_000_000 == 2_000_000_000
+                && data.as_slice() == b"0123!"
+                && u.nlinks == 0
+                && left_alone == stranger_mode => {}
+        _ => {
+            return fail(
+                "changes through a handle on a renamed, then unlinked, file",
+                &(
+                    &changes,
+                    &renamed,
+                    &body,
+                    &unnamed,
+                    &stranger_mode,
+                    &left_alone,
+                ),
+            );
+        }
+    }
+    crate::serial_println!(
+        "[fs::handle]   held: fchmod/fchown/futimens/ftruncate through the handle reach its file: OK"
+    );
+
+    // 11. A directory is changed by its name only while the name names it;
+    // its filesystem is asked by the name either way.
+    const D: &str = "/held_dir";
+    const D2: &str = "/held_dir2";
+    // Best effort: leftovers from an earlier boot's failure.
+    let _ = Vfs::rmdir(D);
+    let _ = Vfs::rmdir(D2);
+    Vfs::mkdir(D)?;
+    let hd = open(D, OpenFlags::READ.union(OpenFlags::DIRECTORY))?;
+    Vfs::rename(D, D2)?;
+    Vfs::mkdir(D)?;
+    let stale = HandleFile::of(hd).and_then(|f| f.set_permissions(0o700));
+    let asked = HandleFile::of(hd).and_then(|f| f.statvfs()).map(|_| ());
+    let new_mode = Vfs::metadata(D).map(|m| m.permissions & 0o7777);
+    let _ = close(hd);
+    let _ = Vfs::rmdir(D);
+    let _ = Vfs::rmdir(D2);
+    match (stale, asked, new_mode) {
+        (Err(KernelError::NotFound), Ok(()), Ok(0o755)) => {}
+        other => return fail("a change by a renamed directory's name", &other),
+    }
+    crate::serial_println!(
+        "[fs::handle]   held: a renamed directory's old name is not changed: OK"
+    );
+
+    // 12. `DIRECTORY_ALLOWED` opens whatever the path names, for reading.
+    Vfs::write_file(A, b"x")?;
+    let either = OpenFlags::READ.union(OpenFlags::DIRECTORY_ALLOWED);
+    let as_dir = open("/", either);
+    let as_file = open(A, either);
+    let as_writer = open("/", either.union(OpenFlags::WRITE));
+    let kinds = (
+        as_dir.as_ref().map(|h| is_directory(*h)).ok(),
+        as_file.as_ref().map(|h| is_directory(*h)).ok(),
+        as_writer.as_ref().err().copied(),
+    );
+    for h in [as_dir, as_file, as_writer].into_iter().flatten() {
+        // Best effort: this test's own handles.
+        let _ = close(h);
+    }
+    let _ = Vfs::remove(A);
+    if kinds != (Some(true), Some(false), Some(KernelError::IsADirectory)) {
+        return fail("DIRECTORY_ALLOWED", &kinds);
+    }
+    crate::serial_println!(
+        "[fs::handle]   DIRECTORY_ALLOWED: a directory or a file, for reading: OK"
+    );
+
+    // 13. A jailed process: a create's mode and a mkdir's land on the jailed
+    // path (they applied the jail twice until 2026-10-01, and failed after
+    // creating), and a change through a handle opened in a read-only volume
+    // is refused.
+    if Vfs::stat("/tmp").is_ok() {
+        const JAIL: &str = "/tmp/held_jail";
+        const RO: &str = "/tmp/held_jail_ro";
+        // Best effort: leftovers from an earlier boot's failure.
+        let _ = Vfs::remove_recursive(JAIL);
+        let _ = Vfs::remove_recursive(RO);
+        Vfs::mkdir(JAIL)?;
+        Vfs::mkdir(RO)?;
+        Vfs::write_file("/tmp/held_jail_ro/f", b"r")?;
+        let pid = crate::proc::pcb::create("held-jail", 0);
+        let outcome = crate::ipc::namespace::set_root(pid, JAIL)
+            .and_then(|()| crate::ipc::namespace::add_volume(pid, "/ro", RO, true))
+            .map(|()| {
+                crate::proc::thread::self_test_as_process(pid, || {
+                    let made =
+                        open_with_mode("/made", OpenFlags::WRITE.union(OpenFlags::CREATE), 0o600)
+                            .map(|h| {
+                                // Best effort: this test's own handle.
+                                let _ = close(h);
+                            });
+                    let dir = Vfs::mkdir_mode("/dir", 0o700);
+                    let ro_change = open("/ro/f", OpenFlags::READ).and_then(|h| {
+                        let changed = HandleFile::of(h).and_then(|f| f.set_permissions(0o600));
+                        // Best effort: this test's own handle.
+                        let _ = close(h);
+                        changed
+                    });
+                    (made, dir, ro_change)
+                })
+            });
+        // Ends the jail and the volume with the process.
+        crate::proc::pcb::destroy(pid);
+        let modes = (
+            Vfs::metadata("/tmp/held_jail/made").map(|m| m.permissions & 0o7777),
+            Vfs::metadata("/tmp/held_jail/dir").map(|m| m.permissions & 0o7777),
+            Vfs::metadata("/tmp/held_jail_ro/f").map(|m| m.permissions & 0o7777),
+        );
+        let _ = Vfs::remove_recursive(JAIL);
+        let _ = Vfs::remove_recursive(RO);
+        match (outcome, modes) {
+            (
+                Ok((Ok(()), Ok(()), Err(KernelError::ReadOnlyFilesystem))),
+                (Ok(0o600), Ok(0o700), Ok(0o644)),
+            ) => {}
+            other => {
+                return fail(
+                    "a jailed process's creates and its read-only volume",
+                    &other,
+                );
+            }
+        }
+        crate::serial_println!(
+            "[fs::handle]   jailed: a create's mode lands; a read-only volume's file keeps its own: OK"
+        );
+    } else {
+        skips.record(
+            "held files: a jailed process",
+            "no /tmp to build a jail under",
+        );
+    }
     Ok(())
 }
 

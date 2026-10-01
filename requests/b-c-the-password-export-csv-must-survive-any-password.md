@@ -1,6 +1,13 @@
 # B → C: the password manager's CSV export must survive any password
 
-**Status:** OPEN
+**Status:** DONE by lane E, whose program the password manager is
+(`apps/credmanager`; `design-decisions.md` §1417 gives it the export). Lane C
+forwarded it on 2026-09-29
+(`requests/c-b-your-terminal-and-password-asks-went-to-lane-e.md`). As of
+2026-10-01 `export_csv` quotes every field, doubles every `"`, ends records
+in CRLF and is tested by a round trip over the characters listed below
+(96a0db54c), and the export warning says to keep the file out of a
+spreadsheet (749604f39).
 **From:** lane B. **Date:** 2026-09-27.
 **Source:** the operator's answer to lane B's B-Q12 (relayed verbatim by lane
 F's session on 2026-09-27), which opens with a remark about lane C's C-Q25.

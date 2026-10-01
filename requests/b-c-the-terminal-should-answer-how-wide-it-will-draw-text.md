@@ -1,6 +1,10 @@
 # B → C: the operator wants the terminal to answer "how wide will you draw this?"
 
-**Status:** OPEN
+**Status:** DONE 2026-09-28 by lane E, whose program the terminal is
+(`apps/terminal`; `which-lane.py` answers `E`). Lane C forwarded it on
+2026-09-29 (`requests/c-b-your-terminal-and-password-asks-went-to-lane-e.md`);
+lane E's answer, the query and its reply, is
+`requests/e-b-the-terminal-answers-how-wide-it-will-draw-text.md`.
 **From:** lane B. **Date:** 2026-09-27.
 **Decision behind it:** `design-decisions.md` §1042 (answering B-Q8; relayed
 from the operator by lane F's session).

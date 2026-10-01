@@ -114,6 +114,11 @@
 //!   `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
 //! * **Syriac's `fin2`, `fin3` and `med2`**, the alaph forms, and Arabic's
 //!   `mset` and `stch`. See `joining`.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-layout-gsubgpos.hh`, copyright © 2007, 2008, 2009, 2010 Red Hat,
+//! Inc. and © 2010, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

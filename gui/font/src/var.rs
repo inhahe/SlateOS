@@ -85,6 +85,15 @@
 //! to reach each rule, and the tests hold this module to them;
 //! `tools/var_oracle.py` asks both about thousands of instances of real
 //! faces.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's
+//! `src/hb-ot-var-avar-table.hh`, copyright © 2017 Google, Inc. Used under
+//! HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
+//!
+//! `Coords::fixed` follows FreeType 2.13.2's `src/truetype/ttgxvar.c`,
+//! copyright (C) 2004-2023 by David Turner, Robert Wilhelm, Werner Lemberg and
+//! George Williams, from The FreeType Project (www.freetype.org). Used under
+//! the FreeType License: see `gui/font/licenses/FTL.TXT`.
 
 use alloc::vec::Vec;
 

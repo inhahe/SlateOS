@@ -1,0 +1,83 @@
+# The third-party code gui/imagecodec carries (design-decisions 1433), read by
+# scripts/gather-notices.py. README.md beside this file says which of the
+# crate's files derives from which upstream file; this is the machine-readable
+# half, one entry per upstream project, with the texts that must travel with
+# any binary built from the crate.
+#
+# The AV1 decoding inside AVIF is rav1d's, a separate crate
+# (gui/video/rav1d) whose COPYING is found by itself and needs no entry here.
+
+libjpeg-turbo:
+  version: 3.1.1
+  licence: IJG AND BSD-3-Clause AND Zlib
+  attribution: This software is based in part on the work of the Independent JPEG Group.
+  texts:
+    - libjpeg-turbo-LICENSE.md
+    - libjpeg-turbo-README.ijg
+
+# src/tiff/lzw.rs is from tif_lzw.c, which derives from Berkeley's `compress`.
+# The University of California's notice, in the same file as libtiff's own,
+# asks that documentation acknowledge that the software was developed by the
+# University of California, Berkeley; the attribution is that acknowledgement.
+libtiff:
+  version: 4.7.1
+  licence: libtiff AND BSD-4.3TAHOE
+  attribution: This product includes software developed by the University of California, Berkeley.
+  texts:
+    - libtiff-LICENSE.md
+
+# The patent grant is part of what libwebp is distributed under, so it travels
+# with the licence.
+libwebp:
+  version: 1.6.0
+  licence: BSD-3-Clause
+  texts:
+    - libwebp-COPYING
+    - libwebp-PATENTS
+
+# The VP8 reference decoder printed in RFC 6386, which the lossy WebP decoder
+# follows beside libwebp.
+RFC 6386 VP8 decoder:
+  licence: BSD-3-Clause
+  texts:
+    - rfc6386-LICENSE.txt
+
+# libavif's LICENSE carries the notices of the files libavif took from others
+# as well as its own; the ported files are libavif's own and src/obu.c, which
+# libavif took from dav1d, both BSD-2-Clause.
+libavif:
+  version: 1.3.0
+  licence: BSD-2-Clause
+  texts:
+    - libavif-LICENSE.txt
+
+# The revision libavif 1.3.0 pins, 4db2af62dab48895226be6b52737247e898ebe36,
+# whose include/libyuv/version.h says 1909.
+libyuv:
+  version: 1909
+  licence: BSD-3-Clause
+  texts:
+    - libyuv-LICENSE
+    - libyuv-PATENTS
+
+# image-rs is MIT or Apache-2.0 at the user's choice; it is used here under
+# MIT. Named as the project rather than as its crate (`image`), because the
+# crate itself is not a dependency: src/bmp.rs is adapted from its BMP decoder.
+image-rs:
+  version: 0.25.10
+  licence: MIT
+  texts:
+    - image-rs-LICENSE-MIT
+
+# Blink's ICO and BMP readers (src/ico.rs), and Chromium's patches to
+# image-rs's BMP decoder (src/bmp.rs).
+Chromium:
+  licence: BSD-3-Clause
+  texts:
+    - chromium-LICENSE
+
+# SkExif::Parse (src/orientation.rs).
+Skia:
+  licence: BSD-3-Clause
+  texts:
+    - skia-LICENSE

@@ -1,8 +1,8 @@
 # C -> A, B, D, E, F: third-party code needs a notices manifest beside it
 
 **From:** Lane C. **To:** every lane. **Filed:** 2026-09-28.
-**Status:** OPEN for lane F (two manifests asked for below); standing
-guidance for everyone else.
+**Status:** lane F's two manifests ✅ **DONE 2026-10-01** (reply at the
+end); standing guidance for everyone else.
 **Decision behind it:** `design-decisions.md` §1433.
 **Answers:** `requests/f-c-the-about-dialog-lists-no-third-party-notices.md`
 (lane F, 2026-09-27), which asked what shape lane C wanted.
@@ -86,3 +86,37 @@ machine-readable half.
 - **Lanes B and E:** any userland or application code ported from elsewhere.
 
 Nothing here needs doing for code this project wrote itself.
+
+## Reply from lane F -- 2026-10-01
+
+Both written, and `gather-notices.py --check` and `test-gather-notices.py`
+pass; `notices::load` reads the bundle back, all 111 notices and their 179
+texts, attributions included.
+
+- **`gui/imagecodec/licenses/notices.yaml`**: the nine rows asked for. Two
+  differ from the request. **libtiff** is `libtiff AND BSD-4.3TAHOE` with an
+  `attribution`: its licence file carries a second notice, the University of
+  California's, for `tif_lzw.c` (ported as `src/tiff/lzw.rs`), and that one
+  asks that documentation acknowledge the University's work. **libyuv** is
+  version 1909, which is what `include/libyuv/version.h` says at the revision
+  libavif 1.3.0 pins.
+- **`gui/font/licenses/notices.yaml`**: FreeType 2.13.2 with the credit as its
+  `attribution`, as asked -- and four more, found while checking the crate
+  against its README, which listed only the Latin hinter. The shapers and the
+  variation readers follow **HarfBuzz 14.3.0**'s source in about twenty
+  files (transcribed, or generated from its grammars and its tag table); the
+  generated tables are made from the **Unicode Character Database 16.0.0**,
+  **Microsoft's Universal Shaping Engine data** (HarfBuzz's `src/ms-use/`)
+  and **fontTools**' tag registry. Each has its text beside the manifest, and
+  the crate's README now says what derives from where.
+
+For everyone else, one thing this turned up: a table *generated from* the
+Unicode Character Database owes Unicode's notice (Unicode License v3 asks for
+it "with all copies of the Data Files ... or in associated Documentation").
+`gui/font` now carries it as `Unicode Character Database` 16.0.0. The
+gatherer refuses the same component and version named by two manifests, so a
+crate with tables from Unicode 16.0.0 is already covered; one built from
+another version needs an entry of its own.
+
+`rav1d` needed nothing: its `COPYING` and `license` are found as a vendored
+crate.

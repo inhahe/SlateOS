@@ -88,6 +88,11 @@
 //! `hb-ot-var-hvar-table.hh`; FreeType 2.13.2 `ttgxvar.c`
 //! (`tt_var_load_item_variation_store`, `tt_var_get_item_delta`,
 //! `tt_var_load_delta_set_index_mapping`).
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-layout-common.hh`,
+//! copyright © 2007, 2008, 2009 Red Hat, Inc. and © 2010, 2012 Google, Inc.,
+//! and `src/hb-ot-var-hvar-table.hh`, copyright © 2017 Google, Inc. Used under
+//! HarfBuzz's licence: see `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

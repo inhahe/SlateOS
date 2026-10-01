@@ -42,6 +42,10 @@
 //! for Malayalam under either, because testing showed Windows does. The comment
 //! there reads "DON'T TOUCH OTHERWISE", and this is a transcription of it
 //! rather than a derivation.
+//!
+//! Portions of this file follow HarfBuzz 14.3.0's `src/hb-ot-shaper-indic.cc`,
+//! copyright © 2011, 2012 Google, Inc. Used under HarfBuzz's licence: see
+//! `gui/font/licenses/harfbuzz-COPYING`.
 
 use alloc::vec::Vec;
 

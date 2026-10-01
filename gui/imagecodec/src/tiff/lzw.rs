@@ -17,6 +17,15 @@
 //! `tif_lzw.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
 //! Graphics, Inc.; (c) 2022 Even Rouault), and changed for this project; used
 //! under libtiff's licence, `licenses/libtiff-LICENSE.md`.
+//!
+//! `tif_lzw.c` derives from the `compress` program, whose code is derived
+//! from software contributed to Berkeley by James A. Woods, derived from
+//! original work by Spencer Thomas and Joseph Orost: copyright (c) 1985, 1986
+//! The Regents of the University of California. All rights reserved. Its
+//! notice, which the same licence file reproduces in its entirety, asks that
+//! documentation acknowledge that the software was developed by the
+//! University of California, Berkeley; `licenses/notices.yaml` makes that
+//! acknowledgement.
 
 use alloc::vec;
 use alloc::vec::Vec;

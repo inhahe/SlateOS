@@ -1380,8 +1380,17 @@ list moved to lane D on 2026-09-22):
       for now (no GNU readline on SlateOS yet).
     - `[ ]` On the image and run at boot -- asked of lanes D and A in
       `requests/b-ad-genuine-oils-staged-and-run-at-boot.md`.
-    - `[ ]` Spec tests on SlateOS; then the switch (the Rust OSH renamed,
-      genuine Oils as `/bin/osh`, `sh` and the login shell); readline.
+    - `[x]` A spec-test harness that runs on SlateOS (2026-10-01):
+      `scripts/oils-spec/` -- upstream's Python 2 harness and helpers ported
+      to Python 3, proved identical to the originals over all 223 spec files
+      (3,956 cases) by `validate.sh`; `run_all.py` runs them on the machine
+      and reports only the cells that differ from the same run recorded on
+      Linux (three runs; unstable cells set aside).
+    - `[ ]` Spec tests run on SlateOS -- the tree is
+      `bash scripts/oils-spec/bundle.sh`; staging and a run are asked of lanes
+      D and A in `requests/b-ad-oils-spec-tests-on-the-image.md`.
+    - `[ ]` The switch (the Rust OSH renamed, genuine Oils as `/bin/osh`, `sh`
+      and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
     reassign, not an assignment: Mono, .NET on Linux (D, as a language

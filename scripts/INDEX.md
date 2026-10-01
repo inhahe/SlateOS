@@ -274,6 +274,15 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
 | `scripts/numfmt-diff.sh` | numfmt-diff.sh — compare our `numfmt` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
+| `scripts/oils-spec/bin/argv.py` | Print the arguments the way Oils' Python 2 `spec/bin/argv.py` did. |
+| `scripts/oils-spec/bin/printenv.py` | Print each named environment variable, or `None` -- the spec helper, ported. |
+| `scripts/oils-spec/bin/read_from_fd.py` | Print up to 1024 bytes from each descriptor named -- the spec helper, ported. |
+| `scripts/oils-spec/bin/show_fd_table.py` | List this process's open descriptors -- the spec helper, ported. |
+| `scripts/oils-spec/bin/stdout_stderr.py` | Write to stdout and stderr and exit as told -- the spec helper, ported. |
+| `scripts/oils-spec/bundle.sh` | Build the tree that puts Oils' spec tests on a SlateOS image. |
+| `scripts/oils-spec/run_all.py` | Run every Oils spec file on this machine and compare with Linux. |
+| `scripts/oils-spec/sh_spec.py` | Oils' spec-test harness, ported from Python 2 to Python 3 to run on SlateOS. |
+| `scripts/oils-spec/validate.sh` | Prove the Python 3 spec harness judges every case as upstream's does. |
 | `scripts/oils-spike/run.sh` | Cross-compile genuine Oils (oils-for-unix) and link it against SlateOS's libc.a. |
 | `scripts/open-requests.py` | List the `requests/` entries addressed to a lane that are still open. |
 | `scripts/option-gap-ref.sh` | The reference half of `scripts/option-gap.sh`, run where the reference lives |
@@ -481,4 +490,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_471 scripts._
+_480 scripts._

@@ -6523,13 +6523,13 @@ check_variant_lists() {
     # programs.md: every program the workspace builds, recorded (design-
     # decisions §1053; requests/b-a-a-gate-for-the-program-catalogue.md).
     echo "=== Checking that programs.md lists every program the workspace builds ==="
-    if ! run_checker program-catalogue-selftest "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --self-test; then
+    if ! run_checker program-catalogue-selftest "$py" "$PROJECT_ROOT/scripts/check-program-catalogue.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  program-catalogue.py no longer agrees" >&2
         echo "with its own cases." >&2
         return 1
     fi
-    if ! run_checker program-catalogue "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --check; then
+    if ! run_checker program-catalogue "$py" "$PROJECT_ROOT/scripts/check-program-catalogue.py"; then
         echo "" >&2
         echo "ERROR: refusing to build.  programs.md does not list what the" >&2
         echo "workspace builds: a program was added, removed or re-described" >&2

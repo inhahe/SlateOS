@@ -7086,22 +7086,26 @@ fi
 # (requests/b-a-a-gate-for-the-program-catalogue.md). A push that adds,
 # removes or re-describes a program regenerates the list in the same commit:
 #     python scripts/program-catalogue.py
-# It reads `cargo metadata --no-deps` and the programs' sources, so it is
-# scoped to manifests and Rust sources, and the boot test runs it too.
+# The gate is scripts/check-program-catalogue.py, which asks the generator's
+# --check: the generator's own bare run writes the list, so it cannot be a
+# gate (check-gates-can-refuse.py). It reads `cargo metadata --no-deps` and
+# the programs' sources, so it is scoped to manifests and Rust sources, and
+# the boot test runs it too.
 #
 # Bypass: ALLOW_PROGRAM_CATALOGUE=1 git push origin <branch>
 # ---------------------------------------------------------------------------
-progcat="${repo_root:-.}/scripts/program-catalogue.py"
+progcat="${repo_root:-.}/scripts/check-program-catalogue.py"
 skip_progcat=$skip
 if [ "${ALLOW_PROGRAM_CATALOGUE:-0}" = "1" ]; then
     echo "pre-push: ALLOW_PROGRAM_CATALOGUE=1 set - skipping gate 76 (program catalogue)." >&2
     skip_progcat=1
 fi
 [ -f "$progcat" ] || skip_progcat=1
-touches '*Cargo.toml' '*.rs' programs.md scripts/program-catalogue.py || skip_progcat=1
+touches '*Cargo.toml' '*.rs' programs.md scripts/program-catalogue.py \
+    scripts/check-program-catalogue.py || skip_progcat=1
 if [ "$skip_progcat" != "1" ]; then
     tree_is_push "gate 76 (program catalogue)" '*Cargo.toml' '*.rs' programs.md \
-        scripts/program-catalogue.py || skip_progcat=1
+        scripts/program-catalogue.py scripts/check-program-catalogue.py || skip_progcat=1
 fi
 note_gate program-catalogue "$skip_progcat"
 if [ "$skip_progcat" != "1" ]; then
@@ -7109,7 +7113,7 @@ if [ "$skip_progcat" != "1" ]; then
         moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE \
             "program-catalogue.py failed its own self-test, so its verdict on this push would not be trustworthy."
     fi
-    if ! run_checker program-catalogue "$py" "$progcat" --check; then
+    if ! run_checker program-catalogue "$py" "$progcat"; then
         moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE "programs.md must list every program the workspace builds, described as
 its own module doc describes it. Regenerate it, and commit it with the
 program:

@@ -102,6 +102,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/check-option-stops.py` | Refuse a program that reports an unknown option and then keeps going. |
 | `scripts/check-overlay0-ink.py` | Refuse `overlay0` as the ink of text that is not in a disabled state. |
 | `scripts/check-pinned-target-build.py` | Compile every crate for the target it SHIPS to, when nothing else does. |
+| `scripts/check-program-catalogue.py` | Refuse a programs.md that is not what the workspace generates now. |
 | `scripts/check-query-status.py` | Guard the rule that answering a question is *not* reporting a failure. |
 | `scripts/check-ran-if.py` | Fail when a `RAN-IF` marker is not printed by the call it annotates. |
 | `scripts/check-read-defaults.py` | Find `.unwrap_or_default()` on a call that returns Option or Result to say |
@@ -488,4 +489,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xargs-diff.sh` | Differential test: our xargs against GNU xargs (findutils 4.9.0). |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_478 scripts._
+_479 scripts._

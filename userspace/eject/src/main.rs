@@ -1,11 +1,13 @@
-//! Slate OS removable media ejection utility.
+//! Slate OS removable media ejection utility: `eject`.
 //!
-//! Multi-personality binary providing:
-//! - **eject** — eject removable media (CD/DVD, USB, floppy)
-//! - **volname** — display volume name of a CD-ROM
+//! Controls removable media devices: open/close tray, lock/unlock and
+//! toggle auto-eject.
 //!
-//! Controls removable media devices: open/close tray, lock/unlock,
-//! toggle auto-eject, and read volume names.
+//! Until 2026-10-01 it also answered to `volname` (the design-decisions
+//! 1045 triage). No current distribution ships that name -- it came with
+//! the standalone eject package, which util-linux's eject replaced without
+//! it -- and SlateOS has no optical drive device for it to read. It also
+//! read the whole device into memory to look at 32 bytes of it.
 
 #![deny(clippy::all)]
 
@@ -240,34 +242,6 @@ fn list_removable_devices() -> Vec<DeviceInfo> {
 }
 
 // ============================================================================
-// Volume name reading (ISO 9660)
-// ============================================================================
-
-fn read_volume_name(device: &OsStr) -> Option<String> {
-    // ISO 9660 primary volume descriptor is at sector 16 (2048 bytes/sector).
-    // Volume ID is at offset 40 within the PVD, 32 bytes.
-    let data = fs::read(device).ok()?;
-    let pvd_offset = 16 * 2048; // Sector 16
-    if data.len() < pvd_offset + 40 + 32 {
-        return None;
-    }
-
-    // Check PVD signature: type 1 at byte 0, "CD001" at bytes 1-5.
-    if data[pvd_offset] != 1 {
-        return None;
-    }
-    if &data[pvd_offset + 1..pvd_offset + 6] != b"CD001" {
-        return None;
-    }
-
-    // Volume identifier at offset 40, length 32.
-    let vol_id = &data[pvd_offset + 40..pvd_offset + 72];
-    let name = String::from_utf8_lossy(vol_id).trim().to_string();
-
-    if name.is_empty() { None } else { Some(name) }
-}
-
-// ============================================================================
 // Unmount helper
 // ============================================================================
 
@@ -490,76 +464,14 @@ fn parse_eject_args(args: &[OsString]) -> Result<EjectOptions, i32> {
 }
 
 // ============================================================================
-// volname personality
-// ============================================================================
-
-fn volname_main(args: &[OsString]) -> i32 {
-    let device = if args.is_empty() {
-        default_device()
-    } else {
-        match args[0].to_str().unwrap_or("") {
-            "--help" | "-h" => {
-                println!("Usage: volname [device]");
-                println!();
-                println!("Display the volume name of a CD-ROM.");
-                println!("Default device: {}", dshow(&default_device()));
-                return 0;
-            }
-            "--version" => {
-                println!("volname (Slate OS coreutils) {VERSION}");
-                return 0;
-            }
-            // `args[0]`, not the decoded view: this operand is the DEVICE.
-            _ => resolve_device(&args[0]),
-        }
-    };
-
-    match read_volume_name(&device) {
-        Some(name) => {
-            println!("{name}");
-            0
-        }
-        None => {
-            eprintln!("volname: cannot read volume name from {}", dshow(&device));
-            1
-        }
-    }
-}
-
-// ============================================================================
 // Main dispatch
 // ============================================================================
 
 fn main() {
     // `args_os`, not `args`: the latter's iterator unwraps, so naming a device
     // whose path holds a byte that is not valid Unicode killed the process.
-    let args: Vec<OsString> = env::args_os().collect();
-
-    let prog_name = {
-        // The personality name (argv[0]); a name that is not Unicode is
-        // not one of the two this binary answers to, so it falls to the
-        // `eject` default just as any other unknown name does.
-        let s = args.first().and_then(|s| s.to_str()).unwrap_or("eject");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
-    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
-
-    let exit_code = match prog_name.as_str() {
-        "volname" => volname_main(&rest),
-        _ => eject_main(&rest),
-    };
-
-    process::exit(exit_code);
+    let rest: Vec<OsString> = env::args_os().skip(1).collect();
+    process::exit(eject_main(&rest));
 }
 
 // ============================================================================
@@ -686,12 +598,6 @@ mod tests {
     fn test_list_removable_devices() {
         // Should not panic regardless of system state.
         let _devices = list_removable_devices();
-    }
-
-    #[test]
-    fn test_read_volume_name_nonexistent() {
-        let name = read_volume_name(OsStr::new("/dev/nonexistent_device_xyz"));
-        assert!(name.is_none());
     }
 
     #[test]

@@ -246,6 +246,9 @@ def targets() -> list[dict]:
                 "crate": p["name"],
                 "dir": crate_dir[len(root):] if crate_dir.startswith(root) else crate_dir,
                 "desc": describe(module_doc(src), p.get("description") or ""),
+                # The crate's own program, whatever it is built as: the row
+                # that carries the crate's other names.
+                "main": src.endswith("/src/main.rs"),
             })
     progs += standalone_services({p["name"] for p in meta["packages"]})
     progs.sort(key=lambda x: (x["name"], x["dir"]))
@@ -294,8 +297,17 @@ def render(progs: list[dict]) -> str:
                   "|---|---|---|---|---|"]
         for p in group:
             names = [f"`{a}`" for a in installed.get(p["name"], [])]
-            if p["name"] == p["crate"]:
-                names += [f"`{a}` *(not installed)*" for a in alias.get(p["crate"], [])]
+            # The ledger names a crate's personalities by the crate, and a
+            # coreutils binary's by the binary (multicall-aliases.py's
+            # `survey`). A crate's go on the row of its own program, which
+            # may be built under another name (`cgroup` as `lscgroup`).
+            if p["crate"] == "coreutils":
+                owned = alias.get(p["name"], [])
+            elif p.get("main"):
+                owned = alias.get(p["crate"], [])
+            else:
+                owned = []
+            names += [f"`{a}` *(not installed)*" for a in owned]
             extra = ", ".join(names)
             crate = "" if p["crate"] == p["name"] else f"`{p['crate']}`"
             lines.append(

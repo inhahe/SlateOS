@@ -18,7 +18,10 @@ fn main() {
     if !target.contains("slateos") {
         return;
     }
-    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+    // `env!`, read when this script is compiled -- cargo sets the variable for
+    // that too -- rather than `env::var` at run time, which can only fail by
+    // panicking, and a build script that panics says less than one that cannot.
+    let manifest = env!("CARGO_MANIFEST_DIR");
     let script = format!("{manifest}/linker.ld");
     println!("cargo:rustc-link-arg=-T{script}");
 }

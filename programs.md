@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**452 programs; 295 on the image, 6 carried inside the kernel.**
+**451 programs; 294 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 297
+## Userland utilities and services (`userspace/`, lane B) -- 296
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -37,7 +37,6 @@ two disagree.
 | `bootctl` | EFI boot manager control. | yes |  |  |
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
-| `cgroup` | Cgroup management utility. | yes |  | `cgclassify`, `cgcreate`, `cgdelete`, `cgexec`, `cgget`, `cgset`, `lssubsys`, `cgclassify` *(not installed)*, `cgcreate` *(not installed)*, `cgdelete` *(not installed)*, `cgexec` *(not installed)*, `cgget` *(not installed)*, `cgset` *(not installed)*, `lssubsys` *(not installed)* |
 | `chage` | Password-aging utility. | yes |  |  |
 | `chattr` | Ext2/ext4 file attribute utilities. | yes |  | `lsattr`, `lsattr` *(not installed)* |
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
@@ -52,7 +51,6 @@ two disagree.
 | `coredumpctl` | Slate OS core dump management | yes |  |  |
 | `cp` | Copy files and directories. | yes | `coreutils` |  |
 | `cpio` | Cpio Archive Utility | yes |  |  |
-| `cpupower` | Slate OS CPU frequency and power management | yes |  | `cpufreq-info` *(not installed)*, `cpufreq-set` *(not installed)* |
 | `crond` | Cron Daemon (`crond`) with anacron support | yes |  | `anacron`, `anacron` *(not installed)* |
 | `crontab` | Per-user cron schedule management | yes |  |  |
 | `csplit` | Output pieces of a file separated by patterns. | yes | `coreutils` |  |
@@ -79,7 +77,7 @@ two disagree.
 | `echo` | Write arguments to standard output. | yes | `coreutils` |  |
 | `ed` | The standard line editor. | yes | `coreutils` |  |
 | `efibootmgr` | EFI boot manager. | yes |  | `efivar` *(not installed)* |
-| `eject` | Removable media ejection utility. | yes |  | `volname` *(not installed)* |
+| `eject` | Removable media ejection utility: `eject`. | yes |  |  |
 | `env` | Run a command in a modified environment, or print the environment. | yes | `coreutils` |  |
 | `expand` | Convert tabs in each file to spaces. | yes | `coreutils` |  |
 | `expr` | Evaluate an expression given as command-line arguments. | yes | `coreutils` |  |
@@ -114,17 +112,17 @@ two disagree.
 | `head` | Output the first part of files. | yes | `coreutils` |  |
 | `hexdump` | Hexadecimal File Dumper | yes |  | `xxd`, `xxd` *(not installed)* |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
-| `hostname` | Show or set the system host name. | yes | `coreutils` |  |
-| `hostnamectl` | Hostname management utilities. | yes |  | `dnsdomainname` *(not installed)*, `domainname` *(not installed)*, `nisdomainname` *(not installed)*, `ypdomainname` *(not installed)* |
+| `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname` *(not installed)*, `domainname` *(not installed)*, `nisdomainname` *(not installed)*, `ypdomainname` *(not installed)* |
+| `hostnamectl` | Query and set the system hostname and related settings. | yes |  |  |
 | `htop` | Interactive Process Viewer | yes |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. | yes |  |  |
-| `hwinfo` | Hardware information utility. | yes |  | `lshw` *(not installed)* |
+| `hwinfo` | Hardware information utility: `hwinfo`, a comprehensive hardware inventory. | yes |  |  |
 | `iconv` | Character encoding conversion utility. | yes |  |  |
 | `id` | Print user and group information for each specified USER, or (when USER is omitted) for the current process. | yes | `coreutils` |  |
 | `ifconfig` | Classic network interface configuration utility. | yes |  |  |
 | `indexer` | Background File Indexer | yes |  |  |
 | `inetd` | Internet Super-Server Daemon (inetd) | yes |  |  |
-| `inotify` | Filesystem event monitoring utility. | yes |  | `inotifywatch` *(not installed)* |
+| `inotifywait` | Filesystem event monitoring utility. | yes | `inotify` | `inotifywatch` *(not installed)* |
 | `install` | Copy files and set attributes | yes |  |  |
 | `iostat` | I/O Statistics Utility | yes |  |  |
 | `ip` | Network Configuration Utility | yes |  |  |
@@ -147,7 +145,7 @@ two disagree.
 | `lockfile` | Create semaphore files, as procmail's `lockfile(1)` does. | yes |  |  |
 | `logger` | Enter messages into the system log. | yes |  |  |
 | `login` | User login program | yes |  |  |
-| `loginctl` | Slate OS session and user management | yes |  | `userdbctl` *(not installed)* |
+| `loginctl` | Slate OS session and user management | yes |  |  |
 | `logind` | Session manager (logind/loginctl) | yes |  |  |
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
@@ -156,6 +154,7 @@ two disagree.
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) | yes |  | `cancel`, `lpq`, `lpr`, `lprm`, `lpstat`, `cancel` *(not installed)*, `lpq` *(not installed)*, `lpr` *(not installed)*, `lprm` *(not installed)*, `lpstat` *(not installed)* |
 | `ls` | List directory contents. | yes | `coreutils` |  |
 | `lsblk` | List block devices. | yes |  |  |
+| `lscgroup` | Cgroup management utility. | yes | `cgroup` | `cgclassify` *(not installed)*, `cgcreate` *(not installed)*, `cgdelete` *(not installed)*, `cgexec` *(not installed)*, `cgget` *(not installed)*, `cgset` *(not installed)*, `lssubsys` *(not installed)* |
 | `lscpu` | The CPU architecture, from `/proc/cpuinfo` and `/sys`. | yes |  |  |
 | `lsirq` | The kernel's interrupt counters, as a table. | yes |  |  |
 | `lsmem` | List the ranges of available memory with their online status. | yes |  |  |
@@ -225,6 +224,7 @@ two disagree.
 | `route` | Routing Table Management | yes |  |  |
 | `rsync` | File Synchronization Utility (rsync / scp) | yes |  |  |
 | `sanitize` | Filename Sanitizer | yes |  |  |
+| `sar` | Sysstat utility | yes | `sysstat` | `mpstat` *(not installed)*, `pidstat` *(not installed)* |
 | `sbctl` | Secure Boot: what the firmware and the kernel hold, and the key-management commands this system can honestly offer. | yes |  |  |
 | `scp` | Secure File Copy (scp) | yes |  |  |
 | `screen` | Terminal Multiplexer | yes |  |  |
@@ -253,7 +253,7 @@ two disagree.
 | `strings` | Print the printable character sequences in a file. | yes | `coreutils` |  |
 | `stty` | Terminal Settings Utility | yes |  |  |
 | `su` | User Switching Utility (`su`) | yes |  |  |
-| `sudo` | Privileged Command Execution Utility | yes |  | `sudoedit` *(not installed)*, `sudoreplay` *(not installed)*, `visudo` *(not installed)* |
+| `sudo` | Privileged Command Execution Utility | yes |  | `sudoedit` *(not installed)* |
 | `sum` | Checksum and count the blocks in a file. | yes | `coreutils` |  |
 | `swapoff` | Disable devices and files for paging and swapping. | yes | `swapon` |  |
 | `swapon` | Enable devices and files for paging and swapping. | yes |  |  |
@@ -261,7 +261,6 @@ two disagree.
 | `sysctl` | View and Modify Kernel Parameters | yes |  |  |
 | `sysinfo` | System Information Utility | yes |  |  |
 | `syslogd` | System Log Daemon (`syslogd`) | yes |  |  |
-| `sysstat` | Sysstat utility | yes |  | `mpstat`, `pidstat`, `mpstat` *(not installed)*, `pidstat` *(not installed)* |
 | `systemctl` | Multi-personality service management utility for SlateOS. | yes |  | `systemd-cat`, `systemd-escape`, `systemd-path`, `systemd-cgls`, `systemd-cgtop`, `systemd-cat` *(not installed)*, `systemd-cgls` *(not installed)*, `systemd-cgtop` *(not installed)*, `systemd-escape` *(not installed)*, `systemd-path` *(not installed)* |
 | `tac` | Reverse line printer and character reverser for Slate OS | yes |  |  |
 | `tail` | Output the last part of files. | yes | `coreutils` |  |
@@ -270,7 +269,6 @@ two disagree.
 | `tee` | Copy standard input to each FILE, and also to standard output. | yes | `coreutils` |  |
 | `telnet` | `Slate OS` Telnet Client | yes |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
-| `thermald` | Slate OS thermal management daemon | yes |  | `thermal-conf` *(not installed)*, `thermal-monitor` *(not installed)* |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command with a time limit, for Slate OS | yes |  |  |
 | `top` | Interactive Process Monitor | yes |  |  |
@@ -298,6 +296,7 @@ two disagree.
 | `uuencode` | GNU sharutils 4.15.2's, checked against Ubuntu 24.04's build of it by `scripts/uu-diff.sh`. | yes |  |  |
 | `vdir` | List directory contents in the long format. | yes | `coreutils` |  |
 | `vi` | Modal terminal text editor for SlateOS. | yes |  |  |
+| `visudo` | Edit the sudoers file with syntax checking. | yes | `sudo` |  |
 | `vmstat` | Virtual Memory Statistics Utility | yes |  |  |
 | `wall` | Terminal messaging utilities for Slate OS | yes |  |  |
 | `watch` | Watch Utility -- Execute a Command Periodically | yes |  |  |
@@ -310,7 +309,7 @@ two disagree.
 | `wipefs` | Wipe signatures from a device. | yes |  |  |
 | `wpa` | WiFi Protected Access multi-personality binary. | yes |  |  |
 | `xargs` | Build command lines from standard input and run them. | yes | `coreutils` |  |
-| `xdg` | XDG File Association Tools | yes |  | `mimeopen` *(not installed)*, `xdg-mime` *(not installed)* |
+| `xdg-open` | XDG File Association Tools | yes | `xdg` | `mimeopen` *(not installed)*, `xdg-mime` *(not installed)* |
 | `yacc` | LALR(1) parser generator | yes |  |  |
 | `yes` | Output a string repeatedly until killed. | yes | `coreutils` |  |
 | `zip` | Zip/unzip archive utility. | yes |  | `unzip`, `unzip` *(not installed)* |

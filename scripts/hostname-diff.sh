@@ -75,9 +75,13 @@ printf '  spaced  \n'     > spaced.txt
 printf 'first\nsecond\n'  > two.txt
 printf '# a comment\nafter\n' > comment.txt
 
+# The name both sides are run by: `hostname`, or one of the four further names
+# the same program answers to -- see "the names the program answers to" below.
+prog=hostname
+
 run_side() {
   local side=$1; shift
-  diff_run timeout -k 2 15 env LC_ALL=C.UTF-8 PATH="$bindir/$side" hostname "$@"
+  diff_run timeout -k 2 15 env LC_ALL=C.UTF-8 PATH="$bindir/$side" "$prog" "$@"
 }
 
 compare() {
@@ -112,17 +116,17 @@ report() {
   return 0
 }
 
-run_case() { compare "$@"; report "hostname $*"; }
+run_case() { compare "$@"; report "$prog $*"; }
 
 xfail_case() {
   local why=$1; shift
   compare "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1))
-    printf 'XPASS hostname %s -- expected to differ (%s) and did not\n' "$*" "$why"
+    printf 'XPASS %s %s -- expected to differ (%s) and did not\n' "$prog" "$*" "$why"
   else
     xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail hostname %s (%s)\n' "$*" "$why"
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s %s (%s)\n' "$prog" "$*" "$why"
   fi
   return 0
 }
@@ -206,11 +210,52 @@ run_case -sQ
 run_case --
 run_case -
 
-# --- the two whose text is ours ----------------------------------------------------
-xfail_case "our help text, not net-tools'" -h
-xfail_case "our help text, not net-tools'" --help
-xfail_case "our version string, not net-tools'" -V
-xfail_case "our version string, not net-tools'" --version
+# --- help and version: upstream's own text, since the port of 2026-10-01 -----------
+run_case -h
+run_case --help
+run_case '-?'
+run_case -V
+run_case --version
+run_case --version=x
+run_case -V -Q
+run_case -Q -V
+
+# --- more of -F and -b ---------------------------------------------------------------
+run_case --file=name.txt
+run_case -b -F /nosuch/file
+run_case -b -F nothing.txt
+run_case -b -F empty.txt
+run_case -F name.txt -s
+run_case -F name.txt other
+run_case one two
+
+# --- the names the program answers to --------------------------------------------------
+# Debian installs dnsdomainname, domainname, nisdomainname and ypdomainname as
+# links to hostname, and upstream picks its default from the last component of
+# argv[0]: dnsdomainname is -d, domainname shows or sets the NIS domain, and the
+# other two are -y. Each name is linked beside `hostname` on both sides, to the
+# same two binaries, so the reference is the real program run by that name.
+# getopt's messages carry argv[0] and err/errx's its last component; run through
+# PATH, both are the bare name.
+for alias in dnsdomainname domainname nisdomainname ypdomainname; do
+  ln -sf "$(readlink "$bindir/ours/hostname")" "$bindir/ours/$alias" || exit 1
+  ln -sf "$(readlink "$bindir/gnu/hostname")" "$bindir/gnu/$alias" || exit 1
+done
+for prog in dnsdomainname domainname nisdomainname ypdomainname; do
+  run_case
+  run_case -s
+  run_case -d
+  run_case -f
+  run_case -y
+  run_case newname
+  run_case -F name.txt
+  run_case -F empty.txt
+  run_case -F /nosuch/file
+  run_case -Q
+  run_case -h
+  run_case -V
+done
+prog=hostname
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

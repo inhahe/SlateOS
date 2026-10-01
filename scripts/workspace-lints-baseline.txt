@@ -53,7 +53,6 @@ userspace/cpio
 userspace/crond
 userspace/crontab
 userspace/ctags
-userspace/dbus
 userspace/diskutil
 userspace/dmesg
 userspace/dmidecode  # bare deny(clippy::all)

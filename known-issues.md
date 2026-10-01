@@ -154935,7 +154935,7 @@ not to look again.
 
 | crate | outcome |
 |---|---|
-| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. |
+| `dbus` | **FIXED.** All three personalities fabricated. The daemon announced a bus it never listened on and wrote a pid file naming PID 1; `dbus-send` printed a method call "on wire" that went nowhere; `dbus-monitor` claimed to be monitoring and exited 0. All ungated and refusing. **Deleted 2026-10-01** under design-decisions §1049: what the refusals waited for, a path-bound `AF_UNIX` socket, is scheduled by no lane, and D-Bus compatibility is on no roadmap (restore point `707be9dc9`). |
 | `lp` | **FIXED.** Reported queued print jobs and never captured the document -- for `-` it drained stdin, measured it, and dropped it. Predicted from this list plus a written-never-read field, which is how it was found. |
 | `ctags` | **CLEAN.** A real tool: `File::create`, writes ctags/etags format, reports write errors. Probed end to end -- three source items in, three correct tag lines out, sorted. The gated functions are a testability gap, not a lie. |
 | `lex` | **CLEAN.** Two write sites, six refusal messages. Does real work and says so when it cannot. |

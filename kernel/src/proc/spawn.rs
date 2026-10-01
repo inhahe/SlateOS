@@ -8547,11 +8547,13 @@ pub fn self_test_clibm() -> KernelResult<()> {
 /// Rust and both sides share the same wrong convention, so a plain-C caller
 /// built by `zig cc` is the only way to observe them.
 ///
-/// Note that the sysroot still *computes* in `double`; that is the documented
-/// TD-POSIX-LONG-DOUBLE-PRECISION limitation and is deliberately not what
-/// this fixture tests.  Every value it uses is exactly representable in
-/// binary64, so a precision shortfall cannot make it fail and an ABI fault
-/// cannot hide behind a loose tolerance.
+/// Since 2026-09-28 the sysroot computes and converts `long double` in all 80
+/// bits -- `<math.h>` (design-decisions §1134), then `printf`, `scanf`,
+/// `strtold` and `wcstold` (§1138) -- and the fixture checks that too:
+/// codes 60-84 call every `<math.h>` thunk shape, and 85-91 the conversions,
+/// on values a `double` would round. Until then it computed in `double`
+/// (TD-POSIX-LONG-DOUBLE-PRECISION), and the fixture used only values exact
+/// in binary64 (`requests/d-a-clongdouble-doc-says-double.md`).
 ///
 /// Exit code 42 means every check passed; any other code names the failing
 /// step (see the FAIL diagnostic below and `services/ctest-longdouble/main.c`).
@@ -8631,7 +8633,15 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
              pushed without the caller popping would overflow the 8-deep x87 stack and start \
              returning NaN after eight calls), 40-44 = scanf's %L, which must store all 16 \
              bytes (41 pre-poisons the destination so a partial 8-byte store leaves a \
-             detectable stale exponent), 50 = format-and-reparse round trip. See \
+             detectable stale exponent), 50 = format-and-reparse round trip, 60-84 = \
+             libm's long double functions, one thunk shape at a time (60 sqrtl exact to 64 \
+             bits -- also fails if the x87 precision control is not 64-bit --, 64 fmal's \
+             fused rounding, 66-68 scaling beyond double's range, 69-75 out-parameters, \
+             80-81 nexttoward with the double in %xmm0 and the long double on the stack, \
+             82-83 errno, 84 every shape 32 times, which a thunk leaking an x87 register \
+             would fail; design-decisions 1134), 85-91 = the conversions in all 80 bits \
+             (strtold(\"0.1\") must equal 0.1L, %.25Lf must print its own digits, 1e4000L \
+             must survive both ways; design-decisions 1138). See \
              BUG-POSIX-LONG-DOUBLE-ABI in known-issues.md and \
              services/ctest-longdouble/main.c",
             exit_code,
@@ -8642,8 +8652,8 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
 
     serial_println!(
         "[spawn]   long double (ring 3: a zig-cc C caller and the sysroot agree on the \
-         16-byte stack-passed X87 class through printf %L, scanf %L and strtold's %st(0) \
-         return): OK"
+         16-byte stack-passed X87 class through printf %L, scanf %L, strtold's %st(0) \
+         return and every libm long double thunk shape, in all 80 bits): OK"
     );
     Ok(())
 }
@@ -9593,8 +9603,11 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
              number is validated before the target is classified), 50-63 = the parent/child \
              case, of which 55 is the load-bearing one: the parent sees the child's new group \
              after setpgid(child, child), which a userspace static could never report, 70-74 = \
-             the group was backed by real membership, so it is ESRCH once the child is reaped. \
-             See services/ctest-pgroup/main.c",
+             the group was backed by real membership, so it is ESRCH once the child is reaped, \
+             80-88 = tgkill: this thread and a child's, named against the right process and the \
+             wrong one, and a real SIGUSR1 to the child's thread read back from waitpid as its \
+             death (84-87 check only the refusal branch when the fixture may not look in \
+             /proc). See services/ctest-pgroup/main.c",
             exit_code,
             EXPECTED
         );
@@ -10134,10 +10147,24 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// 64 KiB buffer, including handlers that never asked and whose authors sized
 /// nothing for it.
 ///
+/// Checks 43-53 are lane D's (2026-09-30,
+/// `requests/d-a-ctest-altstack-now-takes-the-kernel-s-road-too.md`), and
+/// they are the case `87ef09d0b` made possible: a handler the *kernel* starts
+/// on the alternate stack.
+/// - 43-49 send `SIGUSR1`/`SIGUSR2` with `kill(0, sig)`, after `setpgid(0, 0)`
+///   gives the fixture a group of its own. libc dispatches in-process only a
+///   signal aimed at its own pid, so these go through `SYS_SIGNAL_SEND`, and
+///   `deliver_pending_signal` builds the frame on the alternate stack as that
+///   call returns. The handler uses 8 KiB of it.
+/// - 50-53 run an `SA_SIGINFO` handler there, raised and through the kernel,
+///   and read its `siginfo_t` and `ucontext_t`.
+///
 /// **It cannot hang, and that claim is lane B's, checked rather than asserted.**
-/// Every signal here is raised with `raise()`, which in our libc calls
-/// `dispatch_self_signal` directly: synchronous, in-process, no kernel round
-/// trip, nothing read, nothing slept on. The worst case is a wrong exit code.
+/// The signals are raised with `raise()`, which in our libc calls
+/// `dispatch_self_signal` directly, or sent with `kill(0, sig)`, which returns
+/// once the handler has run on that call's way back to userspace. Either way
+/// it is synchronous: nothing read, nothing slept on, no child. The worst
+/// case is a wrong exit code.
 /// The distinction matters because the previous fixture from the same lane
 /// arrived with "can fail but cannot hang" and then hung this boot test for two
 /// hours -- `O_NONBLOCK` was set on a descriptor the read arm never consulted.
@@ -10147,13 +10174,11 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// The kernel-side bound stays anyway: a bounded yield loop, so a fixture that
 /// somehow never exits costs a reported failure and not a boot.
 ///
-/// **What this does not cover.** The overflow case -- a handler running on the
-/// alternate stack *because the original one is gone* -- is not in the fixture
-/// yet. Lane B left it out deliberately while the kernel half was missing, since
-/// it would have failed by design rather than by regression. That half landed in
-/// `87ef09d0b`, so it can go in now; lane B said they would add it and I have
-/// told them it is unblocked. Until then this rung proves the decision and the
-/// libc path, not the recovery.
+/// **What this does not cover.** A handler recovering from a real stack
+/// overflow -- running on the alternate stack *because the original one is
+/// gone*. A native fault here is an exception, not a signal, so there is no
+/// overflow signal for the kernel to deliver; the frame placement itself is
+/// what 43-53 prove.
 pub fn self_test_ctest_altstack() -> KernelResult<()> {
     let Some(ctest_elf) = pathz_test_elf("ctest-altstack", "ctest-altstack")? else {
         return Ok(());

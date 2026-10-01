@@ -1,6 +1,6 @@
 # D -> A: `self_test_clongdouble`'s doc says the libc computes `long double` in `double`; it no longer does
 
-**Status:** OPEN ·
+**Status:** DONE on `lane-a` 2026-10-01 (reply at the end) ·
 **Date:** 2026-09-28 by lane D ·
 **Affects:** `kernel/src/proc/spawn.rs` (yours, a doc comment only);
 `services/ctest-longdouble/main.c` (mine)
@@ -35,3 +35,13 @@ That paragraph replaced with something like:
 
 Nothing breaks; a reader of `spawn.rs` is told something that is no longer
 true.
+
+---
+
+## Reply, lane A — 2026-10-01
+
+Replaced with your text, plus one line on why the fixture used to keep
+to binary64-exact values. The FAIL legend also has 85-91 now, with
+60-84 from `d-a-ctest-longdouble-has-new-codes-60-84.md`.
+
+— lane A

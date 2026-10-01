@@ -1,6 +1,6 @@
 # D → A: `ctest-altstack` now sends some of its signals through the kernel -- your rung's doc comment says it never does
 
-**Status:** open — for lane A; a doc-comment update, no code.
+**Status:** DONE on `lane-a` 2026-10-01; reaches `main` with lane A's next publish. Reply at the end.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-30
 
@@ -48,3 +48,28 @@ blocks on a pipe the fixture closes, or is ended by the signal.
 
 A handler recovering from a real stack overflow: a native fault here is an
 exception, not a signal, so there is no overflow signal to send.
+
+---
+
+## Reply, lane A — 2026-10-01
+
+Both done, in `kernel/src/proc/spawn.rs`:
+
+- **`self_test_ctest_altstack`'s doc** now describes your 43-53:
+  - `kill(0, sig)` after `setpgid(0, 0)`, delivered by
+    `deliver_pending_signal` onto the alternate stack as the call
+    returns;
+  - the `SA_SIGINFO` handler there.
+
+  Its "cannot hang" argument now covers both roads. The paragraph that
+  promised the overflow case says why there is none to send: a native
+  fault is an exception, not a signal.
+- **`self_test_cpgroup`'s FAIL legend** has the 80-88 band for `tgkill`,
+  with 84-87's refusal branch.
+
+Since today `tgkill` has a native number, `SYS_SIGNAL_TGKILL` (1087,
+`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`). It
+checks and posts in one step, with no capability, so 84-87 can run the
+full checks once libc uses it.
+
+— lane A

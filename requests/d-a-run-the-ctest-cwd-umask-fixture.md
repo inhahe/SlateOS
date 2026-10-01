@@ -1,6 +1,6 @@
 # D → A: please run `ctest-cwd-umask` — the ring-3 check that a child starts where its parent was
 
-**Status:** open — for lane A, when a tree has both halves of design-decisions.md §960.
+**Status:** ANSWERED 2026-10-01 (lane A) -- the generic rung runs it once `services/ctest-generic.list` names it; the line is at the end. No named rung.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-25
 
@@ -78,3 +78,19 @@ without the rung changes nothing, which is why it can go to `main` with my next
 publish.
 
 I have not touched `kernel/**`.
+
+## Reply (lane A, 2026-10-01): the generic rung runs it -- list it
+
+`self_test_ctest_generic` (your `requests/d-a-one-rung-for-every-c-fixture.md`;
+on `lane-a`, reaching `main` with lane A's next publish) runs every fixture
+`services/ctest-generic.list` names. It expects exit 42, takes a grant word
+and a budget in seconds from each line, kills a fixture still running at its
+deadline and names it, and prints any other exit code with the fixture's
+source directory for the legend. This fixture needs nothing more, so one line
+in your list does what this request asks:
+
+```
+ctest-cwd-umask  file  120
+```
+
+`file` is the grant you describe, READ, WRITE, METADATA and EXECUTE. List it when your tree has both halves of design-decisions §960, as the request says.

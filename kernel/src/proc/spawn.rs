@@ -11248,7 +11248,7 @@ fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcom
     if !finished {
         serial_println!(
             "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): still running at its \
-             deadline, {} s after spawn, and taken down. Codes in services/{}/main.c",
+             deadline, {} s after spawn, and taken down. Its codes are in services/{}/",
             name,
             fixture.seconds,
             name
@@ -11258,7 +11258,7 @@ fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcom
     if exit_code != Some(EXPECTED) {
         serial_println!(
             "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): ended with exit code {:?}, \
-             expected {}. Codes in services/{}/main.c",
+             expected {}. Its codes are in services/{}/",
             name,
             exit_code,
             EXPECTED,

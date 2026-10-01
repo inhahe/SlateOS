@@ -1313,7 +1313,7 @@ That covers the formatter completely, since `date -d @0 +%F` exercises the same
 code as `date +%F`. What it does not cover is reading the clock, which is one
 line.
 
-## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11)
+## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11) — FIXED 2026-10-01
 
 `hostname -d` and `hostname -f` answer from the resolver's search domain and
 never consult `/etc/hosts`. net-tools resolves through nsswitch, so on this host:
@@ -1490,6 +1490,27 @@ code falls back to the old search-domain behaviour there, so nothing regressed
 
 The remaining 39 rows are other causes: `-i`/`-I` address formatting, `-a` and
 `-A`, and `-b`. They are not this entry.
+
+### FIXED 2026-10-01 — by the route this entry first named
+
+`hostname` is now a port of Debian's `hostname` 3.23
+(`userspace/coreutils/src/bin/hostname`) and resolves exactly as upstream
+does: `getaddrinfo` with `AI_CANONNAME` on what `gethostname` returns, by way
+of `libcall::netdb`. The obstacle above is gone from both ends -- the C library
+reads `/etc/hosts` first and takes the first name on the matching line as the
+canonical one (lane D's `D-POSIX-HOSTS-FILE-WAS-NEVER-READ`), and the kernel's
+resolver consults its hosts table -- so the hosts-file reading the 2026-09-16
+section added had become a second resolver that could only disagree with the
+first, and it is deleted with the rest of the file-based program.
+`scripts/hostname-diff.sh`: **123 passed, 0 differed** (it was 26 / 34), now
+also run under the four names the program answers to.
+
+**What is left is the library's, not this program's:** a host whose FQDN lives
+only in DNS. The kernel's resolver answers an address and no name, so the
+canonical name is the name asked (`posix/src/hosts.rs`'s module doc says so),
+where glibc would answer with the name the search list completed. `hostname -f`
+prints whatever `getaddrinfo` says, as on Linux, and will follow the library
+without a change here.
 
 ## B-POSIX-LOCALHOST-IS-RESOLVED-BY-ASKING-A-DNS-SERVER (lane B, 2026-09-14) — OPEN, fix is lane A's
 
@@ -2478,9 +2499,16 @@ cgroupfs) stay. **The ledger stands at 64.** **Still to judge:**
 `cpufreq-info` and `cpufreq-set`
 (cpupower) and `thermal-monitor`, `thermal-conf` (thermald), which wait on
 the kernel's cpufreq and thermal modules reaching `/sys`; `hostnamectl`'s
-four domain names (which belong to `hostname`, if anywhere); `xdg`'s two;
+four domain names (which belong to `hostname`, if anywhere -- **done**, see
+below); `xdg`'s two;
 and `efivar`, `volname`, `lshw`, `inotifywatch`, `userdbctl`. `sudo`'s
 `visudo` and `sudoreplay` are to be split into crates.
+`hostnamectl`'s `dnsdomainname`, `domainname`, `nisdomainname` and
+`ypdomainname` moved to `hostname`, now a port of Debian's `hostname` 3.23,
+which picks its default from those names as Debian installs them; they are
+**kept, fifth batch**, as further names of that binary, and the ledger now
+reads coreutils' binaries as well as the crates' so it can see them (the four
+rows are renamed, not added). **The ledger stands at 64.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
@@ -71788,7 +71816,7 @@ that could have caught this.
 
 ---
 
-## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — READ SIDE FIXED 2026-09-10; write side needs a syscall
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — FIXED: read side 2026-09-10, write side the same day (`b542b361b`)
 
 **In short:** `gethostname()` and `sethostname()` — the two C functions any
 program uses to ask or set what this machine is called — do not actually talk
@@ -71904,6 +71932,19 @@ write landed. All four now assert the refusal.
 only means of *varying* it, which `gethostid` needs -- it hashes the name.
 That is what `set_stored_hostname_for_test` is for: a test seam is the honest
 place for it, and a public function that half-works is not.
+
+### The write side, closed the same day — noted 2026-10-01
+
+The section above was overtaken within hours and never updated, which this
+note repairs. Lane A added the native pair -- `SYS_HOSTNAME_SET` (1072) and
+`SYS_DOMAINNAME_SET` (1073), `04ef99f35` -- and `b542b361b` wired `sethostname`
+and `setdomainname` to them, so both now change the system's names, under
+`Rights::SET_HOSTNAME`, refusing a name over 64 bytes with `EINVAL`.
+`gethostname` and `getdomainname` read `/proc/sys/kernel/hostname` and
+`.../domainname` and nothing else. `services/ctest-hostname` holds the
+round trip on the real kernel. The C functions are now what a ported program
+should call, and `hostname` does (2026-10-01): its file-based reading, which
+this entry recommended for as long as the functions were wrong, is gone.
 
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
@@ -151114,9 +151155,15 @@ exist: `/proc/net` is a **file**, not a directory — `procfs.rs`'s `ROOT_FILES`
 lists `net` and `gen_net()` writes a readable block — so nothing can live
 beneath it.
 
-    readers:  userspace/coreutils/src/bin/hostname.rs
+    readers:  userspace/coreutils/src/bin/hostname.rs  (until 2026-10-01)
               userspace/ifconfig/src/main.rs
     writers:  none
+
+**`hostname` is no longer a reader (2026-10-01).** It is a port of Debian's
+`hostname` now, and asks the C library: `-I` and `-A` walk `getifaddrs`, `-i`
+takes the addresses `getaddrinfo` gives for the host name. Which also settles
+the `-i` versus `-I` point at the end of this entry. `ifconfig` is the one
+reader left.
 
 This is the inverse of §946's publisher-with-no-subscriber: a **subscriber
 with no publisher**, and it is invisible to the compiler because the

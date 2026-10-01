@@ -651,6 +651,7 @@ dependencies = [
  "errmsg",
  "getoptlong",
  "gnubase64",
+ "libcall",
  "localtime",
  "md5",
  "modechange",
@@ -1567,7 +1568,6 @@ dependencies = [
  "optionalfile",
  "quoting",
  "scratchdir",
- "usageerror",
 ]
 
 [[package]]

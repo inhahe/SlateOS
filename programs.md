@@ -114,8 +114,8 @@ two disagree.
 | `head` | Output the first part of files. | yes | `coreutils` |  |
 | `hexdump` | Hexadecimal File Dumper |  |  | `xxd` *(not installed)* |
 | `hostid` | Print the numeric identifier for the current host. |  | `coreutils` |  |
-| `hostname` | Show or set the system host name. | yes | `coreutils` |  |
-| `hostnamectl` | Hostname management utilities. |  |  | `dnsdomainname` *(not installed)*, `domainname` *(not installed)*, `nisdomainname` *(not installed)*, `ypdomainname` *(not installed)* |
+| `hostname` | Show or set the system's host name: Debian's `hostname` 3.23, ported. | yes | `coreutils` | `dnsdomainname` *(not installed)*, `domainname` *(not installed)*, `nisdomainname` *(not installed)*, `ypdomainname` *(not installed)* |
+| `hostnamectl` | Query and set the system hostname and related settings. |  |  |  |
 | `htop` | Interactive Process Viewer |  |  |  |
 | `hwclock` | Hardware clock and time management utility for SlateOS. |  |  |  |
 | `hwinfo` | Hardware information utility. |  |  | `lshw` *(not installed)* |

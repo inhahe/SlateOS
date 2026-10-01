@@ -32,10 +32,10 @@ gzip:gunzip
 gzip:gzcat
 gzip:zcat
 hexdump:xxd
-hostnamectl:dnsdomainname
-hostnamectl:domainname
-hostnamectl:nisdomainname
-hostnamectl:ypdomainname
+hostname:dnsdomainname
+hostname:domainname
+hostname:nisdomainname
+hostname:ypdomainname
 hwinfo:lshw
 inotify:inotifywatch
 last:lastb

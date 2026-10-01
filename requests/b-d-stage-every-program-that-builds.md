@@ -158,3 +158,22 @@ read the cgroup tree and say so when there is none (they wait, with the
 cgroup tools of batch two, on the kernel's cgroupfs reaching
 `/sys/fs/cgroup`). `systemd-analyze`, `systemd-notify` and
 `systemd-tmpfiles` were deleted instead: each made its answer up.
+
+## The names lane B keeps -- fifth batch (2026-10-01)
+
+```
+dnsdomainname = hostname
+domainname = hostname
+nisdomainname = hostname
+ypdomainname = hostname
+```
+
+`hostname` is now a port of Debian's `hostname` 3.23, which picks its
+default from the name it is run by -- `dnsdomainname` is `hostname -d`,
+`domainname` shows or sets the NIS domain, the other two are `hostname -y`
+-- and Debian installs the four as links to it. They used to be answered by
+`hostnamectl`, which made its own answers out of files; that dispatch is
+gone, so until these lines land nothing answers to the four names at all.
+`scripts/hostname-diff.sh` runs every one of them against Ubuntu's real
+program by that name: 123 agree, none differ. The producer is coreutils'
+`hostname` binary, which `rootfs-bin-manifest.txt` already lists.

@@ -71,3 +71,15 @@ procps-ng:
   texts:
     - GPL-2.0
     - LGPL-2.1
+
+# src/bin/hostname (hostname.c), also installed as dnsdomainname, domainname,
+# nisdomainname and ypdomainname: the hostname Debian split out of net-tools
+# and has maintained since, by Peter Tobias, Bernd Eckenfels, Graham Wilson
+# and Michael Meskes; its localdomain and localhost functions are Copyright
+# (C) 1996 Free Software Foundation, Inc., written by Miles Bader and Marcus
+# Brinkmann. 3.23 is the release Ubuntu 24.04 ships as 3.23+nmu2ubuntu2.
+Debian hostname:
+  version: 3.23
+  licence: GPL-2.0-or-later
+  texts:
+    - GPL-2.0

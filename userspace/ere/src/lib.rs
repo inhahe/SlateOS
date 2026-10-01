@@ -52,9 +52,9 @@
 //! about the same file.
 //!
 //! `posix`'s `regcomp`/`regexec` (`posix/src/regex.rs`) deliberately stays a
-//! separate implementation: it has fixed-size buffers and a C ABI, and it
-//! answers to a different specification — POSIX's, byte-for-byte, including the
-//! error codes, which is what a C program linking `libc` is entitled to expect.
+//! separate implementation: it has a C ABI, and it answers to a different
+//! specification — POSIX's, with glibc's syntax and error codes, which is what
+//! a C program linking `libc` is entitled to expect (design-decisions §1160).
 //! This crate is for the Rust programs.
 //!
 //! ## Why this crate is `no_std`

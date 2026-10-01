@@ -1293,7 +1293,8 @@ impl Interposed {
 /// the spawn path and text to the script reader.
 ///
 /// A `#!` line is the OS's business wherever the OS honours one — every Unix,
-/// and the SlateOS target with it (`posix`'s `linux_binfmt` knows `SCRIPT_MAG`).
+/// and the SlateOS target with it (the C library's `execve` runs the line
+/// itself: `posix/src/shebang.rs`, called from `posix/src/spawn.rs`).
 /// The interposition below is exactly bash's `#if !defined (HAVE_HASH_BANG_EXEC)`
 /// fallback, and is gated the same way: on a host that would not honour the line
 /// the shell honours it instead, because leaving the file to fail would refuse a

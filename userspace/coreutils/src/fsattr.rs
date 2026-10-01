@@ -864,8 +864,8 @@ fn clear_acl(on: On<'_>, name: &[u8]) -> io::Result<()> {
 ///
 /// The split has to exist because `system.posix_acl_access` is *both* an
 /// extended attribute and the file's permissions — this kernel stores POSIX
-/// ACLs in exactly the ext4 form Linux does (`kernel/src/fs/acl.rs`,
-/// `posix/src/linux_acl.rs`). Copying it under `--preserve=xattr` would make
+/// ACLs in exactly the ext4 form Linux does (`kernel/src/fs/acl.rs`). Copying
+/// it under `--preserve=xattr` would make
 /// that option change who may read the file, which is `--preserve=mode`'s job
 /// and which a user asking only for extended attributes did not ask for.
 ///

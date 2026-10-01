@@ -1887,6 +1887,7 @@ dependencies = [
  "killconv",
  "procinfo",
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -2069,6 +2070,7 @@ dependencies = [
  "localtime",
  "quoting",
  "stdfdguard",
+ "sysroot-dep",
  "ulclosestream",
  "ulstrutils",
 ]
@@ -3049,6 +3051,7 @@ dependencies = [
  "libcall",
  "libservicebus",
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]

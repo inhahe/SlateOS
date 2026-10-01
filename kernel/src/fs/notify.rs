@@ -474,6 +474,62 @@ pub fn pending_count(watch_id: u64) -> KernelResult<usize> {
     Ok(watch.events.len())
 }
 
+/// Take pending events from a watch for as long as they fit in `budget`
+/// bytes, as `size_of` measures them: an overflow marker first, if one is
+/// due, then the queue in order. What does not fit stays queued.
+///
+/// `BufferTooSmall` when not even the first event fits, which is then left
+/// in place -- the read Linux's `inotify` answers `EINVAL`. An empty queue
+/// is an empty `Vec`.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a watch that does not exist; `BufferTooSmall` as
+/// above.
+pub fn read_events_within(
+    watch_id: u64,
+    budget: usize,
+    size_of: impl Fn(&FsEvent) -> usize,
+) -> KernelResult<Vec<FsEvent>> {
+    let mut watches = WATCHES.lock();
+    let watch = watches
+        .get_mut(&watch_id)
+        .ok_or(KernelError::InvalidHandle)?;
+
+    let mut result = Vec::new();
+    let mut used = 0usize;
+    if watch.overflowed {
+        let marker = FsEvent {
+            watch_id,
+            event_type: FsEventType::Overflow,
+            path: PathBuf::new(),
+            new_path: None,
+            is_dir: false,
+        };
+        let need = size_of(&marker);
+        if need > budget {
+            return Err(KernelError::BufferTooSmall);
+        }
+        used = need;
+        result.push(marker);
+        watch.overflowed = false;
+    }
+    while let Some(next) = watch.events.front() {
+        let need = size_of(next);
+        let Some(total) = used.checked_add(need).filter(|&t| t <= budget) else {
+            break;
+        };
+        if let Some(event) = watch.events.pop_front() {
+            result.push(event);
+        }
+        used = total;
+    }
+    if result.is_empty() && !watch.events.is_empty() {
+        return Err(KernelError::BufferTooSmall);
+    }
+    Ok(result)
+}
+
 /// Close (remove) a filesystem watch.
 ///
 /// All pending events are discarded.

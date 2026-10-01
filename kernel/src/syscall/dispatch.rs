@@ -30,79 +30,81 @@ use super::number::{
     SYS_CHANNEL_TRY_RECV, SYS_CLOCK_ADJTIME, SYS_CLOCK_MONOTONIC, SYS_CLOCK_REALTIME,
     SYS_CLOCK_SETTIME, SYS_CONSOLE_READ_CHAR, SYS_CONSOLE_TRY_READ_CHAR, SYS_CONSOLE_WRITE,
     SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY, SYS_CP_REGISTER, SYS_CP_TRY_WAIT,
-    SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_TIMES, SYS_DEBUG_PRINT, SYS_DMA_ALLOC,
-    SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY, SYS_DMA_FREE,
-    SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
-    SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE, SYS_DRM_CONNECTOR_STATUS,
-    SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET, SYS_DRM_DISPLAY_SIZE,
-    SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION, SYS_DRM_GEM_CREATE,
-    SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN, SYS_DRM_PAGE_FLIP,
-    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ,
-    SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT,
-    SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP,
-    SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT,
-    SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR,
-    SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH,
-    SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR, SYS_FS_LIST_XATTRS,
-    SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE, SYS_FS_MKDIRAT_PINNED,
-    SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_PREAD, SYS_FS_PWRITE,
-    SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR,
-    SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK, SYS_FS_SEEK_DATA,
-    SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS, SYS_FS_SET_TIMES,
-    SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED,
-    SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY, SYS_FS_TRASH_LIST,
-    SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT, SYS_FS_UNLINKAT_PINNED,
-    SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
-    SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
-    SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
-    SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING, SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY,
-    SYS_IO_RING_ENTER, SYS_IO_RING_SETUP, SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT,
-    SYS_ITIMER_GET, SYS_ITIMER_SET, SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ,
-    SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP, SYS_MPROTECT, SYS_MUNMAP,
-    SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE, SYS_NET_FW_FLUSH,
-    SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE, SYS_NET_RAW_OPEN,
-    SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL, SYS_NET_ROUTE_LIST,
-    SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE, SYS_NS_HIDE,
-    SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL, SYS_PIPE_CLOSE,
-    SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ, SYS_PIPE_READ_TIMEOUT,
-    SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WAIT_READABLE,
-    SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
-    SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
-    SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
-    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
-    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
-    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
-    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
-    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
-    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
-    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
-    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
-    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
-    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
-    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
-    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
-    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP,
-    SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
-    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
-    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
-    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
-    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
-    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
-    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
-    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
-    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
-    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
-    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_CP_UNREGISTER, SYS_CP_WAIT, SYS_CPU_COUNT, SYS_CPU_CURRENT, SYS_CPU_TIMES, SYS_DEBUG_PRINT,
+    SYS_DMA_ALLOC, SYS_DMA_ATTACH, SYS_DMA_DETACH, SYS_DMA_DOMAIN_CREATE, SYS_DMA_DOMAIN_DESTROY,
+    SYS_DMA_FREE, SYS_DMA_MAP, SYS_DMA_UNMAP, SYS_DNS_CACHE_STATS, SYS_DNS_RESOLVE,
+    SYS_DNS_REVERSE_RESOLVE, SYS_DOMAINNAME_SET, SYS_DRM_ATOMIC_COMMIT, SYS_DRM_CLOSE,
+    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_CRTC_INFO, SYS_DRM_CURSOR_MOVE, SYS_DRM_CURSOR_SET,
+    SYS_DRM_DISPLAY_SIZE, SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY, SYS_DRM_FLUSH_REGION,
+    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP, SYS_DRM_MODE_GET, SYS_DRM_OPEN,
+    SYS_DRM_PAGE_FLIP, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
+    SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE,
+    SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND, SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY,
+    SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE, SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK,
+    SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK,
+    SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH, SYS_FS_JOURNAL_CURSOR,
+    SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR,
+    SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
+    SYS_FS_MKDIRAT_PINNED, SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2,
+    SYS_FS_PREAD, SYS_FS_PWRITE, SYS_FS_READ, SYS_FS_READ_FILE, SYS_FS_READDIR_AT, SYS_FS_READLINK,
+    SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RENAMEAT_PINNED, SYS_FS_RMDIR, SYS_FS_SEEK,
+    SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
+    SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS, SYS_FS_SYMLINK,
+    SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
+    SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
+    SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE,
+    SYS_FS_WATCH_READ, SYS_FS_WATCH_READ_RECORDS, SYS_FS_WRITE, SYS_FS_WRITE_FILE,
+    SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI, SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE,
+    SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI,
+    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, SYS_GETRANDOM, SYS_HOSTNAME_SET, SYS_ICMP_PING,
+    SYS_ICMP_PING_WAIT, SYS_IO_RING_DESTROY, SYS_IO_RING_ENTER, SYS_IO_RING_SETUP,
+    SYS_IRQ_REGISTER, SYS_IRQ_RELEASE, SYS_IRQ_WAIT, SYS_ITIMER_GET, SYS_ITIMER_SET,
+    SYS_KEYLAYOUT_SET, SYS_LOADAVG, SYS_LOG_READ, SYS_MM_GET_PROFILE, SYS_MM_SET_PROFILE, SYS_MMAP,
+    SYS_MPROTECT, SYS_MUNMAP, SYS_NET_FW_ADD_RULE, SYS_NET_FW_DEL_RULE, SYS_NET_FW_ENABLE,
+    SYS_NET_FW_FLUSH, SYS_NET_FW_SET_POLICY, SYS_NET_IF_CONFIG, SYS_NET_IF_INFO, SYS_NET_RAW_CLOSE,
+    SYS_NET_RAW_OPEN, SYS_NET_RAW_RX, SYS_NET_RAW_TX, SYS_NET_ROUTE_ADD, SYS_NET_ROUTE_DEL,
+    SYS_NET_ROUTE_LIST, SYS_NET_STAT, SYS_NOTIFY_READY, SYS_NS_ATTACH, SYS_NS_BIND, SYS_NS_CREATE,
+    SYS_NS_HIDE, SYS_NS_QUERY, SYS_NS_UNBIND, SYS_PHYS_PAGES_AVAIL, SYS_PHYS_PAGES_TOTAL,
+    SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_PEEK, SYS_PIPE_POLL, SYS_PIPE_READ,
+    SYS_PIPE_READ_TIMEOUT, SYS_PIPE_READABLE_BYTES, SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE,
+    SYS_PIPE_WAIT_READABLE, SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE,
+    SYS_PROCESS_CHROOT, SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS,
+    SYS_PROCESS_GET_CREDENTIALS, SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID, SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE,
+    SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_PROCESS_KILL,
+    SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
+    SYS_PROCESS_SET_EXEC_CLOSE, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE,
+    SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS,
+    SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT,
+    SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE,
+    SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
+    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
+    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
+    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
+    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
+    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
+    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
+    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
+    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
+    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
+    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
+    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
+    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
+    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
+    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
+    SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
+    SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE,
+    SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -550,6 +552,13 @@ const fn build_v1_table() -> SyscallTable {
     // so it has no flat-table entry.
     handlers[SYS_SIGNAL_REGISTER as usize] = Some(handlers::sys_signal_register);
     handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
+    handlers[SYS_SIGNAL_QUEUE as usize] = Some(handlers::sys_signal_queue);
+    handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
+    handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);
+    handlers[SYS_PROCESS_SET_PRIORITY as usize] = Some(handlers::sys_process_set_priority);
+    handlers[SYS_PROCESS_SET_EXEC_CLOSE as usize] = Some(handlers::sys_process_set_exec_close);
+    handlers[SYS_FS_WATCH_READ_RECORDS as usize] = Some(handlers::sys_fs_watch_read_records);
+    handlers[SYS_CPU_CURRENT as usize] = Some(handlers::sys_cpu_current);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1011,6 +1020,11 @@ pub fn self_test() -> KernelResult<()> {
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
     test_thread_join_timeout_registered()?;
+    test_dispatch_signal_siginfo_frame()?;
+    test_dispatch_priority_doors()?;
+    test_dispatch_exec_close()?;
+    test_dispatch_tioc_and_watch_records()?;
+    test_cpu_current()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2024,18 +2038,23 @@ fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
         }
     }
 
-    // (2) The argument gate runs *before* caller resolution, so a malformed
+    // (2) The argument gate runs *before* caller resolution, so a negative
     //     pgid is EINVAL even when the caller could not be established. If
     //     these two ever collapse into one verdict, a program would learn
-    //     "no such process" for what is really a bad argument.
+    //     "no such process" for what is really a bad argument. Group 0 is not
+    //     a bad argument but a group that does not exist (Linux's
+    //     `tiocspgrp`), judged after the caller and its terminal: for this
+    //     caller, which has no process, NoSuchProcess. It was InvalidArgument
+    //     until 2026-10-01.
     #[allow(clippy::cast_sign_loss)]
     let minus_one = -1_i64 as u64;
-    for (arg, what) in [(0_u64, "tcsetpgrp(0)"), (minus_one, "tcsetpgrp(-1)")] {
-        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value
-            != i64::from(KernelError::InvalidArgument.code())
-        {
-            serial_println!("[syscall]     ({} did not report InvalidArgument)", what);
-            return fail("a non-positive pgid should be InvalidArgument");
+    for (arg, what, want) in [
+        (0_u64, "tcsetpgrp(0)", KernelError::NoSuchProcess),
+        (minus_one, "tcsetpgrp(-1)", KernelError::InvalidArgument),
+    ] {
+        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value != i64::from(want.code()) {
+            serial_println!("[syscall]     ({} did not report {:?})", what, want);
+            return fail("tcsetpgrp's argument gate");
         }
     }
 
@@ -2204,6 +2223,586 @@ fn test_thread_join_timeout_registered() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_THREAD_JOIN_TIMEOUT (1085) is wired: OK");
+    Ok(())
+}
+
+/// The native siginfo frame and the sends that fill it
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`), made as
+/// a process makes them, through `thread::self_test_as_process`:
+///
+/// - `SYS_SIGNAL_REGISTER` answers the flags it honours -- 1 for
+///   `SIGNAL_FRAME_SIGINFO`, 0 without it or when unregistering -- ignores
+///   unknown bits, and the registry records which frame the trampoline reads;
+/// - `SYS_SIGNAL_QUEUE` posts `SI_QUEUE` with the caller as sender and the
+///   value, answers a group (pid not above zero) `NoSuchProcess`, and posts
+///   nothing for signal 0;
+/// - `SYS_SIGNAL_TGKILL` posts `SI_TKILL` for a thread of the process, and
+///   refuses a thread of another (`NoSuchProcess`) and ids not above zero
+///   (`InvalidArgument`);
+/// - `SYS_SIGNAL_SEND`'s signal 0 to one process is the probe its page says
+///   it is (it answered `InvalidArgument` until 2026-10-01);
+/// - none of them lets a process signal one that is not its child, while a
+///   signal the kernel raises reaches it all the same (`SI_KERNEL`, pid 0) --
+///   the terminal's `^C` reaching a foreground job its writer did not start.
+fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
+    use super::number::SIGNAL_FRAME_SIGINFO;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::signal::{self, si_code};
+    use crate::proc::thread::self_test_as_process;
+
+    const SIGUSR1: u64 = 10;
+    const SIGUSR2: u64 = 12;
+    const VALUE: u64 = 0xDEAD_BEEF_0000_0001;
+
+    fn cleanup(pids: &[ProcessId]) {
+        for &p in pids {
+            signal::remove(p);
+            pcb::destroy(p);
+        }
+    }
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: siginfo frame: {}", msg);
+        cleanup(pids);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("siginfo-frame", 0);
+    let stranger = pcb::create("siginfo-stranger", 0);
+    let pids = [pid, stranger];
+    let me = crate::sched::current_task_id();
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    // Registration answers what it honours, and the registry agrees.
+    for (flags, answer, extended) in [
+        (SIGNAL_FRAME_SIGINFO, 1, true),
+        (0, 0, false),
+        (0b110, 0, false),
+        (0b111, 1, true),
+    ] {
+        let got = as_pid(SYS_SIGNAL_REGISTER, args(0x4000, flags, 0));
+        if got != answer || signal::trampoline_frame(pid) != Some((0x4000, extended)) {
+            serial_println!(
+                "[syscall]   register(0x4000, {:#b}) answered {}, registry {:?}",
+                flags,
+                got,
+                signal::trampoline_frame(pid)
+            );
+            return fail("SYS_SIGNAL_REGISTER's answer or record", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_REGISTER, args(0, SIGNAL_FRAME_SIGINFO, 0)) != 0
+        || signal::trampoline_frame(pid).is_some()
+        || signal::extended_frame(pid)
+    {
+        return fail("unregistering honours nothing and keeps nothing", &pids);
+    }
+    // A trampoline makes a post pending (`Deliver`) instead of the default
+    // action, so each send below can be read back.
+    if as_pid(SYS_SIGNAL_REGISTER, args(0x4000, SIGNAL_FRAME_SIGINFO, 0)) != 1 {
+        return fail("re-registering for the sends", &pids);
+    }
+
+    // sigqueue: SI_QUEUE, the caller as sender, the value.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, SIGUSR1, VALUE)) != 0 {
+        return fail("sigqueue to itself refused", &pids);
+    }
+    match signal::take_deliverable_info(pid) {
+        Some((10, info))
+            if info.code == si_code::SI_QUEUE
+                && u64::from(info.sender_pid) == pid
+                && info.value == VALUE => {}
+        other => {
+            serial_println!("[syscall]   sigqueue posted {:?}", other);
+            return fail("sigqueue's record", &pids);
+        }
+    }
+    // Its probe posts nothing; a group is no process; a bad number is caught
+    // once the target is known to exist.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 0, 5)) != 0 || signal::pending(pid) != 0 {
+        return fail("sigqueue's signal 0", &pids);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let minus_five = (-5i64) as u64;
+    for group in [0, minus_five] {
+        if as_pid(SYS_SIGNAL_QUEUE, args(group, SIGUSR1, 0)) != code(KernelError::NoSuchProcess) {
+            return fail("sigqueue to a group", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 65, 0)) != code(KernelError::InvalidArgument) {
+        return fail("sigqueue's signal 65", &pids);
+    }
+
+    // tgkill: this task counts as a thread of `pid` for the test.
+    if as_pid(SYS_SIGNAL_TGKILL, args(pid, me, SIGUSR2)) != 0 {
+        return fail("tgkill to its own thread refused", &pids);
+    }
+    match signal::take_deliverable_info(pid) {
+        Some((12, info)) if info.code == si_code::SI_TKILL && u64::from(info.sender_pid) == pid => {
+        }
+        other => {
+            serial_println!("[syscall]   tgkill posted {:?}", other);
+            return fail("tgkill's record", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_TGKILL, args(stranger, me, SIGUSR2)) != code(KernelError::NoSuchProcess) {
+        return fail("tgkill named a thread of another process", &pids);
+    }
+    for (tgid, tid) in [(0, me), (pid, 0)] {
+        if as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2)) != code(KernelError::InvalidArgument)
+        {
+            return fail("tgkill with an id not above zero", &pids);
+        }
+    }
+
+    // SYS_SIGNAL_SEND's single-process probe.
+    if as_pid(SYS_SIGNAL_SEND, args(pid, 0, 0)) != 0 || signal::pending(pid) != 0 {
+        return fail("kill(pid, 0) is a probe", &pids);
+    }
+
+    // Authority: `stranger` is not `pid`'s child, whichever way it is asked.
+    signal::register_trampoline(stranger, 0x4000);
+    for (what, nr, a) in [
+        ("kill", SYS_SIGNAL_SEND, args(stranger, SIGUSR1, 0)),
+        ("kill's probe", SYS_SIGNAL_SEND, args(stranger, 0, 0)),
+        ("sigqueue", SYS_SIGNAL_QUEUE, args(stranger, SIGUSR1, 1)),
+    ] {
+        if as_pid(nr, a) != code(KernelError::PermissionDenied) {
+            serial_println!("[syscall]   {} to a stranger was not refused", what);
+            return fail("a send without authority", &pids);
+        }
+    }
+    if signal::pending(stranger) != 0 {
+        return fail("a refused send posted anyway", &pids);
+    }
+    // The kernel's own signal needs no authority: raised on `pid`'s thread, it
+    // still reaches `stranger`, from the kernel.
+    #[allow(clippy::cast_possible_truncation)]
+    let posted = self_test_as_process(pid, || {
+        handlers::post_kernel_signal(stranger, SIGUSR1 as u32)
+    });
+    if posted.is_err() {
+        return fail("a kernel signal was refused", &pids);
+    }
+    match signal::take_deliverable_info(stranger) {
+        Some((10, info)) if info.code == si_code::SI_KERNEL && info.sender_pid == 0 => {}
+        other => {
+            serial_println!("[syscall]   kernel signal posted {:?}", other);
+            return fail("a kernel signal's record", &pids);
+        }
+    }
+
+    cleanup(&pids);
+    serial_println!(
+        "[syscall]   signal frame flags, SYS_SIGNAL_QUEUE (1086), SYS_SIGNAL_TGKILL (1087), \
+         authority: OK"
+    );
+    Ok(())
+}
+
+/// The nice doors, made as a process makes them
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`;
+/// `proc::priority`, design-decisions §1503):
+///
+/// - `SYS_PROCESS_SET_PRIORITY` (1089) reaches the named process: a parent
+///   lowers its child's priority, and is refused a stranger
+///   (`PermissionDenied`) and a raise beyond the child's `RLIMIT_NICE`
+///   (`ResourceExhausted`);
+/// - `SYS_PROCESS_GET_PRIORITY` (1088) reads any process with no authority,
+///   gives a group's most favoured member, and refuses an unknown `which`;
+/// - `SYS_PROCESS_SET_NICE` (532), the caller's own, now has its raise
+///   decided by the kernel.
+///
+/// The rule's own cases, groups and users included, are
+/// `proc::priority::self_test`'s.
+fn test_dispatch_priority_doors() -> KernelResult<()> {
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: priority doors: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    // Nice n travels as n + 20.
+    let biased = |nice: i64| u64::try_from(nice.saturating_add(20)).unwrap_or(20);
+
+    let parent = pcb::create("prio-door-parent", 0);
+    let stranger = pcb::create("prio-door-stranger", 0);
+    let Ok(child) = pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())
+    else {
+        return fail("could not fork the scratch child", &[parent, stranger]);
+    };
+    let pids = [child, parent, stranger];
+    let as_parent =
+        |nr: u64, a: SyscallArgs| self_test_as_process(parent, || dispatch(nr, &a).value);
+    let as_stranger =
+        |nr: u64, a: SyscallArgs| self_test_as_process(stranger, || dispatch(nr, &a).value);
+
+    // Lowering a child's priority: allowed, and it is the child that moves.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(10))) != 0
+        || pcb::get_nice(child) != Some(10)
+        || pcb::get_nice(parent) != Some(0)
+    {
+        return fail(
+            "a parent could not renice its child, or reniced itself",
+            &pids,
+        );
+    }
+    // A stranger is not the parent's to renice; a raise is not without the right.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, stranger, biased(10)))
+        != code(KernelError::PermissionDenied)
+        || pcb::get_nice(stranger) != Some(0)
+    {
+        return fail("a stranger was reniced", &pids);
+    }
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(5)))
+        != code(KernelError::ResourceExhausted)
+        || pcb::get_nice(child) != Some(10)
+    {
+        return fail("a raise without the right went through", &pids);
+    }
+    // Reading needs no authority; a group answers its most favoured member.
+    if as_parent(SYS_PROCESS_GET_PRIORITY, args(0, stranger, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(1, 0, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(0, child, 0)) != 30
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(3, 0, 0)) != code(KernelError::InvalidArgument)
+    {
+        return fail("getpriority's answers", &pids);
+    }
+    // The caller's own: a raise refused, a lowering answered with the old nice.
+    if as_stranger(SYS_PROCESS_SET_NICE, args(biased(-5), 0, 0))
+        != code(KernelError::ResourceExhausted)
+        || as_stranger(SYS_PROCESS_SET_NICE, args(biased(5), 0, 0)) != 20
+        || pcb::get_nice(stranger) != Some(5)
+    {
+        return fail("SYS_PROCESS_SET_NICE's raise check", &pids);
+    }
+
+    for p in pids {
+        pcb::destroy(p);
+    }
+    serial_println!(
+        "[syscall]   SYS_PROCESS_GET_PRIORITY (1088), SYS_PROCESS_SET_PRIORITY (1089), \
+         SYS_PROCESS_SET_NICE's raise: OK"
+    );
+    Ok(())
+}
+
+/// The close-on-exec handles of a native exec
+/// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`):
+///
+/// - `SYS_PROCESS_SET_EXEC_CLOSE` (1090) is wired: an empty list is
+///   accepted, and a list it must read from user memory is read from there;
+/// - the exec takes the list less the handles a kept descriptor names;
+/// - `handlers::close_handle_at_exec` closes a pipe end the process holds
+///   as `close()` would -- the reader sees end-of-file at once -- and leaves
+///   alone a console handle, a socket, a handle already closed, and another
+///   process's pipe.
+///
+/// `exec_process` calls these once the new image is in; that path itself is
+/// a ring-3 fixture's to prove (lane B's step 5).
+fn test_dispatch_exec_close() -> KernelResult<()> {
+    use crate::ipc::pipe::{self, PipeHandle};
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::spawn::fd_handle_type;
+    use crate::proc::thread::self_test_as_process;
+
+    const POLL_HANGUP: u16 = 0x10;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: exec close: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+
+    let pid = pcb::create("exec-close", 0);
+    let other = pcb::create("exec-close-other", 0);
+    let pids = [pid, other];
+
+    // Wired: an empty list clears; a real list is read from user memory,
+    // which a kernel address is not.
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a));
+    if as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(0, 0)).value != 0 {
+        return fail("an empty list was not accepted", &pids);
+    }
+    let entry = [0u64; 2];
+    let from_kernel_memory = as_pid(SYS_PROCESS_SET_EXEC_CLOSE, args(entry.as_ptr() as u64, 1));
+    if from_kernel_memory.value != i64::from(KernelError::InvalidAddress.code()) {
+        serial_println!(
+            "[syscall]   SYS_PROCESS_SET_EXEC_CLOSE read kernel memory: {}",
+            from_kernel_memory.value
+        );
+        return fail("the list was not read from user memory", &pids);
+    }
+
+    // A pipe for each process.
+    let mine = as_pid(SYS_PIPE_CREATE, args(0, 0));
+    let theirs = self_test_as_process(other, || dispatch(SYS_PIPE_CREATE, &args(0, 0)));
+    let (Ok(read_end), Ok(write_end), Ok(their_read), Ok(their_write)) = (
+        u64::try_from(mine.value),
+        u64::try_from(mine.value2),
+        u64::try_from(theirs.value),
+        u64::try_from(theirs.value2),
+    ) else {
+        return fail("could not create the scratch pipes", &pids);
+    };
+
+    // The exec keeps the read end under fd 3 and drops the write end: the
+    // read end is filtered out of the close list, the rest stay.
+    pcb::set_exec_inherited_fds(pid, alloc::vec![(3, fd_handle_type::PIPE, read_end)]);
+    pcb::set_exec_close_handles(
+        pid,
+        alloc::vec![
+            (fd_handle_type::PIPE, write_end),
+            (fd_handle_type::PIPE, read_end),
+            (fd_handle_type::TCP_SOCKET, 5),
+            (fd_handle_type::CONSOLE, 0),
+        ],
+    );
+    let taken = pcb::take_exec_close_handles(pid);
+    let want = alloc::vec![
+        (fd_handle_type::PIPE, write_end),
+        (fd_handle_type::TCP_SOCKET, 5),
+        (fd_handle_type::CONSOLE, 0),
+    ];
+    if taken != want || !pcb::take_exec_close_handles(pid).is_empty() {
+        serial_println!("[syscall]   took {:?}, want {:?} once", taken, want);
+        return fail("the close list was not taken less the kept handle", &pids);
+    }
+
+    // Closing the write end: the reader sees end-of-file at once.
+    let close = |ty, h| handlers::close_handle_at_exec(pid, ty, h);
+    if close(fd_handle_type::PIPE, write_end) != Ok(true)
+        || pipe::poll_status(PipeHandle::from_raw(read_end)) & POLL_HANGUP == 0
+        || pcb::owns_ipc_handle(pid, crate::cap::ResourceType::Pipe, write_end)
+    {
+        return fail(
+            "the dropped write end was not closed as close() closes it",
+            &pids,
+        );
+    }
+    // Left alone: a console handle, a socket, a handle already closed, and
+    // another process's pipe.
+    if close(fd_handle_type::CONSOLE, 0) != Ok(false)
+        || close(fd_handle_type::TCP_SOCKET, 5) != Ok(false)
+        || close(fd_handle_type::PIPE, write_end) != Ok(false)
+        || close(fd_handle_type::PIPE, their_write) != Ok(false)
+        || pipe::poll_status(PipeHandle::from_raw(their_read)) & POLL_HANGUP != 0
+    {
+        return fail(
+            "a handle that is not the process's to close was touched",
+            &pids,
+        );
+    }
+
+    // Clean up the rest as their owners would.
+    let leftover_mine = handlers::close_handle_at_exec(pid, fd_handle_type::PIPE, read_end);
+    let leftover_theirs = [their_read, their_write]
+        .map(|h| handlers::close_handle_at_exec(other, fd_handle_type::PIPE, h));
+    pcb::set_exec_inherited_fds(pid, alloc::vec::Vec::new());
+    for p in pids {
+        pcb::destroy(p);
+    }
+    if leftover_mine != Ok(true) || leftover_theirs != [Ok(true), Ok(true)] {
+        serial_println!(
+            "[syscall]   FAIL: exec close: cleanup closed {:?} / {:?}",
+            leftover_mine,
+            leftover_theirs
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   SYS_PROCESS_SET_EXEC_CLOSE (1090), close at exec: OK");
+    Ok(())
+}
+
+/// `requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`,
+/// made as a process makes the calls:
+///
+/// - through a pty **master**, a terminal no session holds has foreground
+///   group 0, Linux's answer (it was ENOTTY);
+/// - through a **slave** that is not the caller's controlling terminal, both
+///   calls are ENOTTY (they answered for the terminal anyway);
+/// - group 0, or a group that does not exist, is ESRCH after the terminal
+///   checks (0 was EINVAL);
+/// - a watch event whose path is longer than 255 bytes arrives whole through
+///   `SYS_FS_WATCH_READ_RECORDS` (1091), and a read too small for the first
+///   record leaves it queued.
+fn test_dispatch_tioc_and_watch_records() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+    use crate::tty::pty;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!(
+            "[syscall]   FAIL: tcgetpgrp/tcsetpgrp, watch records: {}",
+            msg
+        );
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let (master, slave) = pty::create()?;
+    let pid = pcb::create("tioc-session", 0);
+    pcb::register_ipc_handle(pid, ResourceType::Pty, master.raw());
+    pcb::register_ipc_handle(pid, ResourceType::Pty, slave.raw());
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+    let verdict = (|| {
+        // No session holds the terminal yet.
+        if as_pid(SYS_PTY_GET_PGRP, args(master.raw(), 0)) != 0 {
+            return Err("a master with no session should read group 0");
+        }
+        let not_ours = code(KernelError::NotSupported);
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != not_ours
+            || as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), pid)) != not_ours
+        {
+            return Err("a slave that is not our terminal should be ENOTTY");
+        }
+        // Make the slave our controlling terminal: now it answers.
+        if pcb::ctty_acquire(pid, slave.id()).is_err() {
+            return Err("could not make the slave our terminal");
+        }
+        if as_pid(SYS_PTY_GET_PGRP, args(slave.raw(), 0)) != i64::try_from(pid).unwrap_or(-1) {
+            return Err("our own terminal's slave should read our group");
+        }
+        let missing = code(KernelError::NoSuchProcess);
+        if as_pid(SYS_PTY_SET_PGRP, args(slave.raw(), 0)) != missing
+            || as_pid(SYS_PTY_SET_PGRP, args(master.raw(), 7_654_321)) != missing
+            || as_pid(SYS_TTY_SET_PGRP, args(0, 0)) != missing
+        {
+            return Err("group 0 or a missing group should be ESRCH");
+        }
+        if as_pid(SYS_PTY_SET_PGRP, args(master.raw(), pid)) != 0 {
+            return Err("handing the terminal to our own group failed");
+        }
+        Ok(())
+    })();
+    pcb::destroy(pid);
+    // The hangups name the session just destroyed: nobody is left to tell.
+    let _ = pty::close(master);
+    let _ = pty::close(slave);
+    if let Err(msg) = verdict {
+        return fail(msg);
+    }
+
+    // A path of 300 bytes under a watched directory.
+    let mut path = alloc::vec::Vec::from(&b"/WATCH-RECORDS-PROBE/"[..]);
+    path.resize(300, b'n');
+    let watch = crate::fs::notify::create_watch(
+        "/WATCH-RECORDS-PROBE",
+        crate::fs::notify::FsEventMask::ALL_CHANGES,
+        false,
+    )?;
+    crate::fs::notify::emit_created(path.as_slice());
+    let too_small = crate::fs::notify::read_events_within(watch, 8, handlers::watch_record_len);
+    let still_queued = crate::fs::notify::pending_count(watch);
+    let read = crate::fs::notify::read_events_within(watch, 4096, handlers::watch_record_len);
+    crate::fs::notify::close_watch(watch)?;
+    if too_small.as_ref().err() != Some(&KernelError::BufferTooSmall) || still_queued != Ok(1) {
+        return fail("a read too small for the first record did not leave it queued");
+    }
+    let Ok(events) = read else {
+        return fail("the long-path event could not be read");
+    };
+    let [event] = events.as_slice() else {
+        return fail("expected exactly the one long-path event");
+    };
+    let mut record = alloc::vec::Vec::new();
+    handlers::encode_watch_record(event, &mut record);
+    let field32 = |at: usize| {
+        record
+            .get(at..at.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map(u32::from_le_bytes)
+    };
+    let name_end = handlers::WATCH_RECORD_HEADER.saturating_add(path.len());
+    let whole = record.len() == handlers::watch_record_len(event)
+        && record.len() % 8 == 0
+        && record.get(..8) == Some(&watch.to_le_bytes()[..])
+        && field32(8) == Some(0)
+        && field32(16) == u32::try_from(path.len()).ok()
+        && field32(20) == Some(0)
+        && record.get(handlers::WATCH_RECORD_HEADER..name_end) == Some(path.as_slice())
+        && record.get(name_end) == Some(&0);
+    if !whole {
+        serial_println!(
+            "[syscall]     record of {} bytes: {:?}",
+            record.len(),
+            record.get(..24)
+        );
+        return fail("the long path did not arrive whole in its record");
+    }
+    serial_println!(
+        "[syscall]   tcgetpgrp/tcsetpgrp on named terminals, group 0, \
+         SYS_FS_WATCH_READ_RECORDS (1091): OK"
+    );
+    Ok(())
+}
+
+/// `SYS_CPU_CURRENT` (1092) answers a CPU that exists, on node 0, packed as
+/// `cpu | node << 32` (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`).
+/// Which CPU is not pinned: the task may run anywhere.
+fn test_cpu_current() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let got = dispatch(SYS_CPU_CURRENT, &args).value;
+    let cpus = i64::try_from(crate::smp::cpu_count().max(1)).unwrap_or(i64::MAX);
+    if !(0..cpus).contains(&got) {
+        serial_println!(
+            "[syscall]   FAIL: SYS_CPU_CURRENT answered {:#x} with {} CPUs (cpu below the count, node 0)",
+            got,
+            cpus
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   SYS_CPU_CURRENT (1092): CPU {}, node 0: OK",
+        got
+    );
     Ok(())
 }
 
@@ -2388,6 +2987,7 @@ fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
             0,
             Rights::READ | Rights::IO_REALTIME,
         ),
+        (ResourceType::Thread, 0, Rights::IO_REALTIME),
     ] {
         if pcb::grant_capability(pid, rt, id, rights).is_err() {
             return fail("could not grant the scratch process its capabilities", pid);
@@ -2431,6 +3031,10 @@ fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
         (
             "realtime I/O",
             !has(ResourceType::IoScheduler, Rights::IO_REALTIME),
+        ),
+        (
+            "raising priority (CAP_SYS_NICE)",
+            !has(ResourceType::Thread, Rights::IO_REALTIME),
         ),
     ] {
         if !gone {

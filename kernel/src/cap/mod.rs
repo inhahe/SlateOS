@@ -596,8 +596,12 @@ const ROOT_PROCESS_RIGHTS: Rights = Rights::SET_CREDENTIALS
 /// - **on `Process` capabilities:** [`ROOT_PROCESS_RIGHTS`], and `DEBUG` on a
 ///   class-wide one (resource id 0, any process -- `CAP_SYS_PTRACE`). A
 ///   `DEBUG` granted over one process is an explicit grant and stays;
-/// - **on `IoScheduler`:** `IO_REALTIME` (`CAP_SYS_NICE`), the rest kept,
-///   since ordinary I/O may need the capability.
+/// - **`IO_REALTIME` (`CAP_SYS_NICE`)**, the rest kept:
+///   - on `IoScheduler`, since ordinary I/O may need the capability;
+///   - on `Thread`, where it is the right to raise priority
+///     (design-decisions §326, enforced by `proc::priority`). It was left
+///     in place until 2026-10-01, so a process that dropped root could
+///     still put itself above every service.
 ///
 /// What stays is everything else, file access included: here it is a
 /// capability rather than root's bypass of permission bits, so taking it would
@@ -625,7 +629,7 @@ pub fn rights_without_root(
                 kept
             }
         }
-        ResourceType::IoScheduler => rights.remove(Rights::IO_REALTIME),
+        ResourceType::IoScheduler | ResourceType::Thread => rights.remove(Rights::IO_REALTIME),
         _ => rights,
     }
 }

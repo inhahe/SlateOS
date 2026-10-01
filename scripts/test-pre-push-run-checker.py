@@ -90,7 +90,8 @@ def extract_run_checker(text: str) -> str:
 
 
 def child_env() -> dict[str, str]:
-    """This process's environment with every `CHECKER_*` setting removed.
+    """This process's environment with every `CHECKER_*` and `GATE_CACHE*`
+    setting removed.
 
     Every driver below is run under this rather than under a plain inherited
     environment, because the settings the library reads are *exported* by at
@@ -115,8 +116,21 @@ def child_env() -> dict[str, str]:
     and unset alike, so an empty value would happen to work today and would
     stop working the moment a fallback is written `${CHECKER_PROG-checker}`.
     Unset is the state group 6 is about.
+
+    `GATE_CACHE*` is the same leak, found the same way on 2026-10-01 (lane A's
+    rq17 refused to build on it). `boot-test.sh` exports `GATE_CACHE=1` and
+    `GATE_CACHE_DRIVER` for its gates, and `run_checker` wraps a `.py` checker
+    in the cache when it sees them. Under the boot test, then, every fixture
+    checker ran through `gate-cache.py`, whose `gate-cache: MISS ...` line was
+    the first thing a silent checker "said" -- and groups 9 and 10 read it as
+    the decline reason a silent checker must not have. Run by hand, the suite
+    passed.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("CHECKER_")}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not (k.startswith("CHECKER_") or k.startswith("GATE_CACHE"))
+    }
 
 
 class KeptLog:

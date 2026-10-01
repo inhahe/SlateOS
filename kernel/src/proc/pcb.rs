@@ -39,10 +39,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// session.  PID 0 is the kernel, PID 1 is init.
 pub type ProcessId = u64;
 
-/// Counter for generating unique process IDs.
-/// Starts at 1 (PID 0 = kernel).
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-
 /// Cumulative count of processes created since boot.
 ///
 /// Incremented once per successful process creation — both fresh
@@ -50,13 +46,17 @@ static NEXT_PID: AtomicU64 = AtomicU64::new(1);
 /// counter (it never decrements when a process exits), which is exactly
 /// the semantics Linux's `/proc/stat` `processes` field reports.  It is
 /// distinct from the live process count (the size of `PROCESS_TABLE`):
-/// `NEXT_PID` also advances but is an implementation detail of PID
-/// allocation, so we keep a dedicated counter rather than deriving the
-/// value from it.
+/// the id counter also advances, for tasks as well as processes, so we keep
+/// a dedicated counter rather than deriving the value from it.
 static PROCESSES_CREATED: AtomicU64 = AtomicU64::new(0);
 
+/// A new process id, from the counter task ids come from
+/// ([`crate::sched::task::alloc_id`]): one id space, as Linux's. The
+/// process's first thread is then given this same number as its task id
+/// ([`claim_leader_id`]), so a process's id is its main thread's, and no
+/// task id is ever another process's id. Starts at 1: 0 is the kernel.
 fn alloc_pid() -> ProcessId {
-    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    crate::sched::task::alloc_id()
 }
 
 /// The PID [`alloc_pid`] would hand out next, without consuming it.
@@ -69,7 +69,7 @@ fn alloc_pid() -> ProcessId {
 /// side effect on the very sequence it is checking.
 #[must_use]
 pub fn peek_next_pid() -> ProcessId {
-    NEXT_PID.load(Ordering::Relaxed)
+    crate::sched::task::peek_next_id()
 }
 
 /// Cumulative number of processes created since boot.
@@ -195,6 +195,22 @@ impl JobControlEvent {
                 w
             }
             Self::Continued => 0xffff,
+        }
+    }
+
+    /// This transition as `siginfo_t`'s `si_code` and `si_status`:
+    /// `CLD_STOPPED` and the stop signal, or `CLD_CONTINUED` and `SIGCONT`.
+    /// The sibling of [`ExitInfo::sigchld_code_and_status`], for the same
+    /// reason: one mapping for every report of the same change.
+    #[must_use]
+    pub fn sigchld_code_and_status(self) -> (i32, i32) {
+        use crate::proc::signal::{SIGCONT, si_code};
+        // Both values are below 256 (`& 0xff`; SIGCONT is 18), so neither
+        // cast can wrap.
+        #[allow(clippy::cast_possible_wrap)]
+        match self {
+            Self::Stopped(sig) => (si_code::CLD_STOPPED, (sig & 0xff) as i32),
+            Self::Continued => (si_code::CLD_CONTINUED, SIGCONT as i32),
         }
     }
 }
@@ -382,6 +398,9 @@ pub struct Process {
     pub sid: ProcessId,
     /// Thread IDs belonging to this process.
     pub threads: Vec<TaskId>,
+    /// The process's own id has been given to a thread, its first
+    /// ([`claim_leader_id`]). Never cleared: the id stays the leader's.
+    pub leader_id_claimed: bool,
     /// Per-process capability table.
     pub cap_table: CapTable,
     /// Exit code (set when all threads have exited).
@@ -469,6 +488,20 @@ pub struct Process {
     /// `ipc_handles`, and the userspace `close()`/exit path releases each
     /// handle exactly once.  Consumed one-shot by the post-exec startup.
     pub exec_inherited_fds: Vec<(i32, u8, u64)>,
+    /// Handles to close when this process's next `exec` succeeds: those of
+    /// the descriptors libc drops as close-on-exec, as `(fd_handle_type,
+    /// handle)` (`SYS_PROCESS_SET_EXEC_CLOSE`). Without it, a dropped
+    /// descriptor's handle stayed open, unnamed, until the process exited,
+    /// so a close-on-exec pipe's reader saw no end-of-file for the life of
+    /// the new program
+    /// (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+    ///
+    /// Every exec attempt takes it ([`take_exec_close_handles`]): a
+    /// successful one closes the handles and a failed one drops the list,
+    /// leaving them open as POSIX requires. So a stale list can never reach
+    /// a later exec, and libc sends it before each attempt, with the
+    /// kept-descriptor list.
+    pub exec_close_handles: Vec<(u8, u64)>,
     /// Initial command-line arguments for the child process.
     ///
     /// Each element is one argument as a byte string (NOT null-terminated
@@ -1325,6 +1358,7 @@ impl Process {
             pgid: pid,
             sid: pid,
             threads: Vec::new(),
+            leader_id_claimed: false,
             cap_table: CapTable::new(),
             exit_code: None,
             credentials: ProcessCredentials::root(),
@@ -1337,6 +1371,7 @@ impl Process {
             crash_info: None,
             initial_fds: Vec::new(),
             exec_inherited_fds: Vec::new(),
+            exec_close_handles: Vec::new(),
             initial_argv: Vec::new(),
             initial_envp: Vec::new(),
             // Persistent /proc snapshots — populated by set_initial_args
@@ -1783,6 +1818,7 @@ pub fn fork_create(
         pgid: parent_pgid,
         sid: parent_sid,
         threads: Vec::new(),
+        leader_id_claimed: false,
         cap_table,
         exit_code: None,
         credentials,
@@ -1797,6 +1833,7 @@ pub fn fork_create(
         // A fresh fork carries no pending exec fd-table snapshot; it is
         // populated only when this process later calls execve.
         exec_inherited_fds: Vec::new(),
+        exec_close_handles: Vec::new(),
         // argv/envp are not re-read by a forked child — its argument
         // vector already lives in its copy-on-write userspace memory.
         initial_argv: Vec::new(),
@@ -2014,6 +2051,27 @@ pub fn set_running(pid: ProcessId) -> KernelResult<()> {
 
     proc.state = ProcessState::Running;
     Ok(())
+}
+
+/// Claim process `pid`'s own id for the thread about to be created: `true`
+/// the first time it is asked for a live process, `false` ever after (and
+/// for a process that is gone).
+///
+/// `proc::thread` asks before creating each thread and gives the claimed
+/// id to the first, so a process's id is its main thread's task id, as on
+/// Linux: `gettid() == getpid()` in the main thread, and `/proc/<pid>` --
+/// keyed by task id -- is the process. The id comes from the counter task
+/// ids come from ([`alloc_pid`]), so no other task can hold it.
+#[must_use]
+pub fn claim_leader_id(pid: ProcessId) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    match table.get_mut(&pid) {
+        Some(proc) if !proc.leader_id_claimed => {
+            proc.leader_id_claimed = true;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Add a thread to a process.
@@ -3177,36 +3235,61 @@ pub fn ctty_tty_of(pid: ProcessId) -> Option<u32> {
 /// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
 /// - [`KernelError::NotSupported`] (ENOTTY) if `pid`'s session has no
 ///   controlling terminal.
-/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
-/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
-///   in the caller's session.
+/// - [`KernelError::NoSuchProcess`] (ESRCH) if no live process is in group
+///   `pgid` -- 0 included, as Linux's `tiocspgrp` -- judged after the
+///   terminal.
+/// - [`KernelError::PermissionDenied`] (EPERM) if group `pgid` is in another
+///   session.
 pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
-    if pgid == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-
-    // Resolve the caller's session and validate the destination group in one
+    // Resolve the caller's session and judge the destination group in one
     // pass over the process table, then drop it before locking the ctty map.
-    let (sid, group_ok) = {
+    let (sid, group) = {
         let table = PROCESS_TABLE.lock();
         let me = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
         let sid = me.sid;
-        let ok = table
-            .values()
-            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie);
-        (sid, ok)
+        (sid, judge_fg_group(&table, pgid, sid))
     };
 
     let mut map = CTTY_FG_PGRP.lock();
     // Check for the terminal before the group, so a process with no terminal
-    // at all gets ENOTTY rather than a permission verdict about a group it
-    // was never entitled to name.
+    // at all gets ENOTTY rather than a verdict about a group it was never
+    // entitled to name -- Linux's `tiocspgrp` order.
     let slot = map.get_mut(&sid).ok_or(KernelError::NotSupported)?;
-    if !group_ok {
-        return Err(KernelError::PermissionDenied);
-    }
+    group?;
     slot.fg_pgrp = pgid;
     Ok(())
+}
+
+/// Whether `pgid` may become the foreground group of a terminal held by
+/// session `sid`, in Linux `tiocspgrp`'s terms, checked after the terminal
+/// itself:
+/// - `NoSuchProcess` (ESRCH) when no live process is in group `pgid`, which
+///   includes group 0: there is none;
+/// - `PermissionDenied` (EPERM) when the group lives in another session;
+/// - `Ok` otherwise.
+///
+/// Until 2026-10-01 a 0 was refused up front with `InvalidArgument`, before
+/// the terminal checks, and a group that did not exist read the same as one
+/// in another session (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+fn judge_fg_group(
+    table: &BTreeMap<ProcessId, Process>,
+    pgid: ProcessId,
+    sid: ProcessId,
+) -> KernelResult<()> {
+    let mut exists = false;
+    for p in table.values() {
+        if p.pgid == pgid && pgid != 0 && p.state != ProcessState::Zombie {
+            if p.sid == sid {
+                return Ok(());
+            }
+            exists = true;
+        }
+    }
+    if exists {
+        Err(KernelError::PermissionDenied)
+    } else {
+        Err(KernelError::NoSuchProcess)
+    }
 }
 
 /// Set the foreground process group of terminal `tty`, whoever holds it.
@@ -3234,17 +3317,14 @@ pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
 /// the POSIX group rule.
 ///
 /// # Errors
-/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
 /// - [`KernelError::NotSupported`] (ENOTTY) if no session holds `tty` — a pty
 ///   whose slave has not yet run `TIOCSCTTY` has no foreground group to set,
 ///   and inventing one would be a value nothing consults.
-/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
-///   in the session holding `tty`.
+/// - [`KernelError::NoSuchProcess`] (ESRCH) if no live process is in group
+///   `pgid`, 0 included.
+/// - [`KernelError::PermissionDenied`] (EPERM) if group `pgid` is in a session
+///   other than the one holding `tty`.
 pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
-    if pgid == 0 {
-        return Err(KernelError::InvalidArgument);
-    }
-
     // Three short critical sections rather than one, because the two locks may
     // never be held together (see the note on `CTTY_FG_PGRP`) and this needs
     // both: the ctty map to learn *which* session to validate against, then
@@ -3258,15 +3338,7 @@ pub fn ctty_set_fg_pgrp_on(tty: u32, pgid: ProcessId) -> KernelResult<()> {
     }
     .ok_or(KernelError::NotSupported)?;
 
-    let group_ok = {
-        let table = PROCESS_TABLE.lock();
-        table
-            .values()
-            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie)
-    };
-    if !group_ok {
-        return Err(KernelError::PermissionDenied);
-    }
+    judge_fg_group(&PROCESS_TABLE.lock(), pgid, sid)?;
 
     let mut map = CTTY_FG_PGRP.lock();
     let slot = map
@@ -3476,6 +3548,21 @@ pub fn pids_in_group(pgid: ProcessId) -> Vec<ProcessId> {
     table
         .values()
         .filter(|p| p.pgid == pgid && p.state != ProcessState::Zombie)
+        .map(|p| p.pid)
+        .collect()
+}
+
+/// Collect the PIDs of all live (non-zombie) processes whose real uid is
+/// `uid` -- the processes `setpriority`/`getpriority`'s `PRIO_USER` names
+/// (`proc::priority`).
+///
+/// Returns an empty vector if no live process has that uid.
+#[must_use]
+pub fn pids_of_user(uid: u32) -> Vec<ProcessId> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .values()
+        .filter(|p| p.credentials.uid == uid && p.state != ProcessState::Zombie)
         .map(|p| p.pid)
         .collect()
 }
@@ -4756,6 +4843,30 @@ impl ExitInfo {
             #[allow(clippy::cast_possible_wrap)]
             let s = (lo << 8) as i32;
             s
+        }
+    }
+
+    /// This termination as `siginfo_t`'s `si_code` and `si_status`, which
+    /// both the parent's `SIGCHLD` and `waitid` report: `CLD_EXITED` and the
+    /// exit status, `CLD_KILLED` and the signal, or `CLD_DUMPED` and the
+    /// signal when the status word's core bit is set.
+    ///
+    /// Read off [`Self::to_wstatus`] rather than decoded a second time, so a
+    /// child's `wait` status, its `waitid` record and its parent's `SIGCHLD`
+    /// cannot disagree about how it ended -- as `waitid`'s did until
+    /// 2026-10-01, calling a crash `CLD_DUMPED` while the status word said
+    /// killed, no core. A crash writes no core file, so killed is right.
+    #[must_use]
+    pub fn sigchld_code_and_status(&self) -> (i32, i32) {
+        use crate::proc::signal::si_code;
+        let wstatus = self.to_wstatus();
+        let termsig = wstatus & 0x7f;
+        if termsig == 0 {
+            (si_code::CLD_EXITED, (wstatus >> 8) & 0xff)
+        } else if wstatus & 0x80 != 0 {
+            (si_code::CLD_DUMPED, termsig)
+        } else {
+            (si_code::CLD_KILLED, termsig)
         }
     }
 }
@@ -6643,6 +6754,35 @@ pub fn set_exec_inherited_fds(pid: ProcessId, fds: Vec<(i32, u8, u64)>) {
     }
 }
 
+/// Record the handles process `pid`'s next successful `exec` closes
+/// ([`Process::exec_close_handles`]); an empty list clears it.
+pub fn set_exec_close_handles(pid: ProcessId, handles: Vec<(u8, u64)>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.exec_close_handles = handles;
+    }
+}
+
+/// Take the close-on-exec handle list, for an exec attempt that is starting
+/// -- less any handle the exec also keeps under a descriptor
+/// ([`Process::exec_inherited_fds`]). A handle that is both dropped and kept
+/// is still in use, and closing it would close the kept descriptor's file.
+/// Taken under one lock, so the two lists are compared as they stand.
+pub fn take_exec_close_handles(pid: ProcessId) -> Vec<(u8, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return Vec::new();
+    };
+    let mut handles = core::mem::take(&mut proc.exec_close_handles);
+    handles.retain(|&(ty, h)| {
+        !proc
+            .exec_inherited_fds
+            .iter()
+            .any(|&(_, kept_ty, kept_h)| kept_ty == ty && kept_h == h)
+    });
+    handles
+}
+
 /// Take (move out) the exec-carried fd snapshot from a process's PCB.
 ///
 /// One-shot, mirroring [`take_initial_fds`]: the post-exec startup reads
@@ -8478,14 +8618,16 @@ fn test_controlling_terminal() -> KernelResult<()> {
         );
     }
 
-    // (4) Argument gates: pgid 0 is not a group, and handing the terminal to
-    //     a group with no live member would wedge it — nothing would be left
-    //     to hand it back.
-    if ctty_set_fg_pgrp(shell, 0) != Err(KernelError::InvalidArgument) {
-        return fail("tcsetpgrp(0) should be EINVAL", &[shell, job]);
+    // (4) A group that does not exist -- 0 among them -- is ESRCH, as in
+    //     Linux's `tiocspgrp`: handing the terminal to a group with no live
+    //     member would wedge it, with nothing left to hand it back. Until
+    //     2026-10-01 0 was EINVAL and an empty group EPERM, the answer that
+    //     belongs to another session's group (5).
+    if ctty_set_fg_pgrp(shell, 0) != Err(KernelError::NoSuchProcess) {
+        return fail("tcsetpgrp(0) should be ESRCH", &[shell, job]);
     }
-    if ctty_set_fg_pgrp(shell, 7_654_321) != Err(KernelError::PermissionDenied) {
-        return fail("tcsetpgrp to an empty group should be EPERM", &[shell, job]);
+    if ctty_set_fg_pgrp(shell, 7_654_321) != Err(KernelError::NoSuchProcess) {
+        return fail("tcsetpgrp to an empty group should be ESRCH", &[shell, job]);
     }
 
     // (5) Terminal theft: `stranger` leads its own session, so its group is
@@ -8563,9 +8705,9 @@ fn test_controlling_terminal() -> KernelResult<()> {
             &[shell, job, stranger],
         );
     }
-    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::InvalidArgument) {
+    if ctty_set_fg_pgrp_on(crate::tty::CONSOLE, 0) != Err(KernelError::NoSuchProcess) {
         return fail(
-            "terminal-keyed tcsetpgrp(0) should be EINVAL",
+            "terminal-keyed tcsetpgrp(0) should be ESRCH",
             &[shell, job, stranger],
         );
     }

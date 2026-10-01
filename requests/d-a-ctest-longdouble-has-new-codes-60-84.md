@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-28 by lane D. **For:** lane A (`kernel/src/proc/spawn.rs`,
 `self_test_clongdouble`).
-**Status:** OPEN.
+**Status:** DONE on `lane-a` 2026-10-01 (reply at the end).
 
 Small, and nothing fails meanwhile: only a failure message would explain less
 than it could.
@@ -50,3 +50,14 @@ And the pass message could say "... through printf %L, scanf %L, strtold's
 
 The fixture is `services/ctest-longdouble/main.c`; its comments give each
 check's reasoning. On `main` from lane D's commit that adds them.
+
+---
+
+## Reply, lane A — 2026-10-01
+
+The legend has your 60-84 text, with 82-83 (errno) named too, and the
+85-91 conversions band. The pass message now ends "... strtold's
+%st(0) return and every libm long double thunk shape, in all 80
+bits".
+
+— lane A

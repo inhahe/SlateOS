@@ -4281,6 +4281,102 @@ pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(recorded as i64)
 }
 
+/// `SYS_PROCESS_SET_EXEC_CLOSE` (1090) -- name the handles the caller's next
+/// successful `exec` closes: those of the descriptors libc drops as
+/// close-on-exec, which no kept descriptor shares.
+///
+/// `arg0`: pointer to an array of [`FdMapEntry`](crate::proc::spawn::FdMapEntry)
+/// (`handle_type` and `handle` are read; `fd` is ignored). `arg1`: the count.
+/// An empty list (`arg1 == 0` or a null pointer) clears it. A handle type the
+/// kernel does not know refuses the whole list (`InvalidArgument`), so a libc
+/// that names one learns it now rather than at exec. Returns the number of
+/// entries recorded.
+///
+/// See [`Process::exec_close_handles`](crate::proc::pcb::Process::exec_close_handles)
+/// for when the handles are closed, and [`close_handle_at_exec`] for how.
+pub fn sys_process_set_exec_close(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::pcb;
+    use crate::proc::spawn::{FdMapEntry, fd_handle_type};
+
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::ok(0); // Kernel task: nothing to exec.
+    };
+    if args.arg1 == 0 || args.arg0 == 0 {
+        pcb::set_exec_close_handles(pid, alloc::vec::Vec::new());
+        return SyscallResult::ok(0);
+    }
+    let count = usize::try_from(args.arg1).unwrap_or(usize::MAX);
+    let entries = match crate::mm::user::read_user_items::<FdMapEntry>(args.arg0, count, FD_MAP_MAX)
+    {
+        Ok(entries) => entries,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut handles = alloc::vec::Vec::with_capacity(entries.len());
+    for entry in &entries {
+        if entry.handle_type > fd_handle_type::PTY {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        handles.push((entry.handle_type, entry.handle));
+    }
+    let recorded = handles.len();
+    pcb::set_exec_close_handles(pid, handles);
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(recorded as i64)
+}
+
+/// Close one of process `pid`'s handles for its successful `exec`, as
+/// `close()` would close it: deregistered from the process, then released
+/// through its type's close path, so the last writer of a pipe gives its
+/// reader end-of-file and the last close of a pty master hangs the slave up.
+///
+/// `Ok(true)` when the handle was closed. `Ok(false)` when it was left open:
+/// - a console handle, which has nothing to release;
+/// - a handle the process does not hold, so the list cannot reach anyone
+///   else's;
+/// - a TCP or UDP socket. Those are not counted per process: a fork shares
+///   one rather than duplicating it, so closing it here would close it for
+///   every holder. It stays open, as it did before this existed.
+///
+/// `Err` is the close's own failure.
+///
+/// # Errors
+///
+/// What `fs::handle::close` answers for a file handle it cannot close.
+pub(crate) fn close_handle_at_exec(
+    pid: crate::proc::pcb::ProcessId,
+    handle_type: u8,
+    handle: u64,
+) -> KernelResult<bool> {
+    use crate::proc::pcb;
+    use crate::proc::spawn::fd_handle_type;
+
+    let resource = match handle_type {
+        fd_handle_type::FILE => ResourceType::File,
+        fd_handle_type::PIPE => ResourceType::Pipe,
+        fd_handle_type::EVENTFD => ResourceType::EventFd,
+        fd_handle_type::STREAM_SOCKET => ResourceType::StreamSocket,
+        fd_handle_type::PTY => ResourceType::Pty,
+        // CONSOLE, TCP_SOCKET, UDP_SOCKET: see above.
+        _ => return Ok(false),
+    };
+    if !pcb::owns_ipc_handle(pid, resource, handle) {
+        return Ok(false);
+    }
+    match handle_type {
+        fd_handle_type::FILE => {
+            crate::fs::handle::close(handle)?;
+        }
+        fd_handle_type::PIPE => pipe::close(PipeHandle::from_raw(handle)),
+        fd_handle_type::EVENTFD => eventfd::close(EventFdHandle::from_raw(handle)),
+        fd_handle_type::STREAM_SOCKET => {
+            stream_socket::close(StreamSocketHandle::from_raw(handle));
+        }
+        _ => close_pty_handle(crate::tty::pty::PtyHandle::from_raw(handle)),
+    }
+    pcb::deregister_ipc_handle(pid, resource, handle);
+    Ok(true)
+}
+
 /// `SYS_PROCESS_GET_ARGS` — retrieve initial argv/envp.
 ///
 /// Called by the child during startup to read argv and envp data
@@ -5324,11 +5420,12 @@ pub fn sys_tty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// [`pcb::ctty_set_fg_pgrp`]: crate::proc::pcb::ctty_set_fg_pgrp
 pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Reject on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap; 0 is rejected by
-    // `ctty_set_fg_pgrp` itself (there is no group 0 to hand a terminal to).
+    // width rather than reproducing Linux's `int` wrap. 0 goes on through the
+    // terminal checks and is then ESRCH, as in Linux's `tiocspgrp`: there is
+    // no group 0 (`pcb::ctty_set_fg_pgrp`).
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg0 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     let pid = match caller_process_or_err() {
@@ -5997,7 +6094,6 @@ pub fn tty_job_control_decide(pid: crate::proc::pcb::ProcessId, sig: u32) -> Tty
 #[must_use]
 pub fn tty_job_control_check(sig: u32) -> TtyCtlOutcome {
     use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
 
     let Some(pid) = caller_pid() else {
         return TtyCtlOutcome::Done;
@@ -6009,20 +6105,13 @@ pub fn tty_job_control_check(sig: u32) -> TtyCtlOutcome {
     };
     // `decide` already established the caller is in a real group.
     let pgid = pcb::get_pgid(pid).unwrap_or(pid);
-    for target in pcb::pids_in_group(pgid) {
-        let send_args = SyscallArgs {
-            arg0: target,
-            arg1: u64::from(due),
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        // Best-effort, as in `deliver_console_signal`: a member that exited
-        // between the membership snapshot and delivery just fails its own
-        // send; the rest still receive it.
-        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
-    }
+    // The kernel's signal, not the caller's: every member gets it, the
+    // caller's siblings included (it may signal only its own children), and
+    // the caller -- which a stop parks -- gets it last.  Best-effort, as in
+    // `signal_foreground_group`: a member that exited between the membership
+    // snapshot and delivery just fails its own post, and the rest still
+    // receive it, so the tally has nothing to change here.
+    let _ = post_kernel_signal_to_members(&pcb::pids_in_group(pgid), due);
     // ERESTARTSYS, not a plain error: once a `SIGCONT` brings the caller back
     // to the foreground the access should simply proceed, which is what a
     // transparent restart gives.  (A native process that installed a handler
@@ -6115,7 +6204,6 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
 /// error: Linux likewise generates no signal for a tty with no `tty->pgrp`.
 pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
     use crate::proc::pcb;
-    use crate::proc::signal::si_code::SI_KERNEL;
 
     let pgid = crate::tty::foreground_pgid(tty);
     if pgid == 0 {
@@ -6141,29 +6229,14 @@ pub fn signal_foreground_group(tty: crate::tty::TtyId, sig: u8) {
         tty,
         members
     );
-    let mut delivered = 0usize;
-    let mut failed = 0usize;
-    for target in members {
-        let send_args = SyscallArgs {
-            arg0: target,
-            arg1: u64::from(sig),
-            arg2: 0,
-            arg3: 0,
-            arg4: 0,
-            arg5: 0,
-        };
-        // Best-effort, per member: a member that exited between the membership
-        // snapshot and delivery just fails its own send and the rest still
-        // receive it. Counted rather than discarded so the aggregate can be
-        // judged even though no individual failure is worth reporting.
-        // (`SyscallResult` carries an i64 `value` whose negative range is the
-        // error code; it is not a `Result`.)
-        if sys_signal_send_with_info(&send_args, SI_KERNEL, 0).value < 0 {
-            failed = failed.saturating_add(1);
-        } else {
-            delivered = delivered.saturating_add(1);
-        }
-    }
+    // The kernel's signal, not the writer's: a terminal writing `^C` into a
+    // pty may signal only its own children, and the foreground job is
+    // usually its shell's. Best-effort, per member: a member that exited
+    // between the membership snapshot and delivery just fails its own post
+    // and the rest still receive it. Counted rather than discarded so the
+    // aggregate can be judged even though no individual failure is worth
+    // reporting.
+    let (delivered, failed) = post_kernel_signal_to_members(&members, u32::from(sig));
     // Silent unless NOTHING was delivered to a non-empty group: one member
     // exiting mid-delivery is benign, not one send succeeding is a fault, and
     // printing every failure would bury the second in the first.
@@ -6732,18 +6805,41 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
     // handle and its foreground group is a property of *that* terminal's
     // session. Looking the caller up first would only turn a reserved handle's
     // `InvalidHandle` into a less specific verdict.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
-    // No session holds this terminal — a pty whose slave has not yet run
-    // TIOCSCTTY. It has no foreground group, and ENOTTY says so; returning 0
-    // would be a pgid the caller could try to signal.
+    // No session holds this terminal: a pty whose slave has not yet run
+    // TIOCSCTTY, asked about through its master. Linux's `tiocgpgrp` answers
+    // 0 for it (no group, `pid_vnr(NULL)`), and so does this since
+    // 2026-10-01; it was ENOTTY.
     match crate::proc::pcb::ctty_fg_pgrp(tty) {
         #[allow(clippy::cast_possible_wrap)]
         Some(pgid) => SyscallResult::ok(pgid as i64),
-        None => SyscallResult::err(KernelError::NotSupported),
+        None => SyscallResult::ok(0),
     }
+}
+
+/// The terminal a named `SYS_PTY_GET_PGRP`/`SYS_PTY_SET_PGRP` acts on: the
+/// pty the caller holds `raw` for.
+///
+/// Through a **master**, any session's terminal: the master is the other
+/// side of the wire, so it is never the holder's controlling terminal. Through
+/// a **slave**, only the caller's own controlling terminal. A slave that is
+/// not is `NotSupported` (ENOTTY), as in Linux's `tiocgpgrp`/`tiocspgrp`
+/// (`tty == real_tty && current->signal->tty != real_tty`). Before
+/// 2026-10-01, a slave that was not the caller's terminal answered for that
+/// terminal anyway
+/// (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+fn named_pgrp_terminal(raw: u64) -> Result<crate::tty::TtyId, KernelError> {
+    let handle = owned_pty_handle(raw)?;
+    if handle.end() == crate::tty::pty::PtyEnd::Slave {
+        let pid = caller_process_or_err()?;
+        if crate::proc::pcb::ctty_tty_of(pid) != Some(handle.id()) {
+            return Err(KernelError::NotSupported);
+        }
+    }
+    Ok(handle.id())
 }
 
 /// `SYS_PTY_SET_PGRP` — hand a *named* terminal to a process group
@@ -6756,11 +6852,11 @@ pub fn sys_pty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// every existing caller uses.
 pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
     // A negative value is not a process group. Rejected on the full 64-bit
-    // width rather than reproducing Linux's `int` wrap, matching 538; 0 is
-    // rejected further down, where "there is no group 0" is the message.
+    // width rather than reproducing Linux's `int` wrap, matching 538; 0 goes
+    // on through the terminal checks and is then ESRCH.
     #[allow(clippy::cast_possible_wrap)]
     let pgid_signed = args.arg1 as i64;
-    if pgid_signed <= 0 {
+    if pgid_signed < 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if args.arg0 == 0 {
@@ -6774,11 +6870,12 @@ pub fn sys_pty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
             TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
         };
     }
-    // As in `sys_pty_get_pgrp`, the named path needs no caller process: both
-    // the authority (the handle) and the POSIX group rule (the terminal's
-    // session) are properties of the terminal, not of who is asking.
-    let tty = match owned_pty_handle(args.arg0) {
-        Ok(h) => h.id(),
+    // As in `sys_pty_get_pgrp`: through a master the authority (the handle)
+    // and the POSIX group rule (the terminal's session) are properties of the
+    // terminal, not of who is asking; a slave must be the caller's own
+    // controlling terminal.
+    let tty = match named_pgrp_terminal(args.arg0) {
+        Ok(tty) => tty,
         Err(e) => return SyscallResult::err(e),
     };
     // SIGTTOU follows the terminal being written, not the caller — see
@@ -7196,27 +7293,79 @@ pub fn sys_process_get_nice(args: &SyscallArgs) -> SyscallResult {
 /// every task the process owns (nice→priority via
 /// [`thread::nice_to_priority`]) so the change actually affects scheduling.
 ///
-/// Per the thin-primitive contract (see the syscall-number doc), the
-/// `CAP_SYS_NICE` policy for priority raises is enforced by the userspace
-/// posix wrappers; the kernel only performs the mutation, always on the
-/// caller's own process. Returns the *previous* nice, biased by +20. Fails
-/// only if the caller has no owning process.
+/// A raise -- a nice below the current one -- is the kernel's to allow
+/// ([`priority::may_set_nice`](crate::proc::priority::may_set_nice)): within
+/// the process's `RLIMIT_NICE`, or with a Thread capability carrying
+/// IO_REALTIME, else `ResourceExhausted`. It was left to libc until
+/// 2026-10-01, so any program could reach nice -20, the top scheduler
+/// priority, with one direct call. Returns the *previous* nice, biased by
+/// +20.
 pub fn sys_process_set_nice(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{priority, thread};
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
+    match priority::set_own_nice(pid, unbias_nice(args.arg0)) {
+        Ok(old) => SyscallResult::ok(i64::from(old).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
 
-    // Un-bias arg0 (biased +20) back to a signed nice, clamping to the POSIX
-    // range. arg0 is u64; a caller passing a wild value is clamped, not UB.
+/// A nice passed biased by +20 (`0..=39`), as a signed nice: clamped, so a
+/// wild value is clamped rather than misread.
+fn unbias_nice(biased: u64) -> i32 {
+    let clamped = biased.min(39);
+    // 0..=39 fits an i32, and minus 20 is -20..=19.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let requested = (args.arg0 as i64).clamp(0, 39) as i32 - 20;
+    let nice = (clamped as i32).saturating_sub(20);
+    nice
+}
 
-    match thread::set_process_nice(pid, requested) {
-        Some(old) => SyscallResult::ok(i64::from(old) + 20),
-        None => SyscallResult::err(KernelError::NoSuchProcess),
+/// `SYS_PROCESS_GET_PRIORITY` (1088) -- `getpriority(which, who)`: the
+/// nice, biased by +20, of the process, group or user named. For a group or
+/// a user, it is the lowest nice among its processes, as Linux reports.
+///
+/// `which` is 0 (a process: `who` is a pid), 1 (a group: a pgid) or 2 (a
+/// user: a uid). `who` 0 is the caller's own. Reading needs no authority.
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing is
+/// named. See [`crate::proc::priority`].
+pub fn sys_process_get_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::get_priority(caller, which, args.arg1) {
+        Ok(nice) => SyscallResult::ok(i64::from(nice).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
+
+/// `SYS_PROCESS_SET_PRIORITY` (1089) -- `setpriority(which, who, nice)`:
+/// set the nice of the process, group or user named. `nice` is biased by
+/// +20, as `SYS_PROCESS_SET_NICE` takes it.
+///
+/// Each named process is changed only if the caller may change it
+/// ([`crate::proc::priority::may_set_nice`]), and the answer folds the
+/// outcomes as Linux's does:
+/// - `NoSuchProcess` when nothing is named;
+/// - else `PermissionDenied` (no authority over one) or
+///   `ResourceExhausted` (a raise beyond its `RLIMIT_NICE`, without
+///   IO_REALTIME), whichever refusal came last;
+/// - else 0.
+pub fn sys_process_set_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::set_priority(caller, which, args.arg1, unbias_nice(args.arg2)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
     }
 }
 
@@ -7541,7 +7690,16 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 
 /// `SYS_SIGNAL_REGISTER` — register the process-wide signal trampoline.
 ///
-/// `arg0`: trampoline address (0 to unregister).
+/// `arg0`: trampoline address (0 to unregister). `arg1`: frame flags --
+/// [`SIGNAL_FRAME_SIGINFO`](super::number::SIGNAL_FRAME_SIGINFO) asks for the
+/// extended frame, the context followed by the signal's `siginfo`. Answers the
+/// flags it will honour, so a libc can tell an older kernel (which answered 0
+/// whatever it was asked) by the answer.
+///
+/// Unknown flag bits are ignored rather than refused: the answer already says
+/// what took, and a refusal would make every new bit a flag day. That also
+/// makes a caller that never set `arg1` safe whatever the register held: the
+/// extended frame only adds bytes above a context that stays where it was.
 ///
 /// The address is rejected here if it is not in the user half.  Delivery
 /// installs it directly as the SYSRET RIP, and `sysretq` loads RIP while still
@@ -7551,6 +7709,7 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 /// can actually diagnose it.
 pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
+    use super::number::SIGNAL_FRAME_SIGINFO;
     let pid = match caller_process_or_err() {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
@@ -7559,8 +7718,20 @@ pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispat
     if args.arg0 != 0 && args.arg0 >= crate::mm::page_table::USER_SPACE_END {
         return SyscallResult::err(KernelError::InvalidAddress);
     }
-    crate::proc::signal::register_trampoline(pid, args.arg0);
-    SyscallResult::ok(0)
+    // Unregistering honours nothing: there is no frame to build.
+    let honoured = if args.arg0 == 0 {
+        0
+    } else {
+        args.arg1 & SIGNAL_FRAME_SIGINFO
+    };
+    crate::proc::signal::register_trampoline_frame(
+        pid,
+        args.arg0,
+        honoured & SIGNAL_FRAME_SIGINFO != 0,
+    );
+    // `honoured` is at most SIGNAL_FRAME_SIGINFO (1), which fits.
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(honoured as i64)
 }
 
 /// `SYS_SIGNAL_ALTSTACK` (1071) -- record the alternate signal stack and the set
@@ -7578,8 +7749,11 @@ pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
     // A frame needs room for the SignalContext, its 16-byte alignment slack and
     // the fake return slot. Anything smaller is a stack the kernel could not
     // build a frame on, and accepting it would mean discovering that during
-    // delivery -- i.e. during a fault -- instead of here.
-    let minimum = crate::proc::signal::SIGNAL_CONTEXT_SIZE as u64 + 32;
+    // delivery -- i.e. during a fault -- instead of here. Sized for the
+    // extended frame (context plus siginfo tail), not the short one: the
+    // trampoline can be re-registered for it after this stack is set, and the
+    // stack must still hold a frame then.
+    let minimum = (crate::proc::signal::SIGNAL_FRAME_EXTENDED_SIZE as u64).saturating_add(32);
     if size != 0 && (size < minimum || sp.checked_add(size).is_none()) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
@@ -7908,11 +8082,12 @@ pub fn sys_secureboot_verify(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.
 ///
-/// `arg0`: target PID. `arg1`: signal number (1..=NSIG).
+/// `arg0`: target PID. `arg1`: signal number (1..=NSIG; 0 checks and posts
+/// nothing).
 ///
 /// Authority matches `SYS_PROCESS_KILL`: the caller must be the target's
 /// parent, PID 0, the target itself (self-signal), or hold a Process
-/// capability with DELETE rights for the target.
+/// capability with DELETE rights for the target ([`check_signal_target`]).
 pub fn sys_signal_send(args: &super::dispatch::SyscallArgs) -> super::dispatch::SyscallResult {
     // Default sender class for a process-directed `kill(2)`.
     sys_signal_send_with_code(args, crate::proc::signal::si_code::SI_USER)
@@ -7946,7 +8121,7 @@ pub fn sys_signal_send_with_info(
     value: u64,
 ) -> super::dispatch::SyscallResult {
     use super::dispatch::SyscallResult;
-    use crate::proc::{pcb, signal, thread};
+    use crate::proc::thread;
 
     // `arg0` is a signed PID (see SYS_SIGNAL_SEND's docs): the non-positive
     // forms address a process *group*, not a process. Route them to the
@@ -7960,90 +8135,222 @@ pub fn sys_signal_send_with_info(
         return signal_send_to_group(target_signed, sig_signed, si_code, value);
     }
 
-    let target = args.arg0;
-    #[allow(clippy::cast_possible_truncation)]
-    let sig = args.arg1 as u32;
-
-    if !signal::is_valid_signal(sig) {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
     let task_id = sched::current_task_id();
     let caller = thread::owner_process(task_id).unwrap_or(0);
+    let target = args.arg0;
+    let sig = match check_signal_target(caller, target, args.arg1) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        // The probe: everything a send checks has been checked.
+        return SyscallResult::ok(0);
+    }
+    // The record says who sent it -- the caller's real identity, which it
+    // cannot forge -- so an SA_SIGINFO handler on the target sees a faithful
+    // siginfo_t. `value` is the queued `si_value` (0 for kill/tkill/tgkill).
+    let info = sender_info(caller, si_code, value);
+    match post_signal(target, sig, info, (target == caller).then_some(task_id)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
 
-    // Existence + authority. A self-signal is always permitted.
-    if target != caller {
-        let target_parent = match pcb::parent(target) {
-            Some(p) => p,
-            None => return SyscallResult::err(KernelError::NoSuchProcess),
-        };
-        let has_parent_auth = caller == 0 || caller == target_parent;
-        let has_cap_auth = pcb::has_capability_for(
+/// The checks a process's signal to one process passes, in Linux's order
+/// (`kill_pid_info` then `check_kill_permission`), written once for every
+/// native send and the Linux shim's existence probe:
+///
+/// 1. the target is a live process -- else `NoSuchProcess`, or
+///    `ProcessExited` for a zombie;
+/// 2. the signal is a number in `0..=NSIG` -- else `InvalidArgument`;
+/// 3. the caller may signal it: it is the caller itself, the caller's child,
+///    any process when the caller is a kernel task (pid 0), or one the caller
+///    holds a Process capability with DELETE rights for -- else
+///    `PermissionDenied`.
+///
+/// Answers the signal number. 0 is the probe (`kill(pid, 0)`): answered in
+/// full here, with nothing to post.
+///
+/// A signal the kernel raises -- a terminal's, a timer's -- does not come
+/// through here; see [`post_kernel_signal`].
+pub(crate) fn check_signal_target(
+    caller: crate::proc::pcb::ProcessId,
+    target: crate::proc::pcb::ProcessId,
+    sig: u64,
+) -> Result<u32, KernelError> {
+    use crate::proc::{pcb, signal};
+
+    match pcb::state(target) {
+        None => return Err(KernelError::NoSuchProcess),
+        Some(pcb::ProcessState::Zombie) => return Err(KernelError::ProcessExited),
+        Some(_) => {}
+    }
+    let sig = u32::try_from(sig)
+        .ok()
+        .filter(|&s| s == 0 || signal::is_valid_signal(s))
+        .ok_or(KernelError::InvalidArgument)?;
+    if target != caller && caller != 0 {
+        let is_parent = pcb::parent(target) == Some(caller);
+        let holds_cap = pcb::has_capability_for(
             caller,
             crate::cap::ResourceType::Process,
             target,
             crate::cap::Rights::DELETE,
         );
-        if !has_parent_auth && !has_cap_auth {
-            return SyscallResult::err(KernelError::PermissionDenied);
+        if !is_parent && !holds_cap {
+            return Err(KernelError::PermissionDenied);
         }
     }
+    Ok(sig)
+}
 
-    // Reject signals to a dead/unknown process.
-    match pcb::state(target) {
-        Some(pcb::ProcessState::Zombie) => {
-            return SyscallResult::err(KernelError::ProcessExited);
-        }
-        None => return SyscallResult::err(KernelError::NoSuchProcess),
-        _ => {}
-    }
-
-    // Record the sender identity (caller pid + real uid) so an SA_SIGINFO
-    // handler on the target sees a faithful siginfo_t. `value` is the queued
-    // `si_value` payload (0 for the plain kill/tkill/tgkill path).
+/// The record of a signal process `caller` sends: the sender class, the
+/// caller's pid and real uid, and the value.
+fn sender_info(
+    caller: crate::proc::pcb::ProcessId,
+    code: i32,
+    value: u64,
+) -> crate::proc::signal::SigInfo {
+    // Process ids are allocated far below 2^32; the record's field is u32.
     #[allow(clippy::cast_possible_truncation)]
-    let info = signal::SigInfo {
-        code: si_code,
-        sender_pid: caller as u32,
-        sender_uid: pcb::process_uid(caller).unwrap_or(0),
+    let sender_pid = caller as u32;
+    crate::proc::signal::SigInfo {
+        code,
+        sender_pid,
+        sender_uid: crate::proc::pcb::process_uid(caller).unwrap_or(0),
         value,
-    };
+    }
+}
+
+/// Post `sig` to `target` with `info` as its record, and carry out what the
+/// kernel decides for it ([`classify_post_info`]): leave it pending for the
+/// target's handler, or terminate, stop or continue the target.
+///
+/// `self_task` is the posting thread when it belongs to `target`: a stop then
+/// parks it last, after its siblings (`stop_process_for_signal`), and this
+/// returns only once the process is continued.
+///
+/// No gate: a process's send has passed [`check_signal_target`] first, and a
+/// signal the kernel raises needs none ([`post_kernel_signal`]).
+///
+/// [`classify_post_info`]: crate::proc::signal::classify_post_info
+fn post_signal(
+    target: crate::proc::pcb::ProcessId,
+    sig: u32,
+    info: crate::proc::signal::SigInfo,
+    self_task: Option<crate::sched::task::TaskId>,
+) -> KernelResult<()> {
+    use crate::proc::{pcb, signal, thread};
+
     match signal::classify_post_info(target, sig, info) {
-        signal::PostDecision::Deliver | signal::PostDecision::Drop => SyscallResult::ok(0),
+        signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
         signal::PostDecision::Terminate(code) => {
             // No userspace handler (or SIGKILL): terminate like kill().
-            if let Err(e) = pcb::set_exit_code(target, code) {
-                return SyscallResult::err(e);
-            }
+            pcb::set_exit_code(target, code)?;
             thread::kill_process_threads(target);
-            serial_println!(
-                "[signal] Process {} terminated by signal {} (from {})",
-                target,
-                sig,
-                caller
-            );
-            SyscallResult::ok(0)
+            if info.code == signal::si_code::SI_KERNEL {
+                serial_println!(
+                    "[signal] Process {} terminated by kernel signal {}",
+                    target,
+                    sig
+                );
+            } else {
+                serial_println!(
+                    "[signal] Process {} terminated by signal {} (from {})",
+                    target,
+                    sig,
+                    info.sender_pid
+                );
+            }
         }
         signal::PostDecision::Stop(s) => {
-            // Suspend the target's threads for job control. If the caller is
-            // signalling itself, this is a self-stop: pass the current task
-            // so `stop_process_for_signal` parks it last (it yields and only
-            // returns on a later SIGCONT).
-            let self_task = if target == caller {
-                Some(task_id)
-            } else {
-                None
-            };
+            // Suspend the target's threads for job control; a self-stop parks
+            // the current thread last and returns on a later SIGCONT.
             stop_process_for_signal(target, s, self_task);
-            SyscallResult::ok(0)
         }
         signal::PostDecision::Continue => {
             // Resume the target's threads. A pending SIGCONT handler (set by
             // classify_post when a trampoline is registered) runs on the
             // target's next return to userspace.
             continue_process(target);
-            SyscallResult::ok(0)
         }
+    }
+    Ok(())
+}
+
+/// `SYS_SIGNAL_QUEUE` (1086) -- `sigqueue(pid, sig, value)`: post `sig` to
+/// process `pid` with `SI_QUEUE` and `value` as its `si_value`.
+///
+/// One process, never a group: `sigqueue` has none, and Linux's
+/// `rt_sigqueueinfo` answers `ESRCH` for any pid it cannot find, 0 and the
+/// negatives included. Then [`check_signal_target`]'s checks, in its order;
+/// signal 0 checks and posts nothing. See
+/// [`SYS_SIGNAL_QUEUE`](super::number::SYS_SIGNAL_QUEUE).
+pub fn sys_signal_queue(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{signal, thread};
+
+    // `arg0` is a pid_t widened to 64 bits: anything not above zero names no
+    // single process.
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_signed = args.arg0 as i64;
+    if pid_signed <= 0 {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let task_id = sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+    let target = args.arg0;
+    let sig = match check_signal_target(caller, target, args.arg1) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        return SyscallResult::ok(0);
+    }
+    let info = sender_info(caller, signal::si_code::SI_QUEUE, args.arg2);
+    match post_signal(target, sig, info, (target == caller).then_some(task_id)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SIGNAL_TGKILL` (1087) -- `tgkill(tgid, tid, sig)`: post `sig` to
+/// process `tgid`, provided thread `tid` is one of its threads, with
+/// `SI_TKILL`.
+///
+/// The thread check and the post are one step, so a thread id given since to
+/// another process cannot carry the signal there, and the check needs no
+/// capability (libc's, through `/proc/<tgid>/task/<tid>`, needed a File
+/// capability). The signal goes to the process, as every signal does here.
+/// Errors in Linux's order (`do_send_specific`): `InvalidArgument` for an id
+/// not above zero, `NoSuchProcess` for a thread that is not `tgid`'s, then
+/// [`check_signal_target`]'s. See
+/// [`SYS_SIGNAL_TGKILL`](super::number::SYS_SIGNAL_TGKILL).
+pub fn sys_signal_tgkill(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{signal, thread};
+
+    // Both ids are pid_t widened to 64 bits.
+    #[allow(clippy::cast_possible_wrap)]
+    let (tgid_signed, tid_signed) = (args.arg0 as i64, args.arg1 as i64);
+    if tgid_signed <= 0 || tid_signed <= 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let tgid = args.arg0;
+    if thread::owner_process(args.arg1) != Some(tgid) {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let task_id = sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+    let sig = match check_signal_target(caller, tgid, args.arg2) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if sig == 0 {
+        return SyscallResult::ok(0);
+    }
+    let info = sender_info(caller, signal::si_code::SI_TKILL, 0);
+    match post_signal(tgid, sig, info, (tgid == caller).then_some(task_id)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
     }
 }
 
@@ -8125,11 +8432,19 @@ pub fn signal_send_to_group(
     // path, so the per-target authority check (parent / self / Process
     // capability with DELETE) applies to every member individually — a
     // group send grants no authority the caller did not already have.
+    //
+    // The caller, if it is a member, goes last: a stop signal stops it by
+    // parking this thread until a SIGCONT, and in list order every member
+    // after it would wait for that SIGCONT too (as in
+    // `post_kernel_signal_to_members`).
     #[allow(clippy::cast_sign_loss)]
     let sig_u = sig as u64;
+    let caller = thread::owner_process(sched::current_task_id());
+    let (own, others): (alloc::vec::Vec<_>, alloc::vec::Vec<_>) =
+        members.into_iter().partition(|&m| Some(m) == caller);
     let mut any_ok = false;
     let mut last_err = SyscallResult::err(KernelError::NoSuchProcess);
-    for target in members {
+    for target in others.into_iter().chain(own) {
         let send_args = SyscallArgs {
             arg0: target,
             arg1: sig_u,
@@ -8507,56 +8822,78 @@ fn continue_process(pid: crate::proc::pcb::ProcessId) {
     serial_println!("[signal] Process {} continued", pid);
 }
 
-/// Post a kernel-originated signal to `pid` and carry out its default action.
+/// Post a signal the kernel raises -- a terminal's `^C`/`^Z`/`SIGWINCH`, the
+/// `SIGTTIN`/`SIGTTOU` of a background job touching its terminal, the
+/// orphaned group's `SIGHUP`/`SIGCONT` -- and carry out its default action.
 ///
-/// This is the authority-free sibling of [`sys_signal_send_with_info`]: there
-/// is no caller, so no parent/capability check is performed. It is used for
-/// signals the kernel itself raises against a process it is not "calling" from
-/// — currently the orphaned-process-group `SIGHUP`/`SIGCONT` on session-leader
-/// exit. Zombie/unknown targets are skipped silently (the process raced us to
-/// exit, which is exactly the orphan case we are handling).
+/// The record names the kernel as the sender (`SI_KERNEL`, pid 0), and no
+/// authority is checked: no process is sending it (Linux's `SEND_SIG_PRIV`).
+/// The thread it is raised on is only the one the kernel happened to be
+/// running -- a terminal writing a pty's input, a job reading its terminal --
+/// and until 2026-10-01 the terminal paths asked whether *that* process may
+/// signal each target, so a `^C` typed into a terminal reached only the
+/// foreground processes that were the terminal's own children.
 ///
-/// The signal is classified with [`signal::classify_post_info`] and acted on
-/// identically to the user-`kill` path: a userspace handler simply leaves the
-/// signal pending (`Deliver`); the default action terminates, stops, or
-/// continues the process. There is never a self-stop here (the caller is the
-/// exiting thread, not a member of the target group), so `stop_process_for_signal`
-/// is always called with `None`.
-pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
+/// When the target is the current thread's own process, the current thread
+/// is the self-stop thread (parked last on a stop; see [`post_signal`]).
+///
+/// Fails, posting nothing, for a signal number that is not one
+/// (`InvalidArgument`) or a target that is gone (`NoSuchProcess`) or a zombie
+/// (`ProcessExited`).
+pub fn post_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) -> KernelResult<()> {
     use crate::proc::{pcb, signal, thread};
 
     if !signal::is_valid_signal(sig) {
-        return;
+        return Err(KernelError::InvalidArgument);
     }
-    // Skip dead/unknown targets: a zombie cannot be signalled and an absent
-    // pid has nothing to receive.
     match pcb::state(pid) {
-        Some(pcb::ProcessState::Zombie) | None => return,
-        _ => {}
+        None => return Err(KernelError::NoSuchProcess),
+        Some(pcb::ProcessState::Zombie) => return Err(KernelError::ProcessExited),
+        Some(_) => {}
     }
-
-    match signal::classify_post_info(pid, sig, signal::SigInfo::kernel()) {
-        signal::PostDecision::Deliver | signal::PostDecision::Drop => {}
-        signal::PostDecision::Terminate(code) => {
-            if pcb::set_exit_code(pid, code).is_ok() {
-                thread::kill_process_threads(pid);
-                serial_println!(
-                    "[signal] Process {} terminated by kernel signal {}",
-                    pid,
-                    sig
-                );
-            }
-        }
-        signal::PostDecision::Stop(s) => {
-            stop_process_for_signal(pid, s, None);
-        }
-        signal::PostDecision::Continue => {
-            continue_process(pid);
-        }
-    }
+    let current = sched::current_task_id();
+    let self_task = (thread::owner_process(current) == Some(pid)).then_some(current);
+    post_signal(pid, sig, signal::SigInfo::kernel(), self_task)
 }
 
-/// POSIX orphaned-process-group hangup: if `pgid` is now an orphaned process
+/// [`post_kernel_signal`] for a caller with nothing to do about a failure:
+/// the orphaned-process-group hangup, whose targets may be exiting at the
+/// same moment -- which is the very case it handles.
+pub fn deliver_kernel_signal(pid: crate::proc::pcb::ProcessId, sig: u32) {
+    // A target that exited first has nothing left to hang up or continue, and
+    // the signal numbers the callers pass are constants; neither failure
+    // leaves anything undone.
+    let _ = post_kernel_signal(pid, sig);
+}
+
+/// [`post_kernel_signal`] to each of `members` -- a process group the kernel
+/// is signalling -- with the current thread's own process last, if it is one
+/// of them. Answers how many posts succeeded and how many failed.
+///
+/// Last, because a stop signal stops the current process by parking the
+/// current thread until a `SIGCONT`: posted in list order, every member after
+/// it would get its `^Z` or `SIGTTIN` only once the job was continued, if
+/// ever -- a job half stopped, with the stopped half waiting on the half that
+/// was not.
+pub fn post_kernel_signal_to_members(
+    members: &[crate::proc::pcb::ProcessId],
+    sig: u32,
+) -> (usize, usize) {
+    let own = crate::proc::thread::owner_process(sched::current_task_id());
+    let (mut delivered, mut failed) = (0usize, 0usize);
+    let others = members.iter().filter(|&&m| Some(m) != own);
+    let itself = members.iter().filter(|&&m| Some(m) == own);
+    for &member in others.chain(itself) {
+        if post_kernel_signal(member, sig).is_ok() {
+            delivered = delivered.saturating_add(1);
+        } else {
+            failed = failed.saturating_add(1);
+        }
+    }
+    (delivered, failed)
+}
+
+// POSIX orphaned-process-group hangup: if `pgid` is now an orphaned process
 /// group (no live member has a parent in a different group of the same
 /// session) that still contains a **stopped** member, send `SIGHUP` followed
 /// by `SIGCONT` to every member.
@@ -8600,7 +8937,10 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
 /// [`SignalContext`](crate::proc::signal::SignalContext) on the user stack
 /// capturing the interrupted state (including the syscall's return value in
 /// RAX), then rewrite the syscall frame so the SYSRET path jumps to the
-/// trampoline with `rdi = signum` and `rsi = &ctx`.
+/// trampoline with `rdi = signum` and `rsi = &ctx`. A trampoline registered
+/// with `SIGNAL_FRAME_SIGINFO` also gets the signal's record -- code, sender,
+/// value -- right after the context
+/// ([`SignalInfoTail`](crate::proc::signal::SignalInfoTail)).
 ///
 /// If the process has **no** trampoline, the kernel default action applies
 /// instead: a terminating signal kills the process (exit `128 + sig`, via
@@ -8620,7 +8960,9 @@ pub fn kill_orphaned_pgrp(pgid: crate::proc::pcb::ProcessId) {
 /// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
 /// a documented future enhancement.
 pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i64) -> bool {
-    use crate::proc::signal::{self, SIGNAL_CONTEXT_SIZE, SignalContext};
+    use crate::proc::signal::{
+        self, SIGNAL_CONTEXT_SIZE, SIGNAL_FRAME_EXTENDED_SIZE, SignalContext, SignalInfoTail,
+    };
 
     // Fast path: nothing pending anywhere.
     if !signal::any_pending() {
@@ -8642,8 +8984,9 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         return deliver_linux_signal(frame, ret_val, pid, task_id);
     }
 
-    let trampoline = match signal::trampoline(pid) {
-        Some(addr) => addr,
+    // The trampoline and the frame it reads, together (see `trampoline_frame`).
+    let (trampoline, extended) = match signal::trampoline_frame(pid) {
+        Some(registered) => registered,
         None => {
             // No userspace handler trampoline: apply the kernel default
             // action to each deliverable signal. A terminating default kills
@@ -8677,20 +9020,33 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
         }
     };
 
-    let sig = match signal::take_deliverable(pid) {
-        Some(s) => s,
+    // The signal and its record -- sender, code, value -- which the extended
+    // frame hands on and every re-arm below puts back, so a retried delivery
+    // still says who sent it.
+    let (sig, info) = match signal::take_deliverable_info(pid) {
+        Some(taken) => taken,
         None => return false,
     };
 
-    // Compute the placement of the SignalContext on the user stack.
+    // Compute the placement of the frame on the user stack.
     //
     //   sp = user_rsp
-    //   sp -= ctx_size; sp &= !0xF;   (16-byte aligned context)
+    //   sp -= frame_size; sp &= !0xF;  (16-byte aligned context)
     //   ctx_addr = sp
     //   sp -= 8;                       (fake return slot — null)
     //   new_rsp = sp                   (RSP%16 == 8 at handler entry,
     //                                   matching the SysV call convention)
-    let ctx_size = SIGNAL_CONTEXT_SIZE as u64;
+    //
+    // The frame is the SignalContext, then -- for a trampoline registered
+    // with SIGNAL_FRAME_SIGINFO -- the signal's siginfo tail at ctx + 136.
+    // The tail sits above the context, so the context and the return slot
+    // keep their places relative to each other in either form.
+    let frame_size = if extended {
+        SIGNAL_FRAME_EXTENDED_SIZE
+    } else {
+        SIGNAL_CONTEXT_SIZE
+    };
+    let ctx_size = frame_size as u64;
     // Where the frame grows down from. Normally the interrupted stack -- but if
     // this signal's handler asked for SA_ONSTACK, the top of the alternate stack
     // instead, because the case that feature exists to serve is the interrupted
@@ -8704,15 +9060,14 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // and the validate_user_write below, which now checks the alternate stack
     // when that is where the frame is going.
     let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(frame.user_rsp);
-    let ctx_addr = (frame_base.wrapping_sub(ctx_size)) & !0xFu64;
-    let new_rsp = ctx_addr.wrapping_sub(8);
+    let (ctx_addr, new_rsp) = signal::frame_placement(frame_base, ctx_size);
 
     // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
     // writable user mapping before touching it.
     let region_len = (ctx_addr.wrapping_add(ctx_size)).wrapping_sub(new_rsp);
     if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err() {
         // Cannot place the frame; re-arm the signal and skip delivery.
-        signal::set_pending(pid, sig);
+        signal::set_pending_info(pid, sig, info);
         return false;
     }
 
@@ -8766,10 +9121,20 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     // dereference the address.  A failure here re-arms the signal for the same
     // reason the validation failure above does — better to retry delivery than
     // to enter the trampoline with a half-written context.
-    if crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
+    //
+    // The tail goes at ctx + 136 only for a trampoline that asked for it: the
+    // short frame's caller owns the bytes above its context.
+    let tail_written = !extended
+        || crate::mm::user::write_user_value::<SignalInfoTail>(
+            ctx_addr.wrapping_add(SIGNAL_CONTEXT_SIZE as u64),
+            SignalInfoTail::from_info(&info),
+        )
+        .is_ok();
+    if !tail_written
+        || crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
         || crate::mm::user::write_user_value::<u64>(new_rsp, 0u64).is_err()
     {
-        signal::set_pending(pid, sig);
+        signal::set_pending_info(pid, sig, info);
         return false;
     }
 
@@ -12068,6 +12433,98 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// Bytes before the names in a [`SYS_FS_WATCH_READ_RECORDS`] record.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) const WATCH_RECORD_HEADER: usize = 24;
+
+/// The length of `event`'s [`SYS_FS_WATCH_READ_RECORDS`] record: the header,
+/// each path with its NUL, padded to a multiple of 8 so the next header is
+/// aligned.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn watch_record_len(event: &crate::fs::notify::FsEvent) -> usize {
+    let new_path = event.new_path.as_ref().map_or(0, |p| p.as_bytes().len());
+    let names = event
+        .path
+        .as_bytes()
+        .len()
+        .saturating_add(1)
+        .saturating_add(new_path)
+        .saturating_add(1);
+    WATCH_RECORD_HEADER.saturating_add(names).saturating_add(7) & !7
+}
+
+/// Append `event`'s record to `out`, in the layout
+/// [`SYS_FS_WATCH_READ_RECORDS`] documents: exactly
+/// [`watch_record_len`] bytes.
+///
+/// [`SYS_FS_WATCH_READ_RECORDS`]: crate::syscall::number::SYS_FS_WATCH_READ_RECORDS
+pub(crate) fn encode_watch_record(
+    event: &crate::fs::notify::FsEvent,
+    out: &mut alloc::vec::Vec<u8>,
+) {
+    let start = out.len();
+    let path = event.path.as_bytes();
+    let new_path = event.new_path.as_ref().map_or(&[][..], |p| p.as_bytes());
+    // Path lengths beyond u32 cannot occur (paths are bounded far below);
+    // saturating keeps the header honest about a cut it would never make.
+    let len32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    out.extend_from_slice(&event.watch_id.to_le_bytes());
+    out.extend_from_slice(&(event.event_type as u32).to_le_bytes());
+    out.push(u8::from(event.is_dir));
+    out.extend_from_slice(&[0u8; 3]);
+    out.extend_from_slice(&len32(path.len()).to_le_bytes());
+    out.extend_from_slice(&len32(new_path.len()).to_le_bytes());
+    out.extend_from_slice(path);
+    out.push(0);
+    out.extend_from_slice(new_path);
+    out.push(0);
+    out.resize(start.saturating_add(watch_record_len(event)), 0);
+}
+
+/// `SYS_FS_WATCH_READ_RECORDS` (1091) -- read pending events as
+/// variable-length records, so a path of any length arrives whole.
+///
+/// `arg0`: watch ID. `arg1`: output buffer. `arg2`: its length in bytes.
+/// Returns the bytes written: as many whole records as fit, in order, the
+/// rest left queued. 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit, which stays queued. See
+/// [`SYS_FS_WATCH_READ_RECORDS`](crate::syscall::number::SYS_FS_WATCH_READ_RECORDS)
+/// for the layout.
+pub fn sys_fs_watch_read_records(args: &SyscallArgs) -> SyscallResult {
+    let watch_id = args.arg0;
+    let Ok(budget) = usize::try_from(args.arg2) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    if watch_id == 0 || args.arg1 == 0 || budget == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Fail fast on an unusable destination before dequeuing, as
+    // `sys_fs_watch_read` does: the events would otherwise be lost with it.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, budget) {
+        return SyscallResult::err(e);
+    }
+    let events = match crate::fs::notify::read_events_within(watch_id, budget, watch_record_len) {
+        Ok(events) => events,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let mut out = alloc::vec::Vec::new();
+    for event in &events {
+        encode_watch_record(event, &mut out);
+    }
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel buffer of `out.len()` bytes, no more
+        // than `budget` (each record was admitted against it); copy_to_user
+        // re-validates the destination and brackets the store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+        {
+            return SyscallResult::err(e);
+        }
+    }
+    SyscallResult::ok(i64::try_from(out.len()).unwrap_or(i64::MAX))
 }
 
 /// `SYS_FS_WATCH_READ` — read pending filesystem change events.
@@ -15480,6 +15937,29 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
 /// Always returns at least 1 (the BSP).
 ///
 /// Returns: number of online CPUs.
+/// The CPU the caller is running on and its NUMA node, as `getcpu(2)`
+/// reports them; one answer for both ABIs. The node is 0: there is no NUMA
+/// topology yet (Linux's `cpu_to_node` on a single-node machine), and this
+/// is the one place to change when there is.
+#[must_use]
+pub(crate) fn current_cpu_and_node() -> (u32, u32) {
+    let cpu = u32::try_from(crate::smp::current_cpu_index()).unwrap_or(u32::MAX);
+    (cpu, 0)
+}
+
+/// `SYS_CPU_CURRENT` (1092) -- the CPU the calling thread is running on, and
+/// its node: `cpu | node << 32`. No pointers, so it cannot fault, and it is
+/// one call for `sched_getcpu()`/`getcpu()`, which per-CPU code makes on hot
+/// paths (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The answer
+/// can be stale the moment it is returned -- the thread may migrate -- as on
+/// Linux.
+pub fn sys_cpu_current(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let (cpu, node) = current_cpu_and_node();
+    let packed = u64::from(cpu) | (u64::from(node) << 32);
+    SyscallResult::ok(i64::try_from(packed).unwrap_or(i64::MAX))
+}
+
 pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
     let _ = args;
 

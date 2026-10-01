@@ -1337,6 +1337,25 @@ pub fn resolve_syscall_restart(frame: &mut crate::syscall::entry::SyscallFrame, 
 // Native KernelError → Linux errno
 // ---------------------------------------------------------------------------
 
+/// The errno Linux's terminal job-control ioctls (`TIOCGPGRP`, `TIOCSPGRP`)
+/// give a native refusal. Three differ from [`linux_errno_for`]:
+/// - `NotSupported` means "no controlling terminal" here: `ENOTTY`, not the
+///   generic `ENOSYS` (which told a shell the call did not exist);
+/// - `PermissionDenied`, a group in another session, is `EPERM`, not
+///   `EACCES`;
+/// - `NoSuchProcess`, a group that does not exist, is `ESRCH`.
+///
+/// Until 2026-10-01 both ioctls used the generic map
+/// (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`).
+const fn tty_jobctl_errno(e: KernelError) -> i32 {
+    match e {
+        KernelError::NotSupported => errno::ENOTTY,
+        KernelError::PermissionDenied => errno::EPERM,
+        KernelError::NoSuchProcess => errno::ESRCH,
+        other => linux_errno_for(other),
+    }
+}
+
 /// Translate a native [`KernelError`] to the corresponding Linux errno
 /// (positive value).  Callers typically want `-(linux_errno_for(e) as i64)`
 /// as the syscall return value.
@@ -8569,65 +8588,51 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
     if !(0..=64).contains(&sig) {
         return linux_err(errno::EINVAL);
     }
-    if sig == 0 {
-        // sig==0 is the existence probe: same gates as a real signal
-        // send, but no actual delivery.  We've already proven the
-        // target exists (target_u via pcb::state above), so all that
-        // remains is the authority check that handlers::sys_signal_send
-        // would have performed.  Use the *truncated* target_u
-        // throughout — not raw args.arg0 — so a probe like
-        // kill(0x1_0000_0001, 0) hits pid 1 consistently with the
-        // earlier existence gate.  Pre-batch (358) this path
-        // re-loaded args.arg0 and pcb::state(0x1_0000_0001) → None →
-        // ESRCH, diverging from Linux's "pid was truncated to 1, and
-        // 1 exists, so existence probe succeeds".
-        use crate::proc::{pcb, thread};
-        let task_id = crate::sched::current_task_id();
-        let caller = thread::owner_process(task_id).unwrap_or(0);
-        if target_u != caller {
-            let target_parent = match pcb::parent(target_u) {
-                Some(p) => p,
-                // We checked pcb::state(target_u) earlier so this
-                // would only fire on a TOCTOU race with the target's
-                // reaper.  Surface ESRCH in that window — same as
-                // Linux's later check_kill_permission when the task
-                // is reaped underneath us.
-                None => return linux_err(errno::ESRCH),
-            };
-            let has_parent_auth = caller == 0 || caller == target_parent;
-            let has_cap_auth = pcb::has_capability_for(
-                caller,
-                crate::cap::ResourceType::Process,
-                target_u,
-                crate::cap::Rights::DELETE,
-            );
-            if !has_parent_auth && !has_cap_auth {
-                return linux_err(errno::EPERM);
-            }
-        }
-        return SyscallResult::ok(0);
-    }
-    // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
-    // arg0 = target pid, arg1 = signum.  Pass the truncated target
-    // (target_u, derived from pid_i32) and truncated sig so
-    // signal_send sees the post-ABI values.  Pre-batch (358)
-    // forwarded args.arg0 raw, so a probe like
-    // kill(0x1_0000_0001, 9) would send to pid 0x1_0000_0001 rather
-    // than pid 1 and fail with ESRCH even though the truncation gate
-    // had already proven pid 1 lives.
+    // Gate 4: authority, then the post -- or, for sig == 0, the existence
+    // probe, which stops after authority.  Both are the native single-target
+    // path's (`handlers::check_signal_target`), so a Linux-ABI and a native
+    // `kill` cannot disagree about who may signal whom; until 2026-10-01 the
+    // probe carried its own copy of that rule.  Pass the *truncated* target
+    // and signal: pre-batch (358) this forwarded args.arg0 raw, so a probe
+    // like kill(0x1_0000_0001, 9) would send to pid 0x1_0000_0001 rather than
+    // pid 1 and fail with ESRCH even though the truncation gate had already
+    // proven pid 1 lives.
     #[allow(clippy::cast_sign_loss)]
     let sig_u = sig as u64;
     let send_args = SyscallArgs {
         arg0: target_u,
         arg1: sig_u,
-        arg2: args.arg2,
-        arg3: args.arg3,
-        arg4: args.arg4,
-        arg5: args.arg5,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
-    linux_from_native(handlers::sys_signal_send_with_info(
+    linux_from_native_signal_send(handlers::sys_signal_send_with_info(
         &send_args, si_code, value,
     ))
+}
+
+/// A native signal-send answer in the errno terms `kill(2)`, `tgkill(2)` and
+/// `rt_sigqueueinfo(2)` use.
+///
+/// The generic map ([`linux_from_native`]) makes a refusal `EACCES` and a
+/// zombie `ECHILD`, and none of these calls ever answers either: Linux's
+/// `check_kill_permission` says `EPERM`, and this shim answers a zombie
+/// `ESRCH` (see the zombie gate in [`kill_common_value`]). Until 2026-10-01 a
+/// real signal refused for want of authority came back `EACCES` -- only the
+/// `sig == 0` probe, which had its own copy of the check, said `EPERM`.
+fn linux_from_native_signal_send(res: SyscallResult) -> SyscallResult {
+    if res.value >= 0 {
+        return res;
+    }
+    // Native error codes are negative i32s widened to i64.
+    #[allow(clippy::cast_possible_truncation)]
+    let code = res.value as i32;
+    match kernel_error_from_code(code) {
+        Some(KernelError::PermissionDenied) => linux_err(errno::EPERM),
+        Some(KernelError::ProcessExited) => linux_err(errno::ESRCH),
+        _ => linux_from_native(res),
+    }
 }
 
 /// Deliver a signal to every live process in a process group, for the
@@ -8650,7 +8655,7 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
 /// of the ordering rules here — a native-ABI shell and a Linux-ABI shell
 /// must see identical group semantics.
 fn kill_process_group(si_code: i32, value: u64, pid_i32: i32, sig: i32) -> SyscallResult {
-    linux_from_native(handlers::signal_send_to_group(
+    linux_from_native_signal_send(handlers::signal_send_to_group(
         i64::from(pid_i32),
         i64::from(sig),
         si_code,
@@ -9302,7 +9307,7 @@ fn console_terminal_ioctl(
             // than another session's answer.
             let pgrp = match crate::proc::pcb::ctty_get_fg_pgrp(pid) {
                 Ok(p) => p,
-                Err(e) => return linux_err(linux_errno_for(e)),
+                Err(e) => return linux_err(tty_jobctl_errno(e)),
             };
             #[allow(clippy::cast_possible_truncation)]
             let bytes = (pgrp as i32).to_ne_bytes();
@@ -9328,9 +9333,11 @@ fn console_terminal_ioctl(
                 return linux_err(linux_errno_for(e));
             }
             let pgrp = i32::from_ne_bytes(bytes);
-            // A foreground pgrp must be a positive process-group ID.  Linux
-            // rejects pgrp <= 0 with EINVAL before any policy check.
-            if pgrp <= 0 {
+            // Linux 6.6's `tiocspgrp` rejects only a *negative* group up
+            // front (EINVAL). A 0 goes on through the terminal checks and is
+            // then ESRCH, since there is no group 0 (`pcb::ctty_set_fg_pgrp`);
+            // this refused it with EINVAL until 2026-10-01.
+            if pgrp < 0 {
                 return linux_err(errno::EINVAL);
             }
             // The session/liveness policy — the group must be a live group of
@@ -9344,7 +9351,12 @@ fn console_terminal_ioctl(
             match super::handlers::tty_set_pgrp_checked(pid, u64::from(pgrp as u32)) {
                 super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
                 super::handlers::TtyCtlOutcome::Restart(r) => r,
-                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
+                // `tiocspgrp` turns tty_check_change's EIO (an orphaned
+                // background group) into ENOTTY.
+                super::handlers::TtyCtlOutcome::Fail(KernelError::IoError) => {
+                    linux_err(errno::ENOTTY)
+                }
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(tty_jobctl_errno(e)),
             }
         }
         // `tty_id` here is "the terminal this fd names", which we can only
@@ -15571,9 +15583,18 @@ fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
 /// `getpriority(which, who)` — return the nice value of a process,
 /// process group, or user.
 ///
-/// We don't honour nice values; the scheduler runs strict round-robin
-/// within a priority class.  Report nice == 0 (the unbiased default)
-/// for every query.
+/// A thin adapter over [`crate::proc::priority::get_priority`], which the
+/// native `SYS_PROCESS_GET_PRIORITY` shares, so that both ABIs name the same
+/// processes:
+/// - `PRIO_PROCESS` names a pid;
+/// - `PRIO_PGRP` names every live member of a group;
+/// - `PRIO_USER` names every live process of a uid;
+/// - `who == 0` is the caller's own;
+/// - for a group or a user the answer is its most favoured member's nice.
+///
+/// Until 2026-10-01 the group and user forms read the caller's own nice
+/// whatever they were asked about, because nothing modelled groups or users
+/// here.
 ///
 /// CAUTION: Linux's getpriority return-value contract is unusual.
 /// Internally the kernel returns `20 - nice` (so a successful call
@@ -15584,11 +15605,8 @@ fn sys_setsid(_args: &SyscallArgs) -> SyscallResult {
 /// would translate to nice=20 in glibc, the lowest-priority value,
 /// which would surprise programs that read the result and trust it.
 ///
-/// `who == 0` always succeeds (refers to the caller / caller's pgrp /
-/// caller's uid).  For PRIO_PROCESS with `who != 0` we validate that
-/// the target pid exists and return ESRCH otherwise.  PRIO_PGRP and
-/// PRIO_USER lookups silently succeed because we don't model process
-/// groups or per-user task lists.
+/// A kernel task (no process) asking about itself with `who == 0` is told
+/// nice 0.  Reading needs no authority, as on Linux.
 fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
     // Linux's syscall signature is `SYSCALL_DEFINE2(getpriority,
     // int, which, int, who)`.  Both args are truncated to int before
@@ -15602,231 +15620,104 @@ fn sys_getpriority(args: &SyscallArgs) -> SyscallResult {
     let which = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let who = args.arg1 as i32;
-    // Valid `which` values: PRIO_PROCESS=0, PRIO_PGRP=1, PRIO_USER=2.
-    // Linux explicitly rejects which < 0 too (the original C check is
-    // `which > 2 || which < 0`); a raw-u64 compare implicitly caught
-    // negatives via "huge unsigned > 2", but the post-truncation int
-    // compare needs the explicit lower bound.
-    if !(0..=2).contains(&which) {
+    let Some((which, who)) = linux_prio_target(which, who) else {
         return linux_err(errno::EINVAL);
-    }
-    // PRIO_PROCESS with a specific target: enforce existence.  who==0
-    // means "the caller", which we accept unconditionally.  A negative
-    // `who` can't refer to any pid, so it surfaces as ESRCH (Linux's
-    // find_task_by_vpid path returns NULL for any pid <= 0 except the
-    // "self" semantics of pid==0, which we handle above).
-    if which == 0 && who != 0 {
-        if who < 0 {
-            return linux_err(errno::ESRCH);
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let who_pid = who as u64;
-        if pcb::state(who_pid).is_none() {
-            return linux_err(errno::ESRCH);
-        }
-    }
-    // Batch 444 — Linux fidelity for PRIO_PGRP / PRIO_USER with a
-    // negative `who`.  In kernel/sys.c::SYSCALL_DEFINE2(getpriority):
-    //
-    //   case PRIO_PGRP:
-    //       if (who)
-    //           pgrp = find_vpid(who);   // find_vpid takes pid_t
-    //       else
-    //           pgrp = task_pgrp(current);
-    //       do_each_pid_thread(pgrp, PIDTYPE_PGID, p) { ... }
-    //       ...
-    //   case PRIO_USER:
-    //       uid = make_kuid(cred->user_ns, who);
-    //       ...
-    //       else if (!uid_valid(uid))
-    //           goto out_unlock;
-    //
-    // `retval` is initialised to `-ESRCH`.  For PRIO_PGRP with a
-    // negative `who`, `find_vpid(neg)` returns NULL, the
-    // do_each_pid_thread loop iterates zero times, retval stays
-    // -ESRCH.  For PRIO_USER with a negative `who`, make_kuid yields
-    // INVALID_UID, the gate jumps to out_unlock, retval stays
-    // -ESRCH.  Pre-batch we silently fell through to the
-    // caller_pid() fallback and reported the caller's nice as
-    // 20 - nice, hiding the invalid-id error.  Programs probing
-    // unknown pgids/uids (`renice -g -1` shape; conformance suites)
-    // saw "20" / "0" where Linux returns -ESRCH.
-    //
-    // For `who > 0` with PRIO_PGRP / PRIO_USER, we still don't model
-    // pgrps or per-uid nice, so we accept silently and report the
-    // caller's nice.  Linux returns -ESRCH if the pgid/uid is
-    // unknown, but absent a tracking model we'd have to either
-    // unconditionally ESRCH every non-self pgid/uid (which would
-    // break legitimate callers that have no way to know the id is
-    // valid here) or accept (current).  Documented in todo.txt as
-    // a remaining gap; the negative-who case is the strict
-    // Linux-fidelity portion fixable today.
-    if (which == 1 || which == 2) && who < 0 {
-        return linux_err(errno::ESRCH);
-    }
-    // Resolve target pid: which==0 with who==0 means caller; with
-    // who!=0 means the named process.  PRIO_PGRP / PRIO_USER with
-    // who > 0 fall through to caller's nice (no pgrp/uid model).
-    let target_pid: Option<u64> = if which == 0 && who != 0 {
-        #[allow(clippy::cast_sign_loss)]
-        Some(who as u64)
-    } else {
-        caller_pid()
     };
-    // Read stored nice; default 0 if unknown (kernel context with
-    // no PCB, or PRIO_PGRP/PRIO_USER from kernel context).
-    let nice: i32 = target_pid.and_then(pcb::get_nice).unwrap_or(0);
-    // ABI quirk: getpriority returns `20 - nice` so callers can
-    // distinguish "nice = -5" (-> 25) from "syscall error" (-1 to
-    // -4095 are reserved for errno).
-    SyscallResult::ok(i64::from(20 - nice))
+    let Some(who) = who else {
+        return linux_err(errno::ESRCH);
+    };
+    let caller = caller_pid().unwrap_or(0);
+    match crate::proc::priority::get_priority(caller, which, who) {
+        // ABI quirk: getpriority returns `20 - nice` so callers can
+        // distinguish "nice = -5" (-> 25) from "syscall error" (-1 to
+        // -4095 are reserved for errno).  `nice` is -20..=19, so this is
+        // 1..=40.
+        Ok(nice) => SyscallResult::ok(i64::from(20i32.saturating_sub(nice))),
+        Err(refusal) => linux_err(linux_errno_for_nice_refusal(refusal)),
+    }
+}
+
+/// `which` and `who` as `getpriority`/`setpriority` take them, decoded:
+/// `None` for a `which` Linux refuses (`EINVAL`), else the class and the
+/// id -- itself `None` when it names nothing, as a negative `who` does.
+///
+/// Batch 444: Linux answers `ESRCH` for a negative `who` in every class.
+/// `find_task_by_vpid` and `find_vpid` find nothing for one, and
+/// `make_kuid` makes it `INVALID_UID`.  A negative `which` is `EINVAL`
+/// through the explicit `which < 0` gate, which the raw-u64 compare used
+/// to catch only by accident.
+fn linux_prio_target(
+    which: i32,
+    who: i32,
+) -> Option<(crate::proc::priority::PrioWhich, Option<u64>)> {
+    let which = crate::proc::priority::PrioWhich::from_raw(u64::try_from(which).ok()?)?;
+    Some((which, u64::try_from(who).ok()))
+}
+
+/// The errno Linux's `setpriority` and `getpriority` give a refusal:
+/// `ESRCH` when nothing is named, `EPERM` without authority over a member
+/// (`set_one_prio_perm`), `EACCES` for a raise its `RLIMIT_NICE` does not
+/// allow (`can_nice`).
+fn linux_errno_for_nice_refusal(refusal: crate::proc::priority::NiceRefusal) -> i32 {
+    use crate::proc::priority::NiceRefusal;
+    match refusal {
+        NiceRefusal::NoSuchProcess => errno::ESRCH,
+        NiceRefusal::NotPermitted => errno::EPERM,
+        NiceRefusal::RaiseRefused => errno::EACCES,
+    }
 }
 
 /// `setpriority(which, who, prio)` — set the nice value.
 ///
-/// We don't track per-process nice (the scheduler uses our own
-/// priority classes), so a successful call is effectively a no-op for
-/// the scheduler.  We do, however, enforce the *policy* surface so
-/// programs that drop privileges or honestly probe their limits see
-/// the right answers:
+/// A thin adapter over [`crate::proc::priority::set_priority`], which the
+/// native `SYS_PROCESS_SET_PRIORITY` shares:
 ///
-///   - `which > 2` (unknown class) → `EINVAL`.
-///   - PRIO_PROCESS + `who != 0` referring to an unknown pid → `ESRCH`.
-///     PRIO_PGRP / PRIO_USER targets are accepted silently (we don't
-///     model pgrps / uids beyond the implicit "all = caller").
+///   - `which > 2` or negative → `EINVAL`; a negative `who` → `ESRCH`.
 ///   - `prio` is clamped to `[-20, 19]` silently (Linux semantics:
 ///     out-of-range values are not an error, they're just saturated
 ///     to the legal interval).
-///   - If the clamped `new_nice` is **less than** the caller's current
-///     nice (which we model as 0), the caller is requesting a priority
-///     *boost*.  Linux requires either `CAP_SYS_NICE` or `new_nice >=
-///     20 - rlim_cur(RLIMIT_NICE)`; we have no `CAP_SYS_NICE` so we
-///     gate purely on the rlimit.  Default `rlim_cur(NICE) = 0` means
-///     `new_nice >= 20`, which no valid nice can satisfy — any boost
-///     attempt returns `EACCES`.  Programs that raise their
-///     `RLIMIT_NICE` ceiling first (e.g. via `prlimit64`) can then
-///     successfully boost themselves.
-///   - Kernel-context callers (caller_pid is None during self-test)
-///     bypass the rlimit gate, matching the pattern used by RLIMIT_AS
-///     / RLIMIT_FSIZE: the rlimit is a userspace policy, not a kernel
-///     boundary.
+///   - Each named process (`who` 0 is the caller's own process, group or
+///     user) is changed only if the caller may change it:
+///     - authority over it, or `EPERM`;
+///     - a raise below its current nice must be within its `RLIMIT_NICE`
+///       (nice `n` needs a soft limit of `20 - n`, so the default 0 allows
+///       none), or the caller must hold the IO_REALTIME right, or `EACCES`.
+///   - The answer folds as Linux's: `ESRCH` when nothing is named, else the
+///     last refusal, else 0.
+///   - A kernel-context caller (no process) may do anything, and naming
+///     itself (`who == 0`) is a successful no-op.
+///
+/// Until 2026-10-01 any process could renice any other, a raise was judged
+/// against 0 rather than the target's current nice and against the caller's
+/// `RLIMIT_NICE` rather than the target's, and the group and user forms
+/// reniced the caller.
 fn sys_setpriority(args: &SyscallArgs) -> SyscallResult {
     // Linux signature: `SYSCALL_DEFINE3(setpriority, int, which, int,
     // who, int, niceval)`.  All three args truncate to int before the
-    // body; `prio` was already cast below.  Pre-batch we held `which`
-    // and `who` as raw u64, so a probe with which = 0x1_0000_0001 saw
-    // EINVAL where Linux truncates to 1 (PRIO_PGRP) and accepts the
-    // call.  See sys_getpriority for the matching divergence.
+    // body.  Pre-batch we held `which` and `who` as raw u64, so a probe
+    // with which = 0x1_0000_0001 saw EINVAL where Linux truncates to 1
+    // (PRIO_PGRP) and accepts the call.  See sys_getpriority for the
+    // matching divergence.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let which = args.arg0 as i32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let who = args.arg1 as i32;
     // `prio` is `int` in the Linux ABI; read it as i32 (truncating the
-    // upper bits) before clamping.  The full 64-bit value is what
-    // would arrive in a register, but only the low 32 bits matter.
+    // upper bits).  The core clamps it to -20..=19, as Linux's
+    // set_one_prio saturates rather than refuses.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let raw_prio = args.arg2 as i32;
-
-    if !(0..=2).contains(&which) {
+    let Some((which, who)) = linux_prio_target(which, who) else {
         return linux_err(errno::EINVAL);
-    }
-    if which == 0 && who != 0 {
-        if who < 0 {
-            return linux_err(errno::ESRCH);
-        }
-        #[allow(clippy::cast_sign_loss)]
-        let who_pid = who as u64;
-        if pcb::state(who_pid).is_none() {
-            return linux_err(errno::ESRCH);
-        }
-    }
-    // Batch 444 — Linux fidelity for PRIO_PGRP / PRIO_USER with
-    // negative `who`.  setpriority's PRIO_PGRP loop initialises
-    // `error = -ESRCH`; with find_vpid(neg) returning NULL, no
-    // set_one_prio iteration runs, error stays -ESRCH.  PRIO_USER
-    // with negative who fails uid_valid -> jumps to out_unlock with
-    // error == -ESRCH.  Pre-batch we silently accepted (returned 0)
-    // and didn't install (no pgrp/uid model).  See sys_getpriority
-    // for the matching divergence and rationale for keeping the
-    // who > 0 case as silent caller-fallback.
-    if (which == 1 || which == 2) && who < 0 {
+    };
+    let Some(who) = who else {
         return linux_err(errno::ESRCH);
-    }
-
-    // Linux silently saturates out-of-range nice values rather than
-    // erroring: see kernel/sys.c set_one_prio_perm().
-    let new_nice: i32 = raw_prio.clamp(-20, 19);
-
-    // RLIMIT_NICE gate: only required when the caller is asking to
-    // *lower* nice (raise priority) below our modelled current of 0.
-    if new_nice < 0 {
-        if let Err(e) = rlimit_nice_check_for_caller(new_nice) {
-            return linux_err(e);
-        }
-    }
-
-    // Resolve target pid for the per-PCB store.  `who` is i32 here;
-    // the negative case was already rejected above (ESRCH for which==0,
-    // ignored otherwise — PRIO_PGRP/PRIO_USER targets fall through to
-    // caller_pid() since we don't model pgrps or per-uid nice).
-    let target_pid: Option<u64> = if which == 0 && who > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        Some(who as u64)
-    } else {
-        caller_pid()
     };
-    if let Some(tp) = target_pid {
-        // Store the nice value AND apply it to the scheduler (re-prioritise
-        // every task the target owns).  Routing through set_process_nice keeps
-        // the Linux-ABI path and the native SYS_PROCESS_SET_NICE path in lock-
-        // step: nice is a single, real scheduling attribute regardless of which
-        // ABI installed it.
-        let _ = crate::proc::thread::set_process_nice(tp, new_nice);
+    let caller = caller_pid().unwrap_or(0);
+    match crate::proc::priority::set_priority(caller, which, who, raw_prio) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(refusal) => linux_err(linux_errno_for_nice_refusal(refusal)),
     }
-    SyscallResult::ok(0)
-}
-
-/// Enforce `RLIMIT_NICE` for a `setpriority` request that would lower
-/// nice to `new_nice`.
-///
-/// Looks up the caller's `RLIMIT_NICE` soft limit and delegates the
-/// decision to [`rlimit_nice_check_with`].  Kernel-context callers
-/// (no `caller_pid()`) are exempted, matching every other Linux-ABI
-/// rlimit gate in this file.
-fn rlimit_nice_check_for_caller(new_nice: i32) -> Result<(), i32> {
-    let Some(pid) = caller_pid() else {
-        return Ok(());
-    };
-    let Some((soft, _)) = pcb::get_rlimit(pid, pcb::RLIMIT_NICE_INDEX as u32) else {
-        return Ok(());
-    };
-    rlimit_nice_check_with(soft, new_nice)
-}
-
-/// Pure-function form of [`rlimit_nice_check_for_caller`] that takes
-/// the soft limit directly.  Split out so the self-tests can exercise
-/// the decision table without standing up a fake `caller_pid()`.
-///
-/// `soft == RLIM_INFINITY` is always Ok (no enforcement).  Otherwise
-/// the floor for new_nice is `20 - soft`; values below that floor get
-/// `EACCES`.  A saturating subtraction keeps the math safe for
-/// pathologically large `soft` values — they pin the floor at 0 and
-/// then below — but the only realistic non-INFINITY range is `[0, 40]`
-/// per Linux conventions.
-#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-fn rlimit_nice_check_with(soft: u64, new_nice: i32) -> Result<(), i32> {
-    if soft == pcb::RLIM_INFINITY {
-        return Ok(());
-    }
-    // Floor = 20 - soft, clamped to i32.  soft > 40 means floor goes
-    // below -20 (full nice range allowed), so we cap soft at 40 first
-    // to keep the subtraction in i32 without overflow risk.
-    let clamped_soft = soft.min(40) as i32;
-    let floor: i32 = 20 - clamped_soft;
-    if new_nice < floor {
-        return Err(errno::EACCES);
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -18818,10 +18709,8 @@ fn sys_getcpu(args: &SyscallArgs) -> SyscallResult {
     // where Linux writes it (and still returns EFAULT).  `put_user`
     // can only fail with -EFAULT, so any write failure here maps to
     // EFAULT regardless of the underlying access error.
-    #[allow(clippy::cast_possible_truncation)]
-    let cpu_id: u32 = crate::smp::current_cpu_index() as u32;
-    // cpu_to_node(cpu) == 0 on our single-node UMA system.
-    let node_id: u32 = 0;
+    // One answer for both ABIs (native SYS_CPU_CURRENT shares it).
+    let (cpu_id, node_id) = handlers::current_cpu_and_node();
 
     let mut faulted = false;
 
@@ -34750,15 +34639,30 @@ fn sys_sched_setattr(args: &SyscallArgs) -> SyscallResult {
     } else {
         nice_in
     };
-    // user_check_sched_setscheduler: lowering nice (raising priority)
-    // requires RLIMIT_NICE headroom.  Mirror setpriority's gate exactly
-    // (it writes the same PCB nice field) — only checked when we are
-    // actually going to store a fair nice and the value drops below the
-    // modelled baseline of 0.  Kernel-context callers bypass.
+    // user_check_sched_setscheduler: changing another process's scheduling
+    // needs authority over it, and a fair nice below its current one needs
+    // RLIMIT_NICE headroom or the right to raise priority -- the rule
+    // setpriority uses (`proc::priority`), since both write the same nice.
+    // Linux answers EPERM for either refusal here (`req_priv`), where
+    // setpriority answers EACCES for the second.  Kernel-context callers
+    // may do anything.  Until 2026-10-01 only a nice below 0 was checked,
+    // against the caller's RLIMIT_NICE, and any process could restore
+    // another's.
     let stores_fair_nice = !keep_params && (effective_policy == 0 || effective_policy == 3);
-    if stores_fair_nice && effective_nice < 0 {
-        if let Err(e) = rlimit_nice_check_for_caller(effective_nice) {
-            return linux_err(e);
+    if let Some(tp) = target_pid {
+        use crate::proc::priority::{self, NiceRefusal};
+        let caller = caller_pid().unwrap_or(0);
+        let gate = if stores_fair_nice {
+            priority::may_set_nice(caller, tp, effective_nice)
+        } else {
+            priority::may_act_on(caller, tp)
+        };
+        match gate {
+            Ok(()) => {}
+            Err(NiceRefusal::NoSuchProcess) => return linux_err(errno::ESRCH),
+            Err(NiceRefusal::NotPermitted | NiceRefusal::RaiseRefused) => {
+                return linux_err(errno::EPERM);
+            }
         }
     }
 
@@ -44198,47 +44102,25 @@ struct WaitidSiginfo {
     _rest: [u8; 100],
 }
 
-// CLD_* si_code values for SIGCHLD (uapi/asm-generic/siginfo.h).
-const CLD_EXITED: i32 = 1;
-const CLD_KILLED: i32 = 2;
-const CLD_DUMPED: i32 = 3;
-const CLD_STOPPED: i32 = 5;
-const CLD_CONTINUED: i32 = 6;
+// CLD_* si_code values for SIGCHLD (uapi/asm-generic/siginfo.h), from the one
+// table both ABIs read.
+use crate::proc::signal::si_code::{CLD_CONTINUED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
 
 /// Derive `(si_code, si_status)` for a reaped child's exit.
 ///
-/// * crash (unhandled exception) → `CLD_DUMPED` + `SIGSEGV` (11), mirroring
-///   [`encode_linux_wstatus`]'s crash synthesis.
-/// * killed by signal (`exit_code` in 128..=255 by kernel convention) →
-///   `CLD_KILLED` + the signal number.
-/// * normal exit → `CLD_EXITED` + the exit status (low 8 bits).
+/// The mapping is [`crate::proc::pcb::ExitInfo::sigchld_code_and_status`]'s,
+/// which the parent's `SIGCHLD` carries too: a crash is `CLD_KILLED` with
+/// `SIGSEGV` (11), as [`encode_linux_wstatus`]'s status word says. Until
+/// 2026-10-01 this answered `CLD_DUMPED` for it, which the status word -- no
+/// core bit, since no core file is written -- contradicted.
 fn waitid_si_from_exit(info: &crate::proc::pcb::ExitInfo) -> (i32, i32) {
-    if info.crash.is_some() {
-        return (CLD_DUMPED, 11);
-    }
-    let code = info.exit_code;
-    if (128..=255).contains(&code) {
-        // exit_code = 128 + sig (kernel convention).
-        (CLD_KILLED, (code - 128) & 0x7f)
-    } else {
-        (CLD_EXITED, code & 0xff)
-    }
+    info.sigchld_code_and_status()
 }
 
-/// Derive `(si_code, si_status)` for a job-control transition.
-///
-/// `Stopped(sig)` → `CLD_STOPPED` + the stop signal; `Continued` →
-/// `CLD_CONTINUED` + `SIGCONT` (18).
+/// Derive `(si_code, si_status)` for a job-control transition:
+/// [`crate::proc::pcb::JobControlEvent::sigchld_code_and_status`].
 fn waitid_si_from_jc(ev: &crate::proc::pcb::JobControlEvent) -> (i32, i32) {
-    use crate::proc::pcb::JobControlEvent;
-    match ev {
-        JobControlEvent::Stopped(sig) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let s = (*sig & 0xff) as i32;
-            (CLD_STOPPED, s)
-        }
-        JobControlEvent::Continued => (CLD_CONTINUED, 18),
-    }
+    ev.sigchld_code_and_status()
 }
 
 /// A child state-change found by [`waitid_scan`], ready to encode into
@@ -44604,6 +44486,26 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     };
     if waitid_si_from_exit(&killed) != (CLD_KILLED, 9) {
         serial_println!("[syscall/linux]   FAIL: waitid_si_from_exit kill branch");
+        return Err(KernelError::InternalError);
+    }
+    // A crash is killed by SIGSEGV with no core file, and waitid says what
+    // wait4's status word says (11: signalled, no core bit) -- not
+    // CLD_DUMPED, which it answered until 2026-10-01.
+    let crashed = crate::proc::pcb::ExitInfo {
+        exit_code: crate::proc::pcb::crash_exit_code(8),
+        crash: Some(crate::proc::pcb::CrashInfo {
+            exception_code: 8,
+            faulting_rip: 0,
+            aux: 0,
+            thread_id: 0,
+        }),
+    };
+    if waitid_si_from_exit(&crashed) != (CLD_KILLED, 11) || encode_linux_wstatus(&crashed) != 11 {
+        serial_println!(
+            "[syscall/linux]   FAIL: waitid_si_from_exit crash branch {:?} (wstatus {})",
+            waitid_si_from_exit(&crashed),
+            encode_linux_wstatus(&crashed)
+        );
         return Err(KernelError::InternalError);
     }
 
@@ -67077,9 +66979,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //   - setpriority(PRIO_PROCESS, MAX, _) returns ESRCH (target pid
         //     doesn't exist).
         //   - which > 2 returns EINVAL for both syscalls.
-        //   - Pure-helper decision table for rlimit_nice_check_with covers
-        //     RLIM_INFINITY pass-through, default soft=0 boost rejection,
-        //     and soft=21 (allows nice >= -1) acceptance.
+        //   - The RLIMIT_NICE decision table (proc::priority's
+        //     rlimit_allows_nice) covers RLIM_INFINITY pass-through, default
+        //     soft=0 boost rejection, and soft=21 (allows nice >= -1)
+        //     acceptance.
+        //   - PRIO_PGRP / PRIO_USER name real groups and users: an unknown
+        //     one is ESRCH (it read the caller's nice until 2026-10-01).
         {
             let a = SyscallArgs {
                 arg0: 0,
@@ -67329,81 +67234,56 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
-            // Regression guard — positive (unknown) who for PRIO_PGRP /
-            // PRIO_USER still accepted silently (no pgrp/uid model).
-            // Documented divergence preserved.
-            let a = SyscallArgs {
-                arg0: 1,
-                arg1: 7,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::GETPRIORITY, &a).value != 20 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: getpriority(PRIO_PGRP, 7) not 20 ({})",
-                    dispatch_linux(nr::GETPRIORITY, &a).value
-                );
-                return Err(KernelError::InternalError);
+            // A positive group or user that names nothing is ESRCH, as on
+            // Linux.  Until 2026-10-01 both read the caller's nice ("no
+            // pgrp/uid model"); groups and users are real now
+            // (proc::priority).  0x7FFF_FFF0 is no pid, pgid or uid.
+            for which in [1u64, 2] {
+                let a = SyscallArgs {
+                    arg0: which,
+                    arg1: 0x7FFF_FFF0,
+                    arg2: 0,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                };
+                let esrch = linux_err(errno::ESRCH).value;
+                if dispatch_linux(nr::GETPRIORITY, &a).value != esrch
+                    || dispatch_linux(nr::SETPRIORITY, &a).value != esrch
+                {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: get/setpriority({}, 0x7FFF_FFF0) not ESRCH ({})",
+                        which,
+                        dispatch_linux(nr::GETPRIORITY, &a).value
+                    );
+                    return Err(KernelError::InternalError);
+                }
             }
             serial_println!("[syscall/linux]   get/setpriority PRIO_PGRP/USER neg-who ESRCH: OK");
 
-            // rlimit_nice_check_with decision table.  Exercises the
-            // pure-function gate directly, without standing up a fake
-            // caller_pid().
-            //
-            // The helper is invoked by the call site only when new_nice <
-            // 0 (a priority *boost* request); the no-boost case is short-
-            // circuited above the call.  We therefore test only the
-            // new_nice < 0 cases plus the RLIM_INFINITY pass-through.
-            assert_eq!(
-                rlimit_nice_check_with(pcb::RLIM_INFINITY, -20),
-                Ok(()),
-                "RLIM_INFINITY must allow even the most extreme boost",
-            );
-            assert_eq!(
-                rlimit_nice_check_with(0, -1),
-                Err(errno::EACCES),
-                "soft=0 (floor=20) with new_nice=-1 must EACCES",
-            );
-            assert_eq!(
-                rlimit_nice_check_with(20, -1),
-                Err(errno::EACCES),
-                "soft=20 (floor=0) with new_nice=-1 (below floor) must EACCES",
-            );
-            assert_eq!(
-                rlimit_nice_check_with(21, -1),
-                Ok(()),
-                "soft=21 (floor=-1) with new_nice=-1 must succeed (== floor)",
-            );
-            assert_eq!(
-                rlimit_nice_check_with(21, -2),
-                Err(errno::EACCES),
-                "soft=21 (floor=-1) with new_nice=-2 (below floor) must EACCES",
-            );
-            assert_eq!(
-                rlimit_nice_check_with(40, -20),
-                Ok(()),
-                "soft=40 (floor=-20) allows the full Linux nice range",
-            );
-            // soft > 40 is unusual but well-defined: the min(40) clamp in
-            // rlimit_nice_check_with pins the floor at -20, so all valid
-            // nice values pass without u64 overflow risk.
-            assert_eq!(
-                rlimit_nice_check_with(1000, -20),
-                Ok(()),
-                "soft > 40 still admits the full nice range without overflow",
-            );
-
-            // rlimit_nice_check_for_caller in kernel context (caller_pid
-            // is None) must always succeed regardless of new_nice.  This
-            // is the documented "kernel context skips rlimits" rule.
-            assert_eq!(
-                rlimit_nice_check_for_caller(-20),
-                Ok(()),
-                "kernel-context rlimit gate must pass through",
-            );
+            // RLIMIT_NICE decision table: the shared rule in
+            // proc::priority (Linux's can_nice without CAP_SYS_NICE), which
+            // setpriority and sched_setattr both use since 2026-10-01.
+            // Nice n needs a soft limit of 20 - n.
+            for (soft, nice, allowed) in [
+                (pcb::RLIM_INFINITY, -20, true),
+                (0, -1, false),
+                (20, -1, false),
+                (21, -1, true),
+                (21, -2, false),
+                (40, -20, true),
+                (1000, -20, true),
+            ] {
+                if crate::proc::priority::rlimit_allows_nice(soft, nice) != allowed {
+                    serial_println!(
+                        "[syscall/linux]   FAIL: RLIMIT_NICE {} with nice {} should be {}",
+                        soft,
+                        nice,
+                        allowed
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
 
             // Batch 63: per-PCB nice round-trip.
             //

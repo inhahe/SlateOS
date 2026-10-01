@@ -48,3 +48,113 @@ with a pointer here.
 §1043 (answering B-Q9) makes genuine Oils the default shell once it runs on
 SlateOS. When lane B has it building, a separate request will ask for the
 default `sh` and login shell to point at it.
+
+## The names lane B keeps -- first batch (2026-10-01)
+
+Item 3's list begins. Each line is in the form your manifest already reads
+(`ranlib = ar`), and each producer must itself be staged (item 2) for its
+line to mean anything -- none of these five is on the image today:
+
+```
+gunzip = gzip
+zcat = gzip
+gzcat = gzip
+clear = tput
+reset = tput
+tset = tput
+groupadd = useradd
+groupdel = useradd
+groupmod = useradd
+userdel = useradd
+usermod = useradd
+w = who
+unzip = zip
+```
+
+Why these: each program dispatches on its invocation name, each name's
+branch is implemented and tested in the crate, and each set of siblings
+needs the same permissions as the program it lives in (the `useradd`
+family all edit `/etc/users.yaml` and the group files), so §1045's default
+-- the same file under a second name -- holds for all of them.
+`scripts/multicall-aliases.py` now counts a `name = producer` line as
+installing that producer's personality (it reports `ranlib`, `strip` and
+`killall` as installed already), so as these lines land the ledger in
+`scripts/multicall-aliases-baseline.txt` shrinks; lane B regenerates it
+after merging. More batches follow as the triage reaches the remaining
+names (`known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`).
+
+## The names lane B keeps -- second batch (2026-10-01)
+
+```
+xxd = hexdump
+atd = at
+atq = at
+atrm = at
+batch = at
+anacron = crond
+lastb = last
+lastlog = last
+sg = newgrp
+mingetty = getty
+lsattr = chattr
+cgclassify = cgroup
+cgcreate = cgroup
+cgdelete = cgroup
+cgexec = cgroup
+cgget = cgroup
+cgset = cgroup
+lssubsys = cgroup
+cancel = lp
+lpq = lp
+lpr = lp
+lprm = lp
+lpstat = lp
+```
+
+Two kinds, both kept under the operator's rule (§1049: a command stays
+while what it waits for is planned). Most are working programs: `xxd`,
+the `at` family (whose `atd` runs the queue), `anacron`, `lastb` and
+`lastlog` (readers of the `btmp` and `lastlog` records `login` now
+writes), `sg`, `mingetty`. The rest refuse honestly, each waiting on a
+kernel facility that exists or is scheduled: `lsattr` on FS_IOC_GETFLAGS
+(lane A's answer to the chattr request), the cgroup tools on the kernel's
+cgroupfs being reachable at `/sys/fs/cgroup`, and the `lp` family on the
+kernel's print queue (`fs::printqueue`) -- `lp` refuses to queue, `lpstat`
+and `lprm` report what is really in the spool. If you would rather not
+stage refusing programs until their facility lands, leave those three
+groups out; the ledger keeps them either way.
+
+## The names lane B keeps -- third batch (2026-10-01)
+
+```
+mpstat = sysstat
+pidstat = sysstat
+sockstat = ss
+ntpdate = ntpd
+sntp = ntpd
+```
+
+All five work: `mpstat` and `pidstat` read `/proc`, `sockstat` prints BSD's
+layout from the same socket tables `ss` reads, and `ntpdate`/`sntp` really
+query an NTP server and set the clock through `clock_settime`. Seven other
+names left the ledger instead (deleted, not kept), and so did the whole of
+`userspace/resolvectl`; `known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN` has why.
+
+## The names lane B keeps -- fourth batch (2026-10-01)
+
+```
+systemd-cat = systemctl
+systemd-escape = systemctl
+systemd-path = systemctl
+systemd-cgls = systemctl
+systemd-cgtop = systemctl
+```
+
+`systemd-cat` writes the journal record `syslogd` writes, `systemd-escape`
+and `systemd-path` are pure transformations, and `systemd-cgls`/`cgtop`
+read the cgroup tree and say so when there is none (they wait, with the
+cgroup tools of batch two, on the kernel's cgroupfs reaching
+`/sys/fs/cgroup`). `systemd-analyze`, `systemd-notify` and
+`systemd-tmpfiles` were deleted instead: each made its answer up.

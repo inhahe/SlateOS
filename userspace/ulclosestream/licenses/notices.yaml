@@ -1,0 +1,43 @@
+# The util-linux code lane B carries (design-decisions 1433), read by
+# scripts/gather-notices.py. It is named here because every util-linux port
+# links this crate -- `close_stdout` is registered by all of them -- so the
+# notice sits in the one crate they share. A component may be named by one
+# manifest only: a crate that ports more of util-linux adds itself below.
+#
+# The ports, each saying so in its module doc and checked against the real
+# binary: blkdiscard, blkid, blockdev, column, findfs, findmnt, flock, getopt,
+# logger, lsblk, lscpu, lsirq, lsmem, lsns, mountpoint, prlimit, swapon and
+# swapoff, wipefs; userspace/coreutils's cal and renice; userspace/login's
+# login records (login-utils/login.c); and the libraries smartcols
+# (libsmartcols), ulblkid (libblkid), ulmount (libmount), ulsysfs (lib/sysfs.c
+# and friends), ulstrutils (lib/strutils.c) and this crate
+# (include/closestream.h).
+#
+# util-linux licenses file by file (its README.licensing). What these ports
+# take from:
+#   GPL-2.0-or-later  the default, for every file without a notice of its own,
+#                     and most programs (lsblk, findmnt, wipefs, getopt...)
+#   LGPL-2.1-or-later libblkid, libmount, libsmartcols, blkid.c, lsirq.c,
+#                     lib/timeutils.c, lib/cpuset.c, lib/mbsalign.c,
+#                     lib/canonicalize.c, lib/encode.c, lib/match.c
+#   BSD-4-Clause-UC   misc-utils/cal.c, text-utils/column.c,
+#                     misc-utils/logger.c, sys-utils/renice.c
+#   BSD-4.3TAHOE      login-utils/login.c
+#   MIT               sys-utils/flock.c
+#   public domain     include/closestream.h, lib/strutils.c, lib/sysfs.c,
+#                     lib/path.c and the other lib/ and include/ files that say
+#                     "No copyright is claimed" (no notice owed, none given)
+# The BSD and MIT texts are each file's own notice, in BSD-notices and
+# MIT-flock. The attribution is the acknowledgement the BSD-4-Clause-UC files
+# ask advertising to display and login.c asks documentation to make; the
+# University of California withdrew the advertising clause for its own code in
+# 1999, but the files still carry it, so it is shown.
+util-linux:
+  version: 2.39.3
+  licence: GPL-2.0-or-later AND LGPL-2.1-or-later AND BSD-4-Clause-UC AND BSD-4.3TAHOE AND MIT
+  attribution: This product includes software developed by the University of California, Berkeley and its contributors.
+  texts:
+    - GPL-2.0
+    - LGPL-2.1
+    - BSD-notices
+    - MIT-flock

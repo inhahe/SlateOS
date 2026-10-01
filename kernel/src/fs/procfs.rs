@@ -2649,7 +2649,12 @@ fn gen_pid_stat(task_id: u64) -> KernelResult<Vec<u8>> {
         .iter()
         .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
-    Ok(build_pid_stat(task, task_id))
+    // The process-wide fields are the owning process's. For a process's own
+    // directory that is the same number (its id is its main thread's); for a
+    // thread's `/proc/<tid>` it is the thread's process; a kernel task has
+    // none, and reports zeros.
+    let proc_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+    Ok(build_pid_stat(task, proc_id))
 }
 
 /// `/proc/<pid>/task/<tid>/stat` — per-thread task statistics.
@@ -2760,23 +2765,26 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let exit_code =
         crate::proc::pcb::exit_code(task.id).map_or(0i64, |c| (i64::from(c) & 0xff) << 8);
 
-    // priority: Linux reports the kernel-internal priority; for normal tasks
-    // this is in the 0..39 range.  nice is 0 (native scheduler has no nice).
+    // priority (field 18): Linux reports the kernel-internal priority; for
+    // normal tasks this is in the 0..39 range.  nice (field 19): the
+    // process's nice, which `thread::set_process_nice` turns into that
+    // priority.  It was a literal 0 until 2026-10-01, so a renice moved
+    // field 18 and left the field that names it unchanged
+    // (requests/e-ad-renicing-another-process-renices-the-caller.md).  A
+    // bare kernel thread (no PCB) reports 0.
     let priority = i64::from(task.priority);
+    let nice = crate::proc::pcb::get_nice(proc_id).unwrap_or(0);
 
-    // pgrp (field 5) and session (field 6).  We don't track process groups
-    // or sessions as distinct objects; our model is "every process is its
-    // own group and session leader", which is exactly what sys_getpgid /
-    // sys_getsid / sys_getpgrp report (pgid == sid == pid).  These are
-    // process-wide, so they key off `proc_id`.  Bare scheduler tasks
-    // (kernel threads, no PCB) have no group/session — getpgid returns
-    // ESRCH for them — so they report 0/0, matching Linux's kernel-thread
-    // convention.
-    let pgrp_sid = if crate::proc::pcb::state(proc_id).is_some() {
-        proc_id
-    } else {
-        0
-    };
+    // pgrp (field 5) and session (field 6): the process's real group and
+    // session, as getpgid/getsid report them.  Until 2026-10-01 both were
+    // the pid, from a time when every process was its own group and
+    // session leader, so a job's members looked unrelated to
+    // `ps -o pgid,sid`.  Process-wide, so keyed off `proc_id`.  Bare
+    // scheduler tasks (kernel threads, no PCB) have no group or session --
+    // getpgid returns ESRCH for them -- so they report 0/0, matching
+    // Linux's kernel-thread convention.
+    let pgrp = crate::proc::pcb::get_pgid(proc_id).unwrap_or(0);
+    let session = crate::proc::pcb::get_sid(proc_id).unwrap_or(0);
 
     // starttime (field 22): the boot-relative tick when this task was
     // created, in clock ticks at USER_HZ.  The native timer ticks at
@@ -2807,7 +2815,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // One space between every field, terminated by a single newline.
     // Placeholders left-to-right: pid comm state ppid pgrp session
     // <tty_nr/tpgid/flags=0/-1/0> <minflt..cmajflt=0> utime stime
-    // cutime cstime priority nice=0 num_threads itrealvalue=0
+    // cutime cstime priority nice num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
     // Split around the comm so the name can be raw bytes. Field 2 is
@@ -2819,12 +2827,12 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     out.extend_from_slice(format!("{} (", task.id).as_bytes());
     out.extend_from_slice(name);
     let text = format!(
-        ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
+        ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} {} {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
         state_char,
         ppid,
-        pgrp_sid,
-        pgrp_sid,
+        pgrp,
+        session,
         minflt,
         cminflt,
         majflt,
@@ -2834,6 +2842,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         cutime,
         cstime,
         priority,
+        nice,
         num_threads,
         starttime,
         vsize,
@@ -14043,6 +14052,23 @@ fn task_exists(task_id: u64) -> bool {
     crate::sched::task_exists(task_id)
 }
 
+/// The directory `/proc/self` names: the calling process's id -- its main
+/// thread's task id, so the directory that is the process -- or, for a
+/// kernel task with no process, its own id. Until 2026-10-01 this was the
+/// calling *task's* id, which for any thread but the first is not the
+/// process, and before task and process ids shared one counter was not the
+/// process for the first thread either.
+fn self_dir_id() -> u64 {
+    let task = crate::sched::current_task_id();
+    crate::proc::thread::owner_process(task).unwrap_or(task)
+}
+
+/// Whether task `task_id` has a directory in the `/proc` listing: a process's
+/// main thread (whose id is the process's) and a kernel task (no process).
+fn is_listed_at_root(task_id: u64) -> bool {
+    crate::proc::thread::owner_process(task_id).is_none_or(|pid| pid == task_id)
+}
+
 // ---------------------------------------------------------------------------
 // Path resolution helpers
 // ---------------------------------------------------------------------------
@@ -14800,11 +14826,11 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
         return ProcPath::NotFound;
     }
 
-    // "self" is a magic alias for the current task's PID.
+    // "self" is a magic alias for the calling process's directory.
     // Linux provides /proc/self as a symlink → /proc/<current_pid>.
     // We resolve it inline since procfs is a virtual filesystem.
     let pid = if first == "self" {
-        crate::sched::current_task_id()
+        self_dir_id()
     } else if let Ok(p) = first.parse::<u64>() {
         p
     } else {
@@ -14927,8 +14953,15 @@ impl FileSystem for ProcFs {
                     size: 0,
                 });
 
-                // Add per-PID directories for all live tasks.
+                // One directory per process -- its main thread's task id, which is
+                // its pid (`pcb::claim_leader_id`) -- and one per kernel task,
+                // which has no process. A process's other threads are under its
+                // `task/` directory and not listed here, as on Linux; their own
+                // `/proc/<tid>` still resolves.
                 for task in &crate::sched::task_list() {
+                    if !is_listed_at_root(task.id) {
+                        continue;
+                    }
                     entries.push(DirEntry {
                         ino: 0,
                         name: PathBuf::from(format!("{}", task.id)),
@@ -15346,10 +15379,7 @@ impl FileSystem for ProcFs {
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
-            ProcPath::SelfLink => Ok(PathBuf::from(format!(
-                "{}",
-                crate::sched::current_task_id()
-            ))),
+            ProcPath::SelfLink => Ok(PathBuf::from(format!("{}", self_dir_id()))),
             _ => Err(KernelError::InvalidArgument),
         }
     }
@@ -17661,24 +17691,29 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   FAIL: stat has a non-integer numeric field");
         return Err(KernelError::InternalError);
     }
-    // Fields 5 (pgrp) and 6 (session) must agree with the getpgid/getsid
-    // model: pgrp == session, and both equal the pid for a real process or
-    // 0 for a bare kernel task (no PCB).  rest_fields is field3-based, so
-    // index 2 == field 5 (pgrp) and index 3 == field 6 (session).
-    let pgrp_field = rest_fields.get(2).and_then(|f| f.parse::<u64>().ok());
-    let session_field = rest_fields.get(3).and_then(|f| f.parse::<u64>().ok());
-    let expected_pgrp = if crate::proc::pcb::state(current_tid).is_some() {
-        current_tid
-    } else {
-        0
-    };
-    if pgrp_field != Some(expected_pgrp) || session_field != Some(expected_pgrp) {
+    // Fields 5 (pgrp) and 6 (session) are what getpgid/getsid report for
+    // the process the line describes, and field 19 is its nice; a bare
+    // kernel task (no PCB) reports 0 for all three.  rest_fields is
+    // field3-based, so index 2 == field 5, index 3 == field 6 and index
+    // 16 == field 19.  (Until 2026-10-01 the first two were the pid and
+    // the third a literal 0.)
+    let field = |i: usize| rest_fields.get(i).and_then(|f| f.parse::<i64>().ok());
+    let as_field = |v: u64| i64::try_from(v).ok();
+    // The process the line describes: the task's owner (none, so 0, for this
+    // kernel task).
+    let owner = crate::proc::thread::owner_process(current_tid).unwrap_or(0);
+    let expected = (
+        as_field(crate::proc::pcb::get_pgid(owner).unwrap_or(0)),
+        as_field(crate::proc::pcb::get_sid(owner).unwrap_or(0)),
+        Some(i64::from(crate::proc::pcb::get_nice(owner).unwrap_or(0))),
+    );
+    if (field(2), field(3), field(16)) != expected {
         serial_println!(
-            "[procfs]   FAIL: stat pgrp/session = {:?}/{:?}, expected {}/{}",
-            pgrp_field,
-            session_field,
-            expected_pgrp,
-            expected_pgrp
+            "[procfs]   FAIL: stat pgrp/session/nice = {:?}/{:?}/{:?}, expected {:?}",
+            field(2),
+            field(3),
+            field(16),
+            expected
         );
         return Err(KernelError::InternalError);
     }

@@ -1821,7 +1821,16 @@ pub fn spawn_with_affinity(
     pml4_phys: u64,
     affinity_mask: u64,
 ) -> KernelResult<TaskId> {
-    spawn_inner(name, priority, entry, arg, pml4_phys, affinity_mask, true)
+    spawn_inner(
+        name,
+        priority,
+        entry,
+        arg,
+        pml4_phys,
+        affinity_mask,
+        true,
+        None,
+    )
 }
 
 /// Spawn a task but leave it **suspended** — created and inserted into the
@@ -1853,6 +1862,27 @@ pub fn spawn_suspended(
     arg: u64,
     pml4_phys: u64,
 ) -> KernelResult<TaskId> {
+    spawn_suspended_with_id(name, priority, entry, arg, pml4_phys, None)
+}
+
+/// [`spawn_suspended`], giving the task the id `requested_id` when it is
+/// free: a process's first thread is given its process's id, which comes
+/// from the same counter ([`task::alloc_id`]), so that a process's id is its
+/// main thread's, as on Linux. A requested id already in use -- which only
+/// a second "first" thread could ask for -- falls back to a fresh one; the
+/// returned id is the one the task has.
+///
+/// # Errors
+///
+/// Same as [`spawn_with_affinity`].
+pub fn spawn_suspended_with_id(
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    pml4_phys: u64,
+    requested_id: Option<TaskId>,
+) -> KernelResult<TaskId> {
     spawn_inner(
         name,
         priority,
@@ -1861,6 +1891,7 @@ pub fn spawn_suspended(
         pml4_phys,
         task::CPU_AFFINITY_ALL,
         false,
+        requested_id,
     )
 }
 
@@ -1881,6 +1912,9 @@ pub fn admit(task_id: TaskId) -> bool {
 /// When `admit` is `true` the task is created `Ready` and enqueued
 /// immediately (the historical behavior).  When `false` it is created
 /// `Blocked` and left out of every run queue until [`admit`] is called.
+// One argument per thing a spawn decides; a struct for them would be read
+// and unpacked in this one place.
+#[allow(clippy::too_many_arguments)]
 fn spawn_inner(
     name: &[u8],
     priority: u8,
@@ -1889,6 +1923,7 @@ fn spawn_inner(
     pml4_phys: u64,
     affinity_mask: u64,
     admit: bool,
+    requested_id: Option<TaskId>,
 ) -> KernelResult<TaskId> {
     if affinity_mask == 0 {
         return Err(KernelError::InvalidArgument);
@@ -1914,7 +1949,7 @@ fn spawn_inner(
     // task, which itself needed to allocate on its first context-switch
     // path (or a subsequent spawn), hitting the held lock.
     let (id, prio, target_cpu) = cpu::without_interrupts(|| {
-        let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
+        let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys, requested_id)?;
         new_task.cpu_affinity = affinity_mask;
         new_task.cgroup_id = inherit_cgroup;
         new_task.ready_since_tick = crate::apic::tick_count();
@@ -1929,7 +1964,6 @@ fn spawn_inner(
             // is credited only with the moment it spent being registered.
             new_task.block_tick = crate::apic::tick_count();
         }
-        let id = new_task.id;
         let prio = new_task.priority;
         let target_cpu = choose_cpu_for_task(&new_task);
         new_task.last_cpu = target_cpu;
@@ -1940,12 +1974,20 @@ fn spawn_inner(
         // — on the `NotSupported` path the box is dropped exactly where the
         // bare `new_task` used to be, running the same `Task` destructor and
         // freeing the same kernel stack.
-        let new_task = Box::new(new_task);
+        let mut new_task = Box::new(new_task);
 
         let mut state = SCHED.lock();
         if !state.initialized {
             return Err(KernelError::NotSupported);
         }
+        // A requested id is checked here, under the lock that makes the check
+        // and the insert one step. Ids are never reused, so only a second
+        // claim to one process's id could find it taken; that task takes a
+        // fresh id rather than replacing the first.
+        if state.tasks.contains_key(&new_task.id) {
+            new_task.id = task::alloc_id();
+        }
+        let id = new_task.id;
         state.tasks.insert(id, new_task);
         // Only enqueue when admitting immediately.  A suspended task is left
         // out of every run queue; admit() (via wake()) enqueues it later.

@@ -1762,7 +1762,9 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 ///
 /// The recorded handles merely *alias* handles the process already owns
 /// (`ipc_handles`), which survive exec — they are not duplicated and are
-/// never closed by the kernel on this path.
+/// never closed by the kernel on this path.  The handles of the descriptors
+/// it does *not* keep, the close-on-exec ones, go to
+/// [`SYS_PROCESS_SET_EXEC_CLOSE`], which closes them at a successful exec.
 ///
 /// `arg0`: pointer to an array of `FdMapEntry`.
 /// `arg1`: entry count.
@@ -2022,14 +2024,18 @@ pub const SYS_PROCESS_GET_NICE: u64 = 531;
 /// out-of-range inputs are clamped. The mapping nice→priority is monotonic and
 /// sends nice `0` to the default priority level (see `thread::nice_to_priority`).
 ///
-/// **Policy lives in userspace.** Like `SYS_PROCESS_SET_CREDENTIALS`, the
-/// `CAP_SYS_NICE` check that guards a priority *raise* (negative nice) is done
-/// by the userspace posix `nice`/`setpriority` wrappers; the kernel trusts
-/// them and only performs the mutation, always targeting the caller's own
-/// process. Fails only if the caller has no owning process.
+/// **The kernel decides a raise** (a nice below the current one): it must be
+/// within the process's `RLIMIT_NICE`, or the process must hold a Thread
+/// capability with IO_REALTIME (`CAP_SYS_NICE`, design-decisions §326);
+/// otherwise `ResourceExhausted` ("resource limit reached"). Until 2026-10-01
+/// this was left to libc's wrappers, like `SYS_PROCESS_SET_CREDENTIALS`'s
+/// check before it, and a program calling 532 directly could reach nice -20,
+/// the top scheduler priority (`proc::priority`, §1503). Always the
+/// caller's own process; [`SYS_PROCESS_SET_PRIORITY`] names others.
 ///
-/// Returns the *previous* nice value, biased by +20 (`0..=39`). Chosen number
-/// 532 (next free slot after 531).
+/// Returns the *previous* nice value, biased by +20 (`0..=39`);
+/// `NoSuchProcess` for a caller with no process. Chosen number 532 (next free
+/// slot after 531).
 pub const SYS_PROCESS_SET_NICE: u64 = 532;
 
 // ---------------------------------------------------------------------------
@@ -2070,9 +2076,41 @@ pub const SYS_PROCESS_SET_NICE: u64 = 532;
 /// invoked as `trampoline(signum: u64 /* rdi */, ctx: *mut SignalContext
 /// /* rsi */)`.
 ///
-/// Returns: 0 on success, negative `KernelError` code on failure (e.g.
-/// the caller is not associated with a process).
+/// `arg1`: frame flags. [`SIGNAL_FRAME_SIGINFO`] asks for the extended frame:
+/// the `SignalContext` followed by the signal's `siginfo`
+/// (`proc::signal::SignalInfoTail`). Other bits are ignored, so that a libc
+/// built for a later kernel can ask for more and read from the answer what it
+/// got.
+///
+/// Returns: the flags the kernel will honour -- [`SIGNAL_FRAME_SIGINFO`] when
+/// it will build the extended frame, 0 otherwise (always 0 when unregistering;
+/// and 0 from every kernel before 2026-10-01, which ignored `arg1`, so libc
+/// can tell an older kernel by the answer and keep reading the short frame).
+/// Negative `KernelError` code on failure (e.g. the caller is not associated
+/// with a process). The choice goes with the trampoline: kept across `fork`,
+/// dropped at `exec` (`requests/d-a-put-each-signal-s-siginfo-in-the-native-
+/// frame.md`).
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
+
+/// [`SYS_SIGNAL_REGISTER`]'s `arg1` bit asking for the extended signal frame.
+///
+/// The frame is then `SIGNAL_FRAME_EXTENDED_SIZE` (160) bytes: today's 136-byte
+/// `SignalContext`, unchanged and still all `SYS_SIGNAL_RETURN` reads,
+/// followed at offset 136 by
+///
+/// ```text
+/// 136  si_code   i32   SI_USER, SI_QUEUE, SI_TKILL, SI_KERNEL, CLD_*, ...
+/// 140  si_pid    u32   the sender -- for SIGCHLD the child; 0 from the kernel
+/// 144  si_uid    u32   the sender's real uid -- for SIGCHLD the child's
+/// 148  (pad)     u32   0
+/// 152  si_value  u64   sigqueue's value; for SIGCHLD the child's si_status
+///                      (exit status, or the signal that killed it)
+/// ```
+///
+/// The context stays 16-byte aligned and the fake return slot stays 8 bytes
+/// below it, so a trampoline written for the short frame runs unchanged on
+/// the long one.
+pub const SIGNAL_FRAME_SIGINFO: u64 = 1;
 
 /// Post a signal to a target process's pending set, or to every member of
 /// a process group.
@@ -2092,17 +2130,24 @@ pub const SYS_SIGNAL_REGISTER: u64 = 522;
 /// target has no trampoline registered, the kernel applies the default
 /// action (terminating signals kill the process; others are dropped).
 ///
-/// For the group forms the membership is resolved *before* the signal
-/// number is validated, so signalling a group that does not exist reports
+/// The target is resolved *before* the signal number is validated, so
+/// signalling a process or group that does not exist reports
 /// `NoSuchProcess` even when the signal number is also bad — the same
 /// ordering Linux's `kill_something_info` uses, and the more useful
-/// diagnostic (the caller learns the group is gone).  Delivery to the
-/// members is best-effort: the call succeeds if *any* member accepted the
-/// signal, and otherwise reports the last member's error.
+/// diagnostic (the caller learns the target is gone).  Delivery to a
+/// group's members is best-effort: the call succeeds if *any* member
+/// accepted the signal, and otherwise reports the last member's error.
+///
+/// Authority, per target: the caller itself, its child, any process for a
+/// kernel task, or a process the caller holds a Process capability with
+/// DELETE rights for. Signal 0 checks all of that and posts nothing -- for a
+/// single process as well as a group since 2026-10-01; before, a single
+/// process refused it with `InvalidArgument`, contrary to this page.
 ///
 /// Returns: 0 on success, negative `KernelError` code on failure
-/// (`NoSuchProcess` if the PID or group is unknown, `InvalidArgument` for
-/// an out-of-range signal number).
+/// (`NoSuchProcess` if the PID or group is unknown, `ProcessExited` for a
+/// zombie, `InvalidArgument` for an out-of-range signal number,
+/// `PermissionDenied` without the authority above).
 pub const SYS_SIGNAL_SEND: u64 = 523;
 
 /// Return from a signal handler (sigreturn).
@@ -5629,6 +5674,175 @@ pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
 ///
 /// Chosen number 1085, next free slot after 1084.
 pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
+
+// ---------------------------------------------------------------------------
+// Sending a signal with a value, and to a thread (1086-1087)
+// ---------------------------------------------------------------------------
+
+/// Send a signal carrying a value: `signal_queue(pid, sig, value) -> 0`, the
+/// native `sigqueue(3)`.
+///
+/// The target receives `si_code = SI_QUEUE`, the caller's pid and real uid as
+/// the sender, and `value` as `si_value` -- in the extended frame
+/// ([`SIGNAL_FRAME_SIGINFO`]), and in the Linux `rt_sigframe` for a Linux-ABI
+/// target. Before it, a native `sigqueue` had only [`SYS_SIGNAL_SEND`], which
+/// carries no value.
+///
+/// `sigqueue`'s rules: `pid` is one process, never a group, so anything not
+/// above zero answers `NoSuchProcess` (Linux's `ESRCH` for the same call).
+/// Then, in Linux's order: `NoSuchProcess` for no such process,
+/// `ProcessExited` for a zombie, `InvalidArgument` for a signal outside
+/// `0..=64`, `PermissionDenied` without [`SYS_SIGNAL_SEND`]'s authority.
+/// Signal 0 checks all of that and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 4.
+/// Chosen number 1086, next free slot after 1085.
+pub const SYS_SIGNAL_QUEUE: u64 = 1086;
+
+/// Send a signal to a thread of a process: `signal_tgkill(tgid, tid, sig) ->
+/// 0`, the native `tgkill(2)`.
+///
+/// Checks that thread `tid` belongs to process `tgid` and posts in the same
+/// step, so that a thread id reused since the caller learnt it cannot carry
+/// the signal into another process. The target receives `si_code = SI_TKILL`
+/// and the caller's pid and real uid. The signal goes to the process, as
+/// every signal does here -- whichever of its threads next returns to
+/// userspace runs it; per-thread pending sets are a later step.
+///
+/// Errors in Linux's order: `InvalidArgument` for a `tgid` or `tid` not above
+/// zero; `NoSuchProcess` when `tid` is not a thread of `tgid`; then as
+/// [`SYS_SIGNAL_QUEUE`] for the process (zombie, signal number, authority).
+/// The check is the kernel's and needs no capability: libc's had to look in
+/// `/proc/<tgid>/task/<tid>`, which a process with no File capability may
+/// not. Signal 0 checks and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 5.
+/// Chosen number 1087, next free slot after 1086.
+pub const SYS_SIGNAL_TGKILL: u64 = 1087;
+
+// ---------------------------------------------------------------------------
+// The nice of a named process, group or user (1088-1089)
+// ---------------------------------------------------------------------------
+
+/// Read a nice: `process_get_priority(which, who) -> nice + 20`, the native
+/// `getpriority(2)`.
+///
+/// `which` is 0 (one process; `who` is a pid), 1 (a process group; a pgid) or
+/// 2 (a user; a uid), and `who` 0 means the caller's own. For a group or a
+/// user the answer is the lowest nice -- the most favoured member -- as
+/// Linux's. Biased by +20, as [`SYS_PROCESS_GET_NICE`]'s, so it is never
+/// negative. Reading needs no authority, as on Linux, where `/proc` shows it
+/// to anyone.
+///
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing live
+/// is named.
+///
+/// `requests/e-ad-renicing-another-process-renices-the-caller.md`: before it a
+/// native program could name no process but itself, and libc's `getpriority`
+/// read the caller whatever it was asked. Chosen number 1088, next free slot
+/// after 1087.
+pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
+
+/// Set a nice: `process_set_priority(which, who, nice + 20) -> 0`, the native
+/// `setpriority(2)`.
+///
+/// `which` and `who` as [`SYS_PROCESS_GET_PRIORITY`]; the nice biased by +20,
+/// as [`SYS_PROCESS_SET_NICE`] takes it, and clamped. Each named process is
+/// changed only if the caller may change it (`proc::priority`, §1503):
+///
+/// - **authority** -- it is the caller or the caller's child, or the caller
+///   holds a Process capability with DELETE rights for it: who may signal
+///   it may renice it. Else `PermissionDenied` (libc: `EPERM`).
+/// - **a raise** (below its current nice) -- within its `RLIMIT_NICE`, or
+///   the caller holds a Thread capability with IO_REALTIME. Else
+///   `ResourceExhausted` (libc: `EACCES`).
+///
+/// A refusal for one member does not stop the others. The answer is Linux's
+/// fold: `NoSuchProcess` when nothing is named, else the last refusal, else 0.
+/// Chosen number 1089, next free slot after 1088.
+pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
+
+// ---------------------------------------------------------------------------
+// Closing close-on-exec descriptors at a native exec (1090)
+// ---------------------------------------------------------------------------
+
+/// Name the handles the caller's next successful `exec` closes:
+/// `process_set_exec_close(entries_ptr, count) -> count`.
+///
+/// A native process's descriptor table is libc's, in userspace. Before
+/// `exec` libc hands the kernel the descriptors to *keep*
+/// ([`SYS_PROCESS_SET_EXEC_FDS`]). This is the other half: the handles of the
+/// descriptors it drops as close-on-exec and no kept descriptor shares. The
+/// kernel closes them once the new image is in, past the point of no return,
+/// each as `close()` would. So a close-on-exec pipe's reader sees end-of-file
+/// when the exec happens, not when the new program exits -- which is what
+/// `std::process::Command`'s fork path waits for, and what made it, the
+/// GUI terminal's first spawn and an sshd session hang until the child
+/// exited (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`).
+///
+/// - `entries_ptr` points at `FdMapEntry`s, as `SYS_PROCESS_SET_EXEC_FDS`
+///   takes them. `handle_type` and `handle` are read; `fd` is ignored.
+/// - An empty list clears it. A handle type the kernel does not know refuses
+///   the whole list (`InvalidArgument`).
+/// - Every exec attempt takes the list. A failed one leaves the handles open,
+///   as POSIX requires, and drops the list, so send it before each attempt.
+/// - A handle the caller does not hold, a console handle, and a TCP or UDP
+///   socket are left open. Sockets are shared rather than counted across a
+///   fork, so closing one would close it for every holder.
+/// - A handle also named by a kept descriptor is not closed.
+///
+/// Chosen number 1090, next free slot after 1089.
+pub const SYS_PROCESS_SET_EXEC_CLOSE: u64 = 1090;
+
+// ---------------------------------------------------------------------------
+// Watch events whose paths are not cut (1091)
+// ---------------------------------------------------------------------------
+
+/// Read pending filesystem-watch events as variable-length records:
+/// `fs_watch_read_records(watch_id, buf, buf_len) -> bytes`.
+///
+/// [`SYS_FS_WATCH_READ`]'s records are a fixed 528 bytes with 256 for each
+/// path, so a path longer than 255 bytes arrives cut -- and a cut name is
+/// another file's name. These carry each path whole, the shape of Linux's
+/// `inotify_event` (`requests/d-a-tcsetpgrp-of-group-0-and-a-terminal-that-is-not-ours.md`
+/// part 4). Each record, little-endian, starting 8-byte aligned:
+///
+/// ```text
+/// 0   u64  watch id
+/// 8   u32  event type, as SYS_FS_WATCH_READ's (0 created ... 255 overflow)
+/// 12  u8   1 if the subject is a directory, else 0
+/// 13  [3]  zero
+/// 16  u32  path length in bytes, without its NUL
+/// 20  u32  new-path length (renames; 0 otherwise), without its NUL
+/// 24  the path, a NUL, the new path, a NUL, zero padding to a multiple of 8
+/// ```
+///
+/// Returns the bytes written: as many whole records as fit, in order, with
+/// the rest left queued; 0 when nothing is pending. `BufferTooSmall` when the
+/// first pending record does not fit (it stays queued) -- Linux's `EINVAL` for
+/// an `inotify` read too small for one event. `InvalidHandle` for an unknown
+/// watch.
+///
+/// Chosen number 1091, next free slot after 1090.
+pub const SYS_FS_WATCH_READ_RECORDS: u64 = 1091;
+
+// ---------------------------------------------------------------------------
+// Which CPU the caller is on (1092)
+// ---------------------------------------------------------------------------
+
+/// The CPU the calling thread is running on, and its NUMA node:
+/// `cpu_current() -> cpu | node << 32`, the native `getcpu(2)`.
+///
+/// One return value and no pointers, so it is cheap and cannot fault:
+/// `sched_getcpu()` is asked on hot paths, by allocators choosing a per-CPU
+/// arena. Before it, libc had no way to ask and answered CPU 0 everywhere,
+/// piling every thread onto CPU 0's shard
+/// (`requests/d-a-a-native-getcpu-for-sched-getcpu.md`). The node is 0
+/// until there is NUMA topology; the Linux `getcpu` gives the same answer.
+/// As on Linux, the thread may have moved by the time the answer is read.
+///
+/// Chosen number 1092, next free slot after 1091.
+pub const SYS_CPU_CURRENT: u64 = 1092;
 
 // ---------------------------------------------------------------------------
 // Version info

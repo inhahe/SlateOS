@@ -8,7 +8,12 @@
 //! - `cpupower` (default) — CPU power management
 //! - `cpufreq-info` — show CPU frequency information
 //! - `cpufreq-set` — set CPU frequency parameters
-//! - `turbostat` — show CPU C-state and turbo frequency statistics
+//!
+//! It also answered to `turbostat` until 2026-10-01 (the §1045 triage), and
+//! printed `turbostat version 2024.05` over a table whose `Avg_MHz` was the
+//! current frequency and `TSC_MHz` the maximum -- not what turbostat measures
+//! (it counts APERF/MPERF and C-state residency in MSRs, which nothing here
+//! can read). The name went rather than keep a table of the wrong numbers.
 
 use quoting::quoteaf_os;
 use std::env;
@@ -483,7 +488,7 @@ fn cmd_monitor(args: &[String]) {
     println!("\n(snapshot — continuous monitoring requires daemon mode)");
 }
 
-// ── turbostat personality ──────────────────────────────────────────────
+// ── Option checking ────────────────────────────────────────────────────
 
 /// The first `-`-prefixed argument that is not in `known`, if any.
 ///
@@ -515,42 +520,6 @@ fn first_unknown_option<'a>(
         }
     }
     None
-}
-
-fn run_turbostat(args: &[String]) {
-    // Looked only for `-i`, so `turbostat --zzq` printed a full statistics
-    // table and exited 0 -- a report produced without parsing the request.
-    if let Some(bad) = first_unknown_option(args, &["-h", "--help"], &["-i", "--interval"]) {
-        eprintln!("turbostat: unknown option: {bad}");
-        std::process::exit(1);
-    }
-    let interval: u32 = args
-        .iter()
-        .position(|a| a == "-i" || a == "--interval")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5);
-
-    let topo = read_cpu_topology();
-
-    println!("turbostat version 2024.05");
-    println!("Interval: {} seconds", interval);
-    println!();
-
-    println!(
-        "{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "CPU", "Avg_MHz", "Busy%", "Bzy_MHz", "TSC_MHz", "C1%", "C6%"
-    );
-
-    for cpu in &topo.cpus {
-        let tsc_mhz = cpu.max_freq_khz / 1000;
-        let bzy_mhz = cpu.cur_freq_khz / 1000;
-        println!(
-            "{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-            cpu.id, bzy_mhz, "N/A", bzy_mhz, tsc_mhz, "N/A", "N/A"
-        );
-    }
-    println!("\n(snapshot — continuous monitoring requires daemon mode)");
 }
 
 // ── Help ───────────────────────────────────────────────────────────────
@@ -661,11 +630,6 @@ fn main() {
     let code = match prog_name.as_str() {
         "cpufreq-info" => run_cpufreq_info(args),
         "cpufreq-set" => run_cpufreq_set(args),
-        "turbostat" => {
-            let rest: Vec<String> = args.into_iter().skip(1).collect();
-            run_turbostat(&rest);
-            0
-        }
         _ => run_cpupower(args),
     };
 
@@ -679,8 +643,8 @@ mod tests {
     /// A report is not produced for a request that was not parsed.
     ///
     /// `cpufreq-info --zzq` printed "analyzing CPU 0:" and a full frequency
-    /// report; `turbostat --zzq` printed a statistics table. Both looked for
-    /// the options they wanted and ignored everything else.
+    /// report: it looked for the options it wanted and ignored everything
+    /// else.
     #[test]
     fn an_unknown_option_is_refused_before_the_report() {
         let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
@@ -765,9 +729,7 @@ mod tests {
             ("cpupower", "cpupower"),
             ("cpufreq-info", "cpufreq-info"),
             ("cpufreq-set", "cpufreq-set"),
-            ("turbostat", "turbostat"),
             ("/usr/bin/cpupower", "cpupower"),
-            ("C:\\bin\\turbostat.exe", "turbostat"),
         ];
         for (input, expected) in cases {
             let bytes = input.as_bytes();

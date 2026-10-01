@@ -24,9 +24,9 @@
 //! [`crate::button::width`] makes it.
 //!
 //! A [`WidgetKind::ScrollView`] lays what it holds out at its own width and as
-//! tall as it needs, scrolls it under the wheel, cuts it to its box, and
-//! draws a bar down its right edge -- down only: the toolkit's scrollbar is a
-//! column, so content wider than the view scrolls sideways with no bar.
+//! tall as it needs, scrolls it under the wheel (sideways under its tilt),
+//! cuts it to its box, and draws its bars: down its right edge for content
+//! taller than it, across its foot for content wider.
 
 mod draw;
 #[cfg(test)]

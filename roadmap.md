@@ -2129,6 +2129,16 @@ live.
   fixed that opening a folder in the toolkit's folder picker chose it, a
   fix the seven lane E applications already using the picker share.
 
+- `[C]` **The toolkit's widget tree draws in the user's theme** -- done
+  2026-10-01 (`known-issues.md`
+  `TD-C-THE-RETAINED-WIDGET-TREE-HAS-NO-USER-AND-FIVE-OF-ITS-WIDGETS-DRAW-NOTHING`).
+  `guitk::widget`'s declarative tree, which lays out as Flexbox and Grid do
+  (§1455), now draws every control through the toolkit's own module for it
+  in the palette its program gives it, and its five silent kinds work: a
+  multi-line text field, radio buttons in groups, a scroll view, a slider
+  and a picture. Buttons and boxes light under the pointer. A program can
+  build a form from it rather than drawing one by hand.
+
 - `[C]` **Icons' gradients are drawn** (`roadmap-detailed.md` → *SVG
   rendering support*; `design-decisions.md` §1462) -- done 2026-10-01. The toolkit's SVG renderer paints a
   fill or stroke of `url(#id)` with that linear or radial gradient, wherever

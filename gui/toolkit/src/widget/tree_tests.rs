@@ -480,3 +480,35 @@ fn a_press_below_a_scroll_view_reaches_nothing_in_it() {
             .all(|b| matches!(b.kind, WidgetKind::Button { pressed: false, .. }))
     );
 }
+
+/// **Content wider than its scroll view scrolls sideways**, under the
+/// wheel's tilt, and a bar across the view's foot shows where.
+#[test]
+fn content_wider_than_its_view_scrolls_sideways() {
+    let mut wide = Widget::label("A very wide label");
+    wide.style.min_width = Some(900.0);
+    let mut view = Widget::scroll_view().with_child(wide);
+    view.style.min_height = Some(100.0);
+    view.style.max_height = Some(100.0);
+    let mut tree = tree_of(vec![view]);
+    let (x, y) = centre(&tree, 0);
+    let sideways = |tree: &WidgetTree| match tree.root.children[0].kind {
+        WidgetKind::ScrollView { scroll_x, .. } => scroll_x,
+        ref other => panic!("not a scroll view: {other:?}"),
+    };
+    // Tilted right: towards the end.
+    tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 1.0, dy: 0.0 }));
+    assert!(sideways(&tree) > 0.0);
+    for _ in 0..100 {
+        tree.handle_event(&mouse(x, y, MouseEventKind::Scroll { dx: 1.0, dy: 0.0 }));
+    }
+    assert_eq!(sideways(&tree), 900.0 - 300.0);
+    // A bar across the foot: wider than it is tall, at the view's bottom.
+    let view = &tree.root.children[0];
+    let foot = view.layout.y + view.layout.border_box_height();
+    let across = tree.render().commands.iter().any(|c| {
+        matches!(*c, RenderCommand::FillRect { y, width, height, .. }
+            if width > height && (y + height - foot).abs() < 0.5)
+    });
+    assert!(across, "{:?}", tree.render().commands);
+}

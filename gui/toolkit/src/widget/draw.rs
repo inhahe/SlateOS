@@ -309,17 +309,16 @@ impl Widget {
         );
     }
 
-    /// The bar of a scroll view whose content is taller than it, over the
-    /// content down its right edge.
-    ///
-    /// Down only: the toolkit's scrollbar (`crate::scrollbar`) is drawn and
-    /// measured down a column, and content wider than the view scrolls by the
-    /// wheel's sideways turn with no bar to show it.
+    /// The bars of a scroll view whose content overflows it, over the
+    /// content: down its right edge for content taller than it, across its
+    /// foot for content wider -- each stopping short of the corner where
+    /// both are.
     pub(super) fn draw_scrollbars(&self, p: &Palette, tree: &mut RenderTree) {
         let WidgetKind::ScrollView {
+            scroll_x,
             scroll_y,
+            content_width,
             content_height,
-            ..
         } = self.kind
         else {
             return;
@@ -331,16 +330,28 @@ impl Widget {
             hovered: self.hovered,
             dragging: false,
         };
-        if content_height > ch && ch > 0.0 {
-            let track = Rect::new(cx + cw - bar, cy, bar, ch);
-            let travel = content_height - ch;
+        let down = content_height > ch && ch > 0.0;
+        let across = content_width > cw && cw > 0.0;
+        let corner = |both: bool| if both { bar } else { 0.0 };
+        if down {
+            let track = Rect::new(cx + cw - bar, cy, bar, (ch - corner(across)).max(0.0));
             let thumb = crate::scrollbar::thumb_of(
                 track,
                 ch / content_height,
-                scroll_y / travel,
+                scroll_y / (content_height - ch),
                 crate::scrollbar::MIN_THUMB,
             );
             crate::scrollbar::draw(tree, p, track, thumb, state);
+        }
+        if across {
+            let track = Rect::new(cx, cy + ch - bar, (cw - corner(down)).max(0.0), bar);
+            let thumb = crate::scrollbar::thumb_across(
+                track,
+                cw / content_width,
+                scroll_x / (content_width - cw),
+                crate::scrollbar::MIN_THUMB,
+            );
+            crate::scrollbar::draw_across(tree, p, track, thumb, state);
         }
     }
 }

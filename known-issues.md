@@ -177058,10 +177058,9 @@ drag, keys, wheel); `RadioButton` is chosen by a click or Space and clears
 its sibling radio buttons; `Slider` holds the toolkit's `Slider` (press,
 drag, keys, the wheel while focused); `ScrollView` lays its content out at
 its width and unbounded height, scrolls under the wheel within it, cuts it
-to its box and draws a bar; `Image` draws its picture. Buttons and boxes
-light under the pointer. **What remains:** a horizontal scrollbar -- the
-toolkit's scrollbar is drawn down a column, so a scroll view's sideways
-scroll has no bar.
+to its box and draws its bars -- across its foot too, by the scrollbar
+module's `draw_across`, a column's bar laid on its side; `Image` draws its
+picture. Buttons and boxes light under the pointer.
 
 **What.** `gui/toolkit/src/widget.rs` -- `Widget`, `WidgetKind` and
 `WidgetTree`, the toolkit's retained widget tree with its flexbox layout

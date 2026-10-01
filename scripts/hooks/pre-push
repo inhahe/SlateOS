@@ -208,6 +208,9 @@
 #      in the ownership table naming nothing tracked, or a script owned by
 #      two lanes (design-decisions §973, the operator's answer to A-Q11). A
 #      new file gets its owner in the commit that creates it.
+#  76. Refuse a push after which programs.md no longer lists every program
+#      the workspace builds, as the workspace describes it (design-decisions
+#      §1053, the operator's answer to B-Q21).
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -645,8 +648,21 @@ touches_nl='
 
 # The paths the push's own commits change, one per line (with blank lines
 # between commits): every unpublished commit against its parent, a root commit
-# against nothing, a merge not at all. `touches` answers from this list when it
-# can, and the tooling-suite gate reads the names from it.
+# against nothing, and a merge by what its own resolution wrote -- the paths
+# that differ from every parent (`--diff-merges=dense-combined`). `touches`
+# answers from this list when it can, and the tooling-suite gate reads the
+# names from it.
+#
+# A merge was not listed at all until 2026-10-01, because `git log
+# --name-only` prints no files for a merge unless asked to diff merges. So a
+# conflict resolution was invisible to every gate scoped by path: lane B
+# resolved this very file in a merge of origin/main, gave two gates one
+# number, and the hook's own suite -- run whenever the hook is pushed -- did
+# not run, the merge being the only commit that touched it
+# (requests/b-a-pushed-paths-cannot-see-what-a-merge-resolved.md). Dense, not
+# every path the merge brought in: a path taken unchanged from one side was
+# gated when that side was pushed, and a merge of main must not run every
+# gate over another lane's tree.
 #
 # ONE `git log` OVER EVERY COMMIT, NOT `rev-list | xargs git diff-tree`. That
 # was how the tooling-suite gate listed the pushed files, and `diff-tree` takes
@@ -662,7 +678,7 @@ pushed_paths() {
     [ -n "$pushed_shas" ] || return 0
     # shellcheck disable=SC2086
     git -c core.quotePath=false log $pushed_shas \
-        --no-renames --root --name-only --format= \
+        --no-renames --root --name-only --format= --diff-merges=dense-combined \
         --not --remotes="$remote_name" -- 2>/dev/null
 }
 
@@ -2383,9 +2399,25 @@ fi
 #
 # rustfmt is invoked directly rather than through `cargo fmt` on purpose: cargo
 # would need to resolve workspace metadata and would format whole crates, which
-# reintroduces exactly the unrelated-file failure this is avoiding. Every crate
-# in the tree is edition 2024 (checked: 2933 Cargo.toml files, one value), so
-# the edition can be a constant.
+# reintroduces exactly the unrelated-file failure this is avoiding.
+#
+# EACH FILE BY ITS OWN CRATE'S EDITION, AND VENDORED CRATES NOT AT ALL
+# --------------------------------------------------------------------
+# The edition was a constant, 2024, on the strength of "every crate in the tree
+# is edition 2024". That stopped being true: `rustcrypto/typenum` and
+# `rustcrypto/cfg-if` are 2018, `gui/video/rav1d` and `posix/vendor/libm` are
+# not 2024 either, and edition 2024's style sorts imports differently, so seven
+# typenum files formatted exactly as their own edition formats them were
+# refused (lane E's requests/e-a-the-rustfmt-gate-assumes-every-crate-is-
+# edition-2024.md). So `fmt_classify` reads each file's edition from the nearest
+# Cargo.toml at the pushed revision -- a file in no crate keeps 2024 -- and
+# rustfmt is run once per edition.
+#
+# And a vendored crate is not checked at all. A crate whose directory holds
+# `.cargo-checksum.json` is cargo's own record that its bytes are upstream's,
+# worth something only while they stay byte-for-byte what was published, and
+# "rustfmt defaults" (CLAUDE.md) is a rule about this project's code. Formatting
+# one would break its checksum; refusing it would refuse an honest update.
 #
 # WHICH TREE THE BYTES COME FROM, and why it is worth this much machinery
 # ----------------------------------------------------------------------
@@ -2484,7 +2516,7 @@ fmt_report_one() {
     fmt_shown=${fmt_one#"$fmt_mirror/"}
     fmt_tmp="${TMPDIR:-/tmp}/pre-push-fmt.$$.rs"
     if cp "$fmt_one" "$fmt_tmp" 2>/dev/null &&
-        rustfmt --edition 2024 "$fmt_tmp" >/dev/null 2>&1
+        rustfmt --edition "$fmt_edition" "$fmt_tmp" >/dev/null 2>&1
     then
         if cmp -s "$fmt_one" "$fmt_tmp"; then
             rm -f "$fmt_tmp"
@@ -2496,8 +2528,8 @@ fmt_report_one() {
             diff -u --label "$fmt_shown" --label "$fmt_shown (rustfmt)" \
                 "$fmt_one" "$fmt_tmp" >&2
         else
-            printf '  (no `diff` on this machine — run: rustfmt --edition 2024 %s)\n' \
-                "$fmt_shown" >&2
+            printf '  (no `diff` on this machine — run: rustfmt --edition %s %s)\n' \
+                "$fmt_edition" "$fmt_shown" >&2
         fi
         rm -f "$fmt_tmp"
         return 1
@@ -2506,7 +2538,7 @@ fmt_report_one() {
     # The lone copy did not parse, so fall back to the mirror path itself,
     # where the stubs seeded by fmt_materialise let `mod` resolution succeed.
     # Its report still names mirror paths, hence the note.
-    rustfmt --edition 2024 --check "$fmt_one" >&2 && return 0
+    rustfmt --edition "$fmt_edition" --check "$fmt_one" >&2 && return 0
     printf '  (paths above are the mirror; the file to fix is %s)\n' "$fmt_shown" >&2
     return 1
 }
@@ -2566,6 +2598,81 @@ fmt_materialise() {
     printf '%s\n' "$fmt_dst"
 }
 
+# Which edition each pushed file is formatted by, and which files are not this
+# project's to format (see "EACH FILE BY ITS OWN CRATE'S EDITION" above).
+#
+# stdin: the pushed .rs paths, one a line. stdout: `<edition> <path>`, one a
+# line, for every path outside a vendored crate -- the edition first, since it
+# has no spaces and a path may. Everything is read from the pushed revision,
+# never the working tree, for gate 7's usual reason. Two git processes in all,
+# however many files: one `ls-tree` to place each file in its crate, one
+# `cat-file --batch` for the manifests of the crates the push touches.
+#
+# The edition is the manifest's `edition = "..."`; `edition.workspace = true`
+# is the root manifest's; a manifest with neither is 2015, as cargo reads it. A
+# file in no crate keeps 2024.
+fmt_classify() {
+    fmt_tree="${TMPDIR:-/tmp}/pre-push-fmt-tree.$$"
+    fmt_where="${TMPDIR:-/tmp}/pre-push-fmt-where.$$"
+    fmt_eds="${TMPDIR:-/tmp}/pre-push-fmt-eds.$$"
+    git -c core.quotePath=false ls-tree -r --name-only HEAD \
+        > "$fmt_tree" 2>/dev/null || : > "$fmt_tree"
+    # `<crate><TAB><path>`, the crate `.` for the root and `-` for none; a
+    # path in a vendored crate is dropped here. `FILENAME`, not `FNR == NR`,
+    # tells the two inputs apart in every awk below: with an empty first file
+    # `FNR == NR` holds for the second as well, and every path would be read
+    # as a tree entry and dropped -- a gate that silently checked nothing.
+    awk 'FILENAME == ARGV[1] { tree[$0] = 1; next }
+         $0 == "" { next }
+         {
+             crate = "-"; d = $0
+             while (match(d, /\/[^\/]*$/)) {
+                 d = substr(d, 1, RSTART - 1)
+                 if ((d "/Cargo.toml") in tree) { crate = d; break }
+             }
+             if (crate == "-" && ("Cargo.toml" in tree)) crate = "."
+             if (crate == "." && (".cargo-checksum.json" in tree)) next
+             if (crate != "-" && crate != "." \
+                 && ((crate "/.cargo-checksum.json") in tree)) next
+             print crate "\t" $0
+         }' "$fmt_tree" - > "$fmt_where"
+    # Each crate's edition: one manifest request per crate, and the root's
+    # first, for `edition.workspace`. `cat-file --batch` answers in order, each
+    # object after a `<sha> blob <size>` line, or `<name> missing`.
+    {
+        printf 'HEAD:Cargo.toml\n'
+        awk -F '\t' '{ c = $1 } c != "-" && !(c in seen) { seen[c] = 1
+                 if (c == ".") print "HEAD:Cargo.toml"
+                 else print "HEAD:" c "/Cargo.toml" }' "$fmt_where"
+    } | git cat-file --batch 2>/dev/null \
+      | awk 'BEGIN { n = 0 }
+             /^[0-9a-f]+ blob [0-9]+$/ || /^HEAD:.* missing$/ { n++; ed[n] = ""; next }
+             /^[ \t]*edition[ \t]*=[ \t]*"[0-9]+"/ {
+                 if (ed[n] == "") { match($0, /"[0-9]+"/)
+                     ed[n] = substr($0, RSTART + 1, RLENGTH - 2) }
+                 next
+             }
+             /^[ \t]*edition[ \t]*(\.[ \t]*workspace|=[ \t]*\{[ \t]*workspace)/ {
+                 if (ed[n] == "") ed[n] = "workspace"
+                 next
+             }
+             END { for (i = 1; i <= n; i++) print (ed[i] == "" ? "2015" : ed[i]) }' \
+      > "$fmt_eds"
+    # Join, in the order the crates were asked for: the root's answer is the
+    # first line, then one line per crate.
+    awk -F '\t' 'FILENAME == ARGV[1] { e[FNR] = $0; next }
+         {
+             c = $1; p = substr($0, length(c) + 2)
+             if (c == "-") { print "2024 " p; next }
+             if (!(c in idx)) idx[c] = ++k + 1
+             x = e[idx[c]]
+             if (x == "workspace") x = (e[1] ~ /^[0-9]+$/ && e[1] != "2015") ? e[1] : "2024"
+             if (x == "") x = "2024"
+             print x " " p
+         }' "$fmt_eds" "$fmt_where"
+    rm -f "$fmt_tree" "$fmt_where" "$fmt_eds"
+}
+
 # One batch of paths. A function is how a POSIX shell passes a built-up
 # argument list without re-splitting it on spaces.
 #
@@ -2574,7 +2681,7 @@ fmt_materialise() {
 # is rebuilt one file at a time by `fmt_report_one`.
 fmt_check() {
     [ "$#" -gt 0 ] || return 0
-    rustfmt --edition 2024 --check "$@" >/dev/null 2>&1 && return 0
+    rustfmt --edition "$fmt_edition" --check "$@" >/dev/null 2>&1 && return 0
 
     fmt_batch_named=0
     for fmt_path in "$@"; do
@@ -2613,6 +2720,10 @@ fi
 
 fmt_list="${TMPDIR:-/tmp}/pre-push-fmt-list.$$"
 fmt_made="${TMPDIR:-/tmp}/pre-push-fmt-made.$$"
+fmt_classified="${TMPDIR:-/tmp}/pre-push-fmt-classified.$$"
+fmt_by_edition="${TMPDIR:-/tmp}/pre-push-fmt-by-edition.$$"
+# The edition rustfmt is run with: set per group below, 2024 until then.
+fmt_edition=2024
 
 if [ "$skip_fmt" != "1" ]; then
     # `core.quotePath=false` stops git octal-escaping a non-ASCII path into
@@ -2622,6 +2733,11 @@ if [ "$skip_fmt" != "1" ]; then
     git -c core.quotePath=false log --name-only --pretty=format: \
         --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
         -- '*.rs' 2>/dev/null | sort -u > "$fmt_list" || : > "$fmt_list"
+
+    # Each file's edition, and the vendored ones dropped. Only the files kept
+    # are materialised and checked.
+    fmt_classify < "$fmt_list" > "$fmt_classified"
+    sed 's/^[^ ]* //' "$fmt_classified" > "$fmt_list"
 
     # ONE git process for the whole mirror, not one per file.
     #
@@ -2682,27 +2798,47 @@ if [ "$skip_fmt" != "1" ]; then
     # needed: `$1` was captured into `$remote_name` at the top of the file.
     # `IFS= read -r` is what keeps leading whitespace and backslashes in a
     # path intact, and needs no global `IFS` surgery to do it.
-    set --
-    while IFS= read -r fmt_mirrored; do
-        [ -n "$fmt_mirrored" ] || continue
-        set -- "$@" "$fmt_mirrored"
-        # Drain in batches: the command line is finite, and a push that lands a
-        # whole subsystem can carry hundreds of files. (Measured: handing
-        # rustfmt all 5214 of lane B's .rs paths at once fails outright with
-        # exit 126 — which, note, is a *failure*, so an unbatched version of
-        # this gate would have blocked exactly the large pushes it should be
-        # scrutinising most.) Every batch is checked even after one fails, so
-        # the diff printed is complete rather than truncated at the first file.
-        if [ "$#" -ge 64 ]; then
-            fmt_check "$@" || fmt_failed=1
-            set --
-        fi
-    done < "$fmt_made"
-
-    fmt_check "$@" || fmt_failed=1
+    #
+    # One edition at a time: each mirrored path, by its path in the tree, gets
+    # the edition `fmt_classify` found for it. The path in the tree is the
+    # longest suffix of the mirrored line that is one, not the line less a
+    # prefix: the mirror's root is spelled as whatever filled it spelled it,
+    # and gittree.py, a Windows program, was handed `/tmp/...` already
+    # rewritten to `C:/...` by MSYS, so it never begins with "$fmt_mirror".
+    awk 'FILENAME == ARGV[1] { sp = index($0, " ")
+                               e[substr($0, sp + 1)] = substr($0, 1, sp - 1)
+                               next }
+         $0 != "" {
+             rest = $0; gsub(/\\/, "/", rest); ed = ""
+             while ((i = index(rest, "/")) > 0) {
+                 rest = substr(rest, i + 1)
+                 if (rest in e) { ed = e[rest]; break }
+             }
+             print (ed == "" ? "2024" : ed) " " $0
+         }' "$fmt_classified" "$fmt_made" > "$fmt_by_edition"
+    for fmt_edition in $(sed 's/ .*//' "$fmt_by_edition" | sort -u); do
+        set --
+        while IFS= read -r fmt_line; do
+            [ "${fmt_line%% *}" = "$fmt_edition" ] || continue
+            set -- "$@" "${fmt_line#* }"
+            # Drain in batches: the command line is finite, and a push that
+            # lands a whole subsystem can carry hundreds of files. (Measured:
+            # handing rustfmt all 5214 of lane B's .rs paths at once fails
+            # outright with exit 126 — which, note, is a *failure*, so an
+            # unbatched version of this gate would have blocked exactly the
+            # large pushes it should be scrutinising most.) Every batch is
+            # checked even after one fails, so the diff printed is complete
+            # rather than truncated at the first file.
+            if [ "$#" -ge 64 ]; then
+                fmt_check "$@" || fmt_failed=1
+                set --
+            fi
+        done < "$fmt_by_edition"
+        fmt_check "$@" || fmt_failed=1
+    done
 fi
 
-rm -f "$fmt_list" "$fmt_made"
+rm -f "$fmt_list" "$fmt_made" "$fmt_classified" "$fmt_by_edition"
 [ -n "$fmt_mirror" ] && rm -rf "$fmt_mirror"
 
 if [ "$fmt_failed" = "1" ]; then
@@ -2719,9 +2855,10 @@ The fix, for the crate that owns the file:
 
     cargo fmt -p <crate>
 
-or, for exactly the files listed above and nothing else:
+or, for exactly the files listed above and nothing else, with the edition
+in its crate's Cargo.toml (2024 for nearly every crate in the tree):
 
-    rustfmt --edition 2024 <file>...
+    rustfmt --edition <edition> <file>...
 
 then \`git add\` them and COMMIT. Fixing the working tree is not enough: this
 gate reads the bytes you are about to publish, not the ones on disk, so an
@@ -2731,6 +2868,8 @@ only changes are worth their own commit — mixed into a real change they hide i
 
 Only the files this push adds or modifies are checked, so this is never
 complaining about someone else's code, and never about your uncommitted work.
+A vendored crate -- one with .cargo-checksum.json -- is upstream's bytes and
+is never checked.
 A module root's untouched submodules are stubbed out rather than checked, for
 the same reason. If rustfmt failed to *parse* a file rather than reporting a
 diff, the file does not compile either; fix that first.
@@ -6296,13 +6435,13 @@ EOF
 mfprod="${repo_root:-.}/scripts/check-manifest-producers.py"
 skip_mfprod=$skip
 if [ "${ALLOW_MANIFEST_PRODUCERS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_MANIFEST_PRODUCERS=1 set - skipping gate 52 (manifest producers)." >&2
+    echo "pre-push: ALLOW_MANIFEST_PRODUCERS=1 set - skipping gate 53 (manifest producers)." >&2
     skip_mfprod=1
 fi
 [ -f "$mfprod" ] || skip_mfprod=1
 touches scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
 if [ "$skip_mfprod" != "1" ]; then
-    tree_is_push "gate 52 (manifest producers)" scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
+    tree_is_push "gate 53 (manifest producers)" scripts/rootfs-bin-manifest.txt userspace/ scripts/check-manifest-producers.py || skip_mfprod=1
 fi
 note_gate check-manifest-producers "$skip_mfprod"
 if [ "$skip_mfprod" != "1" ]; then
@@ -6327,13 +6466,13 @@ fi
 cpnul="${repo_root:-.}/scripts/check-cp-diff-sees-nul.py"
 skip_cpnul=$skip
 if [ "${ALLOW_CP_DIFF_NUL:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_CP_DIFF_NUL=1 set - skipping gate 53 (cp-diff sees NUL)." >&2
+    echo "pre-push: ALLOW_CP_DIFF_NUL=1 set - skipping gate 54 (cp-diff sees NUL)." >&2
     skip_cpnul=1
 fi
 [ -f "$cpnul" ] || skip_cpnul=1
 touches scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
 if [ "$skip_cpnul" != "1" ]; then
-    tree_is_push "gate 53 (cp-diff sees NUL)" scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
+    tree_is_push "gate 54 (cp-diff sees NUL)" scripts/cp-diff.sh scripts/check-cp-diff-sees-nul.py || skip_cpnul=1
 fi
 note_gate check-cp-diff-sees-nul "$skip_cpnul"
 if [ "$skip_cpnul" != "1" ]; then
@@ -6357,13 +6496,13 @@ fi
 canref="${repo_root:-.}/scripts/check-gates-can-refuse.py"
 skip_canref=$skip
 if [ "${ALLOW_GATES_CAN_REFUSE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GATES_CAN_REFUSE=1 set - skipping gate 54 (gates can refuse)." >&2
+    echo "pre-push: ALLOW_GATES_CAN_REFUSE=1 set - skipping gate 55 (gates can refuse)." >&2
     skip_canref=1
 fi
 [ -f "$canref" ] || skip_canref=1
 touches scripts/ || skip_canref=1
 if [ "$skip_canref" != "1" ]; then
-    tree_is_push "gate 54 (gates can refuse)" scripts/ || skip_canref=1
+    tree_is_push "gate 55 (gates can refuse)" scripts/ || skip_canref=1
 fi
 note_gate check-gates-can-refuse "$skip_canref"
 if [ "$skip_canref" != "1" ]; then
@@ -6388,13 +6527,13 @@ fi
 wired="${repo_root:-.}/scripts/check-gates-are-wired.py"
 skip_wired=$skip
 if [ "${ALLOW_GATES_ARE_WIRED:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GATES_ARE_WIRED=1 set - skipping gate 55 (gates are wired)." >&2
+    echo "pre-push: ALLOW_GATES_ARE_WIRED=1 set - skipping gate 56 (gates are wired)." >&2
     skip_wired=1
 fi
 [ -f "$wired" ] || skip_wired=1
 touches scripts/ || skip_wired=1
 if [ "$skip_wired" != "1" ]; then
-    tree_is_push "gate 55 (gates are wired)" scripts/ || skip_wired=1
+    tree_is_push "gate 56 (gates are wired)" scripts/ || skip_wired=1
 fi
 note_gate check-gates-are-wired "$skip_wired"
 if [ "$skip_wired" != "1" ]; then
@@ -6420,13 +6559,13 @@ fi
 needles="${repo_root:-.}/scripts/check-mutation-needles.py"
 skip_needles=$skip
 if [ "${ALLOW_MUTATION_NEEDLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_MUTATION_NEEDLES=1 set - skipping gate 56 (mutation needles)." >&2
+    echo "pre-push: ALLOW_MUTATION_NEEDLES=1 set - skipping gate 57 (mutation needles)." >&2
     skip_needles=1
 fi
 [ -f "$needles" ] || skip_needles=1
 touches scripts/ || skip_needles=1
 if [ "$skip_needles" != "1" ]; then
-    tree_is_push "gate 56 (mutation needles)" scripts/ || skip_needles=1
+    tree_is_push "gate 57 (mutation needles)" scripts/ || skip_needles=1
 fi
 note_gate check-mutation-needles "$skip_needles"
 if [ "$skip_needles" != "1" ]; then
@@ -6451,13 +6590,13 @@ fi
 uaccess="${repo_root:-.}/scripts/check-user-access-sites.py"
 skip_uaccess=$skip
 if [ "${ALLOW_USER_ACCESS_SITES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USER_ACCESS_SITES=1 set - skipping gate 57 (user-access sites)." >&2
+    echo "pre-push: ALLOW_USER_ACCESS_SITES=1 set - skipping gate 58 (user-access sites)." >&2
     skip_uaccess=1
 fi
 [ -f "$uaccess" ] || skip_uaccess=1
 touches kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
 if [ "$skip_uaccess" != "1" ]; then
-    tree_is_push "gate 57 (user-access sites)" kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
+    tree_is_push "gate 58 (user-access sites)" kernel/ scripts/check-user-access-sites.py || skip_uaccess=1
 fi
 note_gate check-user-access-sites "$skip_uaccess"
 if [ "$skip_uaccess" != "1" ]; then
@@ -6481,13 +6620,13 @@ fi
 linuxonly="${repo_root:-.}/scripts/check-linux-only-capabilities.py"
 skip_linuxonly=$skip
 if [ "${ALLOW_LINUX_ONLY_CAPS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_LINUX_ONLY_CAPS=1 set - skipping gate 58 (Linux-only capabilities)." >&2
+    echo "pre-push: ALLOW_LINUX_ONLY_CAPS=1 set - skipping gate 59 (Linux-only capabilities)." >&2
     skip_linuxonly=1
 fi
 [ -f "$linuxonly" ] || skip_linuxonly=1
 touches kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
 if [ "$skip_linuxonly" != "1" ]; then
-    tree_is_push "gate 58 (Linux-only capabilities)" kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
+    tree_is_push "gate 59 (Linux-only capabilities)" kernel/ scripts/check-linux-only-capabilities.py || skip_linuxonly=1
 fi
 note_gate check-linux-only-capabilities "$skip_linuxonly"
 if [ "$skip_linuxonly" != "1" ]; then
@@ -6510,13 +6649,13 @@ fi
 usagenames="${repo_root:-.}/scripts/check-usage-names-reach-the-command.py"
 skip_usagenames=$skip
 if [ "${ALLOW_USAGE_NAMES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USAGE_NAMES=1 set - skipping gate 59 (usage names reach the command)." >&2
+    echo "pre-push: ALLOW_USAGE_NAMES=1 set - skipping gate 60 (usage names reach the command)." >&2
     skip_usagenames=1
 fi
 [ -f "$usagenames" ] || skip_usagenames=1
 touches kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
 if [ "$skip_usagenames" != "1" ]; then
-    tree_is_push "gate 59 (usage names reach the command)" kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
+    tree_is_push "gate 60 (usage names reach the command)" kernel/ scripts/check-usage-names-reach-the-command.py || skip_usagenames=1
 fi
 note_gate check-usage-names "$skip_usagenames"
 if [ "$skip_usagenames" != "1" ]; then
@@ -6539,13 +6678,13 @@ fi
 refrefuse="${repo_root:-.}/scripts/check-refusals-refuse.py"
 skip_refrefuse=$skip
 if [ "${ALLOW_REFUSALS_REFUSE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_REFUSALS_REFUSE=1 set - skipping gate 60 (refusals refuse)." >&2
+    echo "pre-push: ALLOW_REFUSALS_REFUSE=1 set - skipping gate 61 (refusals refuse)." >&2
     skip_refrefuse=1
 fi
 [ -f "$refrefuse" ] || skip_refrefuse=1
 touches scripts/ || skip_refrefuse=1
 if [ "$skip_refrefuse" != "1" ]; then
-    tree_is_push "gate 60 (refusals refuse)" scripts/ || skip_refrefuse=1
+    tree_is_push "gate 61 (refusals refuse)" scripts/ || skip_refrefuse=1
 fi
 note_gate check-refusals-refuse "$skip_refrefuse"
 if [ "$skip_refrefuse" != "1" ]; then
@@ -6569,7 +6708,7 @@ fi
 usagestat="${repo_root:-.}/scripts/check-usage-status.py"
 skip_usagestat=$skip
 if [ "${ALLOW_USAGE_STATUS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_USAGE_STATUS=1 set - skipping gate 61 (usage messages report failure)." >&2
+    echo "pre-push: ALLOW_USAGE_STATUS=1 set - skipping gate 62 (usage messages report failure)." >&2
     skip_usagestat=1
 fi
 [ -f "$usagestat" ] || skip_usagestat=1
@@ -6577,7 +6716,7 @@ fi
 # so a change to either can change this gate's verdict.
 touches kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 if [ "$skip_usagestat" != "1" ]; then
-    tree_is_push "gate 61 (usage messages report failure)" kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
+    tree_is_push "gate 62 (usage messages report failure)" kernel/ scripts/check-usage-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_usagestat=1
 fi
 note_gate check-usage-status "$skip_usagestat"
 if [ "$skip_usagestat" != "1" ]; then
@@ -6599,7 +6738,7 @@ fi
 querystat="${repo_root:-.}/scripts/check-query-status.py"
 skip_querystat=$skip
 if [ "${ALLOW_QUERY_STATUS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_QUERY_STATUS=1 set - skipping gate 62 (queries report success)." >&2
+    echo "pre-push: ALLOW_QUERY_STATUS=1 set - skipping gate 63 (queries report success)." >&2
     skip_querystat=1
 fi
 [ -f "$querystat" ] || skip_querystat=1
@@ -6607,7 +6746,7 @@ fi
 # so a change to either can change this gate's verdict.
 touches kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 if [ "$skip_querystat" != "1" ]; then
-    tree_is_push "gate 62 (queries report success)" kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
+    tree_is_push "gate 63 (queries report success)" kernel/ scripts/check-query-status.py scripts/check-recursive-locks.py scripts/srcload.py || skip_querystat=1
 fi
 note_gate check-query-status "$skip_querystat"
 if [ "$skip_querystat" != "1" ]; then
@@ -6629,13 +6768,13 @@ fi
 rungnums="${repo_root:-.}/scripts/check-selftest-rung-numbers.py"
 skip_rungnums=$skip
 if [ "${ALLOW_SELFTEST_RUNG_NUMBERS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SELFTEST_RUNG_NUMBERS=1 set - skipping gate 63 (self-test rung numbers)." >&2
+    echo "pre-push: ALLOW_SELFTEST_RUNG_NUMBERS=1 set - skipping gate 64 (self-test rung numbers)." >&2
     skip_rungnums=1
 fi
 [ -f "$rungnums" ] || skip_rungnums=1
 touches kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
 if [ "$skip_rungnums" != "1" ]; then
-    tree_is_push "gate 63 (self-test rung numbers)" kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
+    tree_is_push "gate 64 (self-test rung numbers)" kernel/ scripts/check-selftest-rung-numbers.py || skip_rungnums=1
 fi
 note_gate check-selftest-rung-numbers "$skip_rungnums"
 if [ "$skip_rungnums" != "1" ]; then
@@ -6658,13 +6797,13 @@ fi
 msgnames="${repo_root:-.}/scripts/check-shell-message-names.py"
 skip_msgnames=$skip
 if [ "${ALLOW_SHELL_MESSAGE_NAMES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SHELL_MESSAGE_NAMES=1 set - skipping gate 64 (shell message names)." >&2
+    echo "pre-push: ALLOW_SHELL_MESSAGE_NAMES=1 set - skipping gate 65 (shell message names)." >&2
     skip_msgnames=1
 fi
 [ -f "$msgnames" ] || skip_msgnames=1
 touches kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
 if [ "$skip_msgnames" != "1" ]; then
-    tree_is_push "gate 64 (shell message names)" kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
+    tree_is_push "gate 65 (shell message names)" kernel/ scripts/check-shell-message-names.py || skip_msgnames=1
 fi
 note_gate check-shell-message-names "$skip_msgnames"
 if [ "$skip_msgnames" != "1" ]; then
@@ -6687,13 +6826,13 @@ fi
 nounart="${repo_root:-.}/scripts/check-shell-noun-article.py"
 skip_nounart=$skip
 if [ "${ALLOW_SHELL_NOUN_ARTICLE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SHELL_NOUN_ARTICLE=1 set - skipping gate 65 (shell noun articles)." >&2
+    echo "pre-push: ALLOW_SHELL_NOUN_ARTICLE=1 set - skipping gate 66 (shell noun articles)." >&2
     skip_nounart=1
 fi
 [ -f "$nounart" ] || skip_nounart=1
 touches kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
 if [ "$skip_nounart" != "1" ]; then
-    tree_is_push "gate 65 (shell noun articles)" kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
+    tree_is_push "gate 66 (shell noun articles)" kernel/ scripts/check-shell-noun-article.py || skip_nounart=1
 fi
 note_gate check-shell-noun-article "$skip_nounart"
 if [ "$skip_nounart" != "1" ]; then
@@ -6716,13 +6855,13 @@ fi
 idrung="${repo_root:-.}/scripts/selftest-boot-gate-identity.py"
 skip_idrung=$skip
 if [ "${ALLOW_IDENTITY_RUNG_GATE:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_IDENTITY_RUNG_GATE=1 set - skipping gate 66 (identity-rung gate)." >&2
+    echo "pre-push: ALLOW_IDENTITY_RUNG_GATE=1 set - skipping gate 67 (identity-rung gate)." >&2
     skip_idrung=1
 fi
 [ -f "$idrung" ] || skip_idrung=1
 touches scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
 if [ "$skip_idrung" != "1" ]; then
-    tree_is_push "gate 66 (identity-rung gate)" scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
+    tree_is_push "gate 67 (identity-rung gate)" scripts/boot-test.sh scripts/selftest-boot-gate-identity.py || skip_idrung=1
 fi
 note_gate identity-rung-gate-selftest "$skip_idrung"
 if [ "$skip_idrung" != "1" ]; then
@@ -6741,13 +6880,13 @@ fi
 r3regs="${repo_root:-.}/scripts/check-ring3-entry-regs.py"
 skip_r3regs=$skip
 if [ "${ALLOW_RING3_ENTRY_REGS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_RING3_ENTRY_REGS=1 set - skipping gate 67 (ring-3 entry registers)." >&2
+    echo "pre-push: ALLOW_RING3_ENTRY_REGS=1 set - skipping gate 68 (ring-3 entry registers)." >&2
     skip_r3regs=1
 fi
 [ -f "$r3regs" ] || skip_r3regs=1
 touches kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
 if [ "$skip_r3regs" != "1" ]; then
-    tree_is_push "gate 67 (ring-3 entry registers)" kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
+    tree_is_push "gate 68 (ring-3 entry registers)" kernel/ scripts/check-ring3-entry-regs.py || skip_r3regs=1
 fi
 note_gate ring3-entry-regs "$skip_r3regs"
 if [ "$skip_r3regs" != "1" ]; then
@@ -6773,13 +6912,13 @@ fi
 scindex="${repo_root:-.}/scripts/gen-script-index.py"
 skip_scindex=$skip
 if [ "${ALLOW_SCRIPT_INDEX:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SCRIPT_INDEX=1 set - skipping gate 68 (script index)." >&2
+    echo "pre-push: ALLOW_SCRIPT_INDEX=1 set - skipping gate 69 (script index)." >&2
     skip_scindex=1
 fi
 [ -f "$scindex" ] || skip_scindex=1
 touches scripts/ || skip_scindex=1
 if [ "$skip_scindex" != "1" ]; then
-    tree_is_push "gate 68 (script index)" scripts/ || skip_scindex=1
+    tree_is_push "gate 69 (script index)" scripts/ || skip_scindex=1
 fi
 note_gate script-index "$skip_scindex"
 if [ "$skip_scindex" != "1" ]; then
@@ -6805,13 +6944,13 @@ fi
 foreignwt="${repo_root:-.}/scripts/check-foreign-worktree-paths.py"
 skip_foreignwt=$skip
 if [ "${ALLOW_FOREIGN_WORKTREE_PATHS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_FOREIGN_WORKTREE_PATHS=1 set - skipping gate 69 (foreign worktree paths)." >&2
+    echo "pre-push: ALLOW_FOREIGN_WORKTREE_PATHS=1 set - skipping gate 70 (foreign worktree paths)." >&2
     skip_foreignwt=1
 fi
 [ -f "$foreignwt" ] || skip_foreignwt=1
 touches scripts/ || skip_foreignwt=1
 if [ "$skip_foreignwt" != "1" ]; then
-    tree_is_push "gate 69 (foreign worktree paths)" scripts/ || skip_foreignwt=1
+    tree_is_push "gate 70 (foreign worktree paths)" scripts/ || skip_foreignwt=1
 fi
 note_gate foreign-worktree "$skip_foreignwt"
 if [ "$skip_foreignwt" != "1" ]; then
@@ -6835,13 +6974,13 @@ fi
 frneedles="${repo_root:-.}/scripts/check-frame-needles.py"
 skip_frneedles=$skip
 if [ "${ALLOW_FRAME_NEEDLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_FRAME_NEEDLES=1 set - skipping gate 70 (frame needles)." >&2
+    echo "pre-push: ALLOW_FRAME_NEEDLES=1 set - skipping gate 71 (frame needles)." >&2
     skip_frneedles=1
 fi
 [ -f "$frneedles" ] || skip_frneedles=1
 touches apps/ scripts/check-frame-needles.py || skip_frneedles=1
 if [ "$skip_frneedles" != "1" ]; then
-    tree_is_push "gate 70 (frame needles)" apps/ scripts/check-frame-needles.py || skip_frneedles=1
+    tree_is_push "gate 71 (frame needles)" apps/ scripts/check-frame-needles.py || skip_frneedles=1
 fi
 note_gate check-frame-needles "$skip_frneedles"
 if [ "$skip_frneedles" != "1" ]; then
@@ -6861,13 +7000,13 @@ fi
 gentables="${repo_root:-.}/scripts/check-generated-tables.py"
 skip_gentables=$skip
 if [ "${ALLOW_GENERATED_TABLES:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_GENERATED_TABLES=1 set - skipping gate 71 (generated tables)." >&2
+    echo "pre-push: ALLOW_GENERATED_TABLES=1 set - skipping gate 72 (generated tables)." >&2
     skip_gentables=1
 fi
 [ -f "$gentables" ] || skip_gentables=1
 touches gui/font/ scripts/check-generated-tables.py || skip_gentables=1
 if [ "$skip_gentables" != "1" ]; then
-    tree_is_push "gate 71 (generated tables)" gui/font/ scripts/check-generated-tables.py || skip_gentables=1
+    tree_is_push "gate 72 (generated tables)" gui/font/ scripts/check-generated-tables.py || skip_gentables=1
 fi
 note_gate check-generated-tables "$skip_gentables"
 if [ "$skip_gentables" != "1" ]; then
@@ -6887,13 +7026,13 @@ fi
 dcroots="${repo_root:-.}/scripts/check-diskcleanup-test-roots.py"
 skip_dcroots=$skip
 if [ "${ALLOW_DISKCLEANUP_TEST_ROOTS:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_DISKCLEANUP_TEST_ROOTS=1 set - skipping gate 72 (diskcleanup test roots)." >&2
+    echo "pre-push: ALLOW_DISKCLEANUP_TEST_ROOTS=1 set - skipping gate 73 (diskcleanup test roots)." >&2
     skip_dcroots=1
 fi
 [ -f "$dcroots" ] || skip_dcroots=1
 touches apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
 if [ "$skip_dcroots" != "1" ]; then
-    tree_is_push "gate 72 (diskcleanup test roots)" apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
+    tree_is_push "gate 73 (diskcleanup test roots)" apps/diskcleanup/ scripts/check-diskcleanup-test-roots.py || skip_dcroots=1
 fi
 note_gate check-diskcleanup-test-roots "$skip_dcroots"
 if [ "$skip_dcroots" != "1" ]; then
@@ -6917,13 +7056,13 @@ fi
 reinit="${repo_root:-.}/scripts/check-selftest-reinit.py"
 skip_reinit=$skip
 if [ "${ALLOW_SELFTEST_REINIT:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SELFTEST_REINIT=1 set - skipping gate 73 (self-test tables re-opened)." >&2
+    echo "pre-push: ALLOW_SELFTEST_REINIT=1 set - skipping gate 74 (self-test tables re-opened)." >&2
     skip_reinit=1
 fi
 [ -f "$reinit" ] || skip_reinit=1
 touches kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
 if [ "$skip_reinit" != "1" ]; then
-    tree_is_push "gate 73 (self-test tables re-opened)" kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
+    tree_is_push "gate 74 (self-test tables re-opened)" kernel/ scripts/check-selftest-reinit.py || skip_reinit=1
 fi
 note_gate check-selftest-reinit "$skip_reinit"
 if [ "$skip_reinit" != "1" ]; then
@@ -6934,6 +7073,47 @@ if [ "$skip_reinit" != "1" ]; then
     if ! run_checker check-selftest-reinit "$py" -u "$reinit"; then
         moved_gate_refuses 74 "self-test tables re-opened" ALLOW_SELFTEST_REINIT "A kernel self-test that clears a /proc table must re-open it before it
 returns, or every later reader sees the table empty."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 76 -- program catalogue.
+# programs.md lists every program the workspace builds, each with the first
+# sentence of its own module doc, generated by scripts/program-catalogue.py.
+# The operator asked for the list and for "a rule somewhere that if you make a
+# program, record it somewhere so everybody knows it exists" (design-decisions
+# §1053, B-Q21); this is the rule's enforcement
+# (requests/b-a-a-gate-for-the-program-catalogue.md). A push that adds,
+# removes or re-describes a program regenerates the list in the same commit:
+#     python scripts/program-catalogue.py
+# It reads `cargo metadata --no-deps` and the programs' sources, so it is
+# scoped to manifests and Rust sources, and the boot test runs it too.
+#
+# Bypass: ALLOW_PROGRAM_CATALOGUE=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+progcat="${repo_root:-.}/scripts/program-catalogue.py"
+skip_progcat=$skip
+if [ "${ALLOW_PROGRAM_CATALOGUE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_PROGRAM_CATALOGUE=1 set - skipping gate 76 (program catalogue)." >&2
+    skip_progcat=1
+fi
+[ -f "$progcat" ] || skip_progcat=1
+touches '*Cargo.toml' '*.rs' programs.md scripts/program-catalogue.py || skip_progcat=1
+if [ "$skip_progcat" != "1" ]; then
+    tree_is_push "gate 76 (program catalogue)" '*Cargo.toml' '*.rs' programs.md \
+        scripts/program-catalogue.py || skip_progcat=1
+fi
+note_gate program-catalogue "$skip_progcat"
+if [ "$skip_progcat" != "1" ]; then
+    if ! run_checker program-catalogue-selftest "$py" "$progcat" --self-test; then
+        moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE \
+            "program-catalogue.py failed its own self-test, so its verdict on this push would not be trustworthy."
+    fi
+    if ! run_checker program-catalogue "$py" "$progcat" --check; then
+        moved_gate_refuses 76 "program catalogue" ALLOW_PROGRAM_CATALOGUE "programs.md must list every program the workspace builds, described as
+its own module doc describes it. Regenerate it, and commit it with the
+program:
+    python scripts/program-catalogue.py"
     fi
 fi
 

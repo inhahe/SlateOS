@@ -5148,10 +5148,18 @@ fn read_struct<T: Copy>(data: &[u8]) -> KernelResult<T> {
 /// the filesystem holds.  See `design-decisions.md` §660 — a name that is not
 /// UTF-8 is unusual, but it is a name the disk can hold and therefore one we
 /// have to be able to return.
+///
+/// The two POSIX ACL indexes are whole names, `system.posix_acl_access` and
+/// `system.posix_acl_default`, with nothing stored after them: Linux's ext4
+/// writes an ACL under index 2 or 3 with an empty name. Until 2026-10-01 they
+/// came back as unprefixed empty names, so a file a Linux system had given an
+/// ACL listed an attribute with no name at all.
 fn xattr_full_key(name_index: u8, name: &[u8]) -> Vec<u8> {
     use super::ondisk::xattr_index;
     let prefix: &[u8] = match name_index {
         xattr_index::USER => b"user.",
+        xattr_index::POSIX_ACL_ACCESS => b"system.posix_acl_access",
+        xattr_index::POSIX_ACL_DEFAULT => b"system.posix_acl_default",
         xattr_index::TRUSTED => b"trusted.",
         xattr_index::SECURITY => b"security.",
         xattr_index::SYSTEM => b"system.",
@@ -5171,6 +5179,14 @@ fn xattr_full_key(name_index: u8, name: &[u8]) -> Vec<u8> {
 /// Unknown prefixes get index 0 (raw).
 fn xattr_split_key(key: &[u8]) -> (u8, &[u8]) {
     use super::ondisk::xattr_index;
+    // The ACL names first: they are whole names under `system.`, stored
+    // with an empty name (see `xattr_full_key`).
+    if key == b"system.posix_acl_access" {
+        return (xattr_index::POSIX_ACL_ACCESS, &[]);
+    }
+    if key == b"system.posix_acl_default" {
+        return (xattr_index::POSIX_ACL_DEFAULT, &[]);
+    }
     // `[u8]::strip_prefix` takes a `&[u8; N]` pattern, so each arm names its
     // literal directly rather than going through a `&[u8]` slice.
     if let Some(rest) = key.strip_prefix(b"user.") {
@@ -5883,6 +5899,31 @@ fn test_xattr_key_roundtrip() -> KernelResult<()> {
             "[ext4-driver]   FAIL: security key = '{}'",
             crate::fs::escape::escape_octal(&full, &[])
         );
+        return Err(KernelError::InternalError);
+    }
+
+    // The POSIX ACLs: whole names, stored with an empty name.
+    for (idx, name) in [
+        (
+            xattr_index::POSIX_ACL_ACCESS,
+            b"system.posix_acl_access".as_slice(),
+        ),
+        (
+            xattr_index::POSIX_ACL_DEFAULT,
+            b"system.posix_acl_default".as_slice(),
+        ),
+    ] {
+        if xattr_full_key(idx, &[]).as_slice() != name || xattr_split_key(name) != (idx, &[][..]) {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: ACL key '{}'",
+                crate::fs::escape::escape_octal(name, &[])
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    // Another system. name keeps its own index.
+    if xattr_split_key(b"system.data") != (xattr_index::SYSTEM, b"data".as_slice()) {
+        crate::serial_println!("[ext4-driver]   FAIL: split system.data");
         return Err(KernelError::InternalError);
     }
 

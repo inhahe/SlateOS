@@ -456,6 +456,22 @@ pub fn remove_acl(path: impl AsRef<Path>) -> bool {
     removed
 }
 
+/// Which file an ACL is asked of ([`check_access`]).
+#[derive(Debug, Clone, Copy)]
+pub enum AclFile<'a> {
+    /// The file a path names now.
+    Path(&'a Path),
+    /// A file held open, by its identity, whatever its names now
+    /// (`fs::vfs::FileObject`): its ACL, if it has one, is keyed by it.
+    Held(crate::fs::vfs::FileId),
+}
+
+impl<'a, S: AsRef<[u8]> + ?Sized> From<&'a S> for AclFile<'a> {
+    fn from(path: &'a S) -> Self {
+        Self::Path(Path::new(path))
+    }
+}
+
 /// Check whether a specific access request is permitted by the ACL.
 ///
 /// Follows the POSIX ACL evaluation algorithm:
@@ -469,17 +485,19 @@ pub fn remove_acl(path: impl AsRef<Path>) -> bool {
 ///
 /// If no ACL exists for the path, returns Ok(()) (delegate to traditional
 /// permission checks elsewhere in VFS).
-pub fn check_access(
-    path: impl AsRef<Path>,
+pub fn check_access<'a>(
+    file: impl Into<AclFile<'a>>,
     requester_uid: u32,
     requester_gid: u32,
     file_uid: u32,
     file_gid: u32,
     request: AccessRequest,
 ) -> KernelResult<()> {
-    let path = path.as_ref();
     // Above the lock: this is the site the lock-order gate exists for.
-    let key = acl_key(path);
+    let key = match file.into() {
+        AclFile::Path(path) => acl_key(path),
+        AclFile::Held(id) => AclKey::Id(id),
+    };
     let mut inner = ACLS.lock();
     inner.checks_performed = inner.checks_performed.saturating_add(1);
 

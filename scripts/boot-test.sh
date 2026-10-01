@@ -4268,6 +4268,50 @@ check_text_mode_writes() {
 
 check_text_mode_writes
 
+# Its companion, lane C's (requests/c-a-wire-check-destructive-writes-into-
+# the-boot-test.md): a truncating write under scripts/ -- `open(p, "w")`,
+# `Path.write_text(...)` -- aimed at a file the tree already has empties the
+# file before the call's arguments are checked, so a mistyped `newline=`
+# destroys it and then raises. That is how scripts/hooks/pre-push was emptied
+# on 2026-09-17. The push hook runs it for pushes that touch scripts/; this
+# catches what reached a branch without being pushed.
+check_destructive_writes() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== destructive-write check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the destructive-write gate against its own cases ==="
+    if ! run_checker destructive-writes-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-destructive-writes.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The destructive-write gate fails its own" >&2
+        echo "cases, so its verdict on the tree means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that no script truncates a file the tree already has ==="
+    if run_checker destructive-writes "$py" \
+            "$PROJECT_ROOT/scripts/check-destructive-writes.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A script above opens a file the tree already" >&2
+    echo "has for a truncating write, which empties it before the call's arguments" >&2
+    echo "are checked -- how scripts/hooks/pre-push was emptied on 2026-09-17." >&2
+    echo "Write it with safewrite.write_text, which writes beside the target and" >&2
+    echo "renames over it." >&2
+    exit 1
+}
+
+check_destructive_writes
+
 # `check_libc_shape` began, from the day it was wired until 2026-09-04, with
 # `py="$(find_python)" || return 0`.  `find_python` is defined nowhere -- not
 # here, not in run-checker.sh, not on PATH -- so the substitution exited 127,
@@ -6123,6 +6167,85 @@ check_libc_shape() {
 
 check_libc_shape
 
+# Lane D's three C-library gates (requests/d-a-run-check-libc-declared-in-
+# the-boot-test.md), beside check-libc-shape, so that a push that takes a
+# function away cannot pass:
+#   check-libc-declared    every function musl's headers declare is defined
+#                          by libc.a, and every public name it defines is
+#                          declared by a header;
+#   check-libc-prototypes  each of them takes and returns what its declaration
+#                          says, by the x86-64 calling convention;
+#   check-libc-overlay     posix/include, the header overlay C is built with,
+#                          declares what glibc 2.39's headers declare, where
+#                          they declare it.
+# Each needs zig to preprocess the headers and says so with exit 3, which
+# run_checker files as a skip. check-libc-declared also grades the archive a
+# host may not have built -- its exit 2 -- so that one call may skip on it, as
+# check-libc-shape's does; the other two read sources only, and a 2 from them
+# is a failure.
+check_libc_declarations() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== C library declarations: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the C-library declaration gates against their own cases ==="
+    if ! run_checker check-libc-declared-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-declared.py" --self-test \
+        || ! run_checker check-libc-prototypes-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-prototypes.py" --self-test \
+        || ! run_checker check-libc-overlay-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-overlay.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A C-library gate above fails its own" >&2
+        echo "cases, so its verdict on the C library means nothing." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that libc.a defines what the headers declare, and declares what it defines ==="
+    if ! run_checker --may-skip check-libc-declared "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-declared.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A function the headers declare is missing" >&2
+        echo "from libc.a, or libc.a exports a name no header declares, or a" >&2
+        echo "baseline entry is now defined and its exemption is stale.  A C" >&2
+        echo "program calling a missing one compiles and then fails to link." >&2
+        exit 1
+    fi
+    if [ -n "$RUN_CHECKER_SKIPPED" ]; then
+        echo "=== libc.a declarations: skipped (${RUN_CHECKER_SKIP_REASON:-no reason given}) ==="
+    fi
+
+    echo "=== Checking that each declared function takes and returns what its declaration says ==="
+    if ! run_checker check-libc-prototypes "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-prototypes.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A C-library function above takes or" >&2
+        echo "returns other than its header declares -- a four-byte timer_t" >&2
+        echo "against the header's eight is the kind of thing this finds.  A C" >&2
+        echo "caller passes and reads by the declaration, so it gets garbage." >&2
+        exit 1
+    fi
+
+    echo "=== Checking posix/include against glibc's headers ==="
+    if ! run_checker check-libc-overlay "$py" \
+            "$PROJECT_ROOT/scripts/check-libc-overlay.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  posix/include, the header overlay C is" >&2
+        echo "compiled with, declares something other than glibc 2.39 does, or" >&2
+        echo "where it does not, or a header no longer compiles under one of the" >&2
+        echo "feature-macro settings." >&2
+        exit 1
+    fi
+}
+
+check_libc_declarations
+
 # A diagnostic that names the wrong command is caught by nothing else.
 #
 # The operand helpers are handed their command's name as a bare string literal:
@@ -6394,6 +6517,24 @@ check_variant_lists() {
         echo "scripts it describes, so searching it would answer about a tree" >&2
         echo "that no longer exists.  Regenerate:" >&2
         echo "    python scripts/gen-script-index.py" >&2
+        return 1
+    fi
+
+    # programs.md: every program the workspace builds, recorded (design-
+    # decisions §1053; requests/b-a-a-gate-for-the-program-catalogue.md).
+    echo "=== Checking that programs.md lists every program the workspace builds ==="
+    if ! run_checker program-catalogue-selftest "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  program-catalogue.py no longer agrees" >&2
+        echo "with its own cases." >&2
+        return 1
+    fi
+    if ! run_checker program-catalogue "$py" "$PROJECT_ROOT/scripts/program-catalogue.py" --check; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  programs.md does not list what the" >&2
+        echo "workspace builds: a program was added, removed or re-described" >&2
+        echo "without the list.  Regenerate it, and commit it with the program:" >&2
+        echo "    python scripts/program-catalogue.py" >&2
         return 1
     fi
 

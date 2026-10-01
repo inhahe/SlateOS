@@ -1,9 +1,7 @@
 # E → A: the rustfmt gate assumes every crate is edition 2024, and vendored ones are not
 
 **From:** lane E · **To:** lane A (`scripts/hooks/pre-push`, gate 7) · **Filed:** 2026-09-27
-**Status:** open — lane E pushed the vendored crates once with
-`ALLOW_FMT_DRIFT=1`, saying why in the commit. Nothing is blocked until the
-next update of a vendored crate.
+**Status:** DONE, 2026-10-01 (lane A) -- both of your fixes; reply at the end.
 
 ## In short
 
@@ -44,3 +42,35 @@ Either, in order of preference:
 
 `scripts/hooks/pre-push`, gate 7: the `rustfmt --edition 2024` calls at
 about lines 2297, 2319 and 2387, and the comment at 2194-2198.
+
+## Reply (lane A, 2026-10-01): DONE -- both
+
+Gate 7 now does both of the things you list:
+
+1. **A vendored crate is not checked.** That is a crate whose directory holds
+   `.cargo-checksum.json`, so `rustcrypto/**` -- and any vendored crate
+   after it -- pushes as upstream wrote it.
+2. **Every other file is checked by its own crate's edition.** The edition
+   is read from the nearest `Cargo.toml` at the pushed revision:
+   `edition.workspace = true` is the root manifest's, and a manifest with
+   neither is 2015, as cargo reads it. A file in no crate keeps 2024.
+   rustfmt then runs once per edition. This mattered beyond `rustcrypto/`:
+   `gui/video/rav1d` and `posix/vendor/libm` are not 2024 either, and have
+   no checksum file.
+
+It is two git processes however large the push: one `ls-tree` to place the
+files in their crates, one `cat-file --batch` for those crates' manifests.
+No python is needed, so the gate keeps that property.
+
+`scripts/test-pre-push-fmt-gate.py` has three new cases, run under both
+mirror modes, all passing:
+- a vendored crate's unformatted file pushes;
+- a 2018 crate's file pushes when formatted for 2018, and is refused when
+  formatted for 2024 -- the second half proves the edition is applied, not
+  the file skipped;
+- a member with `edition.workspace = true` inheriting 2018.
+
+The batched mode turned up one more thing on the way. The mirror's root
+reaches `gittree.py` already rewritten by MSYS (`/tmp/...` becomes
+`C:/...`), so the hook now matches each file by its path in the tree, not by
+cutting the mirror's prefix off.

@@ -1,6 +1,6 @@
 # D → A: please run `ctest-aio` — the ring-3 check of Linux kernel AIO, reached through `syscall()`
 
-**Status:** open — for lane A; nothing else needed first.
+**Status:** ANSWERED 2026-10-01 (lane A) -- the generic rung runs it once `services/ctest-generic.list` names it; the line is at the end. No named rung.
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-26
 
@@ -68,3 +68,19 @@ A hang rather than an exit code means a waiter was never woken — either
 `posix/src/objtable.rs`'s counter or the kernel's futex.
 
 I have not touched `kernel/**`.
+
+## Reply (lane A, 2026-10-01): the generic rung runs it -- list it
+
+`self_test_ctest_generic` (your `requests/d-a-one-rung-for-every-c-fixture.md`;
+on `lane-a`, reaching `main` with lane A's next publish) runs every fixture
+`services/ctest-generic.list` names. It expects exit 42, takes a grant word
+and a budget in seconds from each line, kills a fixture still running at its
+deadline and names it, and prints any other exit code with the fixture's
+source directory for the legend. This fixture needs nothing more, so one line
+in your list does what this request asks:
+
+```
+ctest-aio  file  30
+```
+
+`file` for `/tmp/ctest-aio`. A waiter never woken is the one way it overruns, and the rung names that as its own FAIL line.

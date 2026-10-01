@@ -1409,6 +1409,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::ResourceExhausted => errno::ENFILE,
         KernelError::PermissionDenied => errno::EACCES,
         KernelError::InvalidCapability => errno::EPERM,
+        KernelError::NotPermitted => errno::EPERM,
         KernelError::NotFound => errno::ENOENT,
         KernelError::AlreadyExists => errno::EEXIST,
         KernelError::NotADirectory => errno::ENOTDIR,
@@ -1541,54 +1542,16 @@ fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
     }
 }
 
-/// Recover a [`KernelError`] from its stable integer code.
+/// Recover a [`KernelError`] from its stable integer code:
+/// [`KernelError::from_code`].
 ///
-/// This is the inverse of `KernelError::code()`.  Returns `None` if
-/// the code does not name any known variant.
+/// Until 2026-10-01 this was a `match` of its own, which twelve variants added
+/// after it never reached (`BufferTooSmall`, `NoSuchSyscall`, `StaleHandle`,
+/// `NoAttribute` and the eight network errors): [`linux_from_native`] gave a
+/// Linux caller `EINVAL` for each. The list is now the enum's own.
 #[must_use]
 pub const fn kernel_error_from_code(code: i32) -> Option<KernelError> {
-    match code {
-        -1 => Some(KernelError::InternalError),
-        -2 => Some(KernelError::NotSupported),
-        -3 => Some(KernelError::InvalidArgument),
-        -4 => Some(KernelError::WouldBlock),
-        -5 => Some(KernelError::Cancelled),
-        -6 => Some(KernelError::TimedOut),
-        -7 => Some(KernelError::Deadlock),
-        -8 => Some(KernelError::Interrupted),
-        -100 => Some(KernelError::OutOfMemory),
-        -101 => Some(KernelError::InvalidAddress),
-        -102 => Some(KernelError::PageFault),
-        -103 => Some(KernelError::BadAlignment),
-        -200 => Some(KernelError::NoSuchProcess),
-        -201 => Some(KernelError::InvalidExecutable),
-        -202 => Some(KernelError::ProcessExited),
-        -203 => Some(KernelError::NoChildProcess),
-        -300 => Some(KernelError::ChannelClosed),
-        -301 => Some(KernelError::ChannelFull),
-        -302 => Some(KernelError::MessageTooLarge),
-        -303 => Some(KernelError::Overflow),
-        -304 => Some(KernelError::ResourceExhausted),
-        -400 => Some(KernelError::PermissionDenied),
-        -401 => Some(KernelError::InvalidCapability),
-        -500 => Some(KernelError::NotFound),
-        -501 => Some(KernelError::AlreadyExists),
-        -502 => Some(KernelError::NotADirectory),
-        -503 => Some(KernelError::IsADirectory),
-        -504 => Some(KernelError::DiskFull),
-        -505 => Some(KernelError::InvalidHandle),
-        -506 => Some(KernelError::TooManyLinks),
-        -507 => Some(KernelError::NotEmpty),
-        -508 => Some(KernelError::CorruptedData),
-        -509 => Some(KernelError::ReadOnlyFilesystem),
-        -510 => Some(KernelError::TooManyOpenFiles),
-        -511 => Some(KernelError::FileTooLarge),
-        -512 => Some(KernelError::CrossDevice),
-        -600 => Some(KernelError::IoError),
-        -601 => Some(KernelError::NoSuchDevice),
-        -602 => Some(KernelError::DeviceBusy),
-        _ => None,
-    }
+    KernelError::from_code(code)
 }
 
 /// Build a Linux-style error result with the given errno.
@@ -22503,9 +22466,9 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
 /// `sys_lchown`, and `sys_fchownat` (non-`AT_EMPTY_PATH` branch).
 /// Batch 484 extended to `sys_fchmodat`.  Batch 485 extended to
 /// `sys_fchmodat2` (non-`AT_EMPTY_PATH` branch).  Batch 486 extended
-/// to the path-xattr family via `xattr_validate_path_name` and
-/// `xattr_list_path` (setxattr/lsetxattr/getxattr/lgetxattr/
-/// listxattr/llistxattr/removexattr/lremovexattr).  Batch 487
+/// to the path-xattr family (setxattr/lsetxattr/getxattr/lgetxattr/
+/// listxattr/llistxattr/removexattr/lremovexattr), which since 2026-10-01
+/// look their paths up with `resolve_at_path` instead.  Batch 487
 /// extended to `sys_readlink` and `sys_readlinkat` — although those
 /// use `LOOKUP_EMPTY` (so getname allows empty), the empty case
 /// still surfaces ENOENT via `do_readlinkat`'s `error = empty ?
@@ -28437,225 +28400,439 @@ fn sys_process_mrelease(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
-// Extended attributes (xattr)
+// Extended attributes: the twelve calls, in Linux 6.6's order (fs/xattr.c),
+// over the VFS, which applies Linux's rules (`fs::xattr_policy`).
 //
-// Our FS has no extended attribute support yet.  The truthful answers
-// per the Linux man-page are:
-//   - get / list: ENODATA ("attribute does not exist") for path/fd
-//     variants — i.e., no attributes are present.
-//   - set / remove: EOPNOTSUPP ("filesystem does not support xattrs").
-// EOPNOTSUPP is what callers check to learn the FS lacks xattr; ENODATA
-// is what they check to learn a specific attribute is missing.  Both
-// are commonly handled in portable code.
+// | call | order |
+// |---|---|
+// | `setxattr`, `lsetxattr` | flags, name, size, value; the path; `EROFS`; the rules |
+// | `fsetxattr` | the descriptor; flags, name, size, value; `EROFS`; the rules |
+// | `getxattr`, `lgetxattr` | the path; the name; the rules |
+// | `fgetxattr` | the descriptor; the name; the rules |
+// | `listxattr`, `llistxattr`, `flistxattr` | the path or descriptor; the list |
+// | `removexattr`, `lremovexattr` | the path; `EROFS`; the name; the rules |
+// | `fremovexattr` | the descriptor; `EROFS`; the name; the rules |
+//
+// Until 2026-10-01 they checked their arguments and answered EOPNOTSUPP
+// (set, remove), ENODATA (get) and 0 (list), written before the
+// filesystems kept attributes.
 // ---------------------------------------------------------------------------
 
-/// Helper: validate path + name pointers for path-based xattr ops.
+/// `XATTR_NAME_MAX`: a name must end within this many bytes.
+const XATTR_NAME_MAX: usize = 255;
+/// `XATTR_SIZE_MAX`: the largest value, and the most a reader is given.
+const XATTR_SIZE_MAX: usize = 65536;
+/// `XATTR_LIST_MAX`: the most a lister is given.
+const XATTR_LIST_MAX: usize = 65536;
+/// `setxattr`'s `XATTR_CREATE`: fail if the attribute exists.
+const XATTR_CREATE: u32 = 1;
+/// `setxattr`'s `XATTR_REPLACE`: fail if it does not.
+const XATTR_REPLACE: u32 = 2;
+
+/// The errno an xattr call answers for `e`. `NotSupported` -- a namespace no
+/// filesystem here keeps, or a filesystem that keeps none -- is Linux's
+/// `EOPNOTSUPP` here, where the generic map says `ENOSYS`.
+fn xattr_errno(e: KernelError) -> i32 {
+    match e {
+        KernelError::NotSupported => errno::EOPNOTSUPP,
+        other => linux_errno_for(other),
+    }
+}
+
+/// An attribute's name, copied in as Linux's `strncpy_from_user` into a
+/// 256-byte buffer copies it: `EFAULT` for a byte that cannot be read,
+/// `ERANGE` for an empty name or one that does not end within 255 bytes.
+fn xattr_name(ptr: u64) -> Result<alloc::vec::Vec<u8>, i32> {
+    match read_user_cstr(ptr, XATTR_NAME_MAX) {
+        Ok(name) if name.is_empty() => Err(errno::ERANGE),
+        Ok(name) => Ok(name),
+        Err(e) if e == errno::ENAMETOOLONG => Err(errno::ERANGE),
+        Err(e) => Err(e),
+    }
+}
+
+/// What the set calls copy in before anything else (Linux's
+/// `setxattr_copy`).
+struct XattrSetArgs {
+    /// The attribute's name.
+    name: alloc::vec::Vec<u8>,
+    /// Its new value.
+    value: alloc::vec::Vec<u8>,
+    /// What the flags ask of an attribute that exists, or does not.
+    mode: crate::fs::XattrSetMode,
+}
+
+/// Copy in a set call's arguments in Linux's order: the flags (`EINVAL` for a
+/// bit that is neither `XATTR_CREATE` nor `XATTR_REPLACE`), the name, the
+/// size (`E2BIG` over 64 KiB), the value (`EFAULT`). A size of 0 is an empty
+/// value, its pointer not read. Both flags at once ask what no attribute can
+/// satisfy, and the filesystem refuses either way
+/// (`XattrSetMode::Neither`).
+fn xattr_set_copy(
+    name_ptr: u64,
+    value_ptr: u64,
+    size: u64,
+    flags: u64,
+) -> Result<XattrSetArgs, i32> {
+    // `int flags`: the register's upper half is not the caller's.
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = flags as u32;
+    if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+        return Err(errno::EINVAL);
+    }
+    let name = xattr_name(name_ptr)?;
+    let value = if size == 0 {
+        alloc::vec::Vec::new()
+    } else {
+        let size = usize::try_from(size)
+            .ok()
+            .filter(|&s| s <= XATTR_SIZE_MAX)
+            .ok_or(errno::E2BIG)?;
+        crate::mm::user::read_user_vec(value_ptr, size, XATTR_SIZE_MAX).map_err(linux_errno_for)?
+    };
+    let mode = match flags {
+        0 => crate::fs::XattrSetMode::Any,
+        XATTR_CREATE => crate::fs::XattrSetMode::Create,
+        XATTR_REPLACE => crate::fs::XattrSetMode::Replace,
+        _ => crate::fs::XattrSetMode::Neither,
+    };
+    Ok(XattrSetArgs { name, value, mode })
+}
+
+/// Require the caller to hold a File-METADATA capability before reading an
+/// object's attributes, as the native xattr doors do.
+fn require_fs_metadata() -> Result<(), SyscallResult> {
+    handlers::require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA)
+        .map_err(|e| linux_err(linux_errno_for(e)))
+}
+
+/// A path call's file: the path looked up as Linux's `user_path_at` looks it
+/// up, then, for a change, the mount's writability (`mnt_want_write`).
+fn xattr_path_target(
+    path_ptr: u64,
+    follow: bool,
+    access: crate::fs::xattr_policy::Access,
+) -> Result<crate::fs::XattrTarget, SyscallResult> {
+    let path = resolve_at_path(AT_FDCWD, path_ptr)?;
+    crate::fs::Vfs::xattr_target(&path, follow, access).map_err(|e| linux_err(xattr_errno(e)))
+}
+
+/// What a descriptor call's descriptor holds (Linux's `fdget`).
+enum XattrFd {
+    /// A file or directory (`fs::handle::HandleFile`).
+    File(crate::fs::handle::HandleFile),
+    /// Anything else -- a pipe, a socket, an event descriptor, a device -- of
+    /// this kind: an object on no filesystem that keeps attributes.
+    Other(HandleKind),
+}
+
+/// The object behind a descriptor call's descriptor; `EBADF` for one that is
+/// not open.
+fn xattr_fd(arg: u64) -> Result<XattrFd, SyscallResult> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let fd = arg as i32;
+    let entry = lookup_caller_fd(fd)?;
+    if entry.kind != HandleKind::File {
+        return Ok(XattrFd::Other(entry.kind));
+    }
+    crate::fs::handle::HandleFile::of(entry.raw_handle)
+        .map(XattrFd::File)
+        .map_err(|e| linux_err(linux_errno_for(e)))
+}
+
+/// The answer for an attribute of an object on no filesystem: the rules'
+/// refusal, then `NotSupported`, as Linux answers for an inode without
+/// `IOP_XATTR` (`xattr_policy::unkept`). A memfd is a regular file; the rest
+/// are neither files nor directories, which is all the rules ask.
 ///
-/// Path empty-path → ENOENT (batch 486): Linux's `fs/xattr.c::path_*`
-/// (setxattr/getxattr/listxattr/removexattr) all start with
-/// `user_path_at(AT_FDCWD, pathname, lookup_flags, &path)` whose
-/// `getname()` returns -ENOENT for a zero-length user-string before
-/// any xattr-specific gates fire (flags/size/EOPNOTSUPP/ENODATA).
-/// Routes through `check_path_str_nonempty` to surface ENOENT for
-/// empty paths, EFAULT for NULL, then validates the name pointer
-/// stub-style.
-fn xattr_validate_path_name(path: u64, name: u64) -> Result<(), SyscallResult> {
-    if let Err(e) = check_path_str_nonempty(path) {
-        return Err(linux_err(e));
-    }
-    if name == 0 {
-        return Err(linux_err(errno::EFAULT));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(name, 1) {
-        return Err(linux_err(linux_errno_for(e)));
-    }
-    Ok(())
+/// Linux keeps attributes on two of these that this kernel does not: a
+/// memfd's (it is a tmpfs file there), and a socket's
+/// `system.sockprotoname`. Recorded in known-issues
+/// `A-XATTR-ON-SOCKETS-AND-MEMFDS`.
+fn xattr_unkept(
+    kind: HandleKind,
+    name: &[u8],
+    access: crate::fs::xattr_policy::Access,
+) -> KernelError {
+    let entry_type = if kind == HandleKind::MemFd {
+        crate::fs::EntryType::File
+    } else {
+        crate::fs::EntryType::CharDevice
+    };
+    let meta = crate::fs::FileMeta::minimal(entry_type, 0);
+    let caller = crate::fs::xattr_policy::Caller::current();
+    crate::fs::xattr_policy::unkept(name, access, &meta, caller)
 }
 
-/// Helper: validate fd + name for fd-based xattr ops.
-fn xattr_validate_fd_name(fd: i32, name: u64) -> Result<(), SyscallResult> {
-    if name == 0 {
-        return Err(linux_err(errno::EFAULT));
+/// Give the caller `bytes` -- a value, or a list of names -- as Linux's
+/// `do_getxattr` and `listxattr` give them: a `size` of 0 asks the length
+/// alone; `ERANGE` when they do not fit, with nothing written; `E2BIG` when
+/// they would not fit even the most a caller is given, `max` (64 KiB), which a
+/// larger `size` is cut to; `EFAULT` only for bytes copied.
+fn xattr_copy_out(bytes: &[u8], buf: u64, size: u64, max: usize) -> SyscallResult {
+    let Ok(len) = i64::try_from(bytes.len()) else {
+        return linux_err(errno::E2BIG);
+    };
+    if size == 0 {
+        return SyscallResult::ok(len);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(name, 1) {
-        return Err(linux_err(linux_errno_for(e)));
+    let room = usize::try_from(size).map_or(max, |s| s.min(max));
+    if bytes.len() > room {
+        return linux_err(if room >= max {
+            errno::E2BIG
+        } else {
+            errno::ERANGE
+        });
     }
-    validate_linux_fd(fd)
-}
-
-/// Helper: validate the size + flags arguments shared by all the
-/// xattr set-path operations.  Linux's `fs/xattr.c::setxattr_copy`
-/// rejects flag bits outside `XATTR_CREATE | XATTR_REPLACE` (=3) with
-/// EINVAL and sizes greater than `XATTR_SIZE_MAX` (=65536) with
-/// E2BIG, both ahead of the per-FS dispatch.  Pre-batch our stubs
-/// did neither — a probe passing flags=4 or size=70_000 got
-/// EOPNOTSUPP from the terminal, not the Linux-shaped errnos.
-fn xattr_validate_size_flags(size: u64, flags: u64) -> Result<(), SyscallResult> {
-    const XATTR_FLAGS_MASK: u64 = 0x3; // XATTR_CREATE | XATTR_REPLACE
-    const XATTR_SIZE_MAX: u64 = 65536;
-    if flags & !XATTR_FLAGS_MASK != 0 {
-        return Err(linux_err(errno::EINVAL));
-    }
-    if size > XATTR_SIZE_MAX {
-        return Err(linux_err(errno::E2BIG));
-    }
-    Ok(())
-}
-
-fn xattr_set_path(args: &SyscallArgs) -> SyscallResult {
-    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
-        return r;
-    }
-    // Linux gates flags & size before touching the value buffer; do
-    // the same so probes passing flags=4 or size > 65536 see EINVAL
-    // / E2BIG instead of the terminal EOPNOTSUPP.
-    if let Err(r) = xattr_validate_size_flags(args.arg3, args.arg4) {
-        return r;
-    }
-    // value pointer is optional (NULL = delete-like behaviour for some
-    // FS), validate when non-NULL.
-    let size = args.arg3 as usize;
-    if args.arg2 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, size) {
+    if !bytes.is_empty() {
+        // SAFETY: `bytes` is a live kernel slice of `bytes.len()` bytes;
+        // `copy_to_user` validates the destination range and brackets the
+        // store with STAC/CLAC.
+        if let Err(e) = unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), buf, bytes.len()) } {
             return linux_err(linux_errno_for(e));
         }
     }
-    linux_err(errno::EOPNOTSUPP)
+    SyscallResult::ok(len)
+}
+
+/// A listing's answer: the names, each followed by a NUL, given as
+/// `listxattr` gives them.
+fn xattr_list_out(
+    names: crate::error::KernelResult<alloc::vec::Vec<alloc::vec::Vec<u8>>>,
+    buf: u64,
+    size: u64,
+) -> SyscallResult {
+    let names = match names {
+        Ok(n) => n,
+        Err(e) => return linux_err(xattr_errno(e)),
+    };
+    let total = names
+        .iter()
+        .map(|n| n.len().saturating_add(1))
+        .fold(0usize, usize::saturating_add);
+    let mut packed: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if packed.try_reserve_exact(total).is_err() {
+        return linux_err(errno::ENOMEM);
+    }
+    for name in &names {
+        packed.extend_from_slice(name);
+        packed.push(0);
+    }
+    xattr_copy_out(&packed, buf, size, XATTR_LIST_MAX)
+}
+
+/// `setxattr`/`lsetxattr`, as Linux's `path_setxattr`: the arguments, then
+/// the path.
+fn xattr_set_path(args: &SyscallArgs, follow: bool) -> SyscallResult {
+    let set = match xattr_set_copy(args.arg1, args.arg2, args.arg3, args.arg4) {
+        Ok(s) => s,
+        Err(e) => return linux_err(e),
+    };
+    let target = match xattr_path_target(args.arg0, follow, crate::fs::xattr_policy::Access::Write)
+    {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_write() {
+        return r;
+    }
+    match crate::fs::Vfs::xattr_set(&target, &set.name, &set.value, set.mode) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(xattr_errno(e)),
+    }
 }
 
 /// `setxattr(path, name, value, size, flags)`.
 fn sys_setxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_set_path(args)
+    xattr_set_path(args, true)
 }
-/// `lsetxattr(path, name, value, size, flags)`.
+/// `lsetxattr(path, name, value, size, flags)`: a trailing link itself.
 fn sys_lsetxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_set_path(args)
+    xattr_set_path(args, false)
 }
 
-/// `fsetxattr(fd, name, value, size, flags)`.
+/// `fsetxattr(fd, name, value, size, flags)`: the descriptor, then the
+/// arguments, as Linux's.
 fn sys_fsetxattr(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+    let file = match xattr_fd(args.arg0) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let set = match xattr_set_copy(args.arg1, args.arg2, args.arg3, args.arg4) {
+        Ok(s) => s,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(r) = require_fs_write() {
         return r;
     }
-    if let Err(r) = xattr_validate_size_flags(args.arg3, args.arg4) {
-        return r;
+    let res = match &file {
+        XattrFd::File(f) => f.set_xattr(&set.name, &set.value, set.mode),
+        XattrFd::Other(kind) => Err(xattr_unkept(
+            *kind,
+            &set.name,
+            crate::fs::xattr_policy::Access::Write,
+        )),
+    };
+    match res {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(xattr_errno(e)),
     }
-    let size = args.arg3 as usize;
-    if args.arg2 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, size) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    linux_err(errno::EOPNOTSUPP)
 }
 
-fn xattr_get_path(args: &SyscallArgs) -> SyscallResult {
-    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+/// `getxattr`/`lgetxattr`, as Linux's `path_getxattr`: the path, then the
+/// name.
+fn xattr_get_path(args: &SyscallArgs, follow: bool) -> SyscallResult {
+    let target = match xattr_path_target(args.arg0, follow, crate::fs::xattr_policy::Access::Read) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let name = match xattr_name(args.arg1) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(r) = require_fs_metadata() {
         return r;
     }
-    let size = args.arg3 as usize;
-    if args.arg2 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, size) {
-            return linux_err(linux_errno_for(e));
-        }
+    match crate::fs::Vfs::xattr_get(&target, &name) {
+        Ok(value) => xattr_copy_out(&value, args.arg2, args.arg3, XATTR_SIZE_MAX),
+        Err(e) => linux_err(xattr_errno(e)),
     }
-    linux_err(errno::ENODATA)
 }
 
 /// `getxattr(path, name, value, size)`.
 fn sys_getxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_get_path(args)
+    xattr_get_path(args, true)
 }
-/// `lgetxattr(path, name, value, size)`.
+/// `lgetxattr(path, name, value, size)`: a trailing link itself.
 fn sys_lgetxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_get_path(args)
+    xattr_get_path(args, false)
 }
 
-/// `fgetxattr(fd, name, value, size)`.
+/// `fgetxattr(fd, name, value, size)`: the descriptor, then the name.
 fn sys_fgetxattr(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+    let file = match xattr_fd(args.arg0) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let name = match xattr_name(args.arg1) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(r) = require_fs_metadata() {
         return r;
     }
-    let size = args.arg3 as usize;
-    if args.arg2 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, size) {
-            return linux_err(linux_errno_for(e));
-        }
+    let value = match &file {
+        XattrFd::File(f) => f.get_xattr(&name),
+        XattrFd::Other(kind) => Err(xattr_unkept(
+            *kind,
+            &name,
+            crate::fs::xattr_policy::Access::Read,
+        )),
+    };
+    match value {
+        Ok(value) => xattr_copy_out(&value, args.arg2, args.arg3, XATTR_SIZE_MAX),
+        Err(e) => linux_err(xattr_errno(e)),
     }
-    linux_err(errno::ENODATA)
 }
 
-fn xattr_list_path(args: &SyscallArgs) -> SyscallResult {
-    // Batch 486: Linux's listxattr/llistxattr route through
-    // user_path_at → getname → empty-path -> -ENOENT before any
-    // xattr-specific behaviour (which would otherwise return 0 for
-    // an FS-with-no-xattrs).
-    if let Err(e) = check_path_str_nonempty(args.arg0) {
-        return linux_err(e);
+/// `listxattr`/`llistxattr`, as Linux's `path_listxattr`.
+fn xattr_list_path(args: &SyscallArgs, follow: bool) -> SyscallResult {
+    let target = match xattr_path_target(args.arg0, follow, crate::fs::xattr_policy::Access::Read) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_metadata() {
+        return r;
     }
-    let size = args.arg2 as usize;
-    if args.arg1 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, size) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    // No attributes -> empty list -> 0.
-    SyscallResult::ok(0)
+    xattr_list_out(crate::fs::Vfs::xattr_list(&target), args.arg1, args.arg2)
 }
 
 /// `listxattr(path, list, size)`.
 fn sys_listxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_list_path(args)
+    xattr_list_path(args, true)
 }
-/// `llistxattr(path, list, size)`.
+/// `llistxattr(path, list, size)`: a trailing link itself.
 fn sys_llistxattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_list_path(args)
+    xattr_list_path(args, false)
 }
 
-/// `flistxattr(fd, list, size)`.
+/// `flistxattr(fd, list, size)`. An object on no filesystem has none.
 fn sys_flistxattr(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = validate_linux_fd(fd) {
+    let file = match xattr_fd(args.arg0) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if let Err(r) = require_fs_metadata() {
         return r;
     }
-    let size = args.arg2 as usize;
-    if args.arg1 != 0 && size > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, size) {
-            return linux_err(linux_errno_for(e));
-        }
-    }
-    SyscallResult::ok(0)
+    let names = match &file {
+        XattrFd::File(f) => f.list_xattrs(),
+        XattrFd::Other(_) => Ok(alloc::vec::Vec::new()),
+    };
+    xattr_list_out(names, args.arg1, args.arg2)
 }
 
-fn xattr_remove_path(args: &SyscallArgs) -> SyscallResult {
-    if let Err(r) = xattr_validate_path_name(args.arg0, args.arg1) {
+/// `removexattr`/`lremovexattr`, as Linux's `path_removexattr`: the path and
+/// the mount, then the name.
+fn xattr_remove_path(args: &SyscallArgs, follow: bool) -> SyscallResult {
+    let target = match xattr_path_target(args.arg0, follow, crate::fs::xattr_policy::Access::Write)
+    {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let name = match xattr_name(args.arg1) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(r) = require_fs_write() {
         return r;
     }
-    linux_err(errno::EOPNOTSUPP)
+    match crate::fs::Vfs::xattr_remove(&target, &name) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(xattr_errno(e)),
+    }
 }
 
 /// `removexattr(path, name)`.
 fn sys_removexattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_remove_path(args)
+    xattr_remove_path(args, true)
 }
-/// `lremovexattr(path, name)`.
+/// `lremovexattr(path, name)`: a trailing link itself.
 fn sys_lremovexattr(args: &SyscallArgs) -> SyscallResult {
-    xattr_remove_path(args)
+    xattr_remove_path(args, false)
 }
 
-/// `fremovexattr(fd, name)`.
+/// `fremovexattr(fd, name)`: the descriptor and its mount
+/// (`mnt_want_write_file`), then the name, as Linux's.
 fn sys_fremovexattr(args: &SyscallArgs) -> SyscallResult {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let fd = args.arg0 as i32;
-    if let Err(r) = xattr_validate_fd_name(fd, args.arg1) {
+    let file = match xattr_fd(args.arg0) {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if let XattrFd::File(f) = &file
+        && let Err(e) = f.may_change()
+    {
+        return linux_err(xattr_errno(e));
+    }
+    let name = match xattr_name(args.arg1) {
+        Ok(n) => n,
+        Err(e) => return linux_err(e),
+    };
+    if let Err(r) = require_fs_write() {
         return r;
     }
-    linux_err(errno::EOPNOTSUPP)
+    let res = match &file {
+        XattrFd::File(f) => f.remove_xattr(&name),
+        XattrFd::Other(kind) => Err(xattr_unkept(
+            *kind,
+            &name,
+            crate::fs::xattr_policy::Access::Write,
+        )),
+    };
+    match res {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => linux_err(xattr_errno(e)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -49099,6 +49276,372 @@ pub fn self_test_statfs_root() -> crate::error::KernelResult<()> {
     Ok(())
 }
 
+/// The twelve xattr calls on files in `/tmp`, once it is mounted, through
+/// `dispatch_linux` in kernel context (a privileged caller): a value and its
+/// length, the empty value, too small a buffer, `XATTR_CREATE`,
+/// `XATTR_REPLACE` and both, names no handler takes, a 255-byte name, a link,
+/// lists (one past 64 KiB among them), and the order of Linux 6.6's
+/// refusals. Then the descriptor calls' own work, through the
+/// `fs::handle::HandleFile` they act on, on a file renamed and then unlinked
+/// while open: a descriptor needs a process, whose calls cannot read the
+/// kernel's buffers here. Then objects on no filesystem.
+///
+/// # Errors
+///
+/// `InternalError` naming the case that failed; the setup's own.
+pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    use crate::fs::handle::{self as fhandle, HandleFile, OpenFlags};
+    use crate::fs::xattr_policy::Access;
+    use crate::fs::{Vfs, XattrSetMode};
+    use crate::serial_println;
+
+    const FILE: &str = "/tmp/_lx_xattr";
+    const MOVED: &str = "/tmp/_lx_xattr_moved";
+    const LINK: &str = "/tmp/_lx_xattr_link";
+    const MANY: &str = "/tmp/_lx_xattr_many";
+
+    // Best effort, before and after: what is not there is not an error.
+    let cleanup = || {
+        for path in [LINK, FILE, MOVED, MANY] {
+            let _ = Vfs::remove(path);
+        }
+    };
+    cleanup();
+
+    let err = |e: i32| i64::from(e).wrapping_neg();
+    let call = |nr: u64, a: [u64; 5]| {
+        dispatch_linux(
+            nr,
+            &SyscallArgs {
+                arg0: a[0],
+                arg1: a[1],
+                arg2: a[2],
+                arg3: a[3],
+                arg4: a[4],
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let cstr = |s: &[u8]| {
+        let mut v = s.to_vec();
+        v.push(0);
+        v
+    };
+    let p = |v: &[u8]| v.as_ptr() as u64;
+    // A buffer the call writes: its pointer from a unique borrow.
+    let out = |v: &mut [u8]| v.as_mut_ptr() as u64;
+    let fail = |what: &str| {
+        serial_println!("[syscall/linux]   FAIL: xattr: {}", what);
+        Err(KernelError::InternalError)
+    };
+    let check = |what: &str, got: i64, want: i64| {
+        if got == want {
+            Ok(())
+        } else {
+            serial_println!(
+                "[syscall/linux]   FAIL: xattr {}: {}, want {}",
+                what,
+                got,
+                want
+            );
+            Err(KernelError::InternalError)
+        }
+    };
+
+    let run = || -> crate::error::KernelResult<()> {
+        Vfs::write_file(FILE, b"x")?;
+        Vfs::symlink(LINK, FILE)?;
+        let file = cstr(FILE.as_bytes());
+        let link = cstr(LINK.as_bytes());
+        let absent = cstr(b"/tmp/_lx_xattr_absent");
+        let (ua, ub, ue) = (cstr(b"user.a"), cstr(b"user.b"), cstr(b"user.e"));
+        let (none, unspaced, bare) = (cstr(b"user.none"), cstr(b"foo"), cstr(b"user."));
+        let (acl, empty) = (cstr(b"system.posix_acl_access"), cstr(b""));
+        let (tl, ul) = (cstr(b"trusted.l"), cstr(b"user.l"));
+        let mut longest = b"user.".to_vec();
+        longest.resize(255, b'a');
+        let longest = cstr(&longest);
+        let hello = b"hello";
+        let (set, get, list) = (nr::SETXATTR, nr::GETXATTR, nr::LISTXATTR);
+
+        // A value, its length, and too small a buffer.
+        check("set", call(set, [p(&file), p(&ua), p(hello), 5, 0]), 0)?;
+        check("a length", call(get, [p(&file), p(&ua), 0, 0, 0]), 5)?;
+        let mut eight = [0xEEu8; 8];
+        check(
+            "get",
+            call(get, [p(&file), p(&ua), out(&mut eight), 8, 0]),
+            5,
+        )?;
+        if eight != *b"hello\xEE\xEE\xEE" {
+            return fail("get copied other than the value");
+        }
+        let mut three = [0xEEu8; 3];
+        check(
+            "too small",
+            call(get, [p(&file), p(&ua), out(&mut three), 3, 0]),
+            err(errno::ERANGE),
+        )?;
+        if three != [0xEE; 3] {
+            return fail("too small a buffer was written");
+        }
+        let mut more = [0xEEu8; 8];
+        check(
+            "a size past 64 KiB",
+            call(get, [p(&file), p(&ua), out(&mut more), 70_000, 0]),
+            5,
+        )?;
+        check(
+            "absent",
+            call(get, [p(&file), p(&none), 0, 0, 0]),
+            err(errno::ENODATA),
+        )?;
+
+        // The flags.
+        let both = u64::from(XATTR_CREATE | XATTR_REPLACE);
+        let (create, replace) = (u64::from(XATTR_CREATE), u64::from(XATTR_REPLACE));
+        check(
+            "CREATE, present",
+            call(set, [p(&file), p(&ua), p(hello), 1, create]),
+            err(errno::EEXIST),
+        )?;
+        check(
+            "REPLACE, absent",
+            call(set, [p(&file), p(&ub), p(hello), 1, replace]),
+            err(errno::ENODATA),
+        )?;
+        check(
+            "both, present",
+            call(set, [p(&file), p(&ua), p(hello), 1, both]),
+            err(errno::EEXIST),
+        )?;
+        check(
+            "both, absent",
+            call(set, [p(&file), p(&ub), p(hello), 1, both]),
+            err(errno::ENODATA),
+        )?;
+        check("an empty value", call(set, [p(&file), p(&ue), 0, 0, 0]), 0)?;
+        check("its length", call(get, [p(&file), p(&ue), 0, 0, 0]), 0)?;
+
+        // Names.
+        check(
+            "no namespace",
+            call(set, [p(&file), p(&unspaced), p(hello), 1, 0]),
+            err(errno::EOPNOTSUPP),
+        )?;
+        check(
+            "a bare prefix",
+            call(set, [p(&file), p(&bare), p(hello), 1, 0]),
+            err(errno::EINVAL),
+        )?;
+        check(
+            "an ACL's name",
+            call(set, [p(&file), p(&acl), p(hello), 1, 0]),
+            err(errno::EOPNOTSUPP),
+        )?;
+        check(
+            "a 255-byte name",
+            call(set, [p(&file), p(&longest), p(hello), 1, 0]),
+            0,
+        )?;
+        check(
+            "its removal",
+            call(nr::REMOVEXATTR, [p(&file), p(&longest), 0, 0, 0]),
+            0,
+        )?;
+
+        // The order: `setxattr` reads the name before the path, the others
+        // the path first.
+        check(
+            "set, name first",
+            call(set, [p(&absent), p(&empty), 0, 0, 0]),
+            err(errno::ERANGE),
+        )?;
+        check(
+            "get, path first",
+            call(get, [p(&absent), p(&empty), 0, 0, 0]),
+            err(errno::ENOENT),
+        )?;
+        check(
+            "remove, path first",
+            call(nr::REMOVEXATTR, [p(&absent), p(&empty), 0, 0, 0]),
+            err(errno::ENOENT),
+        )?;
+
+        // A link takes no `user.`, but `trusted.`, from a privileged caller.
+        check(
+            "user. on a link",
+            call(nr::LSETXATTR, [p(&link), p(&ul), p(hello), 1, 0]),
+            err(errno::EPERM),
+        )?;
+        check(
+            "trusted. on a link",
+            call(nr::LSETXATTR, [p(&link), p(&tl), p(hello), 1, 0]),
+            0,
+        )?;
+        check(
+            "the link's",
+            call(nr::LGETXATTR, [p(&link), p(&tl), 0, 0, 0]),
+            1,
+        )?;
+        check(
+            "through the link",
+            call(get, [p(&link), p(&tl), 0, 0, 0]),
+            err(errno::ENODATA),
+        )?;
+
+        // Lists.
+        let names = b"user.a\0user.e\0";
+        check("a list's length", call(list, [p(&file), 0, 0, 0, 0]), 14)?;
+        let mut whole = [0xEEu8; 32];
+        check(
+            "a list",
+            call(list, [p(&file), out(&mut whole), 32, 0, 0]),
+            14,
+        )?;
+        if whole.get(..14) != Some(names.as_slice()) {
+            return fail("the list was not each name and a NUL");
+        }
+        let mut four = [0xEEu8; 4];
+        check(
+            "a list, too small",
+            call(list, [p(&file), out(&mut four), 4, 0, 0]),
+            err(errno::ERANGE),
+        )?;
+        if four != [0xEE; 4] {
+            return fail("too small a list buffer was written");
+        }
+        check(
+            "the link's list",
+            call(nr::LLISTXATTR, [p(&link), 0, 0, 0, 0]),
+            10,
+        )?;
+
+        // A list past 64 KiB: 270 names of 248 bytes.
+        Vfs::write_file(MANY, b"x")?;
+        let filler = "m".repeat(240);
+        for i in 0..270u32 {
+            Vfs::set_xattr(MANY, alloc::format!("user.{i:03}{filler}").as_bytes(), b"")?;
+        }
+        let many = cstr(MANY.as_bytes());
+        let mut room = alloc::vec![0u8; XATTR_LIST_MAX];
+        let at = out(&mut room);
+        // 270 names of 248 bytes, each with its NUL.
+        check(
+            "a long list's length",
+            call(list, [p(&many), 0, 0, 0, 0]),
+            67_230,
+        )?;
+        check(
+            "a long list, 64 KiB asked",
+            call(list, [p(&many), at, 65536, 0, 0]),
+            err(errno::E2BIG),
+        )?;
+        check(
+            "a long list, more asked",
+            call(list, [p(&many), at, 1 << 20, 0, 0]),
+            err(errno::E2BIG),
+        )?;
+        check(
+            "a long list, less asked",
+            call(list, [p(&many), at, 1000, 0, 0]),
+            err(errno::ERANGE),
+        )?;
+
+        check(
+            "remove",
+            call(nr::REMOVEXATTR, [p(&file), p(&ua), 0, 0, 0]),
+            0,
+        )?;
+        check(
+            "remove again",
+            call(nr::REMOVEXATTR, [p(&file), p(&ua), 0, 0, 0]),
+            err(errno::ENODATA),
+        )?;
+
+        // Through a descriptor's file: held by its identity, through a
+        // rename and an unlink.
+        let h = fhandle::open(FILE, OpenFlags::READ)?;
+        let held = (|| -> crate::error::KernelResult<()> {
+            HandleFile::of(h)?.set_xattr(b"user.h", b"1", XattrSetMode::Any)?;
+            Vfs::rename(FILE, MOVED)?;
+            let f = HandleFile::of(h)?;
+            if f.get_xattr(b"user.h")? != b"1" {
+                return fail("the descriptor's file lost its attribute in a rename");
+            }
+            f.set_xattr(b"user.r", b"2", XattrSetMode::Create)?;
+            if Vfs::get_xattr(MOVED, b"user.r")? != b"2" {
+                return fail("a change through the descriptor missed the renamed file");
+            }
+            Vfs::remove(MOVED)?;
+            if f.get_xattr(b"user.h")? != b"1" {
+                return fail("the unlinked file lost its attribute");
+            }
+            let mut listed = f.list_xattrs()?;
+            listed.sort();
+            if listed != [b"user.e".to_vec(), b"user.h".to_vec(), b"user.r".to_vec()] {
+                return fail("the descriptor's list");
+            }
+            f.remove_xattr(b"user.r")?;
+            if f.get_xattr(b"user.r") != Err(KernelError::NoAttribute) {
+                return fail("a removal through the descriptor");
+            }
+            if f.set_xattr(b"foo", b"", XattrSetMode::Any) != Err(KernelError::NotSupported) {
+                return fail("a descriptor's name in no namespace");
+            }
+            f.may_change()
+        })();
+        // Best effort: this test's own handle.
+        let _ = fhandle::close(h);
+        held?;
+
+        // Objects on no filesystem: the rules, then EOPNOTSUPP.
+        let (r, w) = (Access::Read, Access::Write);
+        let unkept = [
+            (
+                xattr_unkept(HandleKind::Pipe, b"user.x", r),
+                KernelError::NoAttribute,
+            ),
+            (
+                xattr_unkept(HandleKind::Pipe, b"user.x", w),
+                KernelError::NotPermitted,
+            ),
+            (
+                xattr_unkept(HandleKind::Pipe, b"trusted.x", r),
+                KernelError::NotSupported,
+            ),
+            (
+                xattr_unkept(HandleKind::Pipe, b"trusted.", r),
+                KernelError::NotSupported,
+            ),
+            (
+                xattr_unkept(HandleKind::Socket, b"foo", w),
+                KernelError::NotSupported,
+            ),
+            (
+                xattr_unkept(HandleKind::MemFd, b"user.x", r),
+                KernelError::NotSupported,
+            ),
+        ];
+        if unkept.iter().any(|(got, want)| got != want) {
+            serial_println!("[syscall/linux]   {:?}", unkept);
+            return fail("an object on no filesystem");
+        }
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    serial_println!(
+        "[syscall/linux]   xattr calls: values, lists, flags, names, sizes, a link, \
+         Linux's order; through a descriptor's file across a rename and an \
+         unlink; objects on no filesystem: OK"
+    );
+    Ok(())
+}
+
 /// End-to-end test of `Vfs::rename_noreplace` / `Vfs::rename_exchange` and the
 /// Linux-ABI `renameat2(RENAME_NOREPLACE | RENAME_EXCHANGE)` paths that route
 /// through them.
@@ -55047,12 +55590,26 @@ fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // (12) kernel_error_from_code round-trips.
+    // (12) kernel_error_from_code round-trips: every variant, and by its
+    // number the ones the hand-kept list it replaced had missed.
+    for &e in KernelError::ALL {
+        if kernel_error_from_code(e.code()) != Some(e) {
+            serial_println!("[syscall/linux]   FAIL: {:?} does not round-trip", e);
+            return Err(KernelError::InternalError);
+        }
+    }
     let codes = [
         (-2_i32, KernelError::NotSupported),
         (-3, KernelError::InvalidArgument),
+        (-9, KernelError::BufferTooSmall),
+        (-10, KernelError::NoSuchSyscall),
+        (-402, KernelError::NotPermitted),
         (-500, KernelError::NotFound),
         (-505, KernelError::InvalidHandle),
+        (-513, KernelError::StaleHandle),
+        (-514, KernelError::NoAttribute),
+        (-700, KernelError::ConnectionRefused),
+        (-707, KernelError::NoAddress),
     ];
     for (code, expected) in codes {
         match kernel_error_from_code(code) {
@@ -55071,6 +55628,14 @@ fn self_test_timespec_and_marshalling() -> crate::error::KernelResult<()> {
     // Unknown codes return None.
     if kernel_error_from_code(-9999).is_some() {
         serial_println!("[syscall/linux]   FAIL: unknown code mapped to Some(_)");
+        return Err(KernelError::InternalError);
+    }
+    // What a missing one cost: a native `NoAttribute` reached a Linux caller
+    // as EINVAL rather than ENODATA.
+    if linux_from_native(SyscallResult::err(KernelError::NoAttribute)).value
+        != i64::from(errno::ENODATA).wrapping_neg()
+    {
+        serial_println!("[syscall/linux]   FAIL: a native NoAttribute is not ENODATA");
         return Err(KernelError::InternalError);
     }
 
@@ -81683,330 +82248,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // xattr / quota / module / namespace / mount / swap / reboot /
         // syslog — input validation plus principled errno.
         {
-            // Batch 486: path-xattr family routes the path arg through
-            // check_path_str_nonempty (added by batch 481 helper, extended
-            // here) to surface ENOENT for empty paths before any xattr-
-            // specific gate.  Plant kernel-resident path buffers; legacy
-            // 0x1000 sentinel would page-fault inside the helper.  Name
-            // pointer keeps raw 0x2000 sentinel since xattr_validate_path_name
-            // only stub-validates it.
-            let xattr_path_ne: [u8; 2] = *b"x\0";
-            let xattr_path_e: [u8; 1] = [0u8];
-            core::hint::black_box(&xattr_path_ne);
-            core::hint::black_box(&xattr_path_e);
-            let xa_p_ne = xattr_path_ne.as_ptr() as u64;
-            let xa_p_e = xattr_path_e.as_ptr() as u64;
-
-            // setxattr(NULL,_,_,_,_) -> EFAULT.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
+            // The xattr calls' argument checks, in Linux 6.6's order, with
+            // no file: `setxattr` copies its flags, name, size and value
+            // before it looks the path up; the get, list and remove calls
+            // look the path up first; the descriptor calls take the
+            // descriptor first, and in kernel context there is no descriptor
+            // table, so every one is EBADF. `self_test_xattr_calls` has the
+            // calls on files, once /tmp is mounted.
+            let err = |e: i32| i64::from(e).wrapping_neg();
+            let empty: [u8; 1] = [0];
+            let name: [u8; 7] = *b"user.x\0";
+            // 256 bytes before the NUL, and 255.
+            let mut long = [b'a'; 257];
+            long[256] = 0;
+            let mut longest = [b'a'; 256];
+            longest[255] = 0;
+            let p = |b: &[u8]| b.as_ptr() as u64;
+            let call = |nr: u64, a: [u64; 5]| {
+                dispatch_linux(
+                    nr,
+                    &SyscallArgs {
+                        arg0: a[0],
+                        arg1: a[1],
+                        arg2: a[2],
+                        arg3: a[3],
+                        arg4: a[4],
+                        arg5: 0,
+                    },
+                )
+                .value
             };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: setxattr(NULL) not EFAULT");
-                return Err(KernelError::InternalError);
+            let probes = [
+                (
+                    "setxattr: flags 4, first",
+                    call(nr::SETXATTR, [0, 0, 0, 0, 4]),
+                    errno::EINVAL,
+                ),
+                (
+                    "setxattr: an empty name, before the path",
+                    call(nr::SETXATTR, [0, p(&empty), 0, 0, 0]),
+                    errno::ERANGE,
+                ),
+                (
+                    "setxattr: a 256-byte name",
+                    call(nr::SETXATTR, [0, p(&long), 0, 0, 0]),
+                    errno::ERANGE,
+                ),
+                (
+                    "setxattr: a 255-byte name, then the path",
+                    call(nr::SETXATTR, [0, p(&longest), 0, 0, 0]),
+                    errno::EFAULT,
+                ),
+                (
+                    "setxattr: a value over 64 KiB",
+                    call(nr::SETXATTR, [0, p(&name), 0, 65537, 0]),
+                    errno::E2BIG,
+                ),
+                (
+                    "setxattr: a NULL value with a size",
+                    call(nr::SETXATTR, [0, p(&name), 0, 5, 0]),
+                    errno::EFAULT,
+                ),
+                (
+                    "setxattr: an empty path",
+                    call(nr::SETXATTR, [p(&empty), p(&name), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "lsetxattr: an empty path",
+                    call(nr::LSETXATTR, [p(&empty), p(&name), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "getxattr: the path before the name",
+                    call(nr::GETXATTR, [0, p(&empty), 0, 0, 0]),
+                    errno::EFAULT,
+                ),
+                (
+                    "getxattr: an empty path",
+                    call(nr::GETXATTR, [p(&empty), p(&empty), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "lgetxattr: an empty path",
+                    call(nr::LGETXATTR, [p(&empty), p(&name), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "listxattr: an empty path",
+                    call(nr::LISTXATTR, [p(&empty), 0, 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "llistxattr: an empty path",
+                    call(nr::LLISTXATTR, [p(&empty), 0, 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "removexattr: the path before the name",
+                    call(nr::REMOVEXATTR, [p(&empty), p(&empty), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "lremovexattr: an empty path",
+                    call(nr::LREMOVEXATTR, [p(&empty), p(&name), 0, 0, 0]),
+                    errno::ENOENT,
+                ),
+                (
+                    "fsetxattr: the descriptor before the flags",
+                    call(nr::FSETXATTR, [0, p(&name), 0, 0, 8]),
+                    errno::EBADF,
+                ),
+                (
+                    "fgetxattr: the descriptor before the name",
+                    call(nr::FGETXATTR, [0, 0, 0, 0, 0]),
+                    errno::EBADF,
+                ),
+                (
+                    "flistxattr",
+                    call(nr::FLISTXATTR, [0, 0, 0, 0, 0]),
+                    errno::EBADF,
+                ),
+                (
+                    "fremovexattr",
+                    call(nr::FREMOVEXATTR, [0, 0, 0, 0, 0]),
+                    errno::EBADF,
+                ),
+            ];
+            for (what, got, want) in probes {
+                if got != err(want) {
+                    serial_println!("[syscall/linux]   FAIL: {}: {}, want -{}", what, got, want);
+                    return Err(KernelError::InternalError);
+                }
             }
-            // setxattr("", _, _, _, _) -> ENOENT (Linux user_path_at empty).
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: setxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr(path,name,_,_,_) -> EOPNOTSUPP.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!("[syscall/linux]   FAIL: setxattr not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr with bad flags (bit outside XATTR_CREATE|REPLACE)
-            // -> EINVAL.  Pre-batch returned EOPNOTSUPP from the
-            // terminal because no flags gate existed.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 4,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: setxattr flags=4 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr with flags=3 (CREATE|REPLACE both set) is bit-
-            // legal at this layer; both bits are in the mask.  Falls
-            // through to terminal EOPNOTSUPP.  (vfs_setxattr enforces
-            // mutual exclusion later as EEXIST/ENODATA on a real FS.)
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 3,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!("[syscall/linux]   FAIL: setxattr flags=3 not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr with size > XATTR_SIZE_MAX (65536) -> E2BIG.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 70_000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: setxattr size>65536 not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr with size = 65537 (one past max) -> E2BIG.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 65537,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: setxattr size=65537 not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            // setxattr with size = 65536 (at the boundary) -> EOPNOTSUPP
-            // (boundary inclusive; not E2BIG).
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 65536,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::SETXATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!("[syscall/linux]   FAIL: setxattr size=65536 not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
-            }
-            // fsetxattr with bad flags -> EINVAL (fd validation passes
-            // in kernel context, flags gate fires).
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 8,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FSETXATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: fsetxattr flags=8 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // fsetxattr with size > 65536 -> E2BIG.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 100_000,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FSETXATTR, &a).value != -i64::from(errno::E2BIG) {
-                serial_println!("[syscall/linux]   FAIL: fsetxattr size>65536 not E2BIG");
-                return Err(KernelError::InternalError);
-            }
-            // lsetxattr also shares xattr_set_path -> bad flags -> EINVAL.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0x100,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LSETXATTR, &a).value != -i64::from(errno::EINVAL) {
-                serial_println!("[syscall/linux]   FAIL: lsetxattr flags=0x100 not EINVAL");
-                return Err(KernelError::InternalError);
-            }
-            // lsetxattr("", _, ...) -> ENOENT (shares path gate).
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LSETXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: lsetxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!("[syscall/linux]   xattr set flags/E2BIG gating: OK");
-            // getxattr(path,name,_,_) -> ENODATA.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::GETXATTR, &a).value != -i64::from(errno::ENODATA) {
-                serial_println!("[syscall/linux]   FAIL: getxattr not ENODATA");
-                return Err(KernelError::InternalError);
-            }
-            // getxattr("",_,_,_) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::GETXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: getxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // lgetxattr("",_,_,_) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LGETXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: lgetxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // listxattr(path, NULL, 0) -> 0 (empty list).
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LISTXATTR, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: listxattr not 0");
-                return Err(KernelError::InternalError);
-            }
-            // listxattr("", NULL, 0) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LISTXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: listxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // llistxattr("", NULL, 0) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LLISTXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: llistxattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // removexattr -> EOPNOTSUPP.
-            let a = SyscallArgs {
-                arg0: xa_p_ne,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMOVEXATTR, &a).value != -i64::from(errno::EOPNOTSUPP) {
-                serial_println!("[syscall/linux]   FAIL: removexattr not EOPNOTSUPP");
-                return Err(KernelError::InternalError);
-            }
-            // removexattr("", _) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::REMOVEXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: removexattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            // lremovexattr("", _) -> ENOENT.
-            let a = SyscallArgs {
-                arg0: xa_p_e,
-                arg1: 0x2000,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::LREMOVEXATTR, &a).value != -i64::from(errno::ENOENT) {
-                serial_println!("[syscall/linux]   FAIL: lremovexattr(\"\") not ENOENT");
-                return Err(KernelError::InternalError);
-            }
-            serial_println!(
-                "[syscall/linux]   xattr path-family empty-path -> ENOENT (Linux v6.6 fs/xattr.c::user_path_at -> getname empty -> -ENOENT before xattr gates): OK"
-            );
-            // fgetxattr(NULL name) -> EFAULT.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FGETXATTR, &a).value != -i64::from(errno::EFAULT) {
-                serial_println!("[syscall/linux]   FAIL: fgetxattr(NULL) not EFAULT");
-                return Err(KernelError::InternalError);
-            }
-            // flistxattr in kernel context -> 0.
-            let a = SyscallArgs {
-                arg0: 0,
-                arg1: 0,
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            if dispatch_linux(nr::FLISTXATTR, &a).value != 0 {
-                serial_println!("[syscall/linux]   FAIL: flistxattr not 0");
-                return Err(KernelError::InternalError);
-            }
+            serial_println!("[syscall/linux]   xattr argument checks, in Linux 6.6's order: OK");
 
             // quotactl(cmd=Q_SYNC<<8|USRQUOTA=0x80000100) NULL special
             // -> 0.  Batch 382: Linux's !special branch returns

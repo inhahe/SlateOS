@@ -916,24 +916,28 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
+    fn xattrs_supported(&self) -> bool {
+        true
+    }
+
     fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
-        self.get_xattr_ino(ino, key)
+        self.get_xattr_ino_u32(ino, key)
     }
 
     fn set_xattr(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        self.set_xattr_ino(ino, key, value)
+        self.set_xattr_ino_u32(ino, key, value)
     }
 
     fn remove_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
-        self.remove_xattr_ino(ino, key)
+        self.remove_xattr_ino_u32(ino, key)
     }
 
     fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         let ino = self.driver.resolve_path(path)?;
-        self.list_xattrs_ino(ino)
+        self.list_xattrs_ino_u32(ino)
     }
 
     // --- No-follow xattr variants (lgetxattr/lsetxattr/lremovexattr/
@@ -942,22 +946,38 @@ impl FileSystem for Ext4Fs {
 
     fn get_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path_no_follow(path)?;
-        self.get_xattr_ino(ino, key)
+        self.get_xattr_ino_u32(ino, key)
     }
 
     fn set_xattr_no_follow(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
-        self.set_xattr_ino(ino, key, value)
+        self.set_xattr_ino_u32(ino, key, value)
     }
 
     fn remove_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
-        self.remove_xattr_ino(ino, key)
+        self.remove_xattr_ino_u32(ino, key)
     }
 
     fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         let ino = self.driver.resolve_path_no_follow(path)?;
-        self.list_xattrs_ino(ino)
+        self.list_xattrs_ino_u32(ino)
+    }
+
+    fn get_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<Vec<u8>> {
+        self.get_xattr_ino_u32(ext4_ino(ino)?, key)
+    }
+
+    fn set_xattr_ino(&mut self, ino: u64, key: &[u8], value: &[u8]) -> KernelResult<()> {
+        self.set_xattr_ino_u32(ext4_ino(ino)?, key, value)
+    }
+
+    fn remove_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<()> {
+        self.remove_xattr_ino_u32(ext4_ino(ino)?, key)
+    }
+
+    fn list_xattrs_ino(&mut self, ino: u64) -> KernelResult<Vec<Vec<u8>>> {
+        self.list_xattrs_ino_u32(ext4_ino(ino)?)
     }
 
     fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
@@ -1897,7 +1917,7 @@ impl Ext4Fs {
 
     /// Shared body for [`get_xattr`]/[`get_xattr_no_follow`]: read an xattr
     /// from an already-resolved inode.
-    fn get_xattr_ino(&mut self, ino: u32, key: &[u8]) -> KernelResult<Vec<u8>> {
+    fn get_xattr_ino_u32(&mut self, ino: u32, key: &[u8]) -> KernelResult<Vec<u8>> {
         let inode = self.driver.read_inode(ino)?;
         // Search both inline and external xattrs.
         let attrs = self.driver.read_all_xattrs(ino, &inode)?;
@@ -1914,7 +1934,7 @@ impl Ext4Fs {
 
     /// Shared body for [`set_xattr`]/[`set_xattr_no_follow`]: insert/replace an
     /// xattr on an already-resolved inode.
-    fn set_xattr_ino(&mut self, ino: u32, key: &[u8], value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_ino_u32(&mut self, ino: u32, key: &[u8], value: &[u8]) -> KernelResult<()> {
         let mut inode = self.driver.read_inode(ino)?;
 
         // Read all xattrs (inline + external), then write back to external block.
@@ -1955,7 +1975,7 @@ impl Ext4Fs {
     }
 
     /// Shared body for [`remove_xattr`]/[`remove_xattr_no_follow`].
-    fn remove_xattr_ino(&mut self, ino: u32, key: &[u8]) -> KernelResult<()> {
+    fn remove_xattr_ino_u32(&mut self, ino: u32, key: &[u8]) -> KernelResult<()> {
         let mut inode = self.driver.read_inode(ino)?;
 
         let mut attrs = self.driver.read_all_xattrs(ino, &inode)?;
@@ -1964,7 +1984,7 @@ impl Ext4Fs {
 
         if attrs.len() == original_len {
             // The attribute wasn't present, but the inode was — see
-            // `get_xattr_ino` for why that is not `NotFound`.
+            // `get_xattr_ino_u32` for why that is not `NotFound`.
             return Err(KernelError::NoAttribute);
         }
 
@@ -1978,7 +1998,7 @@ impl Ext4Fs {
     }
 
     /// Shared body for [`list_xattrs`]/[`list_xattrs_no_follow`].
-    fn list_xattrs_ino(&mut self, ino: u32) -> KernelResult<Vec<Vec<u8>>> {
+    fn list_xattrs_ino_u32(&mut self, ino: u32) -> KernelResult<Vec<Vec<u8>>> {
         let inode = self.driver.read_inode(ino)?;
         let attrs = self.driver.read_all_xattrs(ino, &inode)?;
         Ok(attrs.into_iter().map(|(k, _)| k).collect())

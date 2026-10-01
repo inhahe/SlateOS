@@ -902,6 +902,15 @@ def run(args):
     # was still on.  See `consume`.
     seen_with_trigger = 0
     seen_with_until = 0
+    # When the read that held the trigger returned: the stamp its batch
+    # carries. `fire()` stamps `on_at` later, after the batch is parsed up to
+    # the trigger and the spinners are released, and that reaction is the
+    # controller's own -- milliseconds on an idle host, a quarter of a second
+    # on a loaded one (lane C's and lane E's boot tests, 2026-09-25 and -28).
+    # The window's left edge is judged against this stamp, which the window's
+    # completions share or follow; the reaction is reported beside it as
+    # `fire_latency_seconds`.
+    trigger_read_at = None
 
     def snapshot():
         """Read every spinner's (cpu, clock) pair, each under its own lock.
@@ -982,7 +991,8 @@ def run(args):
         way: it will not `fire()`.  See `drain_after_stop` below.
         """
         nonlocal lines_before_on, first_seen_at, read_began, max_gap, \
-            max_work, last_read_io, seen_with_trigger, seen_with_until
+            max_work, last_read_io, seen_with_trigger, seen_with_until, \
+            trigger_read_at
         lower = read_began
         began = time.monotonic()
         read_began = began
@@ -1027,6 +1037,7 @@ def run(args):
             if on_at is None:
                 lines_before_on += 1
                 if name == args.at and not final:
+                    trigger_read_at = observed
                     fire()
                     fired_here = True
                     record["fired"] = True
@@ -1189,6 +1200,15 @@ def run(args):
             "during_seen_with_trigger": seen_with_trigger,
             "after_seen_with_until": seen_with_until,
             "fired_at": round(fired_rel, 4) if fired_rel is not None else None,
+            # The stamp of the read that held the trigger -- the stamp the
+            # window's first completions share -- and how long the controller
+            # took from it to the fire. See `trigger_read_at`.
+            "trigger_seen_at": (round(trigger_read_at - started, 4)
+                                if trigger_read_at is not None else None),
+            "fire_latency_seconds": (round(on_at - trigger_read_at, 4)
+                                     if (on_at is not None
+                                         and trigger_read_at is not None)
+                                     else None),
             # The same two instants on the raw `time.monotonic()` clock, which
             # is one clock across processes on the hosts this runs on. A
             # caller that measures the host *alongside* the run -- the test

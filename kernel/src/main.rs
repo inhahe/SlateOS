@@ -2100,6 +2100,14 @@ extern "C" fn kernel_main() -> ! {
         syscall::linux::self_test_rename_noreplace(),
     );
 
+    // The twelve xattr calls on files (needs the writable /tmp, so it runs
+    // here; `syscall::linux::self_test()` has their argument checks).
+    selftest::dispatch_debug(
+        "Linux xattr calls",
+        selftest::Severity::Diagnostic,
+        syscall::linux::self_test_xattr_calls(),
+    );
+
     // statfs(2) against the real mounted root (the in-self_test() version can
     // only check error paths since it runs before any filesystem is mounted).
     selftest::dispatch_debug(
@@ -5897,6 +5905,18 @@ extern "C" fn kernel_main() -> ! {
                 "/etc/mtab",
                 selftest::Severity::Diagnostic,
                 fs::procfs::self_test_etc_mtab(),
+            );
+            // Extended attributes: Linux's namespace and permission rules,
+            // alone and as every VFS call applies them.
+            selftest::dispatch_debug(
+                "xattr rules",
+                selftest::Severity::Diagnostic,
+                fs::xattr_policy::self_test(),
+            );
+            selftest::dispatch_debug(
+                "xattr rules through the VFS",
+                selftest::Severity::Diagnostic,
+                fs::vfs::self_test_xattr_rules(),
             );
             // netmon backs /proc/netmon and the `netmon` kshell command.  Its
             // init_defaults() previously seeded three FABRICATED connections (sshd

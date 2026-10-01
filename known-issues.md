@@ -180864,6 +180864,130 @@ TC bit), and the resolver uses what it holds. A name with many records
 loses the ones past the cut. glibc retries over TCP; the resolver has no
 TCP client. The fix is that retry, or EDNS0 to raise the UDP size.
 
+### A-XATTR-NAMES-AND-PERMISSIONS-WERE-NOT-LINUXS -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** an extended attribute is a named piece of data kept beside a
+file's contents. The kernel stored any name, for anyone, on anything:
+- an ordinary program could write `trusted.` attributes, which Linux
+  keeps for the administrator;
+- `user.` attributes went onto links and devices, where Linux refuses
+  them;
+- names Linux would not accept were stored -- `foo` with no namespace, the
+  bare prefix `user.`, and `system.posix_acl_access`, an ACL that governed
+  nothing.
+
+A program got a different answer than Linux gives at every one of these
+edges. Lane D asked for the four answers only the kernel can give
+(`requests/d-a-xattr-answers-only-the-filesystem-can-give.md`; their side
+is `B-D-XATTR-SIZES-AND-BUFFERS-WERE-NOT-LINUXS`).
+
+**Fixed** (design-decisions §1511):
+- `fs::xattr_policy` holds Linux 6.6's rules. Every VFS xattr call goes
+  through `Vfs::xattr_on`, which decides them in Linux's order, under the
+  same hold of the filesystem's lock as the change.
+- `KernelError::NotPermitted` (-402, `EPERM`) is new, for the refusals
+  Linux answers `EPERM`. The libc's table wants it
+  (`requests/a-d-two-new-native-error-codes-402-and-707.md`).
+- `sys_fs_get_xattr` copies a value only when all of it fits, so a
+  too-small buffer is left as it was. Neither getter nor lister checks the
+  buffer before the lookup.
+- ext4 reports its two POSIX ACL indexes as `system.posix_acl_access` and
+  `system.posix_acl_default`, where it reported a name of no bytes.
+- Tests: `fs::xattr_policy::self_test` has the rules alone;
+  `fs::vfs::self_test_xattr_rules` runs them on memfs files as three
+  callers; the ext4 key round-trip has the ACL names. `fs::handle`'s
+  no-follow section uses a `trusted.` name now, since `user.` is refused
+  on a link.
+
+**Not changed:** a name stored before this under no namespace is left on
+disk, neither listed nor read.
+
+### A-XATTR-ACLS-NOT-REACHABLE-AS-ATTRIBUTES -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** on Linux, a file's POSIX ACL is also an extended attribute,
+`system.posix_acl_access` (and `system.posix_acl_default` for a
+directory's default ACL). Copying tools carry ACLs that way: `cp -a`,
+`tar --acls`, `rsync -A`, and `getfacl`/`setfacl` themselves. Here the
+ACL lives in `fs::acl` and the attribute names are refused (`EOPNOTSUPP`,
+`fs::xattr_policy`). So those tools see a filesystem without ACL support,
+and a copy loses the ACL quietly.
+
+**Where:** `kernel/src/fs/xattr_policy.rs` (`resolve`) and
+`kernel/src/fs/vfs.rs` (`Vfs::xattr_on`).
+
+**The fix:** translate in the VFS between Linux's binary form and
+`fs::acl`:
+- the form is `posix_acl_xattr_header` (version 2), then 8-byte entries of
+  tag, permission and id;
+- setting the access ACL updates the file's mode, as Linux's
+  `posix_acl_update_mode` does;
+- an ACL the mode alone expresses is stored as the mode only;
+- the default ACL needs `fs::acl` to keep one per directory.
+
+### A-LINUX-XATTR-CALLS-WERE-STUBS -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** the twelve Linux calls on extended attributes (`setxattr`,
+`getxattr`, `listxattr`, `removexattr`, each with an `l` and an `f` form)
+were written before the filesystems kept attributes. They checked their
+arguments, then answered "not supported" to a set or remove, "no such
+attribute" to a get, and an empty list -- whatever the file held. A Linux
+program saw no attributes on any file; `cp -a`, `tar --xattrs` and
+`getfattr` all lost them.
+
+**Fixed:** the calls are real, over the VFS and `fs::xattr_policy`, in
+Linux 6.6's order:
+- `setxattr` copies its flags, name, size and value before the path;
+  the others look up the path first.
+- A name is `ERANGE` empty or past 255 bytes; a value past 64 KiB is
+  `E2BIG`.
+- A reader's buffer is written only when the answer fits: `ERANGE`
+  otherwise, or `E2BIG` when even 64 KiB, which a larger size is cut to,
+  would not hold it.
+- `XATTR_CREATE` and `XATTR_REPLACE` together are refused either way, as
+  Linux's filesystems refuse them (`XattrSetMode::Neither`).
+- The descriptor calls act through the file a descriptor holds, by its
+  identity (`HandleFile`, `Vfs::object_*_xattr`), across a rename or an
+  unlink. The ACL is asked by that identity too (`check_object_access`).
+
+Tests: the argument checks in `syscall::linux::self_test` (no file); the
+calls on `/tmp` files, the descriptor's file across a rename and an
+unlink, and objects on no filesystem in `self_test_xattr_calls`.
+
+### A-XATTR-ON-SOCKETS-AND-MEMFDS -- 2026-10-01 -- OPEN (lane A)
+
+**In short:** on Linux a memfd is a tmpfs file and keeps extended
+attributes, and a socket answers one, `system.sockprotoname` (its
+protocol's name: `TCP`, `UDP`, `UNIX`). Here neither keeps any: past the
+namespace rules, `fgetxattr` and `fsetxattr` on them are `EOPNOTSUPP` and
+`flistxattr` is empty.
+
+**Where:** `kernel/src/syscall/linux.rs`, `xattr_unkept`.
+
+**The fix:** a memfd's attributes beside its pages, through the same
+`fs::xattr_policy`; a socket's `system.sockprotoname` from the socket's
+kind -- read-only, listed, and `system.` allowed for that one name.
+
+### A-KERNEL-ERROR-FROM-CODE-MISSED-TWELVE-VARIANTS -- 2026-10-01 -- FIXED the same day (lane A)
+
+**In short:** when a native handler's error reaches a Linux program, the
+Linux layer turns the error's number back into the error, then into an
+errno (`linux_from_native`). The list that turned numbers back was kept by
+hand, and twelve errors added after it were missing:
+- `BufferTooSmall` and `NoSuchSyscall`;
+- `StaleHandle` and `NoAttribute`;
+- the eight network errors, `ConnectionRefused` through `NoAddress`.
+
+Each reached the Linux program as `EINVAL`. A native `NoAttribute`, for
+example, said "invalid argument" instead of `ENODATA`.
+
+**Fixed:** `kernel/src/error.rs` declares the enum through a macro,
+`kernel_errors!`, which also writes `KernelError::ALL` from the same list.
+`KernelError::from_code` searches it, and `kernel_error_from_code` is that
+function. A new variant cannot be missed. The enum's text keeps its shape
+for lane B's and lane D's parsers. The Linux layer's self-test (12)
+round-trips every variant and checks that a native `NoAttribute` is
+`ENODATA`.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

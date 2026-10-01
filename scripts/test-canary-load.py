@@ -1168,17 +1168,34 @@ with timing_case("spinner occupancy: a loaded run") as tmpdir:
     # check, the open and the read; a boot test's loaded host held one of
     # those for 2.4 s and this check read ten completions 2.37 s before the
     # fire that the very same read had triggered.
+    #
+    # And the left edge is judged against the trigger's read, not the fire.
+    # Until 2026-10-01 it was `fired_at - poll`, and `fired_at` is stamped
+    # after the controller has parsed the batch and released the spinners --
+    # its own reaction, which a loaded host stretched to 0.23 s, refusing two
+    # boot tests (lane C's
+    # requests/c-a-the-canary-window-check-counts-the-controllers-own-delay-as-poll-slack.md,
+    # and the second half of lane E's
+    # requests/e-a-canary-load-live-case-fails-under-transient-load.md). The
+    # completions in the trigger's read carry its stamp, and every later one a
+    # later stamp, so the edge is exact. The reaction is printed, not judged.
     poll = record["poll_seconds"]
+    seen_at = record["trigger_seen_at"]
+    print(f"  the controller's reaction, trigger read to fire: "
+          f"{record['fire_latency_seconds']} s")
     stamp_of = dict(record["completions"])
     inside = [stamp_of[n] for n in record["during_names"] if n in stamp_of]
+    check_true("the trigger's read is stamped, and the fire follows it",
+               seen_at is not None and seen_at <= record["fired_at"],
+               f"trigger read {seen_at}, fired {record['fired_at']}")
     check_true("the window's completions lie inside the load's interval",
-               all(record["fired_at"] - poll <= t <= record["released_at"]
-                   for t in inside),
-               f"fired {record['fired_at']}, released "
+               seen_at is not None
+               and all(seen_at <= t <= record["released_at"] for t in inside),
+               f"trigger read {seen_at}, fired {record['fired_at']}, released "
                f"{record['released_at']}, poll {poll}, times {inside}")
-    check_true("and none of them precedes the trigger by more than one poll",
-               all(t >= record["fired_at"] - poll for t in inside),
-               f"fired {record['fired_at']}, times {inside}")
+    check_true("and none of them precedes the trigger's read",
+               seen_at is not None and all(t >= seen_at for t in inside),
+               f"trigger read {seen_at}, times {inside}")
 
     # Each completion's honest interval: after the read before it began, no
     # later than its own stamp.  Reads are a poll's sleep apart, so a bound

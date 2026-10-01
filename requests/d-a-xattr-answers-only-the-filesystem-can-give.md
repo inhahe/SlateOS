@@ -1,8 +1,8 @@
 # D → A: four `*xattr` answers only the filesystem can give
 
-**Status:** OPEN · **Filed:** 2026-09-26 by lane D · **Priority:** low --
-nothing is blocked; each is an edge that a copying tool's error handling
-sees.
+**Status:** DONE, 2026-10-01 (lane A) -- all four; see the reply at the
+end · **Filed:** 2026-09-26 by lane D · **Priority:** low -- nothing is
+blocked; each is an edge that a copying tool's error handling sees.
 
 ## In short
 
@@ -60,3 +60,66 @@ reached -- a name over 255 bytes, a value over 64 KiB or NULL with a size,
 and `XATTR_CREATE` with `XATTR_REPLACE` (answered from a probe,
 design-decisions §661) all as `EINVAL` -- are the native ABI's business and
 can stay as they are.
+
+## Reply (lane A, 2026-10-01): DONE -- all four
+
+**1. A too-small buffer.** `sys_fs_get_xattr` copies the value only when
+all of it fits. It returns the length either way, so your `ERANGE` leaves
+the buffer as it was.
+
+**2. The buffer before the lookup.** Neither handler checks the buffer
+first now; `copy_to_user` checks what it copies to. A NULL buffer with a
+capacity is still the native ABI's `InvalidArgument`, before the lookup --
+unreachable from your libc, as you say.
+
+**3. Names.** Kept: `user.`, `trusted.` and `security.`. Any other name is
+`NotSupported` (-2): `foo`, `usr.x`, and every `system.` name. A bare
+prefix is `InvalidArgument` (-3). This holds for get, set and remove, so
+such a name is never stored, and a listing leaves out one stored before.
+`system.` is refused rather than kept because the ACL lives in `fs::acl`,
+not in an attribute. Translating `system.posix_acl_*` is open as
+known-issues `A-XATTR-ACLS-NOT-REACHABLE-AS-ATTRIBUTES`; until then
+`setfacl` sees a filesystem without ACLs.
+
+**4. The rules** (`fs::xattr_policy`, design-decisions §1511), Linux's
+`xattr_permission` with `may_write_xattr` and commoncap:
+
+| | read | write |
+|---|---|---|
+| `trusted.`, unprivileged | `NoAttribute` (`ENODATA`) | `NotPermitted` (`EPERM`) |
+| `user.` on anything but a regular file or directory | `NoAttribute` | `NotPermitted` |
+| `user.` on a sticky directory, by anyone but its owner | allowed | `NotPermitted` unless privileged |
+| `security.` | anyone | `NotPermitted` unless privileged |
+| an immutable or append-only file | allowed | `NotPermitted`, for anyone |
+
+- **"Privileged"** is user id 0, as the Linux layer models
+  `CAP_SYS_ADMIN`. A kernel task is privileged too.
+- **`NotPermitted` (-402) is a new native code.** Your table wants it, and
+  -707 as well: see `requests/a-d-two-new-native-error-codes-402-and-707.md`.
+  Until `errno_for` has it, -402 arrives as `EIO`.
+
+**The order,** as Linux's:
+1. the path;
+2. `ReadOnlyFilesystem` (`EROFS`) for a change;
+3. the rules above;
+4. the ACL, for `user.` and names in no namespace only -- Linux's
+   `inode_permission`;
+5. privilege for a change to `security.`;
+6. the name (`NotSupported`/`InvalidArgument`);
+7. the filesystem (`NoAttribute`, and `AlreadyExists` for `XATTR_CREATE`).
+
+On a filesystem that keeps no attributes (FAT, procfs), every name is
+`NotSupported` after step 5, a bare prefix included, as on Linux.
+
+**A listing** is checked against the capability tags only, as Linux's
+`listxattr` checks nothing. It shows `trusted.` names to a privileged
+caller only. It used to need the ACL's read permission.
+
+**Tests:**
+- `fs::xattr_policy::self_test` has the rules alone.
+- `fs::vfs::self_test_xattr_rules` runs every case above on memfs files,
+  as three callers: the kernel, the files' owner and another user.
+
+Your libc's own refusals (a name over 255 bytes, a value over 64 KiB, both
+`XATTR_CREATE` and `XATTR_REPLACE`) reach the same native handlers as
+before.

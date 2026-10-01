@@ -32,6 +32,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+
+use super::xattr_policy;
 // Paths are byte strings, not UTF-8. See `super::path` for why.
 pub use super::path::{Path, PathBuf};
 
@@ -901,6 +903,17 @@ pub trait FileSystem: Send {
     // inode, so one bad name failed the whole inode and took the ordinary
     // attributes down with it.  See `design-decisions.md` §660.
 
+    /// Whether this filesystem keeps extended attributes at all: Linux's
+    /// `IOP_XATTR`. On one that does not, every name is `NotSupported`
+    /// (`EOPNOTSUPP`) before it is looked at -- a bare prefix too, which a
+    /// filesystem that keeps them refuses as `InvalidArgument` -- as Linux's
+    /// `xattr_resolve_name` answers. A listing is empty.
+    ///
+    /// Default: no.
+    fn xattrs_supported(&self) -> bool {
+        false
+    }
+
     /// Get an extended attribute value by key.
     ///
     /// Returns [`KernelError::NoAttribute`] when the object exists but carries
@@ -965,6 +978,42 @@ pub trait FileSystem: Send {
     /// No-follow analogue of [`list_xattrs`](Self::list_xattrs) (`llistxattr`).
     fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         self.list_xattrs(path)
+    }
+
+    // --- By inode number: a file held open, whatever its names now
+    // (`fgetxattr` and the rest, through `fs::handle::HandleFile`). ---
+
+    /// [`get_xattr`](Self::get_xattr) of the file with inode number `ino`.
+    ///
+    /// Default: not supported.
+    fn get_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<Vec<u8>> {
+        let _ = (ino, key);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`set_xattr`](Self::set_xattr) of the file with inode number `ino`.
+    ///
+    /// Default: not supported.
+    fn set_xattr_ino(&mut self, ino: u64, key: &[u8], value: &[u8]) -> KernelResult<()> {
+        let _ = (ino, key, value);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`remove_xattr`](Self::remove_xattr) of the file with inode number
+    /// `ino`.
+    ///
+    /// Default: not supported.
+    fn remove_xattr_ino(&mut self, ino: u64, key: &[u8]) -> KernelResult<()> {
+        let _ = (ino, key);
+        Err(KernelError::NotSupported)
+    }
+
+    /// [`list_xattrs`](Self::list_xattrs) of the file with inode number `ino`.
+    ///
+    /// Default: empty list.
+    fn list_xattrs_ino(&mut self, ino: u64) -> KernelResult<Vec<Vec<u8>>> {
+        let _ = ino;
+        Ok(Vec::new())
     }
 
     // --- Symlink operations ---
@@ -2020,6 +2069,25 @@ impl VfsDcache {
 /// Global VFS path resolution cache.
 static VFS_DCACHE: Mutex<VfsDcache> = Mutex::new(VfsDcache::new());
 
+/// What Linux's `inode_permission` asks of the file for an xattr access, as
+/// the gate's [`PathAccess`]: to read the value, or to change it.
+fn path_access_for(access: xattr_policy::Access) -> PathAccess {
+    match access {
+        xattr_policy::Access::Read => PathAccess::Read,
+        xattr_policy::Access::Write => PathAccess::Write,
+    }
+}
+
+/// The metadata `fs::xattr_policy` decides an xattr call on: the file a
+/// trailing link names when `follow`, the link itself when not.
+fn xattr_meta(fs: &mut dyn FileSystem, relative: &Path, follow: bool) -> KernelResult<FileMeta> {
+    if follow {
+        fs.metadata(relative)
+    } else {
+        fs.lmetadata(relative)
+    }
+}
+
 /// What [`Vfs::set_xattr_with`] does when the attribute already exists.
 ///
 /// The kernel takes this rather than leaving userspace to probe first
@@ -2035,6 +2103,29 @@ pub enum XattrSetMode {
     /// Fail with [`KernelError::NoAttribute`] (`ENODATA`) if the attribute
     /// is not already present — `XATTR_REPLACE`.
     Replace,
+    /// Both `XATTR_CREATE` and `XATTR_REPLACE`, which Linux's filesystems
+    /// refuse either way: `AlreadyExists` when the attribute is present,
+    /// `NoAttribute` when it is not. Only the Linux layer asks it; the native
+    /// ABI refuses the two bits together as `InvalidArgument`.
+    Neither,
+}
+
+/// The file an xattr call names, found and checked as far as Linux goes
+/// before it reads the attribute's name ([`Vfs::xattr_target`]): the path;
+/// for a change, the mount's writability; the capability tags.
+///
+/// The Linux layer reads the name between the two steps, so its refusals come
+/// in Linux's order: `getxattr`, `listxattr` and `removexattr` look up the path
+/// before they read the name, `setxattr` after.
+#[derive(Debug, Clone)]
+pub struct XattrTarget {
+    /// The resolved host path.
+    path: PathBuf,
+    /// Whether a trailing link was followed; when not, the target is the
+    /// link.
+    follow: bool,
+    /// What it was found for: a change has been checked against the mount.
+    access: xattr_policy::Access,
 }
 
 impl XattrSetMode {
@@ -2054,11 +2145,10 @@ impl XattrSetMode {
             Err(KernelError::NoAttribute) => false,
             Err(e) => return Err(e),
         };
-        match self {
-            Self::Any => Ok(()),
-            Self::Create if present => Err(KernelError::AlreadyExists),
-            Self::Replace if !present => Err(KernelError::NoAttribute),
-            Self::Create | Self::Replace => Ok(()),
+        match (self, present) {
+            (Self::Any, _) | (Self::Create, false) | (Self::Replace, true) => Ok(()),
+            (Self::Create | Self::Neither, true) => Err(KernelError::AlreadyExists),
+            (Self::Replace | Self::Neither, false) => Err(KernelError::NoAttribute),
         }
     }
 }
@@ -4098,6 +4188,110 @@ impl Vfs {
         // No notify/journal — timestamp changes are metadata-only.
     }
 
+    /// `fgetxattr` through a held file, whatever its names now: Linux's rules
+    /// (`fs::xattr_policy`) on the file it is, for the calling task.
+    ///
+    /// # Errors
+    ///
+    /// `fs::xattr_policy`'s; the filesystem's (`NoAttribute`).
+    pub fn object_get_xattr(obj: &FileObject, name: &[u8]) -> KernelResult<Vec<u8>> {
+        let caller = xattr_policy::Caller::current();
+        Self::object_xattr_on(obj, name, xattr_policy::Access::Read, caller, |fs, ino| {
+            fs.get_xattr_ino(ino, name)
+        })
+    }
+
+    /// `fsetxattr` through a held file, as
+    /// [`object_get_xattr`](Self::object_get_xattr). `path` names it for
+    /// events.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; `fs::xattr_policy`'s; the mode's; the
+    /// filesystem's.
+    pub fn object_set_xattr(
+        obj: &FileObject,
+        path: &Path,
+        name: &[u8],
+        value: &[u8],
+        mode: XattrSetMode,
+    ) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        let caller = xattr_policy::Caller::current();
+        Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
+            mode.check(fs.get_xattr_ino(ino, name))?;
+            fs.set_xattr_ino(ino, name, value)
+        })?;
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `fremovexattr` through a held file, as
+    /// [`object_set_xattr`](Self::object_set_xattr).
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; `fs::xattr_policy`'s; `NoAttribute`.
+    pub fn object_remove_xattr(obj: &FileObject, path: &Path, name: &[u8]) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)?;
+        let caller = xattr_policy::Caller::current();
+        Self::object_xattr_on(obj, name, xattr_policy::Access::Write, caller, |fs, ino| {
+            fs.remove_xattr_ino(ino, name)
+        })?;
+        super::notify::emit_metadata(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
+    /// `flistxattr` through a held file: the names the calling task may see
+    /// ([`xattr_policy::listed`]), checked against nothing else, as a path's
+    /// listing is.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's.
+    pub fn object_list_xattrs(obj: &FileObject) -> KernelResult<Vec<Vec<u8>>> {
+        let privileged = xattr_policy::Caller::current().privileged;
+        let mut names = obj.fs.lock().list_xattrs_ino(obj.ino)?;
+        names.retain(|name| xattr_policy::listed(name, privileged));
+        Ok(names)
+    }
+
+    /// Whether a held file's mount takes a change now: Linux's
+    /// `mnt_want_write_file`, which `fremovexattr` meets before it reads the
+    /// name.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`.
+    pub fn object_check_writable(obj: &FileObject) -> KernelResult<()> {
+        check_writable_fs(obj.fs_id)
+    }
+
+    /// [`xattr_on`](Self::xattr_on) for a held file, by its inode number. The
+    /// ACL is the file's own, by its identity ([`check_object_access`]); the
+    /// capability tags were the open's to check.
+    fn object_xattr_on<T>(
+        obj: &FileObject,
+        name: &[u8],
+        access: xattr_policy::Access,
+        caller: xattr_policy::Caller,
+        op: impl FnOnce(&mut dyn FileSystem, u64) -> KernelResult<T>,
+    ) -> KernelResult<T> {
+        let namespace = xattr_policy::Namespace::of(name);
+        if namespace.checks_permission() && super::acl::count() != 0 {
+            let meta = obj.fs.lock().metadata_ino(obj.ino)?;
+            xattr_policy::namespace_rules(namespace, access, &meta, caller)?;
+            check_object_access(obj, &meta, path_access_for(access))?;
+        }
+        let mut guard = obj.fs.lock();
+        let meta = guard.metadata_ino(obj.ino)?;
+        xattr_policy::namespace_rules(namespace, access, &meta, caller)?;
+        xattr_policy::after_permission(name, access, caller, guard.xattrs_supported())?;
+        op(&mut **guard, obj.ino)
+    }
+
     /// `fallocate(KEEP_SIZE)` through a held file: reserve space for its
     /// first `size` bytes without changing its size.
     ///
@@ -5676,16 +5870,36 @@ impl Vfs {
         // No notify/journal — timestamp changes are metadata-only.
     }
 
+    // --- Extended attributes ---
+    //
+    // Every call is Linux 6.6's, in its order (`fs::xattr_policy`): the path;
+    // for a change, the mount's writability; the capability tags; then, on
+    // the file as it stands under its filesystem's lock, the namespace's
+    // rules, the ACL where Linux checks the file's own permission, and the
+    // name. A follow call acts on the file a trailing link names, a no-follow
+    // one (`lgetxattr` and the rest) on the link.
+    //
+    // A call is two steps: `xattr_target` finds the file and checks what
+    // Linux checks before it reads the attribute's name; `xattr_get` and the
+    // rest decide the rest. The Linux layer reads the name between them. The
+    // path calls below take both at once.
+
     /// Get an extended attribute value.
+    ///
+    /// # Errors
+    ///
+    /// The path's (`NotFound`, ...), then `fs::xattr_policy`'s, then the
+    /// filesystem's: `NoAttribute` when the file has no such attribute.
     pub fn get_xattr(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<Vec<u8>> {
-        let path = path.as_ref();
-        let path = Self::resolve_follow(path)?;
-        check_path_access(&path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().get_xattr(&relative, key)
+        let target = Self::xattr_target(path, true, xattr_policy::Access::Read)?;
+        Self::xattr_get(&target, key)
     }
 
     /// Set an extended attribute, creating it or overwriting it.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_xattr_with`](Self::set_xattr_with).
     pub fn set_xattr(path: impl AsRef<Path>, key: &[u8], value: &[u8]) -> KernelResult<()> {
         Self::set_xattr_with(path, key, value, XattrSetMode::Any)
     }
@@ -5700,67 +5914,57 @@ impl Vfs {
     /// turned "create, or fail" into a silent overwrite and "replace, or
     /// fail" into a create — the two outcomes the flags exist to forbid.
     /// See `design-decisions.md` §661.
+    ///
+    /// # Errors
+    ///
+    /// The path's; `ReadOnlyFilesystem`; `fs::xattr_policy`'s; the mode's
+    /// (`AlreadyExists`, `NoAttribute`); the filesystem's.
     pub fn set_xattr_with(
         path: impl AsRef<Path>,
         key: &[u8],
         value: &[u8],
         mode: XattrSetMode,
     ) -> KernelResult<()> {
-        let path = path.as_ref();
-        crate::ipc::namespace::check_writable(path)?;
-        let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            let mut guard = fs.lock();
-            mode.check(guard.get_xattr(&relative, key))?;
-            guard.set_xattr(&relative, key, value)?;
-        }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
-        Ok(())
+        let target = Self::xattr_target(path, true, xattr_policy::Access::Write)?;
+        Self::xattr_set(&target, key, value, mode)
     }
 
     /// Remove an extended attribute.
+    ///
+    /// # Errors
+    ///
+    /// The path's; `ReadOnlyFilesystem`; `fs::xattr_policy`'s; `NoAttribute`
+    /// when the file has no such attribute.
     pub fn remove_xattr(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<()> {
-        let path = path.as_ref();
-        crate::ipc::namespace::check_writable(path)?;
-        let path = Self::resolve_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().remove_xattr(&relative, key)?;
-        }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
-        Ok(())
+        let target = Self::xattr_target(path, true, xattr_policy::Access::Write)?;
+        Self::xattr_remove(&target, key)
     }
 
-    /// List all extended attribute keys.
+    /// List the extended attributes' names a caller may see
+    /// ([`xattr_policy::listed`]).
+    ///
+    /// # Errors
+    ///
+    /// The path's; the filesystem's.
     pub fn list_xattrs(path: impl AsRef<Path>) -> KernelResult<Vec<Vec<u8>>> {
-        let path = path.as_ref();
-        let path = Self::resolve_follow(path)?;
-        check_path_access(&path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().list_xattrs(&relative)
+        Self::xattr_list(&Self::xattr_target(path, true, xattr_policy::Access::Read)?)
     }
-
-    // --- No-follow xattr wrappers (lgetxattr/lsetxattr/llistxattr/
-    // lremovexattr): operate on the symlink itself when the final component
-    // is a link.  Intermediate symlinks are still resolved. ---
 
     /// Get an xattr WITHOUT following a trailing symlink (`lgetxattr`).
+    ///
+    /// # Errors
+    ///
+    /// As [`get_xattr`](Self::get_xattr).
     pub fn get_xattr_no_follow(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<Vec<u8>> {
-        let path = path.as_ref();
-        let path = Self::resolve_no_follow(path)?;
-        check_path_access(&path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().get_xattr_no_follow(&relative, key)
+        let target = Self::xattr_target(path, false, xattr_policy::Access::Read)?;
+        Self::xattr_get(&target, key)
     }
 
     /// Set an xattr WITHOUT following a trailing symlink (`lsetxattr`).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_xattr_with`](Self::set_xattr_with).
     pub fn set_xattr_no_follow(
         path: impl AsRef<Path>,
         key: &[u8],
@@ -5770,51 +5974,282 @@ impl Vfs {
     }
 
     /// No-follow analogue of [`set_xattr_with`](Self::set_xattr_with).
+    ///
+    /// # Errors
+    ///
+    /// As [`set_xattr_with`](Self::set_xattr_with).
     pub fn set_xattr_no_follow_with(
         path: impl AsRef<Path>,
         key: &[u8],
         value: &[u8],
         mode: XattrSetMode,
     ) -> KernelResult<()> {
-        let path = path.as_ref();
-        crate::ipc::namespace::check_writable(path)?;
-        let path = Self::resolve_no_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            let mut guard = fs.lock();
-            mode.check(guard.get_xattr_no_follow(&relative, key))?;
-            guard.set_xattr_no_follow(&relative, key, value)?;
-        }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
-        Ok(())
+        let target = Self::xattr_target(path, false, xattr_policy::Access::Write)?;
+        Self::xattr_set(&target, key, value, mode)
     }
 
     /// Remove an xattr WITHOUT following a trailing symlink (`lremovexattr`).
+    ///
+    /// # Errors
+    ///
+    /// As [`remove_xattr`](Self::remove_xattr).
     pub fn remove_xattr_no_follow(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<()> {
+        let target = Self::xattr_target(path, false, xattr_policy::Access::Write)?;
+        Self::xattr_remove(&target, key)
+    }
+
+    /// List xattr names WITHOUT following a trailing symlink (`llistxattr`).
+    ///
+    /// # Errors
+    ///
+    /// As [`list_xattrs`](Self::list_xattrs).
+    pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<Vec<u8>>> {
+        Self::xattr_list(&Self::xattr_target(
+            path,
+            false,
+            xattr_policy::Access::Read,
+        )?)
+    }
+
+    /// Find the file an xattr call names, and check what Linux checks before
+    /// it reads the attribute's name: for a change, the namespace's and the
+    /// mount's writability (Linux's `mnt_want_write`); then the capability
+    /// tags, which deny reaching the object at all. `follow`: a trailing link
+    /// is followed, or is the target itself.
+    ///
+    /// # Errors
+    ///
+    /// The path's; `ReadOnlyFilesystem` for a change; a capability tag's.
+    pub fn xattr_target(
+        path: impl AsRef<Path>,
+        follow: bool,
+        access: xattr_policy::Access,
+    ) -> KernelResult<XattrTarget> {
         let path = path.as_ref();
-        crate::ipc::namespace::check_writable(path)?;
-        let path = Self::resolve_no_follow(path)?;
-        check_writable(&path)?;
-        check_path_access(&path, PathAccess::Write)?;
-        {
-            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().remove_xattr_no_follow(&relative, key)?;
+        if access == xattr_policy::Access::Write {
+            crate::ipc::namespace::check_writable(path)?;
         }
-        super::notify::emit_metadata(&path);
-        super::journal::record(super::journal::JournalEventType::Modified, &path);
+        let path = if follow {
+            Self::resolve_follow(path)?
+        } else {
+            Self::resolve_no_follow(path)?
+        };
+        Self::xattr_target_checked(path, follow, access)
+    }
+
+    /// [`xattr_target`](Self::xattr_target) for a host path already
+    /// resolved: an open handle's (`fs::handle::HandleFile`), to which the
+    /// caller's namespace was applied when it was opened. The target is the
+    /// file the path names.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem` for a change; a capability tag's.
+    pub fn xattr_target_resolved(
+        path: &Path,
+        access: xattr_policy::Access,
+    ) -> KernelResult<XattrTarget> {
+        Self::xattr_target_checked(path.to_path_buf(), true, access)
+    }
+
+    /// The checks both ways of finding a target end in.
+    fn xattr_target_checked(
+        path: PathBuf,
+        follow: bool,
+        access: xattr_policy::Access,
+    ) -> KernelResult<XattrTarget> {
+        if access == xattr_policy::Access::Write {
+            check_writable(&path)?;
+        }
+        check_path_access(&path, PathAccess::Metadata)?;
+        Ok(XattrTarget {
+            path,
+            follow,
+            access,
+        })
+    }
+
+    /// `getxattr` of `name` on a target, for the calling task.
+    ///
+    /// # Errors
+    ///
+    /// `fs::xattr_policy`'s; the filesystem's (`NoAttribute`).
+    pub fn xattr_get(target: &XattrTarget, name: &[u8]) -> KernelResult<Vec<u8>> {
+        Self::xattr_get_as(target, name, xattr_policy::Caller::current())
+    }
+
+    /// `setxattr` of `name` on a target found for a change, for the calling
+    /// task.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` for a target found for reading; `fs::xattr_policy`'s;
+    /// the mode's; the filesystem's.
+    pub fn xattr_set(
+        target: &XattrTarget,
+        name: &[u8],
+        value: &[u8],
+        mode: XattrSetMode,
+    ) -> KernelResult<()> {
+        Self::xattr_set_as(target, name, value, mode, xattr_policy::Caller::current())
+    }
+
+    /// `removexattr` of `name` on a target found for a change, for the
+    /// calling task.
+    ///
+    /// # Errors
+    ///
+    /// As [`xattr_set`](Self::xattr_set), and `NoAttribute`.
+    pub fn xattr_remove(target: &XattrTarget, name: &[u8]) -> KernelResult<()> {
+        Self::xattr_remove_as(target, name, xattr_policy::Caller::current())
+    }
+
+    /// `listxattr` on a target: the names the calling task may see
+    /// ([`xattr_policy::listed`]).
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's.
+    pub fn xattr_list(target: &XattrTarget) -> KernelResult<Vec<Vec<u8>>> {
+        Self::xattr_list_as(target, xattr_policy::Caller::current())
+    }
+
+    /// [`xattr_get`](Self::xattr_get) for `caller`. Taken as an argument
+    /// rather than looked up so the self-test can be someone other than the
+    /// kernel task it runs as (`self_test_xattr_rules`).
+    fn xattr_get_as(
+        target: &XattrTarget,
+        name: &[u8],
+        caller: xattr_policy::Caller,
+    ) -> KernelResult<Vec<u8>> {
+        let follow = target.follow;
+        Self::xattr_on(
+            target,
+            name,
+            xattr_policy::Access::Read,
+            caller,
+            |fs, rel| {
+                if follow {
+                    fs.get_xattr(rel, name)
+                } else {
+                    fs.get_xattr_no_follow(rel, name)
+                }
+            },
+        )
+    }
+
+    /// [`xattr_set`](Self::xattr_set) for `caller` (see
+    /// [`xattr_get_as`](Self::xattr_get_as)).
+    fn xattr_set_as(
+        target: &XattrTarget,
+        name: &[u8],
+        value: &[u8],
+        mode: XattrSetMode,
+        caller: xattr_policy::Caller,
+    ) -> KernelResult<()> {
+        let follow = target.follow;
+        Self::xattr_on(
+            target,
+            name,
+            xattr_policy::Access::Write,
+            caller,
+            |fs, rel| {
+                if follow {
+                    mode.check(fs.get_xattr(rel, name))?;
+                    fs.set_xattr(rel, name, value)
+                } else {
+                    mode.check(fs.get_xattr_no_follow(rel, name))?;
+                    fs.set_xattr_no_follow(rel, name, value)
+                }
+            },
+        )?;
+        super::notify::emit_metadata(&target.path);
+        super::journal::record(super::journal::JournalEventType::Modified, &target.path);
         Ok(())
     }
 
-    /// List xattr keys WITHOUT following a trailing symlink (`llistxattr`).
-    pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<Vec<u8>>> {
-        let path = path.as_ref();
-        let path = Self::resolve_no_follow(path)?;
-        check_path_access(&path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        fs.lock().list_xattrs_no_follow(&relative)
+    /// [`xattr_remove`](Self::xattr_remove) for `caller` (see
+    /// [`xattr_get_as`](Self::xattr_get_as)).
+    fn xattr_remove_as(
+        target: &XattrTarget,
+        name: &[u8],
+        caller: xattr_policy::Caller,
+    ) -> KernelResult<()> {
+        let follow = target.follow;
+        Self::xattr_on(
+            target,
+            name,
+            xattr_policy::Access::Write,
+            caller,
+            |fs, rel| {
+                if follow {
+                    fs.remove_xattr(rel, name)
+                } else {
+                    fs.remove_xattr_no_follow(rel, name)
+                }
+            },
+        )?;
+        super::notify::emit_metadata(&target.path);
+        super::journal::record(super::journal::JournalEventType::Modified, &target.path);
+        Ok(())
+    }
+
+    /// [`xattr_list`](Self::xattr_list) for `caller` (see
+    /// [`xattr_get_as`](Self::xattr_get_as)). Checked against the capability
+    /// tags, when the target was found, and nothing else, as Linux's
+    /// `listxattr` is checked against nothing: a listing shows names, and a
+    /// value's own rules still stand between a caller and the value.
+    fn xattr_list_as(
+        target: &XattrTarget,
+        caller: xattr_policy::Caller,
+    ) -> KernelResult<Vec<Vec<u8>>> {
+        let (fs, _id, _opts, relative) = resolve_mount(&target.path)?;
+        let mut names = {
+            let mut guard = fs.lock();
+            if target.follow {
+                guard.list_xattrs(&relative)?
+            } else {
+                guard.list_xattrs_no_follow(&relative)?
+            }
+        };
+        names.retain(|name| xattr_policy::listed(name, caller.privileged));
+        Ok(names)
+    }
+
+    /// Run `op` on a target's file if `fs::xattr_policy` lets `caller` have
+    /// `access` to the attribute `name`, deciding in Linux 6.6's order.
+    ///
+    /// The namespace's rules and the name are decided under the same hold of
+    /// the filesystem's lock as `op` runs under, so the file cannot become
+    /// immutable, or a sticky directory change hands, between the decision
+    /// and the change -- Linux holds the inode's lock across both. The ACL,
+    /// which Linux checks between the two, cannot be read under that lock
+    /// (`acl::check_access` finds the file by its name, through the VFS), so
+    /// when an ACL could refuse, the rules are also applied to the file once
+    /// before it, for a refusal of theirs to come first as on Linux.
+    fn xattr_on<T>(
+        target: &XattrTarget,
+        name: &[u8],
+        access: xattr_policy::Access,
+        caller: xattr_policy::Caller,
+        op: impl FnOnce(&mut dyn FileSystem, &Path) -> KernelResult<T>,
+    ) -> KernelResult<T> {
+        if access == xattr_policy::Access::Write && target.access != xattr_policy::Access::Write {
+            // Found for reading: its mount was not checked for a change.
+            return Err(KernelError::InvalidArgument);
+        }
+        let namespace = xattr_policy::Namespace::of(name);
+        let (fs, _id, _opts, relative) = resolve_mount(&target.path)?;
+        if namespace.checks_permission() && super::acl::count() != 0 {
+            let meta = xattr_meta(&mut **fs.lock(), &relative, target.follow)?;
+            xattr_policy::namespace_rules(namespace, access, &meta, caller)?;
+            check_path_access(&target.path, path_access_for(access))?;
+        }
+        let mut guard = fs.lock();
+        let meta = xattr_meta(&mut **guard, &relative, target.follow)?;
+        xattr_policy::namespace_rules(namespace, access, &meta, caller)?;
+        xattr_policy::after_permission(name, access, caller, guard.xattrs_supported())?;
+        op(&mut **guard, &relative)
     }
 
     // --- Symlink VFS methods ---
@@ -7880,19 +8315,62 @@ pub(crate) fn path_access_verdict(
         crate::cap::file_tags::check_access(uid, gid, supplementary_gids, path)?;
     }
     if super::acl::count() != 0 {
-        check_acl(path, uid, gid, want)?;
+        check_acl(AclSubject::Path(path), uid, gid, want)?;
     }
     Ok(())
 }
 
-/// Evaluate the path's POSIX ACL, if it has one, for `want`.
+/// [`check_path_access`]'s ACL half for a file held open (`FileObject`), by
+/// the file's own identity rather than a name it may no longer have: for the
+/// calls through a descriptor that Linux still checks against the file's own
+/// permission -- `fsetxattr` of a `user.` name wants write permission,
+/// whatever the descriptor was opened for. The capability tags were the
+/// open's to check. `meta` is the file's.
+///
+/// Kernel tasks and user id 0 pass, as through [`check_path_access`].
+///
+/// # Errors
+///
+/// `PermissionDenied` (`EACCES`) when the file's ACL refuses `want`.
+pub(crate) fn check_object_access(
+    obj: &FileObject,
+    meta: &FileMeta,
+    want: PathAccess,
+) -> KernelResult<()> {
+    if super::acl::count() == 0 {
+        return Ok(());
+    }
+    let task_id = crate::sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return Ok(()), // Kernel task or PID 0 -- bypass.
+    };
+    let creds = match crate::proc::pcb::get_credentials(pid) {
+        Some(c) => c,
+        None => return Ok(()), // No credentials -- process being torn down.
+    };
+    check_acl(AclSubject::Held(obj.id(), meta), creds.uid, creds.gid, want)
+}
+
+/// What [`check_acl`] is asked about: the file a path names now, or a file
+/// held open, with its metadata in hand.
+#[derive(Clone, Copy)]
+enum AclSubject<'a> {
+    /// The file the path names now.
+    Path(&'a Path),
+    /// A held file, by its identity, and its metadata.
+    Held(FileId, &'a FileMeta),
+}
+
+/// Evaluate the POSIX ACL of the file `subject` names, if it has one, for
+/// `want`.
 ///
 /// Split out from [`check_path_access`] so it can be exercised directly with
 /// synthetic credentials: the kernel's own self-tests run as a kernel task,
 /// which the gate above bypasses before reaching any ACL, so a test that went
 /// through the gate could only ever observe "allowed" and would pass against
 /// an ACL layer that had been removed entirely.
-fn check_acl(path: &Path, uid: u32, gid: u32, want: PathAccess) -> KernelResult<()> {
+fn check_acl(subject: AclSubject<'_>, uid: u32, gid: u32, want: PathAccess) -> KernelResult<()> {
     let request = match want {
         // See `PathAccess::Metadata`.
         PathAccess::Metadata => return Ok(()),
@@ -7913,16 +8391,24 @@ fn check_acl(path: &Path, uid: u32, gid: u32, want: PathAccess) -> KernelResult<
     // gate, which would recurse without bound. `metadata_resolved` is the
     // ungated primitive and takes only the filesystem lock, which no caller of
     // this gate holds yet — every call site runs it before touching the VFS.
-    let meta = match Vfs::metadata_resolved(path) {
-        Ok(m) => m,
-        // The object is gone or the filesystem cannot report ownership. Defer:
-        // the operation itself is about to fail with a better error than
-        // PermissionDenied, and denying here would turn a missing file into a
-        // permissions puzzle.
-        Err(_) => return Ok(()),
+    // A held file's comes with it.
+    let fetched;
+    let (file, meta) = match subject {
+        AclSubject::Path(path) => match Vfs::metadata_resolved(path) {
+            Ok(m) => {
+                fetched = m;
+                (super::acl::AclFile::Path(path), &fetched)
+            }
+            // The object is gone or the filesystem cannot report ownership.
+            // Defer: the operation itself is about to fail with a better error
+            // than PermissionDenied, and denying here would turn a missing file
+            // into a permissions puzzle.
+            Err(_) => return Ok(()),
+        },
+        AclSubject::Held(id, meta) => (super::acl::AclFile::Held(id), meta),
     };
 
-    super::acl::check_access(path, uid, gid, meta.uid, meta.gid, request)
+    super::acl::check_access(file, uid, gid, meta.uid, meta.gid, request)
 }
 
 // ---------------------------------------------------------------------------
@@ -11171,6 +11657,311 @@ pub fn glob_self_test() -> KernelResult<()> {
     serial_println!("[glob]   edge cases: OK");
 
     serial_println!("[glob] Self-test passed.");
+    Ok(())
+}
+
+/// The extended-attribute rules as the VFS applies them (`fs::xattr_policy`):
+/// on a memfs file, a link to it, a sticky directory and an immutable file in
+/// `/tmp`, for three callers -- the kernel's own privilege, the files' owner
+/// and another user -- given to the calls' `*_as` forms, this test being a
+/// kernel task itself. `xattr_policy::self_test` has the rules alone; this
+/// proves every call reaches them, in Linux's order, and that a refused name
+/// is never stored.
+///
+/// # Errors
+///
+/// `InternalError` naming the case that failed; the setup's own.
+pub fn self_test_xattr_rules() -> KernelResult<()> {
+    use crate::serial_println;
+    use xattr_policy::Caller;
+
+    const FILE: &str = "/tmp/_xr_file";
+    const LINK: &str = "/tmp/_xr_link";
+    const STICKY: &str = "/tmp/_xr_sticky";
+    const FROZEN: &str = "/tmp/_xr_frozen";
+
+    let root = Caller {
+        privileged: true,
+        uid: Some(0),
+    };
+    let owner = Caller {
+        privileged: false,
+        uid: Some(1000),
+    };
+    let stranger = Caller {
+        privileged: false,
+        uid: Some(2000),
+    };
+
+    // Best effort, before and after: a file left by an earlier run must not
+    // fail this one, and what is not there to remove is not an error.
+    let cleanup = || {
+        let _ = Vfs::set_attributes(FROZEN, FileAttr::NONE);
+        let _ = Vfs::remove(FROZEN);
+        let _ = Vfs::remove(LINK);
+        let _ = Vfs::remove(FILE);
+        let _ = Vfs::rmdir(STICKY);
+    };
+    cleanup();
+
+    let (read, write) = (xattr_policy::Access::Read, xattr_policy::Access::Write);
+    let get = |path: &str, follow: bool, name: &[u8], who: Caller| {
+        Vfs::xattr_target(path, follow, read)
+            .and_then(|target| Vfs::xattr_get_as(&target, name, who))
+            .map(|_| ())
+    };
+    let set = |path: &str, follow: bool, name: &[u8], who: Caller| {
+        Vfs::xattr_target(path, follow, write)
+            .and_then(|target| Vfs::xattr_set_as(&target, name, b"v", XattrSetMode::Any, who))
+    };
+    let remove = |path: &str, name: &[u8], who: Caller| {
+        Vfs::xattr_target(path, true, write)
+            .and_then(|target| Vfs::xattr_remove_as(&target, name, who))
+    };
+
+    let run = || -> KernelResult<()> {
+        Vfs::write_file(FILE, b"x")?;
+        Vfs::set_owner(FILE, 1000, 1000)?;
+        Vfs::symlink(LINK, FILE)?;
+        Vfs::mkdir(STICKY)?;
+        Vfs::set_owner(STICKY, 1000, 1000)?;
+        Vfs::set_permissions(STICKY, 0o1777)?;
+        Vfs::write_file(FROZEN, b"x")?;
+        Vfs::set_attributes(FROZEN, FileAttr::IMMUTABLE)?;
+
+        let denied = Err(KernelError::NotPermitted);
+        let absent = Err(KernelError::NoAttribute);
+        let unsupported = Err(KernelError::NotSupported);
+        // In order: each case may stand on what an earlier one stored.
+        let cases: [(&str, KernelResult<()>, KernelResult<()>); 24] = [
+            // Names no handler takes are refused, and nothing is stored.
+            (
+                "a name in no namespace",
+                set(FILE, true, b"foo", root),
+                unsupported,
+            ),
+            (
+                "a bare prefix",
+                set(FILE, true, b"user.", root),
+                Err(KernelError::InvalidArgument),
+            ),
+            (
+                "an ACL's name",
+                set(FILE, true, b"system.posix_acl_access", root),
+                unsupported,
+            ),
+            (
+                "no namespace, read",
+                get(FILE, true, b"foo", root),
+                unsupported,
+            ),
+            // user.
+            (
+                "user. by the owner",
+                set(FILE, true, b"user.a", owner),
+                Ok(()),
+            ),
+            (
+                "user. read by another",
+                get(FILE, true, b"user.a", stranger),
+                Ok(()),
+            ),
+            (
+                "user. through a link",
+                get(LINK, true, b"user.a", stranger),
+                Ok(()),
+            ),
+            ("user. on a link", set(LINK, false, b"user.l", root), denied),
+            (
+                "user. read on a link",
+                get(LINK, false, b"user.l", root),
+                absent,
+            ),
+            (
+                "user. on another's sticky dir",
+                set(STICKY, true, b"user.d", stranger),
+                denied,
+            ),
+            (
+                "user. on one's own sticky dir",
+                set(STICKY, true, b"user.d", owner),
+                Ok(()),
+            ),
+            (
+                "user. on a sticky dir, privileged",
+                set(STICKY, true, b"user.e", root),
+                Ok(()),
+            ),
+            // trusted.
+            (
+                "trusted. by the kernel",
+                set(FILE, true, b"trusted.t", root),
+                Ok(()),
+            ),
+            (
+                "trusted. read, unprivileged",
+                get(FILE, true, b"trusted.t", owner),
+                absent,
+            ),
+            (
+                "trusted. written, unprivileged",
+                set(FILE, true, b"trusted.t", owner),
+                denied,
+            ),
+            (
+                "trusted. removed, unprivileged",
+                remove(FILE, b"trusted.t", owner),
+                denied,
+            ),
+            (
+                "trusted. on a link, privileged",
+                set(LINK, false, b"trusted.l", root),
+                Ok(()),
+            ),
+            // security.
+            (
+                "security. by the owner",
+                set(FILE, true, b"security.s", owner),
+                denied,
+            ),
+            (
+                "security. by the kernel",
+                set(FILE, true, b"security.s", root),
+                Ok(()),
+            ),
+            (
+                "security. read by another",
+                get(FILE, true, b"security.s", stranger),
+                Ok(()),
+            ),
+            // An immutable file takes no change, from anyone.
+            (
+                "a change to an immutable file",
+                set(FROZEN, true, b"user.i", root),
+                denied,
+            ),
+            (
+                "a removal from an immutable file",
+                remove(FROZEN, b"user.i", root),
+                denied,
+            ),
+            (
+                "a read of an immutable file",
+                get(FROZEN, true, b"user.i", owner),
+                absent,
+            ),
+            // The path is answered before the name is looked at.
+            (
+                "a missing file",
+                get("/tmp/_xr_absent", true, b"foo", root),
+                Err(KernelError::NotFound),
+            ),
+        ];
+        for (what, got, want) in cases {
+            if got != want {
+                serial_println!("[vfs]   FAIL: xattr {}: {:?}, want {:?}", what, got, want);
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // A listing: `trusted.` to the privileged only, and none of the
+        // refused names, which were never stored.
+        let names = |path: &str, follow: bool, who: Caller| -> KernelResult<Vec<Vec<u8>>> {
+            let target = Vfs::xattr_target(path, follow, read)?;
+            let mut names = Vfs::xattr_list_as(&target, who)?;
+            names.sort();
+            Ok(names)
+        };
+        let want = |list: &[&[u8]]| list.iter().map(|n| n.to_vec()).collect::<Vec<_>>();
+        let listings = [
+            (
+                "the owner's",
+                names(FILE, true, owner)?,
+                want(&[b"security.s", b"user.a"]),
+            ),
+            (
+                "the kernel's",
+                names(FILE, true, root)?,
+                want(&[b"security.s", b"trusted.t", b"user.a"]),
+            ),
+            (
+                "the link's",
+                names(LINK, false, root)?,
+                want(&[b"trusted.l"]),
+            ),
+            (
+                "the link's, unprivileged",
+                names(LINK, false, owner)?,
+                Vec::new(),
+            ),
+        ];
+        for (what, got, want) in listings {
+            if got != want {
+                serial_println!(
+                    "[vfs]   FAIL: xattr listing, {}: {:?}, want {:?}",
+                    what,
+                    got,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+
+        // The public calls find their caller themselves (`Caller::current`):
+        // a process with user id 1000 is unprivileged and the files' owner,
+        // and the kernel task this runs as is privileged.
+        let pid = crate::proc::pcb::create("xattr-rules", 0);
+        let found = crate::proc::pcb::set_credentials(
+            pid,
+            crate::proc::pcb::ProcessCredentials::new(1000, 1000),
+        )
+        .map(|()| {
+            crate::proc::thread::self_test_as_process(pid, || {
+                (
+                    Caller::current(),
+                    Vfs::get_xattr(FILE, b"trusted.t").map(|_| ()),
+                    Vfs::set_xattr(FILE, b"user.p", b"v"),
+                    Vfs::list_xattrs(FILE).map(|mut names| {
+                        names.sort();
+                        names
+                    }),
+                )
+            })
+        });
+        crate::proc::pcb::destroy(pid);
+        let (who, trusted, user, listed) = found?;
+        if who != owner
+            || trusted != absent
+            || user != Ok(())
+            || listed != Ok(want(&[b"security.s", b"user.a", b"user.p"]))
+            || Caller::current()
+                != (Caller {
+                    privileged: true,
+                    uid: None,
+                })
+        {
+            serial_println!(
+                "[vfs]   FAIL: xattr as a process: {:?}, {:?}, {:?}, {:?}",
+                who,
+                trusted,
+                user,
+                listed
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    };
+    let result = run();
+    cleanup();
+    result?;
+    serial_println!(
+        "[vfs]   xattr rules: names no handler takes refused and never stored; \
+         user. on files and directories only, a sticky one's by its owner; \
+         trusted. privileged and absent to others; security. read by all, \
+         written by the privileged; no change to an immutable file; the path \
+         before the name; trusted. listed to the privileged only; the caller \
+         a process is: OK"
+    );
     Ok(())
 }
 

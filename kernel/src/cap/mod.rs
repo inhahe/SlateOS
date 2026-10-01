@@ -833,13 +833,17 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    It earns the exception because the value is not ours — it is the
     //    wire's, and the other copy of it lives in a tree this build cannot
     //    compile, so there is nothing to derive it from.
-    if ResourceType::LAST != 31 {
+    //
+    //    32 since 2026-10-01: `Semaphore` (febc4c8d3), a held object like a
+    //    descriptor rather than a privilege, so it implies no Linux capability
+    //    -- told to lane D in requests/a-d-resource-type-32-is-semaphore.md.
+    if ResourceType::LAST != 32 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 31 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 32 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
-             and ask lane B whether the new type implies a Linux capability. If it does, \
+             and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-one types — it needs nothing, and \
+             answer, that file names seven of our thirty-two types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

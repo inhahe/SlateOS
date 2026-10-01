@@ -10628,10 +10628,11 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 // Handle-based filesystem handlers (610–699)
 // ---------------------------------------------------------------------------
 
-/// `SYS_FS_OPEN` — open a file, return a handle.
-/// Open an already-resolved **absolute kernel path** with the given
-/// native [`OpenFlags`](crate::fs::handle::OpenFlags) bits, returning the raw
-/// open-file handle as the syscall value.
+/// Open an already-resolved **absolute kernel path** with the given native
+/// [`OpenFlags`](crate::fs::handle::OpenFlags) bits, returning the raw
+/// open-file handle as the syscall value; a file it creates gets
+/// `create_mode`, the Linux `open` family's `mode` already less the caller's
+/// umask.
 ///
 /// This is the shared core of file opening that works from a kernel-owned
 /// path rather than a userspace pointer.  The Linux ABI's
@@ -10643,29 +10644,9 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Performs the same File-READ capability check and per-process handle
 /// registration `sys_fs_open` does, so the returned handle is closed on
-/// process exit and refcount-shared across `fork`.
-pub fn fs_open_kernel_path(
-    path: impl AsRef<crate::fs::path::Path>,
-    flags_raw: u32,
-) -> SyscallResult {
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
-        return SyscallResult::err(e);
-    }
-    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
-    match crate::fs::handle::open(path, flags) {
-        Ok(handle) => {
-            if let Some(pid) = caller_pid() {
-                pcb::register_ipc_handle(pid, ResourceType::File, handle);
-            }
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
-        }
-        Err(e) => SyscallResult::err(e),
-    }
-}
-
-/// [`fs_open_kernel_path`] with the permission bits a create stamps on a new
-/// file: the Linux `open` family's `mode`, already less the caller's umask.
+/// process exit and refcount-shared across `fork`. Its twin without a mode,
+/// `fs_open_kernel_path`, lost its last caller when the Linux layer began
+/// passing the mode (2026-10-01) and is gone.
 pub fn fs_open_kernel_path_mode(
     path: impl AsRef<crate::fs::path::Path>,
     flags_raw: u32,
@@ -10708,6 +10689,14 @@ pub fn fs_open_tmpfile_kernel_path(
     }
 }
 
+/// `SYS_FS_OPEN` — open a file, return a handle.
+///
+/// `arg0`: path pointer.  `arg1`: path length.  `arg2`: native
+/// [`OpenFlags`](crate::fs::handle::OpenFlags) bits.
+///
+/// A file it creates gets the 0o644 default; [`sys_fs_open_mode`] takes the
+/// mode. The handle is registered to the caller, closed at its exit and
+/// shared with a `fork` child.
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     // Capability: require READ for read-only, WRITE for write.
     // We check the broader File capability — specific rights are

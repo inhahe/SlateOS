@@ -28,29 +28,82 @@
 //! each frame, records a hit box for everything it draws, and answers keys
 //! and clicks through one body that the tests drive too.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// -- Catppuccin Mocha palette ------------------------------------------------
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
+// -- Colours ------------------------------------------------------------------
+//
+// Each ghost is known by its colour, and pac-man by his yellow: those keep
+// their hues in every theme, each as a pale shade and a deep one, drawn in
+// whichever stands off the page (`gamechrome::legible_on`, §1225) -- a light
+// theme's page would lose the pale ones. A ghost's eyes are white with blue
+// pupils, part of the drawing. The maze, the dots and the chrome follow the
+// user's palette (the operator's answer to C-Q16, §1422, and lane C's call
+// for this game). It was all a copy of Catppuccin Mocha, dark on a light
+// desktop.
+
+/// The four ghosts' hues, in `GhostId::ALL`'s order, `(pale, deep)`: red,
+/// lavender, teal, peach.
+const GHOST_HUES: [(Color, Color); 4] = [
+    (Color::from_hex(0xF38BA8), Color::from_hex(0xB0103A)),
+    (Color::from_hex(0xB4BEFE), Color::from_hex(0x4550C8)),
+    (Color::from_hex(0x94E2D5), Color::from_hex(0x0B6E75)),
+    (Color::from_hex(0xFAB387), Color::from_hex(0xB34700)),
+];
+/// Pac-Man's yellow, the same way: an amber on a light page.
+const PACMAN_HUE: (Color, Color) = (Color::from_hex(0xF9E2AF), Color::from_hex(0xB07800));
+/// A frightened ghost, and the white it flashes as the fright wears off.
+const FRIGHTENED: Color = Color::from_hex(0x2B4BD6);
+const FLASH: Color = Color::from_hex(0xF4F4F4);
+/// A ghost's eyes: white, with blue pupils.
+const EYE_WHITE: Color = Color::from_hex(0xF4F4F4);
+const PUPIL: Color = Color::from_hex(0x1A4FC0);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The maze's walls, and the ghosts' door.
+    wall: Color,
+    door: Color,
+    /// The dots and the power pellets.
+    dot: Color,
+    /// Pac-Man, in the shade that stands off the page.
+    pacman: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        let chrome = Chrome::of(p);
+        Self {
+            chrome,
+            wall: p.blue,
+            door: p.lavender,
+            dot: p.ink(p.yellow),
+            pacman: gamechrome::legible_on(PACMAN_HUE, chrome.page),
+        }
+    }
+
+    /// Ghost `id`'s body, in the shade that stands off the page.
+    fn ghost(&self, id: GhostId) -> Color {
+        let i = GhostId::ALL.iter().position(|&g| g == id).unwrap_or(0);
+        GHOST_HUES.get(i).map_or(self.chrome.high, |&pair| {
+            gamechrome::legible_on(pair, self.chrome.page)
+        })
+    }
+}
 
 // -- The maze's size, which is a rule of the game --------------------------
 //
@@ -476,19 +529,19 @@ fn centred(
 ///
 /// A free function rather than a method: the maze is the only state it reads,
 /// and passing it in is what lets a test draw a maze the game is not playing.
-fn draw_maze(f: &mut Frame<Target>, maze: &[[Cell; MAZE_COLS]; MAZE_ROWS], b: &Board) {
+fn draw_maze(f: &mut Frame<Target>, maze: &[[Cell; MAZE_COLS]; MAZE_ROWS], b: &Board, c: &Colours) {
     for (row, cells) in maze.iter().enumerate() {
         for (col, cell) in cells.iter().enumerate() {
             let r = b.cell_rect(grid(row), grid(col));
             match cell {
-                Cell::Wall => fill(f, r, BLUE, CornerRadii::all(b.scaled(2.0 / 18.0))),
+                Cell::Wall => fill(f, r, c.wall, CornerRadii::all(b.scaled(2.0 / 18.0))),
                 // The door is a lintel across the top of its cell, not a full
                 // block: the ghosts pass through it and the player does not,
                 // so it has to read as a gap rather than as wall.
                 Cell::GhostDoor => fill(
                     f,
                     Rect::new(r.x, r.y, r.w, r.h / 3.0),
-                    LAVENDER,
+                    c.door,
                     CornerRadii::ZERO,
                 ),
                 _ => {}
@@ -704,15 +757,6 @@ impl GhostId {
         GhostId::Inky,
         GhostId::Clyde,
     ];
-
-    fn color(self) -> Color {
-        match self {
-            GhostId::Blinky => RED,
-            GhostId::Pinky => LAVENDER,
-            GhostId::Inky => TEAL,
-            GhostId::Clyde => PEACH,
-        }
-    }
 
     /// Scatter target corner for each ghost.
     fn scatter_target(self) -> Pos {
@@ -951,6 +995,10 @@ pub struct PacmanApp {
     /// The size the last frame was drawn at, and so the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl PacmanApp {
@@ -992,6 +1040,7 @@ impl PacmanApp {
             rng: SeededRng::new(seed),
             elapsed_total_ms: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
         };
         app.init_ghosts();
         app
@@ -1032,11 +1081,12 @@ impl PacmanApp {
     /// window and then pressed N would watch the maze jump.
     fn start_new_game(&mut self) {
         let high = self.high_score;
-        let size = self.size;
+        let (size, palette) = (self.size, self.palette);
         let seed = self.rng.next_u64();
         *self = Self::with_seed(seed);
         self.high_score = high;
         self.size = size;
+        self.palette = palette;
         self.state = GameState::Playing;
     }
 
@@ -1588,27 +1638,28 @@ impl PacmanApp {
         // wide for a narrow window spilled past the edge, and a zero-sized
         // window still recorded a clickable `Press N to start` at its centre --
         // a control in a window with no pixels to show it.
+        let c = Colours::of(&self.palette);
         f.clip(l.window);
-        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
-        self.draw_header(&mut f, &l);
+        fill(&mut f, l.window, c.chrome.page, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l, &c);
 
         // The board's own box goes down before anything inside it, so a dot,
         // a pellet or a ghost drawn on top of it answers a hit test first.
         f.hit(Target::Board, board.rect);
-        draw_maze(&mut f, &self.maze, &board);
-        self.draw_dots(&mut f, &board);
-        self.draw_player(&mut f, &board);
-        self.draw_ghosts(&mut f, &board);
+        draw_maze(&mut f, &self.maze, &board, &c);
+        self.draw_dots(&mut f, &board, &c);
+        self.draw_player(&mut f, &board, &c);
+        self.draw_ghosts(&mut f, &board, &c);
 
-        self.draw_footer(&mut f, &l);
-        self.draw_sheet(&mut f, &l);
+        self.draw_footer(&mut f, &l, &c);
+        self.draw_sheet(&mut f, &l, &c);
         f.unclip();
         f
     }
 
     /// The three readings along the top, each placed by measuring it.
-    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.header, MANTLE, CornerRadii::all(l.pad * 0.5));
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.header, c.chrome.band, CornerRadii::all(l.pad * 0.5));
         f.hit(Target::Header, l.header);
         if l.header.is_empty() {
             return;
@@ -1621,7 +1672,15 @@ impl PacmanApp {
         let y = l.header.y + (l.header.h - text::line_height(l.head, bold)) / 2.0;
 
         let score = format!("SCORE: {}", self.score);
-        let r = label(f, l.header.x + inner, y, &score, TEXT_COLOR, l.head, bold);
+        let r = label(
+            f,
+            l.header.x + inner,
+            y,
+            &score,
+            c.chrome.text,
+            l.head,
+            bold,
+        );
         f.hit(Target::Score, r);
 
         let hi = format!("HI: {}", self.high_score);
@@ -1630,7 +1689,7 @@ impl PacmanApp {
             l.header.centre().0,
             y,
             &hi,
-            SUBTEXT0,
+            c.chrome.dim,
             l.head,
             FontWeightHint::Regular,
         );
@@ -1646,7 +1705,7 @@ impl PacmanApp {
             l.header.right() - inner - width,
             y,
             &lvl,
-            LAVENDER,
+            c.chrome.title,
             l.head,
             bold,
         );
@@ -1655,7 +1714,7 @@ impl PacmanApp {
     }
 
     /// Dots and power pellets, each with the box a test can find it by.
-    fn draw_dots(&self, f: &mut Frame<Target>, b: &Board) {
+    fn draw_dots(&self, f: &mut Frame<Target>, b: &Board, c: &Colours) {
         let pulsing = (self.pulse_counter % 30) > 15;
         for (row, cells) in self.maze.iter().enumerate() {
             for (col, cell) in cells.iter().enumerate() {
@@ -1675,7 +1734,7 @@ impl PacmanApp {
                     }
                     _ => continue,
                 };
-                disc(f, cx, cy, radius, YELLOW);
+                disc(f, cx, cy, radius, c.dot);
                 f.hit(target, square_at(cx, cy, radius));
             }
         }
@@ -1683,14 +1742,14 @@ impl PacmanApp {
 
     /// Pac-Man himself: a disc with a bite taken out of it in the direction
     /// he is facing.
-    fn draw_player(&self, f: &mut Frame<Target>, b: &Board) {
+    fn draw_player(&self, f: &mut Frame<Target>, b: &Board, c: &Colours) {
         if self.state == GameState::Menu {
             return;
         }
         let (cx, cy) = b.centre_of(self.player_pos.row, self.player_pos.col);
         let radius = token_radius(b);
 
-        disc(f, cx, cy, radius, YELLOW);
+        disc(f, cx, cy, radius, c.pacman);
 
         if self.mouth_open {
             let reach = radius * 0.5;
@@ -1704,7 +1763,7 @@ impl PacmanApp {
             fill(
                 f,
                 Rect::new(mx - ms / 2.0, my - ms / 2.0, ms, ms),
-                BASE,
+                c.chrome.page,
                 CornerRadii::ZERO,
             );
         }
@@ -1718,14 +1777,14 @@ impl PacmanApp {
             Direction::Left => (cx - radius * 0.45, cy - radius * 0.35),
             Direction::Up => (cx + radius * 0.15, cy - radius * 0.5),
         };
-        disc(f, ex, ey, (radius * 0.25).max(1.0), BASE);
+        disc(f, ex, ey, (radius * 0.25).max(1.0), c.chrome.page);
 
         f.hit(Target::Player, square_at(cx, cy, radius));
     }
 
     /// The four ghosts, drawn after the player so one standing on him is the
     /// one a hit test finds.
-    fn draw_ghosts(&self, f: &mut Frame<Target>, b: &Board) {
+    fn draw_ghosts(&self, f: &mut Frame<Target>, b: &Board, c: &Colours) {
         if self.state == GameState::Menu {
             return;
         }
@@ -1738,13 +1797,13 @@ impl PacmanApp {
             let body = match ghost.mode {
                 GhostMode::Frightened => {
                     if flashing {
-                        TEXT_COLOR
+                        FLASH
                     } else {
-                        BLUE
+                        FRIGHTENED
                     }
                 }
-                GhostMode::Eaten => OVERLAY0,
-                _ => ghost.id.color(),
+                GhostMode::Eaten => c.chrome.off,
+                _ => c.ghost(ghost.id),
             };
 
             // A rounded top and a square skirt, which is what makes the shape
@@ -1769,11 +1828,11 @@ impl PacmanApp {
                 // body above is drawn in the dimmed colour and the eyes are
                 // the only part that reads.
                 let r = (radius * 0.35).max(1.0);
-                disc(f, cx - radius * 0.35, cy, r, TEXT_COLOR);
-                disc(f, cx + radius * 0.35, cy, r, TEXT_COLOR);
+                disc(f, cx - radius * 0.35, cy, r, EYE_WHITE);
+                disc(f, cx + radius * 0.35, cy, r, EYE_WHITE);
             } else {
-                disc(f, cx - radius * 0.4, eye_y, eye_r, TEXT_COLOR);
-                disc(f, cx + radius * 0.4, eye_y, eye_r, TEXT_COLOR);
+                disc(f, cx - radius * 0.4, eye_y, eye_r, EYE_WHITE);
+                disc(f, cx + radius * 0.4, eye_y, eye_r, EYE_WHITE);
 
                 // The pupils lean the way the ghost is going, by a share of
                 // the head rather than by one pixel.
@@ -1785,8 +1844,8 @@ impl PacmanApp {
                     Direction::Down => (0.0, lean),
                 };
                 let pupil = (radius * 0.18).max(1.0);
-                disc(f, cx - radius * 0.4 + px, eye_y + py, pupil, BLUE);
-                disc(f, cx + radius * 0.4 + px, eye_y + py, pupil, BLUE);
+                disc(f, cx - radius * 0.4 + px, eye_y + py, pupil, PUPIL);
+                disc(f, cx + radius * 0.4 + px, eye_y + py, pupil, PUPIL);
             }
 
             // The skirt reaches a full radius below the centre, so the box is
@@ -1799,8 +1858,8 @@ impl PacmanApp {
     }
 
     /// The lives and the dot count along the bottom.
-    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        fill(f, l.footer, MANTLE, CornerRadii::all(l.pad * 0.5));
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        fill(f, l.footer, c.chrome.band, CornerRadii::all(l.pad * 0.5));
         f.hit(Target::Footer, l.footer);
         if l.footer.is_empty() {
             return;
@@ -1811,7 +1870,15 @@ impl PacmanApp {
         let line = text::line_height(l.small, plain);
         let y = l.footer.y + (l.footer.h - line) / 2.0;
 
-        let word = label(f, l.footer.x + inner, y, "LIVES:", SUBTEXT0, l.small, plain);
+        let word = label(
+            f,
+            l.footer.x + inner,
+            y,
+            "LIVES:",
+            c.chrome.dim,
+            l.small,
+            plain,
+        );
         f.hit(Target::Lives, word);
 
         // The tokens start where the word ends, measured. They used to start a
@@ -1823,7 +1890,7 @@ impl PacmanApp {
         for i in 0..self.lives.min(MAX_LIVES_SHOWN) {
             let cx = word.right() + inner + token + f32_from_u32(i) * step;
             let cy = y + line / 2.0;
-            disc(f, cx, cy, token, YELLOW);
+            disc(f, cx, cy, token, c.pacman);
             f.hit(Target::Life(byte_u32(i)), square_at(cx, cy, token));
         }
 
@@ -1834,7 +1901,7 @@ impl PacmanApp {
             l.footer.right() - inner - width,
             y,
             &dots,
-            SUBTEXT0,
+            c.chrome.dim,
             l.small,
             plain,
         );
@@ -1849,15 +1916,23 @@ impl PacmanApp {
     /// code placed each one at `centre - 80`, `- 90`, `- 100`, `- 70` or
     /// `- 50` -- a hand-tuned half-width per string, right only at the one
     /// font size those numbers were eyeballed at.
-    fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout) {
+    fn draw_sheet(&self, f: &mut Frame<Target>, l: &Layout, c: &Colours) {
+        // Every word here is on the sheet's own panel, below, where the
+        // chrome's roles read as they are: the palette inks its text
+        // colours for its own panel (`Palette::ink`).
         let (title, title_color, dim) = match self.state {
             GameState::Playing => return,
-            GameState::Menu => ("PAC-MAN", YELLOW, 220),
-            GameState::Paused => ("PAUSED", YELLOW, 180),
-            GameState::GameOver => ("GAME OVER", RED, 200),
+            GameState::Menu => ("PAC-MAN", c.chrome.even, 220),
+            GameState::Paused => ("PAUSED", c.chrome.even, 180),
+            GameState::GameOver => ("GAME OVER", c.chrome.bad, 200),
         };
 
-        fill(f, l.window, Color::rgba(30, 30, 46, dim), CornerRadii::ZERO);
+        fill(
+            f,
+            l.window,
+            with_alpha(c.chrome.page, dim),
+            CornerRadii::ZERO,
+        );
         f.hit(Target::Overlay, l.window);
 
         let plain = FontWeightHint::Regular;
@@ -1875,21 +1950,21 @@ impl PacmanApp {
                     target: Some(Target::NewGame),
                     size: l.font,
                     weight: plain,
-                    color: TEXT_COLOR,
+                    color: c.chrome.text,
                 });
                 lines.push(SheetLine {
                     text: "Arrow keys to move".to_string(),
                     target: Some(Target::Controls(0)),
                     size: l.small,
                     weight: plain,
-                    color: SUBTEXT0,
+                    color: c.chrome.dim,
                 });
                 lines.push(SheetLine {
                     text: "P to pause".to_string(),
                     target: Some(Target::Controls(1)),
                     size: l.small,
                     weight: plain,
-                    color: SUBTEXT0,
+                    color: c.chrome.dim,
                 });
             }
             GameState::Paused => {
@@ -1898,14 +1973,14 @@ impl PacmanApp {
                     target: Some(Target::Resume),
                     size: l.font,
                     weight: plain,
-                    color: TEXT_COLOR,
+                    color: c.chrome.text,
                 });
                 lines.push(SheetLine {
                     text: "Press N for new game".to_string(),
                     target: Some(Target::NewGame),
                     size: l.font,
                     weight: plain,
-                    color: SUBTEXT0,
+                    color: c.chrome.dim,
                 });
             }
             GameState::GameOver => {
@@ -1914,21 +1989,21 @@ impl PacmanApp {
                     target: Some(Target::FinalStat(0)),
                     size: l.font,
                     weight: plain,
-                    color: TEXT_COLOR,
+                    color: c.chrome.text,
                 });
                 lines.push(SheetLine {
                     text: format!("Level: {}", self.level),
                     target: Some(Target::FinalStat(1)),
                     size: l.font,
                     weight: plain,
-                    color: SUBTEXT0,
+                    color: c.chrome.dim,
                 });
                 lines.push(SheetLine {
                     text: "Press N for new game".to_string(),
                     target: Some(Target::NewGame),
                     size: l.font,
                     weight: plain,
-                    color: TEXT_COLOR,
+                    color: c.chrome.text,
                 });
             }
             GameState::Playing => {}
@@ -1946,6 +2021,36 @@ impl PacmanApp {
         }
 
         let (cx, cy) = l.window.centre();
+        // A panel of its own under the words, sized to them. Over the page's
+        // wash alone they sat on the maze, whose walls showed through: the
+        // level was 3.7:1 over a blue wall in a light theme.
+        let widest = lines
+            .iter()
+            .map(|line| text::measure(&line.text, line.size, line.weight))
+            .fold(0.0_f32, f32::max);
+        let pad = l.font;
+        let block = Rect::new(
+            cx - widest / 2.0 - pad,
+            cy - total / 2.0 - pad,
+            widest + pad * 2.0,
+            total + pad * 2.0,
+        );
+        // Cut to the window, and not drawn under a point, where the
+        // toolkit's border would reach outside it.
+        if let Some(panel) = block.intersect(l.window)
+            && panel.w >= 1.0
+            && panel.h >= 1.0
+        {
+            self.palette.push_surface(
+                f,
+                panel.x,
+                panel.y,
+                panel.w,
+                panel.h,
+                pad * 0.6,
+                Surface::Panel,
+            );
+        }
         let mut y = cy - total / 2.0;
         for line in &lines {
             let r = centred(f, cx, y, &line.text, line.color, line.size, line.weight);
@@ -1962,7 +2067,7 @@ impl PacmanApp {
             let r = (l.title * 0.35).max(1.0);
             let span = (l.window.w - r * 2.0).max(0.0);
             let along = f32_from_u32(self.pulse_counter % 120) / 120.0;
-            disc(f, r + span * along, y + r, r, YELLOW);
+            disc(f, r + span * along, y + r, r, c.pacman);
         }
     }
 
@@ -2004,6 +2109,10 @@ pub fn handle_event(app: &mut PacmanApp, event: &Event) -> EventResult {
 }
 
 impl App for PacmanApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Pac-Man".to_string()
     }
@@ -2101,6 +2210,140 @@ mod tests {
     )]
 
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- the
+    /// menu, a game in play with a ghost frightened and one eaten, and the
+    /// game over -- with only the ghosts', pac-man's and the eyes' own
+    /// colours not the palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let mut derived: Vec<Color> = GHOST_HUES.iter().flat_map(|&(a, b)| [a, b]).collect();
+        derived.extend([
+            PACMAN_HUE.0,
+            PACMAN_HUE.1,
+            FRIGHTENED,
+            FLASH,
+            EYE_WHITE,
+            PUPIL,
+        ]);
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("pacman, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = PacmanApp::with_seed(7);
+        app.theme_changed(p);
+        let menu = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        app.state = GameState::Playing;
+        app.ghosts[0].mode = GhostMode::Frightened;
+        app.ghosts[1].mode = GhostMode::Eaten;
+        let playing = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.state = GameState::GameOver;
+        let over = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("menu", menu),
+            ("playing", playing),
+            ("over", over),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "pacman: {bad:#?}");
+    }
+
+    /// **Every ghost and pac-man stand off the page in either theme**, in
+    /// their own hues: the pale ones vanished on a light page.
+    #[test]
+    fn every_ghost_and_pacman_stand_off_the_page_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for id in GhostId::ALL {
+                let ratio = guitk::theme::contrast_ratio(c.ghost(id), c.chrome.page);
+                assert!(ratio >= 3.0, "{id:?} is {ratio:.2}:1 (light: {light})");
+            }
+            let ratio = guitk::theme::contrast_ratio(c.pacman, c.chrome.page);
+            assert!(ratio >= 3.0, "pac-man is {ratio:.2}:1 (light: {light})");
+        }
+    }
+
+    /// **A new game keeps the user's colours**, as it keeps the window's size.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut app = PacmanApp::with_seed(7);
+        app.theme_changed(&light);
+        app.start_new_game();
+        assert_eq!(app.palette, light);
+    }
     use guitk::probe;
     use std::collections::BTreeSet;
 
@@ -2378,7 +2621,8 @@ mod tests {
 
     #[test]
     fn test_ghost_colors_distinct() {
-        let colors: Vec<Color> = GhostId::ALL.iter().map(|g| g.color()).collect();
+        let c = Colours::of(&Palette::for_mode(false));
+        let colors: Vec<Color> = GhostId::ALL.iter().map(|&g| c.ghost(g)).collect();
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
                 assert_ne!(colors[i], colors[j]);

@@ -117,8 +117,41 @@ pub const SYS_GETRANDOM: u64 = 318;
 /// instead of timing out.
 pub const SYS_FUTEX: u64 = 202;
 
+/// Linux `__NR_io_setup`.
+pub const SYS_IO_SETUP: u64 = 206;
+
+/// Linux `__NR_io_destroy`.
+pub const SYS_IO_DESTROY: u64 = 207;
+
+/// Linux `__NR_io_getevents`.
+pub const SYS_IO_GETEVENTS: u64 = 208;
+
+/// Linux `__NR_io_submit`.
+pub const SYS_IO_SUBMIT: u64 = 209;
+
+/// Linux `__NR_io_cancel`.
+pub const SYS_IO_CANCEL: u64 = 210;
+
+/// Linux `__NR_io_pgetevents`.
+pub const SYS_IO_PGETEVENTS: u64 = 333;
+
+/// Linux `__NR_perf_event_open`.
+pub const SYS_PERF_EVENT_OPEN: u64 = 298;
+
+/// Linux `__NR_bpf`.
+pub const SYS_BPF: u64 = 321;
+
 /// Linux `__NR_pidfd_send_signal`.
 pub const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
+
+/// Linux `__NR_io_uring_setup`.
+pub const SYS_IO_URING_SETUP: u64 = 425;
+
+/// Linux `__NR_io_uring_enter`.
+pub const SYS_IO_URING_ENTER: u64 = 426;
+
+/// Linux `__NR_io_uring_register`.
+pub const SYS_IO_URING_REGISTER: u64 = 427;
 
 /// Linux `__NR_pidfd_open`.
 pub const SYS_PIDFD_OPEN: u64 = 434;
@@ -191,6 +224,47 @@ fn trunc_u32(v: SyscallArg) -> u32 {
     v as u32
 }
 
+/// Reinterpret an argument register as an unsigned 64-bit word (an
+/// `aio_context_t`).
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn word_u64(v: SyscallArg) -> u64 {
+    v as u64
+}
+
+/// Reinterpret an argument register as C's `long` on the target: 64 bits.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn long_i64(v: SyscallArg) -> i64 {
+    v as i64
+}
+
+/// A status the call answered as a `Result`: 0, or -1 with `errno` set.
+#[inline]
+fn ret_status(r: Result<(), i32>) -> SyscallArg {
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// A count the call answered as a `Result`: the count, or -1 with `errno`
+/// set.
+#[inline]
+fn ret_count(r: Result<i64, i32>) -> SyscallArg {
+    match r {
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(n) => n as SyscallArg,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
 /// Widen a 32-bit signed result (the 0/-1 status most of the table
 /// returns, or a pid) to the register width.
 #[inline]
@@ -251,6 +325,11 @@ fn ret_u32(v: u32) -> SyscallArg {
 /// | 102/104/107/108 `get{u,g,eu,eg}id` | [`crate::unistd`] | |
 /// | 110 `getppid` | [`crate::process::getppid`] | |
 /// | 186 `gettid` | [`crate::process::gettid`] | CPython's `os.gettid` |
+/// | 202 `futex` | [`crate::linux_futex::futex`] | all six arguments |
+/// | 206-210, 333 `io_setup` … `io_pgetevents` | [`crate::linux_aio_abi`] | libaio's calls; glibc wraps none (§1114) |
+/// | 298 `perf_event_open` | [`crate::linux_perf_event`] | Linux 6.6's checks, then `ENOSYS`: no PMU |
+/// | 321 `bpf` | [`crate::linux_bpf`] | Linux 6.6's checks, then `ENOSYS`: no BPF |
+/// | 425-427 `io_uring_*` | [`crate::linux_io_uring`] | Linux 6.6's checks, then `ENOSYS`: no rings |
 /// | 318 `getrandom` | [`crate::unistd::getrandom`] | CPython's `bootstrap_hash` |
 /// | 424 `pidfd_send_signal` | [`crate::process::pidfd_send_signal`] | |
 /// | 434 `pidfd_open` | [`crate::process::pidfd_open`] | CPython's `_Py_pidfd_open` |
@@ -319,7 +398,85 @@ pub extern "C" fn syscall(
                 trunc_u32(a6),
             ) as SyscallArg
         }
+        // Kernel AIO.  glibc wraps none of these, so C reaches them only
+        // this way -- libaio included -- and each takes the arguments its
+        // number defines, which is `syscall()`'s contract with its caller.
+        // SAFETY (the five `unsafe` blocks below): that contract -- every
+        // pointer is NULL or the caller's, as the call it names requires.
+        SYS_IO_SETUP => ret_status(unsafe {
+            crate::linux_aio_abi::sys_io_setup(trunc_u32(a1), ptr_arg(a2).cast::<u64>())
+        }),
+        SYS_IO_DESTROY => ret_status(crate::linux_aio_abi::sys_io_destroy(word_u64(a1))),
+        SYS_IO_SUBMIT => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_submit(
+                word_u64(a1),
+                long_i64(a2),
+                ptr_arg(a3)
+                    .cast_const()
+                    .cast::<*mut crate::linux_aio_abi::Iocb>(),
+            )
+        }),
+        SYS_IO_CANCEL => ret_status(unsafe {
+            crate::linux_aio_abi::sys_io_cancel(
+                word_u64(a1),
+                ptr_arg(a2).cast::<crate::linux_aio_abi::Iocb>(),
+            )
+        }),
+        SYS_IO_GETEVENTS => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_getevents(
+                word_u64(a1),
+                long_i64(a2),
+                long_i64(a3),
+                ptr_arg(a4).cast::<crate::linux_aio_abi::IoEvent>(),
+                ptr_arg(a5).cast_const().cast::<crate::stat::Timespec>(),
+            )
+        }),
+        SYS_IO_PGETEVENTS => ret_count(unsafe {
+            crate::linux_aio_abi::sys_io_pgetevents(
+                word_u64(a1),
+                long_i64(a2),
+                long_i64(a3),
+                ptr_arg(a4).cast::<crate::linux_aio_abi::IoEvent>(),
+                ptr_arg(a5).cast_const().cast::<crate::stat::Timespec>(),
+                ptr_arg(a6)
+                    .cast_const()
+                    .cast::<crate::linux_aio_abi::AioSigset>(),
+            )
+        }),
         SYS_PIDFD_OPEN => ret_i32(crate::process::pidfd_open(trunc_i32(a1), trunc_u32(a2))),
+        // Linux's own calls that glibc does not wrap and SlateOS does not
+        // implement: they answer as the kernel's Linux table does -- Linux
+        // 6.6's checks, then ENOSYS -- and C reaches them only this way.
+        SYS_PERF_EVENT_OPEN => ret_i32(crate::linux_perf_event::perf_event_open(
+            ptr_arg(a1).cast::<crate::linux_perf_event::PerfEventAttr>(),
+            trunc_i32(a2),
+            trunc_i32(a3),
+            trunc_i32(a4),
+            word_u64(a5),
+        )),
+        SYS_BPF => ret_i32(crate::linux_bpf::bpf(
+            trunc_u32(a1),
+            ptr_arg(a2),
+            trunc_u32(a3),
+        )),
+        SYS_IO_URING_SETUP => ret_i32(crate::linux_io_uring::io_uring_setup(
+            trunc_u32(a1),
+            ptr_arg(a2).cast::<crate::linux_io_uring::IoUringParams>(),
+        )),
+        SYS_IO_URING_ENTER => ret_i32(crate::linux_io_uring::io_uring_enter(
+            trunc_i32(a1),
+            trunc_u32(a2),
+            trunc_u32(a3),
+            trunc_u32(a4),
+            ptr_arg(a5).cast_const(),
+            trunc_usize(a6),
+        )),
+        SYS_IO_URING_REGISTER => ret_i32(crate::linux_io_uring::io_uring_register(
+            trunc_i32(a1),
+            trunc_u32(a2),
+            ptr_arg(a3),
+            trunc_u32(a4),
+        )),
         SYS_PIDFD_SEND_SIGNAL => ret_i32(crate::process::pidfd_send_signal(
             trunc_i32(a1),
             trunc_i32(a2),
@@ -399,14 +556,91 @@ mod tests {
             SYS_GETPPID,
             SYS_GETTID,
             SYS_GETRANDOM,
+            SYS_FUTEX,
+            SYS_IO_SETUP,
+            SYS_IO_DESTROY,
+            SYS_IO_GETEVENTS,
+            SYS_IO_SUBMIT,
+            SYS_IO_CANCEL,
+            SYS_IO_PGETEVENTS,
             SYS_PIDFD_SEND_SIGNAL,
             SYS_PIDFD_OPEN,
+            SYS_PERF_EVENT_OPEN,
+            SYS_BPF,
+            SYS_IO_URING_SETUP,
+            SYS_IO_URING_ENTER,
+            SYS_IO_URING_REGISTER,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
                 assert_ne!(vals[i], vals[j], "SYS_ constants must be distinct");
             }
         }
+    }
+
+    /// The kernel-AIO numbers, pinned against syscall_64.tbl.
+    #[test]
+    fn test_aio_numbers_are_linux_numbers() {
+        assert_eq!(
+            [
+                SYS_IO_SETUP,
+                SYS_IO_DESTROY,
+                SYS_IO_GETEVENTS,
+                SYS_IO_SUBMIT,
+                SYS_IO_CANCEL,
+                SYS_IO_PGETEVENTS,
+            ],
+            [206, 207, 208, 209, 210, 333]
+        );
+    }
+
+    fn call(n: u64, args: [SyscallArg; 6]) -> SyscallArg {
+        let [a1, a2, a3, a4, a5, a6] = args;
+        syscall(
+            SyscallArg::try_from(n).expect("test number fits"),
+            a1,
+            a2,
+            a3,
+            a4,
+            a5,
+            a6,
+        )
+    }
+
+    /// libaio's life cycle, by number: a context made, used, and ended, with
+    /// syscall()'s -1 and errno for the refusals.
+    #[test]
+    fn test_aio_by_number() {
+        let mut ctx: u64 = 0;
+        let ctxp = (&raw mut ctx).addr() as SyscallArg;
+        assert_eq!(call(SYS_IO_SETUP, [8, ctxp, 0, 0, 0, 0]), 0);
+        assert_ne!(ctx, 0);
+        let id = ctx as SyscallArg;
+        // Nothing submitted, a zero timeout: 0 events.
+        let zero = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut evs = [crate::linux_aio_abi::IoEvent::zeroed(); 2];
+        let evp = evs.as_mut_ptr().addr() as SyscallArg;
+        let tsp = (&raw const zero).addr() as SyscallArg;
+        assert_eq!(call(SYS_IO_GETEVENTS, [id, 1, 2, evp, tsp, 0]), 0);
+        assert_eq!(call(SYS_IO_PGETEVENTS, [id, 1, 2, evp, tsp, 0]), 0);
+        assert_eq!(call(SYS_IO_SUBMIT, [id, 0, 0, 0, 0, 0]), 0);
+        // The refusals.
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_SUBMIT, [id, 1, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_CANCEL, [id, 0, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_SETUP, [8, ctxp, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL, "*ctxp is not 0");
+        assert_eq!(call(SYS_IO_DESTROY, [id, 0, 0, 0, 0, 0]), 0);
+        errno::set_errno(0);
+        assert_eq!(call(SYS_IO_DESTROY, [id, 0, 0, 0, 0, 0]), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     /// An unmapped number must be ENOSYS, not a wild dispatch.  1000 is
@@ -486,5 +720,59 @@ mod tests {
         // Whatever getrandom does on this build (host or target), the
         // indirection must produce the identical value.
         assert_eq!(n, direct);
+    }
+
+    /// perf_event_open, bpf and io_uring, pinned against syscall_64.tbl.
+    #[test]
+    fn test_perf_bpf_io_uring_numbers_are_linux_numbers() {
+        assert_eq!(
+            [
+                SYS_PERF_EVENT_OPEN,
+                SYS_BPF,
+                SYS_IO_URING_SETUP,
+                SYS_IO_URING_ENTER,
+                SYS_IO_URING_REGISTER,
+            ],
+            [298, 321, 425, 426, 427]
+        );
+    }
+
+    /// The five reach Linux 6.6's checks through `syscall()`, where they
+    /// used to be ENOSYS without a look: each NULL here is judged where
+    /// Linux judges it.
+    #[test]
+    fn test_perf_bpf_io_uring_are_checked_through_syscall() {
+        let answer = |n, args| {
+            errno::set_errno(0);
+            (call(n, args), errno::get_errno())
+        };
+        // perf: the flags first, then the attr.
+        assert_eq!(
+            answer(SYS_PERF_EVENT_OPEN, [0, 0, -1, -1, 1 << 20, 0]),
+            (-1, errno::EINVAL)
+        );
+        assert_eq!(
+            answer(SYS_PERF_EVENT_OPEN, [0, 0, -1, -1, 0, 0]),
+            (-1, errno::EFAULT)
+        );
+        // bpf: an attr is read only when there is something to read.
+        assert_eq!(answer(SYS_BPF, [0, 0, 8, 0, 0, 0]), (-1, errno::EFAULT));
+        assert_eq!(
+            answer(SYS_BPF, [1 << 20, 0, 0, 0, 0, 0]),
+            (-1, errno::EINVAL)
+        );
+        // io_uring: the parameter block first; no ring to enter or register.
+        assert_eq!(
+            answer(SYS_IO_URING_SETUP, [8, 0, 0, 0, 0, 0]),
+            (-1, errno::EFAULT)
+        );
+        assert_eq!(
+            answer(SYS_IO_URING_ENTER, [-1, 0, 0, 0, 0, 0]),
+            (-1, errno::EBADF)
+        );
+        assert_eq!(
+            answer(SYS_IO_URING_REGISTER, [-1, 0, 0, 0, 0, 0]),
+            (-1, errno::EBADF)
+        );
     }
 }

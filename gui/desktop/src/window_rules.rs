@@ -2556,10 +2556,12 @@ mod tests {
                                     let ui = wound_ui(tab, criteria_type, filled, selected);
                                     let cmds = ui.render(&p, &mgr, 0.0, 0.0, 900.0, 600.0);
                                     assert!(!cmds.is_empty(), "the panel always draws its frame");
+                                    // The selected chip is lettered for the
+                                    // accent, the save button for green.
                                     palette_check::assert_drawn_from(
                                         &p,
                                         &cmds,
-                                        &[],
+                                        &[readable_on(p.accent), readable_on(p.green)],
                                         "window_rules",
                                     );
                                 }

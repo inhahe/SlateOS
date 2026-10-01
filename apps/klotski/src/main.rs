@@ -73,40 +73,97 @@
 //!    could no longer be unwound to the start. It is a `VecDeque` now, and the
 //!    header shows the count so the loss is at least visible.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// The scrim drawn over the board when the puzzle is solved.
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+
+    /// What the win panel's buttons sit on: the panel's ground, the page or
+    /// the band under the card look.
+    panel: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            mauve: p.ink(p.mauve),
+            panel: if p.surface_style() == SurfaceStyle::Cards {
+                p.mantle
+            } else {
+                p.base
+            },
+        }
+    }
+}
+
+/// The two inks that may be written on a block or on the exit, `(light,
+/// dark)`: whichever reads on it.
 ///
-/// Genuinely translucent — `Canvas::set` composites it with `Color::over`, so
-/// the solved position shows through. The version this replaced was opaque and
-/// claimed otherwise in a comment.
-const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);
+/// The near-black is a neutral one rather than Mocha's crust (`11111B`),
+/// which it used to be: the palette test matches the game's own colours on
+/// RGB, and Mocha's crust among them would pass a leftover Mocha crust
+/// anywhere in a light window.
+const INKS: (Color, Color) = (Color::from_hex(0xFFFFFF), Color::from_hex(0x161616));
 
 const GRID_COLS: usize = 4;
 const GRID_ROWS: usize = 5;
@@ -199,13 +256,15 @@ impl BlockKind {
         }
     }
 
-    #[must_use]
-    pub fn color(self) -> Color {
+    /// The block's colour in `c`: a palette hue per kind, inked to stand off
+    /// the board in a light theme as in a dark one. The kinds are told apart
+    /// by their shapes; the colours only help.
+    fn color(self, c: &Colours) -> Color {
         match self {
-            Self::Big => RED,
-            Self::TallRect => BLUE,
-            Self::WideRect => PEACH,
-            Self::Small => GREEN,
+            Self::Big => c.red,
+            Self::TallRect => c.blue,
+            Self::WideRect => c.peach,
+            Self::Small => c.green,
         }
     }
 
@@ -756,6 +815,12 @@ pub struct Klotski {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Default for Klotski {
@@ -776,6 +841,8 @@ impl Klotski {
             initial_blocks: Vec::new(),
             next_id: 1,
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         app.load_puzzle(0);
         app
@@ -1088,7 +1155,7 @@ impl Klotski {
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: self.colours.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1109,7 +1176,7 @@ impl Klotski {
         // it only because it does not clip — `Frame::clip` pushes a command
         // whether or not the rectangle has area, so a pass that clips before it
         // has refused its band cannot be silent about a band it never had.
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let sub_h = text::line_height(l.small, FontWeightHint::Regular);
@@ -1153,7 +1220,7 @@ impl Klotski {
                 text: "Klotski",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: LAVENDER,
+                color: self.colours.lavender,
             },
             left,
             top,
@@ -1171,7 +1238,7 @@ impl Klotski {
                     text: &subtitle,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.colours.subtext0,
                 },
                 left,
                 top + title_h,
@@ -1185,7 +1252,7 @@ impl Klotski {
                 text: &moves,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             split,
             right,
@@ -1198,7 +1265,9 @@ impl Klotski {
                     text: &undo,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    // Secondary text: the faintest grey is 2.3:1 on a light
+                    // band.
+                    color: self.colours.subtext0,
                 },
                 split,
                 right,
@@ -1215,14 +1284,24 @@ impl Klotski {
         // recomputed here from `board` and `gap`. Two places deriving the same
         // rectangle is two places to change when the solve does, and the one
         // that gets missed is the one the containment test is measured against.
-        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));
+        fill(
+            f,
+            l.board_frame,
+            self.colours.crust,
+            CornerRadii::all(l.gap.max(1.0)),
+        );
 
         // Empty cells first, so a block drawn over one takes the click: the hit
         // test answers with the *last* target covering the point.
         for row in 0..GRID_ROWS {
             for col in 0..GRID_COLS {
                 let r = l.cell_rect(row, col);
-                fill(f, r, SURFACE0, CornerRadii::all(l.gap.max(1.0)));
+                fill(
+                    f,
+                    r,
+                    self.colours.surface0,
+                    CornerRadii::all(l.gap.max(1.0)),
+                );
                 f.hit(Target::Cell(row, col), r);
             }
         }
@@ -1236,14 +1315,19 @@ impl Klotski {
         // `label_centred` asks `centre_line` exactly the second question. Both
         // guards were the same tests written a second time, one level further
         // out, where nothing can reach them.
-        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));
+        fill(
+            f,
+            l.exit,
+            self.colours.mauve,
+            CornerRadii::all(l.gap.max(1.0)),
+        );
         label_centred(
             f,
             &Label {
                 text: "EXIT",
                 size: (l.exit.h * 0.72).clamp(6.0, l.small),
                 weight: FontWeightHint::Bold,
-                color: CRUST,
+                color: gamechrome::legible_on(INKS, self.colours.mauve),
             },
             l.exit,
         );
@@ -1264,11 +1348,12 @@ impl Klotski {
                 fill(
                     f,
                     Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),
-                    YELLOW,
+                    self.colours.yellow,
                     CornerRadii::all(l.cell * 0.1),
                 );
             }
-            fill(f, r, block.kind.color(), CornerRadii::all(l.cell * 0.08));
+            let colour = block.kind.color(&self.colours);
+            fill(f, r, colour, CornerRadii::all(l.cell * 0.08));
 
             let text_of = block.kind.label();
             if !text_of.is_empty() {
@@ -1285,7 +1370,7 @@ impl Klotski {
                             text: text_of,
                             size,
                             weight: FontWeightHint::Bold,
-                            color: CRUST,
+                            color: gamechrome::legible_on(INKS, colour),
                         },
                         r,
                     );
@@ -1295,11 +1380,43 @@ impl Klotski {
         }
     }
 
+    /// A control: the toolkit's push button at this window's size, on
+    /// `ground`; `on` draws the answer offered first as the toolkit's primary
+    /// button, and `live` false the switched-off look.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a button's place, label, size, two states and ground; a struct would be built at each call and read once"
+    )]
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        name: &str,
+        size: f32,
+        on: bool,
+        live: bool,
+        ground: Color,
+    ) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            name,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            ground,
+        );
+    }
+
     fn draw_controls(&self, f: &mut Frame<Target>, l: &Layout) {
         if l.controls.is_empty() {
             return;
         }
-        fill(f, l.controls, MANTLE, CornerRadii::ZERO);
+        fill(f, l.controls, self.colours.mantle, CornerRadii::ZERO);
         let rects = l.button_rects();
         for ((target, name), r) in BUTTONS.into_iter().zip(rects) {
             if r.is_empty() {
@@ -1309,23 +1426,8 @@ impl Klotski {
                 Target::Undo => !self.undo_stack.is_empty(),
                 _ => true,
             };
-            fill(
-                f,
-                r,
-                if live { SURFACE1 } else { SURFACE0 },
-                CornerRadii::all(l.pad.max(1.0)),
-            );
             let size = (r.h * 0.45).clamp(7.0, l.font);
-            label_centred(
-                f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: if live { TEXT_COLOR } else { OVERLAY0 },
-                },
-                r,
-            );
+            self.button(f, r, name, size, false, live, self.colours.mantle);
             // Recorded even when it is drawn dim: `undo` on an empty stack
             // answers `false` and changes nothing, and a target that reports
             // "nothing happened" is the thing the tests can hold on to.
@@ -1338,7 +1440,7 @@ impl Klotski {
         // `centre_line` between them refuse everything it would have caught.
         // The order is what makes that safe — the refusal is *above* the clip,
         // so the pass cannot push a `PushClip` for a band it has no room in.
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         let size = l.small;
         let lh = text::line_height(size, FontWeightHint::Regular);
         let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };
@@ -1356,7 +1458,9 @@ impl Klotski {
                     text: line,
                     size,
                     weight: FontWeightHint::Regular,
-                    color: if i == 0 { SUBTEXT0 } else { OVERLAY0 },
+                    // Secondary text, both lines: the keys are read, and
+                    // the palette's faintest grey is 2.3:1 on a light band.
+                    color: self.colours.subtext0,
                 },
                 l.footer.x + l.pad,
                 top + lh * i as f32,
@@ -1370,14 +1474,33 @@ impl Klotski {
         // A translucent scrim, not an opaque one: the solved board is the thing
         // worth looking at, and painting it out to celebrate it was the joke
         // the old comment was making without meaning to.
-        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+        fill(
+            f,
+            l.window,
+            Chrome::of(&self.palette).scrim,
+            CornerRadii::ZERO,
+        );
 
         // Nothing behind the panel is clickable any more — a modal that only
         // *looks* in front is one whose buttons you can press through.
         f.discard_hits();
 
         let panel = l.win_panel();
-        fill(f, panel, SURFACE0, CornerRadii::all(l.pad * 1.2));
+        // Less than a point either way is no panel: the toolkit's surface
+        // strokes its border half a point inside the box, and in a box that
+        // thin the stroke's own width reaches outside it.
+        if panel.w < 1.0 || panel.h < 1.0 {
+            return;
+        }
+        self.palette.push_surface(
+            f,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            l.pad * 1.2,
+            Surface::Panel,
+        );
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let line_h = text::line_height(l.font, FontWeightHint::Regular);
@@ -1396,7 +1519,7 @@ impl Klotski {
                 text: "Puzzle Solved!",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: GREEN,
+                color: self.colours.green,
             },
             Rect::new(panel.x, top, panel.w, title_h),
         );
@@ -1407,7 +1530,7 @@ impl Klotski {
                 text: &tally,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             Rect::new(panel.x, top + title_h, panel.w, line_h),
         );
@@ -1428,17 +1551,16 @@ impl Klotski {
         let by = top + title_h + line_h;
         for (i, (target, name)) in choices.into_iter().enumerate() {
             let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
-            fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
             let size = (r.h * 0.4).clamp(7.0, l.font);
-            label_centred(
+            // The next puzzle is the answer the panel offers first.
+            self.button(
                 f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: TEXT_COLOR,
-                },
                 r,
+                name,
+                size,
+                target == Target::Next,
+                true,
+                self.colours.panel,
             );
             f.hit(target, r);
         }
@@ -1694,6 +1816,11 @@ pub fn handle_event(game: &mut Klotski, event: &Event) -> EventResult {
 }
 
 impl App for Klotski {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Klotski".to_string()
     }
@@ -1766,6 +1893,294 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every look in `p`'s colours: the opening position, a block picked up
+    /// (its halo drawn), a puzzle solved under its panel, and a cramped
+    /// window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Klotski)> {
+        let mut picked = game();
+        probe::key(&mut picked, &probe::press(Key::Enter));
+        assert!(picked.selected().is_some(), "the fixture picked nothing up");
+        let mut solved = one_move_from_winning();
+        let id = solved.big_block().expect("no big block");
+        assert!(
+            solved.move_block(id, Direction::Down),
+            "the winning move was refused"
+        );
+        assert!(solved.is_won(), "the fixture is not solved");
+        let mut cramped = game();
+        cramped.resize(300.0, 420.0);
+        let mut looks = vec![
+            ("opening", game()),
+            ("picked up", picked),
+            ("solved", solved),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's, the toolkit's
+    /// buttons', or one of the two inks written on a block (the operator's
+    /// C-Q16). It drew in its own copy of Catppuccin Mocha, dark on a light
+    /// desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived = vec![INKS.0, INKS.1];
+            for ground in [c.mantle, c.panel] {
+                derived.extend(gamechrome::button_colours(&p, Kind::Plain, ground));
+                derived.extend(gamechrome::button_colours(&p, Kind::Primary, ground));
+            }
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.size_drawn.0, g.size_drawn.1).commands(),
+                    &derived,
+                    &format!("klotski, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`) -- the big block's name
+    /// and the exit's among them. A switched-off button's label is exempt, as
+    /// WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                c.mantle,
+            );
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "klotski: {bad:#?}");
+    }
+
+    /// A light palette whose hues are the dark theme's pastels: a theme a
+    /// user can put together, and the one a hue drawn without the palette's
+    /// ink would vanish on.
+    fn pale_light() -> Palette {
+        let mut p = Palette::for_mode(true);
+        let dark = Palette::for_mode(false);
+        p.blue = dark.blue;
+        p.green = dark.green;
+        p.red = dark.red;
+        p.yellow = dark.yellow;
+        p.peach = dark.peach;
+        p.mauve = dark.mauve;
+        p.teal = dark.teal;
+        p.lavender = dark.lavender;
+        p.sapphire = dark.sapphire;
+        p
+    }
+
+    /// **The board is seen in either theme** (WCAG 1.4.11's 3:1): every kind
+    /// of block on an empty cell, the halo of the block picked up on the
+    /// well it is drawn over, and the exit on the page.
+    #[test]
+    fn the_board_is_seen_in_either_theme() {
+        // The stock light palette's hues are dark already, so on it a hue
+        // the game forgot to ink is still seen. A user's own light theme
+        // may carry a dark theme's pastels -- `pale_light` -- and on that
+        // one only the palette's inks keep the blocks off the cells.
+        for (light, p) in [
+            (false, Palette::for_mode(false)),
+            (true, Palette::for_mode(true)),
+            (true, pale_light()),
+        ] {
+            let c = Colours::of(&p);
+            for kind in [
+                BlockKind::Big,
+                BlockKind::TallRect,
+                BlockKind::WideRect,
+                BlockKind::Small,
+            ] {
+                let ratio = guitk::theme::contrast_ratio(kind.color(&c), c.surface0);
+                assert!(
+                    ratio >= 3.0,
+                    "a {kind:?} block is {ratio:.2}:1 on an empty cell (light: {light})"
+                );
+            }
+            let halo = guitk::theme::contrast_ratio(c.yellow, c.crust);
+            assert!(
+                halo >= 3.0,
+                "the halo is {halo:.2}:1 on the well (light: {light})"
+            );
+            let exit = guitk::theme::contrast_ratio(c.mauve, c.base);
+            assert!(
+                exit >= 3.0,
+                "the exit is {exit:.2}:1 on the page (light: {light})"
+            );
+        }
+    }
+
+    /// **Undo is switched off with nothing to take back**, in the toolkit's
+    /// look, and live once there is a move to undo.
+    #[test]
+    fn undo_is_switched_off_with_nothing_to_take_back() {
+        let face = |g: &Klotski| {
+            let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+            let fills = fill_rects(&f);
+            let buttons: Vec<(Rect, Color)> = fills
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            f.commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text == "Undo" => Some((*x, *y)),
+                    _ => None,
+                })
+                .find_map(|(tx, ty)| {
+                    buttons
+                        .iter()
+                        .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .expect("Undo is on no button")
+        };
+        let mut g = game();
+        let paint = |disabled| {
+            guitk::button::paint(
+                &g.palette,
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                g.colours.mantle,
+            )
+            .lower
+        };
+        let (live, off) = (paint(false), paint(true));
+        assert_eq!(face(&g), off, "Undo looks live with nothing to take back");
+        let id = g.block_at(3, 1).expect("no block at (3,1)");
+        assert!(
+            g.move_block(id, Direction::Down),
+            "the fixture could not move"
+        );
+        assert_eq!(face(&g), live, "Undo looks off with a move to take back");
+    }
+
+    /// **The win panel has a ground of its own** over the scrim, the
+    /// toolkit's panel, in either look; and **the next puzzle is the answer
+    /// it offers first**, the toolkit's primary button.
+    #[test]
+    fn the_win_panel_is_grounded_and_offers_the_next_puzzle_first() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let (_, g) = every_look(&p)
+                .into_iter()
+                .find(|(what, _)| *what == "solved")
+                .expect("no solved look");
+            let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+            let fills = fill_rects(&f);
+            let panel = g.layout().win_panel();
+            let scrim = fills
+                .iter()
+                .position(|(r, c)| r.w >= g.size_drawn.0 - 0.01 && *c == Chrome::of(&p).scrim)
+                .expect("no scrim");
+            assert!(
+                fills.iter().skip(scrim + 1).any(|(r, c)| {
+                    *c == p.painted(Surface::Panel)
+                        && (r.x - panel.x).abs() < 0.01
+                        && (r.y - panel.y).abs() < 0.01
+                        && (r.w - panel.w).abs() < 0.01
+                        && (r.h - panel.h).abs() < 0.01
+                }),
+                "the win panel has no ground of its own (light: {light}, cards: {cards})"
+            );
+            let c = Colours::of(&p);
+            let primary = guitk::button::paint(&p, Kind::Primary, State::default(), c.panel).lower;
+            // A toolkit button is its face and then the gloss on its upper
+            // half: the same box, half as tall.
+            let buttons: Vec<(Rect, Color)> = fills
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            let next = f
+                .commands()
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, x, y, .. } if text == "Next" => Some((*x, *y)),
+                    _ => None,
+                })
+                .filter(|(x, y)| panel.contains(*x + 1.0, *y + 1.0))
+                .find_map(|(x, y)| {
+                    buttons
+                        .iter()
+                        .find(|(r, _)| r.contains(x + 1.0, y + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .expect("the panel offers no Next");
+            assert_eq!(
+                next, primary,
+                "Next is not offered first (light: {light}, cards: {cards})"
+            );
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::HashSet;
@@ -2973,9 +3388,26 @@ mod tests {
         // box's *width* may end half the slack past the box's right edge. What
         // has to be true is not "the limit is the box's width" but "the run
         // ends where the box does", so that is what is asserted now.
+        //
+        // The buttons were what it read, and they are the toolkit's now: a
+        // toolkit button places its own label, and stops it at its own
+        // padding (`gamechrome`'s tests hold that). The runs this file still
+        // centres are the exit's name and the big block's, so those are the
+        // ones held to their boxes.
         let g = game();
         let l = Layout::new(SIZE.0, SIZE.1);
-        let rects = l.button_rects();
+        let big = g
+            .blocks()
+            .iter()
+            .find(|b| b.kind == BlockKind::Big)
+            .expect("no big block");
+        let boxes = [
+            ("EXIT", l.exit),
+            (
+                BlockKind::Big.label(),
+                l.block_rect(BlockKind::Big, big.row, big.col),
+            ),
+        ];
         let mut checked = 0;
         for cmd in g.frame(SIZE.0, SIZE.1).commands() {
             let RenderCommand::Text {
@@ -2984,7 +3416,7 @@ mod tests {
             else {
                 continue;
             };
-            let Some(i) = BUTTONS.iter().position(|(_, n)| *n == text.as_str()) else {
+            let Some((_, r)) = boxes.iter().find(|(n, _)| *n == text.as_str()) else {
                 continue;
             };
             checked += 1;
@@ -2992,23 +3424,22 @@ mod tests {
                 unreachable!("push_text always sets a limit");
             };
             assert!(
-                (x + max - rects[i].right()).abs() < 0.01,
+                (x + max - r.right()).abs() < 0.01,
                 "the \"{text}\" label starts at {x} with {max} points of room, so \
-                 it may reach {}, in a button running to {}",
+                 it may reach {}, in a box running to {}",
                 x + max,
-                rects[i].right()
+                r.right()
             );
             assert!(
-                *x >= rects[i].x - 0.01,
-                "the \"{text}\" label starts at {x}, left of its button's edge at \
-                 {}",
-                rects[i].x
+                *x >= r.x - 0.01,
+                "the \"{text}\" label starts at {x}, left of its box's edge at {}",
+                r.x
             );
         }
         assert_eq!(
             checked,
-            BUTTONS.len(),
-            "not every button label was drawn, so this proves less than it looks"
+            boxes.len(),
+            "not every centred label was drawn, so this proves less than it looks"
         );
     }
 

@@ -6,16 +6,29 @@ edition = "2024"
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
-# The salted, stretched master-password derivation, shared with
-# `apps/lockscreen` and `gui/credentials` rather than written a fourth time.
-# This crate previously checked the master password against a 64-bit djb2
-# hash, which is not a password derivation at all: one pass, no salt, no cost,
-# and a 64-bit output that any password colliding with the owner's opens the
-# vault. See `pwkdf`'s module doc and `design-decisions.md` §466.
-pwkdf = { path = "../../pwkdf" }
+# The vault's cipher and its key derivation: XChaCha20-Poly1305 and Argon2id,
+# vendored from RustCrypto (design-decisions.md §539, §1218). This crate
+# checked its master password against pwkdf's verifier until 2026-09-27, and
+# kept nothing on disk to check it against.
+seal = { path = "../../rustcrypto/seal" }
+# The vault's contents are tab-separated records, escaped the way every
+# program's record files are.
+textfmt = { path = "../../textfmt" }
+# A fingerprint of the contents, to save exactly when they change.
+sha2 = { path = "../../sha2" }
+# Where the vault is kept: beside every other program's settings and data.
+settingsfile = { path = "../../gui/settingsfile" }
+# The vault written whole or not at all.
+safeio = { path = "../safeio" }
+# A path shown by its bytes, never a lossy decode.
+pathtext = { path = "../pathtext" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# Scratch folders for the vault file, so no test reads or writes a real one.
+scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]
 workspace = true

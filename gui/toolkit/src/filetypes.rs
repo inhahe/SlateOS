@@ -31,114 +31,6 @@ pub enum FileCategory {
 }
 
 // ---------------------------------------------------------------------------
-// FileExtension
-// ---------------------------------------------------------------------------
-
-/// Every file extension the OS recognises out of the box.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FileExtension {
-    // OS-specific
-    Nx,
-    Dso,
-    Slib,
-    Pkg,
-
-    // Documents
-    Txt,
-    Md,
-    Pdf,
-    Doc,
-    Docx,
-    Odt,
-    Rtf,
-    Csv,
-    Tsv,
-    Json,
-    Yaml,
-    Toml,
-    Xml,
-    Html,
-
-    // Spreadsheet / presentation
-    Xls,
-    Xlsx,
-    Ods,
-    Ppt,
-    Pptx,
-    Odp,
-
-    // Images
-    Png,
-    Jpg,
-    Gif,
-    Bmp,
-    Svg,
-    Ico,
-    Webp,
-    Tiff,
-
-    // Audio
-    Mp3,
-    Wav,
-    Flac,
-    Ogg,
-    Aac,
-    Wma,
-    M4a,
-
-    // Video
-    Mp4,
-    Mkv,
-    Avi,
-    Mov,
-    Wmv,
-    Webm,
-    Flv,
-
-    // Code
-    Rs,
-    Py,
-    C,
-    Cpp,
-    H,
-    Hpp,
-    Js,
-    Ts,
-    Java,
-    Go,
-    Rb,
-    Sh,
-    Sql,
-    Css,
-    Scss,
-
-    Kt,
-    Cs,
-
-    // Archives
-    Zip,
-    TarGz,
-    TarBz2,
-    TarXz,
-    SevenZ,
-    Rar,
-
-    // Config / log
-    Ini,
-    Conf,
-    Cfg,
-    Env,
-    Log,
-
-    // Disk images / other
-    Iso,
-    Img,
-
-    // Catch-all
-    Unknown,
-}
-
-// ---------------------------------------------------------------------------
 // FileTypeInfo
 // ---------------------------------------------------------------------------
 
@@ -622,6 +514,38 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         is_text: false,
         is_executable: false,
     },
+    // AVIF, and the HEIF family it is built on: pictures in an ISO Base Media
+    // container, the same `ftyp` box an MP4 opens with. `imagecodec` decodes
+    // AVIF (stills, grids and animated sequences, design-decisions §1333);
+    // nothing here decodes HEIC yet, but a HEIC is still a picture, and
+    // calling it one is what lets whatever opens it say so honestly.
+    FileTypeInfo {
+        extension: ".avif",
+        description: "AVIF Image",
+        mime_type: "image/avif",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".heic",
+        description: "HEIC Image",
+        mime_type: "image/heic",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".heif",
+        description: "HEIF Image",
+        mime_type: "image/heif",
+        category: FileCategory::Image,
+        icon_glyph: '\u{1F5BC}',
+        is_text: false,
+        is_executable: false,
+    },
     FileTypeInfo {
         extension: ".tiff",
         description: "TIFF Image",
@@ -699,6 +623,17 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         extension: ".m4a",
         description: "MPEG-4 Audio",
         mime_type: "audio/mp4",
+        category: FileCategory::Audio,
+        icon_glyph: '\u{266A}',
+        is_text: false,
+        is_executable: false,
+    },
+    // Ogg's audio-only extension (RFC 5334): the same container as `.ogg`,
+    // named for audio whatever the codec inside -- Vorbis, Opus, FLAC.
+    FileTypeInfo {
+        extension: ".oga",
+        description: "Ogg Audio",
+        mime_type: "audio/ogg",
         category: FileCategory::Audio,
         icon_glyph: '\u{266A}',
         is_text: false,
@@ -1214,6 +1149,217 @@ const FILE_TYPE_TABLE: &[FileTypeInfo] = &[
         is_text: false,
         is_executable: false,
     },
+    // Carried from the kernel's `fs::mime` and `fs::filetype` when the
+    // program lists became one (gui/programs/INVENTORY.md section 5).
+    // The ones that are waiting on a decision are not here; see the test
+    // `the_kernels_types_this_table_waits_to_decide_are_still_absent`.
+    FileTypeInfo {
+        extension: ".bat",
+        description: "Windows Batch File",
+        mime_type: "text/x-msdos-batch",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".cmd",
+        description: "Windows Command Script",
+        mime_type: "text/x-msdos-batch",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".cc",
+        description: "C++ Source File",
+        mime_type: "text/x-c++",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".cxx",
+        description: "C++ Source File",
+        mime_type: "text/x-c++",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".hxx",
+        description: "C++ Header File",
+        mime_type: "text/x-c++",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".mjs",
+        description: "JavaScript Module",
+        mime_type: "text/javascript",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".psm1",
+        description: "PowerShell Module",
+        mime_type: "application/x-powershell",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".pyw",
+        description: "Python Source File",
+        mime_type: "text/x-python",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".diff",
+        description: "Patch File",
+        mime_type: "text/x-diff",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".patch",
+        description: "Patch File",
+        mime_type: "text/x-diff",
+        category: FileCategory::Code,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".htm",
+        description: "HTML Document",
+        mime_type: "text/html",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F310}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".markdown",
+        description: "Markdown Document",
+        mime_type: "text/markdown",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F4C4}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".text",
+        description: "Plain Text",
+        mime_type: "text/plain",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F4C4}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".xsd",
+        description: "XML Schema",
+        mime_type: "application/xml",
+        category: FileCategory::Data,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".xsl",
+        description: "XSL Stylesheet",
+        mime_type: "application/xml",
+        category: FileCategory::Data,
+        icon_glyph: '\u{007B}',
+        is_text: true,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".cpio",
+        description: "CPIO Archive",
+        mime_type: "application/x-cpio",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".gzip",
+        description: "Gzip Compressed File",
+        mime_type: "application/gzip",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".zstd",
+        description: "Zstandard Compressed File",
+        mime_type: "application/zstd",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".jar",
+        description: "Java Archive",
+        mime_type: "application/java-archive",
+        category: FileCategory::Archive,
+        icon_glyph: '\u{1F4E6}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".a",
+        description: "Static Library",
+        mime_type: "application/x-archive",
+        category: FileCategory::Library,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".lib",
+        description: "Static Library",
+        mime_type: "application/x-archive",
+        category: FileCategory::Library,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".o",
+        description: "Object File",
+        mime_type: "application/x-object",
+        category: FileCategory::Library,
+        icon_glyph: '\u{2699}',
+        is_text: false,
+        is_executable: false,
+    },
+    FileTypeInfo {
+        extension: ".epub",
+        description: "EPUB E-book",
+        mime_type: "application/epub+zip",
+        category: FileCategory::Document,
+        icon_glyph: '\u{1F4C4}',
+        is_text: false,
+        is_executable: false,
+    },
 ];
 
 /// Sentinel returned when no recognised extension matches.
@@ -1233,408 +1379,254 @@ const UNKNOWN_FILE_TYPE: FileTypeInfo = FileTypeInfo {
 
 /// A magic-byte signature and the file type it identifies.
 struct MagicSignature {
-    /// Byte pattern that must appear at the start of the file.
+    /// Byte pattern that must appear at `offset`.
     bytes: &'static [u8],
     /// Offset from the start of the file where the pattern must appear.
     offset: usize,
-    /// The extension this pattern maps to.
-    extension: FileExtension,
+    /// The row of [`FILE_TYPE_TABLE`] it identifies, by extension.
+    ///
+    /// An extension string rather than an enum: the enum that stood here
+    /// lagged the table (a dozen rows had no variant), so a signature could
+    /// only name what the enum happened to hold. The test
+    /// `every_signature_names_a_row_of_the_table` holds each one to the table.
+    extension: &'static str,
 }
 
-/// Known magic-byte patterns, checked in order (longest / most specific
-/// first where ambiguity exists).
+/// Known magic-byte patterns, checked in order: the more specific first where
+/// two could match one file.
 const MAGIC_TABLE: &[MagicSignature] = &[
     // Slate OS native formats
     MagicSignature {
         bytes: b"\x4fNXE",
         offset: 0,
-        extension: FileExtension::Nx,
+        extension: ".nx",
     },
     MagicSignature {
         bytes: b"\x4fDSO",
         offset: 0,
-        extension: FileExtension::Dso,
+        extension: ".dso",
+    },
+    // ELF: this system has a POSIX layer, so an ELF binary is one of its own,
+    // and the table has held `.elf` as an executable since 2026-09-16. This
+    // entry answered "unknown" until 2026-09-27, from before that decision.
+    MagicSignature {
+        bytes: b"\x7fELF",
+        offset: 0,
+        extension: ".elf",
     },
     // Images
     MagicSignature {
         bytes: b"\x89PNG\r\n\x1a\n",
         offset: 0,
-        extension: FileExtension::Png,
+        extension: ".png",
     },
     MagicSignature {
         bytes: b"\xff\xd8\xff",
         offset: 0,
-        extension: FileExtension::Jpg,
+        extension: ".jpg",
     },
     MagicSignature {
         bytes: b"GIF89a",
         offset: 0,
-        extension: FileExtension::Gif,
+        extension: ".gif",
     },
     MagicSignature {
         bytes: b"GIF87a",
         offset: 0,
-        extension: FileExtension::Gif,
+        extension: ".gif",
     },
     MagicSignature {
         bytes: b"BM",
         offset: 0,
-        extension: FileExtension::Bmp,
+        extension: ".bmp",
+    },
+    // TIFF, in either byte order.
+    MagicSignature {
+        bytes: b"II*\x00",
+        offset: 0,
+        extension: ".tiff",
     },
     MagicSignature {
-        bytes: b"RIFF",
+        bytes: b"MM\x00*",
         offset: 0,
-        extension: FileExtension::Wav, // also AVI; disambiguated later
+        extension: ".tiff",
+    },
+    // RIFF containers, told apart by the form type at offset 8. A bare `RIFF`
+    // at 0 stood here until 2026-09-27, ahead of `WEBP` and mapped to WAV, so
+    // every WebP and every AVI file was reported as WAV audio.
+    MagicSignature {
+        bytes: b"WAVE",
+        offset: 8,
+        extension: ".wav",
     },
     MagicSignature {
         bytes: b"WEBP",
         offset: 8,
-        extension: FileExtension::Webp,
+        extension: ".webp",
+    },
+    MagicSignature {
+        bytes: b"AVI ",
+        offset: 8,
+        extension: ".avi",
     },
     // Documents
     MagicSignature {
         bytes: b"%PDF",
         offset: 0,
-        extension: FileExtension::Pdf,
+        extension: ".pdf",
     },
-    // Archives — order matters (ZIP before PKG because PKG uses the same
-    // PK header — the caller can check the extension to differentiate).
+    // Archives. A package (`.pkg`) is a ZIP too; the caller tells them apart by
+    // extension.
     MagicSignature {
         bytes: b"PK\x03\x04",
         offset: 0,
-        extension: FileExtension::Zip,
+        extension: ".zip",
     },
     MagicSignature {
         bytes: b"\x1f\x8b",
         offset: 0,
-        extension: FileExtension::TarGz,
+        extension: ".tar.gz",
     },
     MagicSignature {
         bytes: b"BZh",
         offset: 0,
-        extension: FileExtension::TarBz2,
+        extension: ".tar.bz2",
     },
     MagicSignature {
         bytes: b"\xfd7zXZ\x00",
         offset: 0,
-        extension: FileExtension::TarXz,
+        extension: ".tar.xz",
     },
     MagicSignature {
         bytes: b"7z\xbc\xaf\x27\x1c",
         offset: 0,
-        extension: FileExtension::SevenZ,
+        extension: ".7z",
     },
     MagicSignature {
         bytes: b"Rar!\x1a\x07",
         offset: 0,
-        extension: FileExtension::Rar,
+        extension: ".rar",
+    },
+    MagicSignature {
+        bytes: b"\x28\xb5\x2f\xfd",
+        offset: 0,
+        extension: ".zst",
+    },
+    MagicSignature {
+        bytes: b"\x04\x22\x4d\x18",
+        offset: 0,
+        extension: ".lz4",
+    },
+    // POSIX tar: `ustar` in the header block, after the 257 bytes of name,
+    // mode and sizes.
+    MagicSignature {
+        bytes: b"ustar",
+        offset: 257,
+        extension: ".tar",
+    },
+    // cpio, in its three ASCII header forms (new, new with checksum, old).
+    MagicSignature {
+        bytes: b"070701",
+        offset: 0,
+        extension: ".cpio",
+    },
+    MagicSignature {
+        bytes: b"070702",
+        offset: 0,
+        extension: ".cpio",
+    },
+    MagicSignature {
+        bytes: b"070707",
+        offset: 0,
+        extension: ".cpio",
+    },
+    // An `ar` archive: a static library.
+    MagicSignature {
+        bytes: b"!<arch>\n",
+        offset: 0,
+        extension: ".a",
     },
     // Audio / Video
     MagicSignature {
         bytes: b"fLaC",
         offset: 0,
-        extension: FileExtension::Flac,
+        extension: ".flac",
     },
     MagicSignature {
         bytes: b"OggS",
         offset: 0,
-        extension: FileExtension::Ogg,
+        extension: ".ogg",
     },
     MagicSignature {
         bytes: b"ID3",
         offset: 0,
-        extension: FileExtension::Mp3,
+        extension: ".mp3",
     },
     MagicSignature {
         bytes: b"\xff\xfb",
         offset: 0,
-        extension: FileExtension::Mp3,
+        extension: ".mp3",
     },
-    // ISO
-    // The "CD001" identifier at offset 0x8001 (sector 16) is canonical,
-    // but we also accept it at the start of a raw dump.
+    MagicSignature {
+        bytes: b"MThd",
+        offset: 0,
+        extension: ".mid",
+    },
+    // ISO: the "CD001" identifier at offset 0x8001 (sector 16).
     MagicSignature {
         bytes: b"CD001",
         offset: 0x8001,
-        extension: FileExtension::Iso,
+        extension: ".iso",
     },
-    // Video containers — ftyp box means ISO Base Media (MP4/MOV/M4A)
+    // ISO Base Media pictures, told apart from video by the `ftyp` box's
+    // major brand, which follows the box type. Above the generic `ftyp`
+    // entry because the table answers with its first match: without these,
+    // every AVIF and HEIC photo was reported as an MP4 video. A sequence
+    // (`avis`) is still an AVIF file -- an animated picture, not a video.
+    //
+    // Only the major brand is read. A file whose major brand is the generic
+    // `mif1` but which lists `avif` among its compatible brands is reported
+    // as HEIF here -- still a picture, which is the error that matters;
+    // `imagecodec::avif::is_avif` reads the whole box and decodes it anyway.
+    MagicSignature {
+        bytes: b"ftypavif",
+        offset: 4,
+        extension: ".avif",
+    },
+    MagicSignature {
+        bytes: b"ftypavis",
+        offset: 4,
+        extension: ".avif",
+    },
+    MagicSignature {
+        bytes: b"ftypheic",
+        offset: 4,
+        extension: ".heic",
+    },
+    MagicSignature {
+        bytes: b"ftypheix",
+        offset: 4,
+        extension: ".heic",
+    },
+    MagicSignature {
+        bytes: b"ftypmif1",
+        offset: 4,
+        extension: ".heif",
+    },
+    // ISO Base Media (MP4, MOV, M4A): an `ftyp` box.
     MagicSignature {
         bytes: b"ftyp",
         offset: 4,
-        extension: FileExtension::Mp4,
+        extension: ".mp4",
     },
-    // Matroska / WebM (EBML header)
+    // Matroska, and WebM, which is Matroska with another document type -- a
+    // fixed-offset pattern cannot tell the two apart, so both read as `.mkv`.
     MagicSignature {
         bytes: b"\x1a\x45\xdf\xa3",
         offset: 0,
-        extension: FileExtension::Mkv,
-    },
-    // ELF — not an Slate OS format but useful for detection
-    MagicSignature {
-        bytes: b"\x7fELF",
-        offset: 0,
-        extension: FileExtension::Unknown, // foreign executable
+        extension: ".mkv",
     },
 ];
-
-// ---------------------------------------------------------------------------
-// Extension string -> FileExtension enum mapping (case-insensitive)
-// ---------------------------------------------------------------------------
-
-/// Convert a dotted extension string (e.g. `".rs"`, `"rs"`, `".RS"`) to the
-/// enum variant.  Returns [`FileExtension::Unknown`] on no match.
-pub fn parse_extension(raw: &str) -> FileExtension {
-    // Strip optional leading dot and lowercase.
-    let ext = raw.strip_prefix('.').unwrap_or(raw);
-    // We avoid heap allocation by matching against known literals directly.
-    // For compound extensions (.tar.gz, .tar.bz2, .tar.xz) we check the
-    // full suffix first.
-    match_extension_ascii_lower(ext)
-}
-
-/// ASCII-case-insensitive matching.  The caller has already stripped the
-/// leading dot.
-fn match_extension_ascii_lower(ext: &str) -> FileExtension {
-    // Compound extensions first (longest match wins).
-    if eq_ignore_ascii(ext, "tar.gz") || eq_ignore_ascii(ext, "tgz") {
-        return FileExtension::TarGz;
-    }
-    if eq_ignore_ascii(ext, "tar.bz2") {
-        return FileExtension::TarBz2;
-    }
-    if eq_ignore_ascii(ext, "tar.xz") {
-        return FileExtension::TarXz;
-    }
-
-    match ext.len() {
-        1 => match_ext_1(ext),
-        2 => match_ext_2(ext),
-        3 => match_ext_3(ext),
-        4 => match_ext_4(ext),
-        _ => match_ext_long(ext),
-    }
-}
-
-fn eq_ignore_ascii(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
-}
-
-fn match_ext_1(ext: &str) -> FileExtension {
-    if eq_ignore_ascii(ext, "c") {
-        FileExtension::C
-    } else if eq_ignore_ascii(ext, "h") {
-        FileExtension::H
-    } else if eq_ignore_ascii(ext, "r") {
-        FileExtension::Rb // .r is R lang, but handle via length bucket
-    } else {
-        FileExtension::Unknown
-    }
-}
-
-fn match_ext_2(ext: &str) -> FileExtension {
-    if eq_ignore_ascii(ext, "nx") {
-        FileExtension::Nx
-    } else if eq_ignore_ascii(ext, "md") {
-        FileExtension::Md
-    } else if eq_ignore_ascii(ext, "py") {
-        FileExtension::Py
-    } else if eq_ignore_ascii(ext, "rs") {
-        FileExtension::Rs
-    } else if eq_ignore_ascii(ext, "js") {
-        FileExtension::Js
-    } else if eq_ignore_ascii(ext, "ts") {
-        FileExtension::Ts
-    } else if eq_ignore_ascii(ext, "go") {
-        FileExtension::Go
-    } else if eq_ignore_ascii(ext, "rb") {
-        FileExtension::Rb
-    } else if eq_ignore_ascii(ext, "sh") {
-        FileExtension::Sh
-    } else if eq_ignore_ascii(ext, "gz") {
-        FileExtension::TarGz
-    } else if eq_ignore_ascii(ext, "xz") {
-        FileExtension::TarXz
-    } else if eq_ignore_ascii(ext, "7z") {
-        FileExtension::SevenZ
-    } else if eq_ignore_ascii(ext, "kt") {
-        FileExtension::Kt
-    } else if eq_ignore_ascii(ext, "cs") {
-        FileExtension::Cs
-    } else {
-        FileExtension::Unknown
-    }
-}
-
-fn match_ext_3(ext: &str) -> FileExtension {
-    if eq_ignore_ascii(ext, "dso") {
-        FileExtension::Dso
-    } else if eq_ignore_ascii(ext, "pkg") {
-        FileExtension::Pkg
-    } else if eq_ignore_ascii(ext, "txt") {
-        FileExtension::Txt
-    } else if eq_ignore_ascii(ext, "pdf") {
-        FileExtension::Pdf
-    } else if eq_ignore_ascii(ext, "doc") {
-        FileExtension::Doc
-    } else if eq_ignore_ascii(ext, "odt") {
-        FileExtension::Odt
-    } else if eq_ignore_ascii(ext, "rtf") {
-        FileExtension::Rtf
-    } else if eq_ignore_ascii(ext, "csv") {
-        FileExtension::Csv
-    } else if eq_ignore_ascii(ext, "tsv") {
-        FileExtension::Tsv
-    } else if eq_ignore_ascii(ext, "xml") {
-        FileExtension::Xml
-    } else if eq_ignore_ascii(ext, "png") {
-        FileExtension::Png
-    } else if eq_ignore_ascii(ext, "jpg") {
-        FileExtension::Jpg
-    } else if eq_ignore_ascii(ext, "gif") {
-        FileExtension::Gif
-    } else if eq_ignore_ascii(ext, "bmp") {
-        FileExtension::Bmp
-    } else if eq_ignore_ascii(ext, "svg") {
-        FileExtension::Svg
-    } else if eq_ignore_ascii(ext, "ico") {
-        FileExtension::Ico
-    } else if eq_ignore_ascii(ext, "mp3") {
-        FileExtension::Mp3
-    } else if eq_ignore_ascii(ext, "wav") {
-        FileExtension::Wav
-    } else if eq_ignore_ascii(ext, "ogg") {
-        FileExtension::Ogg
-    } else if eq_ignore_ascii(ext, "aac") {
-        FileExtension::Aac
-    } else if eq_ignore_ascii(ext, "wma") {
-        FileExtension::Wma
-    } else if eq_ignore_ascii(ext, "m4a") {
-        FileExtension::M4a
-    } else if eq_ignore_ascii(ext, "mp4") {
-        FileExtension::Mp4
-    } else if eq_ignore_ascii(ext, "mkv") {
-        FileExtension::Mkv
-    } else if eq_ignore_ascii(ext, "avi") {
-        FileExtension::Avi
-    } else if eq_ignore_ascii(ext, "mov") {
-        FileExtension::Mov
-    } else if eq_ignore_ascii(ext, "wmv") {
-        FileExtension::Wmv
-    } else if eq_ignore_ascii(ext, "flv") {
-        FileExtension::Flv
-    } else if eq_ignore_ascii(ext, "cpp") {
-        FileExtension::Cpp
-    } else if eq_ignore_ascii(ext, "hpp") {
-        FileExtension::Hpp
-    } else if eq_ignore_ascii(ext, "sql") {
-        FileExtension::Sql
-    } else if eq_ignore_ascii(ext, "css") {
-        FileExtension::Css
-    } else if eq_ignore_ascii(ext, "zip") {
-        FileExtension::Zip
-    } else if eq_ignore_ascii(ext, "rar") {
-        FileExtension::Rar
-    } else if eq_ignore_ascii(ext, "tar") {
-        FileExtension::Zip // tar itself; mapped to archive
-    } else if eq_ignore_ascii(ext, "ini") {
-        FileExtension::Ini
-    } else if eq_ignore_ascii(ext, "cfg") {
-        FileExtension::Cfg
-    } else if eq_ignore_ascii(ext, "env") {
-        FileExtension::Env
-    } else if eq_ignore_ascii(ext, "log") {
-        FileExtension::Log
-    } else if eq_ignore_ascii(ext, "iso") {
-        FileExtension::Iso
-    } else if eq_ignore_ascii(ext, "img") {
-        FileExtension::Img
-    } else if eq_ignore_ascii(ext, "xls") {
-        FileExtension::Xls
-    } else if eq_ignore_ascii(ext, "ods") {
-        FileExtension::Ods
-    } else if eq_ignore_ascii(ext, "ppt") {
-        FileExtension::Ppt
-    } else if eq_ignore_ascii(ext, "odp") {
-        FileExtension::Odp
-    } else if eq_ignore_ascii(ext, "ttf")
-        || eq_ignore_ascii(ext, "otf")
-        || eq_ignore_ascii(ext, "lua")
-        || eq_ignore_ascii(ext, "php")
-        || eq_ignore_ascii(ext, "zig")
-        || eq_ignore_ascii(ext, "ada")
-        || eq_ignore_ascii(ext, "zst")
-    {
-        // Recognized 3-char extensions that fall back to Unknown because the
-        // corresponding enum variants are matched by match_ext_long instead.
-        FileExtension::Unknown
-    } else if eq_ignore_ascii(ext, "tif") {
-        FileExtension::Tiff
-    } else if eq_ignore_ascii(ext, "mid") {
-        FileExtension::Mp3 // midi, close enough category
-    } else if eq_ignore_ascii(ext, "bz2") {
-        FileExtension::TarBz2
-    } else if eq_ignore_ascii(ext, "tgz") {
-        FileExtension::TarGz
-    } else {
-        FileExtension::Unknown
-    }
-}
-
-fn match_ext_4(ext: &str) -> FileExtension {
-    if eq_ignore_ascii(ext, "slib") {
-        FileExtension::Slib
-    } else if eq_ignore_ascii(ext, "docx") {
-        FileExtension::Docx
-    } else if eq_ignore_ascii(ext, "json") {
-        FileExtension::Json
-    } else if eq_ignore_ascii(ext, "yaml") {
-        FileExtension::Yaml
-    } else if eq_ignore_ascii(ext, "toml") {
-        FileExtension::Toml
-    } else if eq_ignore_ascii(ext, "html") {
-        FileExtension::Html
-    } else if eq_ignore_ascii(ext, "jpeg") {
-        FileExtension::Jpg
-    } else if eq_ignore_ascii(ext, "webp") {
-        FileExtension::Webp
-    } else if eq_ignore_ascii(ext, "tiff") {
-        FileExtension::Tiff
-    } else if eq_ignore_ascii(ext, "flac") {
-        FileExtension::Flac
-    } else if eq_ignore_ascii(ext, "webm") {
-        FileExtension::Webm
-    } else if eq_ignore_ascii(ext, "java") {
-        FileExtension::Java
-    } else if eq_ignore_ascii(ext, "scss") {
-        FileExtension::Scss
-    } else if eq_ignore_ascii(ext, "conf") {
-        FileExtension::Conf
-    } else if eq_ignore_ascii(ext, "xlsx") {
-        FileExtension::Xlsx
-    } else if eq_ignore_ascii(ext, "pptx") {
-        FileExtension::Pptx
-    } else if eq_ignore_ascii(ext, "opus") {
-        FileExtension::Ogg // opus mapped to ogg category
-    } else if eq_ignore_ascii(ext, "midi") {
-        FileExtension::Mp3 // midi category
-    } else {
-        FileExtension::Unknown
-    }
-}
-
-#[allow(clippy::if_same_then_else)] // Per-extension arms intentionally identical: each documents a recognized extension that currently maps to Unknown for lack of an enum variant. Future variants slot in here without touching call sites.
-fn match_ext_long(ext: &str) -> FileExtension {
-    if eq_ignore_ascii(ext, "swift") {
-        FileExtension::Unknown // table has it but no enum variant needed
-    } else if eq_ignore_ascii(ext, "woff2") {
-        FileExtension::Unknown
-    } else if eq_ignore_ascii(ext, "woff") {
-        FileExtension::Unknown
-    } else {
-        FileExtension::Unknown
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Public query API
@@ -1671,15 +1663,12 @@ pub fn detect_from_magic(header: &[u8]) -> Option<&'static FileTypeInfo> {
         if header.get(sig.offset..end) != Some(sig.bytes) {
             continue;
         }
-        // Translate the extension enum to the table entry.
-        let ext_str = extension_enum_to_str(sig.extension);
-        if ext_str.is_empty() {
-            // Unknown / foreign binary — return None rather than the generic
-            // unknown entry so callers can distinguish "no match" from
-            // "matched but unrecognised format".
-            return None;
-        }
-        return Some(detect_from_extension(ext_str));
+        let info = detect_from_extension(sig.extension);
+        // A signature naming no row would answer with the "unknown" sentinel,
+        // which a caller could not tell from "no match".
+        // `every_signature_names_a_row_of_the_table` makes this unreachable;
+        // it stays so a mistake reads as "no match", not as a wrong type.
+        return (info.category != FileCategory::Unknown).then_some(info);
     }
     None
 }
@@ -1740,100 +1729,6 @@ pub fn mime_for_extension(ext: &str) -> &'static str {
 
 /// Icon glyph for a directory (not a file extension, but commonly needed).
 pub const DIR_ICON_GLYPH: char = '\u{1F4C1}'; // open file folder
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Map a [`FileExtension`] enum variant back to its canonical dotted
-/// extension string.  Returns `""` for [`FileExtension::Unknown`].
-fn extension_enum_to_str(ext: FileExtension) -> &'static str {
-    match ext {
-        FileExtension::Nx => ".nx",
-        FileExtension::Dso => ".dso",
-        FileExtension::Slib => ".slib",
-        FileExtension::Pkg => ".pkg",
-        FileExtension::Txt => ".txt",
-        FileExtension::Md => ".md",
-        FileExtension::Pdf => ".pdf",
-        FileExtension::Doc => ".doc",
-        FileExtension::Docx => ".docx",
-        FileExtension::Odt => ".odt",
-        FileExtension::Rtf => ".rtf",
-        FileExtension::Csv => ".csv",
-        FileExtension::Tsv => ".tsv",
-        FileExtension::Json => ".json",
-        FileExtension::Yaml => ".yaml",
-        FileExtension::Toml => ".toml",
-        FileExtension::Xml => ".xml",
-        FileExtension::Html => ".html",
-        FileExtension::Xls => ".xls",
-        FileExtension::Xlsx => ".xlsx",
-        FileExtension::Ods => ".ods",
-        FileExtension::Ppt => ".ppt",
-        FileExtension::Pptx => ".pptx",
-        FileExtension::Odp => ".odp",
-        FileExtension::Png => ".png",
-        FileExtension::Jpg => ".jpg",
-        FileExtension::Gif => ".gif",
-        FileExtension::Bmp => ".bmp",
-        FileExtension::Svg => ".svg",
-        FileExtension::Ico => ".ico",
-        FileExtension::Webp => ".webp",
-        FileExtension::Tiff => ".tiff",
-        FileExtension::Mp3 => ".mp3",
-        FileExtension::Wav => ".wav",
-        FileExtension::Flac => ".flac",
-        FileExtension::Ogg => ".ogg",
-        FileExtension::Aac => ".aac",
-        FileExtension::Wma => ".wma",
-        FileExtension::M4a => ".m4a",
-        FileExtension::Mp4 => ".mp4",
-        FileExtension::Mkv => ".mkv",
-        FileExtension::Avi => ".avi",
-        FileExtension::Mov => ".mov",
-        FileExtension::Wmv => ".wmv",
-        FileExtension::Webm => ".webm",
-        FileExtension::Flv => ".flv",
-        FileExtension::Rs => ".rs",
-        FileExtension::Py => ".py",
-        FileExtension::C => ".c",
-        FileExtension::Cpp => ".cpp",
-        FileExtension::H => ".h",
-        FileExtension::Hpp => ".hpp",
-        FileExtension::Js => ".js",
-        FileExtension::Ts => ".ts",
-        FileExtension::Java => ".java",
-        FileExtension::Go => ".go",
-        FileExtension::Rb => ".rb",
-        FileExtension::Sh => ".sh",
-        FileExtension::Sql => ".sql",
-        FileExtension::Css => ".css",
-        FileExtension::Scss => ".scss",
-        FileExtension::Zip => ".zip",
-        FileExtension::TarGz => ".tar.gz",
-        FileExtension::TarBz2 => ".tar.bz2",
-        FileExtension::TarXz => ".tar.xz",
-        FileExtension::SevenZ => ".7z",
-        FileExtension::Rar => ".rar",
-        FileExtension::Ini => ".ini",
-        FileExtension::Conf => ".conf",
-        FileExtension::Cfg => ".cfg",
-        FileExtension::Env => ".env",
-        FileExtension::Log => ".log",
-        FileExtension::Iso => ".iso",
-        FileExtension::Img => ".img",
-        FileExtension::Kt => ".kt",
-        FileExtension::Cs => ".cs",
-        FileExtension::Unknown => "",
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Additional FileExtension variants used above but not in the original enum
-// ---------------------------------------------------------------------------
-// (Kt and Cs are used in match_ext_2 so they must exist in the enum.  They
-// are already included above.)
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1904,7 +1799,8 @@ mod tests {
     #[test]
     fn detect_image_extensions() {
         for ext in &[
-            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".ico", ".webp", ".tiff", ".avif",
+            ".heic", ".heif",
         ] {
             assert_eq!(
                 detect_from_extension(ext).category,
@@ -1914,9 +1810,24 @@ mod tests {
         }
     }
 
+    /// **An `.oga` is Ogg audio**, as the kernel's table had it
+    /// (`audio/ogg`); it waited on `apps/fileassoc` counting the audio group
+    /// from this table rather than by hand, which lane E's 3275adc99 did.
+    #[test]
+    fn an_oga_is_ogg_audio() {
+        let info = detect_from_extension(".oga");
+        assert_eq!(
+            (info.mime_type, info.category),
+            ("audio/ogg", FileCategory::Audio)
+        );
+        assert_eq!(category_from_extension("oga"), FileCategory::Audio);
+    }
+
     #[test]
     fn detect_audio_extensions() {
-        for ext in &[".mp3", ".wav", ".flac", ".ogg", ".aac", ".wma", ".m4a"] {
+        for ext in &[
+            ".mp3", ".wav", ".flac", ".ogg", ".oga", ".aac", ".wma", ".m4a",
+        ] {
             assert_eq!(
                 detect_from_extension(ext).category,
                 FileCategory::Audio,
@@ -2095,6 +2006,38 @@ mod tests {
         assert_eq!(info.extension, ".mp4");
     }
 
+    /// **A picture in an ISO Base Media box is a picture.** AVIF and HEIC open
+    /// with the same `ftyp` box as an MP4, and the brand after it is what
+    /// says which: every one of these was reported as MP4 video, so a photo
+    /// went to the video player.
+    #[test]
+    fn an_iso_media_picture_is_not_read_as_video() {
+        let ftyp = |brand: &[u8; 4]| {
+            let mut header = b"\x00\x00\x00\x1cftyp".to_vec();
+            header.extend_from_slice(brand);
+            header.extend_from_slice(b"\x00\x00\x00\x00mif1miaf");
+            detect_from_magic(&header).map(|info| (info.extension, info.mime_type, info.category))
+        };
+        let picture = |ext, mime| Some((ext, mime, FileCategory::Image));
+        assert_eq!(ftyp(b"avif"), picture(".avif", "image/avif"));
+        assert_eq!(
+            ftyp(b"avis"),
+            picture(".avif", "image/avif"),
+            "an animated AVIF is a picture"
+        );
+        assert_eq!(ftyp(b"heic"), picture(".heic", "image/heic"));
+        assert_eq!(ftyp(b"heix"), picture(".heic", "image/heic"));
+        assert_eq!(ftyp(b"mif1"), picture(".heif", "image/heif"));
+        // The control: video is still video, whatever its brand.
+        for brand in [b"isom", b"mp42", b"M4V ", b"qt  "] {
+            assert_eq!(
+                ftyp(brand).map(|(ext, _, category)| (ext, category)),
+                Some((".mp4", FileCategory::Video)),
+                "{brand:?}"
+            );
+        }
+    }
+
     #[test]
     fn magic_no_match() {
         let header = b"\x00\x00\x00\x00\x00\x00\x00\x00";
@@ -2107,12 +2050,133 @@ mod tests {
         assert!(detect_from_magic(header).is_none());
     }
 
+    /// An ELF binary is one of this system's own (it has a POSIX layer), and
+    /// the table has held `.elf` since 2026-09-16; the signature said
+    /// "unknown" until 2026-09-27, from before that decision.
     #[test]
-    fn magic_elf_returns_none() {
-        // ELF is a foreign format — detect_from_magic returns None because
-        // the signature maps to FileExtension::Unknown.
+    fn magic_detects_elf() {
         let header = b"\x7fELF\x02\x01\x01\x00";
-        assert!(detect_from_magic(header).is_none());
+        let info = detect_from_magic(header).expect("ELF");
+        assert_eq!(info.extension, ".elf");
+        assert_eq!(info.category, FileCategory::Executable);
+    }
+
+    /// Every signature names a row of the table, so a detection can never
+    /// answer with the "unknown" sentinel or with a row that does not exist.
+    #[test]
+    fn every_signature_names_a_row_of_the_table() {
+        for sig in MAGIC_TABLE {
+            assert!(
+                all().any(|info| info.extension == sig.extension),
+                "a signature names {:?}, which the table does not hold",
+                sig.extension
+            );
+        }
+    }
+
+    /// A RIFF file is told apart by its form type. A bare `RIFF` signature
+    /// stood ahead of `WEBP` and answered WAV, so every WebP picture and every
+    /// AVI video was reported as audio.
+    #[test]
+    fn a_riff_file_is_what_its_form_type_says() {
+        let riff = |form: &[u8; 4]| {
+            let mut header = b"RIFF\x24\x00\x00\x00".to_vec();
+            header.extend_from_slice(form);
+            header.extend_from_slice(b"\x00\x00\x00\x00");
+            detect_from_magic(&header).map(|info| info.extension)
+        };
+        assert_eq!(riff(b"WAVE"), Some(".wav"));
+        assert_eq!(riff(b"WEBP"), Some(".webp"));
+        assert_eq!(riff(b"AVI "), Some(".avi"));
+        assert_eq!(riff(b"XXXX"), None, "an unknown RIFF form is not WAV");
+    }
+
+    /// The signatures carried from the kernel's `fs::mime` when the program
+    /// lists became one (gui/programs/INVENTORY.md section 5).
+    #[test]
+    fn the_kernels_signatures_are_recognised() {
+        let mut tar = vec![0u8; 512];
+        tar[257..262].copy_from_slice(b"ustar");
+        let cases: [(&[u8], &str); 11] = [
+            (b"II*\x00\x08\x00\x00\x00", ".tiff"),
+            (b"MM\x00*\x00\x00\x00\x08", ".tiff"),
+            (b"\x28\xb5\x2f\xfd\x00\x00", ".zst"),
+            (b"\x04\x22\x4d\x18\x00\x00", ".lz4"),
+            (&tar, ".tar"),
+            (b"070701000000", ".cpio"),
+            (b"070702000000", ".cpio"),
+            (b"070707000000", ".cpio"),
+            (b"!<arch>\nfile.o", ".a"),
+            (b"MThd\x00\x00\x00\x06", ".mid"),
+            (b"\x7fELF\x02\x01", ".elf"),
+        ];
+        for (header, want) in cases {
+            assert_eq!(
+                detect_from_magic(header).map(|info| info.extension),
+                Some(want),
+                "{header:?}"
+            );
+        }
+    }
+
+    /// The extensions carried from the kernel's `fs::mime` and `fs::filetype`,
+    /// each with the kernel's type (gui/programs/INVENTORY.md section 5).
+    #[test]
+    fn the_kernels_extensions_are_recognised() {
+        for (ext, mime, category) in [
+            ("bat", "text/x-msdos-batch", FileCategory::Code),
+            ("cmd", "text/x-msdos-batch", FileCategory::Code),
+            ("cc", "text/x-c++", FileCategory::Code),
+            ("cxx", "text/x-c++", FileCategory::Code),
+            ("hxx", "text/x-c++", FileCategory::Code),
+            ("mjs", "text/javascript", FileCategory::Code),
+            ("psm1", "application/x-powershell", FileCategory::Code),
+            ("pyw", "text/x-python", FileCategory::Code),
+            ("diff", "text/x-diff", FileCategory::Code),
+            ("patch", "text/x-diff", FileCategory::Code),
+            ("htm", "text/html", FileCategory::Document),
+            ("markdown", "text/markdown", FileCategory::Document),
+            ("text", "text/plain", FileCategory::Document),
+            ("xsd", "application/xml", FileCategory::Data),
+            ("xsl", "application/xml", FileCategory::Data),
+            ("cpio", "application/x-cpio", FileCategory::Archive),
+            ("gzip", "application/gzip", FileCategory::Archive),
+            ("zstd", "application/zstd", FileCategory::Archive),
+            ("jar", "application/java-archive", FileCategory::Archive),
+            ("a", "application/x-archive", FileCategory::Library),
+            ("lib", "application/x-archive", FileCategory::Library),
+            ("o", "application/x-object", FileCategory::Library),
+            ("epub", "application/epub+zip", FileCategory::Document),
+        ] {
+            let info = detect_from_extension(ext);
+            assert_eq!(info.mime_type, mime, ".{ext}");
+            assert_eq!(info.category, category, ".{ext}");
+        }
+    }
+
+    /// The kernel knew nine more, and each is waiting on a decision this table
+    /// has recorded rather than on effort (`known-issues.md`, the `filesearch`
+    /// entry): foreign executables and installers -- this system cannot run
+    /// them -- and databases, which need a kind the category enum does not
+    /// have. Pinned so the next inventory does not "finish the job".
+    #[test]
+    fn the_kernels_types_this_table_waits_to_decide_are_still_absent() {
+        for ext in [
+            "exe", "dll", "class", "wasm", "deb", "rpm", "db", "sqlite", "sqlite3",
+        ] {
+            assert_eq!(
+                category_from_extension(ext),
+                FileCategory::Unknown,
+                ".{ext} was added without the decision that gates it"
+            );
+        }
+        for header in [
+            &b"MZ\x90\x00"[..],
+            b"SQLite format 3\x00",
+            b"\x00asm\x01\x00",
+        ] {
+            assert!(detect_from_magic(header).is_none(), "{header:?}");
+        }
     }
 
     // -- Category classification -------------------------------------------
@@ -2211,37 +2275,6 @@ mod tests {
         assert_eq!(icon_for_extension(".mp4"), '\u{25B6}');
         assert_eq!(icon_for_extension(".rs"), '\u{007B}');
         assert_eq!(icon_for_extension(".zip"), '\u{1F4E6}');
-    }
-
-    // -- parse_extension enum conversion ------------------------------------
-
-    #[test]
-    fn parse_extension_round_trip() {
-        // Verify a representative set of extensions parse correctly.
-        let cases = [
-            ("nx", FileExtension::Nx),
-            (".dso", FileExtension::Dso),
-            ("slib", FileExtension::Slib),
-            (".pkg", FileExtension::Pkg),
-            ("rs", FileExtension::Rs),
-            (".py", FileExtension::Py),
-            ("PNG", FileExtension::Png),
-            (".tar.gz", FileExtension::TarGz),
-            ("7z", FileExtension::SevenZ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(
-                parse_extension(input),
-                expected,
-                "parse_extension({input:?}) mismatch"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_extension_unknown() {
-        assert_eq!(parse_extension(".blahblah"), FileExtension::Unknown);
-        assert_eq!(parse_extension(""), FileExtension::Unknown);
     }
 
     // -- FileTypeInfo fields ------------------------------------------------

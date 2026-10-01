@@ -541,6 +541,18 @@ mod tests {
         flags.set("id:gone", Marks::default());
         let text = flags.to_text();
         assert_eq!(text.lines().count(), 3, "{text}");
+        // One tab a line, the separator: a key's own tab is written `\t`.
+        // This reader splits at the first tab and would read a raw one back
+        // anyway, so the round trip below cannot see it -- but the format is
+        // documented as escaping it, and any reader splitting on tabs would
+        // take the rest of such a key for a third field.
+        for line in text.lines().skip(1) {
+            assert_eq!(
+                line.matches('\t').count(),
+                1,
+                "a key's tab written raw: {line:?}"
+            );
+        }
         let back = Flags::parse(&text).unwrap();
         assert_eq!(back, flags);
         assert!(back.get("file:odd\tname\n#0").flagged);

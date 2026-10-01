@@ -45,6 +45,7 @@ Exit codes:
          is not the same as a pass, and must not read like one
 """
 import argparse
+import fnmatch
 import re
 import subprocess
 import sys
@@ -72,6 +73,8 @@ NOT_SUBJECTS: dict[str, str] = {
     "init/.cargo": "a cargo config directory caught by the `init/*` glob, not a crate",
     "net/.cargo": "a cargo config directory caught by the `net/*` glob, not a crate",
     "userspace/.cargo": "a cargo config directory caught by the `userspace/*` glob, not a crate",
+    "rustcrypto": "vetted cryptography vendored byte-for-byte from crates.io (rustcrypto/README.md, design-decisions 1218); upstream's own suites want upstream's dev-dependencies and rewrite the published Cargo.lock files, so their published vectors run instead in rustcrypto/seal, a workspace member",
+    "posix/vendor": "rust-lang's libm vendored byte-for-byte from crates.io (posix/vendor/README.md, design-decisions 1132); upstream's own suite wants upstream's dev-dependencies (no-panic, from the network), so glibc 2.39's answers are replayed instead by posix's math tests, a workspace member",
 }
 
 # A `#[test]` on its own line. Anchored so a commented-out one, a doc-comment
@@ -87,6 +90,33 @@ def parse_exclude(manifest_text: str) -> list[str]:
     data = tomllib.loads(manifest_text)
     ws = data.get("workspace") or {}
     return [str(e) for e in ws.get("exclude", [])]
+
+
+def parse_members(manifest_text: str) -> list[str]:
+    """The `[workspace] members` list, globs as written."""
+    data = tomllib.loads(manifest_text)
+    ws = data.get("workspace") or {}
+    return [str(m) for m in ws.get("members", [])]
+
+
+def is_member(rel: str, members: list[str]) -> bool:
+    """Is the crate at `rel` a workspace member after all?
+
+    Cargo's rule, not this script's: a path that `members` names -- literally
+    or by a glob -- is a member even when an `exclude` entry covers it
+    (`services/backupd` inside the excluded `services`, as `rustcrypto/seal`
+    inside `rustcrypto`). Such a crate is `cargo test --workspace`'s to run,
+    and counting it here would report a member as an excluded crate. A glob
+    matches one path component per component, as cargo's do: `apps/*` names
+    `apps/x` and not `apps/x/y`.
+    """
+    parts = rel.split("/")
+    for m in members:
+        mp = m.split("/")
+        if len(mp) == len(parts) and all(
+                fnmatch.fnmatchcase(p, q) for p, q in zip(parts, mp)):
+            return True
+    return False
 
 
 def is_crate(rel: str, read) -> bool:
@@ -225,6 +255,22 @@ def selftest() -> int:
     expect("indented in a mod",
            count_tests(["mod t {\n        #[test]\n        fn a() {}\n}\n"]), 1)
 
+    # 4. A crate `members` names inside an excluded directory is cargo's
+    # member, so it is not a subject here -- and only that crate: its
+    # neighbours stay subjects, and a glob reaches one level, not two.
+    rule("a member inside an excluded directory is not a subject")
+    members = parse_members(
+        '[workspace]\n'
+        'members = ["kernel", "apps/*", "services/backupd"]\n'
+        'exclude = ["services"]\n'
+    )
+    expect("members parsed", members, ["kernel", "apps/*", "services/backupd"])
+    expect("named literally", is_member("services/backupd", members), True)
+    expect("its neighbour", is_member("services/init", members), False)
+    expect("named by a glob", is_member("apps/clock", members), True)
+    expect("a glob is one level", is_member("apps/clock/sub", members), False)
+    expect("a prefix is not a match", is_member("services/backupd2", members), False)
+
     for f in failures:
         print(f"FAIL {f}", file=sys.stderr)
     bad = {f.split("|", 1)[0] for f in failures}
@@ -250,6 +296,7 @@ def main() -> int:
         return 2
 
     entries = parse_exclude(manifest)
+    members = parse_members(manifest)
     subjects: list[str] = []
     skipped: list[tuple[str, str]] = []
     for e in entries:
@@ -259,7 +306,12 @@ def main() -> int:
         found = expand(e, _read, _listdir)
         if not found:
             skipped.append((e, "no [package] found under this entry"))
-        subjects.extend(found)
+        for c in found:
+            if is_member(c, members):
+                skipped.append((c, "a workspace member all the same, "
+                                   "so `cargo test --workspace` runs it"))
+            else:
+                subjects.append(c)
 
     counts = {c: count_tests(crate_sources(c)) for c in subjects}
     with_tests = [(c, n) for c, n in counts.items() if n]

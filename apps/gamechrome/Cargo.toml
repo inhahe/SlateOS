@@ -1,0 +1,16 @@
+[package]
+name = "gamechrome"
+version = "0.1.0"
+edition = "2024"
+description = "The chrome every game draws round its board, in the user's theme (the operator's C-Q16, design-decisions §1422)."
+
+[dependencies]
+# The palette, the toolkit's button colours, and the draw commands.
+guitk = { path = "../../gui/toolkit" }
+
+[dev-dependencies]
+# `palette_check`, the accent presets and the palettes for them.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
+
+[lints]
+workspace = true

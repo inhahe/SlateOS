@@ -7589,6 +7589,130 @@ pub fn sys_keylayout_set(args: &SyscallArgs) -> SyscallResult {
     )
 }
 
+/// The caller holds `(Process, ENROLL_SECUREBOOT)`: checked before any
+/// argument is read, so an unprivileged caller learns nothing about which
+/// entries exist from which error it gets back.
+fn require_secureboot_right() -> Result<(), KernelError> {
+    use crate::proc::thread;
+
+    let Some(pid) = thread::owner_process(sched::current_task_id()) else {
+        return Err(KernelError::NoSuchProcess);
+    };
+    if pcb::has_capability_type(
+        pid,
+        ResourceType::Process,
+        crate::cap::Rights::ENROLL_SECUREBOOT,
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::PermissionDenied)
+    }
+}
+
+/// Copy a `len`-byte argument of at most `max` bytes out of user memory.
+fn read_bounded_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
+    let len = usize::try_from(len).map_err(|_| KernelError::InvalidArgument)?;
+    if len > max {
+        return Err(KernelError::InvalidArgument);
+    }
+    if len == 0 {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if ptr == 0 {
+        return Err(KernelError::InvalidAddress);
+    }
+    crate::mm::user::read_user_vec(ptr, len, max)
+}
+
+/// A text argument: an identifier or a hex digest, never a path, so UTF-8 is
+/// required and anything else refused -- not replaced.
+fn read_text_arg(ptr: u64, len: u64, max: usize) -> Result<alloc::string::String, KernelError> {
+    alloc::string::String::from_utf8(read_bounded_arg(ptr, len, max)?)
+        .map_err(|_| KernelError::InvalidArgument)
+}
+
+/// `SYS_SECUREBOOT_ENROLL` — enrol a Secure Boot entry. See
+/// [`SYS_SECUREBOOT_ENROLL`](crate::syscall::number::SYS_SECUREBOOT_ENROLL).
+pub fn sys_secureboot_enroll(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::secureboot;
+
+    if let Err(e) = require_secureboot_right() {
+        return SyscallResult::err(e);
+    }
+    let Some(key_type) = secureboot::KeyType::from_code(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let subject = match read_text_arg(args.arg1, args.arg2, secureboot::MAX_SUBJECT) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let fingerprint = match read_text_arg(args.arg3, args.arg4, secureboot::MAX_HASH_ARG) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    secureboot::init_defaults();
+    match secureboot::enroll_key(key_type, &subject, &fingerprint) {
+        Ok(id) => SyscallResult::ok(i64::from(id)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SECUREBOOT_REMOVE` — remove a Secure Boot entry by id. See
+/// [`SYS_SECUREBOOT_REMOVE`](crate::syscall::number::SYS_SECUREBOOT_REMOVE).
+pub fn sys_secureboot_remove(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_secureboot_right() {
+        return SyscallResult::err(e);
+    }
+    let Ok(id) = u32::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    crate::fs::secureboot::init_defaults();
+    match crate::fs::secureboot::remove_key(id) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SECUREBOOT_VERIFY` — may an image with this hash run? See
+/// [`SYS_SECUREBOOT_VERIFY`](crate::syscall::number::SYS_SECUREBOOT_VERIFY)
+/// for the 16-byte answer.
+pub fn sys_secureboot_verify(args: &SyscallArgs) -> SyscallResult {
+    use crate::fs::secureboot;
+
+    // Bytes, not text: the name may be a path.
+    let name = match read_bounded_arg(args.arg0, args.arg1, secureboot::MAX_IMAGE_NAME) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let hash = match read_text_arg(args.arg2, args.arg3, secureboot::MAX_HASH_ARG) {
+        Ok(s) => s,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg4 == 0 {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
+    // The output is checked writable before anything is recorded, so a bad
+    // pointer does not leave a verification record for an answer nobody got.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg4, 16) {
+        return SyscallResult::err(e);
+    }
+    secureboot::init_defaults();
+    let verdict = match secureboot::verify_image(&name, &hash) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let out: [u32; 4] = [
+        verdict.listing.code(),
+        verdict.listing.key_id().unwrap_or(0),
+        u32::from(verdict.enforced),
+        u32::from(verdict.allowed),
+    ];
+    match crate::mm::user::write_user_value(args.arg4, out) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.
 ///
 /// `arg0`: target PID. `arg1`: signal number (1..=NSIG).

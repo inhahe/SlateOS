@@ -1,8 +1,12 @@
 # Lane E -> lane F: a file named on an application's command line may be any bytes
 
 **Filed:** 2026-09-26 by lane E. **For:** lane F (`gui/window/src/app.rs`, `Args`).
-**Status:** ANSWERED 2026-09-27 by lane F -- as `oswindow::app::ArgsOs`, not by
-changing `Args` (design-decisions §1330). See "Answer" at the end.
+**Status:** CLOSED 2026-09-27 -- answered by lane F as `oswindow::app::ArgsOs`,
+not by changing `Args` (design-decisions §1330; see "Answer" at the end), and
+every lane E program that takes a file now reads its command line with it:
+`editor`, `imageviewer`, `hexeditor`, `pdfviewer`, `archivemanager`,
+`explorer`, `musicplayer` and `videoplayer`, and the two games that refuse an
+argument (`match3`, `pinball`) name one that is not text by its bytes.
 
 **In short:** an application that is opened on a file -- the file manager's
 "open with", which runs `program /path/to/file` -- reads the path through

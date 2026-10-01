@@ -20,6 +20,7 @@
 //! manager whose edits the next list from the compositor threw away; the demo
 //! showed a snapped window at a rectangle no user would ever have seen.
 
+use desktop::hotkeys::{Hotkey, HotkeyAction};
 use desktop::{DesktopShell, ShellAction, WindowInfo, WindowList, calendar, click};
 use guitk::event::{Key, KeyEvent, Modifiers};
 
@@ -109,7 +110,7 @@ fn main() {
     desktop.load_appearance();
     println!(
         "Appearance: {} theme, {:.0}% scaling, UI font {} at {}pt",
-        if desktop.appearance.theme_mode.is_light() {
+        if desktop.appearance.is_light() {
             "light"
         } else {
             "dark"
@@ -166,24 +167,28 @@ fn main() {
     if let Some(row) = settings_row {
         let rect = desktop.start_menu_row_rect(row);
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
-            ShellAction::Launch(path) => println!("Start menu asked to launch: {}", path.display()),
+            ShellAction::Launch(launch) => {
+                println!("Start menu asked to launch: {}", launch.display_line());
+            }
             other => println!("Start menu returned {other:?}"),
         }
     }
 
-    // Open the power menu from the start menu's footer and pick Shutdown, the
-    // way a user reaching for the power button would.
+    // Open the power menu from the foot of the start menu's places column and
+    // pick Shutdown, the way a user reaching for the power button would.
     desktop.handle_mouse(&click(start.x + 8.0, start.y + 8.0));
     let power = desktop.power_button_rect();
     desktop.handle_mouse(&click(power.x + 8.0, power.y + 8.0));
     let shutdown_row = desktop
-        .power_menu_entries()
+        .power_menu_choices()
         .iter()
-        .position(|entry| entry.name == "Shutdown");
+        .position(|choice| *choice == desktop::power::PowerChoice::ShutDown);
     if let Some(row) = shutdown_row {
         let rect = desktop.power_menu_row_rect(row);
         match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
-            ShellAction::Launch(path) => println!("Power menu asked to launch: {}", path.display()),
+            ShellAction::Launch(launch) => {
+                println!("Power menu asked to launch: {}", launch.display_line());
+            }
             other => println!("Power menu returned {other:?}"),
         }
     }
@@ -219,13 +224,23 @@ fn main() {
     // Tiling. The shortcut names an *edge*; which pixels that edge turns into is
     // worked out by the compositor from its own bounds, and this demo has no
     // rectangle to print because the shell never computes one.
+    //
+    // Super+Left is not bound by default (design-decisions.md §1416), so the
+    // demo binds it first, as a user would on the shortcut card.
+    let super_only = Modifiers {
+        super_key: true,
+        ..Modifiers::NONE
+    };
+    if let Err(e) = desktop
+        .hotkeys
+        .register(Hotkey::new(Key::Left, super_only), HotkeyAction::SnapLeft)
+    {
+        println!("Super+Left could not be bound: {e}");
+    }
     let snap_left = KeyEvent {
         key: Key::Left,
         pressed: true,
-        modifiers: Modifiers {
-            super_key: true,
-            ..Modifiers::NONE
-        },
+        modifiers: super_only,
         text: String::new(),
     };
     println!(

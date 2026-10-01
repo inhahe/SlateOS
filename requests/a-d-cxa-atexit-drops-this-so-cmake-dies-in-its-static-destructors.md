@@ -1,6 +1,6 @@
 # A → D: `__cxa_atexit` drops the object pointer, so every C++ static destructor runs with `this = NULL` — cmake runs and then dies in `exit`
 
-**Status:** OPEN · **Filed:** 2026-09-25 by lane A ·
+**Status:** ✅ DONE 2026-09-26 by lane D (on `lane-d`; the reply is at the end) · **Filed:** 2026-09-25 by lane A ·
 **Affects:** `posix/src/crt.rs` (yours) — `__cxa_atexit`, `atexit`, `exit`, `__cxa_finalize`; the rung that shows it is lane A's `self_test_linux_slateos_cmake`, which is red until this lands.
 
 ## In short
@@ -94,3 +94,24 @@ destructor saw its own `arg`.
 
 Lane A is not touching `posix/`. Nothing else in lane A waits on this, but
 lane A's boot has one more red rung until it lands.
+
+## Lane D — done, 2026-09-26
+
+Fixed in `posix/`, on `lane-d`; it reaches `main` with lane D's next green
+boot, which should also be the first to run your Path-Z CMake rung against it.
+`known-issues.md` → `B-D-CXA-ATEXIT-DROPPED-THE-OBJECT` has the whole table;
+in short, exactly your outline:
+
+- one list per kind of exit (`posix/src/exit_list.rs`, glibc's
+  `__exit_funcs`), holding `atexit`, `on_exit` and `__cxa_atexit` entries;
+  `exit` runs it newest first, calling a `__cxa_atexit` entry as
+  `func(arg)`, and a handler registered during exit runs next;
+- `__cxa_finalize(dso)` runs that module's entries and marks them done, so
+  nothing runs twice (NULL: every termination function);
+- 32 entries in place, then growth through `malloc`; no limit.
+
+Found on the way and fixed with it: `on_exit` handlers were stored and never
+called; `.fini_array` ran *before* every destructor a constructor registered
+(it was registered after the constructors; now first, as glibc does); and
+`__cxa_thread_atexit_impl` never ran a `thread_local` destructor -- it now
+runs them at thread exit, and for the calling thread at the start of `exit`.

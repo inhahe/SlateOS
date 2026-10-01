@@ -417,8 +417,8 @@ pub fn categorize_extension(ext: &str) -> FileCategory {
     match ext.to_lowercase().as_str() {
         "txt" | "doc" | "docx" | "pdf" | "odt" | "rtf" | "md" | "tex" | "csv" | "xls" | "xlsx"
         | "pptx" => FileCategory::Document,
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "tiff" | "psd"
-        | "raw" => FileCategory::Image,
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "avif" | "tif"
+        | "tiff" | "psd" | "raw" => FileCategory::Image,
         "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "opus" | "m4a" | "mid" | "midi" => {
             FileCategory::Audio
         }
@@ -917,6 +917,50 @@ impl SearchCriteria {
             path_contains: None,
             current_time: unix_now(),
         }
+    }
+
+    /// The criteria a search runs with: the query's `ext:` and `in:` words
+    /// taken out of it and into the extension and path filters.
+    ///
+    /// `ext:pdf` keeps files ending `.pdf` (a leading dot is fine too), and
+    /// `in:Documents` keeps those whose path contains `Documents` -- `report
+    /// ext:pdf in:2025` is a report, a PDF, somewhere under a 2025 folder.
+    /// Both filters were in the criteria from the start, read by every
+    /// search, and settable by nothing: no control, no key, so no user could
+    /// narrow by either.
+    ///
+    /// Not in regex mode, where the whole query is the pattern and `ext:` may
+    /// be part of it. A word with nothing after the colon is dropped, not
+    /// searched for. A query with neither word is returned exactly as typed,
+    /// spacing and all.
+    #[must_use]
+    pub fn effective(&self) -> Self {
+        let mut out = self.clone();
+        if self.mode == SearchMode::Regex {
+            return out;
+        }
+        let mut words = Vec::new();
+        let mut narrowed = false;
+        for word in self.query.split_whitespace() {
+            if let Some(ext) = word.strip_prefix("ext:") {
+                narrowed = true;
+                let ext = ext.trim_start_matches('.');
+                if !ext.is_empty() {
+                    out.extension_filter = Some(ext.to_lowercase());
+                }
+            } else if let Some(folder) = word.strip_prefix("in:") {
+                narrowed = true;
+                if !folder.is_empty() {
+                    out.path_contains = Some(folder.to_string());
+                }
+            } else {
+                words.push(word);
+            }
+        }
+        if narrowed {
+            out.query = words.join(" ");
+        }
+        out
     }
 
     /// Check if an entry matches all criteria.
@@ -1452,6 +1496,23 @@ const ROW_FONT_SMALL: f32 = 11.0;
 ///
 /// The six sort chords are `Ctrl` plus the first letter of the column, which
 /// is the only reason they are letters rather than a menu.
+/// What the query's `ext:` and `in:` words narrowed a search to, for the
+/// status line -- so a search that found nothing because of them says so.
+fn narrowing(criteria: &SearchCriteria) -> String {
+    let mut parts = Vec::new();
+    if let Some(ext) = &criteria.extension_filter {
+        parts.push(format!("only .{ext}"));
+    }
+    if let Some(folder) = &criteria.path_contains {
+        parts.push(format!("in paths containing {folder}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" -- {}", parts.join(", "))
+    }
+}
+
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Up / Down", "Move through the results"),
     ("PageUp / PageDown", "A page of results"),
@@ -1588,7 +1649,8 @@ impl FileSearchApp {
     pub fn execute_search(&mut self) {
         // Whatever was being searched for, it is not what is being asked now.
         self.content = None;
-        if self.criteria.mode == SearchMode::Content && !self.criteria.query.is_empty() {
+        let criteria = self.criteria.effective();
+        if criteria.mode == SearchMode::Content && !criteria.query.is_empty() {
             self.start_content_search();
             return;
         }
@@ -1600,7 +1662,7 @@ impl FileSearchApp {
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| self.criteria.matches(e))
+            .filter(|(_, e)| criteria.matches(e))
             .map(|(i, _)| i)
             .collect();
 
@@ -1619,9 +1681,10 @@ impl FileSearchApp {
             .sum();
 
         self.status_message = format!(
-            "{count} results ({}) in {}ms",
+            "{count} results ({}) in {}ms{}",
             format_size(total_size),
-            self.search_time_ms
+            self.search_time_ms,
+            narrowing(&criteria)
         );
 
         // A new answer starts at its top.
@@ -1635,12 +1698,13 @@ impl FileSearchApp {
     /// listing one because a file inside it matched would be a different kind
     /// of answer.
     fn start_content_search(&mut self) {
+        let criteria = self.criteria.effective();
         let candidates: Vec<(usize, String)> = self
             .index
             .entries
             .iter()
             .enumerate()
-            .filter(|(_, e)| !e.is_directory && self.criteria.passes_filters(e))
+            .filter(|(_, e)| !e.is_directory && criteria.passes_filters(e))
             .map(|(i, e)| (i, e.path.clone()))
             .collect();
         let total = candidates.len();
@@ -1649,11 +1713,14 @@ impl FileSearchApp {
         self.results_scroll = 0;
         self.content = Some(ContentSearch::start(
             candidates,
-            &self.criteria.query,
-            self.criteria.case_sensitive,
+            &criteria.query,
+            criteria.case_sensitive,
             self.content_limit,
         ));
-        self.status_message = format!("Searching the contents of {total} files...");
+        self.status_message = format!(
+            "Searching the contents of {total} files{}...",
+            narrowing(&criteria)
+        );
     }
 
     /// Take in whatever the content worker has found since last asked.
@@ -2274,7 +2341,7 @@ impl FileSearchApp {
         f.hit(Target::SearchBox, search);
 
         let search_text = if self.criteria.query.is_empty() {
-            "Search files...".to_string()
+            "Search files...  ext:pdf or in:Documents narrow it".to_string()
         } else {
             self.criteria.query.clone()
         };
@@ -4742,8 +4809,10 @@ mod tests {
 
     #[test]
     fn test_categorize_image() {
-        assert_eq!(categorize_extension("png"), FileCategory::Image);
-        assert_eq!(categorize_extension("jpg"), FileCategory::Image);
+        // Every picture the image viewer opens is a picture here too.
+        for ext in ["png", "jpg", "webp", "avif", "tif", "tiff", "AVIF"] {
+            assert_eq!(categorize_extension(ext), FileCategory::Image, "{ext}");
+        }
     }
 
     #[test]
@@ -6013,5 +6082,60 @@ mod tests {
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(result_names(&app), vec!["a.txt"]);
+    }
+
+    // == ext: and in: (2026-09-27) ==============================================
+
+    #[test]
+    fn ext_and_in_words_narrow_the_search_and_leave_the_query() {
+        let mut c = SearchCriteria::new("report ext:.PDF in:2025");
+        let e = c.effective();
+        assert_eq!(e.query, "report");
+        assert_eq!(e.extension_filter.as_deref(), Some("pdf"));
+        assert_eq!(e.path_contains.as_deref(), Some("2025"));
+
+        // A query with neither is left exactly as typed.
+        c.query = "two  spaces".to_string();
+        assert_eq!(c.effective().query, "two  spaces");
+
+        // In regex mode the whole query is the pattern.
+        c.query = "ext:x".to_string();
+        c.mode = SearchMode::Regex;
+        assert_eq!(c.effective().query, "ext:x");
+        assert_eq!(c.effective().extension_filter, None);
+
+        // A word with nothing after the colon narrows nothing and is not searched for.
+        c.mode = SearchMode::Substring;
+        c.query = "notes ext:".to_string();
+        let e = c.effective();
+        assert_eq!(e.query, "notes");
+        assert_eq!(e.extension_filter, None);
+    }
+
+    #[test]
+    fn a_search_typed_with_ext_and_in_finds_only_those_files() {
+        let mut app = FileSearchApp::new();
+        for (name, path) in [
+            ("report.pdf", "/home/u/2025/report.pdf"),
+            ("report.txt", "/home/u/2025/report.txt"),
+            ("report.pdf", "/home/u/2024/report.pdf"),
+        ] {
+            app.index.add(IndexEntry::new(path, name, 10, 0, 0, false));
+        }
+        app.criteria.query = "report ext:pdf in:2025".to_string();
+        app.execute_search();
+        let found: Vec<&str> = app
+            .results
+            .iter()
+            .map(|&i| app.index.entries[i].path.as_str())
+            .collect();
+        assert_eq!(found, ["/home/u/2025/report.pdf"]);
+        assert!(
+            app.status_message.contains("only .pdf") && app.status_message.contains("2025"),
+            "{}",
+            app.status_message
+        );
+        // The box still shows what was typed.
+        assert_eq!(app.criteria.query, "report ext:pdf in:2025");
     }
 }

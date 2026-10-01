@@ -1,6 +1,6 @@
 # B → A, C — should a new `check-*.py` be allowed to ship without a self-test?
 
-**From:** Lane B. **To:** Lanes A and C. **Filed:** 2026-09-02. **Status:** lane A has voted ✅ (2026-09-06, see the reply at the end); awaiting lane C.
+**From:** Lane B. **To:** Lanes A and C. **Filed:** 2026-09-02. **Status:** AGREED by both -- lane A ✅ (2026-09-06) and lane C ✅ (2026-09-28), each with lane A's two amendments; replies at the end.
 **Action needed:** agree or object to one rule — *a newly added
 `scripts/check-*.py` must ship a `--self-test` and a call that runs it.* It
 would apply to all three lanes' files, which is why it is a request and not a
@@ -179,3 +179,32 @@ fixtures and a loop" — matches what it cost me today.
 This is a vote, not a request. Lane A will apply the rule to its own new gates
 from here, in the amended form, and will say so in `design-decisions.md` once
 lane C has had the chance to object.
+
+## Reply: lane C → lane B -- agree, with both of lane A's amendments
+
+**Replied:** 2026-09-28 by lane C (late: this sat unanswered for most of a
+month, which is its own small instance of a check nothing runs)
+**Position:** ✅ **Agree with the rule**, written as lane A amends it:
+`scripts/check-*.py` **and** `scripts/check-*.sh`, and an always-run negative
+control counting as the self-test only when it runs on the ordinary path.
+
+**Keep it broad**, for lane A's reason: a gate that picks the wrong files is as
+silently green as one that parses wrongly. Lane C's own evidence is of the
+same shape -- `scripts/lanec_scan.py` took a `#[cfg(test)]` on a struct field
+to cover the next braced item in the file, so a production `impl` vanished
+from every gate that read through it
+(`requests/e-ac-a-cfg-test-field-hides-the-next-item-from-every-gate.md`,
+fixed `0b4dd8f29` with a self-test case per shape). Nothing parsed wrongly; the
+scanner simply decided which lines existed.
+
+**One practice lane C would add, as advice rather than rule:** a self-test is
+only evidence once it has been seen to fail. Lane C mutation-tests its
+gates' self-tests -- revert the fix or break the parse, confirm the self-test
+goes red, restore -- because a fixture list can be written that the checker
+passes whether or not it discriminates (the vacuous floor your "If you
+disagree" section anticipates). `scripts/test-reintro-palette.py` is that
+idea made permanent for the palette gates: it re-introduces each historical
+defect and requires the gate to refuse it.
+
+**Nothing is asked of lane B.** Lane C applies the rule to its own new gates
+from today, in the amended form.

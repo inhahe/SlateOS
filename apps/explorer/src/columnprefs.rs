@@ -17,6 +17,7 @@
 //! later version, or naming a column since removed, loses that one column and
 //! keeps the rest, rather than shifting every later column along by one.
 
+use crate::fileops::ConflictPolicy;
 use std::path::Path;
 use yamldoc::Document;
 
@@ -220,6 +221,52 @@ pub fn thumb_size(doc: &Document) -> Option<u32> {
 /// Remember `size` as the thumbnail size.
 pub fn set_thumb_size(doc: &mut Document, size: u32) {
     doc.set_i64(&THUMB_SIZE, i64::from(size));
+}
+
+/// What a paste or a drop does with a name the folder already has.
+const ON_CONFLICT: [&str; 2] = ["paste", "on_conflict"];
+
+/// The choices the folder menu offers for a taken name, in its order: the
+/// policy, how the settings file spells it, and how the menu says it.
+pub const CONFLICT_CHOICES: [(ConflictPolicy, &str, &str); 5] = [
+    (ConflictPolicy::Ask, "ask", "Ask each time"),
+    (
+        ConflictPolicy::Rename,
+        "keep-both",
+        "Keep both (the new one numbered)",
+    ),
+    (ConflictPolicy::Skip, "skip", "Skip it"),
+    (
+        ConflictPolicy::OverwriteIfNewer,
+        "replace-if-newer",
+        "Replace it if the new one is newer",
+    ),
+    (ConflictPolicy::Overwrite, "replace", "Replace it"),
+];
+
+/// The saved choice -- Ask when there is none, or one this does not know.
+///
+/// Asking is the default because it is the one choice that decides nothing
+/// on the user's behalf: keep both leaves numbered copies to sort out later,
+/// and the other two lose one file or the other. Until 2026-09-27 a paste
+/// kept both, always, because nothing could ask.
+#[must_use]
+pub fn conflict_policy(doc: &Document) -> ConflictPolicy {
+    doc.get_str(&ON_CONFLICT)
+        .and_then(|name| {
+            CONFLICT_CHOICES
+                .iter()
+                .find(|(_, spelled, _)| *spelled == name)
+                .map(|(policy, _, _)| *policy)
+        })
+        .unwrap_or(ConflictPolicy::Ask)
+}
+
+/// Remember `policy` as what a paste does with a taken name.
+pub fn set_conflict_policy(doc: &mut Document, policy: ConflictPolicy) {
+    if let Some((_, spelled, _)) = CONFLICT_CHOICES.iter().find(|(p, _, _)| *p == policy) {
+        doc.set_str(&ON_CONFLICT, spelled);
+    }
 }
 
 /// Which labels the icon view draws under each thumbnail.

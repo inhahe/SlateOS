@@ -84,6 +84,307 @@ subsystem".)
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
 **delete the entry from here**, and add one line to the `
 
+## D-Q7 — [D] The C library tells programs text is plain ASCII, then reads and writes it as UTF-8. Which should it be? — Status: OPEN (raised 2026-09-29)
+
+**In short:** a program can ask the C library how text is encoded -- whether
+"é" is an error (plain ASCII, which has no accented letters) or two bytes
+(UTF-8, what SlateOS uses everywhere). Asked, the library says ASCII; but
+when it actually converts text, it treats it as UTF-8. Programs that go by
+the answer -- every GNU program ported here -- act as though
+accented text could not occur (plain quotes instead of curly ones, a
+conversion to "the user's encoding" failing on "é"); programs that just
+convert, work. The choice: say UTF-8 everywhere, as your August decision
+for the shell (Q38: "no non-UTF-8 locale") suggests, or copy Linux, where a
+program starts in a one-byte-per-character mode and switches to UTF-8 when
+it asks for the user's settings.
+
+**Terms.** *Locale*: a program's language and text settings, chosen with
+`setlocale`; "C" is the built-in one every program starts in, and
+`LC_ALL=C` in a script asks for it. *`CODESET`*: the question "which
+encoding?", asked with `nl_langinfo`. *`MB_CUR_MAX`*: the longest character,
+in bytes.
+
+What each part says today:
+
+| Part | Says |
+|---|---|
+| `nl_langinfo(CODESET)` | `ANSI_X3.4-1968`: plain ASCII |
+| `iconv`'s default encoding (its empty name) | ASCII |
+| `setlocale(LC_ALL, "")` -- "use the user's settings" | "C", whatever was asked for |
+| `MB_CUR_MAX` | 4: UTF-8's |
+| `mbrtowc`, `wcrtomb` and the other conversions | UTF-8, in every locale |
+| `mbrtoc16`, `mbrtoc32`, `c16rtomb`, `c32rtomb` | ASCII only -- a bug either way, being made UTF-8 like `mbrtowc` now |
+| the `locale` command (lane B) | the C locale's character set is ASCII |
+
+| Option | *What changes:* |
+|---|---|
+| **A. UTF-8 everywhere, and said so** | "Which encoding?" answers UTF-8 in every locale, `setlocale(LC_ALL, "")` answers `C.UTF-8`, `iconv`'s default is UTF-8, the `locale` command says UTF-8. `LC_ALL=C` changes nothing about text. |
+| **B. As Linux and musl: one byte a character in "C", UTF-8 when asked for** | A program starts in a "C" locale where every byte is one character (as POSIX.1-2024 requires of it); `setlocale(LC_ALL, "")` gives it `C.UTF-8` -- SlateOS's default setting -- where text is UTF-8 and everything says so. `LC_ALL=C` in a script gives byte-at-a-time behaviour, as on Linux. |
+| C. Leave it | The mismatch above stays. |
+
+- **A**: the least work, and what the library already does when converting;
+  consistent with Q38. But `LC_ALL=C` -- which `./configure` scripts and
+  many build and shell scripts set to get byte-at-a-time behaviour, and
+  which makes GNU `grep`, `sed` and `sort` take their fast one-byte paths
+  -- would no longer mean that here, and a program that never calls
+  `setlocale` gets UTF-8 where on Linux it gets bytes. It departs from
+  POSIX.1-2024, which requires the "C" locale to be one byte a character.
+- **B**: ported programs behave exactly as they do on Linux, scripts' `LC_ALL=C`
+  included, and it is what POSIX requires; every program that asks for the
+  user's settings -- nearly all that handle text -- gets UTF-8, so what a user
+  sees is UTF-8 throughout. More work: every conversion, `MB_CUR_MAX` and
+  the character-class functions have to follow the program's (or thread's)
+  locale -- a few hours. The "C" locale would be the one non-UTF-8 setting,
+  which Q38's premise said SlateOS does not have; osh stays UTF-8-only
+  either way.
+
+**If never answered:** nothing breaks and nothing is blocked; ported
+programs keep taking accented text for errors in the places that ask the
+encoding by name, and each port that meets it is a case of this question.
+
+**Claude's recommendation:** **B**, with the "C" locale as musl's --
+every byte a character, so nothing in it is ever an encoding error -- and
+`C.UTF-8` the default setting. It is what the software being ported is
+written against, and what POSIX asks for, while keeping SlateOS UTF-8
+wherever a user's text is shown. In the meantime lane D fixes only what is
+wrong either way (`<uchar.h>`'s conversions, which must agree with
+`mbrtowc`'s), and leaves the ASCII answers alone.
+
+**Where it bites:** `posix/src/langinfo.rs` (`CODESET`), `posix/src/locale.rs`
+(`setlocale`), `posix/src/wchar.rs` and `posix/src/uchar.rs` (the
+conversions), `posix/src/ctype.rs` (`MB_CUR_MAX`), `posix/src/iconv.rs`
+(the empty name), `userspace/locale` (lane B); design-decisions §104 and
+§351, which assume no non-UTF-8 locale.
+
+## D-Q6 — [D] Some of the C library is translated from glibc, whose licence binds every program the library is built into. Keep it, or rewrite those parts? — Status: OPEN (raised 2026-09-28)
+
+**In short:** to make the C library behave exactly as Linux's (glibc)
+does, several parts of it were written by translating glibc's own source
+code into Rust, line by line -- most recently the Tamil character set,
+the new C23 maths functions and `clog10` -- and `<obstack.h>`'s macros
+follow glibc's header's, macro for macro. glibc's licence (the LGPL)
+allows that, on a condition: anyone who receives a program containing it
+must be able to rebuild that program with their own copy of the library.
+The C library is built into *every* program on SlateOS, so the condition
+reaches every program, ours and anyone else's. An earlier decision
+(design-decisions.md §1133) assumed the library should stay free of that
+condition and chose other sources for the complex-number functions; the
+translations since have not followed it. Which should hold?
+
+**Terms used below.** *LGPL*: the licence glibc is under -- free to use and
+change, but code derived from it stays under it, and a program containing
+it must let the user swap in their own build of that code. *Statically
+linked*: the library's code is copied into each program, as all programs
+here are today. *Clean-room rewrite*: writing the code again from the
+standards and from glibc's observable behaviour, without its source open --
+the tests that compare us with glibc (glibc as the *oracle*) stay exactly as
+they are, since running a program is not copying it.
+
+What is translated, as far as lane D knows:
+
+| Where | From glibc's | Since |
+|---|---|---|
+| `posix/src/iconv.rs`: the CP1255, CP1258 and TCVN converters' loops | `iconvdata/cp1255.c`, `cp1258.c`, `tcvn5712-1.c` | 2026-09-27, on `main` |
+| `posix/src/iconv.rs`: the T.61 / ISO 6937 / ANSI X3.110 decoder | `iconvdata/t.61.c` and kin | 2026-09-28, on `main` |
+| `posix/src/iconv.rs`: TSCII | `iconvdata/tscii.c` | 2026-09-28, on `main` |
+| `posix/src/c23math.rs`: `nextup` ... `fminimum_mag_num`, `scalbl` | `math/`, `sysdeps/ieee754/*`, `e_scalbl.S` | 2026-09-28, on `main` |
+| `posix/src/narrow.rs`: the narrowing functions' checks | `math/math-narrow.h` | 2026-09-28, on `main` |
+| `posix/src/complex*.rs`: `clog10` | `math/s_clog10_template.c`, `x2y2m1` | 2026-09-28, on `main` |
+| `posix/include/obstack.h`: the macros, macro for macro -- C, in a header a program compiles into itself | the installed `<obstack.h>` (`malloc/obstack.h`) | 2026-09-30 |
+
+One more part, since this was raised, was written with glibc's source
+open, though not translated from it: `posix/src/regex/parse.rs`
+(2026-09-30) takes the order of glibc's `regcomp.c` checks -- which
+character is special where, which error a malformed interval gets, and
+what each of the GNU interface's syntax bits changes -- from reading that
+file, and the oracles' cases then pin each rule: 11,250 pairs of tokens in
+POSIX's two syntaxes, some 41,000 patterns in the GNU ones. Its code is not
+glibc's: an explicit stack where glibc recurses, its own types, none of
+glibc's lines. Under **B** it would be derived again from the oracles'
+answers alone, which already fix every rule it has. (The matcher behind
+it, the rest of `posix/src/regex/`, follows the standard and owes glibc's
+code nothing; its fastmap, `fastmap.rs`, reaches glibc's answer by its
+own reasoning over the tree, where glibc reads its automaton's states.)
+
+The obstack functions behind `<obstack.h>`'s macros, `posix/src/obstack.rs`,
+are not translated: they are held to the oracle's answers, which show every
+chunk size the program's allocation function is asked for. The header is the
+interface itself -- a program expands its macros, and must get what glibc's
+give -- so under **B** it would be written again from the glibc manual's
+description of each macro and held to the same check
+(`posix/tools/oracle/obstack_harness.py --header`: both of the header's forms,
+over glibc's own functions). (The LGPL, in 2.1's §5, lifts its conditions
+from a program that uses only a header's data structure layouts and small
+macros, ten lines or fewer -- as each of these is; whether that settles it
+for this header is part of this question.)
+
+(The character tables themselves -- which byte means which letter -- are
+facts read from glibc's data files and from running its converters, not
+code; they are not in question. And not everything follows glibc's
+source: the `long double` Bessel functions, `posix/src/besl.rs`, were
+written from the mathematics, with glibc only run to see its answers.)
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Keep the translations; honour the LGPL | The files above say they are LGPL. Every program built on the C library must be re-linkable by its user -- which means shipping the library's object files with the system, or making the C library a shared library (`libc.so`) as design.txt plans for later. Nothing is rewritten. |
+| **B.** Rewrite those parts clean-room; glibc stays the oracle, never the source | The library stays under whatever licence SlateOS chooses, with no condition on programs. The six parts are written again from the standards (C23, IEEE 754, the TSCII and ISO 6937 specifications) and must pass the same glibc-comparison tests they pass now; a rule is written down: glibc may be tested against, not read and copied. |
+| **C.** Decide before the first public release, not now | Work continues as it is; the table above is kept current; before anything is distributed as a binary, A or B is applied. |
+
+**If never answered:** nothing breaks and nothing is distributed yet; the
+cost of B grows with every further translation, and lane D will keep
+translating where glibc is the clearest description of the behaviour
+wanted.
+
+**Claude's recommendation:** **B.** The C library is the one piece of code
+every program contains; keeping it free of conditions is worth a few hours
+of rewriting, and the glibc comparison tests -- the part that actually
+guarantees glibc's behaviour -- stay unchanged, so the rewrites cannot drift
+from what the translations do today. Until you answer, new lane D work is
+written from the standards with glibc as the oracle only.
+
+**Where it bites:** the six places above; `design-decisions.md` §1133 (the
+earlier assumption); and every future port where glibc's behaviour is the
+target.
+
+## D-Q5 — [D] Chinese, Japanese and Korean text conversion needs about a megabyte of tables. Build them into every program that converts text, or load them from files? — Status: OPEN (raised 2026-09-28)
+
+**In short:** the C library's `iconv` (the function programs call to
+convert text between character sets -- say from an old Japanese e-mail's
+Shift-JIS into UTF-8) now handles every character set that uses one byte a
+character, 221 of them, with their tables built into the library. What is
+left is Chinese, Japanese and Korean, whose character sets need two or more
+bytes a character and tables of thousands of entries each: about 0.7 MB for
+all of them even stored compactly, one direction only. The question is
+whether that megabyte goes inside every program that uses `iconv`, or into
+files the library reads the first time a program asks for one of these sets.
+
+**Terms used below.** *Statically linked*: the library's code and data are
+copied into each program, as all programs here are today; there is no shared
+copy on disk. *Multibyte set*: a character set with more than one byte for
+some characters -- EUC-JP, Shift-JIS, EUC-KR, GBK, GB18030, Big5,
+ISO-2022-JP, and IBM's double-byte mainframe sets. *mmap*: reading a file by
+mapping it into memory, so every program using it shares one copy in RAM.
+
+| Option | *What changes:* |
+|---|---|
+| **A.** Built in, as the one-byte sets are (design-decisions §1117): the reading half stored, the writing half built when `iconv_open` first opens the set | Every program that calls `iconv` grows by about 0.7 MB on disk, and each open multibyte converter takes about 80 KB of memory and a few milliseconds to open. Nothing else to install; works on any disk layout. |
+| **B.** Table files in the system image (`/usr/lib/iconv/`, one per set), read with mmap the first time a program opens that set -- what glibc does with its converter modules | Programs stay their current size; all of them share one copy of a table in RAM. The files must be on the disk: a program on a system without them is told the set is not available, as glibc says when its modules are missing. |
+| **C.** A, until the C library can be a shared library (`libc.so`, one copy for every program), then nothing more to do | Same as A today; the per-program cost disappears when shared libraries arrive -- which design.txt plans ("within one system generation, apps share .so files") but nothing has built. |
+
+**If never answered:** nothing gets worse -- these sets are refused today, as
+they have been. It blocks Chinese, Japanese and Korean conversion in every C
+program (a mail reader, `iconv -f SHIFT_JIS`, a text editor opening a legacy
+file). The single-byte sets are unaffected.
+
+**Claude's recommendation:** **B.** A megabyte in every program that happens
+to convert text is the wrong place for data that most of them will never
+touch, and sharing one mapped copy is how every mature system does it
+(glibc's modules, ICU's data file). The files are made by the same generator
+that makes the built-in tables today, and lane D's image recipe installs
+them. If shared libraries arrive later, B still costs nothing extra.
+
+**Where it bites:** `posix/src/iconv.rs` (the converters, whichever way the
+tables arrive), `posix/tools/gen_iconv_*.py` (the tables),
+`scripts/create-ext4-rootfs.sh` (installing them, for B).
+
+## D-Q4 — [D] Background services that run before anyone signs in need passwords too. Where should they keep them? — Status: OPEN (raised 2026-09-27)
+
+**In short:** some programs that run in the background need a password to do
+their job, and must do it while nobody is signed in: dynamic DNS (keeping a
+web address such as `myhome.duckdns.org` pointed at a home network) needs the
+DNS provider's password; a scheduled backup to another computer needs that
+computer's password; joining Wi-Fi at startup needs the network's passphrase.
+The password manager cannot give them one at startup: each user's store is
+locked with that user's own master password, so until they sign in and unlock
+it, nothing can read it -- even a program you have allowed to (your C-Q25
+answer). These passwords need a home a background service can reach at
+startup, and the choice is how well that home is protected.
+
+**Terms used below.** *Background service*: a program the system starts at
+boot, before any sign-in (the backup scheduler and the dynamic-DNS updater are
+two). *Encrypted at rest*: stored scrambled, so reading the disk directly -- a
+stolen laptop, or the disk moved to another machine -- shows nothing useful.
+*TPM*: a security chip in most PCs that keeps a key and hands it over only to
+this machine's own, unmodified startup. *Capability*: a permission a program
+holds as a token, as in C-Q25's "a capability key specifically for this".
+
+| Option | *What changes:* |
+|---|---|
+| **A.** A file only the service can read -- what Linux does for Wi-Fi (`/etc/wpa_supplicant/wpa_supplicant.conf`) and NetworkManager's saved networks | Works at startup, simple. The password is stored unscrambled, guarded by who may open the file: other programs on the running system cannot read it, but anyone who reads the disk directly can -- unless the whole disk is encrypted, which then covers it (the kernel has a volume-encryption module, `fs::diskencrypt`; nothing encrypts the system disk with it yet). |
+| **B.** A *system* section of the password manager, unlocked at startup with a key the TPM keeps, readable by services holding a capability for it -- C-Q25's idea, extended to startup | Encrypted at rest even without whole-disk encryption, and one place to see and revoke every stored service password. Needs TPM support, which does not exist yet; on a machine without a TPM the unlocking key must sit on disk, which makes it A with extra steps. |
+| **C.** No stored passwords for background services -- they run only while their owner is signed in and has unlocked the password manager, reading it through C-Q25's capability | Nothing new to protect. Dynamic DNS, backups to another computer and Wi-Fi at startup stop whenever nobody is signed in -- which for a home server is all the time. |
+
+**If never answered:** nothing gets worse today -- no background service
+stores a password yet. It blocks the part of the dynamic-DNS updater that signs
+in to the provider (`requests/e-ad-dynamic-dns-is-a-userspace-service-not-a-kernel-table.md`);
+the rest of it can be built meanwhile.
+
+**Claude's recommendation:** **A now, B when a TPM-backed store exists.** A is
+what every Linux system does for these same passwords, and whole-disk
+encryption, once the system disk uses it, gives A the at-rest protection B
+would. The service, not Settings, writes the file (Settings hands it the
+password and the service checks Settings may), and each service reads its
+passwords through one small function -- so moving to B later changes that
+function and nothing else.
+
+**Where it bites:** `services/dyndns` (lane D, not yet written); lane E's
+Dynamic DNS page in `apps/settings/src/remote.rs`, which would hand the
+password to the service rather than store it in the password manager; later,
+Wi-Fi at startup (`userspace/wpa`, lane B) and backups to another computer
+(`requests/e-db-the-backup-service-runs-backup-run-due.md`).
+
+## D-Q3 — [D] Programs cannot share memory, message queues or named semaphores with each other. Where should the shared ones live? — Status: OPEN (raised 2026-09-26)
+
+**In short:** Unix programs often cooperate through things they open by name:
+a block of shared memory, a queue of messages, a named counter that makes one
+program wait for another. Here each of those is private to the program that
+opened it — two programs opening the same name each get their own — and the
+system cannot yet give two programs the same writable memory at all. So a
+database whose worker programs share memory (PostgreSQL works exactly this
+way) cannot run, and a message one program queues is never seen by another.
+Making them shared needs a home outside any one program; which home?
+
+**What exists now**, all of it in the C library (libc: the library every
+program links for these calls), per program:
+
+| Family | Calls | State |
+|---|---|---|
+| POSIX shared memory | `shm_open` + `mmap(MAP_SHARED)` | a file under `/dev/shm`, but the kernel refuses writable shared file mappings (`ENOSYS`, design-decisions §23) |
+| POSIX named semaphores (counters programs wait on) | `sem_open` | a table inside libc |
+| POSIX message queues | `mq_open`, `mq_send` | a table inside libc: 8 queues of 32 small messages |
+| System V (the older Unix interface for all three) | `shmget`, `msgget`, `semget` | tables inside libc |
+| Locks placed in shared memory | `PTHREAD_PROCESS_SHARED` | refused (`ENOTSUP`): the kernel's futex (its wait/wake primitive) cannot wake across programs yet — requested of lane A |
+
+**The question.** Every option below first needs the kernel to share writable
+memory between programs — anonymous and file-backed `MAP_SHARED` (a mapping
+two programs see the same bytes through). That part is lane A's and not in
+question. What is in question is where the *named objects* live:
+
+| Option | *What changes:* |
+|---|---|
+| **A.** In the kernel, as Linux does | All six families work between programs; each call is a kernel call. The kernel gains three new kinds of object. |
+| **B.** In a service program (an `ipcd`) | All six work between programs; libc asks the service over the system's message channels, so every send or receive costs a round trip through it. The kernel gains nothing beyond shared memory. |
+| **C.** In libc, over shared files — glibc's own design for named semaphores | All six work between programs; each object is a file under `/dev/shm`, mapped into every program that opens it, waits sleep on shared futexes. No new kernel objects and no service; file permissions decide who may open what. A program that dies halfway through an update can leave that one queue stuck, as a crashed lock holder can anywhere. |
+| **D.** Leave it | Programs that use these only within themselves keep working; nothing can share them. |
+
+**If never answered:** safe for everything in the tree today (nothing here
+shares these between programs), but it blocks every port that does —
+PostgreSQL, anything using `sem_open` between programs, daemons built on
+message queues. It does not get worse on its own.
+
+**Claude's recommendation:** **C.** It is how glibc already builds named
+semaphores, it keeps the kernel as small as the design asks (only scheduling,
+memory, IPC primitives and capabilities in the kernel), and its only kernel
+needs — shared writable memory and cross-program futexes — are needed by every
+option anyway. A stays available for System V message queues if a port turns
+out to need kernel-side behaviour C cannot give. Meanwhile lane D keeps the
+single-program versions correct.
+
+**Where it bites:** `posix/src/mqueue.rs`, `posix/src/semaphore.rs`
+(`sem_open`), `posix/src/sysv_*.rs`, `posix/src/mman.rs` (`shm_open`); lane A:
+`kernel/src/mm` (shared mappings) and `kernel/src/ipc/futex.rs`
+(`requests/d-a-futexes-keyed-by-physical-page-for-process-shared-objects.md`).
+
 ## F-Q3 — [F] Screenshots: how does a program get permission to read what is on the screen? — Status: OPEN (raised 2026-09-27)
 
 **In short:** the screenshot tool cannot take screenshots, because no program
@@ -190,167 +491,170 @@ ever be used privately, A is just as good, and simpler.
 reader §1333 builds for AVIF serves HEIC too), a helper program for the
 decoder, and the image viewer's "cannot display" message.
 
-## C-Q26 — [C] Four programs have a preference with nowhere to keep it. Where do user settings live? — Status: OPEN (raised 2026-09-18)
+## F-Q4 — [F] AVIF pictures open about twice as slowly as in a browser. Use the browsers' hand-written assembly, or write the fast parts in Rust? — Status: OPEN (raised 2026-09-27)
 
-**In short:** several programs have a setting that ought to be yours to
-choose — whether the lock screen shows the date, whether the markdown editor
-saves as you type, what rules the password generator checks a password
-against. Right now each of those is decided in the program's source code and
-is the same for everybody. I can give some of them a key to press, but a key
-only lasts until the program closes: reopen it and it is back to the built-in
-answer. Making them stick means deciding where a program's settings are
-*kept*, and that is one decision for all ~280 programs rather than four
-separate ones, which is why I am asking rather than picking.
+**In short:** AVIF pictures decode correctly but take roughly twice as long
+as in Chrome or Firefox: a full-HD photograph takes about 0.2 seconds here
+against 0.09 there. The difference is that the browsers' AV1 decoder (the
+part that unpacks the picture) runs about 160,000 lines of hand-written
+x86 assembly (instructions for the processor, written directly rather than
+compiled), and ours was brought in without it. We can bring that assembly
+in -- the browsers' speed at once, but code that Rust's safety checks cannot
+look at -- or rewrite the fastest parts ourselves in Rust.
 
-**Why you are being asked.** Where settings live is visible to you: it
-decides whether your preferences survive a reinstall, whether you can copy
-them to another machine, whether you can edit them in a text editor, and
-whether one program's settings can be read by another. Those are all things
-you have opinions about and none of them are technical details. It is also
-close to impossible to change later — once programs write to a location, that
-location is the format.
+**Measured** (`imagecodec`'s `bench_avif_decode`, one thread, best of five,
+on a machine busy with other builds, so treat the figures as rough):
 
-| Option | What changes |
-|---|---|
-| **A. One file per program, under a per-user settings directory** | `~/.config/lockscreen.yaml`, `~/.config/markdowneditor.yaml`, one per program, YAML as the design already requires elsewhere |
-| **B. One file for everything** | A single `~/.config/slateos.yaml` with a section per program |
-| **C. A settings service** | Programs ask a running service to read and write their settings; the service owns the files and can tell programs when something changed |
-
-*What changes, in one line each:*
-- **A** — you can open one program's settings in a text editor and see only that program's settings; deleting a program's file resets that program alone.
-- **B** — all your preferences are in one file you can copy to a new machine in a single step; a mistake while editing it can affect every program at once.
-- **C** — changing a setting takes effect immediately in every open window without reopening anything; it needs a service written first, so nothing lands for a while.
-
-**My recommendation: A.** It matches what the design already says about
-configuration (YAML, comments preserved), it is the one option where a
-program can be understood on its own, and it does not need anything built
-before the first program can use it. B's single file is genuinely nicer to
-back up, and that can be added later as an export. C is the best *eventual*
-answer — live updates across windows are worth having — but it is a service,
-and building one to unfreeze four booleans is the wrong order.
-
-**Where it bites, concretely:**
-
-| Program | The setting | What it does today |
+| Picture | Here (Rust only) | Pillow (the browsers' decoder, with assembly) |
 |---|---|---|
-| `apps/lockscreen` | `show_clock_seconds`, `show_date` | seconds hidden, date shown, for everyone |
-| `apps/markdowneditor` | `autosave_enabled` | off, for everyone |
-| `apps/passwordgen` | `PasswordPolicy` | checks its own built-in rules and shows a tick |
-| `apps/explorer` | `ConflictPolicy` | copying onto an existing name always renames, never asks |
-
-**If this is never answered:** nothing breaks and nothing gets worse. Each of
-those keeps its built-in answer, which is a defensible one in every case. The
-cost is that the whole class of "let the user decide" work stays shut: I can
-keep giving settings a key for the current session, but not one that is still
-set tomorrow. The survey that finds these is `scripts/frozen-flag-survey.py`,
-and it currently reports 99 such fields in 37 programs — most are per-session
-choices that a key does fix, and this question is about the remainder.
-
-## C-Q25 — [C] The password manager can write your passwords to a plain file, or write a "backup" that restores nothing. Which? — Status: OPEN (raised 2026-09-17)
-
-**In short:** the credential manager holds logins you have typed in, and
-today there is no way to get them out of it at all — no save button, no
-export, nothing. Two ways out are already written and sitting unused. One
-writes every password as readable text anyone who opens the file can read.
-The other writes a file it calls a *backup* that contains the names of your
-logins but none of the passwords, so restoring from it would give you back a
-list of empty entries. I need you to say which of these the program should
-offer before I connect either one to a button.
-
-**Why you are being asked.** Both choices are about your data leaving the
-program in a form you cannot take back. A plain-text file of passwords is the
-normal way every password manager lets you move to a different one, and it is
-also a file that is exactly as secret as wherever it lands. That is a policy
-call, not a technical one.
-
-| Option | What changes |
-|---|---|
-| **A. Plain-text export, with a warning** | "Export" writes a `.csv` containing every password as readable text; the program warns you first and the file is yours to protect or delete |
-| **B. Encrypted backup** | "Backup" writes a file only this program can read, using the password you unlock the vault with. It restores everything, and it is useless to anyone who takes it |
-| **C. Ship neither yet** | The two unused writers are deleted, and credentials stay inside the program until B is built properly |
-
-*What changes, in one line each:*
-- **A** — you can move your logins to another program today, and a file on your disk holds every password in the clear.
-- **B** — you can restore your vault onto a new machine, and nobody who copies the file learns anything; it needs the encryption work first, so it is not available today.
-- **C** — nothing leaves the program, and there is no way to move or restore your logins at all.
-
-**My recommendation: B, and A only if you want it.** Every password manager
-worth using offers the encrypted backup; the plain-text export is the
-migration escape hatch, and it is a real feature, but it should be a
-deliberate choice you make rather than the only thing on offer.
-
-**What I will not do either way:** connect the existing "backup" writer as it
-stands. It omits the passwords, so a file named like a backup would restore a
-vault of empty logins — and someone who had it would believe their
-credentials were safe. That is the failure this lane keeps finding: a name
-that claims more than the thing behind it does.
-
-**If this is never answered:** nothing gets worse. There is no way to export
-today and there will continue to be none, so no credential can leak through a
-door that does not exist. What stays broken is that a vault cannot be moved
-or restored, which makes the program a place to lose data rather than keep
-it. The two unused writers are `export_csv` and `serialize_backup` in
-`apps/credmanager/src/main.rs`, both carrying a `dead_code` allow that says
-outright they have no caller.
-
-## C-Q24 — [C] The design says to ship almost no keyboard shortcuts. We ship 31. Which ones stay? — Status: OPEN (raised 2026-09-17)
-
-**In short:** you wrote that SlateOS should come with very few keyboard
-shortcuts turned on, "or possibly no" — because "having hotkeys everywhere
-is a fucking pain in the ass". The desktop currently turns on **31** of them.
-Somebody should decide which ones survive. Nothing is broken either way; this
-is about what a new machine feels like on the first day.
-
-**Date raised:** 2026-09-17. **Lane:** C.
-
-**Where it comes from.** `design.txt` line 1320. The same file, a few lines
-later, carries a note headed PUSHBACK arguing that six are expected by
-everybody and should be on: Alt+F4, Alt+Tab, Ctrl+C/V/X, Ctrl+Z, Print
-Screen. So the file says both "almost none" and "these six". It does not say
-where the line is after that, and nothing in `design-decisions.md` records a
-decision — the 31 accumulated without one.
-
-**What is actually bound today.** They fall into four groups, and the groups
-matter more than the list:
-
-| Group | Examples | Count |
-|---|---|---|
-| Keys with one obvious meaning | Volume up/down/mute, brightness up/down, Print Screen | 6 |
-| The six the PUSHBACK note names | Alt+F4, Alt+Tab (and Alt+Shift+Tab) | 3 bound here; Ctrl+C/V/X and Ctrl+Z are **not** and should not be — they belong to whichever application has focus, and a global grab on them would break every one |
-| Window management chords | Snap left/right, minimise, maximise, show desktop, zone overlay | 8 |
-| Shell surfaces and desktops | Super (start menu), Super+R (run), Super+Tab (overview), next/previous desktop, notifications, task manager, settings, lock, shortcut card | 14 |
-
-**The reading that makes the spec consistent.** The complaint is about
-*chords* — Ctrl/Alt/Super combinations a user has to learn and can collide
-with an application. A dedicated Volume Up key is not "a hotkey everywhere";
-it is a key with one meaning, and leaving it unbound makes the hardware look
-broken. If that reading is right, the first group stays regardless and the
-argument is only about the last two.
+| 640x480 | 30 ms | 22 ms |
+| 1920x1080 | 199 ms | 88 ms |
+| 2560x1440 | 354 ms | 161 ms |
+| 1920x1080, 10-bit, full colour | 353 ms | 202 ms |
 
 **The options.**
 
-| | *What changes* |
+| Option | *What changes:* |
 |---|---|
-| **A. Ship the first two groups only** (9) | A new desktop has media keys, Alt+F4 and Alt+Tab. Super does nothing, there is no run box shortcut, no snapping, no desktop switching — each still available, each waiting to be bound. Closest to what the line says. |
-| **B. Ship A plus the shell's own surfaces** (about 14) | Adds Super, Super+R, Super+Tab, the shortcut card. The keys that open the things a user cannot otherwise find. Everything about window layout stays unbound. |
-| **C. Keep all 31, and record that the line has been overruled** | Nothing changes today; the spec stops being contradicted quietly. |
-| **D. Ship A, and put the rest behind one switch** ("enable the extra shortcuts") in the Hotkeys settings | Both audiences served, at the cost of a setting that exists to undo a decision. |
+| **A.** Bring in the assembly | Pictures open as fast as in a browser, straight away. SlateOS gains ~160k lines of x86 assembly (rav1d 1.1.0's own count) that the Rust compiler cannot check -- the same code Chrome, Firefox and Android run on every AV1 image and video, and among the most tested there is. Needs the NASM assembler on the build machine (a small install). |
+| **B.** Write the fast parts in Rust | Each of the handful of hottest routines is rewritten with the processor's vector instructions from Rust, checked sample-for-sample against the plain version. Stays in checkable Rust, but it is a long piece of work, and the speed arrives routine by routine. |
+| **C.** Leave it | Pictures stay about twice as slow as in a browser: fine for a still picture, noticeable for large ones and for AVIF animations. |
 
-**My recommendation: B.** A desktop whose Super key does nothing reads as
-broken rather than as restrained, and the start menu and run box have no other
-discoverable entry point. Window-management chords are exactly what the line
-is complaining about and are the ones people rebind anyway.
+**If never answered:** safe, and nothing is blocked: pictures open, just
+more slowly (option C). It does not get worse over time.
 
-**If it is never answered:** nothing breaks. The 31 stay, the spec goes on
-saying something the code does not do, and every future reader of that line
-has to work out for themselves whether it is stale or unimplemented. That is
-the real cost — not the shortcuts, the ambiguity.
+**Claude's recommendation:** **A.** The assembly is the most exercised code
+in its field, it produces exactly the same pixels as the Rust (dav1d's own
+tests hold the two to each other), and B would spend a long time reaching
+what A gives at once. B stays possible later for any routine that proves to
+matter, one at a time. The one real cost is the unchecked code; if keeping
+every decoder in checked Rust matters more to you than speed, B.
 
-**Where it bites.** `gui/desktop/src/hotkeys.rs`, `register_defaults`.
-Trimming the list is a few minutes' work whichever way it goes; deciding is
-the part that needs you. Note that deleting a default now *sticks* —
-design-decisions 860 — so a user who dislikes any of the 31 can already
-remove it permanently.
+**Where it bites:** `gui/video/rav1d` (its `asm` feature and the build step
+that assembles it, left out when it was vendored -- `VENDORED.md`),
+`known-issues.md` "[F] AVIF decoding has no committed benchmark", and every
+AVIF picture or animation on the system.
+
+## C-Q31 — [C] You suggested a lane say when it starts work outside its own part of the tree. The tool exists -- may `CLAUDE.md` make it a rule? — Status: OPEN (raised 2026-09-27)
+
+**In short:** answering C-Q20 you suggested that whenever a lane takes on a task
+the roadmap does not clearly give it, it should write that down where the other
+lanes will see it, so two lanes do not build the same thing. There is now a
+small tool for exactly that: a lane records "I am doing X" and every other lane
+sees it at once, without waiting for anyone's work to be merged. A tool nobody
+is told about goes unused, and the place every lane is told things is
+`CLAUDE.md`, which changes only on your word. So the question is whether to add
+the paragraph below.
+
+**The tool:** `scripts/lane-claims.py`. A claim is a small file in the one
+folder all six lanes share -- where "stop everything" halts already live -- so it
+is seen the moment it is written. It is a notice, not a lock: nothing is refused
+because of it. Claims older than a week are shown as stale, not hidden.
+
+**The paragraph proposed**, for `CLAUDE.md` under "Six Sessions", after the
+paragraph about `requests/`:
+
+> **Before starting a task the roadmap does not clearly give your lane, check
+> and claim it.** `python scripts/lane-claims.py --check <the paths you will
+> touch>` shows whether another lane has claimed them; if not, `python
+> scripts/lane-claims.py --claim "<what>" --paths <paths>` tells every lane at
+> once, and `--release <what>` when it is done or dropped. A claim is a notice,
+> not a lock.
+
+| Option | *What changes* |
+|---|---|
+| **A. Add it as written** (recommended) | every lane checks for and records a claim before out-of-territory work |
+| **B. Add it, worded your way** | the same, in your words -- tell me the change, or edit it in yourself |
+| **C. Leave `CLAUDE.md` as it is** | the tool exists and is used only by lanes that remember it |
+
+**If it is never answered:** nothing breaks and nothing is blocked; the tool is
+there and lane C uses it. What is lost is the protection it exists for, because
+a claim only helps if the lane about to duplicate the work thinks to look.
+
+## C-Q29 — [C] Copying in one program and pasting in another works nowhere. Should copy and paste travel through the window system? — Status: OPEN (raised 2026-09-26)
+
+**In short:** nothing you copy can be pasted into a *different* program. Each
+program keeps a private clipboard of its own, and the system's clipboard
+program exists but nothing can reach it (`known-issues.md`
+`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`). Building the
+missing link means choosing *how* a program talks to the clipboard, and there
+are three ways. One is through the connection every program with a window
+already has to the window system -- the way Linux's Wayland and macOS do it.
+Another is a second, separate connection to the clipboard program. The third
+is the operating system's core keeping the clipboard itself, which programs
+would reach by asking the core directly. Only the first also carries dragging
+things between programs, which the design asks for.
+
+**Terms, once each:** *the window system* -- the compositor, the program that
+draws every window and passes each its mouse and keyboard; *the clipboard
+program* -- `gui/clipboard`, which keeps what was copied, with a history;
+*A-Q15* -- the open question above: a program could hold only one network
+connection at a time, and on SlateOS the window system's connection is that
+one, so a second connection killed the program's window. Lane A has built the
+fix (2026-09-27, being boot-tested); once it reaches the shared branch, a second
+connection is safe. *The kernel* -- the operating system's core, which every
+program can ask for things directly through *system calls* (requests a program
+makes of the core itself). It already keeps a clipboard of its own
+(`kernel/src/fs/clipboard.rs`: text, and a list of files), which today only the
+kernel's own command shell can reach.
+
+| Option | What changes |
+|---|---|
+| **A. Through the window system** (recommended) | Copy, paste and dragging between programs can all be built now. The window system carries a program's offer of data -- as text, formatted text, a picture or a file -- and the clipboard program keeps the history. |
+| **B. A second connection to the clipboard program** | Copy and paste waits only on lane A's A-Q15 fix reaching the shared branch -- built, not yet published. Dragging between programs still has to go through the window system, so there are two ways of moving data between programs instead of one. |
+| **C. The kernel's own clipboard, through new system calls** | Copy and paste between programs with no connection at all, and lane A's work alone (asked for by lane E: `requests/e-a-a-clipboard-door-for-applications.md`). But the kernel cannot tell which window you are using without asking the window system, so it cannot stop a program in the background from reading what you copied; it holds text and file lists, not pictures or formatted text; and dragging still needs the window system -- two ways, as in B. |
+| **D. Leave it** | Copy and paste keeps working within each program and never between two. |
+
+**Why A.**
+- Dragging needs the window system whatever is chosen. Only the window system
+  knows which window is under the pointer when you let go, so A is one
+  mechanism for both; B and C are each a second one beside it. `design.txt`
+  line 735 asks for exactly that: "a clipboard/drag-and-drop system that
+  supports multiple data formats per operation".
+- The window system knows which window you are using, so it can refuse a
+  program in the background that reads the clipboard behind your back. Under B
+  or C the clipboard would have to ask the window system anyway.
+- It waits on nothing. (B's wait, on A-Q15, is nearly over -- lane A has built
+  the fix -- so this matters less than it did when the question was raised.)
+
+*Updated 2026-09-27 from lane A's note,
+`requests/a-ce-the-clipboard-transport-is-c-q29-and-the-kernel-clipboard-is-a-third-option.md`:
+option C added, and B's wait restated. Lane A will not add the system calls for
+C ahead of your answer, since whichever transport is built first becomes how
+every program copies.*
+
+**Why you are being asked:** whichever way is chosen is how every program will
+copy, paste and drag, for good -- a program written for one cannot use the
+other without being changed -- and it splits work between lanes differently.
+A needs lane F to add the offer and the transfer to the window connection, and
+lane C to make the clipboard program the keeper of the history, with a small
+client for programs; C is lane A's system calls, with the window system still
+needed for dragging.
+
+**If this is never answered:** nothing gets worse. Copy and paste keeps
+working inside each program and never between two, and the emoji picker still
+has no way to give you the emoji you pick.
+
+## C-Q28 — [C] The start button should be the XOR logo, but the logo is not in the repository. Can you add it? — Status: OPEN (raised 2026-09-26)
+
+**In short:** the design says the start button is "a round, shrunken version
+of the XOR logo (`xor2.png`)". No file of that name is in the repository, on
+any branch, so the start button draws a stand-in: a plain four-square picture
+from the built-in icon set. It is not a decision to make so much as a file to
+supply.
+
+**What would happen with it:** the logo would be drawn once as a small SVG
+(a vector picture, so it stays sharp at every size) and shipped as the
+built-in theme's `start-here` icon -- the name icon sets use for "the start
+menu" -- so any theme can still draw its own instead.
+
+| Option | What changes |
+|---|---|
+| **A. You add `xor2.png` (or an SVG of it) to the repository root** | The start button becomes the logo, drawn to match. |
+| **B. The four squares stay** | Nothing: the stand-in remains the start button. |
+
+**If this is never answered:** nothing breaks and nothing gets worse. The start
+button works and looks like a start button, just not like this system's own.
 
 # Resolved` index at
 the bottom under your own lane's subheading. An answered question left in the
@@ -459,1268 +763,6 @@ of them by accident.
 185,074 measurement and the gnulib source that causes the split, is in
 `known-issues.md` → `TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
 
-## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
-
-**In short:** The lock screen — the program that asks for your password when
-the machine is locked — was broken for a day and nobody knew, because nothing
-in this project ever tries to build it. Somebody changed a shared library, the
-lock screen still referred to the old version, and no test anywhere failed. It
-was found by accident. There are 142 more programs in the same position
-(143 counted, one broken). The question is whether to add a slow check that compiles everything
-before work is merged, and if so, what shape it takes — because whatever we
-pick, all three lanes have to live with it.
-
-### What happened
-
-`5264cba7a` (lane B) removed a function argument and a module from `authlib`,
-a shared login library. Its commit message says "no caller changes", which was
-true of every caller *that lane can see*. `apps/lockscreen` is a caller in lane
-C's tree. It stopped compiling and stayed that way until an unrelated tidy-up
-happened to run clippy on it.
-
-Nothing caught it because nothing builds `apps/`:
-
-| What runs today | Why it misses this |
-|---|---|
-| the boot test | builds for the bare-metal target; `apps/*` are not in `default-members` there |
-| each lane's own `cargo test -p …` | a lane only builds what it touched |
-| `check-window-wiring.py`, `check-gates-are-wired.py` | read source text; they never invoke the compiler |
-| CI | there is none |
-
-A `cargo check --workspace --target x86_64-pc-windows-gnu` would have caught it.
-Nobody has a reason to run one.
-
-### A second instance, 2026-09-09 — and this one was not cross-lane
-
-The case above is a lane boundary problem: lane B could not see lane C's caller.
-This one has no lane in it at all.
-
-`design-decisions.md` §826 changed four colour constants in `gui/appearance`.
-Lane C ran `cargo test -p settings`, which passed, and merged. The change also
-broke `a11y::tests::no_high_contrast_colour_is_a_palette_role` in `gui/desktop` —
-pure black had become the light theme's text colour, and that test asserts no
-high-contrast colour is also a palette role. It sat red on `main` until it was
-found by accident a day later, while doing something else.
-
-So the gap is not only "a lane cannot see another lane's callers". It is
-**anyone editing a crate that four others depend on and testing only the crate
-they edited**, which is the ordinary way to work and is what the per-crate
-instruction in `CLAUDE.md` asks for. A palette is exactly the shape of thing
-that has many dependents and no obvious blast radius.
-
-**One practical finding that changes the cost estimate below.**
-`cargo check --workspace --target x86_64-pc-windows-gnu` **exits 0** on the
-current tree and takes minutes on a cold cache, seconds warm. The `build`
-spelling does *not* — it fails trying to link the kernel for the host target,
-which is its own trap (`known-issues.md`
-`TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL`). If the
-answer here is yes, the gate should be spelled `check`, not `build`.
-
-Whether the gate should also run `cargo test --workspace` is a separate and much
-more expensive question: `check` would **not** have caught this second instance,
-because a broken test compiles fine. It would have caught the first.
-
-### A fourth incident, 2026-09-13 — and the first where the tooling caught it
-
-Lane C added a variant to `guitk::Event` (a tray-icon click). The five
-crates that changed were tested and green. `apps/explorer` and
-`apps/stickynotes` match that enum *exhaustively*, so both stopped
-compiling — two crates nobody had named, in the lane's own tree.
-
-What is new is how it surfaced. `scripts/workspace-test.py` builds and runs
-every target, and it reported:
-
-```
-[workspace-test] targets passed: 0
-[workspace-test] runner exited 101 with no failing test — build or launch error.
-```
-
-Note the shape: **zero targets and no failing test**, which is what a build
-break looks like from inside a test runner. A filtered log would have looked
-identical to a clean one.
-
-**What this is and is not evidence for.**
-
-| | |
-|---|---|
-| Does a full-workspace build catch real breaks? | Yes, demonstrably, four times now |
-| Was it cross-lane this time? | **No** — both broken crates were lane C's own |
-| Did it block a merge? | No. It was run voluntarily, before pushing |
-| Would option C (grep before the claim) have caught it? | **No.** No symbol was removed; a variant was *added*, and exhaustive matches break on additions. There is nothing to grep for |
-
-That last row is the part worth weighing. Option C was the cheap answer
-that would have caught the first incident; it cannot catch this one even in
-principle, because the failure is an addition rather than a removal and the
-broken code names nothing that changed. A convention about what to grep
-before claiming "no caller changes" does not help when the claim was never
-made.
-
-It also weakens the case for A over B slightly, in an honest direction:
-the run that caught this was **voluntary**, not a gate, and it was run
-because the lane's habit is to run it before pushing. One data point is not
-a policy, and the habit is exactly the kind of thing that decays when the
-session changes — which is the objection this document already raises
-against option C.
-
-### Option A is already being run, by one lane, and here is what it costs
-
-**Lane C has run the whole-workspace build and test before every merge to
-`main` for some time, voluntarily.** That is not quite option A -- it is option
-A plus running the tests, so it is the *expensive* end of the range -- but it
-answers the part of the question that estimates could not: what happens when
-somebody actually does this.
-
-**It covers the incident that raised this question.** `Cargo.toml` lists
-`"apps/*"` among the workspace members, so `cargo test --workspace` builds
-`apps/lockscreen`. The change that broke it would have gone red here before it
-reached `main`.
-
-**Measured 2026-09-14, eight consecutive runs on the shared machine, under
-whatever contention the other two lanes were producing at the time:**
-
-| | seconds |
-|---|---|
-| runs | 8 |
-| each | 336, 339, 342, 351, 375, 422, 446, 578 |
-| mean | ~399 s, a little under seven minutes |
-| total for the day | ~53 minutes of machine time, for one lane |
-
-**The 578 is the number to look at, not the mean.** It is the slowest of the
-eight by 30%, and it is slow for a knowable reason: lane A started a full boot
-run while it was going. That is the contention this entry's earlier
-measurements kept flagging as the missing figure, caught here by accident
-rather than by design -- one lane's gate and another lane's boot are the two
-heaviest things on this machine, and nothing schedules them apart. Three lanes
-each running a seven-minute gate before each merge will not cost 3 x 7.
-
-**And what it caught in those eight runs: nothing real, twice.** Two of the
-eight went red. Both were the same lane-B timing test (`oils`
-`a_poll_before_the_grace_does_not_lose_the_exit_forever`), which measures a
-real clock against a 20 ms grace and misses its window when two dozen test
-binaries share the machine. Neither was a product defect. Each cost a six-minute
-re-run before anything could be merged.
-
-**Which cuts both ways, and the second way is the one worth weighing.** The
-gate plainly works -- it builds what nothing else builds, it is affordable, and
-lane C has absorbed it without complaint. But on the day it was measured its
-whole observed output was two false alarms, and a gate whose red means "either
-something is broken or the machine was busy" is one that teaches its readers to
-re-run first and think second. Lane A reports the same thing from the other
-end: of four breakages it inherited from `main` on 09-12, each costing a boot
-run, only one was a compile error `cargo check` would have caught.
-
-So the cost of option A is not really the six minutes. It is that mandating a
-gate across three lanes *at the suite's current flakiness* buys a signal the
-lanes will learn to discount -- and a discounted gate catches nothing at all,
-which is strictly worse than the honest "we do not build `apps/`" we have now.
-If the answer is A, it is worth pairing with a rule that a test which cannot
-tell a scheduling accident from a defect gets fixed or quarantined.
-
-*(Recorded by lane C, which is the lane paying this cost, and is therefore the
-least neutral party to report it. The numbers are wall-clock from
-`scripts/run-timeout.py` and can be re-derived from any day's transcript.)*
-
-### Why this is yours and not mine
-
-Any answer gates all three lanes' merges, and the cost lands on whoever is
-merging — not on me proposing it. It is also genuinely slow: a cold check of
-the whole workspace is minutes, and it is minutes *added to every merge*.
-
-### Options
-
-**A. A pre-merge `cargo check --workspace` for the host target.**
-*What changes:* merging to `main` takes a few minutes longer, every time, and a
-lane cannot merge while any crate in the tree is broken — including one broken
-by a different lane.
-The strongest guarantee, and the harshest: lane A is blocked by lane C's typo.
-That is already true of the boot test, which builds the whole workspace, so
-this is a difference of degree.
-
-**B. A nightly (or once-per-session) sweep that only reports.**
-*What changes:* nothing blocks; a broken crate is found within a day instead of
-within a chance encounter, and lands as a `known-issues.md` entry or a
-`requests/` file for whoever owns it.
-Cheap and unintrusive. Does not stop a breakage being merged, only shortens how
-long it lives.
-
-**C. Require the grep before the claim.**
-*What changes:* nothing mechanical; the convention becomes that a commit
-message may not say "no caller changes" about a shared library until
-`grep -rl <symbol> apps/ gui/ net/` has been run.
-Costs nothing and would have caught this exact case, but it is a rule enforced
-by remembering it, which is the kind that decays.
-
-**D. Do nothing.**
-*What changes:* nothing. Broken app crates accumulate silently and are found
-one at a time by whoever next touches them.
-
-### Measured — then measured wrong, twice. Read this before the recommendation
-
-I first recommended the cheap option (B) on the assumption that a full check
-costs "minutes added to every merge". I then measured, got 58 seconds, and
-reversed to the gate (A). **Both of my numbers were about the wrong thing, and
-two other lanes found the holes.** The corrected position is below; the history
-is kept because the *shape* of the error matters more than the number.
-
-**What I actually measured.** `cargo check` over the 143 crates in `apps/`,
-enumerated by name and passed as `-p` flags, on an otherwise idle machine:
-58 seconds warm, exactly one broken (the lockscreen, since repaired).
-
-**Hole 1 — that is not the command the gate would run.** The gate's mechanism
-is `cargo check --workspace` for the host target. On a tree lacking
-`services/hello/target/.../hello`, that does not merely take longer — it *fails
-outright*, because `kernel/src/container.rs` embeds that artifact and it is not
-built by anything cargo runs. My `-p apps/*` enumeration skipped the kernel and
-so never met it. So "58 seconds, all clean" is a number about a command nobody
-would run, and it is the reassuring half. (Found by lane B. Details in
-`known-issues.md` →
-`A-THE-KERNEL-EMBEDS-A-BUILD-ARTIFACT-NOTHING-BUILDS-AND-NOTHING-TRACKS`;
-lane A is fixing the build-graph edge, so this is a prerequisite for the gate,
-not a permanent obstacle.)
-
-**Hole 2 — an idle number is the wrong number for a shared machine.** This
-machine saturates on a *single* cargo run; that is measured, not folklore. So
-the cost of a gate that fires on every merge is not its own wall clock — it is
-its wall clock *under contention*, **plus the degradation it imposes on the
-other two lanes for the duration**. For a gate that runs many times a day
-across three lanes, that second term may well dominate the first.
-
-That distinction is the same one lane A's case for the SSD migration turned on
-(18 random reads/sec contended against 100–150 idle — a 5–8× gap that becomes
-~40× under three-lane load). I read that argument, agreed with it, and then
-failed to apply it to the thing I was proposing. An idle measurement is the
-optimistic half of any question about a machine three agents share.
-
-### The measurement, taken properly (lane B, 2026-09-06)
-
-`cargo check --workspace` for the host target, on `E:/os-lane-b` at
-`b9b7c61df`, machine **idle**:
-
-| | |
-|---|---|
-| **139 s** | full check from cold — the kernel had never been checked in that tree |
-| **15 s** | immediate re-run, nothing changed — the no-op cost |
-| **14 s** | after touching one source file — **the number this entry should quote** |
-
-The gate's cost is the third row: a merge is warm, because the lane just built
-and tested the thing it is merging, and something has changed. **Fourteen
-seconds.**
-
-Lane B stated the cold/warm spread explicitly — 139 → 15 — for the reason that
-my 58 s was misread for want of exactly that context. Quoting 14 s as a
-from-cold figure would be off by two minutes.
-
-**Still to come:** the same measurement under contention, which is the one the
-recommendation should turn on (see Hole 2). Lane B is taking it during lane A's
-boot test.
-
-### The operator's question, answered with the frequency term (lane A, 2026-09-13)
-
-*How much time would C+B save over A, and what is the harm in catching an error
-a day later?*
-
-**The term nobody had measured is how often the gate fires.** `git log
-origin/main --merges`: **489 merges in 10 days**, 86 of them yesterday. So:
-
-| | per run | per day |
-|---|---|---|
-| **A**, whole-workspace, warm, contended | 15 s | ~12 min at 49 merges/day, ~21 min at 86 |
-| **A**, scoped (158 `-p`), same conditions | 8 s | ~7 min / ~11 min |
-| **B**, one sweep, schedulable when idle | ~15 s warm | ~2 min, near-zero contention |
-| **C**, a grep on shared-library commits | ~1 s | negligible |
-
-Direct saving of C+B over A: **10-20 minutes of machine time a day**. Counting
-Hole 2 -- this machine saturates on a single cargo run, so each firing also
-degrades the other two lanes for its duration -- plausibly **25-60 minutes of
-aggregate lane time a day**.
-
-**The harm of a day's delay is real, and I can price it, because it happened to
-me four times on 2026-09-12.** A breakage on main propagates: every lane that
-merges inherits it and spends a boot cycle (10-30 min) rediscovering it.
-
-**But only one of those four was a compile error.**
-
-| inherited breakage | would `cargo check --workspace` catch it? |
-|---|---|
-| `stdin-hang-sweep.sh` SC2046 | no -- shell lint |
-| `getent` `unwrap_or_default` | no -- check-read-defaults |
-| `fio` reading absent `procinfo` fields (E0609) | **yes** |
-| `check-dead-code-allows` missing `newline=` | no -- text-mode gate |
-
-So A addresses about a quarter of the observed breakage traffic, at a cost paid
-on all ~50-90 merges a day. The boot test already catches all four categories;
-A only moves one of them earlier. On this evidence the trade is unfavourable:
-12-22 min/day of machine time to save perhaps one 30-minute rediscovery,
-before counting what it does to the other two lanes.
-
-**Caveats, stated because one day is a small sample.** If compile breakages are
-commoner than 1-in-4, the arithmetic moves. And A is not currently possible at
-all: `cargo check --workspace` fails outright on a clean tree because the kernel
-embeds `services/hello`'s artifact and nothing builds it (Hole 1) -- that has to
-be fixed before A is even an option, whereas B and C could start today.
-
-### Scoped versus whole, measured — and my prediction was wrong
-
-The comparison above (39 s scoped against 14 s whole) was invalid: mine was
-**cold** for ~156 crates, lane B's was **warm incremental**. Lane B then took
-the missing measurement, both sides warm-incremental and **both under identical
-contention** (during lane A's boot test):
-
-| | one app file touched | no-op |
-|---|---|---|
-| **scoped** (158 `-p` flags) | **8 s** | 7 s |
-| **whole** (`--workspace`) | **15 s** | 16 s |
-
-I predicted the enumerated form would lose, because naming 158 packages makes
-cargo do work proportional to the set *named* rather than the set that
-*changed*. It wins, about 2:1. Recorded because this entry has a running theme
-and I am not exempt from it.
-
-**Why, and it is worth knowing independently of the gate.** Neither lane B nor I
-had checked what `--workspace` actually enumerates before reasoning about it.
-Both of us pictured "the 158 apps, plus the kernel". Counted from the manifest
-globs:
-
-| glob | crates |
-|---|---|
-| `apps/*` | 143 |
-| `gui/*` | 15 |
-| `init/*`, `net/*` | 4 |
-| **`userspace/*`** | **2,759** |
-
-So `--workspace` is roughly **2,900 members**, not 160. Scoped checks 158
-things and whole checks about 2,900; the subset being cheaper is not a
-surprise once the number is in front of you. It was in front of neither of us.
-
-### A hazard in the scoped form itself
-
-Before that 8 s counts in the scoped form's favour, somebody has to answer a
-question neither measurement asked: **how was the list of 158 `-p` flags
-built?** That is the only part of this still unrecorded, and it is lane B's to
-answer.
-
-`-p` takes a *package* name, and nine directories under `apps/` and `gui/` are
-not named after their package. Three of the nine -- `backup`, `indexer`,
-`sysinfo` -- resolve to a **different crate that really exists**, in
-`userspace/`; the other six error. See
-`known-issues.md` -> `TD-B-FIVE-CRATES-CANNOT-BE-REACHED-BY-THEIR-DIRECTORY-NAME`
-(filed 2026-09-10, gated as Gate 18 of the boot test). Not repeated here.
-
-So: if the 158 came from `cargo metadata`, the number stands. If from directory
-names, the run could not have completed unless the six erroring names were
-special-cased and the three silent ones were not -- in which case the 8 s
-measured three of the wrong crates and skipped three of the right ones.
-
-**Why this belongs in the decision and not only in the measurement.** A gate
-built out of `-p` flags carries that failure permanently; a `--workspace` gate
-cannot, because it names nothing. That is a point on the coverage axis, not the
-cost one. Lane C hit the live version on 2026-09-14: `cargo test -p sysinfo` on
-a crate in `apps/` ran `userspace/sysinfo`'s tests and printed "26 passed",
-which is a true sentence about tests that really ran and no answer at all to
-the question asked.
-
-### What that means: cost is not the axis, coverage is
-
-At 8 s against 15 s, **both under contention**, cost cannot decide this. Seven
-seconds is inside the noise of a merge. So the scope should be chosen for what
-it *covers*, and there the two differ sharply (lane B's argument, and I think it
-is right):
-
-- A gate scoped to `apps/` + `gui/` catches a breakage whose **victim** lives in
-  those trees. It would have caught my `guitk::Event` one.
-- It would **not** have caught the `authlib` → `init/loginmgr` one, because
-  `init/` is outside the scope — and that is the same commit that started this
-  entry.
-
-Victims can be anywhere, so only whole-workspace covers cross-lane API changes,
-which is the case C-Q11 exists for. **Do not scope for cost.** If a scope is
-ever wanted, it must be justified by coverage, and this one cannot be.
-
-That also disposes of the `include_bytes!` prerequisite as a scoping argument:
-it is a real bug and worth fixing on its own merits, but it is not a reason to
-reduce the gate's coverage, and 15 s says the coverage need not be traded for
-cost.
-
-### The scenario that matters, now measured: worst case 49 seconds
-
-Every figure above is **"one file touched"**. That is not when a gate fires.
-
-`CLAUDE.md` step 1 requires `git fetch origin && git merge origin/main` before a
-lane starts work, and the merge-up happens at the end. So the gate runs on a
-tree that has just absorbed *another lane's* commits — which on a bad day means
-a shared crate (`guitk`, `guiremote`, `authlib`) changed, and everything
-downstream of it rebuilds. Downstream of `guitk` is 158 crates; downstream of
-`authlib` is most of `userspace/`.
-
-Lane B measured it — touch each shared crate, re-check the whole workspace,
-under contention:
-
-| crate touched | dependents | whole-workspace re-check |
-|---|---|---|
-| `authlib` | 12 | 19 s |
-| `posix` | 13 direct | 22 s |
-| `guitk` | 144 | 26 s |
-| **`quoting`** | **773** | **49 s** |
-
-**Worst case in the tree is 49 seconds.** It never approaches the 139 s cold
-figure because `cargo check` does no codegen: a cold run pays to *compile* the
-dependency graph, a post-merge re-check only pays to re-read it — about 63 ms
-per downstream crate.
-
-**Two things I had wrong here, both the failure this entry keeps cataloguing.**
-
-*First:* I wrote that "downstream of `authlib` is most of those 2,759". It is
-**12**. That is wrong by two orders of magnitude and it mattered, because the
-whole expensive-case worry rested on the intuition that a shared-crate change
-rebuilds most of the tree. It does not. **The blast radius that justified this
-entire question was twelve crates.** What made it serious was not that there
-were many victims but that they were in a *different lane* from the author —
-which is the thing a gate fixes and a bigger number would not have made truer.
-
-*Second:* the widest shared crate is not `guitk`, `posix` or `authlib`. It is
-**`quoting`, at 773 dependents**, and it appeared in none of the three candidate
-lists either of us was reasoning from. Lane B measured it precisely so the worst
-case would not be merely the worst of the ones we happened to name. Same shape
-as the six embedded artifacts and the `--workspace` member count: enumerate
-first, then reason.
-
-Dependent counts verified independently here (`grep -rl` over every
-`Cargo.toml`): `quoting` 773, `guitk` 144, `posix` 13, `authlib` 12. Member
-counts: `userspace/*` 2,759, `apps/*` 143, `services/*` 76, `gui/*` 15,
-`init/*` 2, `net/*` 2.
-
-### Recommendation
-
-**Adopt C now, regardless. Defer the A-versus-B choice to one number that does
-not exist yet.**
-
-**Adopt C as well — it is free — but it is not the answer and should not be
-credited as one.** The convention: a commit message may not claim "no caller changes" about a
-shared library until `grep -rl <symbol> apps/ gui/ net/` has been run. It costs
-nothing and needs no infrastructure.
-
-What I originally wrote here was that it "would have caught this". That is true
-of the first two breakages and **not** of the third, which I caused myself a few
-hours after writing this entry — see the third row below. I added a variant to a
-shared enum in `guitk`, updated the three consumers I was thinking about, and
-did not grep for the rest. At that moment I had the failure mode more firmly in
-mind than anyone in this project has ever had it: I had just written up two
-other lanes' instances of it, in this file, arguing for a gate to catch it.
-
-So the honest assessment of C is that it is a *discipline*, and this project now
-has one clean experiment on whether discipline is sufficient here. It is free,
-it costs nothing to keep, and it will catch the cases where the author pauses to
-think. It will not catch the cases where the author is confident — which are the
-same cases, because confidence is what stops you grepping.
-
-### The four breakages, all one shape
-
-| # | Change | Consumer missed | Found by | Author's state |
-|---|---|---|---|---|
-| 1 | `authlib` drops `with_stores`'s second argument (§353) | `init/loginmgr` | lane B, later | believed the caller list complete; had grepped `userspace/*/Cargo.toml`, which covers neither `apps/` nor `init/` |
-| 2 | the same change | `apps/lockscreen` | lane C, by accident, a day later | same commit, same belief — its message says "no caller changes" |
-| 3 | `guitk::Event` gains `SettingsChanged` | `apps/stickynotes`, `apps/explorer` | lane A's boot test, 30 min in | lane C — me — hours after writing this entry |
-| 4 | the same variant, unmerged in lane B's tree | the same two crates | lane B's own C-Q11 measurement run, rc=101 | lane B, *while measuring the cost of the gate that catches it* |
-
-A type or a signature changes, some consumers are updated, others are not, and
-nothing notices until a boot test half an hour in or a person happens to look.
-**Four times in one day, by all three lanes, in three different subsystems** --
-and the last two by the two people who at that moment were most alive to the
-risk.
-
-**Numbers 3 and 4 are the same failure by the two people least able to make
-it, and together they say more than any timing here.** Number 3 was the author
-of this proposal committing the failure hours after writing the argument for a
-gate. Number 4 was the person pricing that gate committing it during the
-measurement. Neither of us failed for want of knowing — we had the failure mode
-in mind more firmly than anyone in this project ever has.
-
-The mechanism that refutes is *priming*, not memory. The grep in option C is a
-step you take when you doubt yourself, and neither of us doubted. A convention
-that fires on doubt cannot cover the confident case, and the confident case is
-most of them. That is why C is kept below as free-and-worth-having rather than
-as a control anyone should rely on.
-
-**Number 3 carries one extra piece of evidence the others do not**, and it bears
-on what a gate is worth. The two crates that broke were the two matching their
-events *exhaustively* — `explorer` names every event it declines, `stickynotes`
-matches every variant. Roughly 140 other apps end with a catch-all arm and
-accepted the new variant in silence. So adding to a shared enum punishes exactly
-the consumers that opted into being told, and rewards the ones that opted out.
-Compiler exhaustiveness is the closest thing to a free gate this codebase has,
-and it only fires where someone chose to leave it armed.
-
-**The dangerous property is discarding, not catching** (lane B and lane A, and
-this corrects my first statement of it). A catch-all that *forwards* the value —
-`Err(e) => report(e)` — still surfaces a new variant as its own text, without
-the crate being recompiled against the new definition. It is
-`_ => {}` that swallows it. So "140 crates end in a wildcard" is the wrong
-count and would condemn arms that are fine; the count that matters is
-catch-alls that *drop* the value, which is not a thing grep can tell you.
-
-That has a direct consequence for what a gate is worth: **a compiling workspace
-is a floor on correctness, never a proof.** A check cannot distinguish a
-forwarding catch-all from a discarding one without reading it, so the gate
-guarantees only that every crate still builds — which is exactly the guarantee
-being priced here, and worth not overselling.
-
-**Between A and B, here is the decision rule rather than a verdict**, so that
-the answer follows from lane B's measurement instead of from my instinct:
-
-| If the contended workspace check costs… | Then |
-|---|---|
-| under ~1 minute | **A** — a fair price for "the tree compiles", and the only option that *stops* a breakage rather than shortening its life |
-| a few minutes, with the other lanes degraded throughout | **B** — the nightly sweep. The guarantee is no longer cheap, and a standing tax on every merge stops being worth it |
-
-**Every figure is now in**, and they all land in the first row:
-
-| scenario | cost |
-|---|---|
-| no-op / one file touched, idle or contended | 14–16 s |
-| after a merge touching `authlib`, `posix` or `guitk` | 19–26 s |
-| **after a merge touching the widest crate in the tree (`quoting`, 773 dependents)** | **49 s** |
-
-Nothing costs a minute, including the worst case, including under contention.
-
-**I recommend A, whole-workspace, and I have dropped the hedge.** I said I
-would drop it if the worst realistic case came in under a minute; it is 49
-seconds. Everything that was uncertain when this entry was written has since
-been measured, and every measurement moved toward A:
-
-- the price is seconds, not minutes, at every point in the range;
-- contention costs almost nothing (14 s idle against 15 s contended);
-- the failure went from "one, found by accident" to **four in one day, by all
-  three lanes**;
-- and the two most recent were committed by the person who wrote the argument
-  for a gate and the person measuring its cost — which is what convinced me the
-  convention in C cannot be the answer.
-
-The standing caveat is unchanged and the operator should still apply it: **I
-have been wrong on this entry's numbers repeatedly** — first guessing minutes,
-then measuring the wrong command, then quoting an idle figure for a shared
-machine, then predicting the scoped/whole comparison backwards, then putting
-`authlib`'s blast radius at ~2,759 when it is 12. Every one of those was
-corrected by another lane rather than by me. What that argues, though, is not
-that the recommendation is unreliable — it is the single best argument *for* the
-recommendation. Five wrong numbers from someone paying close attention, caught
-only because two other agents happened to check, is precisely the case for a
-mechanism that fires without being invoked.
-
-**The objection to A, restated in the better form lane B gave it.** I had
-written it as "the gate lets one lane block another's merge", and answered that
-this is already true of the boot test. Lane B's version is stronger: *the
-coupling exists whether or not there is a gate.* Today it ran in both
-directions — lane B's `authlib` change broke lane C's lockscreen, and that
-lockscreen then stood between lane B's own `init/loginmgr` fix and a green `main`.
-The gate does not create that coupling. It moves discovery from "another lane
-trips over it days later" to "the lane that caused it, at the moment it caused
-it". The cost lands on whoever merges next *without* the gate; with it, it lands
-on whoever broke it.
-
-**One condition on A if it is chosen.** Scope it to the members that genuinely
-check cleanly on the host, and scope it for *that stated reason* — never to
-route around a member that is broken. A gate excluding the kernel because the
-kernel does not build is a gate that has hidden the defect it should have
-reported. (Lane B's phrasing; it is the right test for whether a scoped gate is
-honest.)
-
-### If this is never answered
-
-The current state is safe but degrading, and nothing is blocked: the lockscreen
-is repaired, `main` is green, and adopting C costs nothing and needs no answer
-from you. Everything this question needed measuring is measured; it is waiting
-only on you.
-
-What stays open is the gap. Every shared-library change is another chance for a
-breakage that nothing reports and that is found weeks later by somebody who did
-not cause it. **On the day this was raised it happened four
-times** — twice from `authlib`'s single-store change (`apps/lockscreen` and
-`init/loginmgr`, two lanes, neither caught by anything but a person looking), and
-once from my own `guitk::Event` addition, which a boot test caught thirty
-minutes in, and once again from that same variant in lane B's tree, found by
-the run measuring what a gate would cost. All four are fixed; the mechanism
-that let them through is untouched.
-
-The cost grows with the number of app crates, which is growing.
-
-## C-Q15 — [C] Under the optional "Filled" theme, should the shaded boxes be made paler? — Status: OPEN
-
-**In short:** you chose outlined boxes as the normal look and kept the older
-filled-box look as an option people can switch to. In that filled look, boxes
-are shaded grey, and text on a grey box is harder to read than text on the
-white page. I have just made the *text* darker automatically so it is always
-readable — so nothing is broken either way. The question is whether you would
-also like the grey boxes themselves made a little paler, which would let the
-text stay closer to the colour you actually picked.
-
-**Glossary.** *Contrast* here is the standard accessibility measure of how far
-apart two colours are in brightness; 4.5 is the minimum for ordinary text.
-*Accent* is the one colour you pick that appears throughout the interface —
-currently the blue-green `#00688B`.
-
-**Why this is not urgent.** Every combination now clears 4.5 automatically, in
-both themes, for all fourteen accent choices and any custom one. This is purely
-about how much the accent has to change when the filled theme is switched on.
-
-**How much it changes today.** Under the normal outlined theme, almost nothing —
-at most six units of colour, which nobody can see. Under the filled theme it is
-visible: a green accent renders as a noticeably deeper green on a card than the
-swatch you chose it from.
-
-**The options**
-
-**A. Leave the greys as they are.**
-*What changes:* nothing. Under the filled theme the accent renders deeper than
-its swatch; under the normal theme it is unchanged.
-For: no work, and the automatic adjustment already guarantees readability.
-Against: someone who picks a bright accent and then switches themes sees it go
-muted, with no explanation on screen.
-
-**B. Make the shaded boxes paler, so the accent moves less.**
-*What changes:* cards, selected rows and sidebars become lighter greys in the
-filled theme; accents render closer to the swatch you picked.
-For: the accent you chose is more nearly the accent you see.
-Against: paler cards are harder to tell apart from the white page — which is
-the entire job of a filled theme — so this trades one visible defect for
-another, and there is not much room: a card must stay distinct from the page.
-
-**C. Show the resolved colour on the settings swatches.**
-*What changes:* the accent swatches in Settings are drawn in the colour that
-theme will actually use, so the picker and the desktop agree.
-For: removes the surprise without touching any grey. Cheap.
-Against: the fourteen swatches would look different under the two themes, which
-some people would read as a bug rather than as honesty.
-
-**My recommendation: C, and then A.** The complaint B addresses is really "the
-swatch lied", not "the accent is wrong" — and C fixes exactly that, for the
-cost of drawing the swatches through the palette instead of from the constants.
-B spends the one thing the filled theme cannot spare, which is the distance
-between a card and the page. If after seeing C you still find the deeper accents
-muddy, B is still available and nothing about C forecloses it.
-
-**If it is never answered:** option A happens, and nothing degrades. Text is
-readable in every combination today. The only cost is the mild surprise
-described above, and only for people who switch to the optional theme.
-
-## C-Q16 — [C] Should the games follow the desktop theme, or keep their own colours? — Status: OPEN
-
-**In short:** about forty small games ship with the system — chess, solitaire,
-minesweeper, tetris and so on — and each one has its colours written into it
-rather than taking them from your theme. Twelve *applications* have the same
-problem and that is plainly a bug: a file manager should be light when you
-choose the light theme. For the games I am not sure it is a bug, and I would
-rather ask than decide it with a script. A chess board's light and dark squares
-are the game's own look, the way a photograph in an image viewer is not
-something the theme should tint.
-
-**What is definitely being fixed either way:** every game's *chrome* — its
-menus, score panels, dialogs, and the window background behind the board. Those
-are interface and they should follow your theme. The question is only about the
-playing surface itself: the board, the pieces, the tiles, the cards.
-
-**The options**
-
-**A. The board keeps its own colours; only the chrome follows the theme.**
-*What changes:* a chess board looks the same in light and dark mode; the menu
-bar and score panel around it change.
-For: a game's board is artwork, and forty games designed around their own
-palettes will not all survive being recoloured. Solitaire's card backs,
-minesweeper's numbered tiles and tetris's seven piece colours are conventions
-people recognise. Against: a dark-theme user gets forty bright rectangles.
-
-**B. Everything follows the theme, boards included.**
-*What changes:* a chess board is drawn in two shades from your palette; tetris
-pieces take palette hues.
-For: complete consistency, and dark mode is genuinely dark.
-Against: tetris's pieces are *identified* by colour (the standard seven), and
-minesweeper's numbers 1–8 have fixed colours that players read at a glance.
-Recolouring those makes the games worse, not just different.
-
-**C. Per-game, decided by whether the colour carries meaning.**
-*What changes:* minesweeper and tetris keep their colours (they mean
-something); chess, checkers and solitaire's felt take the theme (they are
-decoration).
-For: the only option that respects both arguments.
-Against: forty individual judgements, and someone has to make them.
-
-**My recommendation: A**, with C available later for the handful where the
-board is obviously just decoration. A gets dark-mode chrome everywhere for a
-modest, mechanical change, and it cannot make any game worse — which B
-demonstrably can. The cost of deferring C is nothing: it is the same work,
-game by game, whenever anyone cares.
-
-**If it is never answered:** I do the chrome (which A and C agree on) and leave
-the boards alone. Nothing breaks; the games simply keep their current
-appearance, which is what they have today. This question is genuinely safe to
-leave — it is here because forty crates is too many to change on my own guess
-about taste, not because anything is blocked.
-
-## C-Q17 — [C] Five finished features are built into the system but cannot be used. Wire them up, or delete them? — Status: OPEN
-
-**In short:** five applications each contain a complete, tested feature that no
-part of the program can reach — the code is compiled into the system and there
-is no button, menu or keystroke that leads to it. Between them that is 327 KB
-of code and 214 tests, all passing. I can wire them into their applications or
-remove them, and those are very different amounts of work, so I would rather
-ask than guess.
-
-**What they are**
-
-| where | what it does | size |
-|---|---|---|
-| the installer | configures the GRUB bootloader | 48 KB |
-| the image viewer | plays video | 77 KB |
-| the process explorer | click a window to find its process; show what a process is waiting on and detect deadlocks; set CPU affinity and priority; browse a process's memory map and environment | 83 KB |
-| system information | queries hardware details | 73 KB |
-| settings | a remote-settings page | 46 KB |
-
-**How each one escapes the compiler, measured 2026-09-16.** The tests are one
-reason; there is a second, and it differs per feature:
-
-| feature | why `dead_code` is silent |
-|---|---|
-| image viewer — video | `#![allow(dead_code)]` at the top of `video.rs` |
-| process explorer — features | `#![allow(dead_code)]` at the top of `features.rs` |
-| settings — remote page | `#![allow(dead_code)]` at the top of `remote.rs` |
-| installer — GRUB | `pub mod grub` in a crate with a `[lib]` section: `dead_code` stops at the crate boundary and cannot see that no one outside calls it |
-| system information — hardware queries | `pub mod hwquery`, same boundary |
-
-So three were silenced deliberately and two are structurally invisible. That
-matters for the decision: the first three would each start warning the moment
-the suppression came off, and the last two would not warn however the code was
-arranged, because the compiler has no way to know a library's public API has no
-users. Whatever is decided here, **the three suppressions are worth removing in
-the same change** -- otherwise the next feature to lose its last caller lands
-in exactly the same silence.
-
-**Why nobody noticed.** Each has its own tests and they all pass, because a
-test calls the code directly — it does not have to find a way in through the
-interface. This is the pattern `known-issues.md` records as lesson 47, and the
-sharp version of it: the process explorer's *own source* quotes that lesson
-while this module sat beside it.
-
-**A worked example of option B's cost, measured 2026-09-16, added so both
-options have evidence.** Three shell panels of this same shape were triaged
-that day: settings screens nobody could open, saving nothing, reached by
-nothing. Two were deleted (4,979 lines, 83 tests) and one was kept, and the
-question that decided each was the same one: **does a working implementation of
-this idea already exist somewhere else?**
-
-- Default applications: yes — `apps/fileassoc` writes the associations and
-  `apps/explorer` obeys them. Deleted, after moving the one idea the panel had
-  that the app lacked.
-- Backup settings: yes — `apps/backup` already does retention, exclusions,
-  incremental backups and pruning, *and runs them*. Deleted outright.
-- Power settings: no. Power plans, battery health and charge history exist
-  nowhere else, and the hardware they need is another team's. Kept.
-
-**Applied to two of the five, 2026-09-16.** The discriminator splits them, so
-this may be five small questions rather than one large one:
-
-| feature | does a working implementation exist elsewhere? | suggests |
-|---|---|---|
-| image viewer — plays video (77 KB) | **Yes.** `apps/videoplayer` is a separate, launchable application: 7,201 lines, 154 tests, no stubs. | delete |
-| process explorer — affinity, deadlocks, memory map (83 KB) | **No.** `features.rs` is 2,624 unreachable lines, and *affinity* and *deadlock detection* appear nowhere else in the tree. `sysmonitor` has some priority handling and none of the rest. | wire up |
-
-The other three (installer/GRUB, hardware queries, remote settings) are **not
-checked** — a first pass was inconclusive and is not reported rather than
-guessed at. Answering for the two above does not depend on them.
-
-Two things in that are worth carrying to the five above. Deleting is far
-cheaper than wiring *when the answer is yes* — most of a day's reading, no new
-interface, no new tests. And the dead copy twice looked *richer* than the live
-one, because a model that never runs is not constrained by having to work, so
-it accumulates vocabulary that reads as sophistication. Sizing these five by
-how finished they look would overvalue them.
-
-**A worked example of option A's cost, measured 2026-09-14.** A sixth feature
-of this shape was wired that day, and it is offered here as evidence rather
-than as a decision: the desktop's wallpaper. `WallpaperManager` could already
-load a picture, crop or letterbox or tile or centre it, span it across
-monitors, tint it by time of day and rotate a folder of them — and `set_image`
-was called four times in the whole tree, all four in the shell's own tests.
-
-Wiring it end to end came to a setting in `appearance.yaml`, twelve lines in
-the shell to adopt it, a Settings page with a file picker, and eight tests.
-Under an hour, and it turned up a real bug on the way: the picker's file filter
-was given bare extensions where the toolkit documents glob patterns, so every
-directory would have listed as empty on first use.
-
-**Two caveats, because an example that flatters the option is not evidence.**
-The wallpaper is the *easy* shape — its interface is a settings row, and this
-tree already has settings rows. The five above need a menu item, a panel or a
-keystroke in applications that have none, which is the part this entry says is
-unclear and the part the wallpaper did not have to solve. And one of the five,
-the image viewer's video player, is not a row anywhere: it is a second mode for
-a whole window.
-
-**The options**
-
-**A. Wire them up.** *What changes:* the installer can set up a bootloader, the
-image viewer plays video, the process explorer gains six tools, and so on.
-For: the code appears finished, and someone wrote and tested all of it. Against:
-it is the largest of the three options, and each one needs interface design —
-a menu item, a panel, a keyboard shortcut — that does not exist yet.
-
-**B. Delete them.** *What changes:* nothing a user can see; the system gets
-327 KB smaller. For: honest — the tree stops claiming to have features it
-cannot offer. Against: throws away working code, including a deadlock detector
-and a bootloader configurator that are not trivial to rewrite.
-
-**C. One at a time, by value.** *What changes:* the installer's bootloader gets
-wired up because an installer that cannot install a bootloader is a real gap;
-the rest are judged individually. For: puts the effort where it matters.
-Against: needs a judgement per module rather than one decision.
-
-**My recommendation: C, starting with the installer.** An installer that cannot
-configure a bootloader is a different severity of problem from a process
-explorer without a window picker, and treating them as one question gets the
-installer either over- or under-served. I would not delete anything until each
-has been looked at — deletion is the only irreversible option here.
-
-**Since this was filed, the ongoing cost stopped being hypothetical.** On
-2026-09-13 two of the five were converted to the user's colour palette --
-the image viewer's video module and the process explorer's features module --
-because a tree-wide sweep found them and there is no way for a sweep to know
-that nothing runs them. That is 106 constant uses and two `&Palette`
-parameters threaded through code that cannot be reached, done on the
-reasoning that it is independent of this answer: it compiles and is tested
-either way, and if it is ever wired up it now arrives with the right
-colours. The same will be true of the next sweep, and the one after.
-
-**A seventh, found on 2026-09-13.** `gui/desktop/src/launcher.rs`'s
-`LauncherState` is constructed only inside its own test module. The shell
-imports two *types* from that file -- `AppEntry` and `Category` -- and nothing
-else; the launcher that actually runs is `apps/launcher`, which has its own
-state machine of the same name. It was found by trying to wire an
-accessibility setting into it and noticing the setter would never be called.
-That is the second time in one day that this class has been found by *nearly
-doing work inside it*, which is the ongoing cost this question is about.
-
-**And the same shape turned up outside the five.** The desktop's icon layer
-(`DesktopIconLayer`, `gui/desktop/src/icons.rs`) is named nowhere but its own
-file, and it is what would read the *desktop icon size* setting -- so that
-preference has a working control in Settings and no consumer that runs.
-`cursor_size` and `cursor_scheme` are in the same position. Those are not
-part of this question and are logged separately, but they say something about
-it: **an answer of "delete" would need a rule, not a list**, because the
-list keeps growing as people look.
-
-**If it is never answered:** nothing breaks and nothing degrades; the system
-keeps carrying code it cannot run. The cost is ongoing rather than sudden —
-every sweep, every conversion and every audit pays attention to these files.
-I spent real effort on one of them tonight before discovering it was
-unreachable.
-
-## C-Q18 — [C] Nothing draws the mouse pointer. When we start, what happens to fullscreen video and games? — Status: OPEN
-
-**In short:** SlateOS does not draw a mouse pointer. On the development
-machine you see Windows' arrow, borrowed from the host; on real hardware there
-would be no pointer at all. The system already works out *which* pointer to
-show — an I-beam over text, arrows on a window edge — and then draws none of
-them. Starting to draw one is straightforward except in a single case:
-fullscreen video and games currently take a shortcut that skips drawing
-altogether, and a pointer cannot be painted on top of a frame that is never
-painted. What you are choosing is what happens in that case.
-
-**Glossary.** *Direct scanout* is the shortcut: when one window covers the
-whole screen and is fully opaque, its picture is handed to the display exactly
-as the program drew it, with no copying. It is what makes fullscreen video and
-games cheap. A *hardware cursor* is a pointer the graphics chip draws for
-itself, from a small image the display controller holds separately — it costs
-nothing per frame and does not disturb the picture underneath.
-
-**Where it bites:** `gui/compositor/src/lib.rs` — `compose_frame`'s
-`direct_scanout_window` bypass, and `cursor_shape`, which is computed on every
-pointer move and read by two tests.
-
-**What is already true, measured 2026-09-13:** `CursorShape` has ten members
-and the compositor picks the right one continuously. Across all three
-presenters there is exactly one line of cursor code — `LoadCursorW(IDC_ARROW)`
-in the Windows host window class — so the shape is chosen and discarded. The
-kernel has cursor-plane support (`kernel/src/drm/`); the compositor's DRM
-presenter never reaches for it.
-
-**The options**
-
-**A. Draw the pointer in software, always — fullscreen loses its shortcut.**
-*What changes:* the pointer appears everywhere, and fullscreen video and games
-go back to being composited frame by frame.
-For: one code path, correct on every backend, and the pointer is never missing.
-Against: it spends a measured performance feature on a 32×32 image. The
-shortcut exists because copying a 4K frame is expensive, and this would pay
-that cost on every frame of every film.
-
-**B. Draw it in software, except over fullscreen content.**
-*What changes:* the pointer appears everywhere except on top of a fullscreen
-video or game, where it disappears.
-For: keeps the shortcut, and for games it is arguably *right* — a game hides
-the pointer itself. Costs nothing new.
-Against: a fullscreen video player with on-screen controls becomes unusable,
-because you cannot see what you are pointing at. "The pointer vanishes
-sometimes" is a hard thing for a user to form a rule about.
-
-**C. Ask the graphics chip to draw it, with software as the fallback.**
-*What changes:* the same as A from the user's side — a pointer that is always
-there — with fullscreen keeping its shortcut on real hardware.
-For: it is what the hardware is for, and it is the only option where nothing
-is given up. The kernel already has the plane support.
-Against: the most work by a wide margin, and the development host has no such
-plane, so the software path has to exist anyway and B or A is what a developer
-would see. Two paths mean the one you test is not the one that ships.
-
-**My recommendation: C, built as B first.** The software renderer is needed
-either way — it is the fallback, and it is what the dev host will use — so the
-first commit is the same under all three answers. The question is only what
-happens when it meets a fullscreen window, and B is a safe place to stand while
-the hardware path is built, because it is the one answer that gives nothing up
-today. What I would not do is A: spending direct scanout permanently, to solve
-a case that C solves properly, is the kind of trade that is easy to make and
-hard to take back.
-
-**If it is never answered:** there is no pointer on real hardware and Windows'
-arrow on the development host, which is also what makes the current state easy
-to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
-whole `CursorShape` vocabulary — and every accessibility question about pointer
-size stays unanswerable. Nothing degrades with time; it simply does not exist.
-## C-Q20 — [C] Four lists of "which programs are installed", and nothing can read the others. Which is the real one? — Status: OPEN
-
-**In short:** four different parts of the system each keep their own list of
-what programs exist on the machine, and the lists disagree. No program can read
-another's. The visible consequence today: the Settings app cannot offer you a
-choice of web browser, because it has no way to find out what browsers are
-installed — so that screen shows a placeholder. The question is which list
-should become the one everybody reads.
-
-**Added 2026-09-14, and it changes what is being asked.** This is not one
-duplicated list, it is the fourth example of one shape found in a single day,
-and the others are larger:
-
-| the idea | how many implementations | connected? |
-|---|---|---|
-| which programs are installed | 4 | none to any other |
-| the clipboard | **15** private ones, plus a service | the service has no clients at all |
-| which programs start at login | 3 | nothing launches any of them |
-| the ICMP echo header | 2 | the unused one is in a crate the user already depends on |
-
-Each was found by asking *what reads this?* and getting "nothing" — never by
-looking for a missing feature, because nothing is missing: every copy works.
-Details in `known-issues.md` under
-`TD-C-FIFTEEN-PRIVATE-CLIPBOARDS-AND-A-SERVICE-NOBODY-TALKS-TO`,
-`TD-C-THREE-STARTUP-MANAGERS-AND-NOTHING-THAT-STARTS-ANYTHING`, and
-`requests/c-a-the-icmp-wire-format-is-written-twice...`.
-
-**Why that is worth your time rather than noise in this entry:** a decision
-about *one* list is a small call about app registries. If the same answer would
-settle the other three, it is worth making it as a rule — "a thing the whole
-system shares lives in one place, and that place is X" — rather than four
-times, differently, by whoever touches each one next. If you would rather
-answer only the narrow question, that is fine and the options below are
-unchanged; this note exists so the choice is yours rather than made by the
-entry's framing.
-
-**The four lists**, with what each knows:
-
-| where | holds | who can read it |
-|---|---|---|
-| `kernel/src/fs/appregistry.rs` | 9 built-in apps, categories, MIME types | `/proc/appregistry`, as a **human-readable report** -- see the correction below |
-| `gui/desktop/src/launcher.rs` | 22 apps with real binary paths, drives the start menu | the desktop shell only |
-| `apps/fileassoc` | 8 apps and which file types they open | nobody -- it is a program, not a library |
-| `gui/desktop/src/default_apps.rs` | a third app list plus per-role defaults | nobody -- 2,325 lines no menu opens |
-
-They are not copies of one list. Until 2026-09-14 the `fileassoc` one named
-eight programs that **do not exist in this tree** (`textedit`, `photoviewer`,
-`browser`, `office`…) while the shell's named the real ones; that half is fixed,
-but the disagreement was invisible for as long as the lists were.
-
-**What it blocks right now.** `design-decisions.md` 815 (the operator's answer
-to C-Q6) says screens you *open* move into the Settings app and the shell's
-copies are deleted. `default_apps.rs` is one of those screens. Porting it needs
-a list of installed programs to choose between, and the Settings app can reach
-none of the four. So a decided piece of work is stopped on this.
-
-### Options
-
-**A. The kernel's registry is the authority; give its view a form a program
-can rely on.** `/proc/appregistry` already exists and already lists every app's
-name and binary path. What it does not have is a shape anything but a person can
-depend on: it opens with "Apps: 9/4096" and groups entries under category
-headings, which a program would have to scrape.
-*What changes:* installing a program makes it appear in the start menu, the
-Settings app and the file manager at once, without any of them being told.
-*Cheaper than it first appears:* the data and the plumbing are built; this is a
-second view in a stable format, not a new subsystem.
-*Against:* A-Q8 answered the same question for desktop icons with "it leaves
-the kernel", and a list of GUI programs is a weaker claim on kernel space than
-icon coordinates were.
-
-**B. A userspace library is the authority; the kernel's registry goes.**
-One crate under `gui/`, read by the shell, the Settings app, the file manager
-and the File Associations program.
-*What changes:* the same as A from the user's side. The difference is where it
-lives and who may change it.
-*Dearer than it first appears, and this is the correction that matters:*
-`fs::appregistry` is **not** an island. `fs::startmenu` calls it at eleven
-sites, `fs::procfs` reads both, `/proc/startmenu` exists as well, and both run
-at boot. So B is "delete a module with a `/proc` surface and a live in-kernel
-consumer, and decide what becomes of `fs::startmenu` and `/proc/startmenu`" --
-a materially larger change than removing `fs::deskicons` was, and all of it in
-lane A's tree.
-
-**C. Leave them separate.**
-*What changes:* nothing today. The Settings app's "default browser" screen stays
-a placeholder, and the four lists go on disagreeing silently.
-
-### If this is never answered
-
-Nothing breaks and nothing gets worse on its own — but `default_apps.rs` and
-the Settings app's Apps section stay where they are, which means one of C-Q6's
-own consequences cannot be carried out. The lists will also drift again: the
-`fileassoc` one drifted to eight fictional programs without anyone noticing,
-because nothing compares them.
-
-**Recommendation: A or B, and the gap between them is narrower than this
-entry first claimed.** The original recommendation was B on the precedent of
-A-Q8, written while believing the kernel's registry had no `/proc` view and no
-consumers. Both were false (below). With the plumbing already built and
-`fs::startmenu` depending on it, A is the smaller change and B is the larger
-one, which is the reverse of what was written.
-
-The principle still favours B -- what a user has installed is a property of
-their userspace, and every consumer of the list is a GUI program. The cost now
-favours A. That is a genuine trade rather than an obvious answer, which is why
-it is the operator's.
-
-Whichever is chosen, the defect to fix is that the four lists are four. Any
-option that leaves two of them is option C wearing a better name.
-
-### Correction, 2026-09-14: this entry was wrong about the kernel's registry
-
-The first version said `fs::appregistry` was "reachable only from the kernel's
-own debug shell -- there is no `/proc` view and nothing in userspace names it".
-Both halves are false, and lane A caught them within the hour:
-
-* `/proc/appregistry` is registered in `procfs.rs`, generated by
-  `gen_appregistry()`, and dispatched. It prints every app's name and binary
-  path.
-* `fs::startmenu` calls `appregistry::get`, `search` and `menu_tree` at eleven
-  sites, and is itself read by `/proc/startmenu`.
-
-**Where the wrong picture came from.** A comment in `kernel/src/main.rs` reads
-"appregistry and startmenu were reachable only from `kshell`" -- past tense,
-describing a condition somebody then fixed. It was read as a statement of the
-present. That is the same failure as reading five `os-lane-[abc]` grep hits as
-five defects when four were prose, and as "only `sysinfo` collides" written
-from one sample: **documentation about a past state is indistinguishable from a
-description of the current one, to a search.**
-
-The premise "four lists, none readable by the others" is therefore too strong.
-Three of the four cannot be read by anything; the kernel's can be read by
-anyone willing to scrape a status report. The question -- which list is the one
-everybody reads -- stands, because scraping a human-readable report is not an
-interface.
-
-## C-Q19 — [C] An event you coloured like your accent is invisible on today's date. Whose colour wins? — Status: OPEN
-
-**In short:** every calendar event can carry a colour you pick, and the month
-grid marks the event's day with a small dot in it. Today's date is drawn as a
-filled circle in your accent colour. Pick an event colour close to your accent
-and the dot lands on that circle and vanishes — the event is still there, the
-mark saying so is not. It affects one cell in forty-two, only when you chose a
-colour, and only when that colour is near your accent. The question is whether
-the system may quietly darken *your* colour to keep it visible.
-
-**Where it bites:** `gui/desktop/src/calendar.rs`, `render_day_cell`.
-
-**Why this is being asked now rather than in August**, when it was first
-noticed and filed as
-`known-issues.md` → `TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC`:
-the option that was least attractive then is cheap now. `appearance::legible_on`
-landed on 2026-09-12 and does exactly one thing — move a colour the smallest
-distance that clears the 4.5:1 floor, and nothing at all when it already does.
-It **preserves hue**: green becomes `#245A18`, blue stays `#0036A3`. So option
-C below is no longer "invent a darkening rule", it is one call.
-
-**And there is an argument on record against it**, written at the call site
-when the current behaviour was chosen: *"An event the user coloured keeps that
-colour everywhere, even on today's disc: it is their data and the calendar
-does not get to overrule it."* That principle is applied elsewhere in this
-lane and was applied twice on 2026-09-13 — `apps/whiteboard`'s stroke colours
-and `apps/screenshot`'s annotations are both left unfloored because they are
-the user's drawing, not the theme's. This entry is the one place where the
-same principle produces something the user cannot see.
-
-**The options**
-
-**A. Leave it. The colour you picked is drawn, always.**
-*What changes:* nothing. An event coloured like your accent has no visible
-mark on today's date.
-For: your data is never altered, and the principle stays simple enough to
-state in one line. Against: the one case it costs is the case where the mark
-exists to be seen.
-
-**B. Draw a thin ring around every coloured dot.**
-*What changes:* every event dot in the grid gains a one-pixel outline in the
-cell's own background colour, today's or not.
-For: no colour is ever altered, and it fixes the general problem rather than
-today's instance. Against: it changes the look of all forty-two cells to solve
-one, and a ring on a six-pixel dot is most of the dot.
-
-**C. Darken or lighten the dot only when it would otherwise be invisible.**
-*What changes:* a dot whose colour is near your accent shifts far enough to be
-seen, on today's cell only. Every other dot is untouched, including the same
-colour on any other day.
-For: one call to the mechanism the rest of the theme already uses, and it is a
-no-op for nearly every colour. Against: it is still the system changing a
-colour you chose, which is the thing A exists to refuse.
-
-**My recommendation: C**, but weakly, and I nearly implemented it without
-asking — the call-site comment is what stopped me. The reason to prefer it is
-that a mark you cannot see is not a smaller failure than a colour shifted by a
-shade. The reason to hesitate is that **A is the rule this lane follows
-everywhere else**, and an exception needs to be worth the inconsistency.
-
-**If it is never answered:** nothing degrades. The event is still in the day's
-detail card, whose colour bar sits on `mantle` and is unaffected, so the
-information is reachable — just not from the grid.
-
-## C-Q21 — [C] Setting a backup to run every day does nothing. What should run it? — Status: OPEN (raised 2026-09-16)
-
-**In short:** the backup program lets you say "back up every day". Nothing on
-the machine ever does it. The setting is written to a file that no program
-reads, so a person who sets it and walks away has no backups at all and is
-never told. Fixing it means deciding *what* wakes up and runs the backup, and
-that choice has a visible consequence for whether backups happen when nobody
-is signed in.
-
-**Why you are being asked rather than told.** The three candidates differ in
-something only you can settle — whether backing up someone's data is allowed to
-happen while they are not signed in — and one of them is not this team's code
-to write.
-
-| Option | What changes | Runs with nobody signed in? |
-|---|---|---|
-| **A. A background service** (a program the system starts at boot, before anyone signs in) | Backups happen on time whether or not anyone is using the machine | Yes |
-| **B. The desktop** (the program that draws your screen after you sign in) | Backups happen shortly after you sign in, and while you are signed in | No |
-| **C. Ask on sign-in** — the desktop notices one is due and offers to run it | You see "a backup is due — run it now?" and choose | No |
-
-*What changes, in one line each:*
-- **A** — the machine backs up at 3am with the screen off, as most people expect "daily backup" to mean.
-- **B** — the machine backs up the first time you sign in that day, and not at all on a day you do not sign in.
-- **C** — you are asked rather than surprised, at the cost of a prompt you can dismiss forever, which makes "daily" mean "when you agree".
-
-**My recommendation: A**, with **C**'s prompt as a fallback for a backup missed
-while the machine was off. "Daily" that silently means "on days you signed in"
-is the same class of quiet untruth this whole thing is about — it would be a
-smaller lie than today's, not a fix for it.
-
-**The catch that makes this a question and not a task.** A background service
-lives in `services/`, which is lane B's tree, not lane C's. So option A is a
-request to another team; B and C are work this lane can do alone. If you pick
-A, the schedule feature stays broken until lane B picks it up. That is a real
-cost and it is why B is tempting — it is worse and available.
-
-**If this is never answered:** the current behaviour stands, which is that the
-command claims a schedule and nothing runs. As of today it at least *says* so
-— it now prints that it records the schedule and does not cause a backup — so
-nobody is misled, but nobody gets a scheduled backup either. Nothing else is
-blocked by this, and it does not get worse with time. Tracked as
-`known-issues.md` BUG-C-BACKUP-SCHEDULE-WRITES-A-FILE-NOTHING-EVER-READS.
-
-## C-Q22 — [C] An account set to "log in automatically" still asks for a password. How does someone get past it to a different account? — Status: OPEN (raised 2026-09-16)
-
-**In short:** you can mark an account to sign in on its own, without typing a
-password. The machine records that and then ignores it — the password box
-appears anyway. Making it work is easy; what is not decided is how anyone
-reaches a *different* account afterwards, because once a machine signs itself
-in, the screen that lets you pick a user never appears. Pick wrong and a shared
-family computer becomes a one-person computer.
-
-**Why this needs you.** Every option below is a few lines of code. The
-difference between them is what a second person has to know, or discover, to
-use the machine at all.
-
-| Option | What changes |
-|---|---|
-| **A. Hold a key while it starts** (the way most systems do it) | The machine signs itself in; holding Shift during start-up shows the chooser instead. A second person cannot find this without being told. |
-| **B. A "Sign in as someone else" button on the way past** | The chooser appears for a few seconds with the account pre-selected and a visible button; if nobody touches it, it proceeds. Everyone can see the escape, at the cost of a pause on every start. |
-| **C. Only when there is one account** | Automatic sign-in works on a single-user machine and silently turns itself off the moment a second account exists. Nobody is ever locked out, and the setting stops working for a reason the user did not do deliberately. |
-
-*What changes, in one line each:*
-- **A** — fastest start, and a second user sees no way in.
-- **B** — every start pauses about three seconds and shows a button.
-- **C** — the feature quietly stops applying when a second account is added.
-
-**My recommendation: B.** A is the familiar answer and is also the reason
-people ask how to get into a computer they can see the desktop of; the escape
-being invisible is the whole problem, not a detail of it. B costs a short pause
-and makes the way out obvious to somebody who has never used the machine. C is
-safe but surprising — a setting that turns itself off is hard to tell from one
-that is broken, which is the shape of defect this project keeps finding.
-
-**A second, smaller answer this needs.** When the machine is being *recovered*
-— started for repair rather than for use — should automatic sign-in be skipped?
-Recommend **yes** for every option: recovery is when you most need to choose a
-different account, and the password is the only thing standing between a
-stolen laptop and its contents.
-
-**If this is never answered:** nothing breaks and nothing gets worse. An
-account marked for automatic sign-in keeps asking for a password, which is the
-safe direction to fail. As of today the module no longer *claims* the feature —
-its own documentation said it had autologin while doing nothing — so the only
-cost is a setting that does not do what its name says. `design-decisions.md`
-824 records why it was left undecided.
-
-## C-Q23 — [C] The feature list is wrong often enough that planning from it misleads. Re-check it, and how far? — Status: OPEN (raised 2026-09-16)
-
-**In short:** `roadmap-detailed.md` is the list of everything this system is
-meant to do, and work gets picked from it. Thirty of its items were checked
-against the code in one evening, and about half were wrong — most of them
-saying "not built" about things that are built and working. Nobody made a
-mistake; the list simply ages faster than anyone updates it. The question is
-whether to spend real time re-checking the rest, and how much.
-
-**The evidence, from the thirty checked** (`known-issues.md` →
-`TD-C-THE-FEATURE-INVENTORY-WAS-WRONG-IN-BOTH-DIRECTIONS`):
-
-| what the list said | what the code said | count |
-|---|---|---|
-| not built | built and working | 11 |
-| not built | built but no user can reach it | 2 |
-| not built | partly built, no record of which part | 5 |
-| not built | genuinely not built | 10 |
-| *nothing* | built and **contradicting the design** | 2 |
-
-The last row is the one that costs most: the file list was choosing columns by
-looking inside folders, which §4.1 forbids in bold, and nothing in the list
-could say so because nothing was missing.
-
-**Why it matters in practice.** Twice this evening I started work the list said
-was unstarted and found it finished — once after building a replacement for
-something that already existed. A list that says "not built" about built things
-sends people to rebuild; a list that cannot express "built but unreachable"
-sends them to write code that is already written.
-
-| Option | What changes |
-|---|---|
-| **A. Re-check the whole file** (~930 open items) | The list becomes trustworthy. Costs days of reading with no new features at the end of it. |
-| **B. Re-check one section at a time, as work is picked from it** | Nothing is re-checked speculatively; each section is corrected by whoever was about to work in it anyway. Slower to become trustworthy, and sections nobody visits stay wrong. |
-| **C. Re-check nothing; treat the list as a wish-list and verify per task** | No effort spent. Every future task pays the same few minutes I paid tonight, and the two design contradictions stay unfound until someone trips over them. |
-
-*What changes, in one line each:*
-- **A** — a week of no visible progress, then a file you can plan from.
-- **B** — planning stays unreliable, but never wastes effort on sections nobody uses.
-- **C** — nothing changes; the cost stays spread thin and permanent.
-
-**My recommendation: B**, with one addition — that a checked item records
-*that* it was checked, and on what date. Half tonight's cost was not knowing
-whether an empty box meant "absent" or "unexamined". That single convention
-makes B converge instead of repeating.
-
-**If this is never answered:** nothing breaks. The list stays a rough guide,
-work continues to be picked from it, and occasionally someone rebuilds
-something that exists — which happened twice tonight and cost an hour each
-time. It does not get worse on its own, but it does not improve either.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS
@@ -2717,6 +1759,82 @@ plain `TcpStream`, as `userspace/pkg` does.
 
 
 
+## E-Q3 — [E] System Restore now keeps the programs' settings and data. Should it also cover the system's own files, and how? — Status: OPEN (raised 2026-09-27)
+
+**In short:** System Restore can now take a restore point of every program's
+settings and data and put them back. It cannot do the same for the system
+itself -- its programs, how it starts, its services, its installed packages --
+and shows those as "needs the system's permission". Undoing a bad system
+update is the other half of what people expect from System Restore. The
+question is which way to build that half, because the three ways differ in
+what they need from the rest of the system and in how much can go wrong.
+
+| Option | What changes for the user | What it needs | Risk |
+|---|---|---|---|
+| **A. A privileged restore service** that copies system folders (`/etc`, `/boot`, `/usr`...) the way the settings folder is copied | "System files" becomes a component that can be ticked | a service running as root that System Restore asks, and a way to replace files the running system is using (a restart into a restore mode) | high: replacing a live system's files can leave it unbootable if interrupted |
+| **B. Filesystem snapshots** (a copy-on-write filesystem, as `design.txt` prefers) | whole-disk restore points, taken instantly | a copy-on-write filesystem -- SlateOS is ext4 today (`design.txt`: "ext4 first") | low once the filesystem exists; blocked until then |
+| **C. Package generations** (Nix-style, as `design.txt` also suggests: "roll back filesystem, reinstall package generation") | "Undo the last update" in the package manager rather than here | the package manager to keep each install as a generation | low; covers updates, not hand-edited system files |
+
+*What changes:* A -- a restore point can include the system. B -- the same,
+without copying. C -- a bad update is undone from the package manager, and
+System Restore stays about the user's own files.
+
+**Recommendation:** C for updates when the package manager can keep
+generations, and B for whole-system snapshots if a copy-on-write filesystem is
+added; not A. A copy-based restore of a running system's files is the one
+design here that can leave a machine that does not start.
+
+**If never answered:** nothing gets worse. System Restore keeps the user's
+settings and data and says plainly that it does not cover the system.
+
+**Where:** `apps/systemrestore/src/points.rs` (`SnapshotComponent::source`,
+`NEEDS_THE_SYSTEM`); `design-decisions.md` §1217.
+
+## E-Q4 — [E] There are two recycle bins, and neither can see what the other holds. Which one is SlateOS's? — Status: OPEN (raised 2026-09-27)
+
+**In short:** deleting a file in the file manager or the image viewer moves it
+to a recycle bin in your home folder, and since today the file manager can show
+that bin and put things back from it. The system has a second recycle bin of its
+own, built into the kernel (the core of the OS that every program runs on),
+which programs could use through a system call (the way a program asks the
+kernel to do something) -- but no program does. A file in one is invisible to
+the other. And the design asks for more than either does: *every* delete,
+including one typed at the command line, should go to the bin; each drive
+should keep its own bin; and old items should go only when space runs short.
+The question is which bin to build that on, because the three answers put the
+work -- and the rules about whose files are whose -- in different places.
+
+**The two, side by side.**
+
+| | The home bin (`~/.recycle`) | The kernel's bin (`/_TRASH`) |
+|---|---|---|
+| Used by | the file manager, the image viewer, and now Disk Cleanup | nothing but the kernel's own debug shell |
+| Whose | one per user | one for the whole machine, shared by every user |
+| File names | kept exactly, whatever bytes they hold | text only, and at most 255 bytes of path |
+| Per drive | no: deleting from a USB stick copies the file onto the system disk | no: "one per filesystem" is planned, not built |
+| Command-line deletes | cannot reach it | could, through the system call, once the shell's `rm` used it |
+
+| Option | *What changes* for the user | What it needs | Cost / risk |
+|---|---|---|---|
+| **A. The kernel's bin, extended** | a file deleted at the command line appears in the file manager's bin | lane A: one bin per user and per drive, names kept exactly, no length limit; then lane E points the desktop at it | the kernel decides where each user's deleted files live -- policy in the core, where the design keeps as little as possible |
+| **B. The home bin only**; the kernel's is retired | nothing, for the desktop; command-line deletes stay permanent unless `rm` is taught to recycle | lane A removes `/_TRASH`; lane E adds one bin per drive to `apps/recyclebin` | cheapest; leaves the design's "every delete goes to the bin" to each program choosing to |
+| **C. A recycle-bin service** (a background program, like the backup service) that owns every user's bins on every drive; the kernel's delete call hands the file to it | as A: every delete reaches the one bin the file manager shows | a new service (lane D), the call redirected to it (lane A), the desktop asking it (lane E) | most work; keeps the policy out of the core, which is the design's microkernel rule |
+
+**Recommendation:** C as the destination, reached through B: keep the home
+bin as the one the desktop uses (it already is, and its format loses nothing),
+add one bin per drive to it, and build no more on `/_TRASH`. When the service
+exists it takes the home bin's format with it, so nothing a user has deleted is
+stranded by the move.
+
+**If never answered:** nothing breaks or gets worse. The desktop's deletes are
+recoverable from the desktop's bin; command-line deletes are permanent, as on
+most systems; and `/_TRASH` holds only what someone put there from the kernel
+shell by hand.
+
+**Where:** `apps/recyclebin/src/lib.rs` (the home bin); `kernel/src/fs/trash.rs`
+and `SYS_FS_TRASH` .. `SYS_FS_TRASH_EMPTY` (618-621) in
+`kernel/src/syscall/number.rs` (the kernel's); `design.txt`, "recycle bin".
+
 ## A-Q22 — [A] If you rename a file, should it keep its version history? — Status: OPEN
 
 **In short:** the system keeps old versions of files, so you can go back to
@@ -2996,6 +2114,89 @@ answered question left in the body is pure cost — and, being older, it sorts
   and updated as a `pkg/` package.
 
 ## Resolved — lane C
+- **Under the optional Filled look, should the grey boxes be paler?** (C-Q15)
+  -- answered 2026-09-27: the boxes stay as they are; instead the accent and the
+  other interface colours are kept separately for each look, so a choice made
+  under one never lands on the other. `design-decisions.md` §1421.
+
+- **Should the games follow the desktop theme?** (C-Q16) -- answered
+  2026-09-27: every game's menus and panels do; each board is decided by
+  whether its colours mean something to a player (Claude's calls, sent to lane
+  E); and every game made as polished as possible. §1422.
+
+- **Five finished features nobody can reach: wire them up or delete them?**
+  (C-Q17) -- answered 2026-09-27: wire them up; where a feature also exists in
+  reachable form, the one kept first takes everything both could do. §1423.
+
+- **An event coloured like the accent vanishes on today's date: whose colour
+  wins?** (C-Q19) -- answered 2026-09-27: neither colour is changed; a warning,
+  both ways round, with a way straight to changing the event's colour. §1424.
+
+- **Four lists of the installed programs: which is the real one?** (C-Q20) --
+  answered 2026-09-27: one library in userspace; the kernel's list goes; and
+  every program, category, file type and default any of the four held is
+  carried over before anything is deleted. §1425.
+
+- **What runs a daily backup?** (C-Q21) -- answered 2026-09-27: a background
+  service started at boot, whether or not anyone signs in; a backup missed while
+  the machine was off runs as soon as it is on again, without asking. §1426.
+
+- **Automatic sign-in: how does someone reach a different account?** (C-Q22)
+  -- answered 2026-09-27: no pause at start-up; a key held while starting shows
+  the chooser, and the screen says so from the first moment; starting for
+  repair skips automatic sign-in. §1427.
+
+- **The feature list is often wrong: re-check it?** (C-Q23) -- answered
+  2026-09-27: section by section as work is picked from it, each check dated.
+  §1428.
+
+- **Which keyboard shortcuts are on by default?** (C-Q24) — answered
+  2026-09-27: Alt+F4, Alt+Tab, Super, Super+R, Print Screen and its variants
+  (including two that save to a file), the dedicated volume and brightness
+  keys, and inside programs Ctrl+C/X/V/Z, Ctrl+Shift+Z and Ctrl+F4; everything
+  else available but off; Super+Tab folded into a setting for Alt+Tab. The
+  operator also asked for a redo tree. `design-decisions.md` §1416.
+
+- **How do passwords leave the password manager?** (C-Q25) — answered
+  2026-09-27: both a plain-text export, made unmistakably clear it is insecure,
+  and an encrypted backup; plus a program may ask for a password only with a
+  capability for it and the user's consent in a prompt. §1417.
+
+- **Where do a program's settings live?** (C-Q26) — answered 2026-09-27: one
+  YAML file per program under the user's settings folder, and a settings
+  service beside it that tells open windows about changes -- not the function
+  that saves. §1418.
+
+- **Should something build every crate before a merge?** (C-Q11) — answered
+  2026-09-27 by delegation: the operator left it to Claude, asking that the
+  check's cost be measured while the machine carries its normal load and set
+  against the time it has saved. Measured and decided 2026-09-27
+  (`design-decisions.md` §1430): the boot test already builds and lints every
+  crate before a merge, at about 2.4% of its time, and has caught real breaks;
+  nothing is added. The
+  operator's two testing ideas that came with the answer went to lane A:
+  `requests/c-a-two-ways-to-test-a-change-without-a-full-boot.md`.
+
+- **The Open and Save windows should be the file explorer: which way?**
+  (C-Q30) — answered 2026-09-27: the explorer shows the window for every
+  program, and the program is handed only the file chosen (option A, which
+  Claude recommended). Written up as `design-decisions.md` §1415, with the
+  work by lane.
+
+- **Nothing draws the mouse pointer; what happens over fullscreen?** (C-Q18)
+  — answered 2026-09-27: the pointer is always shown, drawn on the
+  presenter's copy today and by the display's hardware cursor plane once a
+  screen is shown without copying; the light/dark request is met by the
+  existing Default and Inverted outlined schemes. Written up by lane F as
+  `design-decisions.md` §1334. Before that it was
+  deferred 2026-09-25 to `deferred-questions.md` DQ3, at lane F's request
+  (`requests/f-c-c-q18s-premise-changed-the-pointer-is-drawn-over-fullscreen-at-no-cost.md`).
+  Lane F built the pointer as a layer laid over the picture as it is shown, the
+  way a graphics chip's cursor plane is, and every presenter that exists copies
+  a fullscreen picture anyway, so the pointer costs fullscreen nothing -- the
+  trade the question asked about does not exist yet. The operator's answer
+  settled the later case too, so it does not come back.
+
 - **What does "selected" look like, and what happens to a toolbar?** (C-Q13,
   C-Q14) — both answered 2026-09-12. Selection takes the accent everywhere, at
   the *same* one-pixel thickness rather than a thicker line — the code already

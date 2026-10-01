@@ -212,13 +212,26 @@ impl Rights {
     /// authority, not because the operation is dangerous.
     pub const SET_BRIGHTNESS: Self = Self(1 << 22);
 
+    /// May enrol and remove Secure Boot entries (`PK`, `KEK`, `db`, `dbx`,
+    /// `MOK`): `SYS_SECUREBOOT_ENROLL` and `SYS_SECUREBOOT_REMOVE`.
+    ///
+    /// **The strongest of the setting rights.** A `db` entry decides which
+    /// images may run and a `dbx` entry which may not, so a holder decides
+    /// what the machine will boot. Its own bit for the reason every bit here
+    /// has one: granting "may set the keyboard layout" must not grant this.
+    ///
+    /// Verifying an image needs no right: asking whether an image may run
+    /// discloses nothing the entries' holder has not published in
+    /// `/proc/secureboot`.
+    pub const ENROLL_SECUREBOOT: Self = Self(1 << 23);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 17] = [
+    const DISTINCT: [Self; 18] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -236,6 +249,7 @@ impl Rights {
         Self::SET_HOSTNAME,
         Self::SET_KEYLAYOUT,
         Self::SET_BRIGHTNESS,
+        Self::ENROLL_SECUREBOOT,
     ];
 
     // --- Convenience combinations ---
@@ -303,7 +317,16 @@ impl Rights {
             // Granted rather than withheld because the alternative is a
             // syscall nobody can invoke -- which is the same defect
             // `SYS_KEYLAYOUT_SET` was added to fix, one layer further in.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            // The same decision, for the same reason, for Secure Boot
+            // entries: init holds it, and so does every descendant nothing
+            // has narrowed. Withholding it would make the door a syscall
+            // nobody can invoke -- which is what design-decisions §978 (the
+            // operator's A-Q21 answer, "make them live") rules out. There is
+            // no narrower grant to give yet: the machinery for handing one
+            // administrative tool a right its parent lacks (`authbroker`) is
+            // the next module on the same list. See §1501.
+            | Self::ENROLL_SECUREBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::File`].
@@ -343,7 +366,8 @@ impl Rights {
             // bookkeeping and not as a tightening. Omitting the bit here
             // would be a narrowing smuggled in under an unrelated feature,
             // and 930 rejected narrowing as a separate, larger change.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            | Self::ENROLL_SECUREBOOT.0,
     );
 
     /// What the init process is granted on [`ResourceType::Socket`].
@@ -367,7 +391,8 @@ impl Rights {
             | Self::MEMORY_LOCK.0
             | Self::SET_HOSTNAME.0
             // Per 930, as for `INIT_FILE` above.
-            | Self::SET_KEYLAYOUT.0,
+            | Self::SET_KEYLAYOUT.0
+            | Self::ENROLL_SECUREBOOT.0,
     );
 
     /// No rights.
@@ -493,25 +518,33 @@ const _: () = {
 /// mechanism. `design-decisions.md` §928.
 const _: () = {
     assert!(
-        // 17 as of 2026-09-21: SET_BRIGHTNESS was added for
-        // SYS_BRIGHTNESS_SET. The decision this pin demands, made and
-        // recorded rather than merely unblocked:
+        // 18 as of 2026-09-27: ENROLL_SECUREBOOT was added for
+        // SYS_SECUREBOOT_ENROLL / _REMOVE (design-decisions §978, §1501).
+        // The decision this pin demands:
         //
-        //   INIT_PROCESS  no
-        //   INIT_FILE     no
-        //   INIT_SOCKET   no
+        //   INIT_PROCESS  yes
+        //   INIT_FILE     yes
+        //   INIT_SOCKET   yes
         //
-        // Because that is what its three neighbours do. SET_CREDENTIALS,
-        // SET_HOSTNAME and SET_KEYLAYOUT are all system-wide-setting rights
-        // and none of them is in any INIT_* class -- those grant only the
-        // twelve generic rights, READ through DEBUG. init has no reason to
-        // dim a screen, and the compositor that does should hold the right
-        // explicitly rather than inherit it from being root.
+        // As SET_HOSTNAME and SET_KEYLAYOUT are, and for their reason: a
+        // right nobody holds is a door nobody can open, which the operator's
+        // A-Q21 answer ("make them live") rules out, and there is no
+        // narrower grant to give until `authbroker` -- the next module on the
+        // same list -- can hand one tool a right its parent lacks. Claude's
+        // call within the operator's scope, recorded in §1501, to revisit
+        // when that lands.
         //
-        // This pin did its job: the right was added, committed and pushed
-        // before the build was run, and the const assertion is what caught
-        // it rather than a boot two hours later.
-        Rights::DISTINCT.len() == 17,
+        // 17 (2026-09-21) was SET_BRIGHTNESS, decided the other way: in no
+        // INIT_* class, because init has no reason to dim a screen and the
+        // compositor that does should hold the right explicitly. That note
+        // also said SET_CREDENTIALS, SET_HOSTNAME and SET_KEYLAYOUT were in
+        // no INIT_* class; the lists above show they are in all three, and
+        // it is corrected here rather than left to mislead.
+        //
+        // This pin did its job then: the right was added, committed and
+        // pushed before the build was run, and the const assertion is what
+        // caught it rather than a boot two hours later.
+        Rights::DISTINCT.len() == 18,
         "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
          CLASSES init is granted, whether it should hold the new right: add it \
          to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \

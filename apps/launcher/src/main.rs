@@ -193,6 +193,10 @@ pub struct AppEntry {
     pub description: String,
     /// Path to the executable.
     pub executable_path: String,
+    /// The arguments it is started with, each one whole -- never one string
+    /// with spaces in it. `"/usr/bin/settings --display"` was a single file
+    /// name no system has, so the entry started nothing.
+    pub args: Vec<String>,
     /// Additional search keywords.
     pub keywords: Vec<String>,
     /// Category for badge display.
@@ -208,7 +212,9 @@ pub struct AppEntry {
 /// One entry in the launch history ring buffer.
 #[derive(Clone, Debug)]
 struct LaunchRecord {
-    /// Executable path that was launched.
+    /// What was launched: [`AppEntry::command_key`] -- the path, and its
+    /// arguments when it has any, so three pages of Settings are three
+    /// histories and not one.
     executable_path: String,
     /// Timestamp in seconds since some epoch (monotonic).
     timestamp_secs: u64,
@@ -306,11 +312,54 @@ fn frecency_bonus(
 // Launcher action (returned from event handling)
 // ============================================================================
 
+/// A program to start: its path, and its arguments, each one whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchCommand {
+    pub path: String,
+    pub args: Vec<String>,
+}
+
+impl std::fmt::Display for LaunchCommand {
+    /// As a person would type it, for a message: the path and the arguments,
+    /// spaced. Never for starting anything -- see [`spawn_program`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.path)?;
+        for arg in &self.args {
+            write!(f, " {arg}")?;
+        }
+        Ok(())
+    }
+}
+
+impl AppEntry {
+    /// What starting this entry runs.
+    #[must_use]
+    pub fn launch_command(&self) -> LaunchCommand {
+        LaunchCommand {
+            path: self.executable_path.clone(),
+            args: self.args.clone(),
+        }
+    }
+
+    /// The entry's identity in the launch history: the path, and its
+    /// arguments separated by NUL (which no argument can hold) when it has
+    /// any. An entry with none keys exactly as it always did.
+    #[must_use]
+    pub fn command_key(&self) -> String {
+        let mut key = self.executable_path.clone();
+        for arg in &self.args {
+            key.push('\0');
+            key.push_str(arg);
+        }
+        key
+    }
+}
+
 /// Action the launcher wants the shell to perform after handling an event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LauncherAction {
-    /// Launch the executable at the given path.
-    Launch(String),
+    /// Start this program.
+    Launch(LaunchCommand),
     /// Dismiss/close the launcher dialog.
     Dismiss,
     /// No action needed.
@@ -712,10 +761,10 @@ impl LauncherState {
 
         // Record in history and bump launch count
         entry.launch_count = entry.launch_count.saturating_add(1);
-        let path = entry.executable_path.clone();
+        let command = entry.launch_command();
 
         self.launch_history.push(LaunchRecord {
-            executable_path: path.clone(),
+            executable_path: entry.command_key(),
             timestamp_secs: self.now_secs,
         });
         // Keep history bounded
@@ -724,7 +773,7 @@ impl LauncherState {
         }
 
         self.hide();
-        LauncherAction::Launch(path)
+        LauncherAction::Launch(command)
     }
 
     /// Re-filter and re-sort results based on current query.
@@ -737,7 +786,7 @@ impl LauncherState {
             // Show all apps, sorted by frecency
             for (idx, entry) in self.apps.iter().enumerate() {
                 let frec = frecency_bonus(
-                    &entry.executable_path,
+                    &entry.command_key(),
                     &self.launch_history,
                     self.now_secs,
                     entry.launch_count,
@@ -752,7 +801,7 @@ impl LauncherState {
             for (idx, entry) in self.apps.iter().enumerate() {
                 if let Some(match_score) = search_score(&self.query, entry) {
                     let frec = frecency_bonus(
-                        &entry.executable_path,
+                        &entry.command_key(),
                         &self.launch_history,
                         self.now_secs,
                         entry.launch_count,
@@ -1121,6 +1170,10 @@ impl LauncherState {
 // ============================================================================
 
 /// The default set of launchable apps and system commands.
+/// The power utility, `userspace/powerctl`: `powerctl shutdown`, `reboot`,
+/// `suspend`, `hibernate`. The desktop shell runs the same path.
+const POWERCTL: &str = "/bin/powerctl";
+
 fn builtin_app_database() -> Vec<AppEntry> {
     vec![
         // Applications
@@ -1128,6 +1181,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Terminal".to_string(),
             description: "Command-line terminal emulator".to_string(),
             executable_path: "/usr/bin/terminal".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "shell".into(),
                 "console".into(),
@@ -1141,6 +1195,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Text Editor".to_string(),
             description: "Plain text and code editor".to_string(),
             executable_path: "/usr/bin/editor".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "edit".into(),
                 "code".into(),
@@ -1154,6 +1209,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "File Explorer".to_string(),
             description: "Browse and manage files".to_string(),
             executable_path: "/usr/bin/explorer".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "files".into(),
                 "browse".into(),
@@ -1167,6 +1223,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Calculator".to_string(),
             description: "Scientific calculator".to_string(),
             executable_path: "/usr/bin/calculator".to_string(),
+            args: Vec::new(),
             keywords: vec!["math".into(), "calc".into(), "compute".into()],
             category: Category::Application,
             launch_count: 0,
@@ -1175,6 +1232,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Settings".to_string(),
             description: "System preferences and configuration".to_string(),
             executable_path: "/usr/bin/settings".to_string(),
+            args: Vec::new(),
             keywords: vec!["config".into(), "preferences".into(), "options".into()],
             category: Category::Setting,
             launch_count: 0,
@@ -1183,6 +1241,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "System Info".to_string(),
             description: "Hardware and OS information".to_string(),
             executable_path: "/usr/bin/sysinfo".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "hardware".into(),
                 "info".into(),
@@ -1196,6 +1255,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Process Explorer".to_string(),
             description: "View and manage running processes".to_string(),
             executable_path: "/usr/bin/procexplorer".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "task".into(),
                 "manager".into(),
@@ -1209,6 +1269,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Image Viewer".to_string(),
             description: "View images and photos".to_string(),
             executable_path: "/usr/bin/imageviewer".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "photo".into(),
                 "picture".into(),
@@ -1223,6 +1284,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Music Player".to_string(),
             description: "Play music and audio files".to_string(),
             executable_path: "/usr/bin/musicplayer".to_string(),
+            args: Vec::new(),
             keywords: vec!["audio".into(), "song".into(), "mp3".into(), "media".into()],
             category: Category::Application,
             launch_count: 0,
@@ -1231,6 +1293,7 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Screenshot".to_string(),
             description: "Capture screen area or window".to_string(),
             executable_path: "/usr/bin/screenshot".to_string(),
+            args: Vec::new(),
             keywords: vec![
                 "capture".into(),
                 "snip".into(),
@@ -1241,10 +1304,16 @@ fn builtin_app_database() -> Vec<AppEntry> {
             launch_count: 0,
         },
         // System commands
+        // Power, through `powerctl` -- the program SlateOS has for it, and
+        // what the start menu's power menu runs (lane C's request
+        // c-e-the-launchers-power-entries-name-programs-that-do-not-exist).
+        // These named `/sbin/shutdown`, `/sbin/reboot`, `/sbin/suspend` and
+        // `/usr/bin/logout`, none of which SlateOS has ever had.
         AppEntry {
             name: "Shutdown".to_string(),
             description: "Power off the system".to_string(),
-            executable_path: "/sbin/shutdown".to_string(),
+            executable_path: POWERCTL.to_string(),
+            args: vec!["shutdown".to_string()],
             keywords: vec!["power".into(), "off".into(), "halt".into()],
             category: Category::System,
             launch_count: 0,
@@ -1252,7 +1321,8 @@ fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Restart".to_string(),
             description: "Reboot the system".to_string(),
-            executable_path: "/sbin/reboot".to_string(),
+            executable_path: POWERCTL.to_string(),
+            args: vec!["reboot".to_string()],
             keywords: vec!["reboot".into(), "reset".into()],
             category: Category::System,
             launch_count: 0,
@@ -1260,8 +1330,18 @@ fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Sleep".to_string(),
             description: "Suspend to RAM".to_string(),
-            executable_path: "/sbin/suspend".to_string(),
-            keywords: vec!["suspend".into(), "hibernate".into(), "standby".into()],
+            executable_path: POWERCTL.to_string(),
+            args: vec!["suspend".to_string()],
+            keywords: vec!["suspend".into(), "standby".into()],
+            category: Category::System,
+            launch_count: 0,
+        },
+        AppEntry {
+            name: "Hibernate".to_string(),
+            description: "Save everything to disk and power off".to_string(),
+            executable_path: POWERCTL.to_string(),
+            args: vec!["hibernate".to_string()],
+            keywords: vec!["hibernate".into(), "power".into()],
             category: Category::System,
             launch_count: 0,
         },
@@ -1269,23 +1349,20 @@ fn builtin_app_database() -> Vec<AppEntry> {
             name: "Lock".to_string(),
             description: "Lock the screen".to_string(),
             executable_path: "/usr/bin/lockscreen".to_string(),
+            args: Vec::new(),
             keywords: vec!["lock".into(), "secure".into(), "away".into()],
             category: Category::System,
             launch_count: 0,
         },
-        AppEntry {
-            name: "Logout".to_string(),
-            description: "End current session".to_string(),
-            executable_path: "/usr/bin/logout".to_string(),
-            keywords: vec!["signout".into(), "logoff".into(), "session".into()],
-            category: Category::System,
-            launch_count: 0,
-        },
+        // No "Log out": ending the session is the desktop shell's, which
+        // returns to its own sign-in screen, and a separate program has no
+        // way to ask it. The start menu's power menu has it.
         // Settings shortcuts
         AppEntry {
             name: "Display Settings".to_string(),
             description: "Resolution, scaling, and monitors".to_string(),
-            executable_path: "/usr/bin/settings --display".to_string(),
+            executable_path: "/usr/bin/settings".to_string(),
+            args: vec!["--page".to_string(), "display".to_string()],
             keywords: vec![
                 "monitor".into(),
                 "resolution".into(),
@@ -1298,7 +1375,8 @@ fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Network Settings".to_string(),
             description: "Wi-Fi, Ethernet, and VPN configuration".to_string(),
-            executable_path: "/usr/bin/settings --network".to_string(),
+            executable_path: "/usr/bin/settings".to_string(),
+            args: vec!["--page".to_string(), "network-status".to_string()],
             keywords: vec![
                 "wifi".into(),
                 "ethernet".into(),
@@ -1311,7 +1389,8 @@ fn builtin_app_database() -> Vec<AppEntry> {
         AppEntry {
             name: "Sound Settings".to_string(),
             description: "Audio input/output and volume".to_string(),
-            executable_path: "/usr/bin/settings --sound".to_string(),
+            executable_path: "/usr/bin/settings".to_string(),
+            args: vec!["--page".to_string(), "sound".to_string()],
             keywords: vec![
                 "audio".into(),
                 "volume".into(),
@@ -1361,8 +1440,9 @@ const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
 /// launcher exits as soon as a launch succeeds, so the child is reparented,
 /// and holding the dialog open until the program exits would make the launcher
 /// behave like a terminal.
-fn spawn_program(path: &str) -> Result<(), String> {
-    std::process::Command::new(path)
+fn spawn_program(command: &LaunchCommand) -> Result<(), String> {
+    std::process::Command::new(&command.path)
+        .args(&command.args)
         .spawn()
         .map(|_child| ())
         .map_err(|err| err.to_string())
@@ -1403,13 +1483,13 @@ impl oswindow::app::App for LauncherState {
         let moved = matches!(event, Event::Resize { .. }) || before != self.display_revision();
 
         match action {
-            LauncherAction::Launch(path) => match spawn_program(&path) {
+            LauncherAction::Launch(command) => match spawn_program(&command) {
                 Ok(()) => Response::Exit,
                 // The dialog stays up carrying the reason. Exiting here would
                 // be the worst of both: the program did not start and the
                 // window that could say so is gone.
                 Err(reason) => {
-                    self.report_launch_failure(&path, &reason);
+                    self.report_launch_failure(&command.to_string(), &reason);
                     Response::Redraw
                 }
             },
@@ -1711,6 +1791,7 @@ mod tests {
             name: "Terminal".to_string(),
             description: "Command line".to_string(),
             executable_path: "/usr/bin/terminal".to_string(),
+            args: Vec::new(),
             keywords: vec![],
             category: Category::Application,
             launch_count: 0,
@@ -1727,6 +1808,7 @@ mod tests {
             name: "Terminal".to_string(),
             description: "Command line".to_string(),
             executable_path: "/usr/bin/terminal".to_string(),
+            args: Vec::new(),
             keywords: vec!["shell".into(), "console".into()],
             category: Category::Application,
             launch_count: 0,
@@ -1741,6 +1823,7 @@ mod tests {
             name: "Calculator".to_string(),
             description: "Math tool".to_string(),
             executable_path: "/usr/bin/calc".to_string(),
+            args: Vec::new(),
             keywords: vec!["math".into()],
             category: Category::Application,
             launch_count: 0,
@@ -1854,8 +1937,8 @@ mod tests {
         };
         let action = launcher.handle_key(&enter);
         match action {
-            LauncherAction::Launch(path) => {
-                assert!(!path.is_empty(), "Launch path should not be empty");
+            LauncherAction::Launch(command) => {
+                assert!(!command.path.is_empty(), "Launch path should not be empty");
             }
             _ => panic!("Enter should produce a Launch action"),
         }
@@ -2233,7 +2316,7 @@ mod tests {
     fn a_click_on_a_row_launches_that_row() {
         let mut launcher = shown(1280.0, 800.0);
         let second = launcher.results[1].db_index;
-        let expected = launcher.apps[second].executable_path.clone();
+        let expected = launcher.apps[second].launch_command();
 
         let (x, y) = drawn_row_centre(&launcher, 1);
         assert_eq!(
@@ -2441,8 +2524,12 @@ mod tests {
         // machine. The dialog has to stay up and carry the reason.
         let mut launcher = shown(1280.0, 800.0);
         let missing = String::from("/nonexistent/definitely-not-a-program");
-        let reason = spawn_program(&missing).expect_err("that path is not a program");
-        launcher.report_launch_failure(&missing, &reason);
+        let command = LaunchCommand {
+            path: missing.clone(),
+            args: Vec::new(),
+        };
+        let reason = spawn_program(&command).expect_err("that path is not a program");
+        launcher.report_launch_failure(&command.to_string(), &reason);
 
         assert!(launcher.visible, "the dialog vanished with the error on it");
         let shown_error = launcher.error().expect("an error to show");
@@ -2571,6 +2658,78 @@ mod tests {
             dark,
             fills(&mut app),
             "high contrast reached every other surface but not this window"
+        );
+    }
+
+    // == Entries with arguments (lane C's requests, 2026-09-27) ================
+
+    fn entry_named<'a>(launcher: &'a LauncherState, name: &str) -> &'a AppEntry {
+        launcher
+            .apps
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no entry called {name}"))
+    }
+
+    #[test]
+    fn the_power_entries_ask_powerctl() {
+        let launcher = LauncherState::new(1920.0, 1080.0);
+        for (name, sub) in [
+            ("Shutdown", "shutdown"),
+            ("Restart", "reboot"),
+            ("Sleep", "suspend"),
+            ("Hibernate", "hibernate"),
+        ] {
+            let command = entry_named(&launcher, name).launch_command();
+            assert_eq!(command.path, POWERCTL, "{name}");
+            assert_eq!(command.args, [sub], "{name}");
+        }
+        assert!(
+            !launcher.apps.iter().any(|e| e.name == "Logout"),
+            "a launcher cannot end the shell's session"
+        );
+    }
+
+    #[test]
+    fn the_settings_entries_open_their_page() {
+        let launcher = LauncherState::new(1920.0, 1080.0);
+        for (name, page) in [
+            ("Display Settings", "display"),
+            ("Network Settings", "network-status"),
+            ("Sound Settings", "sound"),
+        ] {
+            let command = entry_named(&launcher, name).launch_command();
+            assert_eq!(command.path, "/usr/bin/settings", "{name}");
+            assert_eq!(command.args, ["--page", page], "{name}");
+        }
+        // No entry names a path with a space in it: that is an argument
+        // pretending to be part of a file name.
+        for e in &launcher.apps {
+            assert!(
+                !e.executable_path.contains(' '),
+                "{}: {}",
+                e.name,
+                e.executable_path
+            );
+        }
+    }
+
+    #[test]
+    fn entries_that_share_a_program_have_histories_of_their_own() {
+        let launcher = LauncherState::new(1920.0, 1080.0);
+        let display = entry_named(&launcher, "Display Settings").command_key();
+        let sound = entry_named(&launcher, "Sound Settings").command_key();
+        assert_ne!(display, sound);
+        let history = vec![LaunchRecord {
+            executable_path: display.clone(),
+            timestamp_secs: 950,
+        }];
+        assert!(frecency_bonus(&display, &history, 1000, 0) > 0);
+        assert_eq!(frecency_bonus(&sound, &history, 1000, 0), 0);
+        // An entry with no arguments keys as it always did.
+        assert_eq!(
+            entry_named(&launcher, "Terminal").command_key(),
+            "/usr/bin/terminal"
         );
     }
 }

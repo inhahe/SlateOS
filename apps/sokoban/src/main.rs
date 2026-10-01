@@ -104,41 +104,94 @@
 //!     has. No level could enter the arm, so no test could own it. The check is
 //!     gone and the invariant is asserted over the whole table instead.
 
+use gamechrome::Chrome;
+use guitk::button::{Kind, State};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::{Palette, SurfaceStyle};
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
-const RED: Color = Color::from_hex(0xF38BA8);
-const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Everything in this game follows the user's palette (the operator's answer
+// to C-Q16, §1422, and lane C's call for this game): its surfaces and text
+// from the palette's roles, each hue in the palette's ink for it, which reads
+// on the page in a light theme as in a dark one. It was all a copy of
+// Catppuccin Mocha, dark on a light desktop.
 
-/// The scrim drawn over the board when the level is solved.
-///
-/// Genuinely translucent — `Canvas::set` composites it with `Color::over`, so
-/// the warehouse you just cleared shows through the panel congratulating you
-/// on it.
-const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Colours {
+    /// The page.
+    base: Color,
+    /// A band.
+    mantle: Color,
+    /// A well.
+    crust: Color,
+    /// Raised.
+    surface0: Color,
+    /// Raised further.
+    surface1: Color,
+    /// Text.
+    text: Color,
+    /// Secondary text.
+    subtext0: Color,
+    /// The palette's blue, inked for the page.
+    blue: Color,
+    /// The palette's green, inked for the page.
+    green: Color,
+    /// The palette's red, inked for the page.
+    red: Color,
+    /// The palette's yellow, inked for the page.
+    yellow: Color,
+    /// The palette's peach, inked for the page.
+    peach: Color,
+    /// The palette's lavender, inked for the page.
+    lavender: Color,
+    /// The palette's mauve, inked for the page.
+    mauve: Color,
+    /// The palette's teal, inked for the page.
+    teal: Color,
+
+    /// What the win panel's buttons sit on: the panel's ground, the page or
+    /// the band under the card look.
+    panel: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            base: p.base,
+            mantle: p.mantle,
+            crust: p.crust,
+            surface0: p.surface0,
+            surface1: p.surface1,
+            text: p.text,
+            subtext0: p.subtext0,
+            blue: p.ink(p.blue),
+            green: p.ink(p.green),
+            red: p.ink(p.red),
+            yellow: p.ink(p.yellow),
+            peach: p.ink(p.peach),
+            lavender: p.ink(p.lavender),
+            mauve: p.ink(p.mauve),
+            teal: p.ink(p.teal),
+            panel: if p.surface_style() == SurfaceStyle::Cards {
+                p.mantle
+            } else {
+                p.base
+            },
+        }
+    }
+}
 
 const WINDOW_WIDTH: f32 = 560.0;
 const WINDOW_HEIGHT: f32 = 640.0;
@@ -887,6 +940,12 @@ pub struct Sokoban {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size_drawn: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
+    /// `palette`'s colours as this window draws them: rebuilt with it.
+    colours: Colours,
 }
 
 impl Default for Sokoban {
@@ -921,6 +980,8 @@ impl Sokoban {
             pushes: 0,
             undo_stack: VecDeque::new(),
             size_drawn: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
+            colours: Colours::of(&Palette::for_mode(false)),
         };
         // The table is validated at startup and is never empty, so level 0 is
         // always there; the answer is discarded because a game with no first
@@ -1286,7 +1347,7 @@ impl Sokoban {
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: self.colours.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1309,7 +1370,7 @@ impl Sokoban {
         // an empty band already leaves this pass without emitting a command.
         // The bail was a guard in front of two rules that already held, and the
         // sweep proved it — deleting it changed no test's answer.
-        fill(f, l.header, MANTLE, CornerRadii::ZERO);
+        fill(f, l.header, self.colours.mantle, CornerRadii::ZERO);
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let sub_h = text::line_height(l.small, FontWeightHint::Regular);
@@ -1372,7 +1433,7 @@ impl Sokoban {
                 text: "Sokoban",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: PEACH,
+                color: self.colours.peach,
             },
             left,
             top,
@@ -1385,7 +1446,7 @@ impl Sokoban {
                     text: &subtitle,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: SUBTEXT0,
+                    color: self.colours.subtext0,
                 },
                 left,
                 top + title_h,
@@ -1398,7 +1459,7 @@ impl Sokoban {
                 text: &first,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             left,
             right,
@@ -1411,7 +1472,7 @@ impl Sokoban {
                     text: &second,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    color: self.colours.subtext0,
                 },
                 left,
                 right,
@@ -1439,11 +1500,18 @@ impl Sokoban {
                 continue;
             }
             let chosen = index == self.cursor;
-            fill(
+            self.palette.push_surface(
                 f,
-                r,
-                if chosen { SURFACE0 } else { MANTLE },
-                CornerRadii::all(l.pad.max(1.0)),
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                l.pad.max(1.0),
+                if chosen {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
             );
             if chosen {
                 // The cursor stripe, down the left edge of the row it marks,
@@ -1456,7 +1524,7 @@ impl Sokoban {
                 // and answers `None` for a row with no area at all.
                 if let Some(stripe) = Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h).intersect(r)
                 {
-                    fill(f, stripe, PEACH, CornerRadii::all(1.0));
+                    fill(f, stripe, self.colours.peach, CornerRadii::all(1.0));
                 }
             }
 
@@ -1495,7 +1563,7 @@ impl Sokoban {
                     text: mark,
                     size,
                     weight: FontWeightHint::Bold,
-                    color: GREEN,
+                    color: self.colours.green,
                 },
                 r.x + l.pad,
                 y,
@@ -1512,7 +1580,11 @@ impl Sokoban {
                     } else {
                         FontWeightHint::Regular
                     },
-                    color: if chosen { TEXT_COLOR } else { SUBTEXT0 },
+                    color: if chosen {
+                        self.colours.text
+                    } else {
+                        self.colours.subtext0
+                    },
                 },
                 r.x + gutter,
                 y,
@@ -1527,7 +1599,12 @@ impl Sokoban {
         if l.board.is_empty() {
             return;
         }
-        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));
+        fill(
+            f,
+            l.board_frame,
+            self.colours.crust,
+            CornerRadii::all(l.gap.max(1.0)),
+        );
 
         let radius = CornerRadii::all((l.cell * 0.08).max(1.0));
         for row in 0..self.rows {
@@ -1544,8 +1621,8 @@ impl Sokoban {
                     f,
                     r,
                     match tile {
-                        Tile::Wall => SURFACE1,
-                        _ => SURFACE0,
+                        Tile::Wall => self.colours.surface1,
+                        _ => self.colours.surface0,
                     },
                     radius,
                 );
@@ -1561,7 +1638,7 @@ impl Sokoban {
                             d.max(0.0),
                             d.max(0.0),
                         ),
-                        MAUVE,
+                        self.colours.mauve,
                         CornerRadii::all(d / 2.0),
                     );
                 }
@@ -1594,7 +1671,11 @@ impl Sokoban {
                     (r.w - inset * 2.0).max(0.0),
                     (r.h - inset * 2.0).max(0.0),
                 ),
-                if home { GREEN } else { PEACH },
+                if home {
+                    self.colours.green
+                } else {
+                    self.colours.peach
+                },
                 CornerRadii::all((l.cell * 0.12).max(1.0)),
             );
         }
@@ -1614,7 +1695,7 @@ impl Sokoban {
                         d.max(0.0),
                         d.max(0.0),
                     ),
-                    BLUE,
+                    self.colours.blue,
                     CornerRadii::all(d / 2.0),
                 );
             }
@@ -1639,13 +1720,45 @@ impl Sokoban {
         }
     }
 
+    /// A control: the toolkit's push button at this window's size, on
+    /// `ground`; `on` draws the answer offered first as the toolkit's primary
+    /// button, and `live` false the switched-off look.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a button's place, label, size, two states and ground; a struct would be built at each call and read once"
+    )]
+    fn button(
+        &self,
+        f: &mut Frame<Target>,
+        r: Rect,
+        name: &str,
+        size: f32,
+        on: bool,
+        live: bool,
+        ground: Color,
+    ) {
+        gamechrome::button(
+            f,
+            &self.palette,
+            (r.x, r.y, r.w, r.h),
+            name,
+            size,
+            if on { Kind::Primary } else { Kind::Plain },
+            State {
+                disabled: !live,
+                ..State::default()
+            },
+            ground,
+        );
+    }
+
     fn draw_controls(&self, f: &mut Frame<Target>, l: &Layout) {
         // As in `draw_header`, and for one more reason: `button_rects` gives a
         // dropped band four empty rectangles, `fill` refuses each of them, and
         // `Frame::hit` records nothing for a rectangle no viewer could see. The
         // `l.controls.is_empty()` bail this opened with stood in front of all
         // three and survived its own mutation row because of it.
-        fill(f, l.controls, MANTLE, CornerRadii::ZERO);
+        fill(f, l.controls, self.colours.mantle, CornerRadii::ZERO);
         let buttons = self.buttons();
         for ((target, name), r) in buttons.iter().copied().zip(l.button_rects(buttons.len())) {
             if r.is_empty() {
@@ -1655,26 +1768,8 @@ impl Sokoban {
             // answers `false` and changes nothing, and a target that reports
             // "nothing happened" is the thing a test can hold on to.
             let live = target != Target::Undo || !self.undo_stack.is_empty();
-            fill(
-                f,
-                r,
-                if live { SURFACE1 } else { SURFACE0 },
-                CornerRadii::all(l.pad.max(1.0)),
-            );
-            // No `line_height(size) <= r.h` here, and there was: `centre_line`
-            // inside `label_centred` answers exactly that question, and a guard
-            // a callee already makes is a line no test can own (lesson 92).
             let size = (r.h * 0.45).clamp(7.0, l.font);
-            label_centred(
-                f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: if live { TEXT_COLOR } else { OVERLAY0 },
-                },
-                r,
-            );
+            self.button(f, r, name, size, false, live, self.colours.mantle);
             f.hit(target, r);
         }
     }
@@ -1685,7 +1780,7 @@ impl Sokoban {
         // or not the rectangle has area, so a pass that clips *before* it has
         // refused the band cannot be silent about a band it was never given.
         // This one refuses at `centre_line`, which is above the clip.
-        fill(f, l.footer, MANTLE, CornerRadii::ZERO);
+        fill(f, l.footer, self.colours.mantle, CornerRadii::ZERO);
         let lh = text::line_height(l.small, FontWeightHint::Regular);
         // Two lines if two fit, otherwise one -- and `centre_line` is what says
         // whether even the one does. The `lh > l.footer.h` bail this opened
@@ -1703,7 +1798,9 @@ impl Sokoban {
                     text: line,
                     size: l.small,
                     weight: FontWeightHint::Regular,
-                    color: OVERLAY0,
+                    // Secondary text: the keys are read, and the palette's
+                    // faintest grey is 2.3:1 on a light band.
+                    color: self.colours.subtext0,
                 },
                 l.footer.x + l.pad,
                 top + i as f32 * lh,
@@ -1716,13 +1813,21 @@ impl Sokoban {
     fn draw_win(&self, f: &mut Frame<Target>, l: &Layout) {
         // A translucent scrim: the warehouse you just cleared is the thing
         // worth looking at.
-        fill(f, l.window, SCRIM, CornerRadii::ZERO);
+        fill(
+            f,
+            l.window,
+            Chrome::of(&self.palette).scrim,
+            CornerRadii::ZERO,
+        );
         // Nothing behind the panel is clickable any more — a modal that only
         // *looks* in front is one whose buttons you can press through.
         f.discard_hits();
 
         let panel = l.win_panel();
-        if panel.is_empty() {
+        // Less than a point either way is no panel: the toolkit's surface
+        // strokes its border half a point inside the box, and in a box that
+        // thin the stroke's own width reaches outside it.
+        if panel.w < 1.0 || panel.h < 1.0 {
             return;
         }
 
@@ -1740,7 +1845,16 @@ impl Sokoban {
             (panel.x - d * 1.8, panel.centre().1 - d / 2.0),
             (panel.right() + d * 0.8, panel.centre().1 - d / 2.0),
         ];
-        let colors = [YELLOW, PEACH, GREEN, TEAL, BLUE, MAUVE, RED, LAVENDER];
+        let colors = [
+            self.colours.yellow,
+            self.colours.peach,
+            self.colours.green,
+            self.colours.teal,
+            self.colours.blue,
+            self.colours.mauve,
+            self.colours.red,
+            self.colours.lavender,
+        ];
         // A window too small for one dot gets none. Clamping the *origin* into
         // `window.w - d` is not a bound on the dot: `.max(0.0)` turns a negative
         // limit into zero, so a window a point tall pinned the top edge at zero
@@ -1762,8 +1876,22 @@ impl Sokoban {
             }
         }
 
-        fill(f, panel, MANTLE, CornerRadii::all(l.pad * 1.2));
-        stroke(f, panel, GREEN, 2.0, CornerRadii::all(l.pad * 1.2));
+        self.palette.push_surface(
+            f,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            l.pad * 1.2,
+            Surface::Panel,
+        );
+        stroke(
+            f,
+            panel,
+            self.colours.green,
+            2.0,
+            CornerRadii::all(l.pad * 1.2),
+        );
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let line_h = text::line_height(l.font, FontWeightHint::Regular);
@@ -1779,7 +1907,7 @@ impl Sokoban {
                 text: "Level Complete!",
                 size: l.big,
                 weight: FontWeightHint::Bold,
-                color: GREEN,
+                color: self.colours.green,
             },
             Rect::new(panel.x, top, panel.w, title_h),
         );
@@ -1790,7 +1918,7 @@ impl Sokoban {
                 text: &tally,
                 size: l.font,
                 weight: FontWeightHint::Regular,
-                color: TEXT_COLOR,
+                color: self.colours.text,
             },
             Rect::new(panel.x, top + title_h, panel.w, line_h),
         );
@@ -1804,17 +1932,16 @@ impl Sokoban {
         let by = top + title_h + line_h;
         for (i, (target, name)) in WIN_BUTTONS.into_iter().enumerate() {
             let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
-            fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
             let size = (r.h * 0.4).clamp(7.0, l.font);
-            label_centred(
+            // The next level is the answer the panel offers first.
+            self.button(
                 f,
-                &Label {
-                    text: name,
-                    size,
-                    weight: FontWeightHint::Regular,
-                    color: TEXT_COLOR,
-                },
                 r,
+                name,
+                size,
+                target == Target::Next,
+                true,
+                self.colours.panel,
             );
             f.hit(target, r);
         }
@@ -2147,6 +2274,11 @@ pub fn handle_event(game: &mut Sokoban, event: &Event) -> EventResult {
 }
 
 impl App for Sokoban {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+        self.colours = Colours::of(palette);
+    }
+
     fn title(&self) -> String {
         "Sokoban".to_string()
     }
@@ -2219,6 +2351,202 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// The colours a game draws in until the theme says otherwise.
+    fn colours() -> Colours {
+        Colours::of(&Palette::for_mode(false))
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// Every look in `p`'s colours: the level list, a level in play, one
+    /// solved, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Sokoban)> {
+        let mut cramped = playing();
+        cramped.size_drawn = (320.0, 380.0);
+        let mut looks = vec![
+            ("list", game()),
+            ("playing", playing()),
+            ("solved", nearly_solved_then_solved()),
+            ("cramped", cramped),
+        ];
+        for (_, g) in &mut looks {
+            g.theme_changed(p);
+        }
+        looks
+    }
+
+    /// A game one move from solved, then solved.
+    fn nearly_solved_then_solved() -> Sokoban {
+        let mut g = nearly_solved();
+        assert!(g.try_move(Direction::Right), "the last move was refused");
+        assert!(g.is_solved(), "the fixture is not solved");
+        g
+    }
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look -- every colour the palette's or the toolkit's
+    /// buttons' (the operator's C-Q16). It drew in its own copy of
+    /// Catppuccin Mocha, dark on a light desktop.
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let mut derived = Vec::new();
+            for ground in [c.mantle, c.panel] {
+                derived.extend(gamechrome::button_colours(&p, Kind::Plain, ground));
+                derived.extend(gamechrome::button_colours(&p, Kind::Primary, ground));
+            }
+            for (what, g) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    g.frame(g.size_drawn.0, g.size_drawn.1).commands(),
+                    &derived,
+                    &format!("sokoban, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`). A switched-off
+    /// button's label is exempt, as WCAG exempts an inactive control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in [(false, false), (true, false), (false, true), (true, true)] {
+            let p = palette(light, cards);
+            let c = Colours::of(&p);
+            let off = guitk::button::paint(
+                &p,
+                Kind::Plain,
+                State {
+                    disabled: true,
+                    ..State::default()
+                },
+                c.mantle,
+            );
+            for (what, g) in every_look(&p) {
+                let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+                let exempt = |r: &gamechrome::legibility::Read| {
+                    r.ink == off.ink && (r.ground == off.lower || r.ground == off.upper)
+                };
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "sokoban: {bad:#?}");
+    }
+
+    /// **Undo is switched off with nothing to take back**, in the toolkit's
+    /// look, and live once there is a move to undo.
+    #[test]
+    fn undo_is_switched_off_with_nothing_to_take_back() {
+        let face = |g: &Sokoban| {
+            let f = g.frame(g.size_drawn.0, g.size_drawn.1);
+            let fills: Vec<(Rect, Color)> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } => Some((Rect::new(*x, *y, *width, *height), *color)),
+                    _ => None,
+                })
+                .collect();
+            let buttons: Vec<(Rect, Color)> = fills
+                .windows(2)
+                .filter_map(|pair| {
+                    let [(face, colour), (gloss, _)] = pair else {
+                        return None;
+                    };
+                    ((gloss.x - face.x).abs() < 0.01
+                        && (gloss.y - face.y).abs() < 0.01
+                        && (gloss.w - face.w).abs() < 0.01
+                        && (gloss.h * 2.0 - face.h).abs() < 0.01)
+                        .then_some((*face, *colour))
+                })
+                .collect();
+            f.commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if text.starts_with("Undo") => {
+                        Some((*x, *y))
+                    }
+                    _ => None,
+                })
+                .find_map(|(tx, ty)| {
+                    buttons
+                        .iter()
+                        .find(|(face, _)| face.contains(tx + 1.0, ty + 1.0))
+                        .map(|(_, colour)| *colour)
+                })
+                .expect("Undo is on no button")
+        };
+        let mut g = playing();
+        let paint = |disabled| {
+            guitk::button::paint(
+                &g.palette,
+                Kind::Plain,
+                State {
+                    disabled,
+                    ..State::default()
+                },
+                g.colours.mantle,
+            )
+            .lower
+        };
+        let (live, off) = (paint(false), paint(true));
+        assert_eq!(face(&g), off, "Undo looks live with nothing to take back");
+        let moved = DIRECTIONS.iter().any(|&d| g.try_move(d));
+        assert!(moved, "the fixture could not move");
+        assert_eq!(face(&g), live, "Undo looks off with a move to take back");
+    }
+
+    /// **The warehouse is seen in either theme** (WCAG 1.4.11's 3:1): a
+    /// crate, a crate home, the player and a target's mark on the floor, and
+    /// a wall told from the floor.
+    #[test]
+    fn the_warehouse_is_seen_in_either_theme() {
+        for light in [false, true] {
+            let c = Colours::of(&Palette::for_mode(light));
+            for (what, colour) in [
+                ("a crate", c.peach),
+                ("a crate home", c.green),
+                ("the player", c.blue),
+                ("a target", c.mauve),
+            ] {
+                let ratio = guitk::theme::contrast_ratio(colour, c.surface0);
+                assert!(
+                    ratio >= 3.0,
+                    "{what} is {ratio:.2}:1 on the floor (light: {light})"
+                );
+            }
+            assert_ne!(c.surface1, c.surface0, "a wall looks like the floor");
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::HashSet;
@@ -5265,7 +5593,7 @@ mod tests {
                 text: long,
                 size: 14.0,
                 weight: FontWeightHint::Bold,
-                color: TEXT_COLOR,
+                color: colours().text,
             },
             box_,
         );

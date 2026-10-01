@@ -2808,6 +2808,29 @@ extern "C" fn kernel_main() -> ! {
         proc::spawn::self_test_ctest_python_repl(),
     );
 
+    // Every C fixture lane D lists in /mnt/tests/ctest-generic.list, from one
+    // rung (requests/d-a-one-rung-for-every-c-fixture.md). LAST of the C
+    // fixtures on purpose: the list is lane D's to grow, and a new fixture
+    // that misbehaves must not be able to disturb a named rung that runs
+    // after it. The parser's own cases first, so a red list rung is not a
+    // parser bug in disguise.
+    {
+        #[inline(never)]
+        fn case() {
+            selftest::dispatch_debug(
+                "C fixture list parser",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_generic_list(),
+            );
+            selftest::dispatch_debug(
+                "listed C fixtures (ring 3, generic rung)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_generic(),
+            );
+        }
+        case();
+    }
+
     {
         #[inline(never)]
         fn case() {

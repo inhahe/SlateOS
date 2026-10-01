@@ -280,14 +280,14 @@ MUTATIONS = [
     # ── New game ──────────────────────────────────────────────────────────
     (
         "a new game keeps the search it was in the middle of",
-        "    fn new_game(&mut self) {\n        let size = self.size;\n        *self = Self::new();\n        self.size = size;\n    }",
-        "    fn new_game(&mut self) {\n        let size = self.size;\n        let thinking = self.thinking;\n        *self = Self::new();\n        self.size = size;\n        self.thinking = thinking;\n    }",
+        "        let (size, palette) = (self.size, self.palette);\n        *self = Self::new();\n        self.size = size;\n        self.palette = palette;",
+        "        let (size, palette) = (self.size, self.palette);\n        let thinking = self.thinking;\n        *self = Self::new();\n        self.size = size;\n        self.palette = palette;\n        self.thinking = thinking;",
         ["a_new_game_started_by_the_button_is_not_still_thinking"],
     ),
     (
         "a new game forgets the size of the window it is in",
-        "        let size = self.size;\n        *self = Self::new();\n        self.size = size;",
-        "        *self = Self::new();",
+        "        *self = Self::new();\n        self.size = size;",
+        "        *self = Self::new();\n        let _ = size;",
         ["a_restart_keeps_the_window_size"],
     ),
     (
@@ -490,6 +490,48 @@ MUTATIONS = [
         "            self.fullmove_number = self.fullmove_number.saturating_add(1);",
         "",
         ["test_fullmove_increments"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        let (size, palette) = (self.size, self.palette);",
+        "        let (size, palette) = (self.size, Palette::for_mode(false));",
+        ["a_new_game_keeps_the_users_colours"],
+    ),
+    (
+        "every piece is drawn in the text colour, as it was",
+        "    let (body, outline) = piece_inks(piece.side, base_color);",
+        "    let (body, outline) = (c.chrome.text, c.chrome.text);",
+        ["each_side_is_its_own_colour_and_every_piece_is_seen"],
+    ),
+    (
+        "a piece is drawn without its outline",
+        "                        (piece.kind.unicode_white(), outline),",
+        "                        (piece.kind.unicode_white(), body),",
+        ["each_side_is_its_own_colour_and_every_piece_is_seen"],
+    ),
+    (
+        "a black piece on a square as dark is not ringed",
+        "            gamechrome::edge_on(BLACK_PIECE, BLACK_PIECE, ground),",
+        "            BLACK_PIECE,",
+        ["each_side_is_its_own_colour_and_every_piece_is_seen"],
+    ),
+    (
+        "the legal moves are marked in a shade the squares hide",
+        "            legal: p.text,",
+        "            legal: p.surface1,",
+        ["the_marks_on_the_board_read_in_either_theme"],
+    ),
+    (
+        "the files' letters are the faintest grey",
+        "                r.bottom() + (l.margin - l.label) / 2.0,\n                l.label,\n                FontWeightHint::Regular,\n                c.chrome.dim,",
+        "                r.bottom() + (l.margin - l.label) / 2.0,\n                l.label,\n                FontWeightHint::Regular,\n                c.chrome.off,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

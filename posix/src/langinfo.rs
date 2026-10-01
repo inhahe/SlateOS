@@ -11,92 +11,101 @@
 // ---------------------------------------------------------------------------
 // Item constants — nl_item values
 // ---------------------------------------------------------------------------
+//
+// An item is its category and its index in it, `(category << 16) | index`,
+// with musl's categories -- LC_CTYPE 0, LC_NUMERIC 1, LC_TIME 2, LC_MONETARY
+// 4, LC_MESSAGES 5 -- which is also glibc's encoding: the two headers agree on
+// every item below (probed 2026-09-27).  So `CODESET` is 14 and `ABDAY_1` is
+// 0x2_0000.  Until 2026-09-27 these were numbered 0 to 55 in an order of this
+// module's own, and a C caller -- whose `<langinfo.h>` is musl's -- asking for
+// `CODESET` (14) was answered with ABDAY_1's "Sun": CPython's locale encoding
+// and gnulib's `locale_charset`, in every GNU port, among them.
 
 /// Radix character (decimal point).
-pub const RADIXCHAR: i32 = 0;
-/// Alias for `RADIXCHAR`.
-pub const D_T_FMT: i32 = 1;
-/// Date-time format.
-pub const D_FMT: i32 = 2;
+pub const RADIXCHAR: i32 = 0x1_0000;
+/// Date and time format, for `strftime`.
+pub const D_T_FMT: i32 = 0x2_0028;
 /// Date format.
-pub const T_FMT: i32 = 3;
+pub const D_FMT: i32 = 0x2_0029;
 /// Time format.
-pub const T_FMT_AMPM: i32 = 4;
+pub const T_FMT: i32 = 0x2_002a;
+/// Time format with AM/PM.
+pub const T_FMT_AMPM: i32 = 0x2_002b;
 /// AM string.
-pub const AM_STR: i32 = 5;
+pub const AM_STR: i32 = 0x2_0026;
 /// PM string.
-pub const PM_STR: i32 = 6;
+pub const PM_STR: i32 = 0x2_0027;
 
-/// Abbreviated weekday names (Sunday = 0).
-pub const DAY_1: i32 = 7;
-pub const DAY_2: i32 = 8;
-pub const DAY_3: i32 = 9;
-pub const DAY_4: i32 = 10;
-pub const DAY_5: i32 = 11;
-pub const DAY_6: i32 = 12;
-pub const DAY_7: i32 = 13;
+/// Full weekday names, Sunday first.
+pub const DAY_1: i32 = 0x2_0007;
+pub const DAY_2: i32 = 0x2_0008;
+pub const DAY_3: i32 = 0x2_0009;
+pub const DAY_4: i32 = 0x2_000a;
+pub const DAY_5: i32 = 0x2_000b;
+pub const DAY_6: i32 = 0x2_000c;
+pub const DAY_7: i32 = 0x2_000d;
 
-/// Abbreviated weekday names.
-pub const ABDAY_1: i32 = 14;
-pub const ABDAY_2: i32 = 15;
-pub const ABDAY_3: i32 = 16;
-pub const ABDAY_4: i32 = 17;
-pub const ABDAY_5: i32 = 18;
-pub const ABDAY_6: i32 = 19;
-pub const ABDAY_7: i32 = 20;
+/// Abbreviated weekday names, Sunday first.
+pub const ABDAY_1: i32 = 0x2_0000;
+pub const ABDAY_2: i32 = 0x2_0001;
+pub const ABDAY_3: i32 = 0x2_0002;
+pub const ABDAY_4: i32 = 0x2_0003;
+pub const ABDAY_5: i32 = 0x2_0004;
+pub const ABDAY_6: i32 = 0x2_0005;
+pub const ABDAY_7: i32 = 0x2_0006;
 
 /// Full month names.
-pub const MON_1: i32 = 21;
-pub const MON_2: i32 = 22;
-pub const MON_3: i32 = 23;
-pub const MON_4: i32 = 24;
-pub const MON_5: i32 = 25;
-pub const MON_6: i32 = 26;
-pub const MON_7: i32 = 27;
-pub const MON_8: i32 = 28;
-pub const MON_9: i32 = 29;
-pub const MON_10: i32 = 30;
-pub const MON_11: i32 = 31;
-pub const MON_12: i32 = 32;
+pub const MON_1: i32 = 0x2_001a;
+pub const MON_2: i32 = 0x2_001b;
+pub const MON_3: i32 = 0x2_001c;
+pub const MON_4: i32 = 0x2_001d;
+pub const MON_5: i32 = 0x2_001e;
+pub const MON_6: i32 = 0x2_001f;
+pub const MON_7: i32 = 0x2_0020;
+pub const MON_8: i32 = 0x2_0021;
+pub const MON_9: i32 = 0x2_0022;
+pub const MON_10: i32 = 0x2_0023;
+pub const MON_11: i32 = 0x2_0024;
+pub const MON_12: i32 = 0x2_0025;
 
 /// Abbreviated month names.
-pub const ABMON_1: i32 = 33;
-pub const ABMON_2: i32 = 34;
-pub const ABMON_3: i32 = 35;
-pub const ABMON_4: i32 = 36;
-pub const ABMON_5: i32 = 37;
-pub const ABMON_6: i32 = 38;
-pub const ABMON_7: i32 = 39;
-pub const ABMON_8: i32 = 40;
-pub const ABMON_9: i32 = 41;
-pub const ABMON_10: i32 = 42;
-pub const ABMON_11: i32 = 43;
-pub const ABMON_12: i32 = 44;
+pub const ABMON_1: i32 = 0x2_000e;
+pub const ABMON_2: i32 = 0x2_000f;
+pub const ABMON_3: i32 = 0x2_0010;
+pub const ABMON_4: i32 = 0x2_0011;
+pub const ABMON_5: i32 = 0x2_0012;
+pub const ABMON_6: i32 = 0x2_0013;
+pub const ABMON_7: i32 = 0x2_0014;
+pub const ABMON_8: i32 = 0x2_0015;
+pub const ABMON_9: i32 = 0x2_0016;
+pub const ABMON_10: i32 = 0x2_0017;
+pub const ABMON_11: i32 = 0x2_0018;
+pub const ABMON_12: i32 = 0x2_0019;
 
 /// Era description (empty in C locale).
-pub const ERA: i32 = 45;
+pub const ERA: i32 = 0x2_002c;
 /// Era date format (empty in C locale).
-pub const ERA_D_FMT: i32 = 46;
+pub const ERA_D_FMT: i32 = 0x2_002e;
 /// Era date-time format (empty in C locale).
-pub const ERA_D_T_FMT: i32 = 47;
+pub const ERA_D_T_FMT: i32 = 0x2_0030;
 /// Era time format (empty in C locale).
-pub const ERA_T_FMT: i32 = 48;
+pub const ERA_T_FMT: i32 = 0x2_0031;
 /// Alternative digits (empty in C locale).
-pub const ALT_DIGITS: i32 = 49;
+pub const ALT_DIGITS: i32 = 0x2_002f;
 
-/// Radix character (decimal point) — same as `RADIXCHAR`.
-pub const DECIMAL_POINT: i32 = 50;
+/// glibc's other name for [`RADIXCHAR`]; musl's header has only that one.
+pub const DECIMAL_POINT: i32 = RADIXCHAR;
 /// Thousands separator.
-pub const THOUSEP: i32 = 51;
-/// Strftime-like format for "yes" response.
-pub const YESEXPR: i32 = 52;
-/// Strftime-like format for "no" response.
-pub const NOEXPR: i32 = 53;
+pub const THOUSEP: i32 = 0x1_0001;
+/// Regular expression for a "yes" answer.
+pub const YESEXPR: i32 = 0x5_0000;
+/// Regular expression for a "no" answer.
+pub const NOEXPR: i32 = 0x5_0001;
 /// Currency symbol.
-pub const CRNCYSTR: i32 = 54;
+pub const CRNCYSTR: i32 = 0x4_000f;
 
 /// Codeset name.
-pub const CODESET: i32 = 55;
+pub const CODESET: i32 = 14;
 
 // ---------------------------------------------------------------------------
 // String table — C locale values
@@ -252,7 +261,6 @@ fn langinfo_lookup(item: i32) -> *const u8 {
         // Era (empty in C locale).
         ERA | ERA_D_FMT | ERA_D_T_FMT | ERA_T_FMT | ALT_DIGITS => EMPTY.as_ptr(),
 
-        DECIMAL_POINT => RADIX_STR.as_ptr(),
         THOUSEP => THOUSEP_STR.as_ptr(),
         YESEXPR => YESEXPR_STR.as_ptr(),
         NOEXPR => NOEXPR_STR.as_ptr(),
@@ -524,6 +532,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The numbers a C caller passes: musl's `<langinfo.h>`, which glibc's
+    /// agrees with item for item (both probed 2026-09-27).  The runs --
+    /// DAY_1..7 and the rest -- are pinned by the sequence tests below.
+    #[test]
+    fn the_items_are_musls() {
+        assert_eq!(CODESET, 14);
+        assert_eq!(
+            (RADIXCHAR, THOUSEP, DECIMAL_POINT),
+            (0x1_0000, 0x1_0001, 0x1_0000)
+        );
+        assert_eq!(
+            (ABDAY_1, DAY_1, ABMON_1, MON_1),
+            (0x2_0000, 0x2_0007, 0x2_000e, 0x2_001a)
+        );
+        assert_eq!((AM_STR, PM_STR), (0x2_0026, 0x2_0027));
+        assert_eq!(
+            (D_T_FMT, D_FMT, T_FMT, T_FMT_AMPM),
+            (0x2_0028, 0x2_0029, 0x2_002a, 0x2_002b)
+        );
+        assert_eq!((ERA, ERA_D_FMT, ALT_DIGITS), (0x2_002c, 0x2_002e, 0x2_002f));
+        assert_eq!((ERA_D_T_FMT, ERA_T_FMT), (0x2_0030, 0x2_0031));
+        assert_eq!(CRNCYSTR, 0x4_000f);
+        assert_eq!((YESEXPR, NOEXPR), (0x5_0000, 0x5_0001));
     }
 
     #[test]

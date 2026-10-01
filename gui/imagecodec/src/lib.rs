@@ -108,10 +108,33 @@
 //! JPEG (old style too), NeXT, ThunderScan, SGI LogLuv or PixarLog. See
 //! [`tiff`].
 //!
+//! AVIF, as libavif reads it -- the reader behind Pillow, and the one Chrome's
+//! is ported from: the container with its items, grids, alpha planes, HDR gain
+//! maps and image sequences, accepted or refused by a port of libavif's own
+//! parser; the AV1 frames decoded by rav1d (dav1d in Rust) as libavif drives
+//! dav1d; and the YUV converted to pixels by ports of libavif's and libyuv's
+//! arithmetic, so that a picture comes out as Chrome and Pillow show it, to
+//! the last bit. For a sequence [`decode`] gives the first frame, and
+//! `avif::Animation` plays every frame in turn -- in order, or from the
+//! nearest key frame to any one asked for -- as libavif decodes them. Built
+//! without the default `avif` feature, the container is still read and
+//! [`decode`] refuses the picture by name. See [`avif`].
+//!
 //! **EXIF orientation is applied**, as Chrome applies it: a JPEG's or PNG's
 //! EXIF saying the picture is on its side turns it, so [`decode`],
 //! [`decode_scaled`] and [`dimensions`] all describe the picture as it is shown.
 //! See [`orientation`].
+//!
+//! # Where the code comes from
+//!
+//! Most of the decoders are ports of the libraries the browsers and Pillow
+//! run -- libjpeg-turbo, libtiff, libwebp, libavif and libyuv, Chromium's and
+//! image-rs's BMP and icon readers, Skia's EXIF reader -- because producing exactly their
+//! pixels is the point. Their notices travel with the code: each ported file
+//! names what it was translated or adapted from, and `licenses/` holds the
+//! licences and a table of what derives from where. Their licences also ask
+//! that a *program* containing this code carry the notices, which
+//! `licenses/README.md` spells out.
 //!
 //! # Picture files for *other* crates' tests
 //!
@@ -128,6 +151,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod avif;
 pub mod bmp;
 mod encode;
 pub mod gif;
@@ -350,6 +374,9 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
     if tiff::is_tiff(bytes) {
         return tiff::decode(bytes, limits);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode(bytes, limits);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -396,6 +423,9 @@ pub fn decode_scaled(bytes: &[u8], limits: Limits, max_w: u32, max_h: u32) -> Im
     if tiff::is_tiff(bytes) {
         return tiff::decode_scaled(bytes, limits, max_w, max_h);
     }
+    if avif::is_avif(bytes) {
+        return avif::decode_scaled(bytes, limits, max_w, max_h);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -430,6 +460,9 @@ pub fn dimensions(bytes: &[u8]) -> ImageResult<(u32, u32)> {
     }
     if tiff::is_tiff(bytes) {
         return tiff::dimensions(bytes);
+    }
+    if avif::is_avif(bytes) {
+        return avif::dimensions(bytes);
     }
     Err(ImageError::UnknownFormat)
 }
@@ -524,6 +557,9 @@ pub fn pixel_format(bytes: &[u8]) -> ImageResult<PixelFormat> {
     if tiff::is_tiff(bytes) {
         return tiff::pixel_format(bytes);
     }
+    if avif::is_avif(bytes) {
+        return avif::pixel_format(bytes);
+    }
     Err(ImageError::UnknownFormat)
 }
 
@@ -563,10 +599,16 @@ mod tests {
             decode(&[], Limits::default()),
             Err(ImageError::UnknownFormat)
         );
-        // A format this crate does not read yet: AVIF's `ftyp` box.
+        // A format this crate does not read: HEIC's `ftyp` box.
+        assert_eq!(
+            dimensions(b"\0\0\0\x1cftypheic\0\0\0\0heicmif1miaf"),
+            Err(ImageError::UnknownFormat)
+        );
+        // AVIF it does: an `ftyp` box that promises a `meta` box and has
+        // none after it is a truncated AVIF.
         assert_eq!(
             dimensions(b"\0\0\0\x1cftypavif\0\0\0\0avifmif1miaf"),
-            Err(ImageError::UnknownFormat)
+            Err(ImageError::Truncated)
         );
         // TIFF it does: a header whose directory is past the end is a
         // truncated TIFF.

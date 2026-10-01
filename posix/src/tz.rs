@@ -1,8 +1,9 @@
 //! The process's current timezone.
 //!
-//! The `TZ`-string grammar, the transition arithmetic and the civil-date
-//! helpers live in the [`tzrules`] crate, which `userspace/oils` links too so
-//! the shell and the libc can never disagree about what time it is.  What
+//! The `TZ`-string grammar, the transition arithmetic, the civil-date
+//! helpers and the order in which a `TZ` value is read live in the
+//! [`tzrules`] crate, which `userspace/oils` and the desktop link too, so the
+//! shell, the desktop and the libc can never disagree about what time it is.  What
 //! stays here is the part that is inherently libc: the *process-wide current
 //! zone*, resolved from the `TZ` environment variable, plus the
 //! process-lifetime NUL-terminated name storage that `tzname[]` and
@@ -36,6 +37,7 @@ pub use tzrules::{
     TZ_NAME_CAP, Tz, TzDate, TzDst, TzFile, TzInfo, TzName, TzTransition, days_from_civil,
     days_in_month, is_leap, year_of_day,
 };
+use tzrules::{TzSource, tz_source};
 
 // ---------------------------------------------------------------------------
 // Process-wide current zone
@@ -220,90 +222,58 @@ pub fn set(tz: Tz) {
 // Resolving `TZ`
 // ---------------------------------------------------------------------------
 
-/// Where zoneinfo files live when `TZ` names one without a leading `/`.
-const TZDIR_DEFAULT: &[u8] = b"/usr/share/zoneinfo";
-
-/// The system-wide zone, followed when `TZ` is unset.
-///
-/// `/etc/localtime` is the portable spelling — a TZif file, or a symlink into
-/// the zoneinfo tree — and is what every ported program already expects, which
-/// is why it is preferred over inventing a SlateOS-specific setting.
-const LOCALTIME_PATH: &[u8] = b"/etc/localtime\0";
-
 /// Resolve `TZ` (or the system default) into a zone, falling back to UTC.
+///
+/// *Which* zone `TZ` names is [`tz_source`]'s decision, not this module's:
+/// the shell and the desktop read `TZ` too, and an order written out three
+/// times is an order that drifts until a program disagrees with `date` about
+/// the time (requests/c-bd-read-tz-through-tzrules-tz-source.md). In short --
+/// `tzrules`' `source` module has the reasons -- unset is the machine's own
+/// zone, empty is UTC, a leading `:` is a file name, a POSIX rule is tried
+/// before a file name, and a name with a `..` component or a NUL is refused.
+///
+/// What stays here is what `tzrules` cannot see or does not do: `TZDIR`, the
+/// refusal of any path a set-user-ID program's `TZ` names (a fact about the
+/// process), and reading the file into [`ZONE_FILE`].
 fn resolve_env_zone() -> Zone {
-    match crate::environ::getenv_bytes(b"TZ") {
-        // `TZ=""` explicitly requests UTC.  This is not the same as unset: a
-        // program that clears `TZ` is asking for UTC, not for the machine's
-        // zone, and scripts rely on the distinction.
-        Some(b"") => Zone::Posix(Tz::utc()),
-        Some(s) => resolve_tz_value(s),
-        // Unset: follow the machine's own zone, as glibc does.  Absent that
-        // file — which is where a freshly installed SlateOS still is, since no
-        // tzdata is shipped yet — UTC.
-        None => load_zoneinfo(LOCALTIME_PATH).map_or(Zone::Posix(Tz::utc()), Zone::File),
-    }
+    zone_from_source(tz_source(crate::environ::getenv_bytes(b"TZ")))
 }
 
-/// Resolve a non-empty `TZ` value.
+/// The zone `source` names, falling back to UTC.
 ///
-/// A leading `:` means "the rest is a file name" (POSIX reserves the prefix for
-/// implementation-defined forms and every libc spells it this way).  Without
-/// it, a POSIX rule string is tried first and the file only if that fails,
-/// which is the order glibc uses — it matters because `EST5EDT` is both a valid
-/// rule string *and* a file name in the zoneinfo tree, and the rule string is
-/// the cheaper and more predictable of the two.
-fn resolve_tz_value(value: &[u8]) -> Zone {
-    if let Some(name) = value.strip_prefix(b":") {
-        return zone_from_name(name);
-    }
-    if let Some(tz) = Tz::parse(value) {
+/// A name we cannot read, or a file we cannot parse, lands on UTC -- which is
+/// what glibc does with a missing tzdata file, so a program that names a zone
+/// we do not ship is no worse off than before this path existed. That includes
+/// `TZ` unset on a machine with no `/etc/localtime`.
+fn zone_from_source(source: TzSource<'_>) -> Zone {
+    if let TzSource::Rule(tz) = source {
         return Zone::Posix(tz);
     }
-    zone_from_name(value)
-}
-
-/// Load the zoneinfo file `name` refers to, falling back to UTC.
-fn zone_from_name(name: &[u8]) -> Zone {
     let mut path = [0u8; crate::unistd::PATH_MAX];
-    let Some(()) = zoneinfo_path(name, &mut path) else {
-        return Zone::Posix(Tz::utc());
-    };
-    // A name we cannot read, or a file we cannot parse, lands on UTC — which is
-    // what glibc does with a missing tzdata file, so a program that names a
-    // zone we do not ship is no worse off than before this path existed.
-    load_zoneinfo(&path).map_or(Zone::Posix(Tz::utc()), Zone::File)
+    zoneinfo_path(source, &mut path)
+        .and_then(|()| load_zoneinfo(&path))
+        .map_or(Zone::Posix(Tz::utc()), Zone::File)
 }
 
-/// Build the NUL-terminated path of the zoneinfo file `name` names.
+/// Build the NUL-terminated path of the zoneinfo file `source` names.
 ///
-/// Returns `None` for a name that must not be resolved:
+/// `None` when it names no file -- UTC, a rule, a refused name -- or one this
+/// process must not open, or when the path does not fit the buffer.
+/// [`tz_source`] has already refused a name with a `..` component (`TZ` is
+/// inherited from whoever started the program, and without that check
+/// `TZ=../../../etc/shadow` would make the libc open an arbitrary file and
+/// report whether it parses as TZif -- a small oracle, but a free one) and one
+/// with a NUL (which would cut short the path handed to the kernel, and so name
+/// a *different* file from the one checked).
 ///
-/// * one containing a `..` component, because `TZ` is attacker-controlled in
-///   any program that inherits an environment, and without this check
-///   `TZ=../../../etc/shadow` would make the libc open an arbitrary file and
-///   report whether it parses as TZif — a small oracle, but a free one;
-/// * one containing an interior NUL, which would truncate the path handed to
-///   the kernel and so name a *different* file than the one checked here;
-/// * an absolute path, or any path at all, in a set-user-ID program (`TZ` is
-///   then attacker-controlled *and* the file is opened with elevated
-///   privilege).  `AT_SECURE` is always 0 today because SlateOS has no
-///   set-user-ID execution yet; the check is here so the day it gains some,
-///   this path is not the hole.
-fn zoneinfo_path(name: &[u8], out: &mut [u8; crate::unistd::PATH_MAX]) -> Option<()> {
-    if name.is_empty() || name.contains(&0) {
-        return None;
-    }
-    // Reject `..` as a whole component; a name like `Europe/Bu..dapest` is
-    // fine, and refusing it would be a surprise.
-    if name.split(|&b| b == b'/').any(|part| part == b"..") {
-        return None;
-    }
-    let secure = crate::crt::getauxval(crate::linux_auxv_types::AT_SECURE.into()) != 0;
-    if secure && name.starts_with(b"/") {
-        return None;
-    }
-
+/// What it cannot refuse is a path in a set-user-ID program (`AT_SECURE`),
+/// where `TZ` is attacker-controlled *and* the file is opened with elevated
+/// privilege: there an absolute path is refused and `TZDIR` ignored.
+/// `AT_SECURE` is always 0 today because SlateOS has no set-user-ID execution
+/// yet; the check is here so the day it gains some, this path is not the hole.
+/// `/etc/localtime`, which no `TZ` value chooses, is opened either way.
+fn zoneinfo_path(source: TzSource<'_>, out: &mut [u8; crate::unistd::PATH_MAX]) -> Option<()> {
+    let secure = || crate::crt::getauxval(crate::linux_auxv_types::AT_SECURE.into()) != 0;
     let mut len = 0usize;
     let mut push = |bytes: &[u8]| -> Option<()> {
         let end = len.checked_add(bytes.len())?;
@@ -311,17 +281,26 @@ fn zoneinfo_path(name: &[u8], out: &mut [u8; crate::unistd::PATH_MAX]) -> Option
         len = end;
         Some(())
     };
-    if name.starts_with(b"/") {
-        push(name)?;
-    } else {
-        // `TZDIR` is the glibc spelling for an alternate tree; honouring it is
-        // what lets a test or a self-contained package point at its own copy.
-        let dir = crate::environ::getenv_bytes(b"TZDIR")
-            .filter(|d| !d.is_empty() && !secure)
-            .unwrap_or(TZDIR_DEFAULT);
-        push(dir.strip_suffix(b"/").unwrap_or(dir))?;
-        push(b"/")?;
-        push(name)?;
+    match source {
+        TzSource::System => push(tzrules::LOCALTIME)?,
+        TzSource::Path(path) => {
+            if secure() {
+                return None;
+            }
+            push(path)?;
+        }
+        TzSource::Named(name) => {
+            // `TZDIR` is the glibc spelling for an alternate tree; honouring
+            // it is what lets a test or a self-contained package point at its
+            // own copy.
+            let dir = crate::environ::getenv_bytes(b"TZDIR")
+                .filter(|d| !d.is_empty() && !secure())
+                .unwrap_or(tzrules::ZONEINFO_DIR);
+            push(dir.strip_suffix(b"/").unwrap_or(dir))?;
+            push(b"/")?;
+            push(name)?;
+        }
+        TzSource::Utc | TzSource::Rule(_) | TzSource::Refused => return None,
     }
     // Room for the terminator was not reserved above, so check it now rather
     // than silently handing the kernel an unterminated buffer.
@@ -473,20 +452,31 @@ mod tests {
         f
     }
 
-    /// The path `zoneinfo_path` builds for `name`, as bytes without the NUL.
-    fn path_for(name: &[u8]) -> Option<Vec<u8>> {
+    /// The path the libc would open for the `TZ` value `tz` (`None`: unset),
+    /// as bytes without the NUL.
+    fn path_for(tz: Option<&[u8]>) -> Option<Vec<u8>> {
         let mut buf = [0u8; crate::unistd::PATH_MAX];
-        zoneinfo_path(name, &mut buf)?;
+        zoneinfo_path(tz_source(tz), &mut buf)?;
         let end = buf.iter().position(|&b| b == 0)?;
         Some(buf.get(..end)?.to_vec())
+    }
+
+    /// The zone the libc would install for the `TZ` value `tz`.
+    fn zone_for(tz: Option<&[u8]>) -> Zone {
+        zone_from_source(tz_source(tz))
     }
 
     #[test]
     fn a_zone_name_resolves_under_the_zoneinfo_directory() {
         let _env = crate::environ::lock_env_for_test();
         assert_eq!(
-            path_for(b"America/New_York").as_deref(),
+            path_for(Some(b"America/New_York")).as_deref(),
             Some(&b"/usr/share/zoneinfo/America/New_York"[..])
+        );
+        // A leading `:` says "file" whatever the rest looks like.
+        assert_eq!(
+            path_for(Some(b":EST5EDT")).as_deref(),
+            Some(&b"/usr/share/zoneinfo/EST5EDT"[..])
         );
     }
 
@@ -494,40 +484,61 @@ mod tests {
     fn an_absolute_tz_names_the_file_directly() {
         let _env = crate::environ::lock_env_for_test();
         assert_eq!(
-            path_for(b"/etc/localtime").as_deref(),
-            Some(&b"/etc/localtime"[..])
+            path_for(Some(b"/etc/zones/home")).as_deref(),
+            Some(&b"/etc/zones/home"[..])
+        );
+        assert_eq!(
+            path_for(Some(b":/etc/zones/home")).as_deref(),
+            Some(&b"/etc/zones/home"[..])
         );
     }
 
+    /// Unset is the machine's own zone; empty is UTC, which opens nothing.
+    #[test]
+    fn unset_reads_etc_localtime_and_empty_reads_nothing() {
+        let _env = crate::environ::lock_env_for_test();
+        assert_eq!(path_for(None).as_deref(), Some(&b"/etc/localtime"[..]));
+        assert_eq!(path_for(Some(b"")), None);
+        assert!(matches!(zone_for(Some(b"")), Zone::Posix(tz) if tz == Tz::UTC));
+        // The host build has no filesystem, so the machine's zone is UTC here,
+        // as it is on a SlateOS that ships no `/etc/localtime`.
+        assert!(matches!(zone_for(None), Zone::Posix(tz) if tz == Tz::UTC));
+    }
+
+    /// `tz_source` refuses these; what this pins is that the libc, which opens
+    /// the file, never gets a path for them.
     #[test]
     fn a_dot_dot_component_is_refused() {
         let _env = crate::environ::lock_env_for_test();
         // `TZ` is inherited from whoever launched the process, so without this
         // the libc would open any file the caller named and reveal whether it
         // parses as TZif.
-        assert!(path_for(b"../../../etc/shadow").is_none());
-        assert!(path_for(b"America/../../etc/shadow").is_none());
+        assert!(path_for(Some(b"../../../etc/shadow")).is_none());
+        assert!(path_for(Some(b"America/../../etc/shadow")).is_none());
+        assert!(path_for(Some(b"/usr/share/zoneinfo/../../etc/shadow")).is_none());
+        assert!(path_for(Some(b":../x")).is_none());
         // A `..` inside a component is not a traversal and must still work.
         assert_eq!(
-            path_for(b"Europe/Bu..dapest").as_deref(),
+            path_for(Some(b"Europe/Bu..dapest")).as_deref(),
             Some(&b"/usr/share/zoneinfo/Europe/Bu..dapest"[..])
         );
     }
 
     #[test]
-    fn an_interior_nul_is_refused() {
+    fn an_interior_nul_or_a_bare_colon_is_refused() {
         let _env = crate::environ::lock_env_for_test();
         // The kernel sees a NUL-terminated path, so a name with an interior
         // NUL would open a different file than the one checked here.
-        assert!(path_for(b"America/New_York\0/../../etc/shadow").is_none());
-        assert!(path_for(b"").is_none());
+        assert!(path_for(Some(b"America/New_York\0/../../etc/shadow")).is_none());
+        assert!(path_for(Some(b":")).is_none());
+        assert!(matches!(zone_for(Some(b":")), Zone::Posix(tz) if tz == Tz::UTC));
     }
 
     #[test]
     fn a_name_too_long_for_the_path_buffer_is_refused() {
         let _env = crate::environ::lock_env_for_test();
         let long = std::vec![b'a'; crate::unistd::PATH_MAX];
-        assert!(path_for(&long).is_none());
+        assert!(path_for(Some(&long)).is_none());
     }
 
     #[test]
@@ -538,11 +549,16 @@ mod tests {
         unsafe {
             crate::environ::setenv(c"TZDIR".as_ptr().cast(), c"/opt/zones/".as_ptr().cast(), 1)
         };
-        let got = path_for(b"America/New_York");
+        let named = path_for(Some(b"America/New_York"));
+        let absolute = path_for(Some(b"/etc/zones/home"));
+        let unset = path_for(None);
         // SAFETY: as above.
         unsafe { crate::environ::unsetenv(c"TZDIR".as_ptr().cast()) };
         // The trailing slash on `TZDIR` must not double up.
-        assert_eq!(got.as_deref(), Some(&b"/opt/zones/America/New_York"[..]));
+        assert_eq!(named.as_deref(), Some(&b"/opt/zones/America/New_York"[..]));
+        // `TZDIR` is where *names* are looked up, and nothing else.
+        assert_eq!(absolute.as_deref(), Some(&b"/etc/zones/home"[..]));
+        assert_eq!(unset.as_deref(), Some(&b"/etc/localtime"[..]));
     }
 
     #[test]
@@ -550,17 +566,17 @@ mod tests {
         let _env = crate::environ::lock_env_for_test();
         // `EST5EDT` is both a valid rule string and a file in the zoneinfo
         // tree; resolving it as a rule is cheaper and is what glibc does.
-        assert!(matches!(resolve_tz_value(b"EST5EDT"), Zone::Posix(_)));
+        assert!(matches!(zone_for(Some(b"EST5EDT")), Zone::Posix(tz) if tz != Tz::UTC));
         // A leading colon forces the file interpretation — and since the host
         // build has no filesystem, that lands on UTC rather than on the rule.
-        let colon = resolve_tz_value(b":EST5EDT");
+        let colon = zone_for(Some(b":EST5EDT"));
         assert!(matches!(colon, Zone::Posix(tz) if tz == Tz::UTC));
     }
 
     #[test]
     fn a_zoneinfo_name_we_cannot_read_falls_back_to_utc() {
         let _env = crate::environ::lock_env_for_test();
-        let zone = resolve_tz_value(b"America/New_York");
+        let zone = zone_for(Some(b"America/New_York"));
         assert!(matches!(zone, Zone::Posix(tz) if tz == Tz::UTC));
     }
 

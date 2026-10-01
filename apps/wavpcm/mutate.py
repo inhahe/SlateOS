@@ -174,6 +174,25 @@ MUTATIONS = [
         "        out.extend_from_slice(&s.saturating_add(1).to_le_bytes());",
         ["sixteen_bit_samples_are_stored_as_they_are"],
     ),
+    # The quantiser's rounding without libm (2026-09-27): exactly f64::round.
+    (
+        "a positive half rounds toward zero",
+        "        .saturating_add(i64::from(frac >= 0.5))",
+        "        .saturating_add(i64::from(frac > 0.5))",
+        ["rounding_without_libm_gives_what_round_gave"],
+    ),
+    (
+        "a negative fraction is never rounded down",
+        "        .saturating_sub(i64::from(frac <= -0.5))",
+        "",
+        ["rounding_without_libm_gives_what_round_gave"],
+    ),
+    (
+        "the rounding is not clamped",
+        "        .clamp(lo, hi)\n}",
+        "\n}",
+        ["rounding_without_libm_gives_what_round_gave"],
+    ),
 ]
 
 if __name__ == "__main__":

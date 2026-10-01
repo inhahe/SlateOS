@@ -116,10 +116,7 @@ impl Priority {
         }
     }
 
-    // Every priority in order, for a picker that does not exist: priority is
-    // cycled with P rather than chosen from a list.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no priority picker")]
+    /// Every priority in order: what the filter bar's Ctrl+P steps through.
     fn all() -> &'static [Priority] {
         &[Self::Low, Self::Medium, Self::High, Self::Critical]
     }
@@ -155,11 +152,8 @@ impl Label {
 /// A checklist item on a card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ChecklistItem {
-    // A stable identifier assigned and never read: this app addresses
-    // boards, columns and cards by position. Kept because it is what to
-    // switch to when that is fixed.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "identity not used for addressing yet")]
+    // Kept in the boards file and read back from it; the program itself
+    // addresses boards, columns and cards by position.
     id: Id,
     text: String,
     done: bool,
@@ -178,19 +172,12 @@ impl ChecklistItem {
 /// A comment on a card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Comment {
-    // A stable identifier assigned and never read: this app addresses
-    // boards, columns and cards by position. Kept because it is what to
-    // switch to when that is fixed.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "identity not used for addressing yet")]
+    // Kept in the boards file and read back from it; the program itself
+    // addresses boards, columns and cards by position.
     id: Id,
     author: String,
     text: String,
-    // A stable identifier assigned and never read: this app addresses
-    // boards, columns and cards by position. Kept because it is what to
-    // switch to when that is fixed.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "identity not used for addressing yet")]
+    // When it was written, kept in the boards file and read back.
     timestamp: u64,
 }
 
@@ -258,21 +245,23 @@ struct Card {
     comments: Vec<Comment>,
     created_at: u64,
     archived: bool,
-    // Swimlanes: a second axis for the board, modelled end to end and
+    /// The column an archived card came out of, by id, so Restore puts it
+    /// back there. `None` for a card never archived, and for one archived
+    /// before this was recorded -- which is restored to the first column.
+    archived_from: Option<Id>,
+    // Swimlanes: a second axis for the board, kept in the boards file and
     // never drawn. The board renderer lays out columns only, so there is
     // nowhere for a lane to appear.
     // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlane: String,
 }
 
 /// Builders for a card.
 ///
-/// The `with_*` methods have no production caller since `create_sample_data`
-/// became a fixture, because nothing in production builds a card yet. They are
-/// the API a real store or an editor would use -- the same shape as
-/// `apps/dbviewer`'s `ColumnDef` builders and `apps/finance`'s `add_account`.
-#[allow(dead_code, reason = "card builders; no store or editor calls them yet")]
+/// Most are the tests' shorthand for a card with a field set: the running
+/// program sets those fields from the keys (E, D, P on an open card), so the
+/// builders are compiled for the tests only rather than kept alive in the
+/// program with an allow.
 impl Card {
     fn new(title: &str) -> Self {
         Self {
@@ -287,30 +276,36 @@ impl Card {
             comments: Vec::new(),
             created_at: 0,
             archived: false,
+            archived_from: None,
             swimlane: String::new(),
         }
     }
 
+    #[cfg(test)]
     fn with_description(mut self, desc: &str) -> Self {
         self.description = desc.to_string();
         self
     }
 
+    #[cfg(test)]
     fn with_priority(mut self, priority: Priority) -> Self {
         self.priority = priority;
         self
     }
 
+    #[cfg(test)]
     fn with_assignee(mut self, assignee: &str) -> Self {
         self.assignee = assignee.to_string();
         self
     }
 
+    #[cfg(test)]
     fn with_due_date(mut self, date: SimpleDate) -> Self {
         self.due_date = Some(date);
         self
     }
 
+    #[cfg(test)]
     fn with_label(mut self, label_id: Id) -> Self {
         if !self.labels.contains(&label_id) {
             self.labels.push(label_id);
@@ -318,11 +313,7 @@ impl Card {
         self
     }
 
-    // Swimlanes: a second axis for the board, modelled end to end and
-    // never drawn. The board renderer lays out columns only, so there is
-    // nowhere for a lane to appear.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "swimlanes have no layout mode")]
+    #[cfg(test)]
     fn with_swimlane(mut self, lane: &str) -> Self {
         self.swimlane = lane.to_string();
         self
@@ -351,10 +342,7 @@ impl Card {
         self.comments.push(Comment::new(author, text, timestamp));
     }
 
-    // A card's checklist is drawn but cannot be ticked: the detail modal
-    // has no per-item selection to hang the toggle on.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "checklist items are not selectable")]
+    /// Ticked from the open card: Tab chooses an item, Space ticks it.
     fn toggle_checklist_item(&mut self, item_id: Id) {
         for item in &mut self.checklist {
             if item.id == item_id {
@@ -369,28 +357,12 @@ impl Card {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SortBy {
     Priority,
-    // Sort orders the user cannot choose: the board always draws cards in
-    // column order, and no key selects a different one.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no sort-order control")]
     DueDate,
-    // Sort orders the user cannot choose: the board always draws cards in
-    // column order, and no key selects a different one.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no sort-order control")]
     CreatedAt,
-    // A sort order the user cannot choose: the board always draws cards in
-    // column order, and no key selects a different one.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no sort-order control")]
     Title,
 }
 
 impl SortBy {
-    // Sort orders the user cannot choose: the board always draws cards in
-    // column order, and no key selects a different one.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no sort-order control")]
     fn label(self) -> &'static str {
         match self {
             Self::Priority => "Priority",
@@ -400,32 +372,31 @@ impl SortBy {
         }
     }
 
-    // Sort orders the user cannot choose: the board always draws cards in
-    // column order, and no key selects a different one.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no sort-order control")]
     fn all() -> &'static [SortBy] {
         &[Self::Priority, Self::DueDate, Self::CreatedAt, Self::Title]
+    }
+
+    /// The order after this one, round to the first: Shift+T.
+    fn next(self) -> Self {
+        let all = Self::all();
+        let at = all.iter().position(|&o| o == self).unwrap_or(0);
+        all.get(at.saturating_add(1))
+            .copied()
+            .unwrap_or(Self::Priority)
     }
 }
 
 /// A Kanban column holding an ordered list of cards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Column {
-    // A stable identifier assigned and never read: this app addresses
-    // boards, columns and cards by position. Kept because it is what to
-    // switch to when that is fixed.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "identity not used for addressing yet")]
+    // Kept in the boards file and read back from it; the program itself
+    // addresses boards, columns and cards by position.
     id: Id,
     name: String,
     card_ids: Vec<Id>,
     wip_limit: Option<usize>,
     sort_by: SortBy,
-    // A collapsed column is modelled and never drawn collapsed: the board
-    // renderer lays out every column at full width.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no collapse control")]
+    /// Drawn narrow, with its cards hidden: Z on the board.
     collapsed: bool,
 }
 
@@ -465,28 +436,19 @@ impl Column {
 /// A Kanban board containing columns and cards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Board {
-    // A stable identifier assigned and never read: this app addresses boards,
-    // columns and cards by position. Kept because it is what to switch to
-    // when that is fixed.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "identity not used for addressing yet")]
+    // Written to the boards file and read back, and not otherwise used: this
+    // app addresses boards by position.
     id: Id,
     name: String,
     columns: Vec<Column>,
     cards: HashMap<Id, Card>,
     labels: Vec<Label>,
     archived_card_ids: Vec<Id>,
-    // Swimlanes: a second axis for the board, modelled end to end and
+    // Swimlanes: a second axis for the board, kept in the boards file and
     // never drawn. The board renderer lays out columns only, so there is
     // nowhere for a lane to appear.
     // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlanes_enabled: bool,
-    // Swimlanes: a second axis for the board, modelled end to end and
-    // never drawn. The board renderer lays out columns only, so there is
-    // nowhere for a lane to appear.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "swimlanes have no layout mode")]
     swimlane_names: Vec<String>,
 }
 
@@ -583,8 +545,13 @@ impl Board {
     }
 
     fn archive_card(&mut self, card_id: Id) -> bool {
+        let from = self
+            .find_card_column(card_id)
+            .and_then(|i| self.columns.get(i))
+            .map(|column| column.id);
         if let Some(card) = self.cards.get_mut(&card_id) {
             card.archived = true;
+            card.archived_from = from;
             self.archived_card_ids.push(card_id);
             // Remove from all columns
             for col in &mut self.columns {
@@ -596,20 +563,38 @@ impl Board {
         }
     }
 
-    // Archiving works one way. Un-archiving is the reverse operation, tested
-    // and without a key.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "the reverse operation has no key")]
+    /// Put an archived card back into column `column_idx`, at the bottom.
+    ///
+    /// The column is checked before anything changes. This cleared the
+    /// card's archived mark and took it out of the archive first, then found
+    /// no such column and answered `false` -- leaving a card in no column and
+    /// not archived, which nothing on screen shows: gone, without a delete.
     fn unarchive_card(&mut self, card_id: Id, column_idx: usize) -> bool {
-        if let Some(card) = self.cards.get_mut(&card_id) {
-            card.archived = false;
-            self.archived_card_ids.retain(|&c| c != card_id);
-            if let Some(col) = self.columns.get_mut(column_idx) {
-                col.card_ids.push(card_id);
-                return true;
-            }
+        if column_idx >= self.columns.len() || !self.archived_card_ids.contains(&card_id) {
+            return false;
         }
-        false
+        let Some(card) = self.cards.get_mut(&card_id) else {
+            return false;
+        };
+        card.archived = false;
+        card.archived_from = None;
+        self.archived_card_ids.retain(|&c| c != card_id);
+        if let Some(col) = self.columns.get_mut(column_idx) {
+            col.card_ids.push(card_id);
+        }
+        true
+    }
+
+    /// Restore an archived card to the column it was archived from, or to
+    /// the first column when that one is gone (or was never recorded).
+    /// Answers the column it went to, or `None` when the board has no
+    /// column to put it in.
+    fn restore_card(&mut self, card_id: Id) -> Option<usize> {
+        let from = self.cards.get(&card_id)?.archived_from;
+        let column = from
+            .and_then(|id| self.columns.iter().position(|c| c.id == id))
+            .unwrap_or(0);
+        self.unarchive_card(card_id, column).then_some(column)
     }
 
     fn delete_card(&mut self, card_id: Id) -> bool {
@@ -624,10 +609,8 @@ impl Board {
         self.columns.push(Column::new(name));
     }
 
-    // Removing a column is tested and has no key: columns are added and never
-    // taken away.
-    // See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
-    #[allow(dead_code, reason = "no remove-column control")]
+    /// Take column `col_idx` off the board. Shift+Delete asks for it only for
+    /// a column with no cards in it, so no card is ever left in no column.
     fn remove_column(&mut self, col_idx: usize) -> Option<Column> {
         if col_idx < self.columns.len() {
             Some(self.columns.remove(col_idx))
@@ -685,7 +668,15 @@ impl Board {
                 match (card_a, card_b) {
                     (Some(ca), Some(cb)) => match sort_by {
                         SortBy::Priority => cb.priority.cmp(&ca.priority),
-                        SortBy::DueDate => ca.due_date.cmp(&cb.due_date),
+                        // Soonest first, and a card with no date after every
+                        // card with one: `None < Some`, so plain `cmp` put the
+                        // undated cards at the top of a column sorted by date.
+                        SortBy::DueDate => match (ca.due_date, cb.due_date) {
+                            (Some(a), Some(b)) => a.cmp(&b),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        },
                         SortBy::CreatedAt => ca.created_at.cmp(&cb.created_at),
                         SortBy::Title => ca.title.cmp(&cb.title),
                     },
@@ -861,7 +852,7 @@ impl JsonExporter {
             "{{\"id\":{},\"title\":\"{}\",\"description\":\"{}\",\"labels\":[{}],\
              \"priority\":\"{}\",\"due_date\":{},\"assignee\":\"{}\",\
              \"checklist\":[{}],\"comments\":[{}],\"created_at\":{},\
-             \"archived\":{},\"swimlane\":\"{}\"}}",
+             \"archived\":{},\"archived_from\":{},\"swimlane\":\"{}\"}}",
             card.id.0,
             Self::escape_json(&card.title),
             Self::escape_json(&card.description),
@@ -873,6 +864,8 @@ impl JsonExporter {
             comments_json.join(","),
             card.created_at,
             card.archived,
+            card.archived_from
+                .map_or_else(|| "null".to_string(), |id| id.0.to_string()),
             Self::escape_json(&card.swimlane),
         )
     }
@@ -934,7 +927,14 @@ impl JsonExporter {
 const BOARDS_MAGIC: &str = "slateos-kanban";
 
 /// The version of the boards file this writes, and the newest it reads.
-const BOARDS_FORMAT: u32 = 1;
+///
+/// 2 adds `origin` lines, the column each archived card came from. A
+/// format 1 file -- every file written before 2026-09-27 -- is still read,
+/// and its archived cards restore to the first column.
+const BOARDS_FORMAT: u32 = 2;
+
+/// The oldest boards file this reads.
+const BOARDS_OLDEST: u32 = 1;
 
 /// The largest boards file this will read. One cut short would be read as
 /// fewer boards with no sign any were missing, so a larger file is refused
@@ -1061,6 +1061,7 @@ fn push_ids(out: &mut String, ids: &[Id]) {
 /// column   <id>  <limit, or nothing>  <priority|due|created|title>  <collapsed 1|0>
 ///          <name>  <card id>...
 /// archived <card id>...
+/// origin   <archived card id>  <column id>        (format 2)
 /// ```
 ///
 /// Fields are separated by tabs and escaped with `textfmt::tsv`; times are
@@ -1142,6 +1143,11 @@ fn boards_text(boards: &[Board], active: usize) -> String {
         out.push_str("archived");
         push_ids(&mut out, &board.archived_card_ids);
         out.push('\n');
+        for card_id in &board.archived_card_ids {
+            if let Some(from) = board.cards.get(card_id).and_then(|c| c.archived_from) {
+                out.push_str(&format!("origin\t{}\t{}\n", card_id.0, from.0));
+            }
+        }
     }
     out
 }
@@ -1169,7 +1175,7 @@ fn parse_boards(text: &str) -> Result<(Vec<Board>, usize), String> {
             "it is a later format ({version}) than this version reads ({BOARDS_FORMAT})"
         ));
     }
-    if version < BOARDS_FORMAT {
+    if version < BOARDS_OLDEST {
         return Err(format!("format {version} is not one this program wrote"));
     }
 
@@ -1331,6 +1337,19 @@ fn parse_boards(text: &str) -> Result<(Vec<Board>, usize), String> {
                     .ok_or_else(|| bad("the archive comes before any board"))?;
                 board.archived_card_ids = placed_ids(cards, board, &mut placed, &bad)?;
             }
+            ["origin", card, column] if version >= 2 => {
+                let card = Id::from_stored(number(card, "an archived card's number")?);
+                let column = Id::from_stored(number(column, "a column's number")?);
+                let board = boards
+                    .last_mut()
+                    .ok_or_else(|| bad("an origin comes before any board"))?;
+                if !board.archived_card_ids.contains(&card) {
+                    return Err(bad("an origin names a card that is not archived"));
+                }
+                if let Some(archived) = board.cards.get_mut(&card) {
+                    archived.archived_from = Some(column);
+                }
+            }
             _ => {
                 return Err(bad(
                     "it is not a line this version reads, or has the wrong number of fields",
@@ -1471,6 +1490,11 @@ fn card_from_json(item: &JsonValue) -> Option<Card> {
         .get("archived")
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
+    card.archived_from = item
+        .get("archived_from")
+        .and_then(JsonValue::as_i64)
+        .and_then(|n| u64::try_from(n).ok())
+        .map(Id::from_stored);
     card.swimlane = item
         .get("swimlane")
         .and_then(JsonValue::as_str)
@@ -1919,21 +1943,32 @@ enum View {
 /// which was written from habit rather than from the handler; the guard
 /// caught it.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("Left / Right", "Another column"),
-    ("Up / Down", "Another card, or scroll a card"),
+    ("Up / Down", "Another card, or scroll an open card"),
+    ("Left / Right", "The next column over"),
     ("PageUp / PageDown", "A screenful at a time"),
     ("Enter", "Open the card, or confirm"),
+    ("E / D", "Edit an open card's title / description"),
+    ("C / L", "Add a comment / a checklist item to it"),
+    ("Tab / Space", "Choose a checklist item / tick it"),
     ("Esc", "Back, or cancel what you are typing"),
     ("N", "A new card, on the board"),
     ("Shift+C", "A new column, on the board"),
-    ("T", "Sort this column, on the board"),
+    ("T / Shift+T", "Sort this column / by the next order"),
+    ("R", "Rename this column"),
+    ("Z", "Collapse or open this column"),
+    ("Shift+Delete", "Remove this column, if it is empty"),
     ("P", "Cycle this card's priority"),
     ("M / B", "Move this card on / back a column"),
     ("Ctrl+D", "Delete this card"),
     ("Ctrl+A", "Archive it"),
-    ("Alt+1-4", "Board, and the three other views"),
+    ("Alt+1-4", "Board, statistics, archive, boards"),
     ("Ctrl+F", "Show or hide the filter bar"),
     ("Ctrl+S", "Type a search term, with that bar open"),
+    (
+        "Ctrl+P / Ctrl+L",
+        "Show one priority / one label, with it open",
+    ),
+    ("Ctrl+U", "Show one person's cards, with it open"),
     ("Ctrl+O", "Open a board"),
     ("Ctrl+E", "Export this one"),
     ("F1", "This list"),
@@ -1945,6 +1980,10 @@ struct KanbanApp {
     picker: FilePicker,
     /// What the last open or save did, for the status line.
     last_file_action: Option<String>,
+    /// Why the last key did nothing, when that needs saying -- "move or
+    /// archive its cards first". Cleared by the next key, so it describes the
+    /// key just pressed and nothing older.
+    note: Option<String>,
     /// The size the last frame was drawn at, so a click on the picker is
     /// answered against the window the user is looking at.
     win_width: f32,
@@ -1975,6 +2014,22 @@ struct KanbanApp {
     /// It used to be written by nobody and read by nobody, so the modal drew
     /// its comments straight over the desktop with no way to reach them.
     detail_scroll: f32,
+    /// The checklist item of the open card that Space ticks, moved by Tab.
+    /// `None` until Tab is first pressed on a card, so opening one never
+    /// shows a focus nobody asked for.
+    checklist_focus: Option<usize>,
+    /// Who a comment is signed by: the login name, when there is one.
+    author: String,
+    /// The archived card the archive view has chosen, by its place in the
+    /// list the view draws.
+    archive_cursor: usize,
+    /// The board the board list has chosen, by its place in the list.
+    ///
+    /// Its own field. It was `selected_column`, borrowed while the list was
+    /// up -- so the list opened with the cursor on whatever row number the
+    /// board's column happened to be, and leaving it with Escape left the
+    /// board's column set to a row of the list.
+    board_cursor: usize,
     show_filter_bar: bool,
     input_buffer: String,
     input_mode: InputMode,
@@ -2011,14 +2066,11 @@ struct KanbanApp {
 
 /// What the user is currently typing into.
 ///
-/// Most of these are never entered. Each names a field the user would type
-/// into — a board name, a card description, a comment, a checklist item — and
-/// the only one reached is the card title. They are the model of an editor
-/// whose UI is not built, and they keep their place here because that is where
-/// it will be built.
-/// See known-issues.md -> TD-C-KANBAN-HAS-AN-EXPORTER-AN-IMPORTER-AND-SWIMLANES-NONE-REACHABLE.
+/// Until 2026-09-27 only the new card's title, a new column's name and a
+/// search were ever entered; the rest were the model of an editor with no
+/// keys. Each is reached now: the open card's E, D, C and L; the board's R;
+/// the board list's N; the filter bar's Ctrl+U.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "no UI enters these input modes")]
 enum InputMode {
     None,
     NewCardTitle,
@@ -2041,6 +2093,7 @@ impl KanbanApp {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             picker: FilePicker::new(),
             last_file_action: None,
+            note: None,
             win_width: INITIAL_WIDTH as f32,
             win_height: INITIAL_HEIGHT as f32,
             boards: vec![default_board],
@@ -2051,6 +2104,10 @@ impl KanbanApp {
             selected_column: 0,
             scroll_offset: 0,
             detail_scroll: 0.0,
+            checklist_focus: None,
+            author: String::from("You"),
+            archive_cursor: 0,
+            board_cursor: 0,
             show_filter_bar: false,
             input_buffer: String::new(),
             input_mode: InputMode::None,
@@ -2067,6 +2124,14 @@ impl KanbanApp {
     /// the one board `new` starts with -- and every change kept from here on.
     fn from_settings() -> Self {
         let mut app = Self::new();
+        // Signed by whoever is logged in; "You" when nothing says. It was
+        // "User" for everybody.
+        if let Some(name) = ["USER", "LOGNAME", "USERNAME"]
+            .iter()
+            .find_map(|var| std::env::var(var).ok().filter(|n| !n.trim().is_empty()))
+        {
+            app.author = name;
+        }
         match boards_path() {
             Some(path) => {
                 app.persist = true;
@@ -2303,6 +2368,93 @@ impl KanbanApp {
         self.last_stamp
     }
 
+    /// Where the chosen card is in its column's list as drawn -- filtered,
+    /// archived cards left out -- or `None` when no card is chosen or it is
+    /// not in the chosen column.
+    fn selected_row(&self) -> Option<usize> {
+        let card = self.selected_card?;
+        self.choosable_ids(self.selected_column)
+            .iter()
+            .position(|&id| id == card)
+    }
+
+    /// The cards of column `col` the arrows can land on: those drawn, which
+    /// is none for a collapsed column.
+    fn choosable_ids(&self, col: usize) -> Vec<Id> {
+        if self
+            .active_board()
+            .columns
+            .get(col)
+            .is_some_and(|c| c.collapsed)
+        {
+            return Vec::new();
+        }
+        self.filtered_card_ids(col)
+    }
+
+    /// Choose the card at `row` of column `col` (the last, if the column is
+    /// shorter), or none if it has no cards; and scroll it into sight.
+    fn choose_in_column(&mut self, col: usize, row: usize) {
+        self.selected_column = col;
+        let cards = self.choosable_ids(col);
+        self.selected_card = cards.get(row.min(cards.len().saturating_sub(1))).copied();
+        self.reveal_selected();
+    }
+
+    /// Move the choice `delta` cards up or down the chosen column. With no
+    /// card chosen there, the first press lands on the first card going down
+    /// and the last going up. Answers whether the choice moved.
+    fn step_card(&mut self, delta: isize) -> bool {
+        let cards = self.choosable_ids(self.selected_column);
+        let Some(last) = cards.len().checked_sub(1) else {
+            return false;
+        };
+        let to = match (self.selected_row(), delta.is_negative()) {
+            (None, true) => last,
+            (None, false) => 0,
+            (Some(row), true) => row.saturating_sub(delta.unsigned_abs()),
+            (Some(row), false) => row.saturating_add(delta.unsigned_abs()).min(last),
+        };
+        if self.selected_row() == Some(to) {
+            return false;
+        }
+        self.choose_in_column(self.selected_column, to);
+        true
+    }
+
+    /// Scroll the board so the chosen card is drawn.
+    ///
+    /// Against the window the last frame was drawn in and the same room
+    /// the renderer gives a column (`column_card_room`); the offset is one
+    /// for every column, as the renderer reads it.
+    fn reveal_selected(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if row < self.scroll_offset {
+            self.scroll_offset = row;
+            return;
+        }
+        let board = self.active_board();
+        let heights: Vec<f32> = self
+            .filtered_card_ids(self.selected_column)
+            .iter()
+            .filter_map(|id| board.cards.get(id))
+            .map(|card| card_height(card) + CARD_GAP)
+            .collect();
+        let top = board_top(self);
+        let room = column_card_room(top, (self.win_height - STATUS_H).max(top));
+        // One card at a time, and never past the chosen one: the room holds
+        // at least the chosen card, or nothing can make it fit.
+        while self.scroll_offset < row {
+            let shown = scroll_window::visible_variable(&heights, room, self.scroll_offset);
+            if row < shown.end() {
+                break;
+            }
+            self.scroll_offset = self.scroll_offset.saturating_add(1);
+        }
+    }
+
     fn add_card(&mut self, title: &str, col_idx: usize) -> Option<Id> {
         let ts = self.next_timestamp();
         let card = Card::new(title).with_created_at(ts);
@@ -2380,6 +2532,27 @@ impl KanbanApp {
         board.add_card_to_column(c6, 4);
     }
 
+    /// After a filter changed what is drawn: a chosen card the filter now
+    /// hides is chosen no longer -- the first card still drawn is, so the
+    /// next key acts on something on screen. Nothing chosen stays so.
+    fn refit_choice(&mut self) {
+        if self.selected_card.is_some() && self.selected_row().is_none() {
+            self.choose_in_column(self.selected_column, 0);
+        } else {
+            self.reveal_selected();
+        }
+    }
+
+    /// After the card at `row` of the chosen column left it -- deleted or
+    /// archived -- choose the one that took its place, so the next key acts
+    /// on a card the user can see; or the one above, if it was the last.
+    fn choose_neighbour(&mut self, row: Option<usize>) {
+        self.selected_card = None;
+        if let Some(row) = row {
+            self.choose_in_column(self.selected_column, row);
+        }
+    }
+
     fn switch_board(&mut self, idx: usize) {
         if idx < self.boards.len() {
             self.active_board_idx = idx;
@@ -2393,6 +2566,11 @@ impl KanbanApp {
         let board = Board::new(name);
         self.boards.push(board);
         self.active_board_idx = self.boards.len().saturating_sub(1);
+        // Nothing chosen on the new board: a card id or column from the old
+        // one would name something this board does not have.
+        self.selected_card = None;
+        self.selected_column = 0;
+        self.scroll_offset = 0;
         // Add default columns
         let board = self.active_board_mut();
         board.add_column("Backlog");
@@ -2427,7 +2605,7 @@ impl KanbanApp {
 
 /// Render the toolbar at the top.
 fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
-    let toolbar_h: f32 = 40.0;
+    let toolbar_h: f32 = TOOLBAR_H;
 
     // Background
     app.palette.push_surface(
@@ -2604,7 +2782,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         return y_offset;
     }
 
-    let bar_h: f32 = 36.0;
+    let bar_h: f32 = FILTER_BAR_H;
 
     app.palette
         .push_surface(tree, 0.0, y_offset, width, bar_h, 0.0, Surface::Card);
@@ -2668,6 +2846,29 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(54.0),
+        overflow: TextOverflow::Ellipsis,
+    });
+
+    // Assignee and label, which Ctrl+U and Ctrl+L set. The filter could hold
+    // both and nothing could set either.
+    let assignee = if app.filter.assignee_filter.is_empty() {
+        "Anyone".to_string()
+    } else {
+        app.filter.assignee_filter.clone()
+    };
+    let label = app
+        .filter
+        .label_filter
+        .and_then(|id| app.active_board().get_label_by_id(id))
+        .map_or_else(|| "Any".to_string(), |l| l.name.clone());
+    tree.push(RenderCommand::Text {
+        x: 420.0,
+        y: y_offset + 9.0,
+        text: format!("Assignee: {assignee}   Label: {label}"),
+        color: app.palette.subtext0,
+        font_size: 12.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some((width - 500.0).max(0.0)),
         overflow: TextOverflow::Ellipsis,
     });
 
@@ -3038,6 +3239,78 @@ fn render_column_header(
     }
 }
 
+/// Height of the toolbar across the top.
+const TOOLBAR_H: f32 = 40.0;
+/// Height of the filter bar, when it is open.
+const FILTER_BAR_H: f32 = 36.0;
+/// Gap between the top of the board and the top of its columns.
+const COLUMN_TOP_GAP: f32 = 8.0;
+/// Height of a column's header, above its first card.
+const COLUMN_HEADER_H: f32 = 36.0;
+/// Gap between two cards in a column, and above the first.
+const CARD_GAP: f32 = 6.0;
+
+/// Where the board starts: under the toolbar, and under the filter bar when
+/// it is open.
+fn board_top(app: &KanbanApp) -> f32 {
+    if app.show_filter_bar {
+        TOOLBAR_H + FILTER_BAR_H
+    } else {
+        TOOLBAR_H
+    }
+}
+
+/// The height a column has for its cards, for a board drawn from `y_start`
+/// down to `bottom`.
+///
+/// One function for the renderer and the keyboard: a card the arrows scroll
+/// into sight is a card the renderer then draws.
+fn column_card_room(y_start: f32, bottom: f32) -> f32 {
+    let card_y = y_start + COLUMN_TOP_GAP + COLUMN_HEADER_H + CARD_GAP;
+    // The "+N more" line's space is reserved whether or not it is needed,
+    // so the number of cards that fit does not depend on how many fit.
+    (bottom - 8.0) - card_y - COLUMN_FOOTER_H
+}
+
+/// Width of a collapsed column: its name, its count, no cards.
+const COLLAPSED_W: f32 = 120.0;
+
+/// Where each column is across the board: its left edge and width.
+///
+/// A collapsed column takes [`COLLAPSED_W`]; the others share what is left,
+/// at least 180 each.
+fn column_spans(columns: &[Column], width: f32) -> Vec<(f32, f32)> {
+    let col_gap: f32 = 8.0;
+    let col_margin: f32 = 8.0;
+    let count = columns.len();
+    let collapsed = columns.iter().filter(|c| c.collapsed).count();
+    let open = count.saturating_sub(collapsed);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a board's column count, far inside f32's exact range"
+    )]
+    let (gaps, narrow, open_n) = (
+        col_gap * count.saturating_sub(1) as f32,
+        COLLAPSED_W * collapsed as f32,
+        open.max(1) as f32,
+    );
+    let open_w = ((width - col_margin * 2.0 - gaps - narrow) / open_n).max(180.0);
+    let mut x = col_margin;
+    columns
+        .iter()
+        .map(|column| {
+            let w = if column.collapsed {
+                COLLAPSED_W
+            } else {
+                open_w
+            };
+            let span = (x, w);
+            x += w + col_gap;
+            span
+        })
+        .collect()
+}
+
 /// Render the board view with columns of cards.
 fn render_board_view(
     tree: &mut RenderTree,
@@ -3052,7 +3325,7 @@ fn render_board_view(
         tree.push(RenderCommand::Text {
             x: width / 2.0 - 80.0,
             y: y_start + 50.0,
-            text: "No columns yet. Press 'C' to add one.".to_string(),
+            text: "No columns yet. Shift+C adds one.".to_string(),
             color: app.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
@@ -3062,14 +3335,9 @@ fn render_board_view(
         return;
     }
 
-    let col_gap: f32 = 8.0;
-    let col_margin: f32 = 8.0;
-    let available_w = width - col_margin * 2.0 - col_gap * (col_count.saturating_sub(1)) as f32;
-    let col_width = (available_w / col_count as f32).max(180.0);
-
-    for (ci, col) in board.columns.iter().enumerate() {
-        let col_x = col_margin + (col_width + col_gap) * ci as f32;
-        let col_y = y_start + 8.0;
+    let spans = column_spans(&board.columns, width);
+    for ((ci, col), &(col_x, col_width)) in board.columns.iter().enumerate().zip(&spans) {
+        let col_y = y_start + COLUMN_TOP_GAP;
 
         // Column background
         tree.push(RenderCommand::FillRect {
@@ -3094,15 +3362,47 @@ fn render_board_view(
             });
         }
 
+        // The chosen column, marked: R, Z, Shift+T, Shift+Delete and N all
+        // act on it, and nothing showed which one it was.
+        if ci == app.selected_column && app.view == View::Board {
+            tree.push(RenderCommand::StrokeRect {
+                x: col_x,
+                y: col_y,
+                width: col_width,
+                height: height - col_y - 8.0,
+                color: app.palette.accent,
+                line_width: 2.0,
+                corner_radii: CornerRadii::all(6.0),
+            });
+        }
+
         // Column header
         render_column_header(tree, &app.palette, col, board, col_x, col_y, col_width);
 
+        // A collapsed column is its header and a count, no cards.
+        if col.collapsed {
+            let hidden = app.filtered_card_ids(ci).len();
+            tree.push(RenderCommand::Text {
+                x: col_x + 10.0,
+                y: col_y + COLUMN_HEADER_H + CARD_GAP,
+                text: format!(
+                    "{hidden} card{} hidden -- Z shows them",
+                    if hidden == 1 { "" } else { "s" }
+                ),
+                color: app.palette.subtext0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((col_width - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            continue;
+        }
+
         // Cards
-        let header_h: f32 = 36.0;
-        let card_gap: f32 = 6.0;
+        let card_gap = CARD_GAP;
         let card_margin: f32 = 6.0;
         let card_width = col_width - card_margin * 2.0;
-        let mut card_y = col_y + header_h + card_gap;
+        let mut card_y = col_y + COLUMN_HEADER_H + card_gap;
 
         // Only the cards this column has room for. Without this the loop drew
         // every card in the column, so a column with more cards than fit ran
@@ -3126,9 +3426,7 @@ fn render_board_view(
             .filter_map(|id| board.cards.get(id))
             .map(|card| card_height(card) + card_gap)
             .collect();
-        // The "+N more" line's space is reserved whether or not it is needed,
-        // so the number of cards that fit does not depend on how many fit.
-        let room = (height - 8.0) - card_y - COLUMN_FOOTER_H;
+        let room = column_card_room(y_start, height);
         let window = scroll_window::visible_variable(&heights, room, app.scroll_offset);
 
         for card_id in filtered_ids
@@ -3241,11 +3539,26 @@ impl DetailModal {
     }
 
     /// Height of the scrolling body: what is left of the modal below the title
-    /// row, less the bottom padding.
+    /// row, less the line of keys and the bottom padding.
     fn body_height(&self) -> f32 {
-        (self.h - DETAIL_PAD - DETAIL_TITLE_ROW - DETAIL_PAD).max(0.0)
+        (self.h - DETAIL_PAD - DETAIL_TITLE_ROW - DETAIL_FOOTER_H - DETAIL_PAD).max(0.0)
+    }
+
+    /// Top of the fixed line naming the card's keys, under the body.
+    fn footer_top(&self) -> f32 {
+        self.body_top() + self.body_height() + 4.0
     }
 }
+
+/// Height of the line of keys along the bottom of the open card.
+const DETAIL_FOOTER_H: f32 = 20.0;
+
+/// The open card's keys, as its footer names them.
+const DETAIL_KEYS: &str =
+    "E title · D description · C comment · L checklist item · Tab, Space tick · Esc close";
+
+/// Height of one checklist row in the open card.
+const CHECK_ROW_H: f32 = 18.0;
 
 /// How far the card-detail body can scroll before its last line reaches the
 /// bottom of the modal.
@@ -3274,6 +3587,7 @@ fn max_detail_scroll(app: &KanbanApp, width: f32, height: f32) -> f32 {
         0.0,
         0.0,
         modal.content_w(),
+        None,
     );
     let content = content_bottom(&scratch.commands).unwrap_or(0.0).max(0.0);
     (content - modal.body_height()).max(0.0)
@@ -3391,8 +3705,40 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
         content_x,
         modal.body_top() - scroll,
         content_w,
+        app.checklist_focus,
     );
     tree.push(RenderCommand::PopClip);
+
+    // The card's keys, which nothing on screen named: E, D, C and L did
+    // nothing at all until 2026-09-27, and the checklist could not be ticked.
+    tree.push(RenderCommand::Text {
+        x: content_x,
+        y: modal.footer_top(),
+        text: DETAIL_KEYS.to_string(),
+        color: app.palette.subtext0,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(content_w),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Where each checklist row of `card` starts, below the top of the open
+/// card's body -- read off the renderer's own drawing, so the rows Tab
+/// scrolls to are the rows it draws.
+fn checklist_rows(app: &KanbanApp, board: &Board, card: &Card) -> Vec<f32> {
+    let modal = DetailModal::for_window(app.win_width, app.win_height);
+    let mut scratch = RenderTree::new();
+    render_card_detail_body(
+        &mut scratch,
+        &app.palette,
+        board,
+        card,
+        0.0,
+        0.0,
+        modal.content_w(),
+        None,
+    )
 }
 
 /// Draw everything below the card-detail modal's title row, with the top of the
@@ -3402,6 +3748,13 @@ fn render_card_detail(tree: &mut RenderTree, app: &KanbanApp, width: f32, height
 /// by drawing it into a list it throws away. Takes the board and card rather
 /// than the app because the measuring caller has already resolved them, and
 /// resolving them twice is one more thing that could resolve differently.
+///
+/// Answers where each checklist row starts, relative to `y`; `focus` is the
+/// row drawn as the one Space ticks.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the body's place and width, what it shows, and the one focus it marks"
+)]
 fn render_card_detail_body(
     tree: &mut RenderTree,
     pal: &Palette,
@@ -3410,7 +3763,9 @@ fn render_card_detail_body(
     content_x: f32,
     y: f32,
     content_w: f32,
-) {
+    focus: Option<usize>,
+) -> Vec<f32> {
+    let mut rows = Vec::new();
     let mut cy = y;
 
     // Priority badge
@@ -3589,7 +3944,18 @@ fn render_card_detail_body(
         }
         cy += 12.0;
 
-        for item in &card.checklist {
+        for (index, item) in card.checklist.iter().enumerate() {
+            rows.push(cy - y);
+            if focus == Some(index) {
+                tree.push(RenderCommand::FillRect {
+                    x: content_x,
+                    y: cy - 2.0,
+                    width: content_w,
+                    height: CHECK_ROW_H,
+                    color: pal.surface1,
+                    corner_radii: CornerRadii::all(3.0),
+                });
+            }
             let check_mark = if item.done { "[x]" } else { "[ ]" };
             let item_color = if item.done { pal.overlay0 } else { pal.text };
             tree.push(RenderCommand::Text {
@@ -3602,7 +3968,7 @@ fn render_card_detail_body(
                 max_width: Some(content_w - 8.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 18.0;
+            cy += CHECK_ROW_H;
         }
         cy += 8.0;
     }
@@ -3649,6 +4015,7 @@ fn render_card_detail_body(
             cy += card_h + COMMENT_GAP;
         }
     }
+    rows
 }
 
 /// Render the archive view.
@@ -3680,11 +4047,34 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
         return;
     }
 
+    tree.push(RenderCommand::Text {
+        x: 180.0,
+        y: y_start + 19.0,
+        text: "Up / Down choose \u{00b7} Enter restores to its column \u{00b7} Ctrl+D deletes"
+            .to_string(),
+        color: app.palette.subtext0,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some((width - 200.0).max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+
     let mut cy = y_start + 44.0;
-    for card_id in &board.archived_card_ids {
+    for (row, card_id) in board.archived_card_ids.iter().enumerate() {
         if let Some(card) = board.cards.get(card_id) {
             app.palette
                 .push_surface(tree, 20.0, cy, width - 40.0, 40.0, 4.0, Surface::Card);
+            if row == app.archive_cursor {
+                tree.push(RenderCommand::StrokeRect {
+                    x: 20.0,
+                    y: cy,
+                    width: width - 40.0,
+                    height: 40.0,
+                    color: app.palette.accent,
+                    line_width: 2.0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
             tree.push(RenderCommand::Text {
                 x: 32.0,
                 y: cy + 6.0,
@@ -3705,18 +4095,22 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            // Restore button
-            render_toolbar_button(
-                tree,
-                width - 100.0,
-                cy + 8.0,
-                70.0,
-                24.0,
-                "Restore",
-                app.palette.green,
-                app.palette.crust,
-                CornerRadii::all(4.0),
-            );
+            // Where Enter would put it back.
+            let to = card
+                .archived_from
+                .and_then(|id| board.columns.iter().find(|c| c.id == id))
+                .or_else(|| board.columns.first())
+                .map_or_else(String::new, |c| format!("back to {}", c.name));
+            tree.push(RenderCommand::Text {
+                x: width - 200.0,
+                y: cy + 13.0,
+                text: to,
+                color: app.palette.subtext0,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(170.0),
+                overflow: TextOverflow::Ellipsis,
+            });
             cy += 48.0;
         }
     }
@@ -3877,10 +4271,32 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
         max_width: None,
         overflow: TextOverflow::Clip,
     });
+    tree.push(RenderCommand::Text {
+        x: 140.0,
+        y: y_start + 19.0,
+        text: "Up / Down choose \u{00b7} Enter opens \u{00b7} N adds a board".to_string(),
+        color: app.palette.subtext0,
+        font_size: 11.0,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some((width - 160.0).max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
 
     let mut cy = y_start + 50.0;
     for (i, board) in app.boards.iter().enumerate() {
         let is_active = i == app.active_board_idx;
+        // The row the arrows are on, which Enter opens. It was not drawn, so
+        // Up and Down moved a choice nobody could see.
+        if i == app.board_cursor {
+            tree.push(RenderCommand::FillRect {
+                x: 14.0,
+                y: cy,
+                width: 4.0,
+                height: 50.0,
+                color: app.palette.accent,
+                corner_radii: CornerRadii::all(2.0),
+            });
+        }
         let bg = if is_active {
             app.palette.surface1
         } else {
@@ -3943,7 +4359,7 @@ fn render_board_list(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_start
         cy + 8.0,
         120.0,
         30.0,
-        "+ New Board",
+        "+ New Board (N)",
         app.palette.blue,
         app.palette.crust,
         CornerRadii::all(6.0),
@@ -4066,7 +4482,7 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
 
     // Toolbar
     render_toolbar(&mut tree, app, width);
-    let mut content_y: f32 = 40.0;
+    let mut content_y: f32 = TOOLBAR_H;
 
     // Filter bar
     content_y = render_filter_bar(&mut tree, app, width, content_y);
@@ -4127,6 +4543,8 @@ fn render_status(tree: &mut RenderTree, app: &KanbanApp, width: f32, height: f32
     );
     let (text, colour) = if let Some(error) = &app.store_error {
         (error.clone(), app.palette.ink(app.palette.red))
+    } else if let Some(note) = &app.note {
+        (note.clone(), app.palette.subtext0)
     } else if let Some(action) = &app.last_file_action {
         let failed = action.starts_with("Could not");
         (
@@ -4182,9 +4600,28 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         return true;
     }
 
+    // A note describes the key it was the answer to, and this is a new key.
+    app.note = None;
+
     // If in input mode, route to input handler
     if app.input_mode != InputMode::None {
         return handle_input_key(app, key);
+    }
+
+    // The open card's own keys, looked at first and only while a card is
+    // open: on the board the same letters mean other things.
+    if app.view == View::CardDetail
+        && let Some(answered) = handle_detail_key(app, key)
+    {
+        return answered;
+    }
+
+    // The archive: choose a card, and put it back or delete it. Archiving was
+    // one way -- the view drew a Restore button nothing could press.
+    if app.view == View::Archive
+        && let Some(answered) = handle_archive_key(app, key)
+    {
+        return answered;
     }
 
     // The board list is a *chooser*, and until this arm existed it was only a
@@ -4192,28 +4629,31 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
     // board and no key picked one.
     if app.view == View::BoardList {
         match key.key {
+            // A new board. `add_board` had tests and no key.
+            Key::N if !key.modifiers.ctrl && !key.modifiers.alt => {
+                app.input_mode = InputMode::NewBoardName;
+                app.input_buffer.clear();
+                return true;
+            }
             Key::Up => {
                 // `saturating_sub` alone would answer "handled" at the top of
                 // the list and redraw the same frame on every press.
-                let Some(next) = app.selected_column.checked_sub(1) else {
+                let Some(next) = app.board_cursor.checked_sub(1) else {
                     return false;
                 };
-                app.selected_column = next;
+                app.board_cursor = next;
                 return true;
             }
             Key::Down => {
                 let last = app.boards.len().saturating_sub(1);
-                if app.selected_column >= last {
+                if app.board_cursor >= last {
                     return false;
                 }
-                app.selected_column = app.selected_column.saturating_add(1);
+                app.board_cursor = app.board_cursor.saturating_add(1);
                 return true;
             }
             Key::Enter => {
-                // `selected_column` doubles as the highlighted row here; the
-                // board view resets it on the way in, which `switch_board`
-                // does.
-                app.switch_board(app.selected_column);
+                app.switch_board(app.board_cursor);
                 return true;
             }
             _ => {}
@@ -4224,9 +4664,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // ESC to go back from sub-views
         Key::Escape => {
             match app.view {
+                // Closing the card leaves it chosen: the arrows go on from
+                // where the user was, and Enter opens it again.
                 View::CardDetail => {
                     app.view = View::Board;
-                    app.selected_card = None;
+                    app.checklist_focus = None;
                 }
                 View::Archive | View::Statistics | View::BoardList => {
                     app.view = View::Board;
@@ -4291,36 +4733,44 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             false
         }
 
-        // Arrow keys for column navigation
-        Key::Left => {
-            if app.selected_column > 0 {
-                app.selected_column = app.selected_column.saturating_sub(1);
-            }
+        // Left and Right choose the next column over, and the card at the
+        // same height in it -- the one the eye is already level with.
+        Key::Left if app.view == View::Board => {
+            let Some(to) = app.selected_column.checked_sub(1) else {
+                return false;
+            };
+            let row = app.selected_row().unwrap_or(0);
+            app.choose_in_column(to, row);
             true
         }
-        Key::Right => {
-            let col_count = app.active_board().columns.len();
-            if app.selected_column.saturating_add(1) < col_count {
-                app.selected_column = app.selected_column.saturating_add(1);
+        Key::Right if app.view == View::Board => {
+            let to = app.selected_column.saturating_add(1);
+            if to >= app.active_board().columns.len() {
+                return false;
             }
+            let row = app.selected_row().unwrap_or(0);
+            app.choose_in_column(to, row);
             true
         }
 
-        // Up/Down scroll the columns by a card; PageUp/PageDown by a screenful.
-        // Not clamped here: the number of cards that fit depends on the window
-        // size and on which cards are filtered in, neither of which this
-        // function knows. The renderer clamps against what it is actually
-        // drawing, so an offset past the end shows the last page rather than a
-        // blank column.
-        Key::Up | Key::Down | Key::PageUp | Key::PageDown if app.view == View::Board => {
-            let step: isize = match key.key {
-                Key::PageUp | Key::PageDown => BOARD_PAGE_STEP,
-                _ => 1,
-            };
-            let delta = if matches!(key.key, Key::Up | Key::PageUp) {
-                step.saturating_neg()
+        // Up and Down choose the card above or below, and the board follows.
+        // They only scrolled, and nothing else chose a card either -- so in
+        // the running program no card could ever be opened, moved, archived
+        // or deleted: every one of those keys wants a chosen card, and only
+        // the tests ever set one.
+        Key::Up if app.view == View::Board => app.step_card(-1),
+        Key::Down if app.view == View::Board => app.step_card(1),
+
+        // PageUp/PageDown scroll the columns by a screenful, leaving the
+        // choice where it is. Not clamped here: the number of cards that fit
+        // depends on the window size and on which cards are filtered in. The
+        // renderer clamps against what it is actually drawing, so an offset
+        // past the end shows the last page rather than a blank column.
+        Key::PageUp | Key::PageDown if app.view == View::Board => {
+            let delta = if key.key == Key::PageUp {
+                BOARD_PAGE_STEP.saturating_neg()
             } else {
-                step
+                BOARD_PAGE_STEP
             };
             app.scroll_offset = scroll_window::shift(app.scroll_offset, delta);
             true
@@ -4357,6 +4807,7 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 // the renderer then clamps back — so the modal would appear to
                 // ignore the first few keypresses.
                 app.detail_scroll = 0.0;
+                app.checklist_focus = None;
                 return true;
             }
             false
@@ -4365,8 +4816,9 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // D = delete card
         Key::D if key.modifiers.ctrl => {
             if let Some(card_id) = app.selected_card {
+                let row = app.selected_row();
                 app.active_board_mut().delete_card(card_id);
-                app.selected_card = None;
+                app.choose_neighbour(row);
                 return true;
             }
             false
@@ -4375,8 +4827,9 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         // A = archive card
         Key::A if key.modifiers.ctrl && !key.modifiers.shift => {
             if let Some(card_id) = app.selected_card {
+                let row = app.selected_row();
                 app.active_board_mut().archive_card(card_id);
-                app.selected_card = None;
+                app.choose_neighbour(row);
                 return true;
             }
             false
@@ -4393,15 +4846,18 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         }
         Key::Num3 if key.modifiers.alt => {
             app.view = View::Archive;
+            app.archive_cursor = 0;
             true
         }
         Key::Num4 if key.modifiers.alt => {
             app.view = View::BoardList;
+            // On the board that is open, which is where the user is.
+            app.board_cursor = app.active_board_idx;
             true
         }
 
         // P = cycle priority on selected card
-        Key::P => {
+        Key::P if !key.modifiers.ctrl => {
             if let Some(card_id) = app.selected_card
                 && let Some(card) = app.active_board_mut().cards.get_mut(&card_id)
             {
@@ -4411,7 +4867,8 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             false
         }
 
-        // M = move card right one column
+        // M = move card right one column. The choice goes with the card, so
+        // M again moves it on.
         Key::M => {
             if let Some(card_id) = app.selected_card {
                 let board = app.active_board();
@@ -4420,6 +4877,8 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                     if to_col < board.columns.len() {
                         app.active_board_mut()
                             .move_card(card_id, from_col, to_col, 0);
+                        app.selected_column = to_col;
+                        app.reveal_selected();
                         return true;
                     }
                 }
@@ -4437,23 +4896,289 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                     let to_col = from_col.saturating_sub(1);
                     app.active_board_mut()
                         .move_card(card_id, from_col, to_col, 0);
+                    app.selected_column = to_col;
+                    app.reveal_selected();
                     return true;
                 }
             }
             false
         }
 
-        // T = sort current column
-        Key::T => {
-            if app.view == View::Board {
-                let col = app.selected_column;
-                app.active_board_mut().sort_column(col);
+        // T = sort the chosen column by its order; Shift+T = the next order.
+        Key::T if app.view == View::Board => {
+            let col = app.selected_column;
+            let Some(order) = app.active_board().columns.get(col).map(|c| c.sort_by) else {
+                return false;
+            };
+            let order = if key.modifiers.shift {
+                let next = order.next();
+                if let Some(column) = app.active_board_mut().columns.get_mut(col) {
+                    column.sort_by = next;
+                }
+                next
+            } else {
+                order
+            };
+            app.active_board_mut().sort_column(col);
+            app.reveal_selected();
+            app.note = Some(format!("Sorted by {}", order.label().to_lowercase()));
+            true
+        }
+
+        // R = rename the chosen column, starting from its name.
+        Key::R if app.view == View::Board && !key.modifiers.ctrl && !key.modifiers.alt => {
+            let Some(name) = app
+                .active_board()
+                .columns
+                .get(app.selected_column)
+                .map(|c| c.name.clone())
+            else {
+                return false;
+            };
+            app.input_mode = InputMode::RenameColumn;
+            app.input_buffer = name;
+            true
+        }
+
+        // Z = collapse or open the chosen column.
+        Key::Z if app.view == View::Board && !key.modifiers.ctrl => {
+            let col = app.selected_column;
+            let Some(column) = app.active_board_mut().columns.get_mut(col) else {
+                return false;
+            };
+            column.collapsed = !column.collapsed;
+            let collapsed = column.collapsed;
+            // A collapsed column shows no cards, so none of them can stay
+            // chosen; opening it again chooses nothing until an arrow does.
+            if collapsed {
+                app.selected_card = None;
+            }
+            true
+        }
+
+        // Shift+Delete = take the chosen column off the board, if it is
+        // empty. A column with cards says so rather than dropping them.
+        Key::Delete if app.view == View::Board && key.modifiers.shift => {
+            let col = app.selected_column;
+            let board = app.active_board();
+            let Some(column) = board.columns.get(col) else {
+                return false;
+            };
+            let cards = column.card_ids.len();
+            if cards > 0 {
+                app.note = Some(format!(
+                    "{} still has {cards} card{} -- move or archive {} first",
+                    column.name,
+                    if cards == 1 { "" } else { "s" },
+                    if cards == 1 { "it" } else { "them" }
+                ));
                 return true;
             }
-            false
+            app.active_board_mut().remove_column(col);
+            let last = app.active_board().columns.len().saturating_sub(1);
+            app.selected_column = col.min(last);
+            app.selected_card = None;
+            true
+        }
+
+        // With the filter bar open: Ctrl+P steps the priority shown, Ctrl+U
+        // types an assignee, Ctrl+L steps the label shown.
+        Key::P if key.modifiers.ctrl && app.show_filter_bar => {
+            let all = Priority::all();
+            app.filter.priority_filter = match app.filter.priority_filter {
+                None => all.first().copied(),
+                Some(p) => {
+                    let at = all.iter().position(|&q| q == p).unwrap_or(0);
+                    all.get(at.saturating_add(1)).copied()
+                }
+            };
+            app.refit_choice();
+            true
+        }
+        Key::U if key.modifiers.ctrl && app.show_filter_bar => {
+            app.input_mode = InputMode::AssigneeFilter;
+            app.input_buffer = app.filter.assignee_filter.clone();
+            true
+        }
+        Key::L if key.modifiers.ctrl && app.show_filter_bar => {
+            let labels: Vec<Id> = app.active_board().labels.iter().map(|l| l.id).collect();
+            app.filter.label_filter = match app.filter.label_filter {
+                None => labels.first().copied(),
+                Some(id) => {
+                    let at = labels.iter().position(|&l| l == id);
+                    at.and_then(|at| labels.get(at.saturating_add(1)).copied())
+                }
+            };
+            app.refit_choice();
+            true
         }
 
         _ => false,
+    }
+}
+
+/// A key for the archive view: `Some(answered)` for one of its own, `None`
+/// for the rest (Escape, the view switches).
+fn handle_archive_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
+    let count = app.active_board().archived_card_ids.len();
+    let plain = !key.modifiers.ctrl && !key.modifiers.alt;
+    match key.key {
+        Key::Up if plain => {
+            let Some(to) = app.archive_cursor.checked_sub(1) else {
+                return Some(false);
+            };
+            app.archive_cursor = to;
+            Some(true)
+        }
+        Key::Down if plain => {
+            let to = app.archive_cursor.saturating_add(1);
+            if to >= count {
+                return Some(false);
+            }
+            app.archive_cursor = to;
+            Some(true)
+        }
+        Key::Enter | Key::R if plain => {
+            let card_id = *app
+                .active_board()
+                .archived_card_ids
+                .get(app.archive_cursor)?;
+            let title = app
+                .active_board()
+                .cards
+                .get(&card_id)
+                .map(|c| c.title.clone())
+                .unwrap_or_default();
+            match app.active_board_mut().restore_card(card_id) {
+                Some(column) => {
+                    let name = app
+                        .active_board()
+                        .columns
+                        .get(column)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+                    app.note = Some(format!("Restored {title} to {name}"));
+                }
+                None => {
+                    app.note =
+                        Some("There is no column to restore it to: Shift+C adds one".to_string());
+                }
+            }
+            app.archive_cursor = app
+                .archive_cursor
+                .min(app.active_board().archived_card_ids.len().saturating_sub(1));
+            Some(true)
+        }
+        Key::D if key.modifiers.ctrl => {
+            let card_id = *app
+                .active_board()
+                .archived_card_ids
+                .get(app.archive_cursor)?;
+            app.active_board_mut().delete_card(card_id);
+            app.archive_cursor = app
+                .archive_cursor
+                .min(app.active_board().archived_card_ids.len().saturating_sub(1));
+            Some(true)
+        }
+        _ => None,
+    }
+}
+
+/// A key for the open card: `Some(answered)` for one of its own, `None` for
+/// one it leaves to the rest -- Escape, the scrolling keys, and P, M and B,
+/// which mean the same with the card open or not.
+///
+/// E, D, C and L begin typing into the input line, E and D with what is
+/// there already so an edit is an edit; Tab and Shift+Tab choose a
+/// checklist item and Space ticks it. Every one of these was modelled --
+/// the input modes, `toggle_checklist_item` -- and no key reached it.
+fn handle_detail_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
+    let plain = !key.modifiers.ctrl && !key.modifiers.alt;
+    let card_id = app.selected_card?;
+    let card = app.active_board().cards.get(&card_id)?;
+    let (mode, seed) = match key.key {
+        Key::E if plain => (InputMode::EditCardTitle, card.title.clone()),
+        Key::D if plain => (InputMode::CardDescription, card.description.clone()),
+        Key::C if plain && !key.modifiers.shift => (InputMode::AddComment, String::new()),
+        Key::L if plain => (InputMode::AddChecklistItem, String::new()),
+        Key::Tab if plain => {
+            let delta = if key.modifiers.shift { -1 } else { 1 };
+            return Some(app.step_checklist(delta));
+        }
+        Key::Space if plain => return Some(app.tick_checklist()),
+        _ => return None,
+    };
+    app.input_mode = mode;
+    app.input_buffer = seed;
+    Some(true)
+}
+
+impl KanbanApp {
+    /// Move the checklist focus of the open card `delta` items, stopping at
+    /// either end; from no focus, the first press lands on the first item
+    /// going forward and the last going back. Answers whether it moved.
+    fn step_checklist(&mut self, delta: isize) -> bool {
+        let Some(card) = self
+            .selected_card
+            .and_then(|id| self.active_board().cards.get(&id))
+        else {
+            return false;
+        };
+        let Some(last) = card.checklist.len().checked_sub(1) else {
+            self.note = Some("This card has no checklist: L adds an item".to_string());
+            return true;
+        };
+        let to = match (self.checklist_focus, delta.is_negative()) {
+            (None, true) => last,
+            (None, false) => 0,
+            (Some(at), true) => at.saturating_sub(delta.unsigned_abs()),
+            (Some(at), false) => at.saturating_add(delta.unsigned_abs()).min(last),
+        };
+        if self.checklist_focus == Some(to) {
+            return false;
+        }
+        self.checklist_focus = Some(to);
+        self.reveal_checklist_focus();
+        true
+    }
+
+    /// Tick or untick the focused checklist item of the open card.
+    fn tick_checklist(&mut self) -> bool {
+        let Some(card_id) = self.selected_card else {
+            return false;
+        };
+        let Some(index) = self.checklist_focus else {
+            self.note = Some("Tab chooses a checklist item, then Space ticks it".to_string());
+            return true;
+        };
+        let Some(card) = self.active_board_mut().cards.get_mut(&card_id) else {
+            return false;
+        };
+        let Some(item_id) = card.checklist.get(index).map(|item| item.id) else {
+            return false;
+        };
+        card.toggle_checklist_item(item_id);
+        true
+    }
+
+    /// Scroll the open card so its focused checklist item is in sight.
+    fn reveal_checklist_focus(&mut self) {
+        let (Some(index), Some(card_id)) = (self.checklist_focus, self.selected_card) else {
+            return;
+        };
+        let board = self.active_board();
+        let Some(card) = board.cards.get(&card_id) else {
+            return;
+        };
+        let Some(&row) = checklist_rows(self, board, card).get(index) else {
+            return;
+        };
+        let body = DetailModal::for_window(self.win_width, self.win_height).body_height();
+        if row < self.detail_scroll {
+            self.detail_scroll = row;
+        } else if row + CHECK_ROW_H > self.detail_scroll + body {
+            self.detail_scroll = row + CHECK_ROW_H - body;
+        }
     }
 }
 
@@ -4471,23 +5196,34 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             app.input_mode = InputMode::None;
             app.input_buffer.clear();
 
-            if text.is_empty() {
+            // Nothing typed is nothing done -- except for a description,
+            // which starts from what is there, so emptying it is the way to
+            // clear it.
+            if text.is_empty()
+                && !matches!(mode, InputMode::CardDescription | InputMode::AssigneeFilter)
+            {
                 return true;
             }
 
             match mode {
                 InputMode::NewCardTitle => {
+                    // The new card is chosen, so the next key acts on it.
                     let col = app.selected_column;
-                    app.add_card(&text, col);
+                    if let Some(id) = app.add_card(&text, col) {
+                        app.selected_card = Some(id);
+                        app.reveal_selected();
+                    }
                 }
                 InputMode::SearchFilter => {
                     app.filter.search_text = text;
                 }
                 InputMode::AssigneeFilter => {
                     app.filter.assignee_filter = text;
+                    app.refit_choice();
                 }
                 InputMode::NewBoardName => {
                     app.add_board(&text);
+                    app.view = View::Board;
                 }
                 InputMode::NewColumnName => {
                     app.active_board_mut().add_column(&text);
@@ -4502,8 +5238,9 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 InputMode::AddComment => {
                     if let Some(card_id) = app.selected_card {
                         let ts = app.next_timestamp();
+                        let author = app.author.clone();
                         if let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
-                            card.add_comment("User", &text, ts);
+                            card.add_comment(&author, &text, ts);
                         }
                     }
                 }
@@ -4912,9 +5649,9 @@ mod tests {
             app.boards.push(Board::new("Second"));
         }
         app.view = View::BoardList;
-        app.selected_column = 0;
+        app.board_cursor = 0;
         assert!(handle_key_event(&mut app, &key_press(Key::Down)));
-        assert_eq!(app.selected_column, 1);
+        assert_eq!(app.board_cursor, 1);
         assert!(handle_key_event(&mut app, &key_press(Key::Enter)));
         assert_eq!(app.active_board_idx, 1, "Enter did not switch the board");
         assert_eq!(app.view, View::Board, "choosing a board should show it");
@@ -4925,18 +5662,66 @@ mod tests {
         let mut app = KanbanApp::new();
         app.create_sample_data();
         app.view = View::BoardList;
-        app.selected_column = 0;
+        app.board_cursor = 0;
         assert!(
             !handle_key_event(&mut app, &key_press(Key::Up)),
             "Up at the top should report that it did nothing"
         );
         let last = app.boards.len().saturating_sub(1);
-        app.selected_column = last;
+        app.board_cursor = last;
         assert!(
             !handle_key_event(&mut app, &key_press(Key::Down)),
             "Down at the bottom should report that it did nothing"
         );
-        assert_eq!(app.selected_column, last);
+        assert_eq!(app.board_cursor, last);
+    }
+
+    /// The list opens on the board that is open, and leaves the board's
+    /// chosen column alone -- the list's cursor was that column, borrowed.
+    #[test]
+    fn the_board_list_opens_on_the_open_board_and_keeps_the_column() {
+        let mut app = KanbanApp::new();
+        app.add_board("Second");
+        app.add_board("Third");
+        app.switch_board(1);
+        app.selected_column = 3;
+        handle_key_event(
+            &mut app,
+            &make_key(
+                Key::Num4,
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        );
+        assert_eq!(app.view, View::BoardList);
+        assert_eq!(
+            app.board_cursor, 1,
+            "the list did not open on the open board"
+        );
+        handle_key_event(&mut app, &key_press(Key::Down));
+        handle_key_event(&mut app, &key_press(Key::Escape));
+        assert_eq!(app.view, View::Board);
+        assert_eq!(
+            app.selected_column, 3,
+            "moving in the list moved the board's column"
+        );
+    }
+
+    #[test]
+    fn n_in_the_board_list_makes_a_board_and_opens_it() {
+        let mut app = KanbanApp::new();
+        app.view = View::BoardList;
+        handle_key_event(&mut app, &key_press(Key::N));
+        assert_eq!(app.input_mode, InputMode::NewBoardName);
+        for c in "Garden".chars() {
+            handle_key_event(&mut app, &make_char_key(c));
+        }
+        handle_key_event(&mut app, &key_press(Key::Enter));
+        assert_eq!(app.boards.len(), 2);
+        assert_eq!(app.active_board().name, "Garden");
+        assert_eq!(app.view, View::Board);
     }
 
     #[test]
@@ -6393,9 +7178,11 @@ mod tests {
         render_card_detail(&mut tree, &app, 1200.0, 800.0);
 
         let cards = comment_cards(&tree);
+        // Lines *of* the body, which is "comment comment ...": the footer
+        // naming the card's keys says "C comment" too, and is not in a card.
         let body_rows: Vec<f32> = text_rows(&tree)
             .into_iter()
-            .filter(|(_, t)| t.contains("comment"))
+            .filter(|(_, t)| t.starts_with("comment"))
             .map(|(y, _)| y)
             .collect();
         assert!(body_rows.len() > 1, "the comment body should have wrapped");
@@ -6572,6 +7359,7 @@ mod tests {
             0.0,
             0.0,
             modal.content_w(),
+            None,
         );
         let content = content_bottom(&scratch.commands).expect("the body draws something");
 
@@ -7135,6 +7923,10 @@ mod tests {
         for i in 0..n {
             app.add_card(&format!("card{i}"), 0);
         }
+        // The size these tests draw at, which is what `render` would have
+        // recorded: the keys scroll against the window last drawn.
+        app.win_width = TEST_W;
+        app.win_height = TEST_H;
         app
     }
 
@@ -7257,17 +8049,10 @@ mod tests {
             Some("card0")
         );
 
-        handle_key_event(&mut app, &make_key(Key::Down, Modifiers::NONE));
-        assert_eq!(
-            drawn_card_titles(&app).first().map(String::as_str),
-            Some("card1"),
-            "Down should move the board by one card"
-        );
-
         handle_key_event(&mut app, &make_key(Key::PageDown, Modifiers::NONE));
         assert_eq!(
             drawn_card_titles(&app).first().map(String::as_str),
-            Some(&format!("card{}", 1 + BOARD_PAGE_STEP)[..]),
+            Some(&format!("card{BOARD_PAGE_STEP}")[..]),
             "PageDown should move by {BOARD_PAGE_STEP} cards"
         );
 
@@ -7294,6 +8079,695 @@ mod tests {
             drawn_card_titles(&app).first().map(String::as_str),
             Some("card0")
         );
+    }
+
+    // == Choosing a card (2026-09-27) ============================================
+    //
+    // Nothing in the running program chose a card: Up and Down only scrolled,
+    // and every test that pressed Enter, P, M, B, Ctrl+D or Ctrl+A first set
+    // `selected_card` itself. So those keys all worked in the tests and did
+    // nothing at all in the window.
+
+    fn tap(app: &mut KanbanApp, key: Key) -> bool {
+        handle_key_event(app, &make_key(key, Modifiers::NONE))
+    }
+
+    fn chosen_title(app: &KanbanApp) -> Option<String> {
+        let id = app.selected_card?;
+        app.active_board().cards.get(&id).map(|c| c.title.clone())
+    }
+
+    #[test]
+    fn the_arrows_choose_a_card_and_enter_opens_it() {
+        let mut app = app_with_cards(3);
+        assert!(tap(&mut app, Key::Down), "Down chose nothing");
+        assert_eq!(chosen_title(&app).as_deref(), Some("card0"));
+        tap(&mut app, Key::Down);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card1"));
+        tap(&mut app, Key::Up);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card0"));
+        assert!(
+            !tap(&mut app, Key::Up),
+            "Up at the top answered as if it moved"
+        );
+        tap(&mut app, Key::Enter);
+        assert_eq!(
+            app.view,
+            View::CardDetail,
+            "Enter did not open the chosen card"
+        );
+    }
+
+    #[test]
+    fn up_with_nothing_chosen_chooses_the_last_card() {
+        let mut app = app_with_cards(3);
+        tap(&mut app, Key::Up);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card2"));
+    }
+
+    #[test]
+    fn walking_down_a_long_column_keeps_the_chosen_card_drawn() {
+        let mut app = app_with_cards(60);
+        for i in 0..60 {
+            tap(&mut app, Key::Down);
+            let chosen = format!("card{i}");
+            assert_eq!(chosen_title(&app).as_deref(), Some(chosen.as_str()));
+            let drawn = drawn_card_titles(&app);
+            assert!(
+                drawn.contains(&chosen),
+                "{chosen} is chosen and not drawn: {drawn:?}"
+            );
+        }
+        // And back up to the top.
+        for _ in 0..60 {
+            tap(&mut app, Key::Up);
+        }
+        assert_eq!(chosen_title(&app).as_deref(), Some("card0"));
+        assert_eq!(
+            drawn_card_titles(&app).first().map(String::as_str),
+            Some("card0")
+        );
+    }
+
+    #[test]
+    fn left_and_right_choose_the_card_level_with_it_in_the_next_column() {
+        let mut app = KanbanApp::new();
+        app.win_height = TEST_H;
+        for i in 0..3 {
+            app.add_card(&format!("left{i}"), 0);
+            app.add_card(&format!("right{i}"), 1);
+        }
+        tap(&mut app, Key::Down);
+        tap(&mut app, Key::Down);
+        assert_eq!(chosen_title(&app).as_deref(), Some("left1"));
+        assert!(tap(&mut app, Key::Right));
+        assert_eq!(app.selected_column, 1);
+        assert_eq!(chosen_title(&app).as_deref(), Some("right1"));
+        tap(&mut app, Key::Right);
+        assert_eq!(app.selected_column, 2);
+        assert_eq!(
+            chosen_title(&app),
+            None,
+            "an empty column has no card to choose"
+        );
+        tap(&mut app, Key::Left);
+        assert_eq!(
+            chosen_title(&app).as_deref(),
+            Some("right0"),
+            "from nothing, the top card"
+        );
+        tap(&mut app, Key::Left);
+        assert!(
+            !tap(&mut app, Key::Left),
+            "Left at the first column answered as if it moved"
+        );
+    }
+
+    /// The keys that act on a card act on the one the arrows chose, with no
+    /// test reaching in to choose it for them.
+    #[test]
+    fn the_card_keys_work_on_a_card_the_arrows_chose() {
+        let mut app = app_with_cards(3);
+        tap(&mut app, Key::Down);
+        tap(&mut app, Key::Down);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card1"));
+
+        // M moves it on, and the choice goes with it, so M again moves it on.
+        tap(&mut app, Key::M);
+        assert_eq!(app.selected_column, 1);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card1"));
+        tap(&mut app, Key::M);
+        assert_eq!(app.selected_column, 2);
+        tap(&mut app, Key::B);
+        assert_eq!(app.selected_column, 1);
+
+        // Archive: the card goes, and nothing in that column is left chosen
+        // because nothing else is in it.
+        handle_key_event(&mut app, &make_key(Key::A, Modifiers::ctrl()));
+        assert_eq!(app.active_board().archived_card_ids.len(), 1);
+        assert_eq!(chosen_title(&app), None);
+
+        // Delete in a column with cards: the next card is chosen in its place.
+        tap(&mut app, Key::Left);
+        assert_eq!(chosen_title(&app).as_deref(), Some("card0"));
+        handle_key_event(&mut app, &make_key(Key::D, Modifiers::ctrl()));
+        assert_eq!(
+            chosen_title(&app).as_deref(),
+            Some("card2"),
+            "the neighbour was not chosen"
+        );
+        handle_key_event(&mut app, &make_key(Key::D, Modifiers::ctrl()));
+        assert_eq!(chosen_title(&app), None);
+        assert!(app.active_board().columns[0].card_ids.is_empty());
+    }
+
+    #[test]
+    fn a_new_card_is_chosen() {
+        let mut app = app_with_cards(2);
+        tap(&mut app, Key::N);
+        for c in "fresh".chars() {
+            handle_key_event(&mut app, &make_char_key(c));
+        }
+        tap(&mut app, Key::Enter);
+        assert_eq!(chosen_title(&app).as_deref(), Some("fresh"));
+    }
+
+    #[test]
+    fn a_new_board_starts_with_nothing_chosen() {
+        let mut app = app_with_cards(2);
+        tap(&mut app, Key::Down);
+        app.selected_column = 3;
+        app.add_board("Second");
+        assert_eq!(app.selected_card, None);
+        assert_eq!(app.selected_column, 0);
+    }
+
+    // == The open card's keys (2026-09-27) =======================================
+
+    /// A board with one card, chosen and open.
+    fn open_card(title: &str) -> (KanbanApp, Id) {
+        let mut app = app_with_cards(0);
+        let id = app.add_card(title, 0).expect("a card");
+        tap(&mut app, Key::Down);
+        tap(&mut app, Key::Enter);
+        assert_eq!(app.view, View::CardDetail);
+        (app, id)
+    }
+
+    fn type_text(app: &mut KanbanApp, text: &str) {
+        for c in text.chars() {
+            handle_key_event(app, &make_char_key(c));
+        }
+    }
+
+    fn card_of(app: &KanbanApp, id: Id) -> &Card {
+        app.active_board().cards.get(&id).expect("the card")
+    }
+
+    #[test]
+    fn e_edits_the_title_starting_from_what_is_there() {
+        let (mut app, id) = open_card("Draft");
+        tap(&mut app, Key::E);
+        assert_eq!(app.input_mode, InputMode::EditCardTitle);
+        assert_eq!(
+            app.input_buffer, "Draft",
+            "an edit that starts empty is a retype"
+        );
+        type_text(&mut app, " two");
+        tap(&mut app, Key::Enter);
+        assert_eq!(card_of(&app, id).title, "Draft two");
+        assert_eq!(app.view, View::CardDetail, "the card closed under the edit");
+    }
+
+    #[test]
+    fn d_edits_the_description_and_emptying_it_clears_it() {
+        let (mut app, id) = open_card("Card");
+        tap(&mut app, Key::D);
+        type_text(&mut app, "What it is for");
+        tap(&mut app, Key::Enter);
+        assert_eq!(card_of(&app, id).description, "What it is for");
+
+        tap(&mut app, Key::D);
+        assert_eq!(app.input_buffer, "What it is for");
+        for _ in 0.."What it is for".len() {
+            tap(&mut app, Key::Backspace);
+        }
+        tap(&mut app, Key::Enter);
+        assert_eq!(
+            card_of(&app, id).description,
+            "",
+            "an emptied description was kept"
+        );
+    }
+
+    #[test]
+    fn c_adds_a_comment_signed_by_whoever_is_writing() {
+        let (mut app, id) = open_card("Card");
+        app.author = "alice".to_string();
+        tap(&mut app, Key::C);
+        type_text(&mut app, "Looks right");
+        tap(&mut app, Key::Enter);
+        let comments = &card_of(&app, id).comments;
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].text, "Looks right");
+        assert_eq!(comments[0].author, "alice");
+        // Shift+C on the board is still a new column, not a comment.
+        let before = app.active_board().columns.len();
+        tap(&mut app, Key::Escape);
+        handle_key_event(
+            &mut app,
+            &make_key(
+                Key::C,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        );
+        assert_eq!(app.input_mode, InputMode::NewColumnName);
+        assert_eq!(app.active_board().columns.len(), before);
+    }
+
+    #[test]
+    fn l_adds_a_checklist_item_and_tab_and_space_tick_it() {
+        let (mut app, id) = open_card("Card");
+        for item in ["first", "second"] {
+            tap(&mut app, Key::L);
+            type_text(&mut app, item);
+            tap(&mut app, Key::Enter);
+        }
+        assert_eq!(card_of(&app, id).checklist.len(), 2);
+
+        // Space with nothing chosen says how, and ticks nothing.
+        assert!(tap(&mut app, Key::Space));
+        assert!(app.note.is_some());
+        assert_eq!(card_of(&app, id).checklist_progress(), (0, 2));
+
+        assert!(tap(&mut app, Key::Tab));
+        assert_eq!(app.checklist_focus, Some(0));
+        tap(&mut app, Key::Tab);
+        assert_eq!(app.checklist_focus, Some(1));
+        assert!(
+            !tap(&mut app, Key::Tab),
+            "Tab past the last item answered as if it moved"
+        );
+        tap(&mut app, Key::Space);
+        assert!(card_of(&app, id).checklist[1].done);
+        assert!(!card_of(&app, id).checklist[0].done);
+        handle_key_event(
+            &mut app,
+            &make_key(
+                Key::Tab,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
+            ),
+        );
+        assert_eq!(app.checklist_focus, Some(0));
+        tap(&mut app, Key::Space);
+        assert_eq!(card_of(&app, id).checklist_progress(), (2, 2));
+        tap(&mut app, Key::Space);
+        assert_eq!(
+            card_of(&app, id).checklist_progress(),
+            (1, 2),
+            "Space again unticks"
+        );
+    }
+
+    #[test]
+    fn tab_brings_a_checklist_item_below_the_fold_into_sight() {
+        let (mut app, id) = open_card("Card");
+        {
+            let card = app.active_board_mut().cards.get_mut(&id).expect("card");
+            card.description = "long enough to push the checklist down. ".repeat(60);
+            for i in 0..30 {
+                card.add_checklist_item(&format!("step {i}"));
+            }
+        }
+        let body = DetailModal::for_window(app.win_width, app.win_height).body_height();
+        for _ in 0..30 {
+            tap(&mut app, Key::Tab);
+            let focus = app.checklist_focus.expect("a focus");
+            let board = app.active_board();
+            let row = checklist_rows(&app, board, card_of(&app, id))[focus];
+            assert!(
+                row >= app.detail_scroll && row + CHECK_ROW_H <= app.detail_scroll + body + 0.01,
+                "item {focus} at {row} is outside the body scrolled to {} (height {body})",
+                app.detail_scroll
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_card_opens_with_no_checklist_focus_left_over() {
+        let (mut app, id) = open_card("Card");
+        app.active_board_mut()
+            .cards
+            .get_mut(&id)
+            .expect("card")
+            .add_checklist_item("x");
+        tap(&mut app, Key::Tab);
+        assert_eq!(app.checklist_focus, Some(0));
+        tap(&mut app, Key::Escape);
+        tap(&mut app, Key::Enter);
+        assert_eq!(app.checklist_focus, None);
+    }
+
+    #[test]
+    fn the_open_card_names_its_keys() {
+        let (app, _) = open_card("Card");
+        assert!(
+            drawn(&app).contains(DETAIL_KEYS),
+            "the card's keys are drawn nowhere"
+        );
+    }
+
+    // == The archive, the columns and the filters (2026-09-27) ====================
+
+    fn alt(k: Key) -> KeyEvent {
+        make_key(
+            k,
+            Modifiers {
+                alt: true,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    fn shift(k: Key) -> KeyEvent {
+        make_key(
+            k,
+            Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    fn column_titles(app: &KanbanApp, col: usize) -> Vec<String> {
+        let board = app.active_board();
+        board.columns[col]
+            .card_ids
+            .iter()
+            .filter_map(|id| board.cards.get(id))
+            .map(|c| c.title.clone())
+            .collect()
+    }
+
+    /// A card archived from a column goes back to that column.
+    #[test]
+    fn an_archived_card_is_restored_to_the_column_it_came_from() {
+        let mut app = app_with_cards(0);
+        app.add_card("keep", 2).expect("card");
+        app.add_card("shelve", 2).expect("card");
+        tap(&mut app, Key::Right);
+        tap(&mut app, Key::Right);
+        tap(&mut app, Key::Down);
+        tap(&mut app, Key::Down);
+        assert_eq!(chosen_title(&app).as_deref(), Some("shelve"));
+        handle_key_event(&mut app, &make_key(Key::A, Modifiers::ctrl()));
+        assert_eq!(column_titles(&app, 2), ["keep"]);
+
+        handle_key_event(&mut app, &alt(Key::Num3));
+        assert_eq!(app.view, View::Archive);
+        assert!(
+            drawn(&app).contains("back to "),
+            "the archive does not say where Enter puts it"
+        );
+        assert!(tap(&mut app, Key::Enter));
+        assert_eq!(column_titles(&app, 2), ["keep", "shelve"]);
+        assert!(app.active_board().archived_card_ids.is_empty());
+        let note = app.note.clone().unwrap_or_default();
+        assert!(note.starts_with("Restored shelve to "), "{note}");
+    }
+
+    /// Its column gone, it goes to the first; with no columns, it stays put
+    /// and the window says why.
+    #[test]
+    fn a_card_whose_column_is_gone_is_restored_to_the_first() {
+        let mut board = Board::new("B");
+        board.add_column("One");
+        board.add_column("Two");
+        let id = board.add_card_to_column(Card::new("x"), 1).expect("card");
+        board.archive_card(id);
+        board.remove_column(1);
+        assert_eq!(board.restore_card(id), Some(0));
+        assert_eq!(board.columns[0].card_ids, [id]);
+
+        let mut bare = Board::new("Bare");
+        bare.add_column("Only");
+        let id = bare.add_card_to_column(Card::new("y"), 0).expect("card");
+        bare.archive_card(id);
+        bare.remove_column(0);
+        assert_eq!(bare.restore_card(id), None);
+        assert_eq!(
+            bare.archived_card_ids,
+            [id],
+            "a failed restore lost the card"
+        );
+        assert!(bare.cards[&id].archived);
+    }
+
+    /// Restoring into a column that is not there changes nothing: it used to
+    /// clear the archive first and leave the card in no column at all.
+    #[test]
+    fn unarchiving_into_no_column_leaves_the_card_archived() {
+        let mut board = Board::new("B");
+        board.add_column("One");
+        let id = board.add_card_to_column(Card::new("x"), 0).expect("card");
+        board.archive_card(id);
+        assert!(!board.unarchive_card(id, 7));
+        assert_eq!(board.archived_card_ids, [id]);
+        assert!(board.cards[&id].archived);
+    }
+
+    #[test]
+    fn the_archive_cursor_moves_and_ctrl_d_deletes_what_it_is_on() {
+        let mut app = app_with_cards(0);
+        for t in ["a", "b", "c"] {
+            let id = app.add_card(t, 0).expect("card");
+            app.active_board_mut().archive_card(id);
+        }
+        handle_key_event(&mut app, &alt(Key::Num3));
+        assert!(!tap(&mut app, Key::Up));
+        assert!(tap(&mut app, Key::Down));
+        assert!(tap(&mut app, Key::Down));
+        assert!(!tap(&mut app, Key::Down));
+        assert_eq!(app.archive_cursor, 2);
+        handle_key_event(&mut app, &make_key(Key::D, Modifiers::ctrl()));
+        let left: Vec<String> = app
+            .active_board()
+            .archived_card_ids
+            .iter()
+            .map(|id| app.active_board().cards[id].title.clone())
+            .collect();
+        assert_eq!(left, ["a", "b"]);
+        assert_eq!(app.archive_cursor, 1, "the cursor was left past the end");
+    }
+
+    /// The origin survives the boards file, and a JSON export.
+    #[test]
+    fn where_a_card_was_archived_from_is_kept() {
+        let mut board = Board::default_board();
+        let id = board.add_card_to_column(Card::new("x"), 3).expect("card");
+        board.archive_card(id);
+        let want = board.columns[3].id;
+        assert_eq!(board.cards[&id].archived_from, Some(want));
+
+        let (back, _) = parse_boards(&boards_text(&[board.clone()], 0)).expect("read back");
+        assert_eq!(back[0].cards[&id].archived_from, Some(want));
+
+        let json = JsonExporter::export_board(&board);
+        let imported = JsonImporter::import_board(&json).expect("imported");
+        assert_eq!(imported.cards[&id].archived_from, Some(want));
+    }
+
+    /// A boards file written before origins existed still reads.
+    #[test]
+    fn a_format_one_boards_file_still_reads() {
+        let text = "slateos-kanban\t1\nactive\t0\nboard\t1\t0\tOld\ncard\t7\tmedium\t\t5\t1\tT\t\t\t\ncolumn\t2\t\tpriority\t0\tTodo\narchived\t7\n";
+        let (boards, _) = parse_boards(text).expect("a format 1 file was refused");
+        assert_eq!(boards[0].archived_card_ids.len(), 1);
+        assert_eq!(
+            boards[0].cards.values().next().expect("card").archived_from,
+            None
+        );
+    }
+
+    #[test]
+    fn r_renames_the_chosen_column_starting_from_its_name() {
+        let mut app = app_with_cards(0);
+        tap(&mut app, Key::Right);
+        let name = app.active_board().columns[1].name.clone();
+        tap(&mut app, Key::R);
+        assert_eq!(app.input_mode, InputMode::RenameColumn);
+        assert_eq!(app.input_buffer, name);
+        type_text(&mut app, "!");
+        tap(&mut app, Key::Enter);
+        assert_eq!(app.active_board().columns[1].name, format!("{name}!"));
+    }
+
+    #[test]
+    fn z_collapses_a_column_and_its_cards_are_not_drawn_or_chosen() {
+        let mut app = app_with_cards(3);
+        tap(&mut app, Key::Down);
+        assert!(chosen_title(&app).is_some());
+        tap(&mut app, Key::Z);
+        assert!(app.active_board().columns[0].collapsed);
+        assert_eq!(chosen_title(&app), None, "a hidden card stayed chosen");
+        assert!(
+            drawn_card_titles(&app).is_empty(),
+            "a collapsed column drew its cards"
+        );
+        assert!(drawn(&app).contains("3 cards hidden"));
+        assert!(
+            !tap(&mut app, Key::Down),
+            "Down chose a card nobody can see"
+        );
+        tap(&mut app, Key::Z);
+        assert!(!app.active_board().columns[0].collapsed);
+        assert_eq!(drawn_card_titles(&app).len(), 3);
+    }
+
+    #[test]
+    fn a_collapsed_column_is_narrow_and_the_others_take_the_room() {
+        let mut columns = vec![Column::new("A"), Column::new("B"), Column::new("C")];
+        let wide = column_spans(&columns, 1200.0);
+        columns[1].collapsed = true;
+        let narrow = column_spans(&columns, 1200.0);
+        assert!((narrow[1].1 - COLLAPSED_W).abs() < 0.01);
+        assert!(narrow[0].1 > wide[0].1, "the open columns did not widen");
+        // Laid out left to right without overlapping.
+        for pair in narrow.windows(2) {
+            assert!(pair[0].0 + pair[0].1 <= pair[1].0);
+        }
+    }
+
+    #[test]
+    fn shift_t_sorts_by_the_next_order_and_says_which() {
+        let mut app = app_with_cards(0);
+        for t in ["b", "c", "a"] {
+            app.add_card(t, 0);
+        }
+        assert_eq!(app.active_board().columns[0].sort_by, SortBy::Priority);
+        // Priority, due date, created, title: three presses reach title.
+        for _ in 0..3 {
+            handle_key_event(&mut app, &shift(Key::T));
+        }
+        assert_eq!(app.active_board().columns[0].sort_by, SortBy::Title);
+        assert_eq!(column_titles(&app, 0), ["a", "b", "c"]);
+        assert_eq!(app.note.as_deref(), Some("Sorted by title"));
+        handle_key_event(&mut app, &shift(Key::T));
+        assert_eq!(
+            app.active_board().columns[0].sort_by,
+            SortBy::Priority,
+            "no wrap"
+        );
+    }
+
+    #[test]
+    fn sorting_by_due_date_puts_undated_cards_last() {
+        let mut board = Board::new("B");
+        board.add_column("A");
+        let undated = board
+            .add_card_to_column(Card::new("none"), 0)
+            .expect("card");
+        let mut soon = Card::new("soon");
+        soon.due_date = Some(SimpleDate {
+            year: 2026,
+            month: 10,
+            day: 1,
+        });
+        let soon = board.add_card_to_column(soon, 0).expect("card");
+        board.columns[0].sort_by = SortBy::DueDate;
+        board.sort_column(0);
+        assert_eq!(board.columns[0].card_ids, [soon, undated]);
+    }
+
+    #[test]
+    fn shift_delete_removes_an_empty_column_and_refuses_one_with_cards() {
+        let mut app = app_with_cards(2);
+        let before = app.active_board().columns.len();
+        assert!(handle_key_event(&mut app, &shift(Key::Delete)));
+        assert_eq!(
+            app.active_board().columns.len(),
+            before,
+            "a column with cards was removed"
+        );
+        let note = app.note.clone().unwrap_or_default();
+        assert!(note.contains("2 cards") && note.contains("first"), "{note}");
+
+        tap(&mut app, Key::Right);
+        handle_key_event(&mut app, &shift(Key::Delete));
+        assert_eq!(app.active_board().columns.len(), before - 1);
+        assert!(app.selected_column < app.active_board().columns.len());
+    }
+
+    #[test]
+    fn the_chosen_column_is_marked() {
+        let mut app = app_with_cards(0);
+        tap(&mut app, Key::Right);
+        let spans = column_spans(&app.active_board().columns, TEST_W);
+        let marked: Vec<f32> = render_app(&app, TEST_W, TEST_H)
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect { x, color, .. } if *color == app.palette.accent => {
+                    Some(*x)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            marked,
+            [spans[1].0],
+            "the chosen column is not the one marked"
+        );
+    }
+
+    #[test]
+    fn the_filter_bar_sets_priority_assignee_and_label() {
+        let mut app = app_with_cards(0);
+        let high = app.add_card("urgent", 0).expect("card");
+        app.active_board_mut()
+            .cards
+            .get_mut(&high)
+            .expect("card")
+            .priority = Priority::High;
+        let alices = app.add_card("hers", 0).expect("card");
+        app.active_board_mut()
+            .cards
+            .get_mut(&alices)
+            .expect("card")
+            .assignee = "Alice".to_string();
+        handle_key_event(&mut app, &make_key(Key::F, Modifiers::ctrl()));
+        assert!(app.show_filter_bar);
+
+        // Ctrl+P steps Low, Medium, High -- and a chosen card the filter hides
+        // stops being chosen.
+        tap(&mut app, Key::Down);
+        assert_eq!(chosen_title(&app).as_deref(), Some("urgent"));
+        handle_key_event(&mut app, &make_key(Key::P, Modifiers::ctrl()));
+        assert_eq!(app.filter.priority_filter, Some(Priority::Low));
+        assert_ne!(
+            chosen_title(&app).as_deref(),
+            Some("urgent"),
+            "a hidden card is still chosen"
+        );
+        handle_key_event(&mut app, &make_key(Key::P, Modifiers::ctrl()));
+        handle_key_event(&mut app, &make_key(Key::P, Modifiers::ctrl()));
+        assert_eq!(app.filter.priority_filter, Some(Priority::High));
+        handle_key_event(&mut app, &make_key(Key::P, Modifiers::ctrl()));
+        handle_key_event(&mut app, &make_key(Key::P, Modifiers::ctrl()));
+        assert_eq!(
+            app.filter.priority_filter, None,
+            "Ctrl+P does not come back to all"
+        );
+
+        // Ctrl+U types an assignee; an empty one clears it.
+        handle_key_event(&mut app, &make_key(Key::U, Modifiers::ctrl()));
+        assert_eq!(app.input_mode, InputMode::AssigneeFilter);
+        type_text(&mut app, "ali");
+        tap(&mut app, Key::Enter);
+        assert_eq!(app.filtered_card_ids(0), [alices]);
+        assert!(drawn(&app).contains("Assignee: ali"));
+        handle_key_event(&mut app, &make_key(Key::U, Modifiers::ctrl()));
+        for _ in 0..3 {
+            tap(&mut app, Key::Backspace);
+        }
+        tap(&mut app, Key::Enter);
+        assert!(
+            app.filter.assignee_filter.is_empty(),
+            "an empty assignee did not clear the filter"
+        );
+
+        // Ctrl+L steps through the board's labels and back to any.
+        let labels: Vec<Id> = app.active_board().labels.iter().map(|l| l.id).collect();
+        for want in labels.iter().map(|&id| Some(id)).chain([None]) {
+            handle_key_event(&mut app, &make_key(Key::L, Modifiers::ctrl()));
+            assert_eq!(app.filter.label_filter, want);
+        }
     }
 
     #[test]
@@ -7487,7 +8961,7 @@ mod tests {
             assert!(
                 [
                     "active", "board", "lane", "label", "card", "tag", "item", "comment", "column",
-                    "archived"
+                    "archived", "origin"
                 ]
                 .contains(&kind),
                 "{line:?}"
@@ -7500,9 +8974,22 @@ mod tests {
         let head = "slateos-kanban\t1";
         let board = "board\t1\t0\tWork";
         let card = |id: u64| format!("card\t{id}\tmedium\t\t5\t0\tTitle\t\t\t");
-        let cases: [(String, &str); 14] = [
+        let cases: [(String, &str); 16] = [
             (String::new(), "not a SlateOS kanban file"),
-            (String::from("slateos-kanban\t2"), "a later format (2)"),
+            (String::from("slateos-kanban\t3"), "a later format (3)"),
+            // Format 1 had no origins; a file that says it is format 1 and
+            // has one was not written by this program.
+            (
+                format!("{head}\n{board}\n{}\narchived\t7\norigin\t7\t2", card(7)),
+                "line 5: it is not a line this version reads",
+            ),
+            (
+                format!(
+                    "slateos-kanban\t2\n{board}\n{}\ncolumn\t2\t\tpriority\t0\tA\t7\norigin\t7\t2",
+                    card(7)
+                ),
+                "line 5: an origin names a card that is not archived",
+            ),
             (String::from(head), "it holds no boards"),
             (
                 format!("{head}\n{board}\n{board}"),

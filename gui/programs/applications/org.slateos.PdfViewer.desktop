@@ -1,0 +1,16 @@
+# SlateOS's own PDF Viewer, as a desktop entry (gui/programs, design-decisions.md 1425).
+# Built into the programs library; the same file installs as
+# /usr/share/applications/org.slateos.PdfViewer.desktop. What each field carries,
+# and where it came from, is gui/programs/INVENTORY.md.
+
+[Desktop Entry]
+Type=Application
+Name=PDF Viewer
+GenericName=Document Viewer
+Comment=Read PDF documents
+Exec=/usr/bin/pdfviewer %F
+TryExec=/usr/bin/pdfviewer
+Icon=x-office-document
+Categories=Office;Viewer;
+Keywords=document;reader;pdf;
+MimeType=application/pdf;

@@ -16,15 +16,14 @@
 //!
 //! A semaphore is a single 32-bit atomic counter: positive means the
 //! resource is available, zero means callers must block.  The counter
-//! doubles as a kernel **futex word** — `sem_wait` blocks via
-//! `SYS_FUTEX_WAIT` (no CPU spin) and `sem_post` wakes a waiter via
-//! `SYS_FUTEX_WAKE`.  The uncontended fast path is a pure userspace CAS
-//! with no syscall.  `sem_timedwait` uses `SYS_FUTEX_WAIT_TIMEOUT`.
+//! doubles as a **futex word** -- `sem_wait` sleeps in a futex wait on it
+//! (no CPU spin) and `sem_post` wakes a waiter ([`crate::lowlevellock`]).
+//! The uncontended fast path is a pure userspace CAS with no syscall.
 //!
-//! On the host build (unit tests) there is no kernel futex, so the
-//! blocking helpers fall back to a cooperative `spin_loop`; the test
-//! suite only exercises the non-blocking paths (CAS success, trywait,
-//! null-pointer validation), so this fallback is never hit in practice.
+//! A signal handler ends a wait as it does on Linux: `sem_wait`'s unless
+//! the handler was installed with `SA_RESTART`, the timed waits' whatever
+//! its flags ([`crate::interrupt`]).  Until 2026-09-30 no wait here ended
+//! early.
 //!
 //! Functions: `sem_init`, `sem_destroy`, `sem_wait`, `sem_trywait`,
 //! `sem_timedwait`, `sem_post`, `sem_getvalue`, `sem_open`,
@@ -37,6 +36,8 @@
 //! tracked in `todo.txt`.
 
 use crate::errno;
+use crate::interrupt::Restart;
+use crate::lowlevellock::Waited;
 use crate::perprocess::process_global;
 
 // ---------------------------------------------------------------------------
@@ -101,21 +102,34 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 
 /// Initialize an unnamed semaphore.
 ///
-/// `pshared` is ignored (cross-process semaphores not supported).
+/// A non-zero `pshared` is `ENOTSUP`: see the check below.
 /// `value` is the initial semaphore count.
 ///
-/// Returns 0 on success, -1 on error.
+/// Returns 0 on success, -1 on error.  glibc's order (nptl/sem_init.c):
+/// `value > SEM_VALUE_MAX` is `EINVAL` before `sem` is touched, so a NULL
+/// `sem` is `EFAULT` -- this libc's substitute for the write's fault
+/// (design-decisions.md §303) -- only for a valid value.  The NULL test came
+/// first until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
-    if sem.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
+pub extern "C" fn sem_init(sem: *mut SemT, pshared: i32, value: u32) -> i32 {
     // Guard against u32 values that would wrap to negative when cast
     // to i32.  Our SEM_VALUE_MAX is i32::MAX.
     if value > i32::MAX as u32 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Then glibc's `futex_supports_pshared`: a semaphore shared between
+    // processes needs a futex the kernel can wake across address spaces,
+    // which it cannot yet (known-issues
+    // `B-D-PROCESS-SHARED-SYNC-IS-SILENTLY-PRIVATE`), so it is ENOTSUP, as
+    // glibc answers where shared futexes are unsupported.  Until 2026-09-26
+    // it was accepted and then worked inside one process only.
+    if pshared != 0 {
+        errno::set_errno(errno::ENOTSUP);
+        return -1;
+    }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -136,72 +150,13 @@ pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
     0
 }
 
-/// Reinterpret the signed counter as the kernel's unsigned 32-bit futex
-/// word (a bit-for-bit reinterpret, not a value conversion — avoids a
-/// sign-loss cast).
-#[cfg(target_os = "none")]
-fn futex_word(expected: i32) -> u64 {
-    u64::from(u32::from_ne_bytes(expected.to_ne_bytes()))
-}
-
-/// Block the calling task until the semaphore value is observed to be
-/// non-zero.  `expected` is the value the caller just read as `<= 0`;
-/// the kernel only blocks if `*word` still equals it, closing the
-/// wait/wake race (a poster that increments and wakes between our load
-/// and this call makes `*word != expected`, so we return immediately and
-/// re-check).
-#[cfg(target_os = "none")]
-fn sem_block(atomic: &core::sync::atomic::AtomicI32, expected: i32) {
-    let addr = atomic.as_ptr() as u64;
-    // SYS_FUTEX_WAIT returns 1 (woken), 0 (value mismatch), or a negative
-    // error.  In every case we simply re-loop and re-evaluate the counter,
-    // so the return value is intentionally ignored.
-    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAIT, addr, futex_word(expected));
-}
-
-/// Host fallback: no kernel futex in the unit-test environment.  The test
-/// suite never blocks (see module docs), so a cooperative spin is fine.
-#[cfg(not(target_os = "none"))]
-fn sem_block(_atomic: &core::sync::atomic::AtomicI32, _expected: i32) {
-    core::hint::spin_loop();
-}
-
-/// Like [`sem_block`] but bounded: block for at most `timeout_ns`
-/// nanoseconds via `SYS_FUTEX_WAIT_TIMEOUT`.
-#[cfg(target_os = "none")]
-fn sem_block_timeout(atomic: &core::sync::atomic::AtomicI32, expected: i32, timeout_ns: u64) {
-    let addr = atomic.as_ptr() as u64;
-    let _ = crate::syscall::syscall3(
-        crate::syscall::SYS_FUTEX_WAIT_TIMEOUT,
-        addr,
-        futex_word(expected),
-        timeout_ns,
-    );
-}
-
-/// Host fallback for the bounded wait.
-#[cfg(not(target_os = "none"))]
-fn sem_block_timeout(_atomic: &core::sync::atomic::AtomicI32, _expected: i32, _timeout_ns: u64) {
-    core::hint::spin_loop();
-}
-
-/// Wake one task blocked on the semaphore's futex word after a post.
-#[cfg(target_os = "none")]
-fn sem_wake_one(atomic: &core::sync::atomic::AtomicI32) {
-    let addr = atomic.as_ptr() as u64;
-    // Wake at most one waiter; a no-op (returns 0) if none are blocked.
-    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAKE, addr, 1);
-}
-
-/// Host fallback: no futex, nothing to wake.
-#[cfg(not(target_os = "none"))]
-fn sem_wake_one(_atomic: &core::sync::atomic::AtomicI32) {}
-
 /// Lock (decrement) a semaphore, blocking if the value is zero.
 ///
 /// The uncontended path is a pure userspace CAS.  When the count is
-/// exhausted the caller blocks in the kernel via `SYS_FUTEX_WAIT` rather
-/// than spinning, so a blocked waiter consumes no CPU.
+/// exhausted the caller sleeps in a futex wait until a post wakes it, so a
+/// blocked waiter consumes no CPU -- or until a signal handler installed
+/// without `SA_RESTART` runs on its thread: -1 with `EINTR`, the count
+/// untouched ([`crate::interrupt`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
@@ -228,8 +183,13 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
             // CAS lost a race; retry immediately without blocking.
             continue;
         }
-        // Count exhausted: block until a poster wakes us, then re-check.
-        sem_block(atomic, current);
+        // Count exhausted: sleep until a poster wakes us, then re-check.
+        if crate::lowlevellock::futex_wait_interruptible(atomic, current, None, Restart::IfAsked)
+            == Waited::Interrupted
+        {
+            errno::set_errno(errno::EINTR);
+            return -1;
+        }
     }
 }
 
@@ -301,7 +261,7 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
             .is_ok()
         {
             // A resource became available; wake one blocked waiter (if any).
-            sem_wake_one(atomic);
+            crate::lowlevellock::futex_wake(atomic, 1);
             return 0;
         }
     }
@@ -310,10 +270,16 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
 /// Lock a semaphore with a timeout.
 ///
 /// Like `sem_wait` but returns `ETIMEDOUT` if the absolute time
-/// `abstime` passes before the semaphore can be decremented.
+/// `abstime` passes before the semaphore can be decremented -- and `EINTR`
+/// for any signal handler that runs on the thread meanwhile, `SA_RESTART`
+/// or not, as Linux answers a timed wait ([`crate::interrupt`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
-    if sem.is_null() || abstime.is_null() {
+    // glibc reads `abstime->tv_nsec` first, then `sem` (nptl/sem_timedwait.c):
+    // a NULL deadline is the first fault, a malformed one the first EINVAL,
+    // and only then is a NULL `sem` reached.  Both pointers were tested
+    // together, ahead of the deadline, until 2026-09-26.
+    if abstime.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -330,8 +296,49 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: both pointers verified non-null.
+    sem_wait_until(unsafe { &*sem }, crate::time::CLOCK_REALTIME, unsafe {
+        &*abstime
+    })
+}
 
-    let atomic = unsafe { &(*sem).value };
+/// `sem_clockwait` (glibc 2.30): [`sem_timedwait`] with the deadline on
+/// `clockid`.  glibc judges the clock first (`CLOCK_REALTIME` or
+/// `CLOCK_MONOTONIC`, else `EINVAL`), then the deadline, then the semaphore.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sem_clockwait(
+    sem: *mut SemT,
+    clockid: i32,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if !crate::lowlevellock::supported_clock(clockid) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if abstime.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: abstime verified non-null above.
+    if !crate::time::valid_nanoseconds(unsafe { (*abstime).tv_nsec }) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if sem.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: both pointers verified non-null.
+    sem_wait_until(unsafe { &*sem }, clockid, unsafe { &*abstime })
+}
+
+/// The timed wait, the deadline on `clock`.
+fn sem_wait_until(sem: &SemT, clock: i32, deadline: &crate::stat::Timespec) -> i32 {
+    let atomic = &sem.value;
 
     loop {
         // Try to decrement.
@@ -352,33 +359,23 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
             continue;
         }
 
-        // Count exhausted: compute the time remaining until the deadline.
-        let mut now = crate::stat::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
-        let deadline = unsafe { &*abstime };
-        if now.tv_sec > deadline.tv_sec
-            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)
-        {
+        // Count exhausted: sleep until a poster wakes us or the deadline
+        // passes, then re-check the counter and the clock.
+        let now = crate::lowlevellock::now_on(clock);
+        let Some(left) = crate::lowlevellock::ns_until(&now, deadline) else {
             errno::set_errno(errno::ETIMEDOUT);
             return -1;
+        };
+        if crate::lowlevellock::futex_wait_interruptible(
+            atomic,
+            current,
+            Some(left),
+            Restart::Never,
+        ) == Waited::Interrupted
+        {
+            errno::set_errno(errno::EINTR);
+            return -1;
         }
-
-        // Remaining nanoseconds = deadline - now.  Use i128 + saturating
-        // arithmetic so a malformed (huge) deadline can't overflow or
-        // panic; we already know now < deadline, so the result is > 0.
-        let secs = deadline.tv_sec.saturating_sub(now.tv_sec);
-        let total_ns = i128::from(secs)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(i128::from(deadline.tv_nsec))
-            .saturating_sub(i128::from(now.tv_nsec));
-        let timeout_ns = u64::try_from(total_ns).unwrap_or(0);
-
-        // Block (bounded) until a poster wakes us or the timeout elapses,
-        // then re-loop to re-check the counter and the deadline.
-        sem_block_timeout(atomic, current, timeout_ns);
     }
 }
 
@@ -416,8 +413,14 @@ pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
 /// Maximum number of distinct named semaphores live at once.
 const MAX_NAMED_SEMS: usize = 16;
 
-/// Maximum length of a semaphore name (including the leading `/`).
-const MAX_SEM_NAME: usize = 64;
+/// The longest semaphore name, leading slashes stripped: `NAME_MAX` less the
+/// `sem.` that glibc puts in front of it to name `/dev/shm/sem.NAME`.  (glibc's
+/// `__shm_get_name` itself allows `NAME_MAX`; a name of 252 to 255 bytes then
+/// fails as `ENAMETOOLONG` in the `open`, which is the answer here too.)
+///
+/// It was 64, counting the leading slash, until 2026-09-26, and a longer
+/// name was `EINVAL`.
+const MAX_SEM_NAME: usize = 255 - 4;
 
 #[repr(C)]
 struct NamedSem {
@@ -477,39 +480,38 @@ fn acquire_sem_lock() -> crate::perprocess::PoolGuard<'static> {
     unsafe { crate::perprocess::lock_pool(sem_lock()) }
 }
 
-/// Validate a POSIX semaphore name: starts with `/`, no further `/`,
-/// fits in `MAX_SEM_NAME` bytes.  Returns the name length on success.
-fn validate_sem_name(name: *const u8) -> Result<usize, i32> {
+/// A POSIX semaphore name as glibc's `__shm_get_name` (posix/shm-directory.c)
+/// reads it: every leading `/` is stripped -- `"sem"`, `"/sem"` and
+/// `"//sem"` are one semaphore -- and what is left must be non-empty with no
+/// `/` in it (`EINVAL`), and no longer than [`MAX_SEM_NAME`]
+/// (`ENAMETOOLONG`).  Returns the stripped name and its length.
+///
+/// A NULL `name` is `EFAULT`, this libc's substitute for glibc's fault on
+/// `name[0]` (design-decisions.md §303).  Until 2026-09-26 the leading `/`
+/// was required, only one was allowed, and a long name was `EINVAL`.
+fn validate_sem_name(name: *const u8) -> Result<(*const u8, usize), i32> {
     if name.is_null() {
         return Err(errno::EFAULT);
     }
-    let mut len: usize = 0;
-    while len <= MAX_SEM_NAME {
-        // SAFETY: caller contract — `name` is NUL-terminated.
-        let b = unsafe { *name.add(len) };
-        if b == 0 {
-            break;
+    let mut start = name;
+    // SAFETY: caller contract -- `name` is NUL-terminated, so every byte up
+    // to and including its NUL may be read.
+    unsafe {
+        while *start == b'/' {
+            start = start.add(1);
         }
-        len = len.wrapping_add(1);
     }
-    if len == 0 || len > MAX_SEM_NAME {
+    // SAFETY: as above; `start` is within the same string.
+    let len = unsafe { crate::string::strlen(start) };
+    // SAFETY: `start` holds `len` bytes before its NUL.
+    let bytes = unsafe { core::slice::from_raw_parts(start, len) };
+    if len == 0 || bytes.contains(&b'/') {
         return Err(errno::EINVAL);
     }
-    // SAFETY: bounded above.
-    let first = unsafe { *name };
-    if first != b'/' {
-        return Err(errno::EINVAL);
+    if len > MAX_SEM_NAME {
+        return Err(errno::ENAMETOOLONG);
     }
-    let mut i: usize = 1;
-    while i < len {
-        // SAFETY: i < len.
-        let b = unsafe { *name.add(i) };
-        if b == b'/' {
-            return Err(errno::EINVAL);
-        }
-        i = i.wrapping_add(1);
-    }
-    Ok(len)
+    Ok((start, len))
 }
 
 /// Find the slot index whose name matches `name[..len]`, considering
@@ -589,16 +591,16 @@ fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
 /// # Errors
 ///
 /// - `EFAULT` — `name` is NULL.
-/// - `EINVAL` — name doesn't start with `/`, contains internal `/`, is
-///   empty, or exceeds `MAX_SEM_NAME` bytes; or `value` exceeds
-///   `i32::MAX`.
+/// - `EINVAL` — the name, its leading slashes stripped, is empty or
+///   contains a `/` ([`validate_sem_name`]); or `value` exceeds `i32::MAX`.
+/// - `ENAMETOOLONG` — the stripped name is longer than [`MAX_SEM_NAME`].
 /// - `EEXIST` — `O_CREAT | O_EXCL` and the name already exists.
 /// - `ENOENT` — name doesn't exist and `O_CREAT` is not set.
 /// - `ENOSPC` — the named-sem pool is exhausted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -> *mut SemT {
     let _ = mode;
-    let name_len = match validate_sem_name(name) {
+    let (name, name_len) = match validate_sem_name(name) {
         Ok(n) => n,
         Err(e) => {
             errno::set_errno(e);
@@ -669,14 +671,12 @@ pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -
 ///
 /// # Errors
 ///
-/// - `EFAULT` — `sem` is NULL.
-/// - `EINVAL` — `sem` doesn't refer to a known named semaphore.
+/// - `EINVAL` — `sem` doesn't refer to a known named semaphore, NULL
+///   included: glibc looks the pointer up among its mappings and never
+///   dereferences it (sysdeps/pthread/sem_close.c).  NULL was `EFAULT`
+///   until 2026-09-26.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
-    if sem.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
     let _guard = acquire_sem_lock();
     let Some(idx) = slot_for_ptr(sem) else {
         errno::set_errno(errno::EINVAL);
@@ -707,11 +707,11 @@ pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
 /// # Errors
 ///
 /// - `EFAULT` — `name` is NULL.
-/// - `EINVAL` — invalid name format.
+/// - `EINVAL`, `ENAMETOOLONG` — as for [`sem_open`].
 /// - `ENOENT` — no semaphore with this name exists.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
-    let name_len = match validate_sem_name(name) {
+    let (name, name_len) = match validate_sem_name(name) {
         Ok(n) => n,
         Err(e) => {
             errno::set_errno(e);
@@ -823,6 +823,15 @@ mod tests {
         // i32::MAX + 1 = 2147483648 — should be rejected
         let ret = sem_init(&raw mut sem, 0, (i32::MAX as u32).wrapping_add(1));
         assert_eq!(ret, -1);
+    }
+
+    /// glibc tests the value before it touches `sem`: a NULL `sem` with too
+    /// large a value is EINVAL.  (EFAULT until 2026-09-26.)
+    #[test]
+    fn test_sem_init_bad_value_beats_null_sem() {
+        crate::errno::set_errno(0);
+        assert_eq!(sem_init(core::ptr::null_mut(), 0, u32::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -1033,18 +1042,60 @@ mod tests {
 
     #[test]
     fn test_sem_open_invalid_name() {
-        // No leading '/'.
-        crate::errno::set_errno(0);
-        let p = sem_open(b"bad\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-        assert_eq!(p, SEM_FAILED);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         // Embedded '/'.
         let p = sem_open(b"/a/b\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
         assert_eq!(p, SEM_FAILED);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        // Empty.
-        let p = sem_open(b"\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-        assert_eq!(p, SEM_FAILED);
+        // Empty, and nothing but slashes.
+        for name in [&b"\0"[..], b"/\0", b"///\0"] {
+            crate::errno::set_errno(0);
+            let p = sem_open(name.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+    }
+
+    /// glibc strips every leading `/`, so "sem", "/sem" and "//sem" name one
+    /// semaphore; the first was EINVAL and the last EINVAL until 2026-09-26.
+    #[test]
+    fn test_sem_open_strips_leading_slashes() {
+        let p = sem_open(b"lead13\0".as_ptr(), crate::fcntl::O_CREAT, 0, 3);
+        assert_ne!(p, SEM_FAILED, "no leading slash is a valid name");
+        let q = sem_open(b"/lead13\0".as_ptr(), 0, 0, 0);
+        let r = sem_open(b"//lead13\0".as_ptr(), 0, 0, 0);
+        assert_eq!((q, r), (p, p), "one semaphore by all three names");
+        assert_eq!(sem_close(p), 0);
+        assert_eq!(sem_close(q), 0);
+        assert_eq!(sem_close(r), 0);
+        assert_eq!(sem_unlink(b"///lead13\0".as_ptr()), 0);
+    }
+
+    /// Past `NAME_MAX` less `sem.` a name is ENAMETOOLONG -- unless it also
+    /// has a `/` in it, which glibc tests first.
+    #[test]
+    fn test_sem_open_long_names() {
+        let mut name = std::vec![b'n'; MAX_SEM_NAME + 1];
+        name[0] = b'/';
+        name.push(0); // "/" + MAX_SEM_NAME bytes: just fits
+        let p = sem_open(name.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_ne!(p, SEM_FAILED, "errno {}", crate::errno::get_errno());
+        assert_eq!(sem_close(p), 0);
+        assert_eq!(sem_unlink(name.as_ptr()), 0);
+        let mut long = std::vec![b'n'; MAX_SEM_NAME + 1];
+        long.push(0);
+        crate::errno::set_errno(0);
+        assert_eq!(
+            sem_open(long.as_ptr(), crate::fcntl::O_CREAT, 0, 0),
+            SEM_FAILED
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+        let last = long.len() - 2;
+        long[last] = b'/';
+        crate::errno::set_errno(0);
+        assert_eq!(
+            sem_open(long.as_ptr(), crate::fcntl::O_CREAT, 0, 0),
+            SEM_FAILED
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -1135,11 +1186,12 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
     }
 
+    /// NULL is not a mapping glibc knows: EINVAL.  (EFAULT until 2026-09-26.)
     #[test]
-    fn test_sem_close_null_efault() {
+    fn test_sem_close_null_einval() {
         crate::errno::set_errno(0);
         assert_eq!(sem_close(core::ptr::null_mut()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -1275,6 +1327,48 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// The deadline is read before the semaphore: a NULL `sem` with a
+    /// malformed deadline is EINVAL.  (EFAULT until 2026-09-26.)
+    #[test]
+    fn test_sem_timedwait_bad_deadline_beats_null_sem() {
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(sem_timedwait(core::ptr::null_mut(), &raw const ts), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `sem_clockwait` judges the clock first: a bad one is EINVAL even with
+    /// NULL pointers.  A monotonic deadline already past times out; a
+    /// positive count is taken without waiting.
+    #[test]
+    fn test_sem_clockwait() {
+        errno::set_errno(0);
+        assert_eq!(
+            sem_clockwait(core::ptr::null_mut(), 5, core::ptr::null()),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let mut sem = SemT::new(0);
+        sem_init(&raw mut sem, 0, 1);
+        let past = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            sem_clockwait(&raw mut sem, crate::time::CLOCK_MONOTONIC, &raw const past),
+            0
+        );
+        errno::set_errno(0);
+        assert_eq!(
+            sem_clockwait(&raw mut sem, crate::time::CLOCK_MONOTONIC, &raw const past),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ETIMEDOUT);
+    }
+
     #[test]
     fn test_sem_timedwait_null_abstime() {
         crate::errno::set_errno(0);
@@ -1326,17 +1420,30 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ETIMEDOUT);
     }
 
-    // -- sem_init with pshared (ignored but accepted) --
+    // -- sem_init with pshared: ENOTSUP, not a private semaphore --
 
     #[test]
-    fn test_sem_init_pshared_nonzero() {
-        let mut sem = SemT::new(0);
-        // pshared=1 should still succeed (we ignore it)
-        let ret = sem_init(&raw mut sem, 1, 10);
-        assert_eq!(ret, 0);
-        let mut val: i32 = 0;
-        sem_getvalue(&raw mut sem, &raw mut val);
-        assert_eq!(val, 10);
+    fn test_sem_init_pshared_nonzero_enotsup() {
+        // A process-shared semaphore would never wake a waiter in another
+        // process, so it is refused -- after the value, before the pointer.
+        let mut sem = SemT::new(7);
+        errno::set_errno(0);
+        assert_eq!(sem_init(&raw mut sem, 1, 10), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        errno::set_errno(0);
+        assert_eq!(sem_init(core::ptr::null_mut(), 1, 10), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOTSUP,
+            "pshared before the pointer"
+        );
+        errno::set_errno(0);
+        assert_eq!(sem_init(&raw mut sem, 1, u32::MAX), -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "the value before pshared"
+        );
     }
 
     // -- SEM_FAILED constant --

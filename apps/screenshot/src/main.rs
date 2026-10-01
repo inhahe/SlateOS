@@ -14,7 +14,8 @@
 use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::dialog::{FileDialog, FilePicker, Picked};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
@@ -27,6 +28,7 @@ use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 // ============================================================================
@@ -857,6 +859,16 @@ pub struct ScreenshotApp {
     pub hovered_button: Option<usize>,
     /// Whether the app should keep running.
     pub running: bool,
+    /// The Save dialog, while one is up.
+    pub picker: FilePicker,
+    /// The next capture asks where it goes instead of taking the default
+    /// action: `--save` on the command line, which the desktop's
+    /// Ctrl+Print Screen and Ctrl+Alt+Print Screen pass (`design-decisions.md`
+    /// §1416).
+    pub ask_where: bool,
+    /// A capture waiting on the Save dialog for its place. Written where the
+    /// user chooses; discarded if they cancel.
+    pub awaiting: Option<Capture>,
 }
 
 impl ScreenshotApp {
@@ -884,6 +896,9 @@ impl ScreenshotApp {
             notification: None,
             hovered_button: None,
             running: true,
+            picker: FilePicker::new(),
+            ask_where: false,
+            awaiting: None,
         }
     }
 
@@ -1013,6 +1028,26 @@ impl ScreenshotApp {
         // otherwise overwrite.
         self.current_saved_path = None;
 
+        // Asked for with `--save`: the Save dialog, in the folder the tool
+        // saves to and under the name it would have used, and the capture
+        // waits for the answer instead of taking the default action.
+        if std::mem::take(&mut self.ask_where) {
+            let folder = &self.settings.save_directory;
+            // The folder is made if it is not there, as a save would make it;
+            // one that cannot be made is not where the dialog starts.
+            let start = if folder.is_dir() || std::fs::create_dir_all(folder).is_ok() {
+                folder.clone()
+            } else {
+                FilePicker::default_start()
+            };
+            let dialog = FileDialog::save()
+                .with_initial_path(start)
+                .with_filename(capture.default_filename());
+            self.picker.put_up(dialog, true);
+            self.awaiting = Some(capture);
+            return;
+        }
+
         // Save to file if that is the default action.
         if self.settings.default_action == PostCaptureAction::SaveToFile {
             let outcome = write_new_png(
@@ -1043,6 +1078,41 @@ impl ScreenshotApp {
         }
         self.current_capture = Some(capture.clone());
         self.capture_history.insert(0, capture);
+    }
+
+    /// Write the capture waiting on the Save dialog to `path`, where the user
+    /// chose. It becomes the current capture, as a capture saved by default
+    /// does, so the preview and the history have it.
+    fn save_where_chosen(&mut self, path: &Path) {
+        let Some(capture) = self.awaiting.take() else {
+            return;
+        };
+        let outcome = write_png(path, capture.width, capture.height, &capture.pixels)
+            .map(|()| path.to_path_buf())
+            .map_err(SaveError::Write);
+        if let Ok(saved) = &outcome {
+            self.current_saved_path = Some(saved.clone());
+        }
+        self.notify_save(&outcome);
+        self.view = AppView::Menu;
+        if self.capture_history.len() >= 20 {
+            self.capture_history.pop();
+        }
+        self.current_capture = Some(capture.clone());
+        self.capture_history.insert(0, capture);
+    }
+
+    /// The Save dialog was cancelled: the capture waiting on it is dropped,
+    /// and the window says so -- a capture that vanished without a word would
+    /// read as one that was never taken.
+    fn discard_awaiting(&mut self) {
+        if self.awaiting.take().is_some() {
+            self.notification = Some(Notification {
+                message: String::from("Not saved -- the screenshot was discarded"),
+                file_path: None,
+                remaining_ms: 4000,
+            });
+        }
     }
 
     /// Save the current capture, with annotations baked in, to a file.
@@ -1113,6 +1183,22 @@ impl ScreenshotApp {
 
     /// Handle a GUI event, returning true if it was consumed.
     pub fn handle_event(&mut self, event: &Event) -> bool {
+        // The Save dialog takes the event first while it is up.
+        match self
+            .picker
+            .handle(event, self.window_width, self.window_height)
+        {
+            Picked::Chose(path) => {
+                self.save_where_chosen(&path);
+                return true;
+            }
+            Picked::Cancelled => {
+                self.discard_awaiting();
+                return true;
+            }
+            Picked::Handled => return true,
+            Picked::Ignored => {}
+        }
         match event {
             Event::Key(key_event) if key_event.pressed => self.handle_key(key_event),
             Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
@@ -1523,29 +1609,58 @@ impl ScreenshotApp {
     // ========================================================================
 
     /// Render the current application state into a `RenderTree`.
-    /// Act on a capture mode given on the command line.
+    /// Act on the command line after the program's name: a capture mode,
+    /// and `--save` after it for a capture that asks where it goes.
     ///
     /// This was the body of `main`, and it is a method so that a test can check
-    /// each flag reaches the mode it names — a test cannot call `main`, so a
-    /// switch that lives there is a blind spot. `argv[0]` is included, as it
-    /// is in `std::env::args`.
-    pub fn apply_command_line(&mut self, args: &[String]) {
-        let Some(mode_arg) = args.get(1) else {
-            return;
+    /// each word reaches what it names -- a test cannot call `main`, so a
+    /// switch that lives there is a blind spot. The words are what
+    /// `oswindow::app::ArgsOs` leaves after taking `--display`.
+    ///
+    /// # Errors
+    ///
+    /// Anything else, named: a screenshot taken because a flag was mistyped
+    /// is a screenshot the user did not ask for, and a program here refuses
+    /// an argument it does not take rather than ignoring it.
+    pub fn apply_command_line(&mut self, rest: &[OsString]) -> Result<(), String> {
+        let mut words = rest.iter();
+        let Some(first) = words.next() else {
+            return Ok(());
         };
-        let mode = match mode_arg.as_str() {
-            "--fullscreen" | "-f" => CaptureMode::FullScreen,
-            "--window" | "-w" => CaptureMode::Window,
-            "--region" | "-r" => CaptureMode::Region,
-            "--delay3" => CaptureMode::Delayed(3),
-            "--delay5" => CaptureMode::Delayed(5),
-            // An unknown argument opens the menu rather than guessing: a
-            // screenshot taken because a flag was mistyped is a screenshot the
-            // user did not ask for.
-            _ => return,
+        let mode = match first.to_str() {
+            Some("--fullscreen" | "-f") => CaptureMode::FullScreen,
+            Some("--window" | "-w") => CaptureMode::Window,
+            Some("--region" | "-r") => CaptureMode::Region,
+            Some("--delay3") => CaptureMode::Delayed(3),
+            Some("--delay5") => CaptureMode::Delayed(5),
+            _ => {
+                return Err(format!(
+                    "{} is not a capture mode; the modes are --fullscreen, --window, \
+                     --region, --delay3 and --delay5",
+                    Path::new(first).shown()
+                ));
+            }
         };
+        let ask_where = match words.next() {
+            None => false,
+            Some(word) if word == "--save" => true,
+            Some(word) => {
+                return Err(format!(
+                    "{} after the mode is not --save",
+                    Path::new(word).shown()
+                ));
+            }
+        };
+        if let Some(extra) = words.next() {
+            return Err(format!(
+                "{} is one argument more than a mode and --save",
+                Path::new(extra).shown()
+            ));
+        }
         self.mode = mode;
+        self.ask_where = ask_where;
         self.start_capture();
+        Ok(())
     }
 
     /// Named `render_tree` and not `render`: at equal arity an inherent method
@@ -1596,6 +1711,13 @@ impl ScreenshotApp {
                 "F1 or ? closes this",
             );
         }
+
+        // The Save dialog over everything: while it is up it has the keys.
+        tree.commands.extend(self.picker.render(
+            &self.palette,
+            self.window_width,
+            self.window_height,
+        ));
 
         tree
     }
@@ -2404,9 +2526,23 @@ impl App for ScreenshotApp {
 }
 
 fn main() -> ExitCode {
+    // Parsed here and handed on to `launch_with`, not `launch`: `launch`
+    // refuses every argument it does not take itself, so `screenshot
+    // --fullscreen` -- what Print Screen starts -- printed an error and never
+    // opened a window.
+    let args = match oswindow::app::ArgsOs::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("screenshot: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let mut app = ScreenshotApp::new(800.0, 600.0);
-    app.apply_command_line(&std::env::args().collect::<Vec<_>>());
-    app::launch("screenshot", &mut app)
+    if let Err(complaint) = app.apply_command_line(&args.rest) {
+        eprintln!("screenshot: {complaint}");
+        return ExitCode::from(2);
+    }
+    app::launch_with("screenshot", args.display.as_deref(), &mut app)
 }
 
 // ============================================================================
@@ -2424,6 +2560,8 @@ fn main() -> ExitCode {
     clippy::indexing_slicing
 )]
 mod tests {
+    use guitk::event::Modifiers;
+
     use super::*;
 
     /// Every colour the screenshot tool's chrome draws comes from the palette.
@@ -2632,10 +2770,9 @@ mod tests {
     // ran the countdown. What was missing was anything that delivered a tick.
     // ------------------------------------------------------------------
 
-    fn argv(rest: &[&str]) -> Vec<String> {
-        std::iter::once("screenshot".to_owned())
-            .chain(rest.iter().map(|s| (*s).to_owned()))
-            .collect()
+    /// The words after the program's name, as `ArgsOs` leaves them.
+    fn argv(rest: &[&str]) -> Vec<OsString> {
+        rest.iter().map(OsString::from).collect()
     }
 
     #[test]
@@ -2712,8 +2849,10 @@ mod tests {
             ("--delay5", CaptureMode::Delayed(5)),
         ] {
             let mut app = ScreenshotApp::new(800.0, 600.0);
-            app.apply_command_line(&argv(&[flag]));
+            app.apply_command_line(&argv(&[flag]))
+                .unwrap_or_else(|e| panic!("{flag} was refused: {e}"));
             assert_eq!(app.mode, mode, "{flag} chose the wrong mode");
+            assert!(!app.ask_where, "{flag} alone asks where");
         }
     }
 
@@ -2721,7 +2860,7 @@ mod tests {
     fn no_arguments_opens_the_menu_and_captures_nothing() {
         let mut app = ScreenshotApp::new(800.0, 600.0);
         let before = app.view;
-        app.apply_command_line(&argv(&[]));
+        assert_eq!(app.apply_command_line(&argv(&[])), Ok(()));
         assert_eq!(app.view, before, "an argument-less launch captured");
     }
 
@@ -2733,7 +2872,11 @@ mod tests {
         // view alone cannot tell "did nothing" from "did it and came back".
         let mut app = ScreenshotApp::new(800.0, 600.0);
         let (view, mode) = (app.view, app.mode);
-        app.apply_command_line(&argv(&["--fulscreen"]));
+        let refused = app.apply_command_line(&argv(&["--fulscreen"]));
+        assert!(
+            refused.as_ref().is_err_and(|e| e.contains("--fulscreen")),
+            "the mistake is not named: {refused:?}"
+        );
         assert_eq!(app.mode, mode, "a mistyped flag chose a capture mode");
         assert_eq!(app.view, view, "a mistyped flag moved off the menu");
         assert!(
@@ -2857,6 +3000,112 @@ mod tests {
     }
 
     // ---- Saving must not overwrite another capture's file ----
+
+    /// **`--save` asks where the capture goes** -- in the folder the tool
+    /// saves to, under the name it would have used -- and writes it there.
+    /// The desktop's Ctrl+Print Screen passed it and the tool did not read it.
+    #[test]
+    fn the_save_word_asks_where_the_capture_goes() {
+        let scratch = temp_dir("ask-where");
+        let dir = scratch.dir().to_path_buf();
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.settings.save_directory = dir.clone();
+        app.settings.default_action = PostCaptureAction::SaveToFile;
+        app.apply_command_line(&argv(&["--window", "--save"]))
+            .expect("a mode and --save");
+        assert_eq!(app.mode, CaptureMode::Window);
+        assert!(app.ask_where);
+
+        let capture = Capture::solid(20, 10, 0xFF00_00FF);
+        let name = capture.default_filename();
+        app.finish_capture(capture);
+        assert!(
+            app.picker.is_open() && app.picker.is_saving(),
+            "no Save dialog"
+        );
+        assert_eq!(
+            app.picker.dialog().map(|d| d.current_path().to_path_buf()),
+            Some(dir.clone()),
+            "the dialog is not in the folder the tool saves to"
+        );
+        assert!(
+            std::fs::read_dir(&dir)
+                .expect("the folder")
+                .next()
+                .is_none(),
+            "the default action saved it before asking"
+        );
+        let drawn = format!("{:?}", app.render_tree().commands);
+        assert!(drawn.contains(&name), "the Save dialog is not drawn");
+
+        // Enter takes the name the dialog was given.
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        let written = dir.join(&name);
+        let bytes = std::fs::read(&written).expect("the capture was written where chosen");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+        assert!(!app.picker.is_open());
+        assert_eq!(app.current_saved_path.as_deref(), Some(written.as_path()));
+        assert!(app.awaiting.is_none());
+
+        // Asked once: the next capture takes the default action again.
+        app.finish_capture(Capture::solid(4, 4, 0xFF00_FF00));
+        assert!(!app.picker.is_open(), "the next capture asked too");
+    }
+
+    /// Cancelling the Save dialog discards the capture, and says so.
+    #[test]
+    fn cancelling_the_save_dialog_discards_the_capture() {
+        let scratch = temp_dir("ask-cancel");
+        let dir = scratch.dir().to_path_buf();
+        let mut app = ScreenshotApp::new(800.0, 600.0);
+        app.settings.save_directory = dir.clone();
+        app.apply_command_line(&argv(&["--fullscreen", "--save"]))
+            .expect("a mode and --save");
+        app.finish_capture(Capture::solid(20, 10, 0xFF00_00FF));
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(!app.picker.is_open());
+        assert!(app.awaiting.is_none(), "the capture was kept");
+        assert!(
+            std::fs::read_dir(&dir)
+                .expect("the folder")
+                .next()
+                .is_none(),
+            "a cancelled capture was written"
+        );
+        let said = app.notification.as_ref().map(|n| n.message.clone());
+        assert!(
+            said.as_deref().is_some_and(|m| m.contains("discarded")),
+            "{said:?}"
+        );
+    }
+
+    /// `--save` comes after a mode, once, and nothing comes after it.
+    #[test]
+    fn the_save_word_is_taken_only_after_a_mode() {
+        for words in [
+            &["--save"][..],
+            &["--window", "--sav"],
+            &["--window", "--save", "--save"],
+            &["--window", "extra"],
+        ] {
+            let mut app = ScreenshotApp::new(800.0, 600.0);
+            assert!(
+                app.apply_command_line(&argv(words)).is_err(),
+                "{words:?} was taken"
+            );
+            assert!(!app.ask_where, "{words:?}");
+        }
+    }
 
     /// Two captures taken in the same second share a filename, and
     /// `Capture::new`'s placeholder timestamp makes *every* capture share one.

@@ -316,13 +316,13 @@ MUTATIONS = [
     ),
     (
         "the keyboard reminder is drawn over the room reading",
-        "        if hint_x >= x {\n            label(f, hint_x, text_y, hint, OVERLAY0, l.font, regular);\n        }",
-        "        label(f, hint_x, text_y, hint, OVERLAY0, l.font, regular);",
+        "        if hint_x >= x {\n            label(f, hint_x, text_y, hint, c.chrome.dim, l.font, regular);\n        }",
+        "        label(f, hint_x, text_y, hint, c.chrome.dim, l.font, regular);",
         ["the_keyboard_hint_goes_before_the_room_reading_does"],
     ),
     (
         "a control's box is recorded before it is drawn wide enough to hit",
-        "            let w = text::measure(control.label(), l.font, regular) + inner * 2.0;",
+        "            let w = text::measure(control.label(), l.font, FontWeightHint::Bold) + inner * 2.0;",
         "            let w = 0.0;",
         ["every_control_on_the_strip_does_what_its_caption_says"],
     ),
@@ -371,9 +371,45 @@ MUTATIONS = [
     ),
     (
         "the win sheet is drawn over every board, won or not",
-        "        if self.won {\n            self.draw_win_sheet(&mut f, &l);\n        }",
-        "        {\n            self.draw_win_sheet(&mut f, &l);\n        }",
+        "        if self.won {\n            self.draw_win_sheet(&mut f, &l, &c);\n        }",
+        "        {\n            self.draw_win_sheet(&mut f, &l, &c);\n        }",
         ["the_win_sheet_is_only_there_once_the_game_is_won"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.state.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a card's face is not outlined",
+        "        stroke(f, r, c.table.face_edge(), 1.0, CornerRadii::all(corner));",
+        "",
+        ["the_cards_are_white_and_seen_on_either_themes_table"],
+    ),
+    (
+        "the win sheet's scrim is Mocha's whatever the theme",
+        "        fill(f, l.window, c.chrome.scrim, CornerRadii::ZERO);",
+        "        fill(f, l.window, Color::rgba(17, 17, 27, 200), CornerRadii::ZERO);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the red suits are the pale pink they were",
+        "        cards::suit_ink(self.is_red())",
+        "        if self.is_red() {\n            Color::from_hex(0xF38BA8)\n        } else {\n            cards::BLACK\n        }",
+        ["test_suit_color"],
+    ),
+    (
+        "the felt is Mocha's base whatever the theme",
+        "        fill(&mut f, l.window, c.table.felt, CornerRadii::ZERO);",
+        "        fill(&mut f, l.window, Color::from_hex(0x1E1E2E), CornerRadii::ZERO);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "an empty foundation's suit is the page's grey, 4.1:1 on its slot",
+        "                            c.chrome.on(c.table.empty).dim,",
+        "                            c.chrome.dim,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

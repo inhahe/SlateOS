@@ -26,6 +26,14 @@
 //! either pass before its descale, at most 61,214 times the largest input
 //! (31,521 from the even part and 29,693 from the odd), which for inputs
 //! of at most 16,383 is about 1.0 * 2^30.
+//!
+//! Portions of this file are translated into Rust from libjpeg-turbo 3.1.1's
+//! `jidctint.c` (copyright (C) 1991-1998 Thomas G. Lane; (C) 2002-2018 Guido
+//! Vollbeding; (C) 2015, 2020, 2022 D. R. Commander) and `jidctint-sse2.asm`
+//! (copyright (C) 2009 Pierre Ossman for Cendio AB; (C) 2009, 2016, 2020,
+//! 2024 D. R. Commander; (C) 2018 Matthias Räncker; (C) 2023 Aliaksiej
+//! Kandracienka; (C) 1999-2006 MIYASAKA Masaru), and changed for this
+//! project; used under the IJG License (`licenses/README.md` says how).
 
 use core::arch::x86_64::{
     __m128i, _mm_add_epi16, _mm_add_epi32, _mm_and_si128, _mm_cmpeq_epi16, _mm_cmpgt_epi16,

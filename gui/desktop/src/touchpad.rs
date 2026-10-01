@@ -1240,11 +1240,9 @@ impl TouchpadSettingsUI {
             overflow: TextOverflow::Clip,
         });
         let track_x = x + 250.0;
-        cmds.extend(crate::switch::switch(
-            track_x,
-            y + 1.0,
-            36.0,
-            18.0,
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(track_x, y + 1.0, 36.0, 18.0),
             value,
             if value { p.accent } else { p.surface2 },
         ));
@@ -1274,19 +1272,24 @@ impl TouchpadSettingsUI {
         // Slider track.
         let track_x = x + 250.0;
         let track_w = 150.0;
-        crate::slider::Slider {
-            x: track_x,
-            y: y + 8.0,
-            width: track_w,
-            height: 4.0,
-            frac: (value - min) / (max - min),
-            thumb: 12.0,
-            track: p.surface1,
-            fill: p.accent,
+        // Drawn and not yet a control: the page has no input of its own (it
+        // is a render of the configuration), so it draws the toolkit's bar.
+        // `draw_bar` bounds the fraction, so a `max` equal to `min` cannot put
+        // a NaN thumb on screen.
+        guitk::slider::draw_bar(
+            cmds,
             p,
-            alpha: u8::MAX,
-        }
-        .draw(cmds);
+            &guitk::slider::Placement::horizontal(
+                guitk::frame::Rect::new(track_x, y + 8.0, track_w, 4.0),
+                12.0,
+            ),
+            (value - min) / (max - min),
+            guitk::slider::Look {
+                track: p.surface1,
+                fill: p.accent,
+                alpha: u8::MAX,
+            },
+        );
         // Value text.
         cmds.push(RenderCommand::Text {
             x: track_x + track_w + 10.0,
@@ -2402,7 +2405,7 @@ mod tests {
     /// pinning it to the accent pinned it to the colour of the fill directly
     /// underneath it, so on the left half of its travel the handle and the
     /// filled track were one accent-coloured blob at 1.00:1. It is now `text`
-    /// (see [`crate::slider`]), and the assertion below is that it does *not*
+    /// (see [`guitk::slider`]), and the assertion below is that it does *not*
     /// follow the accent — which is the only site on this panel where standing
     /// still is the correct behaviour.
     ///

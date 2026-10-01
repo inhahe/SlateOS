@@ -15,8 +15,26 @@ name = "acpi"
 version = "0.1.0"
 
 [[package]]
+name = "aead"
+version = "0.6.1"
+dependencies = [
+ "blobby",
+ "crypto-common",
+ "inout",
+]
+
+[[package]]
 name = "aes"
 version = "0.1.0"
+
+[[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "alarmclock"
@@ -40,8 +58,13 @@ dependencies = [
 name = "appearance"
 version = "0.1.0"
 dependencies = [
+ "datetimesettings",
+ "daywindow",
+ "desktopentry",
  "guitk",
+ "imagecodec",
  "pathcodec",
+ "scratchdir",
  "settingsfile",
  "yamldoc",
 ]
@@ -69,11 +92,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.6.0"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
+]
+
+[[package]]
 name = "arp"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "assert_matches"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b34d609dfbaf33d6889b2b7106d3ca345eacad44200913df5ba02bfd31d2ba9"
 
 [[package]]
 name = "associations"
@@ -88,6 +127,8 @@ dependencies = [
 name = "asteroids"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -102,6 +143,26 @@ dependencies = [
  "cronspool",
  "quoting",
  "userdb",
+]
+
+[[package]]
+name = "atomig"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd0f41f4bb89f5c6450325e283fb78c4a3d042181b54f3855ee2f872919f9863"
+dependencies = [
+ "atomig-macro",
+]
+
+[[package]]
+name = "atomig-macro"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49c98dba06b920588de7d63f6acc23f1e6a9fade5fd6198e564506334fb5a4f5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -147,14 +208,22 @@ dependencies = [
 name = "backup-app"
 version = "0.1.0"
 dependencies = [
- "pathcodec",
  "pathtext",
  "quoting",
  "safeio",
  "scratchdir",
- "sha2",
+ "settingsfile",
+ "snapstore",
  "textfmt",
  "tzrules",
+]
+
+[[package]]
+name = "backupd"
+version = "0.1.0"
+dependencies = [
+ "journalrec",
+ "quoting",
 ]
 
 [[package]]
@@ -165,9 +234,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "base64ct"
+version = "1.8.3"
+
+[[package]]
 name = "battleship"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -195,8 +270,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
+name = "blake2"
+version = "0.11.0"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "blkid"
 version = "0.1.0"
+
+[[package]]
+name = "blobby"
+version = "0.4.0"
+
+[[package]]
+name = "block-buffer"
+version = "0.12.1"
+dependencies = [
+ "hybrid-array",
+]
 
 [[package]]
 name = "blockbuf"
@@ -222,6 +315,8 @@ dependencies = [
 name = "breakout"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -238,8 +333,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "byteread"
 version = "0.1.0"
+
+[[package]]
+name = "c2rust-bitfields"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb34f0c0ace43530b2df7f18bc69ee0c4082158aa451ece29602f8c841e73764"
+dependencies = [
+ "c2rust-bitfields-derive",
+]
+
+[[package]]
+name = "c2rust-bitfields-derive"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3dd1601a7b828ab874d890e5a895563ca8ad485bdd3d2a359f148c8b72537241"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "calculator"
@@ -255,6 +376,7 @@ name = "calendar"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "calendarstore",
  "guitk",
  "oswindow",
  "pathtext",
@@ -263,6 +385,18 @@ dependencies = [
  "textfmt",
  "textline",
  "unsaved",
+]
+
+[[package]]
+name = "calendarstore"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "textfmt",
 ]
 
 [[package]]
@@ -283,10 +417,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-if"
+version = "1.0.5"
+
+[[package]]
+name = "cfg-if"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
 name = "cgroup"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "chacha20"
+version = "0.10.2"
+dependencies = [
+ "cfg-if 1.0.5",
+ "cipher",
+ "cpufeatures",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.11.0"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
 ]
 
 [[package]]
@@ -323,6 +486,8 @@ dependencies = [
 name = "checkers"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -331,6 +496,8 @@ dependencies = [
 name = "chess"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -355,6 +522,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cipher"
+version = "0.5.2"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+ "inout",
+]
+
+[[package]]
 name = "civildate"
 version = "0.1.0"
 
@@ -372,6 +548,10 @@ dependencies = [
  "pathtext",
  "safeio",
 ]
+
+[[package]]
+name = "cmov"
+version = "0.5.4"
 
 [[package]]
 name = "colorpicker"
@@ -415,6 +595,8 @@ dependencies = [
 name = "connect4"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -468,6 +650,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpufeatures"
+version = "0.3.1"
+
+[[package]]
 name = "cpupower"
 version = "0.1.0"
 dependencies = [
@@ -494,7 +680,13 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
- "pwkdf",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "seal",
+ "settingsfile",
+ "sha2",
+ "textfmt",
 ]
 
 [[package]]
@@ -523,8 +715,17 @@ dependencies = [
 name = "crossword"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "crypto-common"
+version = "0.2.2"
+dependencies = [
+ "hybrid-array",
 ]
 
 [[package]]
@@ -535,10 +736,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctutils"
+version = "0.4.2"
+dependencies = [
+ "cmov",
+]
+
+[[package]]
 name = "curl"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "datetimesettings"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "settingsfile",
+ "tzrules",
+ "yamldoc",
 ]
 
 [[package]]
@@ -591,8 +809,11 @@ name = "desktop"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "associations",
  "authlib",
+ "datetimesettings",
  "daywindow",
+ "desktopentry",
  "globmatch",
  "guiremote",
  "guitk",
@@ -605,10 +826,19 @@ dependencies = [
  "pathcodec",
  "posix",
  "procinfo",
+ "programs",
  "scratchdir",
  "settingsfile",
+ "settingswatch",
  "tzrules",
  "yamldoc",
+]
+
+[[package]]
+name = "desktopentry"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
 ]
 
 [[package]]
@@ -672,6 +902,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "digest"
+version = "0.11.3"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+ "ctutils",
+]
+
+[[package]]
 name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
@@ -690,6 +929,7 @@ dependencies = [
  "guitk",
  "oswindow",
  "pathtext",
+ "recyclebin",
 ]
 
 [[package]]
@@ -746,6 +986,8 @@ dependencies = [
 name = "dots"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -766,6 +1008,12 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -810,7 +1058,6 @@ dependencies = [
  "pathtext",
  "safeio",
  "settingsfile",
- "textarea",
  "textline",
 ]
 
@@ -902,6 +1149,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "safeio",
+ "scratchdir",
 ]
 
 [[package]]
@@ -992,6 +1240,8 @@ dependencies = [
 name = "flood"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -1017,6 +1267,8 @@ dependencies = [
 name = "freecell"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -1075,8 +1327,18 @@ dependencies = [
 name = "game2048"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "gamechrome"
+version = "0.1.0"
+dependencies = [
+ "appearance",
+ "guitk",
 ]
 
 [[package]]
@@ -1115,6 +1377,8 @@ version = "0.1.0"
 name = "gomoku"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1140,7 +1404,10 @@ version = "0.1.0"
 dependencies = [
  "civildate",
  "osfont",
+ "pathcodec",
  "randrange",
+ "regex",
+ "settingsname",
  "textfind",
  "textfmt",
  "tzrules",
@@ -1171,6 +1438,7 @@ name = "hangman"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1183,10 +1451,22 @@ version = "0.1.0"
 name = "hearts"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
 ]
+
+[[package]]
+name = "heck"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hex-literal"
+version = "1.1.0"
 
 [[package]]
 name = "hexdump"
@@ -1264,6 +1544,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hybrid-array"
+version = "0.4.15"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "iconv"
 version = "0.1.0"
 dependencies = [
@@ -1283,6 +1570,7 @@ version = "0.1.0"
 dependencies = [
  "crc32",
  "deflate",
+ "rav1d",
 ]
 
 [[package]]
@@ -1328,6 +1616,13 @@ dependencies = [
 [[package]]
 name = "inotify"
 version = "0.1.0"
+
+[[package]]
+name = "inout"
+version = "0.2.2"
+dependencies = [
+ "hybrid-array",
+]
 
 [[package]]
 name = "inputsettings"
@@ -1485,6 +1780,8 @@ version = "0.1.0"
 name = "klotski"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1531,10 +1828,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.189"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
 name = "libcall"
 version = "0.1.0"
 dependencies = [
  "posix",
+]
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+dependencies = [
+ "no-panic",
 ]
 
 [[package]]
@@ -1553,6 +1863,8 @@ dependencies = [
 name = "lightsout"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1581,6 +1893,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lock_api"
+version = "0.4.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
@@ -1592,9 +1913,11 @@ dependencies = [
  "posix",
  "pwkdf",
  "scratchdir",
+ "settingsfile",
  "sha2",
  "tzrules",
  "userdb",
+ "yamldoc",
 ]
 
 [[package]]
@@ -1789,6 +2112,8 @@ dependencies = [
 name = "mahjong"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1827,6 +2152,7 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
  "unsaved",
 ]
 
@@ -1834,6 +2160,8 @@ dependencies = [
 name = "match3"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1842,6 +2170,8 @@ dependencies = [
 name = "maze"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1880,6 +2210,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "memory"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -1918,6 +2250,8 @@ dependencies = [
 name = "minesweeper"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2079,6 +2413,8 @@ dependencies = [
 name = "nim"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2091,6 +2427,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "no-panic"
+version = "0.1.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc80370b4544f28ffa317e3c3474ee3ecbfe269196c01ae657d9f837a7d944a1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "nologin"
 version = "0.1.0"
 
@@ -2098,6 +2445,8 @@ version = "0.1.0"
 name = "nonogram"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2115,6 +2464,14 @@ dependencies = [
  "textfmt",
  "tzrules",
  "unsaved",
+]
+
+[[package]]
+name = "notices"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
+ "yamldoc",
 ]
 
 [[package]]
@@ -2194,6 +2551,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "once_cell"
+version = "1.21.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
 name = "optionalfile"
 version = "0.1.0"
 dependencies = [
@@ -2223,6 +2586,8 @@ dependencies = [
 name = "pacman"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2241,6 +2606,29 @@ dependencies = [
  "safeio",
  "scratchdir",
  "unsaved",
+]
+
+[[package]]
+name = "parking_lot"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
+dependencies = [
+ "lock_api",
+ "parking_lot_core",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
+dependencies = [
+ "cfg-if 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
+ "redox_syscall",
+ "smallvec",
+ "windows-link",
 ]
 
 [[package]]
@@ -2265,6 +2653,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.6.1"
+dependencies = [
+ "phc",
+]
+
+[[package]]
 name = "passwordgen"
 version = "0.1.0"
 dependencies = [
@@ -2274,11 +2669,22 @@ dependencies = [
  "pathtext",
  "safeio",
  "scratchdir",
+ "settingsfile",
+ "yamldoc",
 ]
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pathcodec"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pathtext"
@@ -2318,6 +2724,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "phc"
+version = "0.6.1"
+dependencies = [
+ "base64ct",
+ "ctutils",
+]
+
+[[package]]
 name = "photomanager"
 version = "0.1.0"
 dependencies = [
@@ -2340,6 +2754,7 @@ name = "pinball"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "pathtext",
@@ -2359,6 +2774,8 @@ dependencies = [
 name = "pipes"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2416,6 +2833,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "poly1305"
+version = "0.9.1"
+dependencies = [
+ "cpufeatures",
+ "universal-hash",
+]
+
+[[package]]
 name = "pomodoro"
 version = "0.1.0"
 dependencies = [
@@ -2428,6 +2853,8 @@ dependencies = [
 name = "pong"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2436,6 +2863,7 @@ dependencies = [
 name = "posix"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "tzrules",
 ]
 
@@ -2484,6 +2912,15 @@ dependencies = [
 [[package]]
 name = "procinfo"
 version = "0.1.0"
+
+[[package]]
+name = "programs"
+version = "0.1.0"
+dependencies = [
+ "desktopentry",
+ "guitk",
+ "scratchdir",
+]
 
 [[package]]
 name = "pstree"
@@ -2558,6 +2995,32 @@ name = "randrange"
 version = "0.1.0"
 
 [[package]]
+name = "rav1d"
+version = "1.1.0"
+dependencies = [
+ "assert_matches",
+ "atomig",
+ "bitflags",
+ "cfg-if 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libc",
+ "parking_lot",
+ "paste",
+ "raw-cpuid",
+ "strum",
+ "to_method",
+ "zerocopy",
+]
+
+[[package]]
+name = "raw-cpuid"
+version = "11.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
 name = "readelf"
 version = "0.1.0"
 dependencies = [
@@ -2576,6 +3039,44 @@ dependencies = [
  "pathtext",
  "scratchdir",
 ]
+
+[[package]]
+name = "redox_syscall"
+version = "0.5.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-syntax"
+version = "0.8.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "regextester"
@@ -2639,6 +3140,8 @@ dependencies = [
 name = "reversi"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2683,9 +3186,17 @@ dependencies = [
 name = "rush"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
+
+[[package]]
+name = "rustversion"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "safeio"
@@ -2708,6 +3219,12 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "scopeguard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scp"
@@ -2754,6 +3271,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "seal"
+version = "0.1.0"
+dependencies = [
+ "aead",
+ "argon2",
+ "blake2",
+ "chacha20",
+ "chacha20poly1305",
+ "hex-literal",
+ "poly1305",
+]
+
+[[package]]
 name = "selinux"
 version = "0.1.0"
 dependencies = [
@@ -2777,7 +3307,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -2801,6 +3331,7 @@ dependencies = [
  "appearance",
  "associations",
  "compositor",
+ "datetimesettings",
  "guitk",
  "inputsettings",
  "loginusers",
@@ -2808,6 +3339,7 @@ dependencies = [
  "oswindow",
  "pathtext",
  "quoting",
+ "scratchdir",
  "settingsfile",
  "yamldoc",
 ]
@@ -2817,7 +3349,21 @@ name = "settingsfile"
 version = "0.1.0"
 dependencies = [
  "scratchdir",
+ "settingsname",
  "yamldoc",
+]
+
+[[package]]
+name = "settingsname"
+version = "0.1.0"
+
+[[package]]
+name = "settingswatch"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+ "scratchdir",
+ "settingsname",
 ]
 
 [[package]]
@@ -2856,6 +3402,8 @@ dependencies = [
 name = "simon"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2881,18 +3429,40 @@ dependencies = [
 name = "sliding"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
 ]
 
 [[package]]
+name = "smallvec"
+version = "1.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
 name = "snake"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
+]
+
+[[package]]
+name = "snapstore"
+version = "0.1.0"
+dependencies = [
+ "pathcodec",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "sha2",
+ "tzrules",
 ]
 
 [[package]]
@@ -2915,6 +3485,8 @@ dependencies = [
 name = "sokoban"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -2923,6 +3495,8 @@ dependencies = [
 name = "solitaire"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -2945,6 +3519,8 @@ dependencies = [
 name = "spades"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3079,6 +3655,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "streaming-iterator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
+
+[[package]]
+name = "strum"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+dependencies = [
+ "strum_macros",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "stty"
 version = "0.1.0"
 dependencies = [
@@ -3110,6 +3714,8 @@ dependencies = [
 name = "sudoku"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3126,6 +3732,28 @@ dependencies = [
 
 [[package]]
 name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
+version = "2.0.119"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "syn"
 version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
@@ -3133,6 +3761,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "syntax"
+version = "0.1.0"
+dependencies = [
+ "deflate",
+ "guitk",
+ "regex",
+ "tree-sitter-c2rust",
+ "tree-sitter-language",
+ "tsgrammar",
 ]
 
 [[package]]
@@ -3216,6 +3856,11 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+ "pathtext",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
+ "snapstore",
 ]
 
 [[package]]
@@ -3273,6 +3918,8 @@ dependencies = [
 name = "tetris"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3320,6 +3967,8 @@ dependencies = [
 name = "tictactoe"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3343,6 +3992,12 @@ dependencies = [
  "terminal",
  "tzrules",
 ]
+
+[[package]]
+name = "to_method"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c4ceeeca15c8384bbc3e011dbd8fccb7f068a440b752b7d9b32ceb0ca0e2e8"
 
 [[package]]
 name = "top"
@@ -3370,6 +4025,8 @@ dependencies = [
 name = "towers"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3390,6 +4047,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-c2rust"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e1e4909668d7a5e0eb8d66bd9fe2e789106066626056d3bead80dc6b9d5aeee"
+dependencies = [
+ "c2rust-bitfields",
+ "once_cell",
+ "regex",
+ "regex-syntax",
+ "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-language"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca0d1bf6fdd806e43ae5198f82f527056d359def39e54e67a0f478ac09dac081"
+
+[[package]]
+name = "tsgrammar"
+version = "0.1.0"
+
+[[package]]
 name = "ttyidle"
 version = "0.1.0"
 
@@ -3399,6 +4080,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "typenum"
+version = "1.20.1"
 
 [[package]]
 name = "typingtutor"
@@ -3452,6 +4137,14 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
+]
+
+[[package]]
+name = "universal-hash"
+version = "0.6.1"
+dependencies = [
+ "crypto-common",
+ "ctutils",
 ]
 
 [[package]]
@@ -3546,6 +4239,8 @@ dependencies = [
  "mediaprobe",
  "oswindow",
  "pathtext",
+ "settingsfile",
+ "yamldoc",
 ]
 
 [[package]]
@@ -3643,6 +4338,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
 name = "wipefs"
 version = "0.1.0"
 dependencies = [
@@ -3654,6 +4355,7 @@ name = "wordle"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
 ]
@@ -3662,6 +4364,8 @@ dependencies = [
 name = "wordsearch"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3711,6 +4415,8 @@ dependencies = [
 name = "yahtzee"
 version = "0.1.0"
 dependencies = [
+ "appearance",
+ "gamechrome",
  "guitk",
  "oswindow",
  "randrange",
@@ -3719,6 +4425,27 @@ dependencies = [
 [[package]]
 name = "yamldoc"
 version = "0.1.0"
+
+[[package]]
+name = "zerocopy"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
+dependencies = [
+ "byteorder",
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.7.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zip"

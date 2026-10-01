@@ -41,10 +41,13 @@ pub struct CpuInfo {
     pub base_clock_mhz: Option<u32>,
     /// Turbo clock, on the same terms as [`CpuInfo::base_clock_mhz`].
     pub max_turbo_mhz: Option<u32>,
-    pub l1_data_kb: u32,
-    pub l1_inst_kb: u32,
-    pub l2_kb: u32,
-    pub l3_kb: u32,
+    /// Each cache's size, when the processor reports it (CPUID leaf 4).
+    /// `None`, never 0: a 0 reads as a measurement, and "no L3" is a real
+    /// answer some processors give.
+    pub l1_data_kb: Option<u32>,
+    pub l1_inst_kb: Option<u32>,
+    pub l2_kb: Option<u32>,
+    pub l3_kb: Option<u32>,
     pub features: Vec<(String, bool)>,
 }
 
@@ -63,10 +66,14 @@ pub struct MemorySlot {
 pub struct MemoryInfo {
     pub total_mb: u64,
     pub available_mb: u64,
+    /// Empty when nothing reports it (it is an SMBIOS fact).
     pub mem_type: String,
-    pub speed_mhz: u32,
-    pub slots_used: u32,
-    pub slots_total: u32,
+    /// The memory's speed and its slots, when something reports them --
+    /// SMBIOS does, and nothing here reads it. `None`, never a 0 that reads
+    /// as a machine with no memory slots.
+    pub speed_mhz: Option<u32>,
+    pub slots_used: Option<u32>,
+    pub slots_total: Option<u32>,
     pub slots: Vec<MemorySlot>,
 }
 
@@ -174,9 +181,13 @@ impl NetworkAdapterInfo {
 pub struct DisplayInfo {
     pub gpu_name: String,
     pub vendor: String,
-    pub vram_mb: u32,
+    /// The adapter's memory, when something reports it -- nothing does yet.
+    pub vram_mb: Option<u32>,
+    /// The primary output's mode, `WIDTHxHEIGHT`; empty when there is no
+    /// primary output, rather than the first row's.
     pub resolution: String,
-    pub refresh_rate_hz: u32,
+    /// The primary output's refresh rate, when there is a primary output.
+    pub refresh_rate_hz: Option<u32>,
     pub outputs: Vec<(String, bool)>,
     pub driver_version: String,
 }

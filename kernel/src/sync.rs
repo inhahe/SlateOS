@@ -1172,8 +1172,16 @@ static LEAF_SEEN: [(AtomicUsize, AtomicUsize); MAX_LEAF_PAIRS] = {
     [ZERO; MAX_LEAF_PAIRS]
 };
 
+/// What a pair records as its outer site when this CPU had none recorded.
+///
+/// Not 0, which is what marks a slot empty: a pair stored as `(0, inner)`
+/// would look free, so it would go uncounted and the next claim would take
+/// its slot.
+const SITE_UNRECORDED: usize = usize::MAX;
+
 /// Claim a slot for this (outer, inner) site pair, or report it as already
-/// seen. Linear over 24 entries, and only ever reached on a violation.
+/// seen. Linear over the table's `MAX_LEAF_PAIRS` entries, and only ever
+/// reached on a violation.
 fn leaf_pair_is_new(outer: usize, inner: usize) -> bool {
     for slot in &LEAF_SEEN {
         let o = slot.0.load(Ordering::Relaxed);
@@ -1317,14 +1325,14 @@ fn note_leaf_nesting(inner: &'static [u8]) {
         //
         // The cost is honest and small: the control exercises the detection
         // and the counting, not the dedup or the report text. Those are
-        // exercised by the live tree, which reports 24 distinct pairs.
+        // exercised by the live tree, which reports dozens of distinct pairs.
         return;
     }
     LEAF_NESTINGS.fetch_add(1, Ordering::Relaxed);
     // Once per distinct site pair. `Location::caller()` returns a pointer
     // into read-only data, so its address identifies the site.
     let inner_site = core::ptr::from_ref(core::panic::Location::caller()) as usize;
-    let outer_site = leaf_site().map_or(0, |l| core::ptr::from_ref(l) as usize);
+    let outer_site = leaf_site().map_or(SITE_UNRECORDED, |l| core::ptr::from_ref(l) as usize);
     if !leaf_pair_is_new(outer_site, inner_site) {
         return;
     }
@@ -1442,7 +1450,7 @@ pub fn report_leaf_claims() {
     crate::serial_println!(
         concat!(
             "[sync] leaf-claim check: {} acquisition(s) inside a ",
-            "PreemptSpinMutex, {} distinct site pair(s) named above",
+            "PreemptSpinMutex, {} distinct site pair(s), listed below",
             "{}"
         ),
         total,
@@ -1453,6 +1461,39 @@ pub fn report_leaf_claims() {
             ""
         }
     );
+    // Every pair, one short line each, once. The full lines during the boot
+    // stop at MAX_LEAF_PRINTED; converting every outer lock that is not a
+    // leaf (A-Q16, design-decisions §975) needs all of them, and the table
+    // already holds them.
+    for (i, slot) in LEAF_SEEN.iter().enumerate() {
+        let (outer, inner) = (slot.0.load(Ordering::Acquire), slot.1.load(Ordering::Acquire));
+        if outer == 0 {
+            continue; // An empty slot.
+        }
+        let outer = location_at(outer).map_or((">unrecorded<", 0), |l| (l.file(), l.line()));
+        let inner = location_at(inner).map_or((">unrecorded<", 0), |l| (l.file(), l.line()));
+        crate::serial_println!(
+            "[sync]   leaf pair {}: outer taken at {}:{}, inner at {}:{}",
+            i.saturating_add(1),
+            outer.0,
+            outer.1,
+            inner.0,
+            inner.1
+        );
+    }
+}
+
+/// The `Location` a leaf-pair slot recorded by address; `None` for an empty
+/// slot or a site that was not recorded ([`SITE_UNRECORDED`]).
+fn location_at(addr: usize) -> Option<&'static core::panic::Location<'static>> {
+    if addr == 0 || addr == SITE_UNRECORDED {
+        return None;
+    }
+    // SAFETY: every address in `LEAF_SEEN` other than 0 and
+    // `SITE_UNRECORDED`, both refused above, was taken from a
+    // `&'static Location` -- `Location::caller()` or `leaf_site()` -- which
+    // points into read-only data that lives for the whole program.
+    Some(unsafe { &*(addr as *const core::panic::Location<'static>) })
 }
 /// A preempt-disabling spinlock for **hot leaf locks**.
 ///

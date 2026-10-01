@@ -10487,6 +10487,12 @@ fn gen_secureboot() -> Vec<u8> {
     out.push_str("=== Secure Boot ===\n");
     let (key_count, record_count, total_verified, total_rejected, ops) =
         crate::fs::secureboot::stats();
+    let state = crate::fs::secureboot::get_state();
+    out.push_str(&format!("state: {}\n", state.label()));
+    out.push_str(&format!(
+        "enforcing: {}\n",
+        if state.enforces() { "yes" } else { "no" }
+    ));
     out.push_str(&format!("key_count: {}\n", key_count));
     out.push_str(&format!("record_count: {}\n", record_count));
 

@@ -21,6 +21,8 @@
 #[allow(unused_imports)]
 use guitk::event::{EventResult, Modifiers, MouseEventKind};
 #[allow(unused_imports)]
+use guitk::motion::Motion;
+use guitk::palette::Palette;
 use guitk::render::{FontWeightHint, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
@@ -89,6 +91,9 @@ const ACTION_BTN_PADDING: f32 = 12.0;
 const BADGE_HEIGHT: f32 = 22.0;
 
 const CENTER_WIDTH: f32 = 400.0;
+/// How wide a notification's body may run in the notification center: the
+/// row, less its margins.
+const CENTER_BODY_WIDTH: f32 = CENTER_WIDTH - 40.0;
 const CENTER_HEADER_HEIGHT: f32 = 48.0;
 const CENTER_ITEM_HEIGHT: f32 = 72.0;
 const CENTER_GROUP_HEADER_HEIGHT: f32 = 36.0;
@@ -210,31 +215,42 @@ impl ToastState {
         }
     }
 
-    fn enter_progress(&self) -> f32 {
-        let t = (self.age_ms as f32) / (ANIMATION_DURATION_MS as f32);
-        t.clamp(0.0, 1.0)
+    fn enter_progress(&self, motion: Motion) -> f32 {
+        progress(self.age_ms, slide_ms(motion))
     }
 
-    fn exit_progress(&self) -> f32 {
-        let t = (self.dismiss_age_ms as f32) / (ANIMATION_DURATION_MS as f32);
-        t.clamp(0.0, 1.0)
+    fn exit_progress(&self, motion: Motion) -> f32 {
+        progress(self.dismiss_age_ms, slide_ms(motion))
     }
 
-    fn current_offset(&self) -> f32 {
+    /// How far right of its place the toast is drawn: sliding in along the
+    /// motion's arriving curve -- a spring carries it a little past its
+    /// place, which a toast floating on the desktop can do -- and out along
+    /// its leaving curve.
+    fn current_offset(&self, motion: Motion) -> f32 {
         if self.dismissing {
-            let p = ease_out_cubic(self.exit_progress());
             // Slide back out to the right.
-            (TOAST_WIDTH + TOAST_RIGHT_MARGIN) * p
+            (TOAST_WIDTH + TOAST_RIGHT_MARGIN) * motion.leaving(self.exit_progress(motion))
         } else {
-            let p = ease_out_cubic(self.enter_progress());
-            self.slide_offset * (1.0 - p)
+            self.slide_offset * (1.0 - motion.arriving(self.enter_progress(motion)))
         }
     }
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t;
-    1.0 - inv * inv * inv
+/// How long a toast takes to slide in or out under `motion`: the slide's
+/// designed length, [`ANIMATION_DURATION_MS`], against the standard
+/// transition. Zero when still.
+fn slide_ms(motion: Motion) -> u64 {
+    u64::from(motion.duration_ms(u32::try_from(ANIMATION_DURATION_MS).unwrap_or(u32::MAX)))
+}
+
+/// How far through a slide of `duration_ms` a toast `age_ms` into it is,
+/// 0.0 to 1.0 -- and 1.0, done, for a slide of no length.
+fn progress(age_ms: u64, duration_ms: u64) -> f32 {
+    if duration_ms == 0 {
+        return 1.0;
+    }
+    ((age_ms as f32) / (duration_ms as f32)).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +486,9 @@ pub struct NotificationDaemon {
     viewport_width: f32,
     /// Viewport height.
     viewport_height: f32,
+    /// How toasts slide: the desktop's motion, from the palette the window
+    /// loop hands over (design-decisions §1446).
+    motion: Motion,
 }
 
 impl NotificationDaemon {
@@ -486,7 +505,15 @@ impl NotificationDaemon {
             current_time_ms: 0,
             viewport_width,
             viewport_height,
+            motion: Motion::STANDARD,
         }
+    }
+
+    /// Slide toasts as `motion` says from now on. Under a still motion a
+    /// toast sliding in is in its place at the next frame, and one sliding
+    /// out is gone at the next tick.
+    pub fn set_motion(&mut self, motion: Motion) {
+        self.motion = motion;
     }
 
     // -----------------------------------------------------------------------
@@ -851,7 +878,7 @@ impl NotificationDaemon {
 
         // Remove toasts that have finished exit animation.
         self.toasts.retain(|t| {
-            if t.dismissing && t.dismiss_age_ms >= ANIMATION_DURATION_MS {
+            if t.dismissing && t.dismiss_age_ms >= slide_ms(self.motion) {
                 return false;
             }
             true
@@ -942,7 +969,7 @@ impl NotificationDaemon {
             if toast.dismissing {
                 continue;
             }
-            let offset = toast.current_offset();
+            let offset = toast.current_offset(self.motion);
             let toast_x = base_x + offset;
             let notif = match self.get_notification(toast.notification_id) {
                 Some(n) => n,
@@ -1159,7 +1186,7 @@ impl NotificationDaemon {
         let visible_count = self
             .toasts
             .iter()
-            .filter(|t| !t.dismissing || t.exit_progress() < 1.0)
+            .filter(|t| !t.dismissing || t.exit_progress(self.motion) < 1.0)
             .count()
             .min(MAX_VISIBLE_TOASTS);
 
@@ -1169,7 +1196,7 @@ impl NotificationDaemon {
                 None => continue,
             };
 
-            let offset = toast.current_offset();
+            let offset = toast.current_offset(self.motion);
             let toast_x = base_x + offset;
             let h = self.toast_height(notif);
             let radii = CornerRadii::all(TOAST_CORNER_RADIUS);
@@ -1572,13 +1599,18 @@ impl NotificationDaemon {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Body (truncated).
-        let body_display = if notif.body.len() > 60 {
-            let truncated: String = notif.body.chars().take(57).collect();
-            format!("{truncated}...")
-        } else {
-            notif.body.clone()
-        };
+        // Body: one line, cut to the row's width with a mark when it does
+        // not fit. It was cut at 57 characters whenever it ran past 60
+        // *bytes*, so a short message in any script but ASCII -- forty
+        // accented letters -- gained a "..." for a cut that never happened,
+        // and a long one was cut at a count rather than at the row's edge.
+        let body_display = text::elide(
+            &notif.body,
+            CENTER_BODY_WIDTH,
+            "\u{2026}",
+            11.0,
+            FontWeightHint::Regular,
+        );
         cmds.push(RenderCommand::Text {
             x: center_x + 20.0,
             y: y + 28.0,
@@ -1586,7 +1618,7 @@ impl NotificationDaemon {
             color: SUBTEXT0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(CENTER_WIDTH - 40.0),
+            max_width: Some(CENTER_BODY_WIDTH),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -1824,6 +1856,12 @@ impl oswindow::app::App for NotificationDaemon {
         } else {
             Response::Idle
         }
+    }
+
+    /// The palette's motion is how the toasts slide. (Its colours are not
+    /// read yet: known-issues `TD-C-THE-TOAST-DAEMON-DRAWS-IN-ITS-OWN-COLOURS`.)
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.set_motion(palette.motion);
     }
 
     fn render(&mut self, width: f32, height: f32) -> RenderTree {
@@ -2184,6 +2222,45 @@ mod tests {
         notif.body = String::from(body);
         daemon.handle_request(NotificationRequest::Send(notif));
         daemon
+    }
+
+    /// The body a notification-center row drew for `body`.
+    fn center_body(body: &str) -> String {
+        let mut daemon = daemon_with_body(body);
+        daemon.toggle_center();
+        daemon
+            .render_center()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, .. }
+                    if text.starts_with(body.get(..3).unwrap_or(body)) =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the center drew no body")
+    }
+
+    /// **A body that fits is drawn whole, and one that does not is cut at the
+    /// row's edge with a mark.** It was cut by counting: a body over 60 bytes
+    /// lost everything past its 57th character and gained "...", so forty
+    /// accented letters -- 80 bytes, well inside the row -- read as cut.
+    #[test]
+    fn a_center_row_cuts_a_body_at_its_edge_not_at_a_count() {
+        let accented = "é".repeat(40);
+        assert_eq!(center_body(&accented), accented);
+
+        let long = "word ".repeat(80);
+        let drawn = center_body(&long);
+        assert!(
+            drawn.ends_with('\u{2026}'),
+            "{drawn:?} does not show it was cut"
+        );
+        assert!(
+            text::measure(&drawn, 11.0, FontWeightHint::Regular) <= CENTER_BODY_WIDTH + 0.5,
+            "{drawn:?} runs past the row"
+        );
     }
 
     /// Every body line the toast drew, as (y, text), in draw order.
@@ -2609,13 +2686,56 @@ mod tests {
         assert!(all_dismissing);
     }
 
+    /// **A toast slides as the desktop's motion says**: in along its
+    /// arriving curve and out along its leaving one, as long as the motion
+    /// makes the designed slide -- and under a still motion, in its place at
+    /// once and gone at the next tick.
     #[test]
-    fn test_animation_easing() {
-        // ease_out_cubic(0) = 0, ease_out_cubic(1) = 1.
-        assert!((ease_out_cubic(0.0) - 0.0).abs() < f32::EPSILON);
-        assert!((ease_out_cubic(1.0) - 1.0).abs() < f32::EPSILON);
-        // Monotonically increasing.
-        assert!(ease_out_cubic(0.5) > ease_out_cubic(0.25));
+    fn a_toast_slides_as_the_desktops_motion_says() {
+        use guitk::motion::Curve;
+        let start = TOAST_WIDTH + TOAST_RIGHT_MARGIN;
+        let mut toast = ToastState::new(1);
+        let linear_slow = Motion::new(400, Curve::Linear);
+        toast.age_ms = ANIMATION_DURATION_MS; // half of twice the slide
+        assert!((toast.current_offset(linear_slow) - start * 0.5).abs() < 0.01);
+        // The built-in ease-out: seven-eighths in half-way.
+        toast.age_ms = ANIMATION_DURATION_MS / 2;
+        let offset = toast.current_offset(Motion::STANDARD);
+        assert!((offset - start * 0.125).abs() < 0.5, "{offset}");
+        // A spring passes its place, a little, on the way.
+        let spring = Motion::new(200, Curve::Spring);
+        let passed = (0..ANIMATION_DURATION_MS).any(|age| {
+            toast.age_ms = age;
+            toast.current_offset(spring) < 0.0
+        });
+        assert!(passed, "the spring never passed the toast's place");
+        // Out: a quarter gone half-way, under ease-out.
+        toast.dismissing = true;
+        toast.dismiss_age_ms = ANIMATION_DURATION_MS / 2;
+        let out = toast.current_offset(Motion::STANDARD);
+        assert!((out - start * 0.25).abs() < 0.5, "{out}");
+
+        // Still: in its place from the first frame.
+        let fresh = ToastState::new(2);
+        assert!(fresh.current_offset(Motion::STILL).abs() < f32::EPSILON);
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.set_motion(Motion::STILL);
+        let notif = make_test_notification(0, NotificationPriority::Normal);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon.dismiss(1);
+        daemon.tick(0);
+        assert!(daemon.toasts.is_empty(), "a still toast lingered to fade");
+    }
+
+    /// **The palette's motion is the daemon's**: the window loop hands a
+    /// palette over at start and on every change.
+    #[test]
+    fn the_palettes_motion_is_the_daemons() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut palette = Palette::for_mode(false);
+        palette.motion = Motion::STILL;
+        oswindow::app::App::theme_changed(&mut daemon, &palette);
+        assert!(daemon.motion.is_still());
     }
 
     #[test]

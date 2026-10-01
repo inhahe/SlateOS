@@ -953,7 +953,12 @@ impl UpdateSettingsUI {
         });
         let tx = x + width - 48.0;
         let bg = if on { p.green } else { p.surface1 };
-        cmds.extend(crate::switch::switch(tx, y, 40.0, 20.0, on, bg));
+        cmds.extend(guitk::switch::shapes(
+            p,
+            guitk::frame::Rect::new(tx, y, 40.0, 20.0),
+            on,
+            bg,
+        ));
     }
 }
 

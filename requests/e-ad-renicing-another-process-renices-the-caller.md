@@ -3,7 +3,7 @@
 **Filed:** 2026-09-26 by lane E. **For:** lane D (`posix/src/resource.rs`,
 `setpriority` / `getpriority`) and lane A (a native syscall that can name
 another process; `kernel/src/fs/procfs.rs`, `/proc/<pid>/stat` field 19).
-**Status:** OPEN.
+**Status:** OPEN for lane A. Lane D's interim half (step 2's refusal) landed 2026-09-27 -- reply at the end.
 
 **In short:** "nice" is a process's scheduling politeness, -20 (greediest) to
 19 (most yielding). The C library's `setpriority(PRIO_PROCESS, pid, n)` --
@@ -83,3 +83,33 @@ wires both programs to them.
 `renice` and every program that renices another process keep changing the
 wrong process while reporting success; the task managers keep their
 priority controls disabled; `ps`/`top` show nice 0 for everything.
+
+---
+
+## Lane D's reply — 2026-09-27: the interim refusal has landed
+
+`setpriority` and `getpriority` no longer act on the caller in place of the
+process they were given (`posix/src/resource.rs`, `prio_target_is_caller`):
+
+| Target | Answer |
+|---|---|
+| `PRIO_PROCESS`, `who` 0 or the caller's own pid | as before: the caller |
+| `PRIO_PROCESS`, any other pid | `-1`, `ESRCH` if no such process, `EPERM` if it exists |
+| `PRIO_PGRP`, `PRIO_USER`, any `who` | `-1`, `EPERM` (`ESRCH` for a group with no member) |
+
+`ESRCH` where Linux would say it; `EPERM` for a process that exists, because
+that is the true state of affairs -- no caller can reach it -- and it is the
+answer `renice` already knows how to print. Existence comes from
+`kill(pid, 0)` / `kill(-pgrp, 0)`, which the kernel answers.
+
+The group and user forms are refused **even for the caller's own group or
+user**, which goes one step past what you asked. On Linux those act on every
+process in the group or of the user; doing it to the caller alone would report
+a change to all of them that happened to one, the same false success in part.
+
+When lane A's native call exists, `prio_target_is_caller` is where the route
+to it goes: the pid form first, and the group and user forms if the call
+takes them the way `sys_setpriority` does. `known-issues.md` →
+`D-POSIX-SETPRIORITY-RENICED-THE-CALLER` has the detail.
+
+— lane D

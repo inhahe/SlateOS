@@ -297,6 +297,14 @@ impl DynamicTheme {
 /// Maximum entries tracked for wallpaper history.
 const HISTORY_CAPACITY: usize = 20;
 
+/// How often a dynamic wallpaper asks to be drawn again, in seconds.
+///
+/// Its colour moves through the day in blends hours long, so once a minute is
+/// finer than any step a person could see -- and a frame that comes out the
+/// same is not sent (`ShellSession::refresh_background`), so most of these
+/// wake-ups cost a comparison and nothing more.
+pub const DYNAMIC_REFRESH_SECS: u64 = 60;
+
 /// Runtime state for slideshow mode.
 ///
 /// The three index-bearing fields used to be public and independently
@@ -327,8 +335,15 @@ pub struct SlideshowState {
     order: Vec<usize>,
     /// Position within `order`. Always in range while `order` is non-empty.
     position: usize,
-    /// Timestamp (seconds) when the last image change occurred.
-    pub last_change_secs: u64,
+    /// When the picture now showing went up, in the seconds of the clock
+    /// [`WallpaperManager::tick`] is given -- or `None` until a tick has seen
+    /// it: the manager keeps no clock, so a picture's interval starts at the
+    /// first tick after it is shown.
+    ///
+    /// An `Option` rather than a `u64` whose 0 meant "not yet": the shell's
+    /// clock starts at 0, so a picture put up in its first second looked
+    /// untimed and had its interval started again.
+    shown_since: Option<u64>,
 }
 
 impl SlideshowState {
@@ -339,7 +354,7 @@ impl SlideshowState {
             paths,
             order,
             position: 0,
-            last_change_secs: 0,
+            shown_since: None,
         }
     }
 
@@ -375,13 +390,11 @@ impl SlideshowState {
 
     /// Current image path, if any.
     pub fn current_path(&self) -> Option<&Path> {
-        // Borrows a `&Path` from the `String` the playlist already holds,
-        // rather than converting the playlist. The slideshow is not reachable
-        // -- `roadmap-detailed.md` §3.4 records that nothing outside the
-        // shell's tests calls `set_slideshow` -- so converting its model would
-        // be making dead code byte-correct, which is what persuades the next
-        // reader it is load-bearing. This is the one line needed to keep it
-        // compiling beside a caller that now speaks in paths.
+        // The playlist is `Vec<PathBuf>` since the rotation folder was wired
+        // to `appearance.yaml` on 2026-09-17 (see `paths`), so this is a plain
+        // borrow. The comment that stood here until 2026-09-24 described the
+        // playlist as `String`s and the slideshow as unreachable -- both true
+        // the day it was written, and both false for a week afterwards.
         self.paths
             .get(self.effective_index()?)
             .map(PathBuf::as_path)
@@ -666,17 +679,17 @@ pub struct WallpaperManager {
     current_image_id: u64,
     /// Monotonic counter for generating image IDs.
     next_image_id: u64,
-    /// The pixel size of the picture behind [`Self::current_image_id`].
+    /// The picture on screen: the id it was uploaded under and its pixel
+    /// size, as [`Self::picture_ready`] was told -- or `None` while no picture
+    /// is up.
     ///
-    /// Carries the id it was measured from, and is believed only while that
-    /// id is still current. Decoding takes time: a slideshow that advances
-    /// while a picture is being read would otherwise have the *outgoing*
-    /// picture's size applied to the incoming one, and every fit but
-    /// `Stretch` would place it wrongly for one frame.
-    ///
-    /// `None` until something measures one, which is the honest state -- a
-    /// manager that has allocated an id has not necessarily seen any pixels.
-    image_size: Option<(u64, f32, f32)>,
+    /// Not [`Self::current_image_id`], which is the picture *wanted*. The two
+    /// differ while a new picture decodes, which takes a second or more for a
+    /// photograph: until it is up, the one before it stays on screen rather
+    /// than the desktop going to its plain colour between slides, and an id
+    /// the compositor holds no pixels for is never drawn. It carries its own
+    /// size, so the outgoing picture keeps its fit while the next decodes.
+    shown: Option<(u64, f32, f32)>,
     /// Draws for [`Self::random_wallpaper`]. See [`Self::with_seed`] for why
     /// the manager owns one rather than being handed a seed per call.
     rng: SeededRng,
@@ -717,7 +730,7 @@ impl WallpaperManager {
             history: WallpaperHistory::new(),
             current_image_id: 0,
             next_image_id: 1,
-            image_size: None,
+            shown: None,
             rng,
         }
     }
@@ -851,13 +864,18 @@ impl WallpaperManager {
     // Tick / timing
     // ======================================================================
 
-    /// Advance the wallpaper state. Call once per frame (or per second).
+    /// Advance the wallpaper state. Call when [`next_change_in`] says a
+    /// change is due, or more often -- every frame is fine.
     ///
-    /// `current_time_secs` is seconds since midnight for dynamic mode,
-    /// or a monotonic timestamp for slideshow timing.
+    /// `current_time_secs` is a monotonic timestamp for slideshow timing; a
+    /// dynamic wallpaper is drawn from the time of day, which
+    /// [`get_render_commands`] is given, and ignores it.
     ///
-    /// Returns `true` if the wallpaper visually changed (slideshow advanced
-    /// or dynamic color shifted enough to warrant a redraw).
+    /// Returns `true` if the wallpaper may look different now (the slideshow
+    /// advanced, or it is a dynamic wallpaper, whose colour is always moving).
+    ///
+    /// [`next_change_in`]: Self::next_change_in
+    /// [`get_render_commands`]: Self::get_render_commands
     pub fn tick(&mut self, current_time_secs: u64) -> bool {
         match self.config.mode {
             WallpaperMode::Slideshow => self.tick_slideshow(current_time_secs),
@@ -872,6 +890,35 @@ impl WallpaperManager {
         }
     }
 
+    /// How many seconds after `current_time_secs` [`tick`](Self::tick) will
+    /// next have something new to show, or `None` if nothing here changes by
+    /// itself.
+    ///
+    /// What the shell arms its wake-up from. Without it a desktop with nothing
+    /// else to do slept until the user touched it, and a slideshow showed its
+    /// first picture for as long as they did not; the alternative, waking
+    /// every frame, would decode nothing and cost a machine its sleep.
+    ///
+    /// `Some(0)` for a slideshow a tick has not seen yet: the tick that starts
+    /// its timer is due now. `None` for a slideshow of one picture, which has
+    /// nothing to change to.
+    #[must_use]
+    pub fn next_change_in(&self, current_time_secs: u64) -> Option<u64> {
+        match self.config.mode {
+            WallpaperMode::Slideshow => {
+                let state = self.slideshow.as_ref().filter(|s| s.len() > 1)?;
+                Some(state.shown_since.map_or(0, |since| {
+                    let shown_for = current_time_secs.saturating_sub(since);
+                    self.config
+                        .slideshow_interval_secs
+                        .saturating_sub(shown_for)
+                }))
+            }
+            WallpaperMode::Dynamic => Some(DYNAMIC_REFRESH_SECS),
+            WallpaperMode::SolidColor | WallpaperMode::SingleImage => None,
+        }
+    }
+
     /// Internal slideshow tick logic.
     fn tick_slideshow(&mut self, current_time_secs: u64) -> bool {
         let interval = self.config.slideshow_interval_secs;
@@ -883,22 +930,25 @@ impl WallpaperManager {
                 return false;
             };
 
-            if state.is_empty() {
+            // One picture is a slideshow with nothing to change to. Stepping
+            // it would issue the same picture a new id, and the shell would
+            // read and decode the file again every interval to show what was
+            // already there.
+            if state.len() < 2 {
                 return false;
             }
 
-            // Initialize timestamp on first tick.
-            if state.last_change_secs == 0 {
-                state.last_change_secs = current_time_secs;
-                return false;
-            }
-
-            let elapsed = current_time_secs.saturating_sub(state.last_change_secs);
-            if elapsed >= interval {
-                state.last_change_secs = current_time_secs;
-                state.advance()
-            } else {
-                false
+            match state.shown_since {
+                // The first tick to see this picture starts its interval.
+                None => {
+                    state.shown_since = Some(current_time_secs);
+                    false
+                }
+                Some(since) if current_time_secs.saturating_sub(since) >= interval => {
+                    state.shown_since = Some(current_time_secs);
+                    state.advance()
+                }
+                Some(_) => false,
             }
         };
 
@@ -930,7 +980,8 @@ impl WallpaperManager {
                     .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
-                s.last_change_secs = 0; // Reset timer.
+                // A new picture: its interval starts at the next tick.
+                s.shown_since = None;
             }
         }
     }
@@ -945,7 +996,7 @@ impl WallpaperManager {
                     .push(WallpaperChoice::Slideshow(path.to_path_buf()));
             }
             if let Some(ref mut s) = self.slideshow {
-                s.last_change_secs = 0;
+                s.shown_since = None;
             }
         }
     }
@@ -983,7 +1034,7 @@ impl WallpaperManager {
                 return;
             };
             state.seek(position);
-            state.last_change_secs = 0;
+            state.shown_since = None;
             // Asking the state which image is showing, rather than working it
             // out a second way here — the inline version fell back to
             // `idx % paths.len()` where `effective_index` falls back to `None`.
@@ -1066,17 +1117,14 @@ impl WallpaperManager {
             corner_radii: CornerRadii::ZERO,
         });
 
-        if self.current_image_id != 0 {
-            // The picture's own size, not the screen's. Passing the screen's
-            // size as the image's is what made all six fit modes draw the
-            // identical full-screen rectangle for as long as the setting
-            // existed: `Fill` and `Fit` both scale by a ratio that is then 1,
-            // and `Center` and `Tile` both return the rectangle they were
-            // handed. Falling back to the screen's size when nothing has
-            // measured the picture yet keeps that old behaviour for the one
-            // frame before the decode lands, which is a full-bleed picture
-            // rather than a gap.
-            let (iw_src, ih_src) = self.current_image_size().unwrap_or((width, height));
+        // The picture that is up, at its own size -- not the screen's.
+        // Passing the screen's size as the image's is what made all six fit
+        // modes draw the identical full-screen rectangle for as long as the
+        // setting existed: `Fill` and `Fit` both scale by a ratio that is then
+        // 1, and `Center` and `Tile` both return the rectangle they were
+        // handed. Nothing is drawn until a picture is up: an image id the
+        // compositor holds no pixels for draws nothing, silently.
+        if let Some((id, iw_src, ih_src)) = self.shown_picture() {
             let (ix, iy, iw, ih) =
                 compute_image_rect(width, height, iw_src, ih_src, self.config.fit);
             cmds.push(RenderCommand::Image {
@@ -1084,7 +1132,7 @@ impl WallpaperManager {
                 y: iy,
                 width: iw,
                 height: ih,
-                image_id: self.current_image_id,
+                image_id: id,
             });
         }
 
@@ -1344,29 +1392,28 @@ impl WallpaperManager {
     // Internal helpers
     // ======================================================================
 
-    /// Record the pixel size of the picture now loaded under `id`.
+    /// The picture uploaded under `id`, `width` by `height` pixels, is up:
+    /// draw it from now on.
     ///
-    /// Called by whoever decoded it -- this manager never reads a file, so it
-    /// cannot find this out for itself. Until it is told, every fit mode
-    /// renders as `Stretch`, because a picture assumed to be exactly the size
-    /// of the screen needs no scaling under any of them.
-    ///
-    /// A size for an id that is no longer current is *kept*, not dropped: the
-    /// guard is on the reading side, so a late answer for a superseded picture
-    /// is simply never consulted, and one that arrives just before its own id
-    /// becomes current still applies.
-    pub fn note_image_size(&mut self, id: u64, width: f32, height: f32) {
-        self.image_size = Some((id, width, height));
+    /// Called by whoever uploaded it -- this manager never reads a file, so it
+    /// cannot find this out for itself. Until it is told, no picture is drawn,
+    /// only the colour underneath; after, this one is drawn -- and stays, while
+    /// a newer [`Self::current_image_id`] is decoding, until it is told again.
+    pub fn picture_ready(&mut self, id: u64, width: f32, height: f32) {
+        self.shown = Some((id, width, height));
     }
 
-    /// The size of the picture actually on screen, if it has been measured.
-    ///
-    /// The id check is the whole point -- see [`Self::image_size`].
-    fn current_image_size(&self) -> Option<(f32, f32)> {
-        match self.image_size {
-            Some((id, w, h)) if id == self.current_image_id && w > 0.0 && h > 0.0 => Some((w, h)),
-            _ => None,
-        }
+    /// No picture is up any more: the one wanted would not decode or was
+    /// refused, or none is wanted. The plain colour underneath is drawn.
+    pub fn picture_gone(&mut self) {
+        self.shown = None;
+    }
+
+    /// The picture on screen, as `(id, width, height)`, if one is up with a
+    /// size it can be placed by.
+    #[must_use]
+    pub fn shown_picture(&self) -> Option<(u64, f32, f32)> {
+        self.shown.filter(|(_, w, h)| *w > 0.0 && *h > 0.0)
     }
 
     /// Allocate a new unique image ID.
@@ -1391,7 +1438,12 @@ impl Default for WallpaperManager {
 // Helper functions
 // ============================================================================
 
-/// Parse a 6-character hex color string (e.g., "1E1E2E") into a Color.
+/// Read a colour as the wallpaper's file keeps it: six hex digits, the `#`
+/// optional ("1E1E2E").
+///
+/// Checked as [`Color::from_hex_text`] checks, which the `from_str_radix`
+/// this used to be did not: it takes a leading `+`, so "+1E1E2" read as a
+/// colour.
 fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
@@ -1399,9 +1451,8 @@ fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
             "color: {s} (expected 6 hex digits)"
         )));
     }
-    let val =
-        u32::from_str_radix(s, 16).map_err(|_| ConfigError::InvalidValue(format!("color: {s}")))?;
-    Ok(Color::from_hex(val))
+    Color::from_hex_text(&format!("#{s}"))
+        .ok_or_else(|| ConfigError::InvalidValue(format!("color: {s}")))
 }
 
 /// Compute the destination rectangle for an image given the display area,
@@ -2210,6 +2261,75 @@ mod tests {
         );
     }
 
+    /// **A slideshow says when its next picture is due**, which is what the
+    /// shell sleeps until: now, to start the timer; then the rest of the
+    /// interval; then nothing for a slideshow with nothing to change to.
+    #[test]
+    fn a_slideshow_says_when_its_next_picture_is_due() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow(Path::new("/pics"), 30, false);
+        mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
+        assert_eq!(
+            mgr.next_change_in(0),
+            Some(0),
+            "the timer's start is due now"
+        );
+
+        // Started in the session's first second, which is second 0: the
+        // interval runs from there, and is not started again at the next tick.
+        assert!(!mgr.tick(0));
+        assert_eq!(mgr.next_change_in(0), Some(30));
+        assert!(!mgr.tick(1));
+        assert_eq!(mgr.next_change_in(12), Some(18));
+        assert!(mgr.tick(30), "the interval from second 0 passed");
+        assert_eq!(
+            mgr.next_change_in(30),
+            Some(30),
+            "the next picture's interval"
+        );
+
+        // Overdue is due now, not never.
+        assert_eq!(mgr.next_change_in(500), Some(0));
+    }
+
+    /// **A slideshow of one picture is not a slideshow**: it asks for no
+    /// wake-up, and its picture is not issued a new id -- which would have the
+    /// shell read and decode the same file every interval.
+    #[test]
+    fn a_slideshow_of_one_picture_does_not_change_or_ask_to() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_slideshow(Path::new("/pics"), 10, false);
+        mgr.populate_slideshow_paths(vec!["only.png".into()]);
+        let id = mgr.current_image_id();
+        assert_eq!(mgr.next_change_in(0), None);
+        assert!(!mgr.tick(100));
+        assert!(!mgr.tick(200));
+        assert_eq!(
+            mgr.current_image_id(),
+            id,
+            "the one picture was issued anew"
+        );
+    }
+
+    /// The other modes: a dynamic wallpaper is always moving, slowly; a colour
+    /// or a single picture never changes by itself.
+    #[test]
+    fn only_a_slideshow_or_a_dynamic_wallpaper_asks_to_be_woken() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_solid_color(Color::BLUE);
+        assert_eq!(mgr.next_change_in(0), None);
+        mgr.set_image(Path::new("/pics/a.png"), ImageFit::Fill);
+        assert_eq!(mgr.next_change_in(0), None);
+        mgr.set_dynamic_theme([
+            Color::RED,
+            Color::GREEN,
+            Color::BLUE,
+            Color::WHITE,
+            Color::BLACK,
+        ]);
+        assert_eq!(mgr.next_change_in(0), Some(DYNAMIC_REFRESH_SECS));
+    }
+
     /// An interval of zero is read as one second, not as "every frame".
     #[test]
     fn a_zero_interval_is_clamped() {
@@ -2557,14 +2677,29 @@ mod tests {
         }
     }
 
+    /// A picture is drawn once it is up, and not before: an id the
+    /// compositor holds no pixels for draws nothing, silently, so naming one
+    /// would be a frame that says it shows a picture and does not.
     #[test]
-    fn render_image_produces_fill_and_image() {
+    fn render_image_draws_the_picture_once_it_is_up() {
         let mut mgr = WallpaperManager::new();
         mgr.set_image(Path::new("/test.png"), ImageFit::Stretch);
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+        assert_eq!(
+            cmds.len(),
+            1,
+            "a picture still decoding was drawn: {cmds:?}"
+        );
+        assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
+
+        mgr.picture_ready(mgr.current_image_id(), 1920.0, 1080.0);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert_eq!(cmds.len(), 2);
         assert!(matches!(&cmds[0], RenderCommand::FillRect { .. }));
-        assert!(matches!(&cmds[1], RenderCommand::Image { .. }));
+        assert!(
+            matches!(&cmds[1], RenderCommand::Image { image_id, .. } if *image_id == mgr.current_image_id()),
+            "{cmds:?}"
+        );
     }
 
     /// The fit the user chose reaches the screen.
@@ -2592,7 +2727,7 @@ mod tests {
         fn rect_of(fit: ImageFit) -> (f32, f32, f32, f32) {
             let mut mgr = WallpaperManager::new();
             mgr.set_image(Path::new("/wide.png"), fit);
-            mgr.note_image_size(mgr.current_image_id(), 3000.0, 1000.0);
+            mgr.picture_ready(mgr.current_image_id(), 3000.0, 1000.0);
             let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
             cmds.iter()
                 .find_map(|c| match c {
@@ -2622,30 +2757,76 @@ mod tests {
         assert_ne!(fit, fill, "the fit setting changed nothing on screen");
     }
 
-    /// A size measured from a picture that is no longer up is not applied.
+    /// **The picture on screen stays on screen, at its own size, while the
+    /// next one decodes** -- and is replaced, at the new one's size, when it
+    /// is up.
     ///
-    /// The decode happens off in `session.rs` and takes as long as reading a
-    /// file; a slideshow that advances while one is in flight would otherwise
-    /// have the outgoing picture's proportions imposed on the incoming one.
+    /// Decoding a photograph takes a second or more, and happens on the
+    /// session's decoding thread. Drawing the picture *wanted* rather than the
+    /// one *up* would put the desktop's plain colour between every two slides
+    /// of a slideshow, or apply the outgoing picture's proportions to the
+    /// incoming one.
     #[test]
-    fn a_size_from_a_superseded_picture_is_ignored() {
+    fn the_picture_up_stays_while_the_next_one_decodes() {
+        fn drawn(mgr: &WallpaperManager) -> Option<(u64, f32, f32)> {
+            mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0)
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Image {
+                        image_id,
+                        y,
+                        height,
+                        ..
+                    } => Some((*image_id, *y, *height)),
+                    _ => None,
+                })
+        }
+
         let mut mgr = WallpaperManager::new();
         mgr.set_image(Path::new("/first.png"), ImageFit::Fit);
-        let stale = mgr.current_image_id();
-        mgr.set_image(Path::new("/second.png"), ImageFit::Fit);
-        assert_ne!(stale, mgr.current_image_id(), "the fixture reused the id");
-
-        mgr.note_image_size(stale, 3000.0, 1000.0);
-        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
-        let drawn = cmds.iter().find_map(|c| match c {
-            RenderCommand::Image { y, height, .. } => Some((*y, *height)),
-            _ => None,
-        });
-        assert_eq!(
-            drawn,
-            Some((0.0, 1080.0)),
-            "a measurement of the previous picture was applied to this one"
+        let first = mgr.current_image_id();
+        mgr.picture_ready(first, 3000.0, 1000.0);
+        let (id, y, height) = drawn(&mgr).expect("the first picture is up");
+        assert_eq!(id, first);
+        assert!(
+            y > 0.0 && height < 1080.0,
+            "3:1 in Fit is letterboxed: {y} {height}"
         );
+
+        mgr.set_image(Path::new("/second.png"), ImageFit::Fit);
+        let second = mgr.current_image_id();
+        assert_ne!(first, second, "the fixture reused the id");
+        assert_eq!(
+            drawn(&mgr),
+            Some((first, y, height)),
+            "the picture on screen went away, or changed shape, before the next was up"
+        );
+
+        mgr.picture_ready(second, 1000.0, 1000.0);
+        let (id, y, height) = drawn(&mgr).expect("the second picture is up");
+        assert_eq!(id, second);
+        assert_eq!(
+            (y, height),
+            (0.0, 1080.0),
+            "a square in Fit spans the height"
+        );
+
+        mgr.picture_gone();
+        assert_eq!(drawn(&mgr), None, "a picture that went is still drawn");
+    }
+
+    /// A picture measured with no size is not drawn: `compute_image_rect`
+    /// divides by it.
+    #[test]
+    fn a_picture_with_no_size_is_not_drawn() {
+        let mut mgr = WallpaperManager::new();
+        mgr.set_image(Path::new("/empty.png"), ImageFit::Fit);
+        mgr.picture_ready(mgr.current_image_id(), 0.0, 1000.0);
+        assert_eq!(mgr.shown_picture(), None);
+        mgr.picture_ready(mgr.current_image_id(), 1000.0, 0.0);
+        assert_eq!(mgr.shown_picture(), None);
+        let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
     }
 
     #[test]
@@ -2686,6 +2867,8 @@ mod tests {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow(Path::new("/walls"), 300, false);
         mgr.populate_slideshow_paths(vec![PathBuf::from("/walls/one.png")]);
+        // What the session says once the slide is decoded and uploaded.
+        mgr.picture_ready(mgr.current_image_id(), 1920.0, 1080.0);
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert_eq!(
             cmds.len(),
@@ -3104,6 +3287,8 @@ mod tests {
     #[test]
     fn parse_hex_invalid_chars() {
         assert!(parse_hex_color("ZZZZZZ").is_err());
+        // A sign is not a digit, though `from_str_radix` takes one.
+        assert!(parse_hex_color("+1E1E2").is_err());
     }
 
     // ------------------------------------------------------------------

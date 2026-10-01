@@ -1,0 +1,14 @@
+# glibc 2.39's tgkill on Linux (posix/tools/oracle/tgkill_harness.py):
+# <case> = <return> <errno>
+tgid 0 = -1 EINVAL
+tid 0 = -1 EINVAL
+tgid -1 = -1 EINVAL
+tid -5 = -1 EINVAL
+no such thread here, bad signal = -1 ESRCH
+no such process, bad signal = -1 ESRCH
+this thread, signal 65 = -1 EINVAL
+this thread, signal -1 = -1 EINVAL
+this thread, signal 0 = 0 0
+another process's main thread, signal 0 = 0 0
+another process, a thread not its, signal 0 = -1 ESRCH
+this thread, SIGUSR1 = 0 0, the handler before the return, told SI_TKILL

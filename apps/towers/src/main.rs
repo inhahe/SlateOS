@@ -66,33 +66,48 @@
 //! `3^n` positions, for every disk count the game offers — computed
 //! independently of the code under test.
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::surface::Surface;
 use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha, only the entries this program paints with ──
-const COL_BASE: Color = Color::from_hex(0x1E1E2E);
-const COL_CRUST: Color = Color::from_hex(0x11111B);
-const COL_SURFACE0: Color = Color::from_hex(0x313244);
-const COL_SURFACE1: Color = Color::from_hex(0x45475A);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-const COL_OVERLAY: Color = Color::from_hex(0x6C7086);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_GREEN: Color = Color::from_hex(0xA6E3A1);
-const COL_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COL_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// A disk's colour is how a player follows it from peg to peg, so the disks
+// keep theirs in every theme; the pegs, the base, the board and the chrome
+// round them follow the user's palette (the operator's answer to C-Q16,
+// §1422, and lane C's call for this game). It was all a copy of Catppuccin
+// Mocha, dark on a light desktop.
 
-/// Drawn over the window behind the help sheet, and over a solved puzzle.
-const COL_SCRIM: Color = Color::rgba(0x1E, 0x1E, 0x2E, 158);
-const COL_VEIL: Color = Color::rgba(0x11, 0x11, 0x1B, 214);
+/// A disk's number: every disk is pale, so near-black on all of them.
+///
+/// A neutral near-black and not Mocha's crust (`11111B`): the palette test
+/// names this as the game's own colour and matches it on RGB, so Mocha's
+/// crust here would let a leftover Mocha crust through in a light window.
+const DISK_INK: Color = Color::from_hex(0x161616);
+
+/// The colours the window draws in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+        }
+    }
+}
 
 /// Disk colours, smallest first. A disk keeps its colour whatever peg it is on,
 /// which is the only cue that tells you two stacks apart at a glance.
@@ -536,6 +551,11 @@ pub struct Towers {
     show_help: bool,
     width: f32,
     height: f32,
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame. A reset rebuilds the stacks in this same state, so they
+    /// carry over.
+    palette: Palette,
 }
 
 impl Default for Towers {
@@ -562,6 +582,7 @@ impl Towers {
             show_help: false,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
+            palette: Palette::for_mode(false),
         };
         app.reset();
         app
@@ -1211,26 +1232,34 @@ fn ring(f: &mut Frame, r: Rect, thickness: f32, color: Color) {
     );
 }
 
-/// One button: a filled pill with a centred caption, and its hit box.
-fn button(f: &mut Frame, r: Rect, body: &str, size: f32, live: bool, target: Target) {
+/// One button: the toolkit's push button in the palette, switched off when
+/// it would do nothing, with its label at the window's size, and its hit box.
+#[allow(clippy::too_many_arguments)]
+fn button(
+    f: &mut Frame,
+    palette: &Palette,
+    r: Rect,
+    body: &str,
+    size: f32,
+    live: bool,
+    target: Target,
+    ground: Color,
+) {
     if r.w <= 0.0 || r.h <= 0.0 {
         return;
     }
-    fill(
+    gamechrome::button(
         f,
-        r,
-        if live { COL_SURFACE0 } else { COL_CRUST },
-        (r.h * 0.28).min(8.0),
-    );
-    centred_in(
-        f,
-        r.x,
-        r.w,
-        r.y + r.h / 2.0,
+        palette,
+        (r.x, r.y, r.w, r.h),
         body,
         size,
-        if live { COL_TEXT } else { COL_OVERLAY },
-        FontWeightHint::Bold,
+        guitk::button::Kind::Plain,
+        guitk::button::State {
+            disabled: !live,
+            ..guitk::button::State::default()
+        },
+        ground,
     );
     f.hit(target, r);
 }
@@ -1243,7 +1272,7 @@ pub fn disk_color(size: u8) -> Color {
         .saturating_sub(1)
         .checked_rem(DISK_COLORS.len())
         .unwrap_or(0);
-    DISK_COLORS.get(index).copied().unwrap_or(COL_TEXT)
+    DISK_COLORS.get(index).copied().unwrap_or(DISK_INK)
 }
 
 impl Towers {
@@ -1272,31 +1301,32 @@ impl Towers {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = self.layout(width, height);
         let mut f = Frame::new(l.window.w, l.window.h);
-        fill(&mut f, l.window, COL_BASE, 0.0);
+        let c = Colours::of(&self.palette);
+        fill(&mut f, l.window, c.chrome.page, 0.0);
 
         if l.shows_header() {
-            self.draw_header(&mut f, &l);
+            self.draw_header(&mut f, &l, &c);
         }
         if l.shows_info() {
-            self.draw_info(&mut f, &l);
+            self.draw_info(&mut f, &l, &c);
         }
-        self.draw_board(&mut f, &l);
+        self.draw_board(&mut f, &l, &c);
         if !self.playing() {
-            self.draw_banner(&mut f, &l);
+            self.draw_banner(&mut f, &l, &c);
         }
         if l.shows_controls() {
-            self.draw_controls(&mut f, &l);
+            self.draw_controls(&mut f, &l, &c);
         }
         if l.shows_scores() {
-            self.draw_scores(&mut f, &l);
+            self.draw_scores(&mut f, &l, &c);
         }
         if self.show_help {
-            draw_help(&mut f, &l);
+            draw_help(&mut f, &l, &c, &self.palette);
         }
         f
     }
 
-    fn draw_header(&self, f: &mut Frame, l: &Layout) {
+    fn draw_header(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let cy = l.header.y + l.header.h / 2.0;
         let first = l.header_button(0);
         let title_span = (first.x - l.pad * 2.0 - l.header.x).max(0.0);
@@ -1306,7 +1336,7 @@ impl Towers {
             cy - text::line_height(l.font, FontWeightHint::Bold) / 2.0,
             "Tower of Hanoi",
             l.font,
-            COL_LAVENDER,
+            c.chrome.title,
             FontWeightHint::Bold,
             Some(title_span),
         );
@@ -1317,22 +1347,28 @@ impl Towers {
         for i in 0..2 {
             button(
                 f,
+                &self.palette,
                 l.header_button(i),
                 captions.get(i).copied().unwrap_or(""),
                 l.small,
                 live.get(i).copied().unwrap_or(true),
                 targets.get(i).copied().unwrap_or(Target::Help),
+                c.chrome.page,
             );
         }
     }
 
-    fn draw_info(&self, f: &mut Frame, l: &Layout) {
+    fn draw_info(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let colour = if self.state == GameState::Solved {
-            if self.assisted { COL_YELLOW } else { COL_GREEN }
+            if self.assisted {
+                c.chrome.even
+            } else {
+                c.chrome.good
+            }
         } else if self.held.is_some() || self.solving {
-            COL_YELLOW
+            c.chrome.even
         } else {
-            COL_SUBTEXT
+            c.chrome.dim
         };
         centred_in(
             f,
@@ -1346,11 +1382,11 @@ impl Towers {
         );
     }
 
-    fn draw_board(&self, f: &mut Frame, l: &Layout) {
+    fn draw_board(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         if l.board.w <= 0.0 || l.board.h <= 0.0 {
             return;
         }
-        fill(f, l.board, COL_CRUST, (l.board.h * 0.04).min(12.0));
+        fill(f, l.board, c.chrome.well, (l.board.h * 0.04).min(12.0));
 
         let base_y = l.base_y();
         let disk_h = l.disk_h(self.disks);
@@ -1367,8 +1403,8 @@ impl Towers {
                     (col.w - 4.0).max(0.0),
                     (col.h - 4.0).max(0.0),
                 );
-                fill(f, inset, COL_BASE, (col.w * 0.04).min(10.0));
-                ring(f, inset, (col.w * 0.012).max(1.5), COL_LAVENDER);
+                fill(f, inset, c.chrome.page, (col.w * 0.04).min(10.0));
+                ring(f, inset, (col.w * 0.012).max(1.5), c.chrome.ring);
             }
 
             centred_in(
@@ -1378,7 +1414,7 @@ impl Towers {
                 col.y + label_h / 2.0,
                 &format!("{}", p.saturating_add(1)),
                 l.small,
-                if aimed { COL_YELLOW } else { COL_OVERLAY },
+                if aimed { c.chrome.even } else { c.chrome.dim },
                 FontWeightHint::Bold,
             );
 
@@ -1395,14 +1431,14 @@ impl Towers {
                     rod_w,
                     (base_y - rod_top).max(0.0),
                 ),
-                COL_SURFACE1,
+                c.chrome.lit,
                 rod_w / 2.0,
             );
             let plinth_w = col.w * 0.9;
             fill(
                 f,
                 Rect::new(cx - plinth_w / 2.0, base_y, plinth_w, plinth),
-                COL_SURFACE1,
+                c.chrome.lit,
                 plinth / 2.0,
             );
 
@@ -1422,7 +1458,7 @@ impl Towers {
                         r.y + r.h / 2.0,
                         &format!("{}", size),
                         l.small,
-                        COL_CRUST,
+                        DISK_INK,
                         FontWeightHint::Bold,
                     );
                 }
@@ -1446,12 +1482,12 @@ impl Towers {
                 (disk_h - (disk_h * 0.12).min(3.0)).max(1.0),
             );
             fill(f, r, disk_color(size), (r.h * 0.35).min(6.0));
-            ring(f, r, (r.h * 0.12).max(1.0), COL_TEXT);
+            ring(f, r, (r.h * 0.12).max(1.0), c.chrome.text);
         }
     }
 
     /// The result, over the finished puzzle.
-    fn draw_banner(&self, f: &mut Frame, l: &Layout) {
+    fn draw_banner(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let h = (l.board.h * 0.24).clamp(0.0, 56.0);
         let w = (l.board.w * 0.8).min(420.0);
         if h <= 0.0 || w <= 0.0 {
@@ -1463,7 +1499,15 @@ impl Towers {
             w,
             h,
         );
-        fill(f, r, COL_VEIL, (h * 0.3).min(12.0));
+        // The toolkit's panel, a ground of its own over the pegs. It was the
+        // chrome's veil, and the palette's inks -- made for the page -- fell
+        // to 4.2:1 on it in a light theme. On the panel the chrome's roles
+        // read as they are: the palette inks its text colours for its own
+        // panel (`Palette::ink`).
+        if r.w >= 1.0 && r.h >= 1.0 {
+            self.palette
+                .push_surface(f, r.x, r.y, r.w, r.h, (h * 0.3).min(12.0), Surface::Panel);
+        }
         centred_in(
             f,
             r.x,
@@ -1471,7 +1515,11 @@ impl Towers {
             r.y + r.h * 0.36,
             &self.status(),
             l.small,
-            if self.assisted { COL_YELLOW } else { COL_GREEN },
+            if self.assisted {
+                c.chrome.even
+            } else {
+                c.chrome.good
+            },
             FontWeightHint::Bold,
         );
         centred_in(
@@ -1481,29 +1529,31 @@ impl Towers {
             r.y + r.h * 0.74,
             "N for a new game, Up or Down to change the disk count",
             (l.small - 1.0).max(6.0),
-            COL_SUBTEXT,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
     }
 
-    fn draw_controls(&self, f: &mut Frame, l: &Layout) {
+    fn draw_controls(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         let fewer = self.disks.saturating_sub(1);
         let more = self.disks.saturating_add(1);
         let solve = if self.solving { "Stop" } else { "Solve" };
         button(
             f,
+            &self.palette,
             l.control(0),
             "Fewer",
             l.small,
             self.enabled(Action::SetDisks(fewer)),
             Target::Fewer,
+            c.chrome.page,
         );
 
         // The readout between the two buttons is not a control, so it records
         // no hit box: clicking it must do nothing rather than doing whichever
         // of its neighbours happens to be drawn underneath.
         let mid = l.control(1);
-        fill(f, mid, COL_CRUST, (mid.h * 0.28).min(8.0));
+        fill(f, mid, c.chrome.well, (mid.h * 0.28).min(8.0));
         centred_in(
             f,
             mid.x,
@@ -1511,37 +1561,43 @@ impl Towers {
             mid.y + mid.h / 2.0,
             &format!("{} disks", self.disks),
             l.small,
-            COL_SUBTEXT,
+            c.chrome.dim,
             FontWeightHint::Regular,
         );
 
         button(
             f,
+            &self.palette,
             l.control(2),
             "More",
             l.small,
             self.enabled(Action::SetDisks(more)),
             Target::More,
+            c.chrome.page,
         );
         button(
             f,
+            &self.palette,
             l.control(3),
             "Undo",
             l.small,
             self.enabled(Action::Undo),
             Target::Undo,
+            c.chrome.page,
         );
         button(
             f,
+            &self.palette,
             l.control(4),
             solve,
             l.small,
             self.enabled(Action::ToggleSolve),
             Target::Solve,
+            c.chrome.page,
         );
     }
 
-    fn draw_scores(&self, f: &mut Frame, l: &Layout) {
+    fn draw_scores(&self, f: &mut Frame, l: &Layout, c: &Colours) {
         for i in 0..DISK_CHOICES {
             let r = l.score_cell(i);
             if r.w <= 0.0 || r.h <= 0.0 {
@@ -1549,7 +1605,10 @@ impl Towers {
             }
             let disks = MIN_DISKS.saturating_add(i);
             let here = disks == self.disks;
-            fill(f, r, COL_CRUST, (r.h * 0.22).min(7.0));
+            fill(f, r, c.chrome.well, (r.h * 0.22).min(7.0));
+            // Written for the well, which is not the page: the page's grey
+            // was 4.2:1 on it in a light theme.
+            let on = c.chrome.on(c.chrome.well);
             let best = self.best.get(i).copied().flatten();
             let shortest = pow2(disks as u32).saturating_sub(1);
             let body = match best {
@@ -1565,11 +1624,11 @@ impl Towers {
                 &body,
                 (l.small - 1.0).max(6.0),
                 if here {
-                    COL_YELLOW
+                    on.even
                 } else if best.is_some() {
-                    COL_SUBTEXT
+                    on.text
                 } else {
-                    COL_OVERLAY
+                    on.dim
                 },
                 if here {
                     FontWeightHint::Bold
@@ -1581,12 +1640,18 @@ impl Towers {
     }
 }
 
-fn draw_help(f: &mut Frame, l: &Layout) {
+fn draw_help(f: &mut Frame, l: &Layout, c: &Colours, palette: &Palette) {
     // Dim the whole window first, then the panel on top of it, so the sheet
     // reads as in front of the puzzle rather than part of it.
-    fill(f, l.window, COL_SCRIM, 0.0);
+    fill(f, l.window, c.chrome.scrim, 0.0);
     let p = l.help;
-    fill(f, p, COL_VEIL, 10.0);
+    // The toolkit's panel. Under a point either way its border, stroked half
+    // a point in, would reach outside the sheet.
+    if p.w >= 1.0 && p.h >= 1.0 {
+        palette.push_surface(f, p.x, p.y, p.w, p.h, 10.0, Surface::Panel);
+    }
+    // On the panel the chrome's roles read as they are: the palette inks
+    // its text colours for its own panel (`Palette::ink`).
 
     let pad = (p.w * 0.05).clamp(6.0, 18.0);
     let inner = (p.w - pad * 2.0).max(0.0);
@@ -1597,7 +1662,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
         p.y + pad,
         HELP_TITLE,
         l.font,
-        COL_YELLOW,
+        c.chrome.even,
         FontWeightHint::Bold,
         Some(inner),
     );
@@ -1623,7 +1688,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
             y,
             k,
             l.small,
-            COL_BLUE,
+            c.chrome.key,
             FontWeightHint::Bold,
             Some(key_span),
         );
@@ -1633,7 +1698,7 @@ fn draw_help(f: &mut Frame, l: &Layout) {
             y,
             v,
             l.small,
-            COL_TEXT,
+            c.chrome.text,
             FontWeightHint::Regular,
             Some((inner - key_span).max(0.0)),
         );
@@ -1793,6 +1858,10 @@ pub fn handle_event(app: &mut Towers, event: &Event) -> EventResult {
 }
 
 impl App for Towers {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Tower of Hanoi".to_string()
     }
@@ -1880,6 +1949,188 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// **The window is drawn in the user's colours**, light or dark -- a
+    /// disk in hand over an aimed peg, a solved puzzle, and the help sheet --
+    /// with only the disks' own colours and their numbers' ink not the
+    /// palette's (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let mut derived: Vec<Color> = DISK_COLORS.to_vec();
+            derived.push(DISK_INK);
+            derived.extend(gamechrome::button_colours(
+                &p,
+                guitk::button::Kind::Plain,
+                Chrome::of(&p).page,
+            ));
+            // The records' words, written for the well.
+            let chrome = gamechrome::Chrome::of(&p);
+            derived.extend(chrome.on(chrome.well).inks());
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("towers, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the palette and legibility tests read, drawn in `p`'s
+    /// colours, and a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame)> {
+        let mut app = Towers::new();
+        app.theme_changed(p);
+        app.set_disks(8);
+        assert!(app.grab(0), "the first peg's top disk could not be taken");
+        let holding = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let cramped = app.frame(320.0, 360.0);
+        app.show_help = true;
+        let help = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut solved = Towers::new();
+        solved.theme_changed(p);
+        solve_by_hand(&mut solved);
+        let solved = solved.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        vec![
+            ("holding", holding),
+            ("help", help),
+            ("solved", solved),
+            ("cramped", cramped),
+        ]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it). A
+    /// switched-off button's label is exempt, as WCAG exempts an inactive
+    /// control.
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            let chrome = gamechrome::Chrome::of(&p);
+            let off: Vec<_> = [chrome.band, chrome.page, chrome.well]
+                .into_iter()
+                .flat_map(|ground| {
+                    [guitk::button::Kind::Plain, guitk::button::Kind::Primary].map(|kind| {
+                        guitk::button::paint(
+                            &p,
+                            kind,
+                            guitk::button::State {
+                                disabled: true,
+                                ..guitk::button::State::default()
+                            },
+                            ground,
+                        )
+                    })
+                })
+                .collect();
+            let exempt = |r: &gamechrome::legibility::Read| {
+                off.iter()
+                    .any(|o| r.ink == o.ink && (r.ground == o.lower || r.ground == o.upper))
+            };
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, exempt) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "towers: {bad:#?}");
+    }
+
+    /// **A button that would do nothing is switched off**, in the toolkit's
+    /// look for it: Fewer at the fewest disks, and live again above them.
+    #[test]
+    fn a_button_that_would_do_nothing_is_switched_off() {
+        let p = Palette::for_mode(false);
+        let page = Chrome::of(&p).page;
+        let face = |disabled| {
+            guitk::button::paint(
+                &p,
+                guitk::button::Kind::Plain,
+                guitk::button::State {
+                    disabled,
+                    ..guitk::button::State::default()
+                },
+                page,
+            )
+            .lower
+        };
+        let (off, on) = (face(true), face(false));
+        // The face under the button's own label.
+        let face_under = |app: &Towers, caption: &str| {
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            let (tx, ty) = f
+                .commands()
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, x, y, .. } if text == caption => Some((*x, *y)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{caption} is not drawn"));
+            f.commands().iter().find_map(|cmd| match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if Rect::new(*x, *y, *width, *height).contains(tx + 1.0, ty + 1.0)
+                    && (*color == off || *color == on) =>
+                {
+                    Some(*color)
+                }
+                _ => None,
+            })
+        };
+        let mut app = Towers::new();
+        assert!(app.set_disks(MIN_DISKS) || app.disks == MIN_DISKS);
+        assert_eq!(
+            face_under(&app, "Fewer"),
+            Some(off),
+            "Fewer looks live at the fewest"
+        );
+        assert!(app.set_disks(MIN_DISKS + 1));
+        assert_eq!(
+            face_under(&app, "Fewer"),
+            Some(on),
+            "Fewer looks off with a disk to lose"
+        );
+    }
+
+    /// **Every disk's number reads on it**: near-black on every disk.
+    #[test]
+    fn every_disks_number_reads_on_it() {
+        for disk in DISK_COLORS {
+            let ratio = guitk::theme::contrast_ratio(DISK_INK, disk);
+            assert!(ratio >= 4.5, "the number is {ratio:.2}:1 on {disk:?}");
+        }
+    }
     use guitk::event::Modifiers;
     use guitk::probe;
     use std::collections::{HashMap, VecDeque};

@@ -3445,8 +3445,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
             "[spawn]   FAIL: Linux SysV stack — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -3458,8 +3457,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
             "[spawn]   FAIL: Linux SysV stack — expected exit code 3 (argc), got {:?}",
             ec
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -3473,8 +3471,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                 Some(t) => t,
                 None => {
                     serial_println!("[spawn]   FAIL: saved auxv length underflow");
-                    thread::on_thread_exit(result.task_id);
-                    pcb::destroy(result.pid);
+                    teardown_fixture(result.pid, result.task_id);
                     return Err(KernelError::InternalError);
                 }
             };
@@ -3483,8 +3480,7 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                     "[spawn]   FAIL: saved auxv not AT_NULL-terminated (len={})",
                     auxv.len()
                 );
-                thread::on_thread_exit(result.task_id);
-                pcb::destroy(result.pid);
+                teardown_fixture(result.pid, result.task_id);
                 return Err(KernelError::InternalError);
             }
         }
@@ -3493,14 +3489,12 @@ fn test_spawn_linux_sysv_stack() -> KernelResult<()> {
                 "[spawn]   FAIL: saved auxv missing/misaligned: {:?}",
                 other.as_ref().map(alloc::vec::Vec::len)
             );
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Linux SysV initial-stack delivery (exit(argc)): OK");
     serial_println!("[spawn]   Linux auxv persisted for PR_GET_AUXV / procfs: OK");
@@ -3585,8 +3579,7 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(INTERP_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -3731,8 +3724,7 @@ pub fn self_test_file_handle_ownership() -> KernelResult<()> {
             crate::sched::yield_now();
             crate::sched::yield_now();
             let code = pcb::exit_code(result.pid);
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             match code {
                 Some(0) => {}
                 Some(1) => {
@@ -3790,8 +3782,7 @@ pub fn self_test_file_handle_ownership() -> KernelResult<()> {
                  handle {victim_handle}, which its claimed parent does not own; the child \
                  was handed a duplicate of another process's open file."
             );
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
         }
         Err(e) => {
             failed += 1;
@@ -3934,8 +3925,7 @@ pub fn self_test_openat2_beneath() -> KernelResult<()> {
         crate::sched::yield_now();
         crate::sched::yield_now();
         let code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         code
     };
 
@@ -4139,8 +4129,7 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -5439,8 +5428,7 @@ fn run_ring3_http_capstone() {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -5535,8 +5523,7 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -5650,8 +5637,7 @@ fn run_ring3_udp6_capstone() {
     }
 
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     match exit_code {
         Some(0) => serial_println!(
@@ -7100,8 +7086,7 @@ pub fn self_test_linux_brk() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7221,8 +7206,7 @@ pub fn self_test_linux_sa_restart() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7327,8 +7311,7 @@ pub fn self_test_linux_signalfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7442,8 +7425,7 @@ pub fn self_test_linux_eventfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7556,8 +7538,7 @@ pub fn self_test_linux_timerfd_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7670,8 +7651,7 @@ pub fn self_test_linux_inotify_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7785,8 +7765,7 @@ pub fn self_test_linux_poll_interrupt() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7898,8 +7877,7 @@ pub fn self_test_linux_poll_empty_infinite() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -7988,8 +7966,7 @@ pub fn self_test_linux_argv0_deref() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8108,8 +8085,7 @@ pub fn self_test_fastpy_slateos_tls() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8227,8 +8203,7 @@ pub fn self_test_ctls_thread() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8355,8 +8330,7 @@ pub fn self_test_clibc_float() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8483,8 +8457,7 @@ pub fn self_test_clibm() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8611,8 +8584,7 @@ pub fn self_test_clongdouble() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8736,8 +8708,7 @@ pub fn self_test_cfortify() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -8903,8 +8874,7 @@ pub fn self_test_ctest_keylayout() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9078,8 +9048,7 @@ pub fn self_test_ctest_python_repl() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9297,8 +9266,7 @@ pub fn self_test_coreutils_runs() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9486,8 +9454,7 @@ pub fn self_test_zombiewait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9580,8 +9547,7 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -9766,8 +9732,7 @@ pub fn self_test_jobctl() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10034,8 +9999,7 @@ pub fn self_test_cctty() -> KernelResult<()> {
     // the console, so this is what the session-exit release has to clean up.
     let held_at_exit = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // And after: destroying the session's last process must release it.
     let held_after_destroy = pcb::ctty_fg_pgrp(crate::tty::CONSOLE);
@@ -10220,8 +10184,7 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10385,8 +10348,7 @@ pub fn self_test_ctest_initfini() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10595,8 +10557,7 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10800,8 +10761,7 @@ pub fn self_test_ctest_pty() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10944,8 +10904,7 @@ pub fn self_test_cscanf() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -10969,6 +10928,382 @@ pub fn self_test_cscanf() -> KernelResult<()> {
          v*scanf a correct va_list past the six-register boundary, so destination \
          pointers come from the caller's overflow area rather than a stack word past \
          a fixed array): OK"
+    );
+    Ok(())
+}
+
+/// Take down a fixture process a rung spawned, whatever state it is in.
+///
+/// A fixture that reached `Zombie` has no thread left, and is reaped as the
+/// rungs always reaped one. A fixture that did not -- its rung's deadline
+/// passed -- still has scheduler tasks, and `pcb::destroy` frees the address
+/// space they would run on next. So its threads are killed first, which is
+/// also what makes it a zombie, and only then is it destroyed: the order the
+/// `fastpy-nice` rung has always used for the tool it stops on purpose.
+///
+/// A fixture's own children are its to reap: one that forks waits for them
+/// before it exits, or leaves orphans no rung can see.
+fn teardown_fixture(pid: ProcessId, task_id: TaskId) {
+    if pcb::state(pid) != Some(pcb::ProcessState::Zombie) {
+        thread::kill_process_threads(pid);
+        for _ in 0..2000 {
+            if pcb::state(pid) == Some(pcb::ProcessState::Zombie) {
+                break;
+            }
+            crate::sched::yield_now();
+        }
+    }
+    thread::on_thread_exit(task_id);
+    pcb::destroy(pid);
+}
+
+/// Where lane D lists the C fixtures [`self_test_ctest_generic`] runs:
+/// `services/ctest-generic.list`, staged by `scripts/create-ext4-rootfs.sh`.
+const CTEST_GENERIC_LIST: &str = "/mnt/tests/ctest-generic.list";
+
+/// The longest a listed fixture may ask for, in seconds: a bound, so that a
+/// typo (`300000`) is a line the rung cannot read rather than a boot held for
+/// days. Five times the longest any fixture has asked for so far.
+const CTEST_GENERIC_MAX_SECONDS: u64 = 600;
+
+/// One line of the list.
+struct GenericFixture<'a> {
+    /// `/mnt/tests/<name>.elf`, and its `argv[0]`.
+    name: &'a str,
+    /// The capabilities it is spawned holding.
+    grants: alloc::vec::Vec<(ResourceType, u64, Rights)>,
+    /// How long it may take, from spawn to `Zombie`.
+    seconds: u64,
+}
+
+/// What a listed fixture came to, when it did not fail.
+enum GenericOutcome {
+    Passed,
+    /// Its ELF is not staged: counted into the end-of-boot verdict by
+    /// [`pathz_test_elf`], as any absent fixture is.
+    Skipped,
+}
+
+/// The capability a grant word in the list stands for.
+///
+/// A closed vocabulary rather than capabilities spelled out in the list: the
+/// list is lane D's and grants are the kernel's decision, so a fixture that
+/// needs a new one asks for a new word, and this table says what it means.
+fn ctest_generic_grant(word: &str) -> Option<(ResourceType, u64, Rights)> {
+    match word {
+        // One wildcard File capability, which every file-touching fixture so
+        // far has needed (`requests/d-a-one-rung-for-every-c-fixture.md`).
+        "file" => Some((
+            ResourceType::File,
+            0,
+            Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::METADATA,
+        )),
+        // The right to change Secure Boot's lists: the granted arm of
+        // SYS_SECUREBOOT_ENROLL and _REMOVE (design-decisions §1501).
+        "secureboot" => Some((ResourceType::Process, 0, Rights::ENROLL_SECUREBOOT)),
+        _ => None,
+    }
+}
+
+/// A name the rung may turn into a path: letters, digits, `-`, `_` and `.`,
+/// not starting with `.`, at most 64 bytes. Anything else -- a `/` above all
+/// -- would load a file other than `/mnt/tests/<name>.elf`.
+fn ctest_generic_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Parse the list: one fixture a line, `name grants seconds` separated by
+/// blanks; `#` to the end of a line is a comment; blank lines are ignored.
+/// `grants` is `-` for none, or grant words joined by `,`.
+///
+/// # Errors
+///
+/// The 1-based number of the first line it cannot read, and why. A line is
+/// refused rather than skipped: the rootfs script refuses such a list, so one
+/// reaching the image is a fault in that script or in this parser, and a
+/// fixture silently not run is the thing this rung exists to prevent.
+fn parse_ctest_generic_list(
+    text: &str,
+) -> Result<alloc::vec::Vec<GenericFixture<'_>>, (usize, &'static str)> {
+    let mut fixtures: alloc::vec::Vec<GenericFixture<'_>> = alloc::vec::Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let number = index.saturating_add(1);
+        let line = raw.split('#').next().unwrap_or_default();
+        let mut fields = line.split_ascii_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let (Some(grants), Some(seconds), None) = (fields.next(), fields.next(), fields.next())
+        else {
+            return Err((number, "not three fields (name, grants, seconds)"));
+        };
+        if !ctest_generic_name_ok(name) {
+            return Err((
+                number,
+                "the name is not a fixture name (letters, digits, '-', '_', '.')",
+            ));
+        }
+        if fixtures.iter().any(|f| f.name == name) {
+            return Err((number, "the fixture is listed twice"));
+        }
+        let mut caps = alloc::vec::Vec::new();
+        if grants != "-" {
+            for word in grants.split(',') {
+                let Some(cap) = ctest_generic_grant(word) else {
+                    return Err((number, "a grant word this kernel does not know"));
+                };
+                caps.push(cap);
+            }
+        }
+        let Ok(seconds) = seconds.parse::<u64>() else {
+            return Err((number, "seconds is not a whole number"));
+        };
+        if seconds == 0 || seconds > CTEST_GENERIC_MAX_SECONDS {
+            return Err((number, "seconds is 0 or more than 600"));
+        }
+        fixtures.push(GenericFixture {
+            name,
+            grants: caps,
+            seconds,
+        });
+    }
+    Ok(fixtures)
+}
+
+/// Run one listed fixture: spawn it with its grants, wait for it until its
+/// deadline, take it down whatever happened, and judge its exit code.
+fn run_ctest_generic(fixture: &GenericFixture<'_>) -> KernelResult<GenericOutcome> {
+    /// Every C fixture's "every check passed".
+    const EXPECTED: i32 = 42;
+
+    let name = fixture.name;
+    let Some(elf) = pathz_test_elf(name, name)? else {
+        return Ok(GenericOutcome::Skipped);
+    };
+    serial_println!(
+        "[spawn] Running {} (ring 3, C fixture, generic rung, {} s allowed, {} bytes ELF)...",
+        name,
+        fixture.seconds,
+        elf.len()
+    );
+
+    let argv: &[&[u8]] = &[name.as_bytes()];
+    let options = SpawnOptions {
+        name,
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &fixture.grants,
+        fd_map: &[],
+        argv,
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let result = match spawn_process(&elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): spawn returned {:?}",
+                name,
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    // A time, not a count of yields: a fixture that sleeps is judged by the
+    // clock it reads, however busy the machine is.
+    let deadline = crate::hrtimer::now_ns()
+        .saturating_add(fixture.seconds.saturating_mul(1_000_000_000));
+    let finished = loop {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            break true;
+        }
+        if crate::hrtimer::now_ns() >= deadline {
+            break false;
+        }
+        crate::sched::yield_now();
+    };
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if !finished {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): still running at its \
+             deadline, {} s after spawn, and taken down. Codes in services/{}/main.c",
+            name,
+            fixture.seconds,
+            name
+        );
+        return Err(KernelError::TimedOut);
+    }
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: {} (ring 3, C fixture, generic rung): ended with exit code {:?}, \
+             expected {}. Codes in services/{}/main.c",
+            name,
+            exit_code,
+            EXPECTED,
+            name
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[spawn]   {} (ring 3, C fixture, generic rung): OK", name);
+    Ok(GenericOutcome::Passed)
+}
+
+/// One rung for every C fixture lane D lists in `/mnt/tests/ctest-generic.list`
+/// (`requests/d-a-one-rung-for-every-c-fixture.md`).
+///
+/// A rung per fixture was the same thirty lines each time, and a new fixture
+/// -- or a change to one's grants or time -- needed a kernel change. Lane D
+/// keeps the list, so neither does now. Each fixture is spawned with
+/// `argv = [<name>]`, no environment and the capabilities its grant words
+/// stand for ([`ctest_generic_grant`]), and given until a deadline in seconds.
+/// 42 is a pass, as for every C fixture; anything else names the fixture and
+/// points at the code legend at the top of its `main.c`, so the rung does not
+/// keep copies of legends that would drift.
+///
+/// Every listed fixture runs even after one fails, and the rung fails if any
+/// did. No list in the image is a counted skip, not a failure; a line that
+/// cannot be read is a failure.
+pub fn self_test_ctest_generic() -> KernelResult<()> {
+    const RUNG: &str = "ctest-generic";
+
+    if !crate::fs::selftest::is_mounted(FIXTURE_MOUNT) {
+        pathz_skip(
+            format_args!("{RUNG}"),
+            &alloc::format!("{CTEST_GENERIC_LIST} (nothing is mounted at {FIXTURE_MOUNT})"),
+        );
+        return Ok(());
+    }
+    let bytes = match crate::fs::Vfs::read_file(CTEST_GENERIC_LIST) {
+        Ok(b) => b,
+        Err(e) => return pathz_fixture_absent(RUNG, CTEST_GENERIC_LIST, &e),
+    };
+    let Ok(text) = core::str::from_utf8(&bytes) else {
+        serial_println!(
+            "[spawn]   FAIL: {}: {} is not UTF-8 text",
+            RUNG,
+            CTEST_GENERIC_LIST
+        );
+        return Err(KernelError::InternalError);
+    };
+    let fixtures = match parse_ctest_generic_list(text) {
+        Ok(f) => f,
+        Err((line, why)) => {
+            serial_println!(
+                "[spawn]   FAIL: {}: {} line {}: {} -- scripts/create-ext4-rootfs.sh should \
+                 have refused it",
+                RUNG,
+                CTEST_GENERIC_LIST,
+                line,
+                why
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    if fixtures.is_empty() {
+        serial_println!(
+            "[spawn]   {}: the list names no fixtures, so there is nothing to run: OK",
+            RUNG
+        );
+        return Ok(());
+    }
+
+    let (mut passed, mut skipped, mut failed) = (0usize, 0usize, 0usize);
+    for fixture in &fixtures {
+        match run_ctest_generic(fixture) {
+            Ok(GenericOutcome::Passed) => passed = passed.saturating_add(1),
+            Ok(GenericOutcome::Skipped) => skipped = skipped.saturating_add(1),
+            // Its FAIL line, naming it and why, is already printed; what is
+            // left to do is count it, so the rung fails once every fixture
+            // has had its turn.
+            Err(_) => failed = failed.saturating_add(1),
+        }
+    }
+    serial_println!(
+        "[spawn]   {}: {} listed -- {} passed, {} failed, {} skipped",
+        RUNG,
+        fixtures.len(),
+        passed,
+        failed,
+        skipped
+    );
+    if failed > 0 {
+        return Err(KernelError::InternalError);
+    }
+    Ok(())
+}
+
+/// The list parser's cases, run at boot because the kernel crate has no host
+/// tests: a list that parses, and each way a line is refused.
+pub fn self_test_ctest_generic_list() -> KernelResult<()> {
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[spawn]   FAIL: ctest-generic list parser: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let good = "# name grants seconds\n\
+                \n\
+                ctest-obstack  -            30\n\
+                ctest-stdio    file         60   # a comment after a line\r\n\
+                ctest-sb       file,secureboot 5\n";
+    let Ok(list) = parse_ctest_generic_list(good) else {
+        return fail("a well-formed list was refused");
+    };
+    let shape: alloc::vec::Vec<(&str, usize, u64)> = list
+        .iter()
+        .map(|f| (f.name, f.grants.len(), f.seconds))
+        .collect();
+    if shape != [("ctest-obstack", 0, 30), ("ctest-stdio", 1, 60), ("ctest-sb", 2, 5)] {
+        return fail("a well-formed list parsed to the wrong fixtures");
+    }
+    if list.get(2).and_then(|f| f.grants.get(1)).map(|g| g.0) != Some(ResourceType::Process) {
+        return fail("'secureboot' did not grant a Process capability");
+    }
+    if !matches!(parse_ctest_generic_list("# only a comment\n\n"), Ok(v) if v.is_empty()) {
+        return fail("a list of comments is not an empty list");
+    }
+
+    for (case, text, line) in [
+        ("two fields", "ok - 5\nctest-x -\n", 2),
+        ("four fields", "ctest-x - 5 extra\n", 1),
+        ("a path for a name", "../etc/x - 5\n", 1),
+        ("a dot name", ".hidden - 5\n", 1),
+        ("listed twice", "ctest-x - 5\nctest-x file 5\n", 2),
+        ("an unknown grant", "ctest-x root 5\n", 1),
+        ("an empty grant word", "ctest-x file, 5\n", 1),
+        ("seconds not a number", "ctest-x - 5s\n", 1),
+        ("zero seconds", "ctest-x - 0\n", 1),
+        ("seconds over the bound", "ctest-x - 601\n", 1),
+    ] {
+        match parse_ctest_generic_list(text) {
+            Err((n, _)) if n == line => {}
+            Err((n, why)) => {
+                serial_println!(
+                    "[spawn]   ctest-generic list parser: '{}' refused at line {} ({}), expected line {}",
+                    case,
+                    n,
+                    why,
+                    line
+                );
+                return fail("a bad line was refused at the wrong line");
+            }
+            Ok(_) => {
+                serial_println!("[spawn]   ctest-generic list parser: '{}' was accepted", case);
+                return fail("a bad line was accepted");
+            }
+        }
+    }
+    serial_println!(
+        "[spawn]   ctest-generic list parser: a good list parses, ten bad lines are refused at their line: OK"
     );
     Ok(())
 }
@@ -11044,8 +11379,7 @@ pub fn self_test_fastpy_slateos_fileio() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -11153,8 +11487,7 @@ pub fn self_test_fastpy_slateos_fileio2() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -11323,8 +11656,7 @@ pub fn self_test_fastpy_slateos_cat() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAT_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11458,8 +11790,7 @@ pub fn self_test_fastpy_slateos_run() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(RUN_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11637,8 +11968,7 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     let sched_state = crate::sched::task_state(result.task_id);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(FE_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -11819,8 +12149,7 @@ pub fn self_test_fastpy_slateos_capture() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAP_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -12011,8 +12340,7 @@ pub fn self_test_fastpy_slateos_pipeline() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PIPE_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -12226,8 +12554,7 @@ pub fn self_test_fastpy_slateos_redirect() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
@@ -12429,8 +12756,7 @@ pub fn self_test_fastpy_slateos_inredirect() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -12629,8 +12955,7 @@ pub fn self_test_fastpy_slateos_minishell() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie {
             return Err(KernelError::InternalError);
         }
@@ -13209,8 +13534,7 @@ pub fn self_test_fastpy_slateos_pathlib() -> KernelResult<()> {
     }
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -13344,8 +13668,7 @@ pub fn self_test_fastpy_slateos_grep() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-grep (ring 3) did not reach Zombie (state {:?})",
@@ -13493,8 +13816,7 @@ pub fn self_test_fastpy_slateos_wc() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(WC_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13593,8 +13915,7 @@ pub fn self_test_fastpy_slateos_head() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(HEAD_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13694,8 +14015,7 @@ pub fn self_test_fastpy_slateos_uniq() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(UNIQ_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13798,8 +14118,7 @@ pub fn self_test_fastpy_slateos_tail() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TAIL_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -13902,8 +14221,7 @@ pub fn self_test_fastpy_slateos_sort() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SORT_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14006,8 +14324,7 @@ pub fn self_test_fastpy_slateos_freq() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(FREQ_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14130,8 +14447,7 @@ pub fn self_test_fastpy_slateos_ls() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14264,8 +14580,7 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let still_exists = crate::fs::Vfs::exists_or_err(RM_FILE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     // Best-effort cleanup in case the delete failed and the file survived.
     let _ = crate::fs::Vfs::remove(RM_FILE);
 
@@ -14416,8 +14731,7 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     let src_exists = crate::fs::Vfs::exists_or_err(MV_SRC);
     let dst_contents = crate::fs::Vfs::read_file(MV_DST);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14566,8 +14880,7 @@ pub fn self_test_fastpy_slateos_mkdir() -> KernelResult<()> {
     // Capture the post-run type before teardown.
     let post_meta = crate::fs::Vfs::metadata(MK_DIR);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::rmdir(MK_DIR);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14702,8 +15015,7 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let still_exists = crate::fs::Vfs::exists_or_err(RM_DIR);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::rmdir(RM_DIR);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14835,8 +15147,7 @@ pub fn self_test_fastpy_slateos_size() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SIZE_FILE);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -14953,8 +15264,7 @@ pub fn self_test_fastpy_slateos_ftype() -> KernelResult<()> {
             crate::sched::yield_now();
         }
         let code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie {
             return None;
         }
@@ -15086,8 +15396,7 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15232,8 +15541,7 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15419,8 +15727,7 @@ pub fn self_test_fastpy_slateos_chmod() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15577,8 +15884,7 @@ pub fn self_test_fastpy_slateos_truncate() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15762,8 +16068,7 @@ pub fn self_test_fastpy_slateos_settimes() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -15920,8 +16225,7 @@ pub fn self_test_fastpy_slateos_getmtime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16102,8 +16406,7 @@ pub fn self_test_fastpy_slateos_getatime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16280,8 +16583,7 @@ pub fn self_test_fastpy_slateos_getctime() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16487,8 +16789,7 @@ pub fn self_test_fastpy_slateos_access() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16671,8 +16972,7 @@ pub fn self_test_fastpy_slateos_samefile() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -16901,8 +17201,7 @@ pub fn self_test_fastpy_slateos_islink() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17134,8 +17433,7 @@ pub fn self_test_fastpy_slateos_stat() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17327,8 +17625,7 @@ pub fn self_test_fastpy_slateos_statvfs() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17548,8 +17845,7 @@ pub fn self_test_fastpy_slateos_getuid() -> KernelResult<()> {
     // spawn actually installed the identity the tool then read back.
     let stored = pcb::get_credentials(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -17768,8 +18064,7 @@ pub fn self_test_fastpy_slateos_setuid() -> KernelResult<()> {
     // MUTATED the credentials (not merely returned success).
     let stored = pcb::get_credentials(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18079,8 +18374,7 @@ pub fn self_test_fastpy_slateos_nice() -> KernelResult<()> {
         }
         crate::sched::yield_now();
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let Some((fields, stored_nice, base_prio)) = observed else {
         serial_println!(
@@ -18285,8 +18579,7 @@ pub fn self_test_fastpy_slateos_umask() -> KernelResult<()> {
         }
         crate::sched::yield_now();
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let Some((fields, perms)) = observed else {
         serial_println!(
@@ -18459,8 +18752,7 @@ pub fn self_test_fastpy_slateos_chown() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18600,8 +18892,7 @@ pub fn self_test_fastpy_slateos_clock() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18851,8 +19142,7 @@ pub fn self_test_fastpy_slateos_sleep() -> KernelResult<()> {
         hpet_after.saturating_sub(hpet_before),
     );
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -18975,8 +19265,7 @@ pub fn self_test_fastpy_slateos_getpid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19133,8 +19422,7 @@ pub fn self_test_fastpy_slateos_getppid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19293,8 +19581,7 @@ pub fn self_test_fastpy_slateos_gettid() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19459,8 +19746,7 @@ pub fn self_test_fastpy_slateos_pipe() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19601,8 +19887,7 @@ pub fn self_test_fastpy_slateos_dup() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19733,8 +20018,7 @@ pub fn self_test_fastpy_slateos_dup2() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -19875,8 +20159,7 @@ pub fn self_test_fastpy_slateos_lseek() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -20012,8 +20295,7 @@ pub fn self_test_fastpy_slateos_ftruncate() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -20149,8 +20431,7 @@ pub fn self_test_fastpy_slateos_pos() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::vfs::Vfs::remove(DAT_PATH);
 
@@ -20274,8 +20555,7 @@ pub fn self_test_fastpy_slateos_sysinfo() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -20383,8 +20663,7 @@ pub fn self_test_fastpy_slateos_store() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(STORE_PATH);
     // The utility wrote this blob; clean it up regardless of outcome.
     let _ = crate::fs::Vfs::remove(STORE_BLOB_PATH);
@@ -20499,8 +20778,7 @@ pub fn self_test_fastpy_slateos_pkg() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -20715,8 +20993,7 @@ pub fn self_test_fastpy_slateos_pkg_gen() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -20894,8 +21171,7 @@ pub fn self_test_fastpy_slateos_pkg_verify() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21111,8 +21387,7 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
     let keep_exists = crate::fs::Vfs::exists_or_err(KEEP_BLOB);
     let orphan_exists = crate::fs::Vfs::exists_or_err(ORPHAN_BLOB);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     cleanup();
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
@@ -21230,8 +21505,7 @@ pub fn self_test_fastpy_slateos_pkg_search() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21367,8 +21641,7 @@ pub fn self_test_fastpy_slateos_pkg_upgrade() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21535,8 +21808,7 @@ pub fn self_test_fastpy_slateos_pkg_batch() -> KernelResult<()> {
         }
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
                 "[spawn]   FAIL: fastpy-pkg (ring 3) did not reach Zombie (state {:?})",
@@ -21725,8 +21997,7 @@ pub fn self_test_linux_envp0_deref() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -21827,8 +22098,7 @@ pub fn self_test_linux_fork_wait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -21948,8 +22218,7 @@ pub fn self_test_linux_fork_execve_wait() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TGT_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22068,8 +22337,7 @@ pub fn self_test_linux_pipe_fork_dup2_exec() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(TGT_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22174,8 +22442,7 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
     // created a symlink resolving to "Z" before we tear it down.
     let kernel_readback = crate::fs::Vfs::readlink(LINK_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(LINK_PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22352,8 +22619,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(dst_path);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(src_path);
     let _ = crate::fs::Vfs::remove(dst_path);
 
@@ -22661,8 +22927,7 @@ pub fn self_test_linux_utimensat() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22773,8 +23038,7 @@ pub fn self_test_linux_chmod_chown() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -22899,8 +23163,7 @@ pub fn self_test_linux_truncate() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -23017,8 +23280,7 @@ pub fn self_test_linux_fchmodat2() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::metadata(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -23136,8 +23398,7 @@ pub fn self_test_linux_evdev() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -23237,8 +23498,7 @@ pub fn self_test_linux_virtgpu_getparam() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23346,8 +23606,7 @@ pub fn self_test_linux_virtgpu_resource() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23442,8 +23701,7 @@ pub fn self_test_linux_fallocate() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let kernel_readback = crate::fs::Vfs::read_file(PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(PATH);
 
     if state != Some(pcb::ProcessState::Zombie) {
@@ -23559,8 +23817,7 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
         Ok(r) => r,
         Err(e) => {
             // A was spawned; tear it down before bailing.
-            thread::on_thread_exit(a.task_id);
-            pcb::destroy(a.pid);
+            teardown_fixture(a.pid, a.task_id);
             serial_println!("[spawn]   FAIL: fs-tls proc B spawn returned {:?}", e);
             return Err(e);
         }
@@ -23582,10 +23839,8 @@ pub fn self_test_linux_fs_tls_switch() -> KernelResult<()> {
     let a_exit = pcb::exit_code(a.pid);
     let b_exit = pcb::exit_code(b.pid);
 
-    thread::on_thread_exit(a.task_id);
-    thread::on_thread_exit(b.task_id);
-    pcb::destroy(a.pid);
-    pcb::destroy(b.pid);
+    teardown_fixture(a.pid, a.task_id);
+    teardown_fixture(b.pid, b.task_id);
 
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23677,8 +23932,7 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
         Ok(r) => r,
         Err(e) => {
             // A was spawned; tear it down before bailing.
-            thread::on_thread_exit(a.task_id);
-            pcb::destroy(a.pid);
+            teardown_fixture(a.pid, a.task_id);
             serial_println!("[spawn]   FAIL: gs-tls proc B spawn returned {:?}", e);
             return Err(e);
         }
@@ -23700,10 +23954,8 @@ pub fn self_test_linux_gs_tls_switch() -> KernelResult<()> {
     let a_exit = pcb::exit_code(a.pid);
     let b_exit = pcb::exit_code(b.pid);
 
-    thread::on_thread_exit(a.task_id);
-    thread::on_thread_exit(b.task_id);
-    pcb::destroy(a.pid);
-    pcb::destroy(b.pid);
+    teardown_fixture(a.pid, a.task_id);
+    teardown_fixture(b.pid, b.task_id);
 
     if a_state != Some(pcb::ProcessState::Zombie) || b_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -23843,8 +24095,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
         let state = pcb::state(result.pid);
         let exit_code = pcb::exit_code(result.pid);
 
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
 
         if state != Some(pcb::ProcessState::Zombie) {
             serial_println!(
@@ -23944,8 +24195,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             crate::sched::yield_now();
             let st = pcb::state(r.pid);
             let ec = pcb::exit_code(r.pid);
-            thread::on_thread_exit(r.task_id);
-            pcb::destroy(r.pid);
+            teardown_fixture(r.pid, r.task_id);
             (st, ec)
         }
         Err(e) => {
@@ -24044,8 +24294,7 @@ pub fn self_test_linux_execveat() -> KernelResult<()> {
             crate::sched::yield_now();
             let st = pcb::state(r.pid);
             let ec = pcb::exit_code(r.pid);
-            thread::on_thread_exit(r.task_id);
-            pcb::destroy(r.pid);
+            teardown_fixture(r.pid, r.task_id);
             (st, ec)
         }
         Err(e) => {
@@ -24139,8 +24388,7 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -24252,8 +24500,7 @@ fn stop_shm_probe(side: &SpawnResult) {
         );
         let _ = shm_probe_exited(side.pid, 2000);
     }
-    thread::on_thread_exit(side.task_id);
-    pcb::destroy(side.pid);
+    teardown_fixture(side.pid, side.task_id);
 }
 
 /// The body of [`self_test_shm_futex`], for one region the caller closes.
@@ -24425,8 +24672,7 @@ pub fn self_test_munmap_abi() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -24499,8 +24745,7 @@ pub fn self_test_sizegate_abi() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -24585,8 +24830,7 @@ pub fn self_test_callmax_abi() -> KernelResult<()> {
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if exit_code != Some(0) {
         serial_println!(
@@ -24661,8 +24905,7 @@ pub fn self_test_filestream_abi() -> KernelResult<()> {
         pcb::destroy(result.pid);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     // The probe's file: tidy, not judged.
     let _ = crate::fs::Vfs::remove("/tmp/.filestream-probe");
 
@@ -24822,8 +25065,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -24996,8 +25238,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     // are visible.)
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid); // closes the child's fd 1 → releases capture_handle
+    teardown_fixture(result.pid, result.task_id); // closes the child's fd 1 → releases capture_handle
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25211,8 +25452,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     // Read the captured output before teardown releases the child's fd 1.
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid); // closes child fds 0 & 1 → releases both handles
+    teardown_fixture(result.pid, result.task_id); // closes child fds 0 & 1 → releases both handles
     let _ = crate::fs::Vfs::remove(INPUT);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
@@ -25398,8 +25638,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25596,8 +25835,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25790,8 +26028,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -25985,8 +26222,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26181,8 +26417,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26399,8 +26634,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(CAPTURE);
     // Release our own (open) reference to the capture handle.  The
     // parent's reference (dup_shared + register above) was already
@@ -26577,8 +26811,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26756,8 +26989,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(IN_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -26941,8 +27173,7 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27222,8 +27453,7 @@ pub fn self_test_cpython_on_slateos_libc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27457,8 +27687,7 @@ fn pkgconf_invoke(
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(out_path);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -27890,8 +28119,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28067,8 +28295,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28253,8 +28480,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28429,8 +28655,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -28656,8 +28881,7 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let captured = crate::fs::Vfs::read_file(CAPTURE);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(SCRIPT);
     let _ = crate::fs::Vfs::remove(CAPTURE);
 
@@ -28843,8 +29067,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
     let _ = crate::fs::Vfs::remove(GLOB_A);
     let _ = crate::fs::Vfs::remove(GLOB_B);
@@ -29022,8 +29245,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29181,8 +29403,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29337,8 +29558,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29496,8 +29716,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29654,8 +29873,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29820,8 +30038,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -29982,8 +30199,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let written = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -30153,8 +30369,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     // not tell` is not `the operation worked`.
     let wrong_exists = crate::fs::Vfs::exists_or_err(WRONG_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(GOOD_PATH);
     let _ = crate::fs::Vfs::remove(WRONG_PATH);
 
@@ -30332,8 +30547,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -30486,8 +30700,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -30640,8 +30853,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
@@ -30900,8 +31112,7 @@ pub fn self_test_linux_slateos_make() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
     let _ = crate::fs::Vfs::remove(MAKEFILE_PATH);
 
@@ -31124,8 +31335,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 
     let cc_state = pcb::state(cc_result.pid);
     let cc_exit = pcb::exit_code(cc_result.pid);
-    thread::on_thread_exit(cc_result.task_id);
-    pcb::destroy(cc_result.pid);
+    teardown_fixture(cc_result.pid, cc_result.task_id);
 
     if !cc_reaped || cc_state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -31265,8 +31475,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // opens an independent handle onto the same inode).
     let out = crate::fs::Vfs::read_file(OUT_PATH);
 
-    thread::on_thread_exit(run_result.task_id);
-    pcb::destroy(run_result.pid);
+    teardown_fixture(run_result.pid, run_result.task_id);
     let _ = crate::fs::Vfs::remove(SRC_PATH);
     let _ = crate::fs::Vfs::remove(OBJ_PATH);
     let _ = crate::fs::Vfs::remove(OUT_PATH);
@@ -31602,8 +31811,7 @@ fn spawn_reap_tcc(tcc_elf: &[u8], argv: &[&[u8]], label: &str) -> KernelResult<O
 
     let state = pcb::state(cc_result.pid);
     let exit = pcb::exit_code(cc_result.pid);
-    thread::on_thread_exit(cc_result.task_id);
-    pcb::destroy(cc_result.pid);
+    teardown_fixture(cc_result.pid, cc_result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -31771,8 +31979,7 @@ fn run_dynamic_capture(
     let exit = pcb::exit_code(run_result.pid);
     let out = crate::fs::Vfs::read_file(out_path);
 
-    thread::on_thread_exit(run_result.task_id);
-    pcb::destroy(run_result.pid);
+    teardown_fixture(run_result.pid, run_result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -32494,8 +32701,7 @@ int main(void){\n\
 
     let state = pcb::state(result.pid);
     let make_exit = pcb::exit_code(result.pid);
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -33597,8 +33803,7 @@ fn test_spawn_from_elf() -> KernelResult<()> {
     // The process should now be a zombie (SYS_EXIT called
     // on_thread_exit automatically).  The manual call below is a
     // harmless no-op (the mapping was already removed).
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn from ELF (ring 3): OK");
     Ok(())
@@ -33653,8 +33858,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
     // Let thread run (ring 3 → SYS_EXIT) and clean up.
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with capabilities: OK");
     Ok(())
@@ -33739,8 +33943,7 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(heir.task_id);
-    pcb::destroy(heir.pid);
+    teardown_fixture(heir.pid, heir.task_id);
 
     if !inherited || !kept_write {
         serial_println!(
@@ -33771,8 +33974,7 @@ fn test_spawn_inherits_parent_capabilities() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(orphan.task_id);
-    pcb::destroy(orphan.pid);
+    teardown_fixture(orphan.pid, orphan.task_id);
     pcb::destroy(parent);
 
     // `usize::MAX` is the "process vanished before we looked" sentinel from the
@@ -33903,8 +34105,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(heir.task_id);
-    pcb::destroy(heir.pid);
+    teardown_fixture(heir.pid, heir.task_id);
 
     if !has_read || has_write || has_secret || heir_count != 1 {
         serial_println!(
@@ -34008,8 +34209,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
                     what,
                     r.pid
                 );
-                thread::on_thread_exit(r.task_id);
-                pcb::destroy(r.pid);
+                teardown_fixture(r.pid, r.task_id);
                 pcb::destroy(parent);
                 return Err(KernelError::InternalError);
             }
@@ -34081,8 +34281,7 @@ fn test_spawn_capability_subset() -> KernelResult<()> {
 
     crate::sched::yield_now();
     crate::sched::yield_now();
-    thread::on_thread_exit(pauper.task_id);
-    pcb::destroy(pauper.pid);
+    teardown_fixture(pauper.pid, pauper.task_id);
     pcb::destroy(parent);
 
     if pauper_count != 0 {
@@ -34255,8 +34454,7 @@ fn test_spawn_faulting_process() -> KernelResult<()> {
         serial_println!(
             "[spawn]          the null write did not fault; the process ran to SYS_EXIT instead"
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
     pcb::destroy(result.pid);
@@ -34307,8 +34505,7 @@ fn test_spawn_stack_growth() -> KernelResult<()> {
             code_growth
         );
         serial_println!("[spawn]          stack growth failed and an unresolvable #PF killed it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
     pcb::destroy(result.pid);
@@ -34509,8 +34706,7 @@ fn test_exec_process() -> KernelResult<()> {
             state
         );
         // Clean up.
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -34525,14 +34721,12 @@ fn test_exec_process() -> KernelResult<()> {
         );
         serial_println!("[spawn]          the process DIED instead of exec-ing");
         // Clean up.
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
     // Clean up.
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Exec (replace process image): OK");
     Ok(())
@@ -34569,8 +34763,7 @@ fn test_seh_handler_exit() -> KernelResult<()> {
             "[spawn]   FAIL: SEH exit test — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -34586,12 +34779,10 @@ fn test_seh_handler_exit() -> KernelResult<()> {
             seh_code
         );
         serial_println!("[spawn]          the handler never ran and the #PF killed it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   SEH handler catches fault (calls SYS_EXIT): OK");
     Ok(())
@@ -34630,8 +34821,7 @@ fn test_seh_handler_resume() -> KernelResult<()> {
             "[spawn]   FAIL: SEH resume test — expected Zombie, got {:?}",
             s
         );
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
 
@@ -34647,12 +34837,10 @@ fn test_seh_handler_resume() -> KernelResult<()> {
             seh_code
         );
         serial_println!("[spawn]          the ud2 killed it instead of resuming past it");
-        thread::on_thread_exit(result.task_id);
-        pcb::destroy(result.pid);
+        teardown_fixture(result.pid, result.task_id);
         return Err(KernelError::InternalError);
     }
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   SEH handler resumes execution (SYS_EXCEPTION_RETURN): OK");
     Ok(())
@@ -34742,8 +34930,7 @@ fn test_no_frame_leak() -> KernelResult<()> {
     crate::sched::reap_dead_tasks();
 
     // Now destroy the process (should free all user AS frames).
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let after = frame::stats().ok_or(KernelError::InternalError)?;
 
@@ -34913,8 +35100,7 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
 
@@ -34940,8 +35126,7 @@ fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with empty fd_map: OK");
     Ok(())
@@ -34961,8 +35146,7 @@ fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
             crate::sched::yield_now();
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             serial_println!("[spawn]   FAIL: spawn with invalid handle should fail");
             Err(KernelError::InternalError)
         }
@@ -35061,8 +35245,7 @@ fn test_spawn_with_pty_master() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // With both master references gone, closing the slave destroys the device.
     pty::close(slave);
@@ -35114,8 +35297,7 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
             serial_println!("[spawn]   FAIL: unowned pty master was accepted");
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             false
         }
     };
@@ -35204,8 +35386,7 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     let _ = crate::fs::Vfs::remove("/test_fd_oneshot.tmp");
 
@@ -35278,8 +35459,7 @@ fn test_spawn_with_argv() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with argv (3 args): OK");
     Ok(())
@@ -35322,8 +35502,7 @@ fn test_spawn_with_argv_envp() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   Spawn with argv + envp: OK");
     Ok(())
@@ -35351,16 +35530,14 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // A relative (invalid) cwd is rejected by set_cwd → child stays at `/`.
     let bad = SpawnOptions::new("spawn-test-cwd-bad").cwd(b"relative/dir");
@@ -35374,16 +35551,14 @@ fn test_spawn_with_cwd() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result2.task_id);
-            pcb::destroy(result2.pid);
+            teardown_fixture(result2.pid, result2.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result2.task_id);
-    pcb::destroy(result2.pid);
+    teardown_fixture(result2.pid, result2.task_id);
 
     serial_println!("[spawn]   Spawn with initial cwd (valid + invalid): OK");
     Ok(())
@@ -35459,8 +35634,7 @@ fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
     for &(pid, task) in spawned.iter().rev() {
-        thread::on_thread_exit(task);
-        pcb::destroy(pid);
+        teardown_fixture(pid, task);
     }
     if result.is_ok() {
         serial_println!(
@@ -35487,16 +35661,14 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result.task_id);
-            pcb::destroy(result.pid);
+            teardown_fixture(result.pid, result.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     // No uid_gid → child keeps the default root (uid 0) credentials.
     let dflt = SpawnOptions::new("spawn-test-uid-default");
@@ -35510,16 +35682,14 @@ fn test_spawn_with_uid_gid() -> KernelResult<()> {
             );
             crate::sched::yield_now();
             crate::sched::reap_dead_tasks();
-            thread::on_thread_exit(result2.task_id);
-            pcb::destroy(result2.pid);
+            teardown_fixture(result2.pid, result2.task_id);
             return Err(KernelError::InternalError);
         }
     }
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result2.task_id);
-    pcb::destroy(result2.pid);
+    teardown_fixture(result2.pid, result2.task_id);
 
     serial_println!("[spawn]   Spawn with initial uid/gid (explicit + default): OK");
     Ok(())
@@ -35559,8 +35729,7 @@ fn test_spawn_args_one_shot() -> KernelResult<()> {
     crate::sched::yield_now();
     crate::sched::yield_now();
     crate::sched::reap_dead_tasks();
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     serial_println!("[spawn]   take_initial_args is one-shot: OK");
     Ok(())
@@ -35606,10 +35775,8 @@ fn test_spawn_records_parent() -> KernelResult<()> {
     )?;
 
     let cleanup = |fail: bool| {
-        thread::on_thread_exit(child.task_id);
-        pcb::destroy(child.pid);
-        thread::on_thread_exit(parent.task_id);
-        pcb::destroy(parent.pid);
+        teardown_fixture(child.pid, child.task_id);
+        teardown_fixture(parent.pid, parent.task_id);
         if fail {
             Err(KernelError::InternalError)
         } else {
@@ -35788,8 +35955,7 @@ fn cmake_invoke(
     let out = crate::fs::Vfs::read_file(out_path).unwrap_or_default();
     let err = crate::fs::Vfs::read_file(err_path).unwrap_or_default();
 
-    thread::on_thread_exit(result.task_id);
-    pcb::destroy(result.pid);
+    teardown_fixture(result.pid, result.task_id);
 
     if !reaped || state != Some(pcb::ProcessState::Zombie) {
         serial_println!(

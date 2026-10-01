@@ -198,9 +198,9 @@ LANES: dict[str, Lane] = {
         "Graphics Stack",
         "the compositor and its display protocol (gui/compositor, gui/remote), "
         "the window library every application links (gui/window), text "
-        "rendering (gui/font), image decoding (gui/imagecodec) and the Vulkan "
-        "loader (gui/vulkan) -- plus the GPU userspace ports (Mesa, Vulkan "
-        "drivers, Vello/HarfBuzz).",
+        "rendering (gui/font), image decoding (gui/imagecodec), the video "
+        "codecs (gui/video) and the Vulkan loader (gui/vulkan) -- plus the GPU "
+        "userspace ports (Mesa, Vulkan drivers, Vello/HarfBuzz).",
         "new lane, taken from lane C's old tree.",
     ),
 }
@@ -254,9 +254,11 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("gui/font/", "F"),
     ("gui/imagecodec/", "F"),
     ("gui/vulkan/", "F"),
-    # Reserved before its first file (lane F, 2026-09-27): the video codec
-    # crate of F-Q2 / design-decisions §1332, beside gui/imagecodec and
-    # gui/remote. Without the carve-out it would fall to lane C's gui/.
+    # The video codecs, one crate each: rav1d (AV1, which AVIF pictures are
+    # made of) and, per the operator's F-Q2 answer (design-decisions.md
+    # sec. 1332), VP9 for remote desktop's capture stream.  Added 2026-09-27
+    # when lane F created the directory; it never held lane C work, so the
+    # carve-out out of `gui/` took nothing lane C had.
     ("gui/video/", "F"),
     # --- §973: every file that had no lane (2026-09-27) --------------------
     # Root leaf crates go to the lane whose code depends on them most, counted
@@ -381,6 +383,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "check-crate-names.py",
         "check-dead-code-allows.py",
         "check-design-decisions-bands.py",
+        "check-destructive-writes.py",
         "check-eol.py",
         "check-evdev-elf-asm.py",
         "check-excluded-crate-tests.py",
@@ -485,6 +488,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "rustlex.py",
         "rustrungs.py",
         "rustscan.py",
+        "safewrite.py",
         "scan-orphan-modules.py",
         "scan-unwrap.py",
         "selftest-boot-gate-identity.py",
@@ -499,6 +503,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "stack-frames.py",
         "stage-hunks.py",
         "straddle-check.py",
+        "suite_pool.py",
         "symbolize.py",
         "test-backfill-lane-fields.py",
         "test-bench-history.py",
@@ -710,6 +715,8 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "check-window-wiring.py",
         "contrast-explorer.html",
         "fields-written-never-read-baseline.txt",
+        "gather-notices.py",
+        "lane-claims.py",
         "lanec_scan.py",
         "reintro-input-settings.py",
         "reintro-keylayout.py",
@@ -722,12 +729,19 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "reintro-scroll-panes.py",
         "reintro-textview.py",
         "reintro-toolkit-focus.py",
+        "test-gather-notices.py",
+        "test-lane-claims.py",
+        "test-reintro-palette.py",
     ),
     "D": (
         "check-duplicate-exports.py",
         "check-env-identity.py",
         "check-libc-abi.py",
+        "check-libc-declared.py",
+        "check-libc-overlay.py",
+        "check-libc-prototypes.py",
         "check-libc-shape.py",
+        "check-libc-target-warnings.py",
         "check-manifest-producers.py",
         "check-one-libc-per-process.py",
         "check-pinned-target-build.py",
@@ -755,7 +769,9 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "check-unused-exports.py",
         "count_centrings.py",
         "find-claimed-acts.py",
+        "find-drawn-only-settings.py",
         "find-echoed-settings.py",
+        "find-options-only-emptied.py",
         "find-overstated-records.py",
         "find-silent-incapacity.py",
         "find-stale-admissions.py",
@@ -777,6 +793,8 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "reintro-sysinfo.py",
         "sabotage.py",
         "scan-unwired.py",
+        "stillreports.py",
+        "test-mutation_harness.py",
         "verify_mutations.py",
     ),
     "F": (
@@ -1402,7 +1420,10 @@ def _self_test() -> int:
         ("gui/font/src/lib.rs", "F"),
         ("gui/imagecodec/src/png.rs", "F"),
         ("gui/vulkan/src/lib.rs", "F"),
+        ("gui/video/rav1d/src/lib.rs", "F"),
+        ("gui/video", "F"),
         ("gui/compositorx/src/lib.rs", "C"),
+        ("gui/videos/src/lib.rs", "C"),
         # §973: scripts, root crates and requests have lanes now.
         ("scripts/check-eol.py", "A"),
         ("scripts/hooks/pre-push", "A"),

@@ -16,38 +16,73 @@
 use std::cmp::Ordering;
 use std::process::ExitCode;
 
+use gamechrome::Chrome;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
+use guitk::palette::Palette;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 use oswindow::app::{self, App, Response};
 
-// ── Catppuccin Mocha palette ────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E1E2E);
-const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const BLUE: Color = Color::from_hex(0x89B4FA);
-const RED: Color = Color::from_hex(0xF38BA8);
-const PEACH: Color = Color::from_hex(0xFAB387);
-const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const OVERLAY0: Color = Color::from_hex(0x6C7086);
-
-// ── Board colours ───────────────────────────────────────────────────
-const BOARD_GREEN: Color = Color::from_hex(0x2E7D32);
-const BOARD_GREEN_LIGHT: Color = Color::from_hex(0x388E3C);
-const BOARD_BORDER: Color = Color::from_hex(0x1B5E20);
-const CURSOR_COLOR: Color = Color::from_hex(0x89B4FA);
-const VALID_MOVE_DOT: Color = Color::rgba(166, 227, 161, 160);
-const LAST_MOVE_HIGHLIGHT: Color = Color::rgba(250, 179, 135, 100);
+// ── Colours ─────────────────────────────────────────────────────────
+//
+// Black and white are which player is which, so the discs keep their colours
+// in every theme; everything else -- the board, the page, the panel -- follows
+// the user's palette (the operator's answer to C-Q16, §1422, and lane C's call
+// for this game). It was all a copy of Catppuccin Mocha round a green baize,
+// dark on a light desktop. A disc the shade of the square under it is ringed
+// in a rim that stands off the square (`gamechrome::edge_on`).
 const BLACK_PIECE: Color = Color::from_hex(0x1A1A2E);
 const WHITE_PIECE: Color = Color::from_hex(0xE8E8E8);
 const BLACK_PIECE_BORDER: Color = Color::from_hex(0x000000);
 const WHITE_PIECE_BORDER: Color = Color::from_hex(0xBBBBBB);
+/// Text on black's share of the score bar.
+const ON_BLACK_PIECE: Color = WHITE_PIECE;
+
+/// The colours the window and the board draw in, from the user's palette.
+#[derive(Clone, Copy, Debug)]
+struct Colours {
+    chrome: Chrome,
+    /// The board's squares, alternating: two of the palette's raised shades,
+    /// close enough to read as one board.
+    square: Color,
+    square_alt: Color,
+    /// The board's rim and the lines between its squares.
+    lines: Color,
+    /// The keyboard's square: the accent, as every focus ring is.
+    cursor: Color,
+    /// The dot on a square Black may play.
+    legal: Color,
+    /// The wash on the square last played.
+    last: Color,
+    /// Black's turn, and Black's moves in the history.
+    black_side: Color,
+    /// White's turn, and White's moves in the history.
+    white_side: Color,
+    /// The last move's notation: the hue of the mark it leaves on the board.
+    last_move: Color,
+}
+
+impl Colours {
+    fn of(p: &Palette) -> Self {
+        Self {
+            chrome: Chrome::of(p),
+            square: p.surface0,
+            square_alt: p.surface1,
+            lines: p.overlay0,
+            cursor: p.accent,
+            legal: p.ink(p.green),
+            last: with_alpha(p.peach, 100),
+            black_side: p.ink(p.blue),
+            white_side: p.ink(p.peach),
+            last_move: p.ink(p.peach),
+        }
+    }
+}
 
 // ── The board's dimensions ──────────────────────────────────────────
 
@@ -748,6 +783,10 @@ struct ReversiApp {
     /// The size the last frame was drawn at, which is the size the next click
     /// is read against.
     size: (f32, f32),
+    /// The user's colours, replaced whenever the theme changes. Seeded from
+    /// the defaults; the framework calls `App::theme_changed` before the
+    /// first frame.
+    palette: Palette,
 }
 
 impl ReversiApp {
@@ -761,18 +800,22 @@ impl ReversiApp {
             move_history: Vec::new(),
             notice: None,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            palette: Palette::for_mode(false),
         }
     }
 
-    /// Deal a new game without forgetting how big the window is.
+    /// Deal a new game without forgetting how big the window is, or the
+    /// colours it is drawn in.
     ///
     /// `*self = Self::new()` was the whole of the old new-game handler, and
     /// with the window size now living in the state that would have snapped
-    /// the board back to its opening size on every new game.
+    /// the board back to its opening size on every new game -- and the theme
+    /// back to the default one.
     fn restart(&mut self) {
-        let size = self.size;
+        let (size, palette) = (self.size, self.palette);
         *self = Self::new();
         self.size = size;
+        self.palette = palette;
     }
 
     /// Note the size a frame was drawn at.
@@ -1002,30 +1045,31 @@ impl ReversiApp {
     /// One frame at the given size: what to draw, and what a click there hits.
     fn frame(&self, w: f32, h: f32) -> Frame<Target> {
         let l = Layout::solve(w, h);
+        let c = Colours::of(&self.palette);
         let mut f = Frame::new(l.window.w, l.window.h);
         f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: l.window.w,
             height: l.window.h,
-            color: BASE,
+            color: c.chrome.page,
             corner_radii: CornerRadii::ZERO,
         });
         // A window too small for its contents crops them rather than painting
         // over its neighbours.
         f.clip(l.window);
-        self.draw_header(&l, &mut f);
-        self.draw_board(&l, &mut f);
-        self.draw_panel(&l, &mut f);
-        self.draw_status(&l, &mut f);
+        self.draw_header(&l, &mut f, &c);
+        self.draw_board(&l, &mut f, &c);
+        self.draw_panel(&l, &mut f, &c);
+        self.draw_status(&l, &mut f, &c);
         f.unclip();
         f
     }
 
     /// The title, and the two score chips beside it.
-    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_header(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.header, l.pad);
-        let title_ink = Ink::new(l.title, FontWeightHint::Bold, LAVENDER);
+        let title_ink = Ink::new(l.title, FontWeightHint::Bold, c.chrome.title);
         let title = label_in(f, band, "Reversi", title_ink);
         f.hit(Target::Title, title);
 
@@ -1033,7 +1077,7 @@ impl ReversiApp {
         // `BOARD_OFFSET_X + 120.0` and `+ 180.0`, two numbers that were right
         // for one font at one size and silently overlapped the title at any
         // other.
-        let ink = Ink::new(l.font, FontWeightHint::Bold, TEXT_COLOR);
+        let ink = Ink::new(l.font, FontWeightHint::Bold, c.chrome.text);
         let gap = l.pad * 1.5;
         let mut x = title.right() + gap;
         for (target, text) in [
@@ -1056,7 +1100,7 @@ impl ReversiApp {
 
     /// The board: its border, its squares, the pieces on them, and its a-h
     /// and 1-8.
-    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_board(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let g = Grid::fit(inset(l.board_area, l.pad), l.small);
         let board = g.board_rect();
 
@@ -1066,7 +1110,7 @@ impl ReversiApp {
             y: board.y - edge,
             width: board.w + edge * 2.0,
             height: board.h + edge * 2.0,
-            color: BOARD_BORDER,
+            color: c.lines,
             corner_radii: CornerRadii::all(edge),
         });
         // Recorded before the squares so a click that lands between them --
@@ -1083,9 +1127,9 @@ impl ReversiApp {
         for pos in all_positions() {
             let square = g.square(pos.row, pos.col);
             let shade = if (pos.row.saturating_add(pos.col)) % 2 == 0 {
-                BOARD_GREEN
+                c.square
             } else {
-                BOARD_GREEN_LIGHT
+                c.square_alt
             };
             f.push(RenderCommand::FillRect {
                 x: square.x,
@@ -1102,7 +1146,7 @@ impl ReversiApp {
                     y: square.y,
                     width: square.w,
                     height: square.h,
-                    color: LAST_MOVE_HIGHLIGHT,
+                    color: c.last,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1114,7 +1158,7 @@ impl ReversiApp {
                     y: square.y + ring,
                     width: (square.w - ring * 2.0).max(0.0),
                     height: (square.h - ring * 2.0).max(0.0),
-                    color: CURSOR_COLOR,
+                    color: c.cursor,
                     line_width: ring,
                     corner_radii: CornerRadii::all(ring),
                 });
@@ -1123,7 +1167,7 @@ impl ReversiApp {
             let cell = self.board.get(pos);
             if cell.is_piece() {
                 let (cx, cy) = g.centre(pos.row, pos.col);
-                draw_piece(f, cx, cy, g.step * 0.37, cell);
+                draw_piece(f, cx, cy, g.step * 0.37, cell, shade);
             } else if self.phase == Phase::Playing
                 && self.current_turn == Cell::Black
                 && legal.contains(&pos)
@@ -1135,7 +1179,7 @@ impl ReversiApp {
                     y: cy - r,
                     width: r * 2.0,
                     height: r * 2.0,
-                    color: VALID_MOVE_DOT,
+                    color: c.legal,
                     corner_radii: CornerRadii::all(r),
                 });
             }
@@ -1145,7 +1189,7 @@ impl ReversiApp {
                 y: square.y,
                 width: square.w,
                 height: square.h,
-                color: BOARD_BORDER,
+                color: c.lines,
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1157,7 +1201,7 @@ impl ReversiApp {
         // Chess and go both run the other way, which is why
         // `the_board_is_lettered_and_numbered_the_othello_way` pins this to
         // the published rules rather than to this comment.
-        let ink = Ink::new(l.small, FontWeightHint::Regular, SUBTEXT0);
+        let ink = Ink::new(l.small, FontWeightHint::Regular, c.chrome.dim);
         for i in 0..SIDE {
             let square = g.square(i, i);
             let letter = column_letter(i).to_string();
@@ -1192,28 +1236,33 @@ impl ReversiApp {
     /// `+ 72.0`, `+ 110.0`, `+ 155.0`, `+ 205.0` -- and drew a fixed twelve
     /// history rows whatever the window's height, which a short window ran
     /// straight through its own help text.
-    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_panel(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.panel, l.pad);
         f.push(RenderCommand::FillRect {
             x: band.x,
             y: band.y,
             width: band.w,
             height: band.h,
-            color: SURFACE0,
+            color: c.chrome.raised,
             corner_radii: CornerRadii::all(l.pad),
         });
         f.hit(Target::Panel, band);
 
         let inner = inset(band, l.pad);
-        let label_ink = Ink::new(l.small, FontWeightHint::Bold, SUBTEXT0);
-        let body_ink = Ink::new(l.font, FontWeightHint::Regular, TEXT_COLOR);
+        // The panel's words in inks moved to read on it: the palette's are
+        // made for the page, and the panel is raised off it -- its grey was
+        // 4.1:1 there in a light theme, and a side's colour 3.6:1.
+        let on = c.chrome.on(c.chrome.raised);
+        let read = |ink: Color| gamechrome::Ink::on(ink, &[c.chrome.raised]).small;
+        let label_ink = Ink::new(l.small, FontWeightHint::Bold, on.dim);
+        let body_ink = Ink::new(l.font, FontWeightHint::Regular, on.text);
         let mut y = inner.y;
 
         // Whose turn.
         let (turn_text, turn_color) = match (self.phase, self.current_turn) {
-            (Phase::GameOver, _) => ("Game Over", RED),
-            (Phase::Playing, Cell::White) => ("White to move", PEACH),
-            (Phase::Playing, _) => ("Your turn (Black)", BLUE),
+            (Phase::GameOver, _) => ("Game Over", on.bad),
+            (Phase::Playing, Cell::White) => ("White to move", read(c.white_side)),
+            (Phase::Playing, _) => ("Your turn (Black)", read(c.black_side)),
         };
         let drawn = panel_row(
             f,
@@ -1236,16 +1285,17 @@ impl ReversiApp {
             y: bar.y,
             width: bar.w,
             height: bar.h,
-            color: SURFACE1,
+            color: c.chrome.lit,
             corner_radii: CornerRadii::all(bar_h / 4.0),
         });
+        let mut black_w = 0.0;
         if black > 0 {
             // The division is inside the guard, not defended by a `.max(1.0)`
             // outside it: `black > 0` already means the total is at least one,
             // so the floor could never fire, and a defence that cannot fire is
             // a defence nothing can prove is there.
             let total = f32_from_i32(black.saturating_add(white));
-            let black_w = f32_from_i32(black) / total * bar.w;
+            black_w = f32_from_i32(black) / total * bar.w;
             f.push(RenderCommand::FillRect {
                 x: bar.x,
                 y: bar.y,
@@ -1260,20 +1310,39 @@ impl ReversiApp {
                 },
             });
         }
-        let chip = Ink::new(l.small, FontWeightHint::Bold, TEXT_COLOR);
+        let chip = Ink::new(
+            l.small,
+            FontWeightHint::Bold,
+            c.chrome.on(c.chrome.lit).text,
+        );
         let b_text = format!("B: {black}");
         let w_text = format!("W: {white}");
         let chip_y = bar.y + (bar.h - chip.height()) / 2.0;
-        label(f, bar.x + l.pad / 2.0, chip_y, &b_text, chip);
         // Right-aligned by measurement rather than by `px + 160.0`, which was
         // a number chosen for one font size and wrong at every other.
-        label(
-            f,
-            (bar.right() - l.pad / 2.0 - chip.width(&w_text)).max(bar.x),
-            chip_y,
-            &w_text,
-            chip,
-        );
+        let w_x = (bar.right() - l.pad / 2.0 - chip.width(&w_text)).max(bar.x);
+        // Black's share is black in every theme and the track is the theme's,
+        // so in a light theme no one ink reads on both -- and either count can
+        // straddle the share's edge, "B" when black holds a sliver of the board
+        // and "W" when it holds nearly all of it. Each count is drawn twice,
+        // clipped to either side of the edge, in the ink for that side.
+        let share = Rect::new(bar.x, bar.y, black_w, bar.h);
+        let track = Rect::new(bar.x + black_w, bar.y, bar.w - black_w, bar.h);
+        for (ground, ink) in [
+            (
+                share,
+                Ink::new(l.small, FontWeightHint::Bold, ON_BLACK_PIECE),
+            ),
+            (track, chip),
+        ] {
+            if ground.is_empty() {
+                continue;
+            }
+            f.clip(ground);
+            label(f, bar.x + l.pad / 2.0, chip_y, &b_text, ink);
+            label(f, w_x, chip_y, &w_text, ink);
+            f.unclip();
+        }
         f.hit(Target::ScoreBar, bar);
         y = bar.bottom() + l.small * 0.6;
 
@@ -1302,7 +1371,7 @@ impl ReversiApp {
                 inner,
                 &mut y,
                 &last.notation(),
-                Ink::new(l.font, FontWeightHint::Regular, PEACH),
+                Ink::new(l.font, FontWeightHint::Regular, read(c.last_move)),
             );
             f.hit(Target::LastMove, drawn);
             y += l.small * 0.6;
@@ -1311,12 +1380,12 @@ impl ReversiApp {
         // The help sits on the floor of the panel, and the history fills
         // whatever is between the cursor and it -- so the two cannot collide
         // however long the game runs or however short the window is.
-        let help_ink = Ink::new(l.small, FontWeightHint::Regular, OVERLAY0);
+        let help_ink = Ink::new(l.small, FontWeightHint::Regular, on.dim);
         let help_h = help_ink.height() * 2.0;
         let help_top = (inner.bottom() - help_h).max(y);
 
         let heading = panel_row(f, inner, &mut y, "History", label_ink);
-        let row_ink = Ink::new(l.small, FontWeightHint::Regular, TEXT_COLOR);
+        let row_ink = Ink::new(l.small, FontWeightHint::Regular, on.text);
         let rows = count_from_f32((help_top - y) / row_ink.height());
         let start = self.move_history.len().saturating_sub(rows);
         let mut history_box = Rect::new(heading.x, heading.y, heading.w, heading.h);
@@ -1325,9 +1394,9 @@ impl ReversiApp {
                 l.small,
                 FontWeightHint::Regular,
                 if record.color == Cell::Black {
-                    BLUE
+                    read(c.black_side)
                 } else {
-                    PEACH
+                    read(c.white_side)
                 },
             );
             let text = format!("{}. {}", idx.saturating_add(1), record.notation());
@@ -1355,15 +1424,15 @@ impl ReversiApp {
     }
 
     /// The line along the bottom of the window.
-    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>) {
+    fn draw_status(&self, l: &Layout, f: &mut Frame<Target>, c: &Colours) {
         let band = inset(l.status, l.pad);
         let ink = Ink::new(
             l.font,
             FontWeightHint::Regular,
             if self.phase == Phase::GameOver {
-                PEACH
+                c.chrome.even
             } else {
-                TEXT_COLOR
+                c.chrome.text
             },
         );
         let drawn = label_in(f, band, &self.status(), ink);
@@ -1371,16 +1440,19 @@ impl ReversiApp {
     }
 }
 
-/// A disc, drawn as a fully-rounded rect.
+/// A disc, drawn as a fully-rounded rect, on a square of colour `ground`.
 ///
 /// A free function rather than a method: it read `&self` and used nothing from
 /// it, which is a method only in spelling.
-fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, cell: Cell) {
-    let (fill, border) = match cell {
+fn draw_piece(f: &mut Frame<Target>, cx: f32, cy: f32, radius: f32, cell: Cell, ground: Color) {
+    let (fill, own_edge) = match cell {
         Cell::Black => (BLACK_PIECE, BLACK_PIECE_BORDER),
         Cell::White => (WHITE_PIECE, WHITE_PIECE_BORDER),
         Cell::Empty => return,
     };
+    // A black disc on a dark theme's square, or a white one on a light
+    // theme's, is ringed so it can be seen.
+    let border = gamechrome::edge_on(own_edge, fill, ground);
     let shadow = (radius * 0.09).max(1.0);
     f.push(RenderCommand::FillRect {
         x: cx - radius + shadow,
@@ -1534,6 +1606,10 @@ fn handle_event(app: &mut ReversiApp, event: &Event) -> EventResult {
 }
 
 impl App for ReversiApp {
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Reversi".to_string()
     }
@@ -1628,6 +1704,203 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use guitk::probe;
+
+    /// **The window is drawn in the user's colours**, light or dark, in
+    /// either surface look and every state it shows, with only the board's own
+    /// colours not the palette's. It drew in its own copy of Catppuccin Mocha,
+    /// dark on a light desktop (the operator's C-Q16).
+    #[test]
+    fn the_window_is_drawn_in_the_users_colours() {
+        let board = [
+            BLACK_PIECE,
+            WHITE_PIECE,
+            BLACK_PIECE_BORDER,
+            WHITE_PIECE_BORDER,
+            ON_BLACK_PIECE,
+            gamechrome::RIMS.0,
+            gamechrome::RIMS.1,
+        ];
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            // The side panel's words, moved to read on it (and the score
+            // bar's counts on its track).
+            let c = Colours::of(&p);
+            let mut derived = board.to_vec();
+            derived.extend(c.chrome.on(c.chrome.raised).inks());
+            derived.extend(c.chrome.on(c.chrome.lit).inks());
+            for ink in [c.white_side, c.black_side, c.last_move] {
+                derived.push(gamechrome::Ink::on(ink, &[c.chrome.raised]).small);
+            }
+            for (what, f) in every_look(&p) {
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    f.commands(),
+                    &derived,
+                    &format!("reversi, {what}, light: {light}, cards: {cards}"),
+                );
+            }
+        }
+    }
+
+    /// The palette for a light or a dark theme, in the bordered look (the
+    /// default) or the card look.
+    fn palette(light: bool, cards: bool) -> Palette {
+        let mut p = Palette::for_mode(light);
+        p.set_surface_style(if cards {
+            guitk::palette::SurfaceStyle::Cards
+        } else {
+            guitk::palette::SurfaceStyle::Borders
+        });
+        p
+    }
+
+    /// `(light, cards)`: both themes, in both surface looks.
+    const LOOKS: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+    /// Every state the window shows, drawn in `p`'s colours: in play with a
+    /// move on the board, over, and in a cramped window.
+    fn every_look(p: &Palette) -> Vec<(&'static str, Frame<Target>)> {
+        let mut app = ReversiApp::new();
+        app.theme_changed(p);
+        app.cursor = Pos::new(2, 3);
+        app.handle_key(Key::Enter);
+        let playing = app.draw(NATURAL);
+        let cramped = app.draw((320.0, 340.0));
+        app.phase = Phase::GameOver;
+        let over = app.draw(NATURAL);
+        vec![("playing", playing), ("over", over), ("cramped", cramped)]
+    }
+
+    /// **Every text reads on what is drawn under it**, in either theme and
+    /// either surface look (`gamechrome::legibility`: each run held to
+    /// WCAG's floor for its size against the fills under it).
+    #[test]
+    fn every_text_reads_on_what_is_under_it_in_either_theme() {
+        let mut bad = Vec::new();
+        for (light, cards) in LOOKS {
+            let p = palette(light, cards);
+            for (what, f) in every_look(&p) {
+                for r in gamechrome::legibility::illegible(f.commands(), p.base, |_| false) {
+                    bad.push(format!(
+                        "{what}, light: {light}, cards: {cards}: {:?} {:.2}:1 on {:?}",
+                        r.text,
+                        r.ratio(),
+                        r.ground
+                    ));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "reversi: {bad:#?}");
+    }
+
+    /// **A new game keeps the user's colours.** It rebuilds the game from
+    /// scratch, and would have rebuilt the palette with it.
+    #[test]
+    fn a_new_game_keeps_the_users_colours() {
+        let light = Palette::for_mode(true);
+        let mut app = ReversiApp::new();
+        app.theme_changed(&light);
+        app.restart();
+        assert_eq!(app.palette, light);
+    }
+
+    /// **Both discs are seen on both squares in either theme**: the board
+    /// follows the theme, so a black disc on a dark theme's board and a white
+    /// one on a light theme's are ringed, and the ring is what is drawn.
+    #[test]
+    fn both_discs_are_seen_on_both_squares_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            let mut app = ReversiApp::new();
+            app.theme_changed(&p);
+            let f = app.draw(NATURAL);
+            // The four opening discs sit on both shades of square.
+            for pos in [
+                Pos::new(3, 3),
+                Pos::new(3, 4),
+                Pos::new(4, 3),
+                Pos::new(4, 4),
+            ] {
+                let square = box_of(&app, Target::Square(byte(pos.row), byte(pos.col)));
+                let ground = if (pos.row + pos.col) % 2 == 0 {
+                    c.square
+                } else {
+                    c.square_alt
+                };
+                let piece = app.board.get(pos);
+                let fill = if piece == Cell::Black {
+                    BLACK_PIECE
+                } else {
+                    WHITE_PIECE
+                };
+                let edge = f
+                    .commands()
+                    .iter()
+                    .find_map(|cmd| match cmd {
+                        RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color,
+                            ..
+                        } if square.contains(x + width / 2.0, y + height / 2.0)
+                            && *color != c.lines
+                            && *color != c.cursor =>
+                        {
+                            Some(*color)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("no disc is outlined at {pos:?}"));
+                let seen = guitk::theme::contrast_ratio(fill, ground)
+                    .max(guitk::theme::contrast_ratio(edge, ground));
+                assert!(
+                    seen >= 3.0,
+                    "{piece:?} at {pos:?} is seen at {seen:.2}:1 (light: {light})"
+                );
+            }
+        }
+    }
+
+    /// **Both counts on the score bar read wherever they fall**, in either
+    /// theme: over black's share in the black share's ink, over the track in
+    /// the theme's -- including a count the share's edge runs through.
+    #[test]
+    fn both_counts_read_on_the_score_bar_in_either_theme() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let c = Colours::of(&p);
+            assert!(guitk::theme::contrast_ratio(ON_BLACK_PIECE, BLACK_PIECE) >= 4.5);
+            assert!(guitk::theme::contrast_ratio(c.chrome.text, c.chrome.lit) >= 4.5);
+            // One black disc to sixty-three white: "B: 1" straddles the edge,
+            // so it is drawn in both inks.
+            let mut app = ReversiApp::new();
+            app.theme_changed(&p);
+            let mut cells = vec![(0, 0, Cell::Black)];
+            for row in 0..SIDE {
+                for col in 0..SIDE {
+                    if (row, col) != (0, 0) {
+                        cells.push((row, col, Cell::White));
+                    }
+                }
+            }
+            app.board = board_with(&cells);
+            let f = app.draw(NATURAL);
+            let inks: Vec<Color> = f
+                .commands()
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    RenderCommand::Text { text, color, .. } if text == "B: 1" => Some(*color),
+                    _ => None,
+                })
+                .collect();
+            assert!(inks.contains(&ON_BLACK_PIECE), "light: {light}: {inks:?}");
+            assert!(inks.contains(&c.chrome.text), "light: {light}: {inks:?}");
+            assert!(f.is_balanced(), "a clip was left open");
+        }
+    }
 
     /// The sizes every geometry test is run at.
     ///
@@ -2701,7 +2974,9 @@ mod tests {
     #[test]
     fn the_frame_paints_the_whole_window_and_closes_every_clip() {
         for (w, h) in SIZES {
-            let f = ReversiApp::new().draw((w, h));
+            let app = ReversiApp::new();
+            let f = app.draw((w, h));
+            let page = Colours::of(&app.palette).chrome.page;
             assert!(
                 f.is_balanced(),
                 "a clip was pushed and never popped at {w}x{h}"
@@ -2710,7 +2985,7 @@ mod tests {
                 matches!(
                     cmd,
                     RenderCommand::FillRect { x, y, width, height, color, .. }
-                        if *x == 0.0 && *y == 0.0 && *width == w && *height == h && *color == BASE
+                        if *x == 0.0 && *y == 0.0 && *width == w && *height == h && *color == page
                 )
             });
             assert!(painted, "the window has no background at {w}x{h}");
@@ -2876,7 +3151,7 @@ mod tests {
         let legal = app.board.legal_moves(Cell::Black);
         for pos in all_positions() {
             let square = box_of(&app, Target::Square(byte(pos.row), byte(pos.col)));
-            let dotted = fills_at(&f, square).contains(&VALID_MOVE_DOT);
+            let dotted = fills_at(&f, square).contains(&Colours::of(&app.palette).legal);
             assert_eq!(
                 dotted,
                 legal.contains(&pos),
@@ -2903,7 +3178,9 @@ mod tests {
                     height,
                     color,
                     ..
-                } if *color == CURSOR_COLOR => Some(Rect::new(*x, *y, *width, *height)),
+                } if *color == Colours::of(&app.palette).cursor => {
+                    Some(Rect::new(*x, *y, *width, *height))
+                }
                 _ => None,
             })
             .collect();
@@ -2921,17 +3198,18 @@ mod tests {
         let mut app = ReversiApp::new();
         app.phase = Phase::GameOver;
         let f = app.draw(NATURAL);
+        let c = Colours::of(&app.palette);
         assert!(
             !f.commands().iter().any(|cmd| matches!(
                 cmd,
-                RenderCommand::StrokeRect { color, .. } if *color == CURSOR_COLOR
+                RenderCommand::StrokeRect { color, .. } if *color == c.cursor
             )),
             "a finished game still invites a move with a cursor"
         );
         assert!(
             !f.commands().iter().any(|cmd| matches!(
                 cmd,
-                RenderCommand::FillRect { color, .. } if *color == VALID_MOVE_DOT
+                RenderCommand::FillRect { color, .. } if *color == c.legal
             )),
             "a finished game still dots squares nobody may play"
         );
@@ -2952,7 +3230,7 @@ mod tests {
         for pos in all_positions() {
             let square = box_of(&app, Target::Square(byte(pos.row), byte(pos.col)));
             assert_eq!(
-                fills_at(&f, square).contains(&LAST_MOVE_HIGHLIGHT),
+                fills_at(&f, square).contains(&Colours::of(&app.palette).last),
                 pos == played,
                 "{pos:?} is highlighted and the last move was {played:?}"
             );
@@ -3146,10 +3424,13 @@ mod tests {
             let f = app.draw((w, h));
             let l = Layout::solve(w, h);
             let want = inset(l.panel, l.pad);
-            let got = f
+            // Every fill in the panel's colour, and one of them must be the
+            // panel: the board's squares are drawn in the same raised shade,
+            // so the first such fill is a square.
+            let got: Vec<Rect> = f
                 .commands()
                 .iter()
-                .find_map(|cmd| match cmd {
+                .filter_map(|cmd| match cmd {
                     RenderCommand::FillRect {
                         x,
                         y,
@@ -3157,16 +3438,18 @@ mod tests {
                         height,
                         color,
                         ..
-                    } if *color == SURFACE0 => Some(Rect::new(*x, *y, *width, *height)),
+                    } if *color == Colours::of(&app.palette).chrome.raised => {
+                        Some(Rect::new(*x, *y, *width, *height))
+                    }
                     _ => None,
                 })
-                .expect("the panel's own band was never painted");
+                .collect();
             assert!(
-                (got.x - want.x).abs() < 0.01
+                got.iter().any(|got| (got.x - want.x).abs() < 0.01
                     && (got.y - want.y).abs() < 0.01
                     && (got.w - want.w).abs() < 0.01
-                    && (got.h - want.h).abs() < 0.01,
-                "the panel band is painted at {got:?} and the layout put the panel at {want:?} at {w}x{h}"
+                    && (got.h - want.h).abs() < 0.01),
+                "no band is painted where the layout put the panel, {want:?}, at {w}x{h}"
             );
         }
     }

@@ -18,6 +18,15 @@
 //! matching their behavior on a Linux kernel with
 //! `perf_event_paranoid = 3` or a kernel built without
 //! `CONFIG_PERF_EVENTS=y`.
+//!
+//! ## Reached through `syscall()`
+//!
+//! glibc wraps none of these calls: programs -- `perf`, libbpf's CPU profiler, JIT profilers -- make them with
+//! `syscall(SYS_perf_event_open, …)`, which answers with the checks below and then
+//! `ENOSYS`, as the kernel's own Linux table does.  Until 2026-09-26 the C
+//! library also exported `perf_event_open` under its own name, which glibc does not, and
+//! `syscall()` answered `ENOSYS` without a look; the names went as libaio's
+//! did (design-decisions.md §1114).
 
 use crate::errno;
 use crate::linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL;
@@ -130,8 +139,10 @@ pub const PERF_EVENT_IOC_REFRESH: u64 = 0x2402;
 pub const PERF_EVENT_IOC_RESET: u64 = 0x2403;
 /// Set output.
 pub const PERF_EVENT_IOC_SET_OUTPUT: u64 = 0x2405;
-/// Set BPF program.
-pub const PERF_EVENT_IOC_SET_BPF: u64 = 0x2408;
+/// Set BPF program: `_IOW('$', 8, __u32)`, so the direction (write) and the
+/// argument's size (4) are in the number, as in every `_IOW` -- the five
+/// above are `_IO`, which carry neither.
+pub const PERF_EVENT_IOC_SET_BPF: u64 = 0x4004_2408;
 
 // ---------------------------------------------------------------------------
 // PerfEventAttr — describes what to measure (simplified)
@@ -356,7 +367,6 @@ fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
 /// * `ENOSYS` — everything valid and privilege held, but the kernel
 ///   has no PMU driver yet. Real callers treat this identically to a
 ///   Linux kernel built without `CONFIG_PERF_EVENTS=y`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn perf_event_open(
     attr: *mut PerfEventAttr,
     pid: i32,
@@ -556,6 +566,17 @@ mod tests {
             | PERF_FLAG_PID_CGROUP
             | PERF_FLAG_FD_CLOEXEC;
         assert_eq!(combined, 0x0F);
+    }
+
+    /// `_IOW('$', 8, __u32)`, built as `asm-generic/ioctl.h` builds it: the
+    /// direction in bits 30-31, the size in 16-29, the type in 8-15.
+    #[test]
+    fn set_bpf_is_an_iow_of_a_u32() {
+        let (write, size, ty, nr) = (1u64, 4u64, u64::from(b'$'), 8u64);
+        assert_eq!(
+            PERF_EVENT_IOC_SET_BPF,
+            write << 30 | size << 16 | ty << 8 | nr
+        );
     }
 
     #[test]
@@ -1565,9 +1586,9 @@ mod tests {
         }
 
         /// Exclude_kernel bit does not collide with exclusive
-        /// (bit 3, in the canonical Linux layout) — this is the bug
-        /// observed in `linux_perf_types.rs`.  Documents the
-        /// expected non-overlap.
+        /// (bit 3, in the canonical Linux layout) — the bug a copy of these
+        /// constants once had (`linux_perf_types.rs`, since deleted).
+        /// Documents the expected non-overlap.
         #[test]
         fn test_perf_phase181_exclude_kernel_distinct_from_exclusive() {
             const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;

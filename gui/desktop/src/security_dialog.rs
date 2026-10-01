@@ -109,6 +109,10 @@ const BUTTON_HEIGHT: f32 = 34.0;
 const BUTTON_WIDTH: f32 = 120.0;
 const BUTTON_SPACING: f32 = 12.0;
 const BUTTON_RADIUS: f32 = 6.0;
+/// The "remember" checkbox's row, and what it says -- named once, because the
+/// drawing and the hit test must agree on both.
+const REMEMBER_ROW: f32 = 20.0;
+const REMEMBER_LABEL: &str = "Remember this decision";
 
 const TITLE_FONT_SIZE: f32 = 16.0;
 const SUBTITLE_FONT_SIZE: f32 = 13.0;
@@ -751,11 +755,13 @@ impl SecurityDialog {
         None
     }
 
-    /// Hit-test the "remember" checkbox area.
+    /// Hit-test the "remember" checkbox: the toolkit's region for it -- the
+    /// box as a 24-pixel target and its label -- rather than a fixed 200 by 20
+    /// that ignored how long the label is.
     fn hit_test_remember(&self, x: f32, y: f32) -> bool {
         let h = self.dialog_height();
         let checkbox_y = h - PADDING - BUTTON_HEIGHT - 28.0;
-        (PADDING..=PADDING + 200.0).contains(&x) && y >= checkbox_y && y <= checkbox_y + 20.0
+        guitk::checkbox::hit(PADDING, checkbox_y, REMEMBER_ROW, REMEMBER_LABEL).contains(x, y)
     }
 
     /// Y position of the "Show details" / "Hide details" link.
@@ -1106,15 +1112,20 @@ impl SecurityDialog {
             });
         }
 
-        // --- Remember checkbox ---
+        // --- Remember checkbox: the toolkit's ---
         let checkbox_y = dy + dh - PADDING - BUTTON_HEIGHT - 28.0;
-        self.render_checkbox(
-            p,
+        guitk::checkbox::draw(
             &mut cmds,
-            dx + PADDING,
-            checkbox_y,
-            self.remember,
-            "Remember this decision",
+            p,
+            (dx + PADDING, checkbox_y, REMEMBER_ROW),
+            REMEMBER_LABEL,
+            if self.remember {
+                guitk::checkbox::CheckState::Checked
+            } else {
+                guitk::checkbox::CheckState::Unchecked
+            },
+            guitk::checkbox::State::default(),
+            0.0,
         );
 
         // --- Action buttons ---
@@ -1318,66 +1329,6 @@ impl SecurityDialog {
             overflow: TextOverflow::Ellipsis,
         });
     }
-
-    /// Render a checkbox with label.
-    fn render_checkbox(
-        &self,
-        p: &Palette,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        checked: bool,
-        label: &str,
-    ) {
-        let box_size = 16.0;
-
-        // Checkbox background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: y + 1.0,
-            width: box_size,
-            height: box_size,
-            color: if checked { p.accent } else { p.surface0 },
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Checkbox border
-        cmds.push(RenderCommand::StrokeRect {
-            x,
-            y: y + 1.0,
-            width: box_size,
-            height: box_size,
-            color: if checked { p.accent } else { p.surface2 },
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-
-        // Checkmark
-        if checked {
-            cmds.push(RenderCommand::Text {
-                x: x + 2.0,
-                y: y + 1.0,
-                text: "✓".into(),
-                font_size: 12.0,
-                color: p.on_accent(),
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(box_size),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Label
-        cmds.push(RenderCommand::Text {
-            x: x + box_size + 8.0,
-            y: y + 2.0,
-            text: label.into(),
-            font_size: DETAIL_FONT_SIZE,
-            color: p.subtext1,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
 }
 
 impl Default for SecurityDialog {
@@ -1528,7 +1479,15 @@ mod tests {
                                 dialog.hovered_button = hovered;
                                 let cmds = dialog.render(&p);
                                 assert!(!cmds.is_empty());
-                                palette_check::assert_drawn_from(&p, &cmds, &[], "security_dialog");
+                                // The risk badge and the two answer buttons
+                                // are lettered for their own hues.
+                                let inks = [p.green, p.yellow, p.peach, p.red].map(readable_on);
+                                palette_check::assert_drawn_from(
+                                    &p,
+                                    &cmds,
+                                    &inks,
+                                    "security_dialog",
+                                );
                             }
                         }
                     }
@@ -1609,6 +1568,65 @@ mod tests {
         dialog.deny_current();
         assert!(!dialog.is_visible());
         assert_eq!(dialog.pending_count(), 0);
+    }
+
+    /// The "remember" checkbox answers where it is drawn: on its box, on its
+    /// label, and not past the label's end.
+    ///
+    /// Aimed at the box the renderer drew (the toolkit checkbox's well), so a
+    /// drawing and a hit test that drifted apart would show here -- the
+    /// dialog's old test was a fixed 200-by-20 area that knew nothing of the
+    /// label.
+    #[test]
+    fn the_remember_checkbox_answers_on_its_box_and_its_label() {
+        let p = Palette::for_mode(false);
+        let mut dialog = SecurityDialog::new();
+        dialog.push_request(sample_request(7));
+        let well = dialog
+            .render(&p)
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if (width - guitk::checkbox::SIZE).abs() < f32::EPSILON
+                    && (height - guitk::checkbox::SIZE).abs() < f32::EPSILON
+                    && color == p.crust =>
+                {
+                    Some((x, y))
+                }
+                _ => None,
+            })
+            .expect("the checkbox's box is drawn");
+        let press = |x: f32, y: f32| MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        };
+        let mid_y = well.1 + guitk::checkbox::SIZE / 2.0;
+
+        assert!(dialog.handle_mouse_event(&press(well.0 + 7.0, mid_y)));
+        assert!(dialog.remember, "a click on the box ticks it");
+        assert!(
+            dialog
+                .drain_events()
+                .contains(&SecurityDialogEvent::RememberToggled(7, true))
+        );
+
+        let label_end = well.0 + guitk::checkbox::width(REMEMBER_LABEL) - 2.0;
+        dialog.handle_mouse_event(&press(label_end, mid_y));
+        assert!(!dialog.remember, "a click on the label's end unticks it");
+
+        let past = well.0 + guitk::checkbox::width(REMEMBER_LABEL) + 40.0;
+        dialog.handle_mouse_event(&press(past, mid_y));
+        assert!(
+            !dialog.remember,
+            "a click past the label is not the checkbox's"
+        );
     }
 
     #[test]

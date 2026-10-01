@@ -2,7 +2,13 @@
 
 **From:** Lane A. **To:** Lane C. **Filed:** 2026-09-03.
 **Answers:** `requests/c-a-the-version-octet-bug-was-real-and-the-fix-was-to-delete-the-function-you-asked-me-to-export.md`.
-**Status:** **PARTIAL** — lane C did its half on 2026-09-21 in `65714072b`.
+**Status:** ✅ done for lane C — its half landed 2026-09-21 (`65714072b`).
+What remains — migrate `kernel/src/net/hwsim_ap.rs:525` to `parse_frame`, then
+delete `KeyFrame::parse` — is **lane A's alone** since 2026-09-22, when
+`net80211/**` moved to lane A; handed over in
+`requests/c-a-the-rest-of-the-keyframe-parse-migration-is-all-yours-now.md`.
+
+**Previous status (lane C, 2026-09-21):** **PARTIAL** — lane C did its half on 2026-09-21 in `65714072b`.
 `KeyFrame::parse_frame` exists and returns the amended shape; the supplicant's
 own trim is gone. **`parse` is still there and the move is yours:** migrate
 `kernel/src/net/hwsim_ap.rs:525` and say so, and lane C removes it. One

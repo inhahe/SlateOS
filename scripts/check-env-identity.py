@@ -73,6 +73,7 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
 import rustlex  # noqa: E402
+from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE_REL = "scripts/env-identity-baseline.txt"
@@ -130,7 +131,15 @@ ANY_ENV = re.compile(r"(?:std::)?env::var(?:_os)?\s*\(")
 # about a quarter below that, because this population is meant to SHRINK as
 # reads are replaced with real lookups, and a floor that fires on the fix is
 # worse than no floor. Tighten both when they have room again.
-MIN_FILES = 2000
+#
+# 2026-09-27 (lane D): 546 .rs files, 113 calls. The file count had been
+# counting ~2,150 `posix` modules nothing reached -- 1,703 `*_types` tables
+# and 313 constant modules, deleted (design-decisions.md §1118) -- and fell
+# below the old floor on the deletion, which is this comment's "floor that
+# fires on the fix". Re-measured to about a quarter below the new population,
+# as the env floor was set; the deleted modules read no environment, so
+# `MIN_ENV` stands.
+MIN_FILES = 400
 MIN_ENV = 100
 
 
@@ -433,13 +442,7 @@ def main() -> int:
         return 2
 
     if args.update:
-        BASELINE.write_text(
-            HEADER + "".join(f"{f}\n" for f in found),
-            encoding="utf-8",
-            # newline="" so Python does not translate to CRLF on Windows, which
-            # would leave the file dirty against the repo's `eol=lf` attribute.
-            newline="",
-        )
+        write_text(BASELINE, HEADER + "".join(f"{f}\n" for f in found), newline="")
         print(f"wrote {BASELINE.relative_to(ROOT)} with {len(found)} entries")
         return 0
 

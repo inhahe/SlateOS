@@ -114,16 +114,10 @@ MUTATIONS = [
         ["cycling_difficulty_visits_all_three_and_comes_home"],
     ),
     (
-        "two difficulties share a colour",
-        "            Self::Intermediate => YELLOW,",
-        "            Self::Intermediate => GREEN,",
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
-    ),
-    (
         "two difficulties share a name",
         '            Self::Intermediate => "Intermediate",',
         '            Self::Intermediate => "Beginner",',
-        ["every_difficulty_has_its_own_name_and_its_own_colour"],
+        ["every_difficulty_has_its_own_name"],
     ),
     # ── Addressing the board ──────────────────────────────────────────────
     (
@@ -768,14 +762,14 @@ MUTATIONS = [
     # ── Drawing ───────────────────────────────────────────────────────────
     (
         "a covered cell and a flagged one look the same",
-        "            CellState::Flagged => SURFACE2,",
-        "            CellState::Flagged => SURFACE1,",
+        "            CellState::Flagged => c.flagged,",
+        "            CellState::Flagged => c.covered,",
         ["a_covered_cell_a_flagged_one_and_an_open_one_are_three_different_faces"],
     ),
     (
         "the mine that ended the game is not marked",
-        "            CellState::Revealed if lost_here => RED,",
-        "            CellState::Revealed if lost_here => SURFACE0,",
+        "            CellState::Revealed if lost_here => c.lost,",
+        "            CellState::Revealed if lost_here => c.open,",
         ["the_mine_that_ended_the_game_is_the_one_painted_red"],
     ),
     (
@@ -786,8 +780,8 @@ MUTATIONS = [
     ),
     (
         "a flagged cell is drawn blank",
-        '                centred_in(f, r, "F", size, PEACH, FontWeightHint::Bold);',
-        '                centred_in(f, r, "", size, PEACH, FontWeightHint::Bold);',
+        "                centred_in(f, r, \"F\", size, c.flag.at(size, true), FontWeightHint::Bold);",
+        "                centred_in(f, r, \"\", size, c.flag.at(size, true), FontWeightHint::Bold);",
         ["a_flagged_cell_carries_a_flag_and_an_uncovered_mine_carries_a_star"],
     ),
     (
@@ -798,14 +792,14 @@ MUTATIONS = [
     ),
     (
         "a count is drawn in the colour of the count above it",
-        "                    .get(usize::from(cell.adjacent).saturating_sub(1))",
-        "                    .get(usize::from(cell.adjacent))",
-        ["an_open_number_is_drawn_in_the_colour_that_count_is_given"],
+        "            .get(usize::from(n).saturating_sub(1))",
+        "            .get(usize::from(n))",
+        ["each_neighbour_count_is_written_in_its_own_colour", "every_digit_reads_on_an_open_tile_in_either_theme"],
     ),
     (
         "two counts share a colour",
-        "    GREEN,      // 2",
-        "    BLUE,       // 2",
+        "    (Color::from_hex(0xA6E3A1), Color::from_hex(0x008000)), // 2 green",
+        "    (Color::from_hex(0x89B4FA), Color::from_hex(0x0000FF)), // 2 green",
         ["each_neighbour_count_is_written_in_its_own_colour"],
     ),
     (
@@ -834,8 +828,8 @@ MUTATIONS = [
     ),
     (
         "the new-game chip is drawn on top of the level chip",
-        '        chip(f, l.chip(0), Target::NewGame, "New", l.font, LAVENDER);',
-        '        chip(f, l.chip(1), Target::NewGame, "New", l.font, LAVENDER);',
+        "            l.chip(0),\n            Target::NewGame,",
+        "            l.chip(1),\n            Target::NewGame,",
         ["clicking_the_level_chip_moves_to_the_next_level"],
     ),
     (
@@ -846,8 +840,8 @@ MUTATIONS = [
     ),
     (
         "a win and a game in progress are the same colour",
-        "        GameStatus::Won => GREEN,",
-        "        GameStatus::Won => BLUE,",
+        "        GameStatus::Won => c.good,",
+        "        GameStatus::Won => c.key,",
         ["every_state_of_the_game_says_its_own_word_in_its_own_colour"],
     ),
     (
@@ -918,6 +912,54 @@ MUTATIONS = [
         "        Event::Tick { elapsed_ms } => app.tick(*elapsed_ms),",
         "        Event::Tick { .. } => EventResult::Ignored,",
         ["the_clock_counts_the_time_that_passed_not_the_times_it_was_woken"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "a new game drops the user's colours",
+        "        let (palette, size) = (self.palette, self.size);",
+        "        let (palette, size) = (Palette::for_mode(false), self.size);",
+        ["a_new_game_keeps_the_users_colours_and_the_window_size"],
+    ),
+    (
+        "a new game forgets the window's size",
+        "        let (palette, size) = (self.palette, self.size);",
+        "        let (palette, size) = (self.palette, (WINDOW_WIDTH, WINDOW_HEIGHT));",
+        ["a_new_game_keeps_the_users_colours_and_the_window_size"],
+    ),
+    (
+        "a digit's two shades are never chosen between",
+        "Ink::on(gamechrome::legible_on(pair, self.open), &[self.open])",
+        "Ink::on(pair.0, &[self.open])",
+        ["every_digit_reads_on_an_open_tile_in_either_theme"],
+    ),
+    (
+        "a covered tile is painted the open ground's colour",
+        "            covered: p.surface1,",
+        "            covered: p.mantle,",
+        ["covered_and_open_tiles_are_clearly_apart"],
+    ),
+    (
+        "the header's chips are raised slabs with a page ink on them again",
+        "    gamechrome::button(\n        f,\n        p,\n        (r.x, r.y, r.w, r.h),\n        s,\n        size,\n        guitk::button::Kind::Plain,\n        guitk::button::State::default(),\n        ground,\n    );",
+        "    let _ = ground;\n    fill(f, r, Chrome::of(p).raised, 5.0);\n    centred_in(f, r, s, size, Chrome::of(p).title, FontWeightHint::Bold);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the flag's letter is the page's peach, 2.5:1 on its tile",
+        "                centred_in(f, r, \"F\", size, c.flag.at(size, true), FontWeightHint::Bold);",
+        "                centred_in(f, r, \"F\", size, self.palette.ink(self.palette.peach), FontWeightHint::Bold);",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "a small digit keeps its colour unmoved, 4.2:1 on its tile",
+        "                Ink::on(gamechrome::legible_on(pair, self.open), &[self.open]).at(size, true)",
+        "                gamechrome::legible_on(pair, self.open)",
+        ["every_text_reads_on_what_is_under_it_in_either_theme", "every_digit_reads_on_an_open_tile_in_either_theme"],
     ),
 ]
 

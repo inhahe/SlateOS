@@ -16,22 +16,22 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
 //!
-//! # Master password
+//! # The vault on disk
 //!
-//! The vault's master password is checked against a [`pwkdf::PasswordVerifier`]
-//! — a salted, stretched derivation shared with `apps/lockscreen` and
-//! `gui/credentials`, so that the three cannot drift into three incompatible
-//! formats (`design-decisions.md` §466). Until 2026-08-18 it was checked
-//! against a 64-bit djb2 hash, which is not a password derivation: no salt, no
-//! cost, and a width at which collisions are constructible rather than
-//! theoretical. See [`Vault::create`].
+//! The vault is one file, `<config>/credmanager/vault`, encrypted under a key
+//! made from the master password: Argon2id makes the key and
+//! XChaCha20-Poly1305 seals the entries, through `rustcrypto/seal` -- vetted
+//! code, not this project's (`design-decisions.md` §539, §1218). The master
+//! password is never stored, nor anything that checks a guess more cheaply
+//! than opening the file does; a key that does not open the vault is the
+//! wrong password. Locked, the program holds the sealed file and nothing
+//! else -- no key, no entry. Every change is saved as it is made, under a new
+//! nonce. The file's layout is `vaultfile`'s module doc.
 //!
-//! The vault *contents* are not yet encrypted at rest — this crate has no
-//! persistence layer at all, so every launch opens an empty vault. When one is
-//! written, the key comes from `pwkdf::derive_key` under the same params, and
-//! the verifier stored beside it must be written with its salt and round count
-//! or the vault is unopenable. Tracked as
-//! `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK`.
+//! Until 2026-09-27 nothing was kept: every launch opened an empty vault, the
+//! master password was checked against a stored verifier that was never
+//! written anywhere, and locking changed a flag while every entry stayed in
+//! memory behind the lock screen.
 
 // Nineteen items are built and exercised by tests but reachable from no
 // control yet: the CSV export, the backup serialiser, the clipboard copy, and
@@ -46,10 +46,13 @@
 // `known-issues.md` → `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE`.
 
 use appearance::Palette;
+use pathtext::ShowPath;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use guitk::color::Color;
+use guitk::dialog::{FilePicker, Picked};
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 #[cfg(test)]
@@ -63,7 +66,8 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
-use pwkdf::{KdfError, KdfParams, PasswordVerifier};
+
+mod vaultfile;
 
 // =============================================================================
 // Catppuccin Mocha palette
@@ -144,6 +148,34 @@ enum Target {
     MasterInput,
     /// Lock screen: the Unlock button.
     Unlock,
+    /// First run: the master-password field.
+    NewPassword,
+    /// First run: the field it is typed again in.
+    ConfirmPassword,
+    /// First run: the button that makes the vault.
+    CreateVault,
+    /// Settings: back the vault up.
+    BackUp,
+    /// Settings: restore from a backup.
+    RestoreBackup,
+    /// Settings: export as plain text.
+    ExportCsv,
+    /// The export warning: go on.
+    ExportAnyway,
+    /// The restore dialog's password field.
+    RestoreInput,
+    /// The restore dialog: open the backup with the password typed.
+    RestoreOpen,
+    /// The restore dialog: replace this vault's entries with the backup's.
+    RestoreReplace,
+    /// Any vault dialog: leave it, doing nothing.
+    DialogCancel,
+    /// Entry detail: change this entry.
+    EditEntry,
+    /// Entry detail: delete this entry (after asking).
+    DeleteEntry,
+    /// The delete question: yes.
+    DeleteConfirmed,
     /// New-entry form: the type chooser, indexing [`EntryType::all`].
     NewKind(usize),
     /// New-entry form: field `n`, indexing [`fields_for`].
@@ -604,24 +636,31 @@ impl Folder {
 // Vault
 // =============================================================================
 
-/// Domain label mixed into this crate's stored verifier.
+/// How much work makes the key of a new vault: RFC 9106's second
+/// recommendation -- 64 MiB, three passes, four lanes -- through `seal`.
 ///
-/// It is what stops a verifier from meaning anything anywhere else: the lock
-/// screen (`slateos-lockscreen-verifier`) and the credential service
-/// (`slateos-credential-verifier`) derive theirs from the same key material
-/// under different labels, so a value lifted from one store cannot be replayed
-/// against another. Changing this string invalidates every existing vault, and
-/// nothing local would fail — hence the format-pinning test.
-const VERIFIER_DOMAIN: &[u8] = b"slateos-credmanager-vault";
+/// Every vault records its own parameters in its file's header, so raising
+/// this later makes new vaults costlier without making an old one unopenable.
+const NEW_VAULT_KDF: seal::KdfParams = seal::KdfParams::RECOMMENDED;
 
-/// Iteration count for vaults built by tests.
+/// The shortest master password a new vault accepts.
 ///
-/// The properties under test — that the right password is accepted, that a
-/// wrong one is not, that the salt is honoured — do not depend on the number
-/// of rounds, and [`pwkdf::DEFAULT_ROUNDS`] is chosen to take ~130 ms, which
-/// a suite that builds a vault per test would turn into several minutes.
+/// Length is not strength, and the strength meter says more; but a master
+/// password shorter than this is guessed quickly whatever the key derivation
+/// costs, and it is the one password that guards all the others.
+const MIN_MASTER_PASSWORD_CHARS: usize = 10;
+
+/// The key derivation of the vaults tests build: the cheapest Argon2id allows.
+///
+/// The properties under test -- the right password opens, a wrong one does
+/// not, the salt is honoured -- do not depend on the cost, and the real one
+/// takes seconds per unlock in a debug build.
 #[cfg(test)]
-const TEST_ROUNDS: u32 = 16;
+const TEST_KDF: seal::KdfParams = seal::KdfParams {
+    memory_kib: 8,
+    iterations: 1,
+    lanes: 1,
+};
 
 /// The master password of the vault built by [`AppState::for_test`].
 #[cfg(test)]
@@ -634,19 +673,29 @@ enum VaultState {
     Unlocked,
 }
 
-/// The vault holds all entries, folders, and metadata.
+/// The vault: its entries while it is unlocked, and the sealed file they are
+/// kept in.
+///
+/// **Locked**, it holds [`sealed`](Self::sealed) -- the vault as last
+/// written, encrypted -- and what making the key needs: the Argon2id
+/// parameters and the salt. No entry and no key is in memory. **Unlocking**
+/// makes the key from the master password and opens `sealed` with it; a key
+/// that does not open it is the wrong password (or a changed file), and there
+/// is no other check, so none that is cheaper to run. **Locking** forgets the
+/// key and every entry.
 #[derive(Clone, Debug)]
 struct Vault {
     name: String,
     state: VaultState,
-    /// What the master password is checked against.
-    ///
-    /// A [`PasswordVerifier`], not a hash: it carries the salt and the
-    /// iteration count *with* the stored value, because all three have to
-    /// agree and a persistence layer that writes down only the last one has
-    /// destroyed the vault. This field used to be a `u64` from a djb2 hash —
-    /// see [`Vault::create`] for why that was worse than it looks.
-    master: PasswordVerifier,
+    /// How the key is made from the master password.
+    kdf: seal::KdfParams,
+    /// What it is made with besides -- drawn at random when the vault is made.
+    salt: [u8; seal::SALT_LEN],
+    /// The key, while unlocked.
+    key: Option<seal::Key>,
+    /// The vault as last sealed: what its file holds, and what unlocking
+    /// opens. Empty for a vault that has never been sealed.
+    sealed: Vec<u8>,
     entries: Vec<Entry>,
     folders: Vec<Folder>,
     last_access: u64,
@@ -655,70 +704,56 @@ struct Vault {
 }
 
 impl Vault {
-    /// Create a vault, enrolling `master_password` against a fresh salt.
+    /// A new vault, unlocked and empty, whose key `master_password` makes
+    /// under `kdf` and `salt`.
+    ///
+    /// The salt is the caller's to draw, from the system's secure random
+    /// source: this runs under test too, where that source is not reachable.
     ///
     /// # Errors
     ///
-    /// [`KdfError::EntropyUnavailable`] if the kernel CSPRNG cannot be
-    /// reached. Propagated rather than papered over with a fixed salt: this is
-    /// the *secret* tier of `design-decisions.md` §465, and a predictable salt
-    /// chosen once outlives every later chance to notice it. Refusing to
-    /// create the vault is recoverable; creating it against a guessable salt
-    /// is not.
-    ///
-    /// # What this replaced
-    ///
-    /// Until 2026-08-18 the master password was stored as
-    /// `simple_hash(password): u64` — djb2, one multiply-add per byte, no
-    /// salt, no iteration. Three separate failures, of which only the first is
-    /// the obvious one:
-    ///
-    /// - **No cost.** Testing a guess took two arithmetic operations per
-    ///   character, so an attacker with the stored value ran through the
-    ///   entire plausible-password space at memory speed.
-    /// - **No salt.** The same password produced the same 64 bits in every
-    ///   vault on every machine, so one precomputed table opened all of them.
-    /// - **64 bits, non-cryptographic.** Collisions are not a theoretical
-    ///   concern for djb2 — they are constructible — and [`Vault::unlock`]
-    ///   accepted *any* colliding string, not just the owner's password.
-    fn create(name: &str, master_password: &str) -> Result<Self, KdfError> {
-        let params = KdfParams::fresh(pwkdf::DEFAULT_ROUNDS)?;
-        Ok(Self::with_verifier(
-            name,
-            PasswordVerifier::create(master_password.as_bytes(), params, VERIFIER_DOMAIN),
-        ))
+    /// The key cannot be made: not enough memory, or parameters Argon2 refuses.
+    fn create(
+        name: &str,
+        master_password: &str,
+        kdf: seal::KdfParams,
+        salt: [u8; seal::SALT_LEN],
+    ) -> Result<Self, vaultfile::OpenError> {
+        let key = vaultfile::key_for(master_password, kdf, &salt)?;
+        let mut vault = Self::locked(kdf, salt, Vec::new());
+        vault.name = name.to_string();
+        vault.key = Some(key);
+        vault.state = VaultState::Unlocked;
+        Ok(vault)
     }
 
-    /// Reopen a vault whose verifier was read back from storage.
+    /// The vault a file's bytes hold, locked.
     ///
-    /// `params` must be the salt and cost the verifier was created under; a
-    /// store that keeps the verifier and loses the salt has locked the owner
-    /// out permanently, and the symptom ("correct password refused") does not
-    /// point at the cause.
-    /// Reopen a vault whose verifier was written down somewhere.
+    /// # Errors
     ///
-    /// Unused because this crate has no persistence layer: every launch opens
-    /// an empty vault, as the module doc says. This is the door a loader would
-    /// come in through. See `todo.txt`.
-    #[allow(
-        dead_code,
-        reason = "the persistence layer that would call it does not exist yet"
-    )]
-    fn from_stored(name: &str, params: KdfParams, verifier: [u8; 32]) -> Self {
-        Self::with_verifier(
-            name,
-            PasswordVerifier::from_parts(params, VERIFIER_DOMAIN, verifier),
-        )
+    /// The header does not read: not a vault, a newer format, cut short, or
+    /// asking for more work than any vault this program writes.
+    fn from_file(bytes: Vec<u8>) -> Result<Self, vaultfile::OpenError> {
+        let header = vaultfile::Header::parse(&bytes)?;
+        Ok(Self::locked(header.kdf, header.salt, bytes))
     }
 
-    /// The empty vault around an already-built verifier — the one place the
-    /// non-password fields are initialised, so the three constructors cannot
-    /// drift apart in what a fresh vault contains.
-    fn with_verifier(name: &str, master: PasswordVerifier) -> Self {
+    /// No vault yet: what the window holds while the first one is being made,
+    /// or while the file there cannot be read.
+    fn none_yet() -> Self {
+        Self::locked(NEW_VAULT_KDF, [0; seal::SALT_LEN], Vec::new())
+    }
+
+    /// A locked vault around `sealed` -- the one place the fields are set, so
+    /// the constructors cannot drift apart in what a vault starts with.
+    fn locked(kdf: seal::KdfParams, salt: [u8; seal::SALT_LEN], sealed: Vec<u8>) -> Self {
         Self {
-            name: name.to_string(),
+            name: String::new(),
             state: VaultState::Locked,
-            master,
+            kdf,
+            salt,
+            key: None,
+            sealed,
             entries: Vec::new(),
             folders: Vec::new(),
             last_access: 0,
@@ -727,19 +762,21 @@ impl Vault {
         }
     }
 
-    /// A vault with a known master password, a named salt and a cheap cost.
-    ///
-    /// `#[cfg(test)]` so that neither shortcut can reach production. Both are
-    /// deliberate and neither is safe outside a test: the fixed salt makes
-    /// assertions reproducible, and [`TEST_ROUNDS`] keeps a suite that builds
-    /// a vault in almost every test from spending ~130 ms on each one.
+    /// A sealed, locked vault with a known master password and the cheapest
+    /// key derivation.
     #[cfg(test)]
+    #[allow(
+        clippy::expect_used,
+        reason = "a test fixture: the cheapest key derivation, sealed once"
+    )]
     fn for_test(name: &str, master_password: &str) -> Self {
-        let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
-        Self::with_verifier(
-            name,
-            PasswordVerifier::create(master_password.as_bytes(), params, VERIFIER_DOMAIN),
-        )
+        let mut vault = Self::create(name, master_password, TEST_KDF, [0x5A; seal::SALT_LEN])
+            .expect("the test vault's key");
+        vault
+            .reseal([0x11; seal::NONCE_LEN])
+            .expect("the test vault's seal");
+        vault.lock();
+        vault
     }
 
     fn next_id(&mut self) -> u64 {
@@ -748,23 +785,77 @@ impl Vault {
         id
     }
 
-    /// Try to unlock the vault with `password`.
+    /// Open the vault with `password`.
     ///
-    /// Costs a full derivation — deliberately ~130 ms at
-    /// [`pwkdf::DEFAULT_ROUNDS`]. That is the point, and it is why this is
-    /// called on submit rather than per keystroke.
-    fn unlock(&mut self, password: &str, now: u64) -> bool {
-        if self.master.check(password.as_bytes()) {
-            self.state = VaultState::Unlocked;
-            self.last_access = now;
-            true
-        } else {
-            false
-        }
+    /// Costs a full key derivation -- a large part of a second at
+    /// [`NEW_VAULT_KDF`] -- which is the point: it is what every guess costs
+    /// an attacker holding the file. Called on submit, never per keystroke.
+    ///
+    /// # Errors
+    ///
+    /// The key does not open the vault (the wrong password, or the file has
+    /// been changed), or what it holds is not a vault this program reads.
+    /// Nothing about the vault changes then.
+    fn open(&mut self, password: &str, now: u64) -> Result<(), vaultfile::OpenError> {
+        let key = vaultfile::key_for(password, self.kdf, &self.salt)?;
+        let text = vaultfile::open_file(&self.sealed, &key)?;
+        let contents = vaultfile::parse_contents(&text).map_err(vaultfile::OpenError::Contents)?;
+        self.name = contents.name;
+        self.auto_lock_minutes = contents.auto_lock_minutes;
+        self.id_gen = contents.next_id;
+        self.folders = contents.folders;
+        self.entries = contents.entries;
+        self.key = Some(key);
+        self.state = VaultState::Unlocked;
+        self.last_access = now;
+        Ok(())
     }
 
+    /// [`open`](Self::open), saying only whether it did -- for tests.
+    #[cfg(test)]
+    fn unlock(&mut self, password: &str, now: u64) -> bool {
+        self.open(password, now).is_ok()
+    }
+
+    /// Lock: forget the key and every entry. What they were is in
+    /// [`sealed`](Self::sealed), and unlocking brings it back.
     fn lock(&mut self) {
+        if let Some(key) = self.key.as_mut() {
+            // Overwritten before it is let go, so the key is not left for
+            // whatever reuses the memory. The entries' strings are freed
+            // without being overwritten: `String` does not promise that, and
+            // a crate that does is not vendored.
+            key.fill(0);
+        }
+        self.key = None;
+        self.entries.clear();
+        self.folders.clear();
         self.state = VaultState::Locked;
+    }
+
+    /// Seal what the vault holds, under `nonce`, into
+    /// [`sealed`](Self::sealed).
+    ///
+    /// `nonce` must be new: sealing twice under one key and nonce gives both
+    /// away. The caller draws it from the system's secure random source.
+    ///
+    /// # Errors
+    ///
+    /// The vault is locked -- there is no key -- or holds more than one nonce
+    /// can seal (256 GiB).
+    fn reseal(&mut self, nonce: seal::Nonce) -> Result<(), &'static str> {
+        let Some(key) = self.key.as_ref() else {
+            return Err("the vault is locked");
+        };
+        let header = vaultfile::Header {
+            kdf: self.kdf,
+            salt: self.salt,
+            nonce,
+        };
+        let sealed = vaultfile::seal_file(key, &header, &vaultfile::contents_text(self))
+            .map_err(|_| "the vault is too large to seal")?;
+        self.sealed = sealed;
+        Ok(())
     }
 
     fn is_unlocked(&self) -> bool {
@@ -796,10 +887,8 @@ impl Vault {
 
     /// Delete an entry.
     ///
-    /// No caller yet: adding a credential is wired up as of this change and
-    /// deleting one is not, so there is no control that reaches this. See
-    /// `todo.txt`.
-    #[allow(dead_code, reason = "no delete control yet -- see todo.txt")]
+    /// Reached from the entry's Delete button and the Delete key, after a
+    /// question -- see `ask_delete`. It had no caller until 2026-09-27.
     fn remove_entry(&mut self, entry_id: u64) -> bool {
         let before = self.entries.len();
         self.entries.retain(|e| e.id != entry_id);
@@ -816,9 +905,8 @@ impl Vault {
         self.entries.iter_mut().find(|e| e.id == entry_id)
     }
 
-    /// Replace an entry's payload. No caller: the detail view shows a
-    /// credential and cannot edit one. See `todo.txt`.
-    #[allow(dead_code, reason = "no edit control yet -- see todo.txt")]
+    /// Replace an entry's payload, from the form's Edit. It had no caller
+    /// until 2026-09-27.
     fn update_entry(&mut self, entry_id: u64, data: EntryData, now: u64) -> bool {
         if let Some(entry) = self.get_entry_mut(entry_id) {
             entry.data = data;
@@ -2493,134 +2581,139 @@ fn audit_vault(vault: &Vault, now: u64) -> Vec<AuditIssue> {
 // Import / Export
 // =============================================================================
 
-/// Export vault entries to CSV format.
-/// The vault as CSV, for moving it to another password manager.
+/// The vault as CSV with every password in plain text, for moving to another
+/// password manager -- the operator's option A of C-Q25 (`design-decisions.md`
+/// §1417), offered only behind a warning that says what the file is.
 ///
-/// Advertised in the module doc and reachable from nothing: there is no
-/// control that calls it, and no filesystem to write the result to. See
-/// `todo.txt` -- the clipboard is the sink this can have today.
-#[allow(dead_code, reason = "no export control yet -- see todo.txt")]
+/// **Every field is quoted, always**, and a `"` inside one is doubled
+/// (RFC 4180). A password may hold any character at all -- a comma, a quote, a
+/// line break, a tab, a leading space or `=` -- and quoting only the fields
+/// that "need" it is how an exporter splits one password into two columns, or
+/// loses the space it began with to a reader that trims. Records end in CRLF,
+/// as RFC 4180 says. Nothing is altered to defend spreadsheets from formulas:
+/// the file is for importing, and a password changed on the way out is a
+/// password that no longer works.
+///
+/// Columns: `type`, `name`, `username`, `password`, `url`, `notes`,
+/// `one-time code secret`, `tags` (`;` between), `folder`, `favourite`. A card,
+/// an identity and an SSH key have no columns of their own in any importer's
+/// CSV, so their fields are written into `notes`, one `label: value` a line.
 fn export_csv(vault: &Vault) -> String {
-    let mut csv = String::from("type,name,username,password,url,notes,tags,folder,starred\n");
+    fn quoted(s: &str) -> String {
+        let mut out = String::with_capacity(s.len().saturating_add(2));
+        out.push('"');
+        for c in s.chars() {
+            if c == '"' {
+                out.push('"');
+            }
+            out.push(c);
+        }
+        out.push('"');
+        out
+    }
+    fn lines(pairs: &[(&str, &str)], notes: &str) -> String {
+        let mut out: Vec<String> = pairs
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect();
+        if !notes.is_empty() {
+            out.push(notes.to_string());
+        }
+        out.join("\n")
+    }
+    let header = [
+        "type",
+        "name",
+        "username",
+        "password",
+        "url",
+        "notes",
+        "one-time code secret",
+        "tags",
+        "folder",
+        "favourite",
+    ];
+    let mut csv = header.map(quoted).join(",");
+    csv.push_str("\r\n");
     for entry in &vault.entries {
-        let etype = entry.entry_type().label();
-        let name = escape_csv(entry.display_name());
-        let subtitle = escape_csv(entry.subtitle());
-        let password = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.password),
-            _ => String::new(),
+        let (username, password, url, notes, totp) = match &entry.data {
+            EntryData::Login(d) => (
+                d.username.clone(),
+                d.password.clone(),
+                d.url.clone(),
+                d.notes.clone(),
+                d.totp_secret.clone().unwrap_or_default(),
+            ),
+            EntryData::SecureNote(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                d.content.clone(),
+                String::new(),
+            ),
+            EntryData::CreditCard(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Number", &d.number_masked),
+                        ("Expiry", &d.expiry),
+                        ("Cardholder", &d.cardholder),
+                    ],
+                    &d.notes,
+                ),
+                String::new(),
+            ),
+            EntryData::Identity(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Email", &d.email),
+                        ("Phone", &d.phone),
+                        ("Address", &d.address),
+                    ],
+                    "",
+                ),
+                String::new(),
+            ),
+            EntryData::SshKey(d) => (
+                String::new(),
+                String::new(),
+                String::new(),
+                lines(
+                    &[
+                        ("Fingerprint", &d.fingerprint),
+                        ("Public key", &d.public_key),
+                    ],
+                    "",
+                ),
+                String::new(),
+            ),
         };
-        let url = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.url),
-            _ => String::new(),
-        };
-        let notes = match &entry.data {
-            EntryData::Login(d) => escape_csv(&d.notes),
-            EntryData::CreditCard(d) => escape_csv(&d.notes),
-            _ => String::new(),
-        };
-        // Tag and folder names are free-form user text just like the other
-        // columns, so they need the same quoting; before this they were the
-        // only two fields interpolated raw.
-        let tags = escape_csv(&entry.tags.join(";"));
-        let folder = escape_csv(
-            &entry
-                .folder_id
-                .and_then(|fid| vault.get_folder(fid))
-                .map_or(String::new(), |f| f.name.clone()),
-        );
-        let starred = if entry.starred { "true" } else { "false" };
-
-        csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{}\n",
-            etype, name, subtitle, password, url, notes, tags, folder, starred,
-        ));
+        let folder = entry
+            .folder_id
+            .and_then(|fid| vault.get_folder(fid))
+            .map_or(String::new(), |f| f.name.clone());
+        let row = [
+            entry.entry_type().label().to_string(),
+            entry.display_name().to_string(),
+            username,
+            password,
+            url,
+            notes,
+            totp,
+            entry.tags.join(";"),
+            folder,
+            if entry.starred { "yes" } else { "no" }.to_string(),
+        ];
+        csv.push_str(&row.map(|field| quoted(&field)).join(","));
+        csv.push_str("\r\n");
     }
     csv
-}
-
-/// Escape a value for CSV output.
-/// Quote a CSV field per RFC 4180.
-///
-/// Delegates to the shared escaper so this app cannot drift from the other
-/// CSV writers again. The local version this replaced omitted `\r` from its
-/// trigger set; since RFC 4180 records are CRLF-terminated, a bare CR in an
-/// unquoted field splits the record for most readers.
-#[allow(
-    dead_code,
-    reason = "only `export_csv` calls it, and that has no caller yet"
-)]
-fn escape_csv(s: &str) -> String {
-    guitk::csv::field(s)
-}
-
-/// Serialize vault to a backup string (simplified JSON-like format).
-/// The vault in a form that could be written out and read back. Same story as
-/// `export_csv`: advertised, and nothing calls it.
-#[allow(dead_code, reason = "no backup control yet -- see todo.txt")]
-fn serialize_backup(vault: &Vault) -> String {
-    let mut out = String::from("{\n  \"vault_name\": ");
-    // Every string below is user-chosen (vault/entry/folder/tag names). None
-    // of them was escaped before, so a `"` in any one of them produced a
-    // backup file that no JSON reader could load -- i.e. a silently
-    // unrestorable backup, which is the worst possible failure for a
-    // credential vault.
-    out.push_str(&format!(
-        "\"{}\",\n",
-        guitk::escape::json_string(&vault.name)
-    ));
-    out.push_str(&format!("  \"entry_count\": {},\n", vault.entries.len()));
-    out.push_str("  \"entries\": [\n");
-    // Index of the last element, so the "is this the final one?" test inside
-    // the loop is a comparison rather than an `i + 1` that has to be argued
-    // safe. `saturating_sub` covers the empty case, where the loop body never
-    // runs and the value is unused.
-    let last_entry = vault.entries.len().saturating_sub(1);
-    for (i, entry) in vault.entries.iter().enumerate() {
-        out.push_str("    {\n");
-        out.push_str(&format!("      \"id\": {},\n", entry.id));
-        out.push_str(&format!(
-            "      \"type\": \"{}\",\n",
-            entry.entry_type().label()
-        ));
-        out.push_str(&format!(
-            "      \"name\": \"{}\",\n",
-            guitk::escape::json_string(entry.display_name())
-        ));
-        out.push_str(&format!("      \"starred\": {},\n", entry.starred));
-        out.push_str(&format!("      \"compromised\": {},\n", entry.compromised));
-        out.push_str(&format!("      \"created_at\": {},\n", entry.created_at));
-        out.push_str(&format!("      \"modified_at\": {},\n", entry.modified_at));
-        let tags_str: Vec<String> = entry
-            .tags
-            .iter()
-            .map(|t| format!("\"{}\"", guitk::escape::json_string(t)))
-            .collect();
-        out.push_str(&format!("      \"tags\": [{}]\n", tags_str.join(", ")));
-        if i < last_entry {
-            out.push_str("    },\n");
-        } else {
-            out.push_str("    }\n");
-        }
-    }
-    out.push_str("  ],\n");
-    out.push_str("  \"folders\": [\n");
-    let last_folder = vault.folders.len().saturating_sub(1);
-    for (i, folder) in vault.folders.iter().enumerate() {
-        out.push_str(&format!(
-            "    {{ \"id\": {}, \"name\": \"{}\" }}",
-            folder.id,
-            guitk::escape::json_string(&folder.name)
-        ));
-        if i < last_folder {
-            out.push_str(",\n");
-        } else {
-            out.push('\n');
-        }
-    }
-    out.push_str("  ]\n");
-    out.push_str("}\n");
-    out
 }
 
 // =============================================================================
@@ -2805,6 +2898,8 @@ fn field_is_secret(kind: EntryType, index: usize) -> bool {
 /// A credential being written, before it is a credential.
 #[derive(Clone, Debug)]
 struct NewEntryForm {
+    /// The entry this form changes, or `None` for a new one.
+    editing: Option<u64>,
     kind: EntryType,
     /// One string per entry in `fields_for(kind)`.
     values: Vec<String>,
@@ -2815,6 +2910,7 @@ struct NewEntryForm {
 impl NewEntryForm {
     fn new(kind: EntryType) -> Self {
         Self {
+            editing: None,
             kind,
             values: vec![String::new(); fields_for(kind).len()],
             focused: 0,
@@ -2828,7 +2924,9 @@ impl NewEntryForm {
     /// a typed secret into a field that is drawn in the clear would be the
     /// worst possible way to find that out.
     fn set_kind(&mut self, kind: EntryType) {
-        if self.kind == kind {
+        // An entry being edited keeps its kind: a login does not turn into a
+        // note by a click on the wrong pill.
+        if self.kind == kind || self.editing.is_some() {
             return;
         }
         *self = Self::new(kind);
@@ -2836,6 +2934,43 @@ impl NewEntryForm {
 
     fn labels(&self) -> &'static [&'static str] {
         fields_for(self.kind)
+    }
+
+    /// The form over an existing entry, its fields filled in -- in the order
+    /// [`fields_for`] names them.
+    fn for_entry(entry: &Entry) -> Self {
+        let values: Vec<String> = match &entry.data {
+            EntryData::Login(d) => vec![
+                d.site.clone(),
+                d.username.clone(),
+                d.password.clone(),
+                d.url.clone(),
+                d.notes.clone(),
+            ],
+            EntryData::SecureNote(d) => vec![d.title.clone(), d.content.clone()],
+            EntryData::CreditCard(d) => vec![
+                d.name.clone(),
+                d.number_masked.clone(),
+                d.expiry.clone(),
+                d.cardholder.clone(),
+                d.notes.clone(),
+            ],
+            EntryData::Identity(d) => vec![
+                d.name.clone(),
+                d.email.clone(),
+                d.phone.clone(),
+                d.address.clone(),
+            ],
+            EntryData::SshKey(d) => {
+                vec![d.name.clone(), d.fingerprint.clone(), d.public_key.clone()]
+            }
+        };
+        Self {
+            editing: Some(entry.id),
+            kind: entry.entry_type(),
+            values,
+            focused: 0,
+        }
     }
 
     fn value(&self, index: usize) -> &str {
@@ -2939,9 +3074,163 @@ const NOT_COPIED: &str =
 // Application state
 // =============================================================================
 
+/// What the lock screen is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Gate {
+    /// There is a vault: ask for its master password.
+    Unlock,
+    /// There is none yet: choose the master password that makes one.
+    Create(NewVault),
+    /// The vault file is there and cannot be opened, for the reason given.
+    /// Nothing is ever written over it: the window offers no way to.
+    Unreadable(String),
+}
+
+/// The form that makes the first vault.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NewVault {
+    /// The master password, as typed.
+    password: String,
+    /// Typed again, to catch a slip nobody can see behind the dots.
+    confirm: String,
+    /// Whether the keyboard is in the second field rather than the first.
+    confirming: bool,
+    /// Why the last press of Create made nothing.
+    error: Option<String>,
+}
+
+/// A question the vault's own controls ask before they act.
+#[derive(Clone, Debug)]
+enum VaultDialog {
+    /// Plain-text export: what the file will be, before a place is chosen.
+    ExportWarning,
+    /// A backup to restore from, waiting for the master password it was
+    /// made with.
+    RestorePassword {
+        path: PathBuf,
+        backup: Box<Vault>,
+        input: String,
+        error: Option<String>,
+    },
+    /// The backup is open: replace this vault's entries with its own?
+    RestoreConfirm { path: PathBuf, backup: Box<Vault> },
+    /// Delete this entry?
+    DeleteConfirm { id: u64 },
+}
+
+/// What the file dialog that is up was opened to do with the file chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PickFor {
+    Backup,
+    Restore,
+    Export,
+}
+
+/// The largest file Restore reads as a vault. A vault of ten thousand entries
+/// is a few MiB; this is room for far more, and a stop for a file that is
+/// plainly something else.
+const MAX_VAULT_BYTES: usize = 256 << 20;
+
+/// Where the vault is kept: `<config>/credmanager/vault`, beside every other
+/// program's settings and data (`settingsfile::config_dir`).
+fn vault_path() -> Option<PathBuf> {
+    settingsfile::config_dir().map(|dir| dir.join("credmanager").join("vault"))
+}
+
+/// Fill `out` from the kernel's secure random source: `false` if it cannot
+/// be reached, and then nothing may be sealed -- a salt or nonce that is not
+/// random is not a salt or a nonce.
+fn kernel_entropy(out: &mut [u8]) -> bool {
+    guitk::rng::fill_secret(out).is_ok()
+}
+
+/// Random-enough bytes for tests, different on every call.
+#[cfg(test)]
+fn test_entropy(out: &mut [u8]) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAWS: AtomicU64 = AtomicU64::new(1);
+    let draw = DRAWS.fetch_add(1, Ordering::Relaxed).to_le_bytes();
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = draw.get(i % 8).copied().unwrap_or(0) ^ u8::try_from(i % 251).unwrap_or(0);
+    }
+    true
+}
+
+/// A system whose secure random source cannot be reached.
+#[cfg(test)]
+fn no_entropy(_out: &mut [u8]) -> bool {
+    false
+}
+
+/// A fingerprint of what the vault holds, to tell when it has changed since it
+/// was last sealed -- so a change is saved once, and a keystroke that changed
+/// nothing saves nothing.
+fn fingerprint(vault: &Vault) -> [u8; 32] {
+    sha2::sha256(vaultfile::contents_text(vault).as_bytes())
+}
+
+/// Write the sealed vault to `path`, whole or not at all, readable by its
+/// owner alone.
+///
+/// The folder is made owner-only as it is made, so the file is never
+/// readable by anyone else even for the moment before its own mode is set.
+/// Its contents are encrypted either way; this keeps other users from
+/// copying it to guess at offline.
+fn write_vault(path: &Path, sealed: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(dir)?;
+    }
+    safeio::write_atomically(path, sealed)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Seconds since 1970, from the clock.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// Top-level application state.
 struct AppState {
     vault: Vault,
+    /// Where the vault is kept. `None` when there is no home folder: the vault
+    /// then lasts as long as the window, and the window says so.
+    store: Option<PathBuf>,
+    /// What the lock screen is for.
+    gate: Gate,
+    /// Where salts and nonces come from: the kernel's secure random source.
+    entropy: fn(&mut [u8]) -> bool,
+    /// How much work makes a new vault's key ([`NEW_VAULT_KDF`]; the cheapest
+    /// under test).
+    new_vault_kdf: seal::KdfParams,
+    /// What the vault held when it was last sealed ([`fingerprint`]).
+    saved: Option<[u8; 32]>,
+    /// Why the last save did not happen, for as long as that is so.
+    save_error: Option<String>,
+    /// A close found the vault unsaved and said so: the next close goes.
+    close_anyway: bool,
+    /// Why the last unlock did not.
+    unlock_message: String,
+    /// The question a vault control is asking, while it is up.
+    dialog: Option<VaultDialog>,
+    /// The file dialog, and what it was opened for.
+    picker: FilePicker,
+    pick_for: Option<PickFor>,
+    /// What the last back-up, restore or export did, or why it did not.
+    vault_message: Option<String>,
     sidebar_selection: SidebarSelection,
     selected_entry_id: Option<u64>,
     detail_view: DetailView,
@@ -3010,6 +3299,18 @@ impl AppState {
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             vault,
+            store: None,
+            gate: Gate::Unlock,
+            entropy: kernel_entropy,
+            new_vault_kdf: NEW_VAULT_KDF,
+            saved: None,
+            save_error: None,
+            close_anyway: false,
+            unlock_message: String::new(),
+            dialog: None,
+            picker: FilePicker::new(),
+            pick_for: None,
+            vault_message: None,
             sidebar_selection: SidebarSelection::AllItems,
             selected_entry_id: None,
             detail_view: DetailView::EntryDetail,
@@ -3040,7 +3341,228 @@ impl AppState {
     /// [`TEST_MASTER_PASSWORD`].
     #[cfg(test)]
     fn for_test() -> Self {
-        Self::new(Vault::for_test("My Vault", TEST_MASTER_PASSWORD))
+        let mut state = Self::new(Vault::for_test("My Vault", TEST_MASTER_PASSWORD));
+        state.entropy = test_entropy;
+        state.new_vault_kdf = TEST_KDF;
+        state
+    }
+
+    /// The window over the vault kept at `store`: its lock screen if there is
+    /// one, the form that makes one if there is not, and the reason if the
+    /// file there cannot be opened.
+    fn open(store: Option<PathBuf>) -> Self {
+        let mut state = Self::new(Vault::none_yet());
+        state.gate = match store.as_deref().map(std::fs::read) {
+            None => Gate::Create(NewVault::default()),
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                Gate::Create(NewVault::default())
+            }
+            Some(Err(e)) => Gate::Unreadable(format!("it could not be read: {e}")),
+            Some(Ok(bytes)) => match Vault::from_file(bytes) {
+                Ok(vault) => {
+                    state.vault = vault;
+                    Gate::Unlock
+                }
+                Err(e) => Gate::Unreadable(e.to_string()),
+            },
+        };
+        state.store = store;
+        state
+    }
+
+    /// Save the vault if what it holds is not what was last sealed.
+    ///
+    /// Run after every event, so no path that changes an entry can forget to
+    /// save it: the check is on what the vault holds, not on who changed it.
+    fn keep_if_changed(&mut self) {
+        if !self.vault.is_unlocked() {
+            return;
+        }
+        let now = fingerprint(&self.vault);
+        if self.saved != Some(now) {
+            self.keep(now);
+        }
+    }
+
+    /// Seal the vault under a new nonce and write it, recording `holds` as
+    /// what was saved -- or say why not.
+    fn keep(&mut self, holds: [u8; 32]) {
+        let mut nonce = [0u8; seal::NONCE_LEN];
+        if !(self.entropy)(&mut nonce) {
+            self.save_error = Some(
+                "this system's secure random source cannot be reached, and a vault sealed \
+                 without it would not be safe"
+                    .to_string(),
+            );
+            return;
+        }
+        if let Err(why) = self.vault.reseal(nonce) {
+            self.save_error = Some(why.to_string());
+            return;
+        }
+        if let Some(path) = self.store.as_deref()
+            && let Err(e) = write_vault(path, &self.vault.sealed)
+        {
+            self.save_error = Some(format!("{} could not be written: {e}", path.shown()));
+            return;
+        }
+        self.saved = Some(holds);
+        self.save_error = None;
+    }
+
+    /// Lock the vault, saving it first if it changed.
+    fn lock_vault(&mut self) {
+        self.keep_if_changed();
+        self.vault.lock();
+        self.saved = None;
+        self.dialog = None;
+        self.picker.close();
+        self.pick_for = None;
+    }
+
+    /// Put the file dialog up: where to back up to, what to restore, or where
+    /// to export to.
+    fn open_picker(&mut self, purpose: PickFor) {
+        match purpose {
+            PickFor::Backup => self.picker.open_to_write("credmanager-backup.vault"),
+            PickFor::Export => self.picker.open_to_write("credentials.csv"),
+            PickFor::Restore => self.picker.open_to_read(),
+        }
+        self.pick_for = Some(purpose);
+    }
+
+    /// Do with `path` what the file dialog was opened for.
+    fn picked(&mut self, purpose: PickFor, path: &Path) {
+        match purpose {
+            PickFor::Backup => self.back_up(path),
+            PickFor::Restore => self.start_restore(path),
+            PickFor::Export => self.export_to(path),
+        }
+    }
+
+    /// Back the vault up to `path`: the vault sealed as it is now, under a new
+    /// nonce -- the operator's option B of C-Q25. It opens with the master
+    /// password the vault has now, and restores everything in it; to anyone
+    /// without that password it is as closed as the vault itself.
+    fn back_up(&mut self, path: &Path) {
+        let mut nonce = [0u8; seal::NONCE_LEN];
+        if !(self.entropy)(&mut nonce) {
+            self.vault_message = Some(
+                "Not backed up: this system's secure random source cannot be reached.".to_string(),
+            );
+            return;
+        }
+        if let Err(why) = self.vault.reseal(nonce) {
+            self.vault_message = Some(format!("Not backed up: {why}."));
+            return;
+        }
+        self.vault_message = Some(match write_vault(path, &self.vault.sealed) {
+            Ok(()) => format!(
+                "Backed up to {}. It opens with the master password you have now.",
+                path.shown()
+            ),
+            Err(e) => format!("Not backed up: {} could not be written: {e}", path.shown()),
+        });
+    }
+
+    /// Read the backup at `path`, and ask for the master password it was made
+    /// with.
+    fn start_restore(&mut self, path: &Path) {
+        let bytes = match safeio::read_capped(path, MAX_VAULT_BYTES) {
+            Ok(read) if read.truncated => {
+                self.vault_message = Some(format!("{} is too large to be a vault.", path.shown()));
+                return;
+            }
+            Ok(read) => read.bytes,
+            Err(e) => {
+                self.vault_message = Some(format!("{} could not be read: {e}", path.shown()));
+                return;
+            }
+        };
+        match Vault::from_file(bytes) {
+            Ok(backup) => {
+                self.dialog = Some(VaultDialog::RestorePassword {
+                    path: path.to_path_buf(),
+                    backup: Box::new(backup),
+                    input: String::new(),
+                    error: None,
+                });
+            }
+            Err(why) => {
+                self.vault_message = Some(format!("{} cannot be restored: {why}.", path.shown()));
+            }
+        }
+    }
+
+    /// Open the backup with the password typed into the restore dialog.
+    fn restore_open(&mut self) {
+        match self.dialog.take() {
+            Some(VaultDialog::RestorePassword {
+                path,
+                mut backup,
+                input,
+                ..
+            }) => match backup.open(&input, self.now) {
+                Ok(()) => self.dialog = Some(VaultDialog::RestoreConfirm { path, backup }),
+                Err(why) => {
+                    self.dialog = Some(VaultDialog::RestorePassword {
+                        path,
+                        backup,
+                        input: String::new(),
+                        error: Some(capitalised(&why.to_string())),
+                    });
+                }
+            },
+            other => self.dialog = other,
+        }
+    }
+
+    /// Replace this vault's entries with the opened backup's. The vault keeps
+    /// its own master password: what is restored is sealed under it.
+    fn restore_replace(&mut self) {
+        match self.dialog.take() {
+            Some(VaultDialog::RestoreConfirm { path, backup }) => {
+                let mut backup = *backup;
+                let entries = std::mem::take(&mut backup.entries);
+                let folders = std::mem::take(&mut backup.folders);
+                let name = std::mem::take(&mut backup.name);
+                let (id_gen, auto_lock) = (backup.id_gen, backup.auto_lock_minutes);
+                // Its key, overwritten, and nothing of it left behind.
+                backup.lock();
+                let count = entries.len();
+                self.vault.name = name;
+                self.vault.entries = entries;
+                self.vault.folders = folders;
+                self.vault.id_gen = id_gen;
+                self.vault.auto_lock_minutes = auto_lock;
+                self.selected_entry_id = None;
+                self.refresh_filter();
+                self.keep_if_changed();
+                self.vault_message = Some(format!(
+                    "Restored {count} {} from {}. It opens with your master password.",
+                    if count == 1 { "entry" } else { "entries" },
+                    path.shown()
+                ));
+            }
+            other => self.dialog = other,
+        }
+    }
+
+    /// Write every entry to `path` as CSV, passwords in plain text -- the
+    /// operator's option A of C-Q25, reached only through the warning.
+    fn export_to(&mut self, path: &Path) {
+        let count = self.vault.entries.len();
+        self.vault_message = Some(
+            match write_vault(path, export_csv(&self.vault).as_bytes()) {
+                Ok(()) => format!(
+                    "Exported {count} {} to {} in plain text: anyone who can open it can read \
+                 every password in it. Delete it once it is imported.",
+                    if count == 1 { "entry" } else { "entries" },
+                    path.shown()
+                ),
+                Err(e) => format!("Not exported: {} could not be written: {e}", path.shown()),
+            },
+        );
     }
 
     /// Where the panes go at the size the window is currently believed to be.
@@ -3188,7 +3710,7 @@ impl AppState {
         self.now = self.now.saturating_add(elapsed_ms / 1000);
 
         if self.vault.should_auto_lock(self.now) {
-            self.vault.lock();
+            self.lock_vault();
         }
     }
 }
@@ -3460,8 +3982,39 @@ fn take_toolbar(x: &mut f32, w: f32) -> Rect {
 /// access.
 const NOT_KEPT_LINES: [&str; 2] = [
     "This vault is not saved anywhere.",
-    "There is no storage layer yet, so every entry is gone when the window closes. Do not rely on it.",
+    "There is no home folder to keep it in, so every entry is gone when the window closes. Do not rely on it.",
 ];
+
+impl AppState {
+    /// The two lines under the toolbar: where the vault is kept, or why it is
+    /// not -- and whether that is a warning.
+    fn notice_lines(&self) -> ([String; 2], bool) {
+        let Some(path) = self.store.as_deref() else {
+            return (NOT_KEPT_LINES.map(str::to_string), true);
+        };
+        if let Some(why) = &self.save_error {
+            return (
+                [
+                    "Not saved -- the last change is only in this window.".to_string(),
+                    capitalised(why),
+                ],
+                true,
+            );
+        }
+        (
+            [
+                format!(
+                    "Kept in {}, encrypted with your master password.",
+                    path.shown()
+                ),
+                self.vault_message.clone().unwrap_or_else(|| {
+                    "Every change is saved as it is made. Ctrl+L locks the vault.".to_string()
+                }),
+            ],
+            false,
+        )
+    }
+}
 
 fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
     let width = layout.window.w;
@@ -4021,6 +4574,28 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
         badge_color,
         state.palette.base,
     );
+
+    // Edit and Delete, at the right of the badge's line. Delete asks first.
+    let mut bx = x_start + panel_width - pad;
+    for (label, target, width) in [
+        ("Delete", Target::DeleteEntry, 70.0),
+        ("Edit (Ctrl+E)", Target::EditEntry, 110.0),
+    ] {
+        bx -= width;
+        draw_button(
+            frame,
+            bx,
+            y - 4.0,
+            width,
+            26.0,
+            label,
+            state.palette.surface1,
+            state.palette.text,
+            false,
+        );
+        frame.hit(target, Rect::new(bx, y - 4.0, width, 26.0));
+        bx -= 8.0;
+    }
 
     if entry.starred {
         draw_text(
@@ -4759,7 +5334,11 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
         frame,
         x_start + pad,
         y,
-        "New Entry",
+        if form.editing.is_some() {
+            "Edit Entry"
+        } else {
+            "New Entry"
+        },
         state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
@@ -4767,9 +5346,13 @@ fn render_new_entry_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
     );
     y += 36.0;
 
-    // Type chooser: one pill per kind, the chosen one filled.
+    // Type chooser: one pill per kind, the chosen one filled. An entry being
+    // edited keeps its kind, so only its own pill is drawn.
     let mut chooser_x = x_start + pad;
     for (index, kind) in EntryType::all().iter().enumerate() {
+        if form.editing.is_some() && *kind != form.kind {
+            continue;
+        }
         let label = kind.label();
         let w = text::padded_width(label, 10.0, SMALL_FONT_SIZE, FontWeightHint::Regular);
         if chooser_x + w > x_start + pad + inner {
@@ -5540,41 +6123,58 @@ fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height
     );
     y += 16.0;
 
-    // Export section
+    // Your vault: back it up, restore it, or take everything out of it. The
+    // two buttons drawn here before 2026-09-27 -- "Export CSV" and "Backup" --
+    // recorded no target, so pressing them did nothing at all.
     draw_text(
         frame,
         x_start + pad,
         y,
-        "DATA",
-        state.palette.overlay0,
+        "YOUR VAULT",
+        state.palette.subtext0,
         SMALL_FONT_SIZE,
         FontWeightHint::Bold,
         None,
     );
     y += 24.0;
-
-    draw_button(
-        frame,
-        x_start + pad,
-        y,
-        120.0,
-        32.0,
-        "Export CSV",
-        state.palette.surface1,
-        state.palette.text,
-        false,
-    );
-    draw_button(
-        frame,
-        x_start + pad + 132.0,
-        y,
-        120.0,
-        32.0,
-        "Backup",
-        state.palette.surface1,
-        state.palette.text,
-        false,
-    );
+    let explain = [
+        "A backup is this vault, sealed: it opens with your master password, restores everything,",
+        "and is as closed as the vault to anyone else. An export is every password in plain text.",
+    ];
+    for line in explain {
+        draw_text(
+            frame,
+            x_start + pad,
+            y,
+            line,
+            state.palette.subtext0,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(panel_width - pad * 2.0),
+        );
+        y += SMALL_FONT_SIZE + 6.0;
+    }
+    y += 6.0;
+    let mut bx = x_start + pad;
+    for (label, target, width) in [
+        ("Back up...", Target::BackUp, 110.0),
+        ("Restore from a backup...", Target::RestoreBackup, 200.0),
+        ("Export as plain text...", Target::ExportCsv, 190.0),
+    ] {
+        draw_button(
+            frame,
+            bx,
+            y,
+            width,
+            32.0,
+            label,
+            state.palette.surface1,
+            state.palette.text,
+            false,
+        );
+        frame.hit(target, Rect::new(bx, y, width, 32.0));
+        bx += width + 12.0;
+    }
 
     let _ = y;
 }
@@ -5709,7 +6309,479 @@ fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f
 fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     // Full-screen overlay
     draw_rect(frame, 0.0, 0.0, width, height, state.palette.mantle, 0.0);
+    match &state.gate {
+        Gate::Unlock => render_unlock_panel(frame, state, width, height),
+        Gate::Create(form) => render_create_panel(frame, state, form, width, height),
+        Gate::Unreadable(why) => render_unreadable_panel(frame, state, why, width, height),
+    }
+}
 
+/// A lock-screen card of `w` x `h`, centred, with its shadow. Returns its
+/// top-left corner.
+fn lock_card(
+    frame: &mut Frame,
+    state: &AppState,
+    width: f32,
+    height: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32) {
+    let px = width / 2.0 - w / 2.0;
+    let py = height / 2.0 - h / 2.0;
+    frame.push(RenderCommand::BoxShadow {
+        x: px,
+        y: py,
+        width: w,
+        height: h,
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 24.0,
+        spread: 0.0,
+        color: Color::rgba(0, 0, 0, 100),
+        corner_radii: CornerRadii::all(12.0),
+    });
+    draw_rect(frame, px, py, w, h, state.palette.surface0, 12.0);
+    (px, py)
+}
+
+/// Lines of a lock-screen card, each centred on `center_x`, from `y` down.
+fn centred_lines(
+    frame: &mut Frame,
+    lines: &[(&str, Color, f32, FontWeightHint)],
+    center_x: f32,
+    mut y: f32,
+    max_width: f32,
+) -> f32 {
+    for &(line, color, size, weight) in lines {
+        draw_text(
+            frame,
+            text::center_x(line, center_x, size, weight).max(center_x - max_width / 2.0),
+            y,
+            line,
+            color,
+            size,
+            weight,
+            Some(max_width),
+        );
+        y += size + 8.0;
+    }
+    y
+}
+
+/// A masked password field, with its hit box.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a field is a box, its text, its state and its target"
+)]
+fn masked_field(
+    frame: &mut Frame,
+    state: &AppState,
+    rect: Rect,
+    value: &str,
+    placeholder: &str,
+    focused: bool,
+    failed: bool,
+    target: Target,
+) {
+    let border = if failed {
+        state.palette.red
+    } else if focused {
+        state.palette.blue
+    } else {
+        state.palette.surface2
+    };
+    draw_rect(
+        frame,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        state.palette.base,
+        CORNER_RADIUS,
+    );
+    draw_stroke_rect(
+        frame,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        border,
+        1.0,
+        CORNER_RADIUS,
+    );
+    let masked = "*".repeat(value.chars().count());
+    let (shown, color) = if masked.is_empty() {
+        (placeholder.to_string(), state.palette.subtext0)
+    } else {
+        (masked, state.palette.text)
+    };
+    draw_text(
+        frame,
+        rect.x + 12.0,
+        rect.y + 12.0,
+        &shown,
+        color,
+        DEFAULT_FONT_SIZE,
+        FontWeightHint::Regular,
+        Some(rect.w - 24.0),
+    );
+    frame.hit(target, rect);
+}
+
+/// The first run: choose the master password that makes the vault.
+fn render_create_panel(
+    frame: &mut Frame,
+    state: &AppState,
+    form: &NewVault,
+    width: f32,
+    height: f32,
+) {
+    let (w, h) = (440.0, 420.0);
+    let (px, py) = lock_card(frame, state, width, height, w, h);
+    let cx = px + w / 2.0;
+    let mut y = centred_lines(
+        frame,
+        &[
+            (
+                "Create your vault",
+                state.palette.text,
+                HEADING_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
+            (
+                "Choose a master password. It opens everything kept here,",
+                state.palette.subtext0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+            (
+                "and it cannot be recovered: forget it, and the vault is lost.",
+                state.palette.subtext0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+        ],
+        cx,
+        py + 28.0,
+        w - 40.0,
+    );
+    y += 8.0;
+    let field_w = w - 60.0;
+    for (label, value, confirming, target) in [
+        (
+            "Master password",
+            &form.password,
+            false,
+            Target::NewPassword,
+        ),
+        (
+            "Type it again",
+            &form.confirm,
+            true,
+            Target::ConfirmPassword,
+        ),
+    ] {
+        draw_text(
+            frame,
+            px + 30.0,
+            y,
+            label,
+            state.palette.subtext0,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            None,
+        );
+        y += SMALL_FONT_SIZE + 6.0;
+        masked_field(
+            frame,
+            state,
+            Rect::new(px + 30.0, y, field_w, 40.0),
+            value,
+            "",
+            form.confirming == confirming,
+            false,
+            target,
+        );
+        y += 52.0;
+    }
+    if !form.password.is_empty() {
+        let (strength, bits) = evaluate_password_strength(&form.password);
+        let line = format!("Strength: {} ({bits:.0} bits)", strength.label());
+        draw_text(
+            frame,
+            px + 30.0,
+            y,
+            &line,
+            state.palette.ink(strength.color(&state.palette)),
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(field_w),
+        );
+    }
+    y += SMALL_FONT_SIZE + 10.0;
+    if let Some(error) = &form.error {
+        draw_text(
+            frame,
+            px + 30.0,
+            y,
+            error,
+            state.palette.ink(state.palette.red),
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(field_w),
+        );
+    }
+    let create = Rect::new(cx - 70.0, py + h - 56.0, 140.0, 36.0);
+    draw_button(
+        frame,
+        create.x,
+        create.y,
+        create.w,
+        create.h,
+        "Create vault",
+        state.palette.blue,
+        state.palette.base,
+        false,
+    );
+    frame.hit(Target::CreateVault, create);
+}
+
+/// The vault file is there and cannot be opened: say why, and do nothing to it.
+fn render_unreadable_panel(
+    frame: &mut Frame,
+    state: &AppState,
+    why: &str,
+    width: f32,
+    height: f32,
+) {
+    let (w, h) = (480.0, 220.0);
+    let (px, py) = lock_card(frame, state, width, height, w, h);
+    let where_ = state
+        .store
+        .as_deref()
+        .map(|p| p.shown().to_string())
+        .unwrap_or_default();
+    let reason = capitalised(why);
+    centred_lines(
+        frame,
+        &[
+            (
+                "The vault cannot be opened",
+                state.palette.text,
+                HEADING_FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
+            (
+                where_.as_str(),
+                state.palette.subtext0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+            (
+                reason.as_str(),
+                state.palette.ink(state.palette.red),
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+            (
+                "It is left exactly as it is: nothing here will write over it.",
+                state.palette.subtext0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
+        ],
+        px + w / 2.0,
+        py + 36.0,
+        w - 40.0,
+    );
+}
+
+/// A line of a vault dialog and its colour.
+type DialogLine = (String, Color);
+/// A vault dialog's button: its label, what it presses, and whether it is
+/// the one Enter presses.
+type DialogButton = (&'static str, Target, bool);
+
+/// A vault dialog, over everything else, with nothing behind it clickable.
+fn render_vault_dialog(
+    frame: &mut Frame,
+    state: &AppState,
+    dialog: &VaultDialog,
+    width: f32,
+    height: f32,
+) {
+    // Modal: the window behind stays painted, and none of it can be pressed.
+    frame.discard_hits();
+    draw_rect(
+        frame,
+        0.0,
+        0.0,
+        width,
+        height,
+        Color::rgba(0, 0, 0, 120),
+        0.0,
+    );
+    let (w, h) = (520.0, 250.0);
+    let (px, py) = lock_card(frame, state, width, height, w, h);
+    let cx = px + w / 2.0;
+    let small = |text: &str, color: Color| (text.to_string(), color);
+    let (title, lines, buttons): (&str, Vec<DialogLine>, [DialogButton; 2]) = match dialog {
+        VaultDialog::ExportWarning => (
+            "Export every password as plain text?",
+            vec![
+                small(
+                    "The file will hold every login and password in this vault,",
+                    state.palette.ink(state.palette.red),
+                ),
+                small(
+                    "readable by anyone -- and any program -- that can open it.",
+                    state.palette.ink(state.palette.red),
+                ),
+                small(
+                    "Use it only to move to another password manager, and delete it after.",
+                    state.palette.subtext0,
+                ),
+                // Formula injection is warned of, not defended against by
+                // changing the file: a password altered on the way out no
+                // longer works (lane B's request, the operator's §1417).
+                small(
+                    "Don't open it in a spreadsheet: it may run a password as a formula.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Export anyway", Target::ExportAnyway, true),
+                ("Cancel", Target::DialogCancel, false),
+            ],
+        ),
+        VaultDialog::RestorePassword { path, error, .. } => (
+            "Restore from a backup",
+            vec![
+                small(&path.shown().to_string(), state.palette.subtext0),
+                small(
+                    "Type the master password this backup was made with.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    error.as_deref().unwrap_or(""),
+                    state.palette.ink(state.palette.red),
+                ),
+            ],
+            [
+                ("Open", Target::RestoreOpen, true),
+                ("Cancel", Target::DialogCancel, false),
+            ],
+        ),
+        VaultDialog::DeleteConfirm { id } => (
+            "Delete this entry?",
+            vec![
+                small(
+                    state.vault.get_entry(*id).map_or("", |e| e.display_name()),
+                    state.palette.text,
+                ),
+                small(
+                    "It is gone from this vault as soon as you say so.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    "A backup made before now still holds it.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Delete", Target::DeleteConfirmed, true),
+                ("Keep it", Target::DialogCancel, false),
+            ],
+        ),
+        VaultDialog::RestoreConfirm { path, backup } => (
+            "Replace this vault's entries?",
+            vec![
+                small(
+                    &format!(
+                        "{} holds {} {}; this vault holds {}.",
+                        path.file_name()
+                            .map_or_else(|| path.shown().to_string(), |n| n.shown().to_string()),
+                        backup.entries.len(),
+                        if backup.entries.len() == 1 {
+                            "entry"
+                        } else {
+                            "entries"
+                        },
+                        state.vault.entries.len()
+                    ),
+                    state.palette.text,
+                ),
+                small(
+                    "Everything here now is replaced. Back it up first if you may want it.",
+                    state.palette.subtext0,
+                ),
+                small(
+                    "The vault keeps your master password.",
+                    state.palette.subtext0,
+                ),
+            ],
+            [
+                ("Replace", Target::RestoreReplace, true),
+                ("Keep mine", Target::DialogCancel, false),
+            ],
+        ),
+    };
+    draw_text(
+        frame,
+        text::center_x(title, cx, HEADING_FONT_SIZE, FontWeightHint::Bold).max(px + 16.0),
+        py + 22.0,
+        title,
+        state.palette.text,
+        HEADING_FONT_SIZE,
+        FontWeightHint::Bold,
+        Some(w - 32.0),
+    );
+    let mut y = py + 58.0;
+    for (line, color) in &lines {
+        if line.is_empty() {
+            continue;
+        }
+        draw_text(
+            frame,
+            px + 24.0,
+            y,
+            line,
+            *color,
+            SMALL_FONT_SIZE,
+            FontWeightHint::Regular,
+            Some(w - 48.0),
+        );
+        y += SMALL_FONT_SIZE + 8.0;
+    }
+    if let VaultDialog::RestorePassword { input, error, .. } = dialog {
+        masked_field(
+            frame,
+            state,
+            Rect::new(px + 24.0, py + h - 100.0, w - 48.0, 36.0),
+            input,
+            "",
+            true,
+            error.is_some(),
+            Target::RestoreInput,
+        );
+    }
+    let mut bx = px + w - 24.0;
+    for (label, target, primary) in buttons.iter().rev() {
+        let bw = 130.0;
+        bx -= bw;
+        let (bg, fg) = if *primary {
+            (state.palette.blue, state.palette.base)
+        } else {
+            (state.palette.surface1, state.palette.text)
+        };
+        draw_button(frame, bx, py + h - 52.0, bw, 34.0, label, bg, fg, false);
+        frame.hit(*target, Rect::new(bx, py + h - 52.0, bw, 34.0));
+        bx -= 12.0;
+    }
+}
+
+/// There is a vault: its name, the master-password field and Unlock.
+fn render_unlock_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let center_x = width / 2.0;
     let center_y = height / 2.0;
     let panel_w = 360.0;
@@ -5755,17 +6827,19 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
 
     // Vault name. A vault named in any non-ASCII script used to drift left of
     // centre by half its excess byte count, since the offset was `len * 5.0`.
-    let name_x = text::center_x(
-        &state.vault.name,
-        center_x,
-        HEADING_FONT_SIZE,
-        FontWeightHint::Bold,
-    );
+    // A vault read from its file has no name until it is opened: the name is
+    // inside, encrypted with everything else.
+    let name = if state.vault.name.is_empty() {
+        "Your vault"
+    } else {
+        state.vault.name.as_str()
+    };
+    let name_x = text::center_x(name, center_x, HEADING_FONT_SIZE, FontWeightHint::Bold);
     draw_text(
         frame,
         name_x,
         py + 70.0,
-        &state.vault.name,
+        name,
         state.palette.text,
         HEADING_FONT_SIZE,
         FontWeightHint::Bold,
@@ -5849,20 +6923,27 @@ fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f
         Rect::new(input_x, input_y, input_w, input_h),
     );
 
-    // Error message
+    // Why it did not open. The usual reason is long -- "that is not its
+    // master password -- or the file has been changed since it was saved" --
+    // so it is broken at its dash onto two lines rather than cut short.
     if state.unlock_failed {
-        let error = "Incorrect password";
-        let error_x = text::center_x(error, center_x, SMALL_FONT_SIZE, FontWeightHint::Regular);
-        draw_text(
-            frame,
-            error_x,
-            input_y + input_h + 8.0,
-            error,
-            state.palette.red,
-            SMALL_FONT_SIZE,
-            FontWeightHint::Regular,
-            None,
-        );
+        let mut ey = input_y + input_h + 6.0;
+        for part in state.unlock_message.split(" -- ") {
+            let part = capitalised(part.trim());
+            let error_x = text::center_x(&part, center_x, SMALL_FONT_SIZE, FontWeightHint::Regular)
+                .max(px + 8.0);
+            draw_text(
+                frame,
+                error_x,
+                ey,
+                &part,
+                state.palette.red,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Regular,
+                Some(panel_w - 16.0),
+            );
+            ey += SMALL_FONT_SIZE + 3.0;
+        }
     }
 
     // Unlock button
@@ -5914,7 +6995,8 @@ impl AppState {
 
         render_toolbar(&mut frame, self, &layout);
         // In the strip under the toolbar, which nothing else is drawn in.
-        for (i, line) in NOT_KEPT_LINES.iter().enumerate() {
+        let (notice, warning) = self.notice_lines();
+        for (i, line) in notice.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "two lines; index is 0 or 1")]
             let ty = layout.notice.y + 3.0 + i as f32 * NOTICE_LINE_H;
             let avail = (layout.notice.w - 16.0).max(0.0);
@@ -5924,8 +7006,8 @@ impl AppState {
             frame.push(RenderCommand::Text {
                 x: 8.0,
                 y: ty,
-                text: (*line).to_string(),
-                color: if i == 0 {
+                text: line.clone(),
+                color: if i == 0 && warning {
                     self.palette.ink(self.palette.yellow)
                 } else {
                     self.palette.subtext0
@@ -5954,6 +7036,16 @@ impl AppState {
             DetailView::Settings => render_settings_panel(&mut frame, self, w, h),
             DetailView::AuditReport => render_audit_panel(&mut frame, self, w, h),
             DetailView::NewEntry => render_new_entry_panel(&mut frame, self, w, h),
+        }
+        if let Some(dialog) = &self.dialog {
+            render_vault_dialog(&mut frame, self, dialog, w, h);
+        }
+        if self.picker.is_open() {
+            // Modal like the dialog: nothing behind it may be clicked.
+            frame.discard_hits();
+            for command in self.picker.render(&self.palette, w, h) {
+                frame.push(command);
+            }
         }
 
         debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
@@ -6054,10 +7146,33 @@ fn save_new_entry(state: &mut AppState) -> bool {
     let Some(form) = state.new_entry.as_ref() else {
         return false;
     };
-    let Some(data) = form.build() else {
+    let Some(mut data) = form.build() else {
         return false;
     };
-    let id = state.vault.add_entry(data, state.now);
+    let id = if let Some(id) = form.editing {
+        // What the form does not show is kept as it was: a login's
+        // one-time-code secret, and a card number the form showed masked
+        // and was not changed -- masking a mask again would lose it.
+        if let Some(old) = state.vault.get_entry(id) {
+            match (&old.data, &mut data) {
+                (EntryData::Login(o), EntryData::Login(n)) => {
+                    n.totp_secret.clone_from(&o.totp_secret);
+                }
+                (EntryData::CreditCard(o), EntryData::CreditCard(n))
+                    if form.value(1) == o.number_masked =>
+                {
+                    n.number_masked.clone_from(&o.number_masked);
+                }
+                _ => {}
+            }
+        }
+        if !state.vault.update_entry(id, data, state.now) {
+            return false;
+        }
+        id
+    } else {
+        state.vault.add_entry(data, state.now)
+    };
     state.new_entry = None;
     state.selected_entry_id = Some(id);
     state.detail_view = DetailView::EntryDetail;
@@ -6066,6 +7181,42 @@ fn save_new_entry(state: &mut AppState) -> bool {
     state.run_audit();
     state.clamp_scroll();
     true
+}
+
+/// Open the form over the selected entry, to change it.
+fn open_edit_entry(state: &mut AppState) {
+    let Some(entry) = state
+        .selected_entry_id
+        .and_then(|id| state.vault.get_entry(id))
+    else {
+        return;
+    };
+    state.new_entry = Some(NewEntryForm::for_entry(entry));
+    state.detail_view = DetailView::NewEntry;
+    state.detail_scroll = 0.0;
+}
+
+/// Ask whether to delete the selected entry.
+fn ask_delete(state: &mut AppState) {
+    if let Some(id) = state
+        .selected_entry_id
+        .filter(|id| state.vault.get_entry(*id).is_some())
+    {
+        state.dialog = Some(VaultDialog::DeleteConfirm { id });
+    }
+}
+
+/// Delete the entry the question was about.
+fn delete_entry(state: &mut AppState, id: u64) {
+    state.dialog = None;
+    if state.vault.remove_entry(id) {
+        if state.selected_entry_id == Some(id) {
+            state.selected_entry_id = None;
+        }
+        state.refresh_filter();
+        state.run_audit();
+        state.clamp_scroll();
+    }
 }
 
 /// Throw the form away.
@@ -6132,7 +7283,14 @@ fn copy_field(state: &mut AppState, index: usize) -> bool {
     true
 }
 
+/// Answer `event`, then save the vault if the answer changed it.
 fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
+    let result = dispatch_event(state, event);
+    state.keep_if_changed();
+    result
+}
+
+fn dispatch_event(state: &mut AppState, event: &Event) -> EventResult {
     match event {
         Event::Tick { elapsed_ms } => {
             state.tick(*elapsed_ms);
@@ -6155,6 +7313,51 @@ fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
 fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // Lock screen input
     if !state.vault.is_unlocked() {
+        let create = match &mut state.gate {
+            Gate::Unlock => None,
+            // Nothing to type into and nothing to do: the file is left alone.
+            Gate::Unreadable(_) => return EventResult::Consumed,
+            Gate::Create(form) => Some(match key.key {
+                Key::Enter if form.confirming => true,
+                Key::Enter | Key::Tab => {
+                    form.confirming = true;
+                    false
+                }
+                Key::Backspace => {
+                    let field = if form.confirming {
+                        &mut form.confirm
+                    } else {
+                        &mut form.password
+                    };
+                    field.pop();
+                    form.error = None;
+                    false
+                }
+                Key::Escape => {
+                    *form = NewVault::default();
+                    false
+                }
+                _ => {
+                    if !key.types_text() {
+                        return EventResult::Ignored;
+                    }
+                    let field = if form.confirming {
+                        &mut form.confirm
+                    } else {
+                        &mut form.password
+                    };
+                    field.extend(key.typed());
+                    form.error = None;
+                    false
+                }
+            }),
+        };
+        if let Some(create) = create {
+            if create {
+                create_vault(state);
+            }
+            return EventResult::Consumed;
+        }
         match key.key {
             Key::Enter => attempt_unlock(state),
             Key::Backspace => {
@@ -6176,6 +7379,11 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         return EventResult::Consumed;
     }
 
+    // A vault dialog is modal: its keys, and nothing behind it.
+    if state.dialog.is_some() {
+        return dialog_key(state, key);
+    }
+
     // The new-entry form takes the keyboard while it is up: every printable
     // key goes into a field rather than into the search box behind it.
     if state.detail_view == DetailView::NewEntry && state.new_entry.is_some() {
@@ -6195,7 +7403,7 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // Main app key handling
     let result = match key.key {
         Key::L if key.modifiers.ctrl => {
-            state.vault.lock();
+            state.lock_vault();
             EventResult::Consumed
         }
         Key::F if key.modifiers.ctrl => {
@@ -6208,6 +7416,15 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
         Key::G if key.modifiers.ctrl => {
             state.detail_view = DetailView::PasswordGenerator;
             regenerate_password(state);
+            EventResult::Consumed
+        }
+        // A plain letter goes to the search box, so editing is Ctrl+E.
+        Key::E if key.modifiers.ctrl => {
+            open_edit_entry(state);
+            EventResult::Consumed
+        }
+        Key::Delete if state.selected_entry_id.is_some() => {
+            ask_delete(state);
             EventResult::Consumed
         }
         Key::Escape => {
@@ -6384,6 +7601,61 @@ fn act_on(state: &mut AppState, target: Target) -> EventResult {
             attempt_unlock(state);
             EventResult::Consumed
         }
+        Target::CreateVault => {
+            create_vault(state);
+            EventResult::Consumed
+        }
+        Target::BackUp => {
+            state.open_picker(PickFor::Backup);
+            EventResult::Consumed
+        }
+        Target::RestoreBackup => {
+            state.open_picker(PickFor::Restore);
+            EventResult::Consumed
+        }
+        Target::ExportCsv => {
+            state.dialog = Some(VaultDialog::ExportWarning);
+            EventResult::Consumed
+        }
+        Target::ExportAnyway => {
+            state.dialog = None;
+            state.open_picker(PickFor::Export);
+            EventResult::Consumed
+        }
+        Target::RestoreOpen => {
+            state.restore_open();
+            EventResult::Consumed
+        }
+        Target::RestoreReplace => {
+            state.restore_replace();
+            EventResult::Consumed
+        }
+        Target::DialogCancel => {
+            state.dialog = None;
+            EventResult::Consumed
+        }
+        Target::EditEntry => {
+            open_edit_entry(state);
+            EventResult::Consumed
+        }
+        Target::DeleteEntry => {
+            ask_delete(state);
+            EventResult::Consumed
+        }
+        Target::DeleteConfirmed => {
+            if let Some(VaultDialog::DeleteConfirm { id }) = state.dialog {
+                delete_entry(state, id);
+            }
+            EventResult::Consumed
+        }
+        // The field is where typing already goes.
+        Target::RestoreInput => EventResult::Consumed,
+        Target::NewPassword | Target::ConfirmPassword => {
+            if let Gate::Create(form) = &mut state.gate {
+                form.confirming = target == Target::ConfirmPassword;
+            }
+            EventResult::Consumed
+        }
         // The field is where typing already goes; clicking it is a no-op that
         // still has to be claimed, or the click falls through to the scrim.
         Target::MasterInput => EventResult::Consumed,
@@ -6514,12 +7786,117 @@ fn handle_scroll(state: &mut AppState, x: f32, y: f32, dy: f32) -> EventResult {
 /// Check `master_input` against the vault's verifier.
 fn attempt_unlock(state: &mut AppState) {
     let password = state.master_input.clone();
-    if state.vault.unlock(&password, state.now) {
-        state.unlock_failed = false;
-        state.master_input.clear();
-        state.refresh_filter();
-    } else {
-        state.unlock_failed = true;
+    match state.vault.open(&password, state.now) {
+        Ok(()) => {
+            state.unlock_failed = false;
+            state.unlock_message.clear();
+            state.master_input.clear();
+            // What was just opened is what the file holds.
+            state.saved = Some(fingerprint(&state.vault));
+            state.refresh_filter();
+        }
+        Err(why) => {
+            state.unlock_failed = true;
+            state.unlock_message = capitalised(&why.to_string());
+        }
+    }
+}
+
+/// `text` with its first letter a capital, for a message that starts a line.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// Keys while a vault dialog is up: Escape leaves it, Enter does what its
+/// first button does, and typing goes into the restore dialog's field.
+fn dialog_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
+    /// What a key asks of the dialog, decided before anything is done, so the
+    /// dialog is not still borrowed when the doing needs the whole state.
+    enum Then {
+        Close,
+        Export,
+        Open,
+        Replace,
+        Delete(u64),
+        Nothing,
+    }
+    let then = match (&mut state.dialog, key.key) {
+        (_, Key::Escape) => Then::Close,
+        (Some(VaultDialog::ExportWarning), Key::Enter) => Then::Export,
+        (Some(VaultDialog::RestorePassword { .. }), Key::Enter) => Then::Open,
+        (Some(VaultDialog::RestoreConfirm { .. }), Key::Enter) => Then::Replace,
+        (Some(VaultDialog::DeleteConfirm { id }), Key::Enter) => Then::Delete(*id),
+        (Some(VaultDialog::RestorePassword { input, error, .. }), Key::Backspace) => {
+            input.pop();
+            *error = None;
+            Then::Nothing
+        }
+        (Some(VaultDialog::RestorePassword { input, error, .. }), _) if key.types_text() => {
+            input.extend(key.typed());
+            *error = None;
+            Then::Nothing
+        }
+        _ => Then::Nothing,
+    };
+    match then {
+        Then::Close => state.dialog = None,
+        Then::Export => {
+            state.dialog = None;
+            state.open_picker(PickFor::Export);
+        }
+        Then::Open => state.restore_open(),
+        Then::Replace => state.restore_replace(),
+        Then::Delete(id) => delete_entry(state, id),
+        Then::Nothing => {}
+    }
+    EventResult::Consumed
+}
+
+/// Make the first vault from the form, and save it.
+fn create_vault(state: &mut AppState) {
+    let Gate::Create(form) = &mut state.gate else {
+        return;
+    };
+    if form.password.chars().count() < MIN_MASTER_PASSWORD_CHARS {
+        form.error = Some(format!(
+            "Choose a master password of at least {MIN_MASTER_PASSWORD_CHARS} characters."
+        ));
+        form.confirming = false;
+        return;
+    }
+    if form.password != form.confirm {
+        form.error = Some("The two do not match. Type it again.".to_string());
+        form.confirm.clear();
+        form.confirming = true;
+        return;
+    }
+    let mut salt = [0u8; seal::SALT_LEN];
+    if !(state.entropy)(&mut salt) {
+        form.error = Some(
+            "This system's secure random source cannot be reached, so no vault can be made safely."
+                .to_string(),
+        );
+        return;
+    }
+    let password = std::mem::take(&mut form.password);
+    form.confirm.clear();
+    match Vault::create("My Vault", &password, state.new_vault_kdf, salt) {
+        Ok(vault) => {
+            state.vault = vault;
+            state.vault.touch(state.now);
+            state.gate = Gate::Unlock;
+            state.saved = None;
+            state.keep_if_changed();
+            state.refresh_filter();
+        }
+        Err(why) => {
+            if let Gate::Create(form) = &mut state.gate {
+                form.error = Some(format!("The vault could not be made: {why}."));
+            }
+        }
     }
 }
 
@@ -6550,7 +7927,31 @@ impl App for AppState {
         {
             return Response::Exit;
         }
+        // The file dialog first: while it is up it takes the keyboard and the
+        // mouse, so a key meant for a file name cannot reach the vault behind.
+        match self.picker.handle(event, self.width, self.height) {
+            Picked::Chose(path) => {
+                if let Some(purpose) = self.pick_for.take() {
+                    self.picked(purpose, &path);
+                }
+                self.keep_if_changed();
+                return Response::Redraw;
+            }
+            Picked::Cancelled => {
+                self.pick_for = None;
+                return Response::Redraw;
+            }
+            Picked::Handled => return Response::Redraw,
+            Picked::Ignored => {}
+        }
         if matches!(event, Event::CloseRequested) {
+            // Every change is saved as it is made, so this is the last chance
+            // for one whose save failed: say so once, and let the next close go.
+            self.keep_if_changed();
+            if self.save_error.is_some() && self.vault.is_unlocked() && !self.close_anyway {
+                self.close_anyway = true;
+                return Response::KeepOpen;
+            }
             return Response::Exit;
         }
         match handle_event(self, event) {
@@ -6604,12 +8005,9 @@ impl Probe for AppState {
 /// `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK`, and wiring the window is what turns
 /// the gap from theoretical into visible.
 fn main() -> ExitCode {
-    let Ok(vault) = Vault::create("My Vault", "") else {
-        // A key derivation that will not run is not something a credential
-        // manager should paper over by opening an unprotected window.
-        return ExitCode::FAILURE;
-    };
-    app::launch("credmanager", &mut AppState::new(vault))
+    let mut state = AppState::open(vault_path());
+    state.now = unix_now();
+    app::launch("credmanager", &mut state)
 }
 
 // =============================================================================
@@ -6959,87 +8357,38 @@ mod tests {
     // the ones its caller depends on.
 
     /// The property djb2 could not have had: a salt. Without one the same
-    /// password yields the same stored value in every vault on every machine,
-    /// so a single precomputed table opens all of them — and equal stored
-    /// values advertise which vaults to try it against.
-    ///
-    /// Asserted against `Vault::create`, the real path, so it fails if the
-    /// salt ever silently becomes a constant again. On a host build there is
-    /// no kernel entropy source, so `create` refuses — and *that* is asserted
-    /// instead, because what must never happen is a salt appearing anyway.
+    /// password makes the same key in every vault on every machine, so one
+    /// precomputed table opens all of them.
     #[test]
-    fn two_vaults_with_the_same_password_do_not_store_the_same_verifier() {
-        match (
-            Vault::create("A", "correct horse"),
-            Vault::create("B", "correct horse"),
-        ) {
-            (Ok(a), Ok(b)) => {
-                assert_ne!(
-                    a.master.params().salt(),
-                    b.master.params().salt(),
-                    "two vaults drew the same salt -- it is a constant again"
-                );
-                assert_ne!(
-                    a.master.verifier(),
-                    b.master.verifier(),
-                    "the salt did not reach the stored value"
-                );
-                // And both still open with the password they were made from.
-                assert!(a.master.check(b"correct horse"));
-                assert!(b.master.check(b"correct horse"));
-            }
-            (Err(a), Err(b)) => {
-                assert_eq!(a, KdfError::EntropyUnavailable);
-                assert_eq!(b, KdfError::EntropyUnavailable);
-            }
-            _ => panic!("an entropy source that works only sometimes is the worst case of all"),
-        }
+    fn two_vaults_with_one_password_do_not_share_a_key() {
+        let a = Vault::create("A", "correct horse", TEST_KDF, [1; seal::SALT_LEN]).unwrap();
+        let b = Vault::create("B", "correct horse", TEST_KDF, [2; seal::SALT_LEN]).unwrap();
+        assert_ne!(a.key, b.key, "the salt did not reach the key");
     }
 
-    /// The salt has to reach the stored value for any of this to mean
-    /// anything. Guards against it being kept, round-tripped and then ignored,
-    /// which would leave every vault behaving exactly as it did with djb2.
+    /// The salt is in the file's header, so it cannot be lost apart from the
+    /// vault -- and a header whose salt was changed opens nothing.
     #[test]
-    fn the_salt_changes_the_stored_verifier() {
-        let one = KdfParams::new(*b"salt number one!", TEST_ROUNDS);
-        let two = KdfParams::new(*b"salt number two!", TEST_ROUNDS);
-        assert_ne!(
-            PasswordVerifier::create(b"identical password", one, VERIFIER_DOMAIN).verifier(),
-            PasswordVerifier::create(b"identical password", two, VERIFIER_DOMAIN).verifier()
-        );
-    }
-
-    #[test]
-    fn a_verifier_is_worthless_without_the_salt_it_was_made_under() {
-        // Why `master` holds a `PasswordVerifier` rather than a bare hash: a
-        // persistence layer that writes the stored value and drops the salt
-        // has locked the owner out, and the symptom — "correct password
-        // refused" — does not point at the cause.
-        let v = Vault::for_test("V", "correct horse");
-        let wrong_salt = KdfParams::new([0xA5u8; pwkdf::SALT_LEN], TEST_ROUNDS);
-        let reopened = Vault::from_stored("V", wrong_salt, v.master.verifier());
-        assert!(v.master.check(b"correct horse"));
-        assert!(!reopened.master.check(b"correct horse"));
-    }
-
-    #[test]
-    fn a_vault_verifier_cannot_be_replayed_against_the_lock_screen() {
-        // The domain label is the whole of this property, and changing it is a
-        // one-word edit with no local symptom, so it is pinned here.
-        let params = KdfParams::new([0x5Au8; pwkdf::SALT_LEN], TEST_ROUNDS);
-        let vault = PasswordVerifier::create(b"correct horse", params, VERIFIER_DOMAIN);
-        let lockscreen =
-            PasswordVerifier::create(b"correct horse", params, b"slateos-lockscreen-verifier");
-        assert_ne!(vault.verifier(), lockscreen.verifier());
+    fn a_vault_is_worthless_without_the_salt_it_was_made_under() {
+        let vault = Vault::for_test("V", "correct horse");
+        let mut bytes = vault.sealed.clone();
+        let salt_at = 20;
+        bytes[salt_at] ^= 1;
+        let mut changed = Vault::from_file(bytes).unwrap();
+        assert!(!changed.unlock("correct horse", 100));
     }
 
     #[test]
     fn a_stored_vault_reopens_with_the_password_it_was_created_from() {
         let original = Vault::for_test("V", "correct horse");
-        let mut reopened =
-            Vault::from_stored("V", original.master.params(), original.master.verifier());
+        let mut reopened = Vault::from_file(original.sealed.clone()).unwrap();
         assert!(!reopened.unlock("wrong", 100));
+        assert!(!reopened.is_unlocked());
         assert!(reopened.unlock("correct horse", 100));
+        assert_eq!(
+            reopened.name, "V",
+            "the name comes out of the sealed contents"
+        );
     }
 
     // == Vault tests ===========================================================
@@ -7078,8 +8427,10 @@ mod tests {
     #[test]
     fn test_vault_auto_lock() {
         let mut v = Vault::for_test("Test", "pw");
-        v.auto_lock_minutes = 5;
+        // Set while open: the timeout is kept inside the sealed vault, so
+        // unlocking reads it back from there.
         v.unlock("pw", 100);
+        v.auto_lock_minutes = 5;
         assert!(!v.should_auto_lock(100));
         assert!(!v.should_auto_lock(399)); // 299s < 300s
         assert!(v.should_auto_lock(400)); // 300s >= 300s
@@ -7761,110 +9112,298 @@ mod tests {
         assert_eq!(AuditIssueKind::Compromised.label(), "Compromised");
     }
 
-    // == Export tests ===========================================================
+    // == Export, backup and restore (2026-09-27; C-Q25, §1417) ===================
+    //
+    // The operator's answer: a plain-text export made totally clear to be
+    // insecure (A), and an encrypted backup that restores everything (B). The
+    // backup is the sealed vault itself; the old JSON-ish "backup" that left
+    // every password out is gone, never having been connected.
 
+    /// Every character a password can hold comes back out of the CSV exactly
+    /// (B-Q12: the export must not mangle a password that holds the
+    /// characters CSV itself uses).
     #[test]
-    fn test_export_csv_header() {
-        let v = Vault::for_test("V", "pw");
-        let csv = export_csv(&v);
-        assert!(csv.starts_with("type,name,username,password,url,notes,tags,folder,starred\n"));
-    }
-
-    #[test]
-    fn test_export_csv_entry() {
-        let mut v = Vault::for_test("V", "pw");
-        v.add_entry(
-            EntryData::Login(LoginData::new("site", "user", "pass")),
-            100,
-        );
-        let csv = export_csv(&v);
-        assert!(csv.contains("Login"));
-        assert!(csv.contains("site"));
-        assert!(csv.contains("user"));
-    }
-
-    #[test]
-    fn test_escape_csv_no_special() {
-        assert_eq!(escape_csv("hello"), "hello");
-    }
-
-    #[test]
-    fn test_escape_csv_with_comma() {
-        assert_eq!(escape_csv("a,b"), "\"a,b\"");
-    }
-
-    #[test]
-    fn test_escape_csv_with_quotes() {
-        assert_eq!(escape_csv("say \"hi\""), "\"say \"\"hi\"\"\"");
-    }
-
-    #[test]
-    fn a_carriage_return_forces_a_quoted_csv_field() {
-        // RFC 4180 records are CRLF-terminated, so a bare CR in an unquoted
-        // field splits the record for most readers.
-        assert_eq!(escape_csv("a\rb"), "\"a\rb\"");
-    }
-
-    #[test]
-    fn a_hostile_entry_name_cannot_forge_a_backup_field() {
-        let mut v = Vault::for_test("My \"Vault\"", "pw");
-        v.add_entry(
-            EntryData::Login(LoginData::new(
-                "svc\",\n      \"starred\": true,\n      \"x\": \"",
-                "u",
-                "p",
-            )),
-            100,
-        );
-        v.add_folder("Home\\Work");
-        let backup = serialize_backup(&v);
-        // The forged key must not appear as a second `starred` field.
-        assert_eq!(
-            backup.matches("\"starred\":").count(),
-            1,
-            "entry name forged a key: {backup}"
-        );
-        // Quotes in the vault name and backslashes in a folder name survive
-        // as data rather than terminating their strings.
-        assert!(
-            backup.contains("\"vault_name\": \"My \\\"Vault\\\"\""),
-            "vault name not escaped: {backup}"
-        );
-        assert!(
-            backup.contains("\"name\": \"Home\\\\Work\""),
-            "folder name not escaped: {backup}"
-        );
-    }
-
-    #[test]
-    fn a_hostile_tag_cannot_forge_a_backup_tag() {
-        let mut v = Vault::for_test("V", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
-        if let Some(e) = v.entries.first_mut() {
-            e.tags.push("a\", \"injected".to_string());
+    fn an_export_keeps_every_character_of_every_password() {
+        let mut v = unlocked_vault();
+        let every: String = (1u8..=127)
+            .map(char::from)
+            .chain("\u{e9}\u{1F512}".chars())
+            .collect();
+        let hostile = [
+            "plain",
+            "a,b",
+            "say \"hi\"",
+            "\"",
+            "line\nbreak",
+            "cr\rand\r\ncrlf",
+            " leading and trailing ",
+            "=1+1",
+            "tab\there",
+            every.as_str(),
+            "",
+        ];
+        for (i, pw) in hostile.iter().enumerate() {
+            let mut login = LoginData::new(&format!("site{i}"), "user", pw);
+            login.notes = (*pw).to_string();
+            v.add_entry(EntryData::Login(login), 1);
         }
-        let backup = serialize_backup(&v);
-        let tags_line = backup
-            .lines()
-            .find(|l| l.contains("\"tags\":"))
-            .expect("tags line");
-        // One tag in, one tag out: the comma inside it must stay inert.
-        assert_eq!(
-            tags_line.matches("\", \"").count(),
-            0,
-            "tag forged a second array element: {tags_line}"
+        let csv = export_csv(&v);
+        assert!(csv.ends_with("\r\n"), "records end in CRLF");
+        let records = textfmt::csv::parse_records(&csv);
+        assert_eq!(records.len(), hostile.len() + 1, "{csv:?}");
+        assert_eq!(records[0][3].text, "password");
+        for (i, pw) in hostile.iter().enumerate() {
+            let row = &records[i + 1];
+            assert_eq!(row.len(), 10, "row {i} split: {row:?}");
+            assert_eq!(row[3].text, *pw, "password {i}");
+            assert_eq!(row[5].text, *pw, "notes {i}");
+            assert!(row.iter().all(|f| f.quoted), "row {i} has a bare field");
+        }
+    }
+
+    #[test]
+    fn every_kind_of_entry_reaches_the_export() {
+        let mut v = unlocked_vault();
+        v.add_entry(
+            EntryData::CreditCard(CreditCardData::new("Visa", "****4242", "12/30", "Ann")),
+            1,
+        );
+        v.add_entry(
+            EntryData::Identity(IdentityData::new("Ann", "ann@example.org")),
+            1,
+        );
+        v.add_entry(
+            EntryData::SshKey(SshKeyData::new("deploy", "SHA256:xyz", "ssh-ed25519 AAAA")),
+            1,
+        );
+        v.add_entry(
+            EntryData::SecureNote(SecureNoteData::new("Wifi", "the code")),
+            1,
+        );
+        let records = textfmt::csv::parse_records(&export_csv(&v));
+        let notes: Vec<&str> = records[1..].iter().map(|r| r[5].text.as_str()).collect();
+        assert!(
+            notes[0].contains("****4242") && notes[0].contains("12/30"),
+            "{notes:?}"
+        );
+        assert!(notes[1].contains("ann@example.org"), "{notes:?}");
+        assert!(notes[2].contains("SHA256:xyz"), "{notes:?}");
+        assert_eq!(notes[3], "the code");
+    }
+
+    #[test]
+    fn export_comes_only_after_the_warning_says_what_it_is() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::ExportCsv);
+        assert!(matches!(state.dialog, Some(VaultDialog::ExportWarning)));
+        assert!(
+            !state.picker.is_open(),
+            "the file dialog came up before the warning"
+        );
+        let shown = drawn(&state);
+        assert!(shown.contains("plain text"), "{shown}");
+        assert!(shown.contains("readable by anyone"), "{shown}");
+        assert!(
+            shown.contains("spreadsheet"),
+            "the warning does not say to keep it out of a spreadsheet: {shown}"
+        );
+        act_on(&mut state, Target::DialogCancel);
+        assert!(state.dialog.is_none() && !state.picker.is_open());
+
+        act_on(&mut state, Target::ExportCsv);
+        act_on(&mut state, Target::ExportAnyway);
+        assert!(state.picker.is_open());
+        assert_eq!(state.pick_for, Some(PickFor::Export));
+    }
+
+    #[test]
+    fn an_export_is_written_where_chosen_and_says_what_it_is() {
+        let scratch = scratchdir::ScratchDir::new("credmanager_export");
+        let mut state = unlocked_app();
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new("bank", "ann", "hunter2")),
+            1,
+        );
+        let path = scratch.dir().join("out").join("credentials.csv");
+        state.picked(PickFor::Export, &path);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"hunter2\""), "{text}");
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("plain text"),
+            "{:?}",
+            state.vault_message
         );
     }
 
     #[test]
-    fn test_serialize_backup() {
-        let mut v = Vault::for_test("Test", "pw");
-        v.add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 100);
-        v.add_folder("Work");
-        let backup = serialize_backup(&v);
-        assert!(backup.contains("\"vault_name\": \"Test\""));
-        assert!(backup.contains("\"entry_count\": 1"));
-        assert!(backup.contains("\"name\": \"Work\""));
+    fn a_backup_is_the_vault_sealed_and_opens_with_its_master_password() {
+        let (scratch, mut state) = first_run("backup");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        let backup = scratch.dir().join("elsewhere").join("vault.backup");
+        state.picked(PickFor::Backup, &backup);
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("Backed up"),
+            "{:?}",
+            state.vault_message
+        );
+        let bytes = std::fs::read(&backup).unwrap();
+        assert!(
+            !bytes.windows(14).any(|w| w == b"hunter2-secret"),
+            "the backup holds a password in the clear"
+        );
+        let mut opened = Vault::from_file(bytes).unwrap();
+        assert!(!opened.unlock("not it", 0));
+        assert!(opened.unlock(MASTER, 0));
+        assert_eq!(opened.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_restore_needs_the_backups_password_and_asks_before_replacing() {
+        // A backup of one vault...
+        let (scratch, mut old) = first_run("restore_from");
+        make_vault(&mut old, MASTER, MASTER);
+        add_login(&mut old, "old.example", "old-secret");
+        add_login(&mut old, "older.example", "older-secret");
+        let backup = scratch.dir().join("vault.backup");
+        old.picked(PickFor::Backup, &backup);
+
+        // ...restored into another, with a different master password.
+        let other = "another master password";
+        let (scratch2, mut state) = first_run("restore_into");
+        make_vault(&mut state, other, other);
+        add_login(&mut state, "new.example", "new-secret");
+        state.picked(PickFor::Restore, &backup);
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::RestorePassword { .. })),
+            "{:?}",
+            state.dialog
+        );
+
+        type_in(&mut state, "wrong password");
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            matches!(
+                state.dialog,
+                Some(VaultDialog::RestorePassword { error: Some(_), .. })
+            ),
+            "{:?}",
+            state.dialog
+        );
+        assert_eq!(state.vault.entries.len(), 1);
+
+        type_in(&mut state, MASTER);
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::RestoreConfirm { .. })),
+            "{:?}",
+            state.dialog
+        );
+        assert!(
+            drawn(&state).contains("Replace this vault"),
+            "{}",
+            drawn(&state)
+        );
+        assert_eq!(state.vault.entries.len(), 1, "replaced before being asked");
+
+        handle_event(&mut state, &key(Key::Enter));
+        assert!(state.dialog.is_none());
+        assert_eq!(state.vault.entries.len(), 2);
+
+        // Kept, under this vault's own master password and not the backup's.
+        let mut again = reopen(&scratch2);
+        assert!(!again.vault.unlock(MASTER, 0));
+        assert!(again.vault.unlock(other, 0));
+        assert_eq!(again.vault.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_backup_is_said_to_be_so() {
+        let scratch = scratchdir::ScratchDir::new("credmanager_not_a_backup");
+        let path = scratch.dir().join("notes.txt");
+        std::fs::write(&path, "shopping").unwrap();
+        let mut state = unlocked_app();
+        state.picked(PickFor::Restore, &path);
+        assert!(state.dialog.is_none());
+        assert!(
+            state
+                .vault_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("cannot be restored"),
+            "{:?}",
+            state.vault_message
+        );
+    }
+
+    fn ctrl_l() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::L,
+            pressed: true,
+            modifiers: guitk::event::Modifiers {
+                ctrl: true,
+                ..guitk::event::Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn a_vault_dialog_is_modal() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::ExportCsv);
+        handle_event(&mut state, &ctrl_l());
+        assert!(
+            state.vault.is_unlocked(),
+            "a key reached the window behind the dialog"
+        );
+        assert!(
+            !probe::is_visible(&state, Target::Add),
+            "the toolbar behind can be clicked"
+        );
+        assert!(probe::is_visible(&state, Target::ExportAnyway));
+        handle_event(&mut state, &key(Key::Escape));
+        assert!(state.dialog.is_none());
+    }
+
+    #[test]
+    fn the_settings_buttons_can_be_pressed() {
+        let mut state = unlocked_app();
+        state.detail_view = DetailView::Settings;
+        for target in [Target::BackUp, Target::RestoreBackup, Target::ExportCsv] {
+            assert!(
+                probe::is_visible(&state, target),
+                "{target:?} is drawn and cannot be pressed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_dialog_takes_the_keys_while_it_is_up() {
+        let mut state = unlocked_app();
+        act_on(&mut state, Target::BackUp);
+        assert!(state.picker.is_open());
+        state.on_event(&ctrl_l());
+        assert!(
+            state.vault.is_unlocked(),
+            "a key reached the vault behind the file dialog"
+        );
+        // Ctrl+L started a path in the dialog's own address bar (the dialog
+        // takes it, as a file manager does), so the first Escape stops the
+        // typing and the second is the dialog's.
+        state.on_event(&key(Key::Escape));
+        assert!(state.picker.is_open(), "Escape left a path and the dialog");
+        state.on_event(&key(Key::Escape));
+        assert!(!state.picker.is_open());
+        assert_eq!(state.pick_for, None);
     }
 
     // == SortOrder tests =======================================================
@@ -9725,5 +11264,554 @@ mod tests {
             });
             assert!(!crowded, "{line:?} shares its row with other text");
         }
+    }
+
+    // == The vault on disk (2026-09-27) ========================================
+    //
+    // Until then nothing was kept: every launch opened an empty vault, the
+    // master password was checked against a verifier stored nowhere, and
+    // locking changed a flag while every entry stayed in memory. These are
+    // about the file, the gate in front of it, and the rule that every change
+    // is saved as it is made.
+
+    /// Every string the window draws, joined.
+    fn drawn(state: &AppState) -> String {
+        state
+            .draw((DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn vault_file(scratch: &scratchdir::ScratchDir) -> PathBuf {
+        scratch
+            .dir()
+            .join("config")
+            .join("credmanager")
+            .join("vault")
+    }
+
+    /// The window a new launch opens on the vault kept in `scratch`, with the
+    /// cheapest key derivation and test randomness.
+    fn reopen(scratch: &scratchdir::ScratchDir) -> AppState {
+        let mut state = AppState::open(Some(vault_file(scratch)));
+        state.entropy = test_entropy;
+        state.new_vault_kdf = TEST_KDF;
+        state
+    }
+
+    /// A first run on an empty scratch folder.
+    fn first_run(tag: &str) -> (scratchdir::ScratchDir, AppState) {
+        let scratch = scratchdir::ScratchDir::new(&format!("credmanager_{tag}"));
+        let state = reopen(&scratch);
+        (scratch, state)
+    }
+
+    fn key(key: Key) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// Type `text` as the user would: through the whole event path, saving
+    /// included.
+    fn type_in(state: &mut AppState, text: &str) {
+        for ch in text.chars() {
+            handle_event(
+                state,
+                &Event::Key(KeyEvent {
+                    key: Key::A,
+                    pressed: true,
+                    modifiers: guitk::event::Modifiers::NONE,
+                    text: ch.to_string(),
+                }),
+            );
+        }
+    }
+
+    const MASTER: &str = "correct horse battery";
+
+    /// Make the vault the way a person does: type, Tab, type again, Enter.
+    fn make_vault(state: &mut AppState, password: &str, again: &str) {
+        type_in(state, password);
+        handle_event(state, &key(Key::Tab));
+        type_in(state, again);
+        handle_event(state, &key(Key::Enter));
+    }
+
+    /// Add a login through the vault, then let an event save it.
+    fn add_login(state: &mut AppState, site: &str, password: &str) {
+        state.vault.add_entry(
+            EntryData::Login(LoginData::new(site, "ann", password)),
+            1_700_000_000,
+        );
+        handle_event(state, &Event::Tick { elapsed_ms: 0 });
+    }
+
+    #[test]
+    fn a_first_run_makes_the_vault_from_a_master_password_typed_twice() {
+        let (scratch, mut state) = first_run("first");
+        assert!(matches!(state.gate, Gate::Create(_)));
+        assert!(
+            drawn(&state).contains("Create your vault"),
+            "{}",
+            drawn(&state)
+        );
+        make_vault(&mut state, MASTER, MASTER);
+        assert!(state.vault.is_unlocked(), "{:?}", state.gate);
+        assert_eq!(state.gate, Gate::Unlock);
+        assert!(
+            vault_file(&scratch).exists(),
+            "the new vault was not written"
+        );
+        assert!(state.save_error.is_none(), "{:?}", state.save_error);
+    }
+
+    #[test]
+    fn a_short_or_mismatched_master_password_makes_no_vault() {
+        let (scratch, mut state) = first_run("mismatch");
+        make_vault(&mut state, "short", "short");
+        assert!(!state.vault.is_unlocked());
+        let Gate::Create(form) = &state.gate else {
+            panic!("{:?}", state.gate)
+        };
+        assert!(
+            form.error.as_deref().unwrap_or("").contains("at least"),
+            "{form:?}"
+        );
+
+        let (_, mut state) = first_run("mismatch2");
+        make_vault(&mut state, MASTER, "correct horse batterY");
+        assert!(!state.vault.is_unlocked());
+        let Gate::Create(form) = &state.gate else {
+            panic!("{:?}", state.gate)
+        };
+        assert!(
+            form.error.as_deref().unwrap_or("").contains("do not match"),
+            "{form:?}"
+        );
+        assert!(!vault_file(&scratch).exists());
+    }
+
+    #[test]
+    fn nothing_in_the_vault_file_is_in_the_clear() {
+        let (scratch, mut state) = first_run("clear");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        let bytes = std::fs::read(vault_file(&scratch)).unwrap();
+        for needle in ["hunter2-secret", "bank.example", MASTER, "login"] {
+            assert!(
+                !bytes.windows(needle.len()).any(|w| w == needle.as_bytes()),
+                "{needle:?} is in the vault file in the clear"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vault_opens_again_only_with_its_master_password() {
+        let (scratch, mut state) = first_run("reopen");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        let before = std::fs::read(vault_file(&scratch)).unwrap();
+
+        let mut again = reopen(&scratch);
+        assert_eq!(again.gate, Gate::Unlock);
+        assert!(!again.vault.is_unlocked());
+        assert!(
+            again.vault.entries.is_empty(),
+            "entries in memory before unlocking"
+        );
+
+        type_in(&mut again, "not the password");
+        handle_event(&mut again, &key(Key::Enter));
+        assert!(!again.vault.is_unlocked());
+        assert!(
+            drawn(&again).contains("not its master password"),
+            "{}",
+            drawn(&again)
+        );
+        assert_eq!(
+            std::fs::read(vault_file(&scratch)).unwrap(),
+            before,
+            "a failed unlock wrote"
+        );
+
+        again.master_input.clear();
+        type_in(&mut again, MASTER);
+        handle_event(&mut again, &key(Key::Enter));
+        assert!(again.vault.is_unlocked());
+        assert_eq!(again.vault.entries.len(), 1);
+        let EntryData::Login(login) = &again.vault.entries[0].data else {
+            panic!("{:?}", again.vault.entries[0].data)
+        };
+        assert_eq!(login.password, "hunter2-secret");
+        assert_eq!(
+            std::fs::read(vault_file(&scratch)).unwrap(),
+            before,
+            "opening the vault saved it again, though nothing changed"
+        );
+    }
+
+    #[test]
+    fn every_change_is_saved_as_it_is_made_under_a_new_nonce() {
+        let (scratch, mut state) = first_run("nonce");
+        make_vault(&mut state, MASTER, MASTER);
+        let first = std::fs::read(vault_file(&scratch)).unwrap();
+        add_login(&mut state, "a.example", "one");
+        let second = std::fs::read(vault_file(&scratch)).unwrap();
+        add_login(&mut state, "b.example", "two");
+        let third = std::fs::read(vault_file(&scratch)).unwrap();
+        let nonce =
+            |b: &[u8]| b[vaultfile::HEADER_LEN - seal::NONCE_LEN..vaultfile::HEADER_LEN].to_vec();
+        assert_ne!(first, second, "the first change was not saved");
+        assert_ne!(second, third, "the second change was not saved");
+        assert_ne!(nonce(&first), nonce(&second), "a nonce was used twice");
+        assert_ne!(nonce(&second), nonce(&third), "a nonce was used twice");
+
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, 0));
+        assert_eq!(again.vault.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_vault_file_changed_in_any_byte_opens_nothing() {
+        let (scratch, mut state) = first_run("changed");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        let path = vault_file(&scratch);
+        let good = std::fs::read(&path).unwrap();
+        // Past the header, in the sealed part: the header's own bytes are
+        // checked by vaultfile's tests.
+        for at in [vaultfile::HEADER_LEN, good.len() - 1] {
+            let mut bent = good.clone();
+            bent[at] ^= 1;
+            std::fs::write(&path, &bent).unwrap();
+            let mut again = reopen(&scratch);
+            assert!(
+                !again.vault.unlock(MASTER, 0),
+                "a file changed at {at} opened"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_vault_is_left_alone() {
+        let (scratch, _) = first_run("junk");
+        let path = vault_file(&scratch);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"my shopping list").unwrap();
+        let mut state = reopen(&scratch);
+        assert!(
+            matches!(state.gate, Gate::Unreadable(_)),
+            "{:?}",
+            state.gate
+        );
+        assert!(
+            drawn(&state).contains("cannot be opened"),
+            "{}",
+            drawn(&state)
+        );
+        make_vault(&mut state, MASTER, MASTER);
+        assert!(
+            !state.vault.is_unlocked(),
+            "a vault was made over a file there"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"my shopping list");
+    }
+
+    #[test]
+    fn locking_forgets_the_key_and_every_entry() {
+        let mut state = unlocked_app();
+        state
+            .vault
+            .add_entry(EntryData::Login(LoginData::new("s", "u", "p")), 0);
+        handle_event(&mut state, &Event::Tick { elapsed_ms: 0 });
+        handle_event(
+            &mut state,
+            &Event::Key(KeyEvent {
+                key: Key::L,
+                pressed: true,
+                modifiers: guitk::event::Modifiers {
+                    ctrl: true,
+                    ..guitk::event::Modifiers::NONE
+                },
+                text: String::new(),
+            }),
+        );
+        assert!(!state.vault.is_unlocked());
+        assert!(state.vault.key.is_none(), "the key outlived the lock");
+        assert!(
+            state.vault.entries.is_empty(),
+            "the entries outlived the lock"
+        );
+        assert!(state.vault.unlock(TEST_MASTER_PASSWORD, 0));
+        assert_eq!(
+            state.vault.entries.len(),
+            1,
+            "what was locked did not come back"
+        );
+    }
+
+    #[test]
+    fn without_secure_randomness_nothing_is_sealed_and_the_window_says_so() {
+        let (scratch, mut state) = first_run("entropy");
+        make_vault(&mut state, MASTER, MASTER);
+        let saved = std::fs::read(vault_file(&scratch)).unwrap();
+        state.entropy = no_entropy;
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        assert!(state.save_error.is_some());
+        assert_eq!(std::fs::read(vault_file(&scratch)).unwrap(), saved);
+        assert!(drawn(&state).contains("Not saved"), "{}", drawn(&state));
+
+        let (_, mut fresh) = first_run("entropy2");
+        fresh.entropy = no_entropy;
+        make_vault(&mut fresh, MASTER, MASTER);
+        assert!(!fresh.vault.is_unlocked(), "a vault was made with no salt");
+    }
+
+    #[test]
+    fn a_close_that_could_not_save_says_so_once() {
+        let (scratch, mut state) = first_run("close");
+        make_vault(&mut state, MASTER, MASTER);
+        // A file takes the folder's name, so nothing can be written there.
+        let dir = vault_file(&scratch).parent().unwrap().to_path_buf();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"in the way").unwrap();
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        assert!(state.save_error.is_some());
+        assert_eq!(state.on_event(&Event::CloseRequested), Response::KeepOpen);
+        assert_eq!(state.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_contents_keep_every_character_of_every_field() {
+        let mut vault = unlocked_vault();
+        let odd = "tab\there\nline\rreturn\\slash \u{e9}\u{1F512} ,\"quoted\"; = + -";
+        let folder = vault.add_folder(odd);
+        let mut login = LoginData::new(odd, odd, odd);
+        login.url = odd.to_string();
+        login.notes = odd.to_string();
+        login.totp_secret = Some(odd.to_string());
+        let id = vault.add_entry(EntryData::Login(login), 5);
+        vault.set_folder(id, Some(folder));
+        vault.add_tag(id, odd);
+        vault.add_tag(id, "second");
+        vault.toggle_star(id);
+        vault.add_entry(EntryData::SecureNote(SecureNoteData::new("", "")), 6);
+        vault.add_entry(
+            EntryData::CreditCard(CreditCardData::new(odd, "****1234", "12/30", odd)),
+            7,
+        );
+        let text = vaultfile::contents_text(&vault);
+        let back = vaultfile::parse_contents(&text).unwrap();
+        let mut rebuilt = unlocked_vault();
+        rebuilt.name = back.name;
+        rebuilt.auto_lock_minutes = back.auto_lock_minutes;
+        rebuilt.id_gen = back.next_id;
+        rebuilt.folders = back.folders;
+        rebuilt.entries = back.entries;
+        assert_eq!(vaultfile::contents_text(&rebuilt), text);
+        assert_eq!(rebuilt.entries.len(), 3);
+    }
+
+    #[test]
+    fn contents_that_are_not_understood_are_refused_whole() {
+        // A vault whose next id is past the entry below, so each bad case is
+        // wrong in exactly one way and is refused for that reason alone.
+        let mut base = unlocked_vault();
+        base.id_gen = 100;
+        let good = vaultfile::contents_text(&base);
+        assert!(vaultfile::parse_contents(&good).is_ok());
+        let entry = "login\t9\t\t0\t0\t1\t1\ts\tu\tp\turl\tnotes";
+        assert!(
+            vaultfile::parse_contents(&format!("{good}{entry}\n")).is_ok(),
+            "control: the entry the bad cases are made from is itself good"
+        );
+        for bad in [
+            String::new(),
+            "not a vault".to_string(),
+            format!("{good}mystery\tfield\n"),
+            format!("{good}{entry}\textra\n"),
+            format!("{good}{}\n", entry.replace("\t0\t0\t", "\t2\t0\t")),
+            format!("{good}{}\n", entry.replace("\tu\t", "\t\\q\t")),
+            format!("{good}{entry}\n{entry}\n"),
+            format!("{good}tag\t77\tno such entry\n"),
+            format!("{good}{}\n", entry.replace("login\t9\t\t", "login\t9\t4\t")),
+            format!("{good}note\t9\t\t0\t0\t1\t1\ttitle\tbody\ntotp\t9\tsecret\n"),
+            good.replacen("vault\t", "vault\tx\t", 1),
+        ] {
+            assert!(
+                vaultfile::parse_contents(&bad).is_err(),
+                "read as a vault: {bad:?}"
+            );
+        }
+        // An id at or past the next one to hand out would be handed out twice.
+        let mut vault = unlocked_vault();
+        vault.add_entry(EntryData::SecureNote(SecureNoteData::new("n", "")), 0);
+        let text =
+            vaultfile::contents_text(&vault).replacen(&format!("\t{}\n", vault.id_gen), "\t1\n", 1);
+        assert!(vaultfile::parse_contents(&text).is_err(), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_vault_file_is_its_owners_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let (scratch, mut state) = first_run("mode");
+        make_vault(&mut state, MASTER, MASTER);
+        let path = vault_file(&scratch);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let dir = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir & 0o077, 0, "{dir:o}");
+    }
+
+    // == Edit and delete (2026-09-27) ============================================
+    //
+    // With the vault kept on disk, an entry saved could never be changed or
+    // taken back out: `update_entry` and `remove_entry` had no caller.
+
+    /// A login with a one-time-code secret, a tag, a folder and a star, selected.
+    fn app_with_a_login() -> (AppState, u64) {
+        let mut state = unlocked_app();
+        let mut login = LoginData::new("bank.example", "ann", "old-password");
+        login.totp_secret = Some("JBSWY3DPEHPK3PXP".to_string());
+        let id = state.vault.add_entry(EntryData::Login(login), 100);
+        let folder = state.vault.add_folder("Money");
+        state.vault.set_folder(id, Some(folder));
+        state.vault.add_tag(id, "important");
+        state.vault.toggle_star(id);
+        state.selected_entry_id = Some(id);
+        state.refresh_filter();
+        (state, id)
+    }
+
+    #[test]
+    fn editing_a_login_changes_what_was_typed_and_keeps_the_rest() {
+        let (mut state, id) = app_with_a_login();
+        state.now = 500;
+        assert_eq!(act_on(&mut state, Target::EditEntry), EventResult::Consumed);
+        assert_eq!(state.detail_view, DetailView::NewEntry);
+        assert!(drawn(&state).contains("Edit Entry"), "{}", drawn(&state));
+        let form = state.new_entry.as_mut().unwrap();
+        assert_eq!(
+            form.value(2),
+            "old-password",
+            "the form did not open on the entry"
+        );
+        form.focus(2);
+        while form.backspace() {}
+        form.type_text("new-password");
+        assert!(save_new_entry(&mut state));
+
+        assert_eq!(state.vault.entries.len(), 1, "an edit added an entry");
+        let entry = state.vault.get_entry(id).unwrap();
+        let EntryData::Login(login) = &entry.data else {
+            panic!("{:?}", entry.data)
+        };
+        assert_eq!(login.password, "new-password");
+        assert_eq!(login.site, "bank.example");
+        assert_eq!(
+            login.totp_secret.as_deref(),
+            Some("JBSWY3DPEHPK3PXP"),
+            "the TOTP secret was lost"
+        );
+        assert_eq!(entry.tags, vec!["important".to_string()]);
+        assert!(entry.folder_id.is_some() && entry.starred);
+        assert_eq!((entry.created_at, entry.modified_at), (100, 500));
+    }
+
+    #[test]
+    fn an_entry_being_edited_keeps_its_kind() {
+        let (mut state, _) = app_with_a_login();
+        open_edit_entry(&mut state);
+        let form = state.new_entry.as_mut().unwrap();
+        form.set_kind(EntryType::SecureNote);
+        assert_eq!(form.kind, EntryType::Login);
+        assert!(
+            !probe::is_visible(&state, Target::NewKind(1)),
+            "another kind is offered for an entry being edited"
+        );
+    }
+
+    #[test]
+    fn a_card_number_left_alone_stays_as_it_was_kept() {
+        let mut state = unlocked_app();
+        let id = state.vault.add_entry(
+            EntryData::CreditCard(CreditCardData::new(
+                "Visa",
+                "************4242",
+                "12/30",
+                "Ann",
+            )),
+            1,
+        );
+        state.selected_entry_id = Some(id);
+        open_edit_entry(&mut state);
+        let form = state.new_entry.as_mut().unwrap();
+        form.focus(2);
+        while form.backspace() {}
+        form.type_text("01/31");
+        assert!(save_new_entry(&mut state));
+        let EntryData::CreditCard(card) = &state.vault.get_entry(id).unwrap().data else {
+            panic!()
+        };
+        assert_eq!(card.number_masked, "************4242");
+        assert_eq!(card.expiry, "01/31");
+    }
+
+    #[test]
+    fn delete_asks_first_and_then_takes_the_entry_out_of_the_vault() {
+        let (scratch, mut state) = first_run("delete");
+        make_vault(&mut state, MASTER, MASTER);
+        add_login(&mut state, "bank.example", "hunter2-secret");
+        add_login(&mut state, "mail.example", "other-secret");
+        let id = state.vault.entries[0].id;
+        state.selected_entry_id = Some(id);
+
+        handle_event(&mut state, &key(Key::Delete));
+        assert!(
+            matches!(state.dialog, Some(VaultDialog::DeleteConfirm { .. })),
+            "{:?}",
+            state.dialog
+        );
+        assert!(
+            drawn(&state).contains("Delete this entry?"),
+            "{}",
+            drawn(&state)
+        );
+        handle_event(&mut state, &key(Key::Escape));
+        assert_eq!(state.vault.entries.len(), 2, "Escape deleted it");
+
+        assert_eq!(
+            act_on(&mut state, Target::DeleteEntry),
+            EventResult::Consumed
+        );
+        handle_event(&mut state, &key(Key::Enter));
+        assert_eq!(state.vault.entries.len(), 1);
+        assert!(state.vault.get_entry(id).is_none());
+        assert_eq!(state.selected_entry_id, None);
+
+        let mut again = reopen(&scratch);
+        assert!(again.vault.unlock(MASTER, 0));
+        assert_eq!(again.vault.entries.len(), 1, "the deletion was not kept");
+    }
+
+    #[test]
+    fn edit_and_delete_can_be_pressed_on_an_entry() {
+        let (state, _) = app_with_a_login();
+        assert!(probe::is_visible(&state, Target::EditEntry));
+        assert!(probe::is_visible(&state, Target::DeleteEntry));
     }
 }

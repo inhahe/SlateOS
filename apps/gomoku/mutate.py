@@ -156,8 +156,8 @@ MUTATIONS = [
     # ── The window ────────────────────────────────────────────────────────
     (
         "the background is painted at the size the program was written for",
-        "        fill(f, l.window, BASE, CornerRadii::all(0.0));",
-        "        fill(f, Rect::new(0.0, 0.0, 800.0, 600.0), BASE, CornerRadii::all(0.0));",
+        "        fill(f, l.window, c.chrome.page, CornerRadii::all(0.0));",
+        "        fill(f, Rect::new(0.0, 0.0, 800.0, 600.0), c.chrome.page, CornerRadii::all(0.0));",
         ["the_background_covers_the_window_at_every_size"],
     ),
     # ── The board and the rules ───────────────────────────────────────────
@@ -337,7 +337,7 @@ MUTATIONS = [
     ),
     (
         "the window is never asked for a tick",
-        "        Some(Duration::from_millis(60))",
+        "        (self.phase == GamePhase::Thinking).then_some(Duration::from_millis(60))",
         "        None",
         ["the_app_asks_for_the_tick_that_makes_white_move"],
     ),
@@ -552,18 +552,14 @@ MUTATIONS = [
     ),
     (
         "the status band never says White is thinking",
-        '            GamePhase::Thinking => ("White is thinking...", LAVENDER),\n'
-        "            GamePhase::Playing => (",
+        "            GamePhase::Thinking => (\"White is thinking...\", c.chrome.title),\n            GamePhase::Playing => (",
         "            GamePhase::Thinking | GamePhase::Playing => (",
-        [
-            "the_status_band_says_what_the_game_is_doing",
-            "the_frame_after_blacks_move_says_white_is_thinking",
-        ],
+        ["the_status_band_says_what_the_game_is_doing", "the_frame_after_blacks_move_says_white_is_thinking"],
     ),
     (
         "the header names the wrong colour to play",
-        '            GamePhase::Playing if self.current_turn == Cell::Black => ("Black to play", BLUE),',
-        '            GamePhase::Playing if self.current_turn == Cell::Black => ("White to play", BLUE),',
+        "                (\"Black to play\", c.chrome.key)",
+        "                (\"White to play\", c.chrome.key)",
         ["the_header_names_the_turn"],
     ),
     (
@@ -574,8 +570,8 @@ MUTATIONS = [
     ),
     (
         "the panel reads the scores off by one column",
-        '            (format!("{BLACK_SCORE_STEM}{}", self.scores.0), TEXT_COLOR),',
-        '            (format!("{BLACK_SCORE_STEM}{}", self.scores.1), TEXT_COLOR),',
+        "                format!(\"{BLACK_SCORE_STEM}{}\", self.scores.0),",
+        "                format!(\"{BLACK_SCORE_STEM}{}\", self.scores.1),",
         ["the_panel_counts_the_moves_and_the_scores"],
     ),
     (
@@ -592,15 +588,14 @@ MUTATIONS = [
     ),
     (
         "the button label is drawn away from the button",
-        "                r.x + (r.w - tw) / 2.0,\n                r.y + (r.h - l.small) / 2.0,",
-        "                l.board.x,\n                l.board.y,",
+        "                (r.x, r.y, r.w, r.h),\n                label,",
+        "                (l.board.x, l.board.y, r.w, r.h),\n                label,",
         ["each_button_is_labelled_where_it_is_clickable"],
     ),
     (
         "the panel is painted even when the layout dropped it",
-        "        if l.panel.is_empty() {\n            return;\n        }\n"
-        "        fill(f, l.panel, MANTLE, CornerRadii::all(0.0));",
-        "        fill(f, l.panel, MANTLE, CornerRadii::all(0.0));",
+        "        if l.panel.is_empty() {\n            return;\n        }\n        fill(f, l.panel, c.chrome.band, CornerRadii::all(0.0));",
+        "        fill(f, l.panel, c.chrome.band, CornerRadii::all(0.0));",
         ["nothing_is_painted_outside_the_window"],
     ),
     (
@@ -634,6 +629,54 @@ MUTATIONS = [
         '        String::from("gomoku")',
         '        String::from("Gomoku game")',
         ["the_window_names_itself"],
+    ),
+    (
+        "the theme is never taken up",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        self.palette = *palette;",
+        "    fn theme_changed(&mut self, palette: &Palette) {\n        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the last-move dot is the pale red it was",
+        "const LAST_MOVE_MARKER: Color = Color::from_hex(0xD20F39);",
+        "const LAST_MOVE_MARKER: Color = Color::from_hex(0xF38BA8);",
+        ["the_last_move_dot_can_be_seen_on_either_stone"],
+    ),
+    (
+        "the undo button is drawn live with nothing to undo",
+        "                    disabled: !enabled,",
+        "                    disabled: false,",
+        ["the_undo_button_is_switched_off_with_nothing_to_undo"],
+    ),
+    (
+        "a stone the shade of the board is not ringed",
+        "                let border = gamechrome::edge_on(own_edge, body, c.board);",
+        "                let border = own_edge;",
+        ["both_stones_are_seen_on_the_board_in_either_theme"],
+    ),
+    (
+        "the cursor is drawn in the board's colour",
+        "            color: c.cursor,",
+        "            color: c.board,",
+        ["the_cursor_is_drawn_where_the_arrows_left_it"],
+    ),
+    (
+        "the win leaves no mark",
+        "            fill(f, rect, c.win, CornerRadii::all(l.stone));",
+        "            fill(f, rect, c.board, CornerRadii::all(l.stone));",
+        ["the_win_is_marked_on_the_five_stones_that_made_it"],
+    ),
+    (
+        "the lines are drawn in the board's own shade",
+        "            lines: p.subtext0,",
+        "            lines: p.surface1,",
+        ["the_lines_stand_off_the_board_in_either_theme"],
+    ),
+    (
+        "the board's coordinates are the page's grey, 4.1:1 on it",
+        "        let label_ink = c.chrome.on(c.board).dim;",
+        "        let label_ink = c.chrome.dim;",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
     ),
 ]
 

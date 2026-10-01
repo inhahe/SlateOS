@@ -10,8 +10,8 @@
 //! - Bulk generation with export
 //! - PIN generator with configurable length
 //! - Pronounceable password generator
-//! - Password policy compliance checking
-//! - Multi-panel UI with generator, analyzer, and history
+//! - Checking rules the user sets on the Rules tab, kept in `passwordgen.yaml`
+//! - Multi-panel UI with generator, analyzer, history and rules
 //!
 //! Uses the guitk library for UI rendering.
 
@@ -858,7 +858,11 @@ fn format_crack_time(guesses: f64, rate_per_sec: f64) -> String {
 
 /// Analyze a password's strength.
 pub fn analyze_password(password: &str) -> PasswordAnalysis {
-    let length = password.len();
+    // Characters, not bytes. "pässwörd" is eight characters long, and every
+    // figure below is per character typed: counting bytes made an accented
+    // letter count twice towards the length a rule asks for, and twice again
+    // towards the strength.
+    let length = password.chars().count();
     let has_lowercase = password.chars().any(|c| c.is_ascii_lowercase());
     let has_uppercase = password.chars().any(|c| c.is_ascii_uppercase());
     let has_digits = password.chars().any(|c| c.is_ascii_digit());
@@ -1084,17 +1088,28 @@ fn is_common_password(password: &str) -> bool {
 // Password policy
 // ============================================================================
 
-/// Policy rules for password compliance checking.
-#[derive(Clone, Debug)]
+/// The rules a password is checked against.
+///
+/// Until 2026-09-27 these were compiled in and the same for everybody: the
+/// status bar said "Compliant" against rules nobody could see or change
+/// (C-Q26). They are drawn and changed on the Rules tab now, and kept in
+/// `passwordgen.yaml` -- see [`PasswordPolicy::from_settings`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PasswordPolicy {
+    /// The fewest characters a password may have.
     pub min_length: usize,
+    /// The most it may have; `None` is no limit.
     pub max_length: Option<usize>,
     pub require_lowercase: bool,
     pub require_uppercase: bool,
     pub require_digit: bool,
     pub require_symbol: bool,
+    /// How many of the four kinds of character -- lowercase, uppercase,
+    /// digits and symbols -- it must mix.
     pub min_classes: usize,
-    pub min_entropy: f64,
+    /// The least strength it may have, in bits of entropy.
+    pub min_bits: u32,
+    /// Whether a password on the list of commonly used ones is refused.
     pub disallow_common: bool,
 }
 
@@ -1108,59 +1123,220 @@ impl Default for PasswordPolicy {
             require_digit: true,
             require_symbol: false,
             min_classes: 3,
-            min_entropy: 40.0,
+            min_bits: 40,
             disallow_common: true,
         }
     }
 }
 
+/// The settings file the rules are kept in: `<config>/passwordgen.yaml`, one
+/// file per program (C-Q26, option A -- `design-decisions.md` §1418).
+const CONFIG_NAME: &str = "passwordgen";
+
+/// The mapping in that file the rules are kept under.
+const RULES_KEY: &str = "rules";
+
+/// The longest a length rule can name: the longest password the generator
+/// makes.
+const RULE_LENGTH_MAX: usize = MAX_PASSWORD_LEN;
+
+/// The strength rule's ceiling and its step, in bits. Two hundred is past
+/// anything a password is asked to be; five-bit steps take the arrow keys
+/// from the default forty to anything a site asks for in a few presses.
+const RULE_BITS_MAX: u32 = 200;
+const RULE_BITS_STEP: u32 = 5;
+
 impl PasswordPolicy {
-    /// Check compliance, returning a list of violations.
+    /// Every rule `password` breaks, one sentence each; empty when it meets
+    /// them all.
+    #[must_use]
     pub fn check(&self, password: &str) -> Vec<String> {
         let analysis = analyze_password(password);
+        let length = analysis.length;
         let mut violations = Vec::new();
 
-        if password.len() < self.min_length {
-            violations.push(format!("Too short (minimum {} chars)", self.min_length));
+        if length < self.min_length {
+            violations.push(format!(
+                "Too short: {}, and the rules ask for at least {}",
+                characters(length),
+                self.min_length
+            ));
         }
         if let Some(max) = self.max_length
-            && password.len() > max
+            && length > max
         {
-            violations.push(format!("Too long (maximum {max} chars)"));
+            violations.push(format!(
+                "Too long: {}, and the rules allow at most {max}",
+                characters(length)
+            ));
         }
         if self.require_lowercase && !analysis.has_lowercase {
-            violations.push("Must contain lowercase letter".to_owned());
+            violations.push("Has no lowercase letter".to_owned());
         }
         if self.require_uppercase && !analysis.has_uppercase {
-            violations.push("Must contain uppercase letter".to_owned());
+            violations.push("Has no uppercase letter".to_owned());
         }
         if self.require_digit && !analysis.has_digits {
-            violations.push("Must contain digit".to_owned());
+            violations.push("Has no digit".to_owned());
         }
         if self.require_symbol && !analysis.has_symbols {
-            violations.push("Must contain symbol".to_owned());
+            violations.push("Has no symbol".to_owned());
         }
         if analysis.char_classes_used < self.min_classes {
             violations.push(format!(
-                "Must use at least {} character classes (using {})",
-                self.min_classes, analysis.char_classes_used
+                "Mixes {} of the four kinds of character, and the rules ask for {}",
+                analysis.char_classes_used, self.min_classes
             ));
         }
-        if analysis.entropy_bits < self.min_entropy {
+        // Rounded down for the sentence: 39.6 bits said as "40" beside a rule
+        // of 40 would read as a rule met and reported broken.
+        if analysis.entropy_bits < f64::from(self.min_bits) {
             violations.push(format!(
-                "Entropy too low ({:.0} bits, minimum {:.0})",
-                analysis.entropy_bits, self.min_entropy
+                "Too weak: {:.0} bits, and the rules ask for {}",
+                analysis.entropy_bits.floor(),
+                self.min_bits
             ));
         }
         if self.disallow_common && analysis.is_common {
-            violations.push("Password is commonly used".to_owned());
+            violations.push("Is one of the most commonly used passwords".to_owned());
         }
 
         violations
     }
 
+    #[must_use]
     pub fn is_compliant(&self, password: &str) -> bool {
         self.check(password).is_empty()
+    }
+
+    /// The rules kept in `doc`, over the defaults -- and one sentence for
+    /// each value there that could not be used, which keeps its default.
+    ///
+    /// A value is refused rather than clamped into range: a file that says
+    /// the shortest allowed is 500 was written by somebody who meant
+    /// something, and quietly checking against a different rule is worse
+    /// than saying so.
+    #[must_use]
+    pub fn from_settings(doc: &yamldoc::Document) -> (Self, Vec<String>) {
+        let mut rules = Self::default();
+        let mut problems = Vec::new();
+        let longest_rule = i64::try_from(RULE_LENGTH_MAX).unwrap_or(i64::MAX);
+
+        if let Some(n) = kept_number(doc, "shortest", 1, longest_rule, &mut problems)
+            .and_then(|n| usize::try_from(n).ok())
+        {
+            rules.min_length = n;
+        }
+        if let Some(n) = kept_number(doc, "longest", 1, longest_rule, &mut problems)
+            .and_then(|n| usize::try_from(n).ok())
+        {
+            if n >= rules.min_length {
+                rules.max_length = Some(n);
+            } else {
+                problems.push(format!(
+                    "{CONFIG_NAME}.yaml: {RULES_KEY}.longest ({n}) is less than the shortest \
+                     allowed ({}), so no longest is set",
+                    rules.min_length
+                ));
+            }
+        }
+        for (key, rule) in [
+            ("lowercase", &mut rules.require_lowercase),
+            ("uppercase", &mut rules.require_uppercase),
+            ("digit", &mut rules.require_digit),
+            ("symbol", &mut rules.require_symbol),
+            ("refuse_common", &mut rules.disallow_common),
+        ] {
+            if let Some(on) = kept_switch(doc, key, &mut problems) {
+                *rule = on;
+            }
+        }
+        if let Some(n) =
+            kept_number(doc, "kinds", 1, 4, &mut problems).and_then(|n| usize::try_from(n).ok())
+        {
+            rules.min_classes = n;
+        }
+        if let Some(n) = kept_number(doc, "strength", 0, i64::from(RULE_BITS_MAX), &mut problems)
+            .and_then(|n| u32::try_from(n).ok())
+        {
+            rules.min_bits = n;
+        }
+        (rules, problems)
+    }
+
+    /// Write the rules into `doc` under `rules:`, leaving everything else in
+    /// it -- comments included -- as it was.
+    pub fn store_into(&self, doc: &mut yamldoc::Document) {
+        // Every length here is at most `RULE_LENGTH_MAX`, so the fallback is
+        // never taken; it is there so this cannot panic.
+        let whole = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
+        doc.set_i64(&[RULES_KEY, "shortest"], whole(self.min_length));
+        if let Some(n) = self.max_length {
+            doc.set_i64(&[RULES_KEY, "longest"], whole(n));
+        } else {
+            // No limit is no key, so the file reads the way the rule does.
+            // Whether there was one to take out does not matter.
+            doc.remove(&[RULES_KEY, "longest"]);
+        }
+        doc.set_bool(&[RULES_KEY, "lowercase"], self.require_lowercase);
+        doc.set_bool(&[RULES_KEY, "uppercase"], self.require_uppercase);
+        doc.set_bool(&[RULES_KEY, "digit"], self.require_digit);
+        doc.set_bool(&[RULES_KEY, "symbol"], self.require_symbol);
+        doc.set_i64(&[RULES_KEY, "kinds"], whole(self.min_classes));
+        doc.set_i64(&[RULES_KEY, "strength"], i64::from(self.min_bits));
+        doc.set_bool(&[RULES_KEY, "refuse_common"], self.disallow_common);
+    }
+}
+
+/// The whole number kept at `rules.<key>`, if it is one from `lo` to `hi`.
+///
+/// No key is `None` and says nothing: the rule was never changed. A key
+/// holding anything else is `None` too, with a sentence in `problems` saying
+/// which and why.
+fn kept_number(
+    doc: &yamldoc::Document,
+    key: &str,
+    lo: i64,
+    hi: i64,
+    problems: &mut Vec<String>,
+) -> Option<i64> {
+    let path = [RULES_KEY, key];
+    if !doc.contains(&path) {
+        return None;
+    }
+    let n = doc.get_i64(&path).filter(|n| (lo..=hi).contains(n));
+    if n.is_none() {
+        problems.push(format!(
+            "{CONFIG_NAME}.yaml: {RULES_KEY}.{key} is not a whole number from {lo} to {hi}, \
+             so the built-in rule is used"
+        ));
+    }
+    n
+}
+
+/// The on-or-off rule kept at `rules.<key>`, read the way [`kept_number`]
+/// reads a number.
+fn kept_switch(doc: &yamldoc::Document, key: &str, problems: &mut Vec<String>) -> Option<bool> {
+    let path = [RULES_KEY, key];
+    if !doc.contains(&path) {
+        return None;
+    }
+    let on = doc.get_bool(&path);
+    if on.is_none() {
+        problems.push(format!(
+            "{CONFIG_NAME}.yaml: {RULES_KEY}.{key} is not true or false, so the built-in rule \
+             is used"
+        ));
+    }
+    on
+}
+
+/// "1 character", "8 characters".
+fn characters(n: usize) -> String {
+    if n == 1 {
+        "1 character".to_owned()
+    } else {
+        format!("{n} characters")
     }
 }
 
@@ -1186,17 +1362,136 @@ pub enum ActiveTab {
     Generator,
     Analyzer,
     History,
+    /// The rules a password is checked against, and what they say of the
+    /// ones on show.
+    Rules,
 }
 
 impl ActiveTab {
+    /// Every tab, in the order the toolbar draws them and `Tab` visits them.
+    pub const ALL: [ActiveTab; 4] = [Self::Generator, Self::Analyzer, Self::History, Self::Rules];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Generator => "Generator",
             Self::Analyzer => "Analyzer",
             Self::History => "History",
+            Self::Rules => "Rules",
+        }
+    }
+
+    /// The tab after this one, round to the first.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Generator => Self::Analyzer,
+            Self::Analyzer => Self::History,
+            Self::History => Self::Rules,
+            Self::Rules => Self::Generator,
         }
     }
 }
+
+// ============================================================================
+// The Rules tab
+// ============================================================================
+
+/// One line of the Rules tab: a rule, the words it is drawn with, and how
+/// the arrow keys change it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleRow {
+    Shortest,
+    Longest,
+    Lowercase,
+    Uppercase,
+    Digit,
+    Symbol,
+    Kinds,
+    Strength,
+    Common,
+}
+
+impl RuleRow {
+    /// Every row, in the order the tab draws them.
+    pub const ALL: [RuleRow; 9] = [
+        Self::Shortest,
+        Self::Longest,
+        Self::Lowercase,
+        Self::Uppercase,
+        Self::Digit,
+        Self::Symbol,
+        Self::Kinds,
+        Self::Strength,
+        Self::Common,
+    ];
+
+    /// What the rule is, as the tab says it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Shortest => "Shortest allowed",
+            Self::Longest => "Longest allowed",
+            Self::Lowercase => "Must have a lowercase letter",
+            Self::Uppercase => "Must have an uppercase letter",
+            Self::Digit => "Must have a digit",
+            Self::Symbol => "Must have a symbol",
+            Self::Kinds => "Kinds of character it must mix",
+            Self::Strength => "Least strength",
+            Self::Common => "Refuse the most common passwords",
+        }
+    }
+
+    /// What it is set to, as the tab says it.
+    #[must_use]
+    pub fn value(self, rules: &PasswordPolicy) -> String {
+        let yes_no = |on: bool| if on { "Yes" } else { "No" }.to_owned();
+        match self {
+            Self::Shortest => characters(rules.min_length),
+            Self::Longest => rules
+                .max_length
+                .map_or_else(|| "No limit".to_owned(), characters),
+            Self::Lowercase => yes_no(rules.require_lowercase),
+            Self::Uppercase => yes_no(rules.require_uppercase),
+            Self::Digit => yes_no(rules.require_digit),
+            Self::Symbol => yes_no(rules.require_symbol),
+            Self::Kinds => format!("{} of the four", rules.min_classes),
+            Self::Strength => format!("{} bits", rules.min_bits),
+            Self::Common => yes_no(rules.disallow_common),
+        }
+    }
+
+    /// Whether the rule is on or off, rather than a number.
+    #[must_use]
+    pub fn is_switch(self) -> bool {
+        matches!(
+            self,
+            Self::Lowercase | Self::Uppercase | Self::Digit | Self::Symbol | Self::Common
+        )
+    }
+}
+
+/// Move the longest-allowed rule by `delta`. "No limit" sits just above the
+/// largest number, so Right from the top turns the limit off and Left from
+/// "No limit" turns it back on at the top; nothing goes below `shortest`.
+fn step_longest(current: Option<usize>, delta: isize, shortest: usize) -> Option<usize> {
+    let no_limit = RULE_LENGTH_MAX.saturating_add(1);
+    let lowest = shortest.clamp(1, RULE_LENGTH_MAX);
+    let moved = step(current.unwrap_or(no_limit), delta, lowest, no_limit);
+    (moved < no_limit).then_some(moved)
+}
+
+/// How the Rules tab's keys are said on the tab itself.
+const RULES_HINT: &str =
+    "Up / Down chooses a rule, Left / Right changes it, Space turns it on or off";
+
+/// The Rules tab's rows: a row, and the gap under it.
+const RULE_ROW_PITCH: f32 = ITEM_HEIGHT + 4.0;
+
+/// One line of what the rules say of a password.
+const RULE_LINE_HEIGHT: f32 = 16.0;
+
+/// What the analyser draws for each character it is not showing.
+const MASK: &str = "\u{2022}";
 
 // ============================================================================
 // Main application
@@ -1230,6 +1525,12 @@ const MAX_BULK: usize = 100;
 /// different fields, and four copies of a saturating step is four chances for one of them
 /// to have the wrong bound.
 fn step(value: usize, delta: isize, lo: usize, hi: usize) -> usize {
+    // `clamp` panics on an empty range. No caller builds one, and this keeps
+    // a range worked out at run time -- a rule read from a file, say -- from
+    // ever being the first.
+    if lo > hi {
+        return value;
+    }
     let moved = if delta < 0 {
         value.saturating_sub(delta.unsigned_abs())
     } else {
@@ -1271,12 +1572,13 @@ pub enum GenKind {
 /// arrangement exists to avoid.
 ///
 /// An earlier draft of this list carried a `Up / Down` row for "move through
-/// the options". This app binds neither key; the row was written from a glance
-/// at `toggle_option` and was pure invention.
+/// the options". The app bound neither key then; the row was written from a
+/// glance at `toggle_option` and was pure invention.
 /// `every_advertised_key_does_something` caught it on its first run, which is
-/// the guard working on the author rather than on the app.
+/// the guard working on the author rather than on the app. The `Up / Down`
+/// row here now is the Rules tab's, which does bind them.
 const SHORTCUTS: &[(&str, &str)] = &[
-    ("1-3", "Generator, analyser, history"),
+    ("1-4", "Generator, analyser, history, rules"),
     ("Tab", "The next tab"),
     ("P", "A password"),
     ("W", "A passphrase"),
@@ -1285,8 +1587,10 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("B", "A batch of them"),
     ("Space / Enter", "Another of the same kind"),
     ("Left / Right", "Shorter / longer"),
+    ("Up / Down", "Choose a rule, on the rules tab"),
     ("C", "Clear the history"),
     ("Ctrl+E", "Export"),
+    ("Ctrl+R", "Show or hide what the analyser measures"),
     ("F1", "This list"),
 ];
 
@@ -1298,6 +1602,21 @@ pub struct PasswordApp {
     pub analyzer_input: String,
     pub history: Vec<HistoryEntry>,
     pub policy: PasswordPolicy,
+    /// Which rule the Rules tab's cursor is on, as an index into
+    /// [`RuleRow::ALL`].
+    pub rule_cursor: usize,
+    /// Whether the analyser draws what is typed into it, rather than a dot
+    /// for each character. Off to begin with: the analyser is where somebody
+    /// types a password they use, and a screen is read over a shoulder.
+    pub analyzer_revealed: bool,
+    /// Whether this window keeps the rules in `passwordgen.yaml`. Set by
+    /// [`PasswordApp::with_settings`], which `main` calls; a window a test
+    /// builds keeps nothing, so no test writes the developer's own settings.
+    keeps_settings: bool,
+    /// What in `passwordgen.yaml` could not be used when the window opened,
+    /// one sentence each -- drawn on the Rules tab until a rule is changed,
+    /// which writes the file whole again.
+    pub settings_problems: Vec<String>,
     pub active_tab: ActiveTab,
     /// What the generator tab is producing; see [`GenKind`].
     pub gen_kind: GenKind,
@@ -1375,6 +1694,10 @@ impl PasswordApp {
             analyzer_input: String::new(),
             history: Vec::new(),
             policy: PasswordPolicy::default(),
+            rule_cursor: 0,
+            analyzer_revealed: false,
+            keeps_settings: false,
+            settings_problems: Vec::new(),
             active_tab: ActiveTab::Generator,
             gen_kind: GenKind::Password,
             pin_length: 6,
@@ -1484,8 +1807,12 @@ impl PasswordApp {
     }
 
     /// Analyze a password from the analyzer input.
+    ///
+    /// Nothing typed is nothing measured: an empty field rated "Very Weak"
+    /// would be a verdict on a password nobody has.
     pub fn analyze_input(&mut self) {
-        self.current_analysis = Some(analyze_password(&self.analyzer_input));
+        self.current_analysis =
+            (!self.analyzer_input.is_empty()).then(|| analyze_password(&self.analyzer_input));
     }
 
     /// Set analyzer input.
@@ -1493,9 +1820,138 @@ impl PasswordApp {
         self.analyzer_input = input.to_owned();
     }
 
-    /// Check policy compliance for current password.
+    /// Every rule the password on show breaks -- see
+    /// [`PasswordApp::shown_password`].
+    #[must_use]
     pub fn check_policy(&self) -> Vec<String> {
-        self.policy.check(&self.current_password)
+        self.policy.check(self.shown_password())
+    }
+
+    /// The password the window is showing: the one being typed on the
+    /// analyser tab, the generated one on every other.
+    #[must_use]
+    pub fn shown_password(&self) -> &str {
+        if self.active_tab == ActiveTab::Analyzer {
+            &self.analyzer_input
+        } else {
+            &self.current_password
+        }
+    }
+
+    /// This window, with the rules the user set last time -- and keeping any
+    /// they change from now on.
+    #[must_use]
+    pub fn with_settings(mut self) -> Self {
+        self.keeps_settings = true;
+        let (rules, problems) = PasswordPolicy::from_settings(&settingsfile::load(CONFIG_NAME));
+        self.policy = rules;
+        if let Some(first) = problems.first() {
+            // The status bar has room for one; the Rules tab lists them all.
+            self.status = Some(match problems.len() {
+                1 => first.clone(),
+                n => format!(
+                    "{first} (and {} more: see the Rules tab)",
+                    n.saturating_sub(1)
+                ),
+            });
+        }
+        self.settings_problems = problems;
+        self
+    }
+
+    /// Move the Rules tab's cursor by `delta` rows.
+    fn move_rule_cursor(&mut self, delta: isize) -> EventResult {
+        let before = self.rule_cursor;
+        self.rule_cursor = step(before, delta, 0, RuleRow::ALL.len().saturating_sub(1));
+        if self.rule_cursor == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Change the rule under the cursor: a number moves one step the way the
+    /// key points, a switch flips.
+    ///
+    /// The two lengths hold each other in place -- the shortest cannot pass
+    /// the longest, nor the longest the shortest -- so a rule no password
+    /// could meet cannot be set from here.
+    fn change_rule(&mut self, delta: isize) -> EventResult {
+        let Some(row) = RuleRow::ALL.get(self.rule_cursor).copied() else {
+            return EventResult::Ignored;
+        };
+        let before = self.policy.clone();
+        let rules = &mut self.policy;
+        match row {
+            RuleRow::Shortest => {
+                let most = rules
+                    .max_length
+                    .unwrap_or(RULE_LENGTH_MAX)
+                    .clamp(1, RULE_LENGTH_MAX);
+                rules.min_length = step(rules.min_length, delta, 1, most);
+            }
+            RuleRow::Longest => {
+                rules.max_length = step_longest(rules.max_length, delta, rules.min_length);
+            }
+            RuleRow::Kinds => rules.min_classes = step(rules.min_classes, delta, 1, 4),
+            RuleRow::Strength => {
+                rules.min_bits = if delta < 0 {
+                    rules.min_bits.saturating_sub(RULE_BITS_STEP)
+                } else {
+                    rules
+                        .min_bits
+                        .saturating_add(RULE_BITS_STEP)
+                        .min(RULE_BITS_MAX)
+                };
+            }
+            RuleRow::Lowercase => rules.require_lowercase = !rules.require_lowercase,
+            RuleRow::Uppercase => rules.require_uppercase = !rules.require_uppercase,
+            RuleRow::Digit => rules.require_digit = !rules.require_digit,
+            RuleRow::Symbol => rules.require_symbol = !rules.require_symbol,
+            RuleRow::Common => rules.disallow_common = !rules.disallow_common,
+        }
+        if self.policy == before {
+            return EventResult::Ignored;
+        }
+        self.keep_rules();
+        EventResult::Consumed
+    }
+
+    /// Space or Enter on the Rules tab: flips a switch, and does nothing to
+    /// a number, which has two directions that Space names neither of.
+    fn toggle_rule(&mut self) -> EventResult {
+        match RuleRow::ALL.get(self.rule_cursor) {
+            Some(row) if row.is_switch() => self.change_rule(1),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Keep the rules in `passwordgen.yaml`, if this window keeps settings,
+    /// and say so when they could not be kept.
+    fn keep_rules(&mut self) {
+        if !self.keeps_settings {
+            return;
+        }
+        let mut doc = settingsfile::load(CONFIG_NAME);
+        self.policy.store_into(&mut doc);
+        match settingsfile::store(CONFIG_NAME, &doc) {
+            Ok(()) => {
+                // Written whole, so whatever the file held that could not be
+                // used when the window opened has been replaced -- and the
+                // user, who was told about it, is told that too.
+                if !self.settings_problems.is_empty() {
+                    self.settings_problems.clear();
+                    self.status = Some(format!(
+                        "{CONFIG_NAME}.yaml now holds the rules as they are shown"
+                    ));
+                }
+            }
+            Err(e) => {
+                self.status = Some(format!(
+                    "The rule holds until the window closes -- it was not saved: {e}"
+                ));
+            }
+        }
     }
 
     /// Clear history.
@@ -1666,10 +2122,23 @@ impl PasswordApp {
                     self.analyze_input();
                     return EventResult::Consumed;
                 }
-                // The tab keys keep working, or there is no way out of the box.
-                Key::Tab | Key::Num1 | Key::Num2 | Key::Num3 => {}
+                // Tab still moves on, or there would be no way out of the box.
+                // The digit keys do not: here a digit is part of the password,
+                // and "abc123" used to jump to the generator at the "1".
+                Key::Tab => {}
+                // A dot for each character until asked: see
+                // `analyzer_revealed`.
+                Key::R if key.modifiers.ctrl => {
+                    self.analyzer_revealed = !self.analyzer_revealed;
+                    return EventResult::Consumed;
+                }
                 _ => {
-                    if key.text.is_empty() || key.modifiers.ctrl {
+                    // A control character is a key, not part of a password:
+                    // an Enter that carries a "\r" must not be typed into it.
+                    if key.text.is_empty()
+                        || key.modifiers.ctrl
+                        || key.text.chars().any(char::is_control)
+                    {
                         return EventResult::Ignored;
                     }
                     let mut input = self.analyzer_input.clone();
@@ -1680,16 +2149,25 @@ impl PasswordApp {
                 }
             }
         }
+        // On the Rules tab the arrows and Space are the rules'. Everything
+        // else means what it means on any tab.
+        if self.active_tab == ActiveTab::Rules {
+            match key.key {
+                Key::Up => return self.move_rule_cursor(-1),
+                Key::Down => return self.move_rule_cursor(1),
+                Key::Left => return self.change_rule(-1),
+                Key::Right => return self.change_rule(1),
+                Key::Space | Key::Enter => return self.toggle_rule(),
+                _ => {}
+            }
+        }
         match key.key {
             Key::Num1 => self.set_tab(ActiveTab::Generator),
             Key::Num2 => self.set_tab(ActiveTab::Analyzer),
             Key::Num3 => self.set_tab(ActiveTab::History),
+            Key::Num4 => self.set_tab(ActiveTab::Rules),
             Key::Tab => {
-                let next = match self.active_tab {
-                    ActiveTab::Generator => ActiveTab::Analyzer,
-                    ActiveTab::Analyzer => ActiveTab::History,
-                    ActiveTab::History => ActiveTab::Generator,
-                };
+                let next = self.active_tab.next();
                 self.set_tab(next)
             }
             // What to generate. Each key both chooses the kind and produces
@@ -1813,6 +2291,13 @@ impl PasswordApp {
             return EventResult::Ignored;
         }
         self.active_tab = tab;
+        // The strength on show is of the password on show. Carried across
+        // unchanged, the generator tab went on showing the strength of
+        // whatever had last been typed into the analyser, beside a different
+        // password -- and the analyser showed the generated one's before
+        // anything was typed.
+        let shown = self.shown_password();
+        self.current_analysis = (!shown.is_empty()).then(|| analyze_password(shown));
         EventResult::Consumed
     }
 
@@ -1934,13 +2419,8 @@ impl PasswordApp {
         });
 
         // Tab buttons
-        let tabs = [
-            ActiveTab::Generator,
-            ActiveTab::Analyzer,
-            ActiveTab::History,
-        ];
         let mut tx = 220.0;
-        for tab in &tabs {
+        for tab in &ActiveTab::ALL {
             let is_active = *tab == self.active_tab;
             let btn_w = text::padded_width_any_weight(tab.label(), 10.0, 11.0);
             self.palette.push_surface(
@@ -2006,15 +2486,22 @@ impl PasswordApp {
         let status = if let Some(message) = &self.status {
             message.clone()
         } else {
-            format!(
-                "{} passwords generated  |  Policy: {}",
-                self.history.len(),
-                if self.policy.is_compliant(&self.current_password) {
-                    "Compliant"
-                } else {
-                    "Non-compliant"
-                },
-            )
+            // Of the password on show -- the typed one on the analyser tab.
+            // This used to judge the generated one on every tab, beside a
+            // strength meter measuring the typed one. And nothing is judged
+            // when there is nothing to judge: an empty field "breaking" the
+            // shortest-length rule is not news.
+            let shown = self.shown_password();
+            let rules = if shown.is_empty() {
+                String::new()
+            } else {
+                match self.policy.check(shown).len() {
+                    0 => "  |  Meets your rules".to_owned(),
+                    1 => "  |  Breaks 1 of your rules (the Rules tab says which)".to_owned(),
+                    n => format!("  |  Breaks {n} of your rules (the Rules tab says which)"),
+                }
+            };
+            format!("{} passwords generated{rules}", self.history.len())
         };
         cmds.push(RenderCommand::Text {
             x: 12.0,
@@ -2040,6 +2527,11 @@ impl PasswordApp {
             color: self.palette.surface0,
             width: 1.0,
         });
+
+        if self.active_tab == ActiveTab::Analyzer {
+            self.render_analyzer_input(cmds, y, height);
+            return;
+        }
 
         let mut cy = y + 12.0;
         let lx = 12.0;
@@ -2333,7 +2825,14 @@ impl PasswordApp {
                     cmds.push(RenderCommand::Text {
                         x: lx,
                         y: cy,
-                        text: "Generate a password to see analysis".to_owned(),
+                        // What to do to see one, which is not the same on the
+                        // two tabs that draw it.
+                        text: if self.active_tab == ActiveTab::Analyzer {
+                            "Type a password on the left to see how strong it is"
+                        } else {
+                            "Generate a password to see analysis"
+                        }
+                        .to_owned(),
                         color: self.palette.subtext0,
                         font_size: 13.0,
                         font_weight: FontWeightHint::Regular,
@@ -2342,6 +2841,7 @@ impl PasswordApp {
                     });
                 }
             }
+            ActiveTab::Rules => self.render_rules(cmds, lx, cy, max_w, y + height),
             ActiveTab::History => {
                 cmds.push(RenderCommand::Text {
                     x: lx,
@@ -2440,6 +2940,333 @@ impl PasswordApp {
     }
 }
 
+/// Where a list is drawn: its left edge, its width, and the line it must not
+/// cross.
+#[derive(Clone, Copy)]
+struct Column {
+    x: f32,
+    width: f32,
+    bottom: f32,
+}
+
+/// A section heading, in the small capitals every panel here uses.
+fn heading(pal: &Palette, label: &str, x: f32, y: f32, width: f32) -> RenderCommand {
+    RenderCommand::Text {
+        x,
+        y,
+        text: label.to_owned(),
+        color: pal.subtext0,
+        font_size: 10.0,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width),
+        overflow: TextOverflow::Ellipsis,
+    }
+}
+
+/// Draw `lines` from `top` in `color`, as many as fit above the column's
+/// bottom; when they do not all fit, the last row that does says how many
+/// were left out. Returns the cursor after the last row drawn.
+///
+/// `render_pattern_list`'s rule, for its reason: a list cut short without
+/// saying so reads as the whole of it.
+fn push_bounded_lines(
+    cmds: &mut Vec<RenderCommand>,
+    pal: &Palette,
+    lines: &[String],
+    color: Color,
+    column: Column,
+    top: f32,
+) -> f32 {
+    let total = lines.len();
+    let room = rows_that_fit(top, column.bottom, RULE_LINE_HEIGHT);
+    let overflowing = total > room;
+    let shown = if overflowing {
+        room.saturating_sub(1)
+    } else {
+        total
+    };
+    let mut cy = top;
+    for line in lines.iter().take(shown) {
+        cmds.push(RenderCommand::Text {
+            x: column.x,
+            y: cy,
+            text: line.clone(),
+            color,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(column.width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += RULE_LINE_HEIGHT;
+    }
+    if overflowing && room > 0 {
+        cmds.push(RenderCommand::Text {
+            x: column.x,
+            y: cy,
+            text: format!("+{} more", total.saturating_sub(shown)),
+            color: pal.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(column.width),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += RULE_LINE_HEIGHT;
+    }
+    cy
+}
+
+impl PasswordApp {
+    /// What the rules say of `password`, from `top`: "Meets every rule", or
+    /// each rule it breaks. Returns the cursor after.
+    fn push_verdict(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        password: &str,
+        column: Column,
+        top: f32,
+    ) -> f32 {
+        let broken = self.policy.check(password);
+        if broken.is_empty() {
+            let met = ["Meets every rule".to_owned()];
+            return push_bounded_lines(
+                cmds,
+                &self.palette,
+                &met,
+                self.palette.ink(self.palette.green),
+                column,
+                top,
+            );
+        }
+        push_bounded_lines(
+            cmds,
+            &self.palette,
+            &broken,
+            self.palette.ink(self.palette.red),
+            column,
+            top,
+        )
+    }
+
+    /// The analyser's half of the window: the password being measured -- a
+    /// dot for each character until the user asks to see it -- and what the
+    /// rules say of it.
+    ///
+    /// Until 2026-09-27 this tab drew the generator here, so what was typed
+    /// was never on screen at all: the meter measured a password nobody
+    /// could see, and a typo in it could not be found.
+    fn render_analyzer_input(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
+        let lx = 12.0;
+        let max_w = LEFT_PANEL_WIDTH - 24.0;
+        let column = Column {
+            x: lx,
+            width: max_w,
+            bottom: y + height,
+        };
+        let mut cy = y + 12.0;
+
+        cmds.push(heading(&self.palette, "PASSWORD TO MEASURE", lx, cy, max_w));
+        cy += 18.0;
+        self.palette
+            .push_surface(cmds, lx, cy, max_w, 32.0, CORNER_RADIUS, Surface::Card);
+        let typed = self.analyzer_input.chars().count();
+        let (shown, color, weight) = if typed == 0 {
+            (
+                "Type a password to measure it".to_owned(),
+                self.palette.subtext0,
+                FontWeightHint::Regular,
+            )
+        } else {
+            let whole = if self.analyzer_revealed {
+                self.analyzer_input.clone()
+            } else {
+                MASK.repeat(typed)
+            };
+            // The end is where the typing is, so a long one loses its start,
+            // and says so.
+            (
+                text::elide_start(&whole, max_w - 16.0, "…", 13.0, FontWeightHint::Bold),
+                self.palette.text,
+                FontWeightHint::Bold,
+            )
+        };
+        cmds.push(RenderCommand::Text {
+            x: lx + 8.0,
+            y: cy + 9.0,
+            text: shown,
+            color,
+            font_size: 13.0,
+            font_weight: weight,
+            max_width: Some(max_w - 16.0),
+            overflow: TextOverflow::Clip,
+        });
+        cy += 44.0;
+
+        let about = [
+            format!(
+                "{}. Ctrl+R {} it.",
+                characters(typed),
+                if self.analyzer_revealed {
+                    "hides"
+                } else {
+                    "shows"
+                }
+            ),
+            "Digits are part of the password here, not tab keys.".to_owned(),
+            "Backspace takes the last character off.".to_owned(),
+            "Tab moves on to the next tab.".to_owned(),
+            "Nothing typed here is kept or written anywhere.".to_owned(),
+        ];
+        cy = push_bounded_lines(
+            cmds,
+            &self.palette,
+            &about,
+            self.palette.subtext0,
+            column,
+            cy,
+        );
+
+        if typed > 0 && cy + 30.0 + RULE_LINE_HEIGHT <= column.bottom {
+            cy += 12.0;
+            cmds.push(heading(&self.palette, "YOUR RULES", lx, cy, max_w));
+            cy += 18.0;
+            self.push_verdict(cmds, &self.analyzer_input, column, cy);
+        }
+    }
+
+    /// The Rules tab: every rule and what it is set to, the cursor on one,
+    /// and what the rules say of the passwords on show.
+    fn render_rules(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        lx: f32,
+        top: f32,
+        max_w: f32,
+        bottom: f32,
+    ) {
+        let column = Column {
+            x: lx,
+            width: max_w,
+            bottom,
+        };
+        let mut cy = top;
+        cmds.push(heading(&self.palette, "YOUR RULES", lx, cy, max_w));
+        cy += 18.0;
+        cmds.push(RenderCommand::Text {
+            x: lx,
+            y: cy,
+            text: RULES_HINT.to_owned(),
+            color: self.palette.subtext0,
+            font_size: 11.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(max_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        cy += 22.0;
+
+        // Every row when they fit; when they do not, the ones up to the
+        // cursor, so the rule the arrows are changing is always on screen.
+        let room = rows_that_fit(cy, bottom, RULE_ROW_PITCH).min(RuleRow::ALL.len());
+        let first = self.rule_cursor.saturating_add(1).saturating_sub(room);
+        for (i, row) in RuleRow::ALL.iter().enumerate().skip(first).take(room) {
+            let selected = i == self.rule_cursor;
+            self.palette.push_surface(
+                cmds,
+                lx,
+                cy,
+                max_w,
+                ITEM_HEIGHT,
+                CORNER_RADIUS,
+                if selected {
+                    Surface::Selected
+                } else {
+                    Surface::Card
+                },
+            );
+            let value = row.value(&self.policy);
+            let value_w = text::measure(&value, 12.0, FontWeightHint::Bold);
+            cmds.push(RenderCommand::Text {
+                x: lx + 10.0,
+                y: cy + 8.0,
+                text: row.label().to_owned(),
+                color: self.palette.text,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((max_w - value_w - 30.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            cmds.push(RenderCommand::Text {
+                x: lx + max_w - 10.0 - value_w,
+                y: cy + 8.0,
+                text: value,
+                color: if selected {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
+                font_size: 12.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
+                overflow: TextOverflow::Clip,
+            });
+            cy += RULE_ROW_PITCH;
+        }
+
+        // What the rules say, section by section, while there is room for a
+        // heading and a line under it.
+        let fits = |cy: f32| cy + 26.0 + RULE_LINE_HEIGHT <= bottom;
+        if !fits(cy) {
+            return;
+        }
+        cy += 8.0;
+        cmds.push(heading(
+            &self.palette,
+            "THE GENERATED PASSWORD",
+            lx,
+            cy,
+            max_w,
+        ));
+        cy += 18.0;
+        cy = if self.current_password.is_empty() {
+            let none = ["Nothing generated yet".to_owned()];
+            push_bounded_lines(
+                cmds,
+                &self.palette,
+                &none,
+                self.palette.subtext0,
+                column,
+                cy,
+            )
+        } else {
+            self.push_verdict(cmds, &self.current_password, column, cy)
+        };
+        if !self.analyzer_input.is_empty() && fits(cy) {
+            cy += 8.0;
+            cmds.push(heading(
+                &self.palette,
+                "THE ONE IN THE ANALYSER",
+                lx,
+                cy,
+                max_w,
+            ));
+            cy += 18.0;
+            cy = self.push_verdict(cmds, &self.analyzer_input, column, cy);
+        }
+        if !self.settings_problems.is_empty() && fits(cy) {
+            cy += 8.0;
+            cmds.push(heading(&self.palette, "YOUR SETTINGS FILE", lx, cy, max_w));
+            cy += 18.0;
+            push_bounded_lines(
+                cmds,
+                &self.palette,
+                &self.settings_problems,
+                self.palette.ink(self.palette.peach),
+                column,
+                cy,
+            );
+        }
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -2501,7 +3328,7 @@ impl App for PasswordApp {
 }
 
 fn main() -> ExitCode {
-    let mut app = PasswordApp::new();
+    let mut app = PasswordApp::new().with_settings();
     // So the first frame shows something on every tab rather than an empty
     // field the user has to press a key to fill.
     app.gen_password();
@@ -2579,17 +3406,18 @@ mod tests {
     fn every_advertised_key_does_something() {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
-                // Two tabs, because `set_tab` deliberately answers `Ignored`
+                // Every tab, because `set_tab` deliberately answers `Ignored`
                 // for the tab you are already on -- so no single state can
-                // answer all three digits, and these two between them do.
-                let answered = [ActiveTab::Generator, ActiveTab::History]
-                    .into_iter()
-                    .any(|tab| {
-                        let mut app = seeded_app();
-                        app.handle_event(&press(Key::P));
-                        app.active_tab = tab;
-                        app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
-                    });
+                // answer all four digits -- and the arrows and Space mean the
+                // rules' on the Rules tab. Its cursor starts on the second
+                // rule, where Up and Down both have somewhere to go.
+                let answered = ActiveTab::ALL.into_iter().any(|tab| {
+                    let mut app = seeded_app();
+                    app.handle_event(&press(Key::P));
+                    app.active_tab = tab;
+                    app.rule_cursor = 1;
+                    app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
+                });
                 assert!(
                     answered,
                     "the list advertises {label:?} for {what:?}, and nothing answers {:?}",
@@ -3181,12 +4009,13 @@ rejects: {:?}",
     }
 
     #[test]
-    fn the_tab_keys_still_work_from_inside_the_analyser() {
-        // Otherwise there is no way out of the text box.
+    fn the_tab_key_still_leaves_the_analyser() {
+        // Otherwise there is no way out of the text box: the digit keys are
+        // part of the password in there.
         let mut app = seeded_app();
         app.handle_event(&press(Key::Num2));
-        assert_eq!(app.handle_event(&press(Key::Num1)), EventResult::Consumed);
-        assert_eq!(app.active_tab, ActiveTab::Generator);
+        assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+        assert_eq!(app.active_tab, ActiveTab::History);
     }
 
     #[test]
@@ -3227,11 +4056,7 @@ rejects: {:?}",
     #[test]
     fn rendering_draws_something_on_every_tab_at_an_awkward_size() {
         let mut app = seeded_app();
-        for tab in [
-            ActiveTab::Generator,
-            ActiveTab::Analyzer,
-            ActiveTab::History,
-        ] {
+        for tab in ActiveTab::ALL {
             app.active_tab = tab;
             for (w, h) in [(1.0, 1.0), (640.0, 480.0), (3840.0, 2160.0)] {
                 assert!(
@@ -3266,22 +4091,11 @@ rejects: {:?}",
     fn a_toolbar_tab_keeps_its_width_when_selected() {
         // The tab strip is laid out left to right from a fixed origin, so a tab
         // that grew when selected would push every tab after it sideways.
-        let widths: Vec<f32> = [
-            ActiveTab::Generator,
-            ActiveTab::Analyzer,
-            ActiveTab::History,
-        ]
-        .iter()
-        .map(|t| text::padded_width_any_weight(t.label(), 10.0, 11.0))
-        .collect();
-        for (i, tab) in [
-            ActiveTab::Generator,
-            ActiveTab::Analyzer,
-            ActiveTab::History,
-        ]
-        .iter()
-        .enumerate()
-        {
+        let widths: Vec<f32> = ActiveTab::ALL
+            .iter()
+            .map(|t| text::padded_width_any_weight(t.label(), 10.0, 11.0))
+            .collect();
+        for (i, tab) in ActiveTab::ALL.iter().enumerate() {
             for weight in [FontWeightHint::Regular, FontWeightHint::Bold] {
                 let needed = text::measure(tab.label(), 11.0, weight) + 20.0;
                 assert!(
@@ -3965,5 +4779,419 @@ rejects: {:?}",
             fills(&mut app),
             "high contrast reached every other surface but not this window"
         );
+    }
+
+    // == The rules are the user's, and each tab judges what it shows =========
+    //
+    // 2026-09-27, C-Q26: the rules were compiled in; the analyser never drew
+    // what was typed into it; the digit keys could not be typed there; and
+    // the strength and the verdict on show could belong to a different
+    // password from the one beside them.
+
+    /// A key as the compositor sends it: the digit keys carry their digit.
+    fn key_with_text(k: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: text.to_owned(),
+        })
+    }
+
+    /// A seeded app with a password generated, on the Rules tab.
+    fn on_rules_tab() -> PasswordApp {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        assert_eq!(app.handle_event(&press(Key::Num4)), EventResult::Consumed);
+        assert_eq!(app.active_tab, ActiveTab::Rules);
+        app
+    }
+
+    #[test]
+    fn the_arrows_change_the_rule_under_the_cursor() {
+        let mut app = on_rules_tab();
+        let password = app.current_password.clone();
+        // The cursor starts on the shortest length.
+        assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Consumed);
+        assert_eq!(app.policy.min_length, 9);
+        assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Consumed);
+        assert_eq!(app.policy.min_length, 8);
+        // Down to "must have a symbol", and Space turns it on.
+        for _ in 0..5 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(RuleRow::ALL[app.rule_cursor], RuleRow::Symbol);
+        assert!(!app.policy.require_symbol);
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Consumed);
+        assert!(app.policy.require_symbol);
+        // Space names no direction, so it does nothing to a number.
+        app.handle_event(&press(Key::Down));
+        assert_eq!(RuleRow::ALL[app.rule_cursor], RuleRow::Kinds);
+        assert_eq!(app.handle_event(&press(Key::Space)), EventResult::Ignored);
+        assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Consumed);
+        assert_eq!(app.policy.min_classes, 4);
+        assert_eq!(
+            app.handle_event(&press(Key::Right)),
+            EventResult::Ignored,
+            "there are four kinds of character, not five"
+        );
+        // Strength moves in fives.
+        app.handle_event(&press(Key::Down));
+        app.handle_event(&press(Key::Right));
+        assert_eq!(app.policy.min_bits, 45);
+        // None of it generated anything or left the tab.
+        assert_eq!(app.active_tab, ActiveTab::Rules);
+        assert_eq!(app.current_password, password);
+    }
+
+    #[test]
+    fn the_cursor_stays_on_the_list() {
+        let mut app = on_rules_tab();
+        assert_eq!(app.handle_event(&press(Key::Up)), EventResult::Ignored);
+        for _ in 0..20 {
+            app.handle_event(&press(Key::Down));
+        }
+        assert_eq!(app.rule_cursor, RuleRow::ALL.len() - 1);
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn no_limit_sits_above_the_longest_length_and_the_lengths_hold_each_other() {
+        let mut app = on_rules_tab();
+        app.handle_event(&press(Key::Down));
+        assert_eq!(RuleRow::ALL[app.rule_cursor], RuleRow::Longest);
+        assert_eq!(app.policy.max_length, None);
+        assert_eq!(
+            app.handle_event(&press(Key::Right)),
+            EventResult::Ignored,
+            "there is nothing above no limit"
+        );
+        app.handle_event(&press(Key::Left));
+        assert_eq!(app.policy.max_length, Some(RULE_LENGTH_MAX));
+        app.handle_event(&press(Key::Right));
+        assert_eq!(app.policy.max_length, None);
+        // The longest cannot go below the shortest...
+        app.policy.max_length = Some(9);
+        assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Consumed);
+        assert_eq!(app.policy.max_length, Some(8));
+        assert_eq!(app.handle_event(&press(Key::Left)), EventResult::Ignored);
+        // ...nor the shortest above the longest.
+        app.handle_event(&press(Key::Up));
+        assert_eq!(app.handle_event(&press(Key::Right)), EventResult::Ignored);
+        assert_eq!(app.policy.min_length, 8);
+    }
+
+    #[test]
+    fn the_rules_tab_draws_every_rule_and_what_they_say() {
+        let mut app = on_rules_tab();
+        app.current_password = "password".to_owned();
+        let drawn = card_text(&app);
+        for row in RuleRow::ALL {
+            assert!(drawn.contains(row.label()), "{row:?} is not drawn: {drawn}");
+            assert!(
+                drawn.contains(&row.value(&app.policy)),
+                "{row:?}'s setting is not drawn: {drawn}"
+            );
+        }
+        assert!(
+            drawn.contains(RULES_HINT),
+            "the tab does not say its keys: {drawn}"
+        );
+        assert!(
+            drawn.contains("Is one of the most commonly used passwords"),
+            "{drawn}"
+        );
+        app.current_password = "Str0ng!Password".to_owned();
+        assert!(card_text(&app).contains("Meets every rule"));
+    }
+
+    #[test]
+    fn a_rule_changed_is_kept_and_the_next_window_starts_with_it() {
+        settingsfile::testing::with_scratch_config("passwordgen-rules", |dir| {
+            let mut app = seeded_app().with_settings();
+            app.handle_event(&press(Key::P));
+            app.handle_event(&press(Key::Num4));
+            app.handle_event(&press(Key::Right));
+            let next = seeded_app().with_settings();
+            assert_eq!(
+                next.policy.min_length, 9,
+                "the rule did not outlive the window"
+            );
+            assert_eq!(next.policy, app.policy);
+            let text = std::fs::read_to_string(dir.join("slateos").join("passwordgen.yaml"))
+                .unwrap_or_default();
+            assert!(text.contains("shortest: 9"), "{text:?}");
+        });
+    }
+
+    #[test]
+    fn a_window_a_test_builds_keeps_no_rules() {
+        settingsfile::testing::with_scratch_config("passwordgen-quiet", |dir| {
+            let mut app = on_rules_tab();
+            app.handle_event(&press(Key::Right));
+            assert_eq!(app.policy.min_length, 9);
+            assert!(
+                !dir.join("slateos").join("passwordgen.yaml").exists(),
+                "a window that keeps nothing wrote the rules"
+            );
+        });
+    }
+
+    #[test]
+    fn a_kept_rule_that_cannot_be_used_is_said_and_the_default_used() {
+        let doc = yamldoc::Document::parse(
+            "rules:\n  shortest: 500\n  digit: maybe\n  kinds: 2\n  longest: 4\n",
+        );
+        let (rules, problems) = PasswordPolicy::from_settings(&doc);
+        assert_eq!(rules.min_length, 8, "an impossible length was used");
+        assert!(rules.require_digit, "an unreadable switch was used");
+        assert_eq!(
+            rules.min_classes, 2,
+            "a good value beside bad ones was dropped"
+        );
+        assert_eq!(
+            rules.max_length, None,
+            "a longest below the shortest was used"
+        );
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        for key in ["rules.shortest", "rules.digit", "rules.longest"] {
+            assert!(
+                problems.iter().any(|p| p.contains(key)),
+                "{key}: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rules_read_back_as_they_were_written() {
+        let rules = PasswordPolicy {
+            min_length: 12,
+            max_length: Some(64),
+            require_lowercase: false,
+            require_uppercase: true,
+            require_digit: false,
+            require_symbol: true,
+            min_classes: 2,
+            min_bits: 60,
+            disallow_common: false,
+        };
+        let mut doc = yamldoc::Document::parse("# my rules\nother: kept\n");
+        rules.store_into(&mut doc);
+        let (back, problems) =
+            PasswordPolicy::from_settings(&yamldoc::Document::parse(&doc.to_text()));
+        assert_eq!(back, rules);
+        assert!(problems.is_empty(), "{problems:?}");
+        let text = doc.to_text();
+        assert!(
+            text.contains("# my rules") && text.contains("other: kept"),
+            "{text}"
+        );
+        // No limit is no key.
+        let unlimited = PasswordPolicy {
+            max_length: None,
+            ..rules
+        };
+        unlimited.store_into(&mut doc);
+        assert!(!doc.contains(&["rules", "longest"]), "{}", doc.to_text());
+        assert_eq!(PasswordPolicy::from_settings(&doc).0.max_length, None);
+    }
+
+    #[test]
+    fn a_settings_problem_is_said_when_the_window_opens_and_cleared_by_a_change() {
+        settingsfile::testing::with_scratch_config("passwordgen-problem", |dir| {
+            let folder = dir.join("slateos");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("passwordgen.yaml"), "rules:\n  kinds: 9\n").unwrap();
+            let mut app = seeded_app().with_settings();
+            assert!(
+                app.status
+                    .as_deref()
+                    .is_some_and(|s| s.contains("rules.kinds")),
+                "{:?}",
+                app.status
+            );
+            app.handle_event(&press(Key::Num4));
+            assert!(card_text(&app).contains("YOUR SETTINGS FILE"));
+            app.handle_event(&press(Key::Right));
+            assert!(
+                app.settings_problems.is_empty(),
+                "{:?}",
+                app.settings_problems
+            );
+            let text = std::fs::read_to_string(folder.join("passwordgen.yaml")).unwrap();
+            assert!(text.contains("kinds: 3"), "{text}");
+        });
+    }
+
+    #[test]
+    fn digits_are_part_of_the_password_in_the_analyser() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        for (k, t) in [
+            (Key::Num1, "1"),
+            (Key::Num2, "2"),
+            (Key::Num3, "3"),
+            (Key::Num4, "4"),
+        ] {
+            assert_eq!(
+                app.handle_event(&key_with_text(k, t)),
+                EventResult::Consumed
+            );
+        }
+        assert_eq!(app.analyzer_input, "1234");
+        assert_eq!(
+            app.active_tab,
+            ActiveTab::Analyzer,
+            "a digit left the analyser"
+        );
+    }
+
+    #[test]
+    fn a_key_that_carries_a_control_character_is_not_typed() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(
+            app.handle_event(&key_with_text(Key::Enter, "\r")),
+            EventResult::Ignored
+        );
+        assert_eq!(app.analyzer_input, "");
+    }
+
+    #[test]
+    fn the_analyser_shows_what_is_typed_as_dots_until_asked() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        for c in "hunter2".chars() {
+            app.handle_event(&typed(c));
+        }
+        let drawn = card_text(&app);
+        assert!(!drawn.contains("hunter2"), "drawn in the clear: {drawn}");
+        assert!(drawn.contains(&MASK.repeat(7)), "{drawn}");
+        assert!(drawn.contains("7 characters"), "{drawn}");
+        assert_eq!(app.handle_event(&ctrl(Key::R)), EventResult::Consumed);
+        assert!(
+            card_text(&app).contains("hunter2"),
+            "Ctrl+R did not show it"
+        );
+        assert_eq!(app.analyzer_input, "hunter2", "Ctrl+R was typed");
+    }
+
+    #[test]
+    fn each_tab_measures_the_password_it_shows() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::P));
+        let generated = app.current_password.chars().count();
+        app.handle_event(&press(Key::Num2));
+        assert!(
+            app.current_analysis.is_none(),
+            "the analyser showed the generated password's strength before anything was typed"
+        );
+        app.handle_event(&typed('a'));
+        assert_eq!(app.current_analysis.as_ref().map(|a| a.length), Some(1));
+        app.handle_event(&press(Key::Tab));
+        app.handle_event(&press(Key::Num1));
+        assert_eq!(
+            app.current_analysis.as_ref().map(|a| a.length),
+            Some(generated),
+            "the generator tab measured what was typed in the analyser"
+        );
+        app.handle_event(&press(Key::Num2));
+        assert_eq!(app.current_analysis.as_ref().map(|a| a.length), Some(1));
+    }
+
+    #[test]
+    fn a_password_is_as_long_as_its_characters_not_its_bytes() {
+        assert_eq!(analyze_password("pässwörd").length, 8);
+        let rules = PasswordPolicy {
+            min_length: 9,
+            ..PasswordPolicy::default()
+        };
+        assert!(
+            rules.check("pässwörd").iter().any(|v| v.contains("short")),
+            "ten bytes were counted as ten characters"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_judges_the_password_on_show() {
+        let mut app = seeded_app();
+        app.current_password = "Str0ng!Password".to_owned();
+        assert!(
+            card_text(&app).contains("Meets your rules"),
+            "{}",
+            card_text(&app)
+        );
+        app.handle_event(&press(Key::Num2));
+        // An empty field is judged by nobody -- and the empty analysis says
+        // what to do on this tab, not on the generator's.
+        let empty = card_text(&app);
+        assert!(
+            !empty.contains("Breaks") && !empty.contains("Meets your rules"),
+            "{empty}"
+        );
+        assert!(empty.contains("Type a password on the left"), "{empty}");
+        for c in "password".chars() {
+            app.handle_event(&typed(c));
+        }
+        assert!(card_text(&app).contains("Breaks"), "{}", card_text(&app));
+    }
+
+    /// Every rule row and every line of what the rules say stays above the
+    /// status bar, at any height -- and when the rows do not all fit, the one
+    /// under the cursor is among those drawn.
+    #[test]
+    fn the_rules_tab_stays_inside_its_panel_and_keeps_the_cursor_in_view() {
+        for (w, h) in [(1100.0, 700.0), (640.0, 480.0), (800.0, 300.0)] {
+            let mut app = on_rules_tab();
+            app.current_password = "aaa".to_owned();
+            app.analyzer_input = "b".to_owned();
+            app.settings_problems = vec!["one".to_owned(), "two".to_owned(), "three".to_owned()];
+            app.rule_cursor = RuleRow::ALL.len() - 1;
+            let cmds = app.render_commands(w, h);
+            let bottom = h - STATUS_BAR_HEIGHT;
+            for c in &cmds {
+                if let RenderCommand::Text { x, y, text, .. } = c
+                    && *x >= LEFT_PANEL_WIDTH
+                    && *y >= TOOLBAR_HEIGHT
+                {
+                    assert!(
+                        *y + RULE_LINE_HEIGHT <= bottom + 0.5,
+                        "{text:?} at y={y} runs past {bottom} in a {w}x{h} window"
+                    );
+                }
+            }
+            let last = RuleRow::ALL[RuleRow::ALL.len() - 1].label();
+            assert!(
+                text_rows(&cmds).iter().any(|(_, t)| t == last),
+                "the rule under the cursor is not drawn at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_every_character_takes_the_strength_away_too() {
+        let mut app = seeded_app();
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&typed('a'));
+        assert!(app.current_analysis.is_some());
+        app.handle_event(&press(Key::Backspace));
+        assert!(
+            app.current_analysis.is_none(),
+            "an empty field was given a strength"
+        );
+    }
+
+    #[test]
+    fn tab_visits_every_tab_in_the_toolbar_order() {
+        let mut app = seeded_app();
+        for want in ActiveTab::ALL
+            .iter()
+            .cycle()
+            .skip(1)
+            .take(ActiveTab::ALL.len())
+        {
+            assert_eq!(app.handle_event(&press(Key::Tab)), EventResult::Consumed);
+            assert_eq!(app.active_tab, *want);
+        }
     }
 }

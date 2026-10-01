@@ -194,6 +194,13 @@
 #  72. Run check-diskcleanup-test-roots.py at the push (design-decisions 974): diskcleanup test roots.
 #  73. Run check-selftest-reinit.py at the push (design-decisions 974): self-test tables re-opened.
 #
+#  51. Refuse a warning in the libc's own sources, compiled as they ship:
+#      toolchain/build-sysroot.ps1's crates, with its settings, for its
+#      target. That build and gate 40's compile of posix both judge by exit
+#      status, which a warning leaves at 0, and the host's tests and clippy
+#      never compile `cfg(target_os = "none")` -- so a function dead there
+#      sat in every sysroot build's output for six commits, read by nothing.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -986,7 +993,10 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # on a coreutils-only push. Left unscoped because `touches` answers
 # yes/no rather than which, and a wrong answer there silently narrows
 # the gate -- the failure this whole gate family keeps producing.
-touches posix/ userspace/authlib/ userspace/coreutils/         scripts/check-test-order-independence.py || skip_toi=1
+# `gui/vulkan/` since 2026-09-24, with `vkloader`'s entry in CRATES: every
+# crate in that list must be a trigger here, or a push touching only it skips
+# the gate that was added to cover it.
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/         scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0
@@ -1136,6 +1146,39 @@ if [ "$skip_tmw" != "1" ]; then
         tmw_failed=1
     elif ! run_checker text-mode-writes "$py" "$tmw"; then
         tmw_failed=1
+    fi
+fi
+
+# Gate 44b: refuse a truncating write, under `scripts/`, aimed at a tree file.
+#
+# check-destructive-writes.py, gate 44's companion, and the reason the two sit
+# together: gate 44 makes every write under scripts/ spell out `newline=`, and
+# a *mistyped* `newline=` is what emptied this very hook on 2026-09-17 --
+# `io.open(path, "w")` truncates first and validates its arguments second. So
+# gate 44 raises the odds of a bad argument, and this one makes sure a bad one
+# costs a temporary file (`safewrite.write_text`) rather than a tracked one.
+#
+# Written by lane C on 2026-09-22 and wired to nothing: check-gates-are-wired
+# refused lane C's next boot test for exactly that, which is what it is for.
+# Wired here on 2026-09-24, beside its sibling and on the same terms -- scoped
+# to pushes that touch scripts/, which is all it reads, and self-tested before
+# its verdict is believed. `boot-test.sh` is lane A's; the request to run it
+# there too is requests/c-a-wire-check-destructive-writes-into-the-boot-test.md.
+skip_dw=0
+dw="${repo_root:-.}/scripts/check-destructive-writes.py"
+[ -f "$dw" ] || skip_dw=1
+[ -n "$py" ] || skip_dw=1
+# No `pushed_shas` guard, as gate 44: one run against the working tree.
+touches scripts/ || skip_dw=1
+note_gate destructive-writes "$skip_dw"
+
+dw_failed=0
+if [ "$skip_dw" != "1" ]; then
+    if ! run_checker destructive-writes-selftest "$py" "$dw" --self-test; then
+        echo "pre-push: check-destructive-writes.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
+        dw_failed=1
+    elif ! run_checker destructive-writes "$py" "$dw"; then
+        dw_failed=1
     fi
 fi
 
@@ -1660,6 +1703,25 @@ EOF
     else
         exit 1
     fi
+fi
+
+if [ "$dw_failed" = "1" ]; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a script truncates a file the tree already has.
+
+The write is named above. `open(path, "w")` and `Path.write_text(...)` empty
+the target *before* they check their arguments, so a mistyped `newline=`
+destroys the file and then raises -- which is how scripts/hooks/pre-push was
+emptied on 2026-09-17.
+
+Write through `safewrite.write_text(path, text)` instead: it writes beside the
+target and renames over it, so any failure leaves the original as it was.
+
+Reproduce exactly what the hook saw:
+    python scripts/check-destructive-writes.py
+EOF
+    exit 1
 fi
 
 if [ "$tmw_failed" = "1" ]; then
@@ -2877,7 +2939,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Gate 51 -- file ownership: refuse to publish a tracked file with no owner.
+# Gate 74 -- file ownership: refuse to publish a tracked file with no owner.
 #
 # (Placed here, beside gate 9, rather than after gate 50: both judge what a
 # push adds under shared paths, and a reader looking for one finds the other.)
@@ -3850,7 +3912,10 @@ fi
 [ -f "$abicheck" ] || skip_abi=1
 # The checker and the table it reads are in scope alongside the types, per
 # gate 8's rule: a change to either changes every verdict it gives.
-touches posix/src/ scripts/check-libc-abi.py || skip_abi=1
+# ... and since 2026-09-30 the overlay's headers and glibc_constants.txt, which
+# its constants are compared with too.
+touches posix/src/ posix/include/ posix/tools/oracle/glibc_constants.txt \
+    scripts/check-libc-abi.py || skip_abi=1
 note_gate libc-abi "$skip_abi"
 
 if [ "$skip_abi" != "1" ]; then
@@ -5946,6 +6011,87 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 51 -- libc-target-warnings.  The libc's own sources compiled as they
+# ship, without a warning.
+#
+# `check-libc-target-warnings.py`: each crate toolchain/build-sysroot.ps1
+# builds -- posix, whose archive is libc.a, and toolchain/stubs -- checked
+# with that script's own settings, for its target spec, read out of the
+# script rather than copied, so the two cannot drift.
+#
+# WHAT IT CATCHES.  On 2026-09-30 lane D found `signal::dispatch_delivered`
+# dead on the target: the posix crate's one warning, printed by every
+# sysroot build for six commits and read by nothing.  Every place that
+# compiles posix for bare metal judges by exit status, and a warning exits
+# 0 -- build-sysroot.ps1 does, and so does gate 40, which prints the
+# warning among a whole push's output and passes.  The host's tests and
+# clippy, which do refuse warnings, never compile the code these are about:
+# `cfg(target_os = "none")`.
+#
+# WHY NOT IN GATE 40.  That gate compiles posix for its pinned
+# x86_64-unknown-none, not the spec libc.a is built for, and eight crates
+# in one verdict -- lane A's services/netstack among them, over a `touches`
+# that includes netproto/.  A posix warning refused there would refuse lane
+# A's push over lane D's code.  This one is scoped to the trees whose
+# warnings it counts, so a refusal lands on the push that caused it.
+#
+# NOT COUNTED: the vendored libm's warnings (upstream's, 32 on 2026-09-30)
+# and the toolchain's own crates -- printed as a count, not refused.  An
+# error in any crate is refused: the libc then does not build.
+#
+# COST.  ~11 s when posix has changed, ~2 s when not; a cold run checks core
+# and compiler_builtins from rust-src first.  Needs the nightly toolchain
+# with rust-src that build-sysroot.ps1 needs; without it the checker exits
+# 3 and run_checker reports the gate SKIPPED, loudly.
+#
+# `touches` names the script it reads its plan from and the checker itself,
+# per gate 8's rule: a change to either changes every verdict it gives.
+# ---------------------------------------------------------------------------
+
+tgtwarn="${repo_root:-.}/scripts/check-libc-target-warnings.py"
+skip_tgtwarn=0
+# Bypass: ALLOW_LIBC_TARGET_WARNINGS=1 git push origin <branch>
+if [ "${ALLOW_LIBC_TARGET_WARNINGS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_LIBC_TARGET_WARNINGS=1 set - skipping the libc-target-warnings gate." >&2
+    skip_tgtwarn=1
+fi
+[ -n "$py" ] || skip_tgtwarn=1
+[ -f "$tgtwarn" ] || skip_tgtwarn=1
+touches posix/ tzrules/ toolchain/stubs/ toolchain/build-sysroot.ps1 \
+        scripts/check-libc-target-warnings.py || skip_tgtwarn=1
+# No `pushed_shas` guard: one run over the worktree, as gate 40's is.
+note_gate libc-target-warnings "$skip_tgtwarn"
+
+tgtwarn_failed=0
+if [ "$skip_tgtwarn" != "1" ]; then
+    if ! run_checker libc-target-warnings-selftest "$py" "$tgtwarn" --selftest; then
+        echo "pre-push: check-libc-target-warnings.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        tgtwarn_failed=1
+    elif ! run_checker libc-target-warnings "$py" "$tgtwarn"; then
+        tgtwarn_failed=1
+    fi
+fi
+if [ "$tgtwarn_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - the libc's own sources warn when compiled for
+the target they ship to.
+
+Each warning is shown above, with its file and line.  They are in code the
+host's tests and clippy do not compile -- \`cfg(target_os = "none")\` -- so
+nothing else here would have shown them: the sysroot build prints them and
+passes.  Fix each one.  A dead item the target does not use is usually
+test-only (\`#[cfg(test)]\`) or target-only (\`#[cfg(target_os = "none")]\`);
+say which, rather than allowing it dead everywhere.
+
+    python scripts/check-libc-target-warnings.py
+
+To push anyway:
+    ALLOW_LIBC_TARGET_WARNINGS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 # Gates 52-73: boot-test gates that take seconds, run at the push too.
 #
 # WHY. The operator's answer to A-Q13 (design-decisions 974). A fault a lane
@@ -6496,7 +6642,7 @@ fi
 # scripts/INDEX.md must match the scripts. Regenerate it:
 #     python scripts/gen-script-index.py
 # A new script directly in scripts/ also needs its line in your lane's block of
-# SCRIPT_OWNERS in scripts/which-lane.py (gate 51).
+# SCRIPT_OWNERS in scripts/which-lane.py (gate 74).
 #
 # Bypass: ALLOW_SCRIPT_INDEX=1 git push origin <branch>
 # ---------------------------------------------------------------------------
@@ -6521,7 +6667,7 @@ if [ "$skip_scindex" != "1" ]; then
         moved_gate_refuses 68 "script index" ALLOW_SCRIPT_INDEX "scripts/INDEX.md must match the scripts. Regenerate it:
     python scripts/gen-script-index.py
 A new script directly in scripts/ also needs its line in your lane's block of
-SCRIPT_OWNERS in scripts/which-lane.py (gate 51)."
+SCRIPT_OWNERS in scripts/which-lane.py (gate 74)."
     fi
 fi
 

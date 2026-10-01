@@ -548,6 +548,7 @@ fn to_compositor_request(
         RequestBody::ReloadInput => CompositorRequest::ReloadInput,
         RequestBody::ReloadNotifications => CompositorRequest::ReloadNotifications,
         RequestBody::ReloadSession => CompositorRequest::ReloadSession,
+        RequestBody::AnnounceSettings { name } => CompositorRequest::AnnounceSettings { name },
         // A shell's, because what it does lands on every client: their windows
         // are redrawn, and any they have lost track of is dropped. Carries no
         // window, so there is nothing to resolve.
@@ -1220,7 +1221,7 @@ mod tests {
     use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
-    use guitk::event::{Event, Key, Modifiers};
+    use guitk::event::{Event, Key, Modifiers, SettingsName};
 
     use crate::EventNotification;
 
@@ -2952,6 +2953,158 @@ mod tests {
                 1200,
                 "the reload request did not reach the interval the compositor measures with"
             );
+        });
+    }
+
+    /// `text` as a settings-file name, for the announcements below.
+    fn settings_name(text: &str) -> SettingsName {
+        SettingsName::new(text.as_bytes()).expect("a valid settings name")
+    }
+
+    #[test]
+    fn a_program_s_settings_announcement_reaches_every_window_as_its_own_group() {
+        // design-decisions.md §1418: each program keeps its settings in a file
+        // of its own, and a change to it reaches its open windows at once. The
+        // compositor relays it to every window -- the owner is the one that
+        // matches the name -- and reads nothing: a program's settings are no
+        // business of its. The sender (the settings watcher) has no window, and
+        // needs none, like every other settings request.
+        inputsettings::config::testing::with_scratch_config("wire-announce-program", |_root| {
+            let (mut comp, mut link) = wired();
+            let a = comp.create_window("a".to_string(), 100, 100, 7);
+            let b = comp.create_window("b".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+            let before = comp.double_click_ms();
+            let calendar = settings_name("calendar");
+
+            let responses = exchange(
+                &mut comp,
+                &mut link,
+                vec![RequestBody::AnnounceSettings { name: calendar }],
+            );
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "an announcement is answered Ok, got {responses:?}"
+            );
+            let mut got = announced(&mut comp);
+            got.sort_by_key(|(id, _)| *id);
+            let mut want = vec![
+                (a.0, SettingsGroup::Program(calendar)),
+                (b.0, SettingsGroup::Program(calendar)),
+            ];
+            want.sort_by_key(|(id, _)| *id);
+            assert_eq!(got, want, "every window's program should have been told");
+            assert_eq!(
+                comp.double_click_ms(),
+                before,
+                "a program's file is announced, not read"
+            );
+        });
+    }
+
+    #[test]
+    fn a_desktop_file_announced_by_name_is_what_its_own_verb_does() {
+        // The settings watcher knows only that a file changed, not which files
+        // the compositor reads. `input` by name must re-read input.yaml and
+        // announce `Input` -- not `Program("input")`, which no receiver
+        // matches and which the input decoder refuses.
+        inputsettings::config::testing::with_scratch_config("wire-announce-by-name", |_root| {
+            let (mut comp, mut link) = wired();
+            let w = comp.create_window("a".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+            let mut file = inputsettings::InputFile::new();
+            file.settings.mouse.set_double_click_ms(1200);
+            file.save().expect("write scratch input.yaml");
+
+            let input = settings_name("input");
+            exchange(
+                &mut comp,
+                &mut link,
+                vec![RequestBody::AnnounceSettings { name: input }],
+            );
+            assert_eq!(
+                comp.double_click_ms(),
+                1200,
+                "input.yaml announced by name was not re-read"
+            );
+            assert_eq!(announced(&mut comp), vec![(w.0, SettingsGroup::Input)]);
+
+            for (text, group) in [
+                ("notifications", SettingsGroup::Notifications),
+                ("session", SettingsGroup::Session),
+            ] {
+                let name = settings_name(text);
+                exchange(
+                    &mut comp,
+                    &mut link,
+                    vec![RequestBody::AnnounceSettings { name }],
+                );
+                assert_eq!(announced(&mut comp), vec![(w.0, group)], "{text}");
+            }
+        });
+    }
+
+    #[test]
+    fn appearance_announced_by_name_is_re_read_and_announced_as_appearance() {
+        appearance::config::testing::with_scratch_config("wire-announce-appearance", |_root| {
+            let (mut comp, mut link) = wired();
+            let w = comp.create_window("a".to_string(), 100, 100, 7);
+            let _ = announced(&mut comp);
+            let mut file = appearance::AppearanceFile::new();
+            file.settings.drop_shadows = false;
+            file.save().expect("write scratch appearance.yaml");
+
+            let name = settings_name("appearance");
+            exchange(
+                &mut comp,
+                &mut link,
+                vec![RequestBody::AnnounceSettings { name }],
+            );
+            assert!(
+                !comp.appearance().drop_shadows,
+                "appearance.yaml announced by name was not re-read"
+            );
+            assert_eq!(announced(&mut comp), vec![(w.0, SettingsGroup::Appearance)]);
+        });
+    }
+
+    #[test]
+    fn a_program_s_announcement_arrives_on_the_wire_with_its_name() {
+        // End to end through both real codecs: a windowless client's request
+        // in (the settings watcher is one), a window's event out. A variant
+        // that carries a name is the kind that gets half-wired -- relayed
+        // correctly and then encoded without its name, or decoded short.
+        inputsettings::config::testing::with_scratch_config("wire-announce-e2e", |_root| {
+            let (mut comp, mut link) = wired();
+            let window = open(&mut comp, &mut link, "Calendar");
+            comp.route_input(&mut link); // opening it focused it
+            drop(link.take_outgoing());
+
+            let mut watcher = ClientLink::new(99);
+            let calendar = settings_name("calendar");
+            exchange(
+                &mut comp,
+                &mut watcher,
+                vec![RequestBody::AnnounceSettings { name: calendar }],
+            );
+
+            assert_eq!(comp.route_input(&mut link), 1);
+            let (events, _) = decode_input_frame(&link.take_outgoing()).expect("decodes");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].window, window);
+            assert_eq!(
+                events[0].event,
+                Event::SettingsChanged {
+                    group: SettingsGroup::Program(calendar)
+                }
+            );
+            assert_eq!(comp.route_input(&mut watcher), 0, "it has no window");
         });
     }
 

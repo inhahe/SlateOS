@@ -17,6 +17,13 @@
 //! equal the RFC's reference code exactly -- the RFC clamps an intermediate to
 //! a signed byte where libwebp clamps the result to the range the next step
 //! can use, and the two agree on every input; the tests hold them to it.
+//!
+//! Portions of this file are translated into Rust from libwebp 1.6.0's
+//! `dec.c` (copyright 2010-2025 Google Inc.) and from RFC 6386's reference
+//! decoder (copyright 2010, 2011 Google Inc.), and changed for this project;
+//! used under libwebp's BSD licence and patent grant
+//! (`licenses/libwebp-COPYING`, `licenses/libwebp-PATENTS`) and the RFC's
+//! (`licenses/rfc6386-LICENSE.txt`).
 
 /// The strength of the filter for one macroblock (libwebp's `VP8FInfo`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

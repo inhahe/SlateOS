@@ -131,9 +131,8 @@ MUTATIONS = [
         # control.  A hit box on it swallows a click and does nothing, which is
         # worse than no hit box: the click it ate would have reached the cell.
         "the exit strip records a target",
-        "        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));",
-        "        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));\n"
-        "        f.hit(Target::Cell(GRID_ROWS, WIN_COL), l.exit);",
+        "            l.exit,\n            self.colours.mauve,\n            CornerRadii::all(l.gap.max(1.0)),\n        );\n",
+        "            l.exit,\n            self.colours.mauve,\n            CornerRadii::all(l.gap.max(1.0)),\n        );\n        f.hit(Target::Cell(GRID_ROWS, WIN_COL), l.exit);\n",
         ["the_exit_strip_records_no_target"],
     ),
     (
@@ -152,13 +151,13 @@ MUTATIONS = [
     ),
     (
         "the win panel records no way on",
-        # Anchored on the label call above it: `f.hit(target, r);` on its own
+        # Anchored on the button call above it: `f.hit(target, r);` on its own
         # also ends `draw_controls`' loop, and an anchor that matches twice
         # patches two sites, so the row stops saying what its name says.
-        "                r,\n"
+        "                self.colours.panel,\n"
         "            );\n"
         "            f.hit(target, r);",
-        "                r,\n"
+        "                self.colours.panel,\n"
         "            );",
         ["the_win_overlay_offers_a_way_on"],
     ),
@@ -172,8 +171,8 @@ MUTATIONS = [
     ),
     (
         "the win scrim is opaque",
-        "const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xB4);",
-        "const SCRIM: Color = Color::rgba(0x11, 0x11, 0x1B, 0xFF);",
+        "            Chrome::of(&self.palette).scrim,",
+        "            self.colours.crust,",
         ["the_win_scrim_is_translucent"],
     ),
     (
@@ -218,14 +217,13 @@ MUTATIONS = [
         # Not `the_block_label_stays_inside_the_block`: starting at the box's
         # right-hand edge leaves `r.right() - x == 0`, `push_text` refuses, and
         # a label that was never drawn is inside every box there is.  What dies
-        # is the centring's own test and the pass-draws-something converse.
+        # is the centring's own test.  The pass-draws-something converse died
+        # too while the controls' names were centred here; they are the
+        # toolkit's buttons now, which place their own labels.
         "a centred label starts at the right-hand edge of its box",
         "    let x = r.x + (r.w - w) / 2.0;",
         "    let x = r.x + r.w;",
-        [
-            "a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box",
-            "a_pass_with_room_paints_and_a_pass_with_none_paints_nothing",
-        ],
+        ["a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box"],
     ),
     (
         # Not the containment test.  A footer told to stack two lines in a
@@ -459,9 +457,9 @@ MUTATIONS = [
     ),
     (
         "the undo button is never dimmed",
-        "                if live { SURFACE1 } else { SURFACE0 },",
-        "                SURFACE1,",
-        ["the_undo_button_is_dimmed_when_there_is_nothing_to_undo"],
+        "            self.button(f, r, name, size, false, live, self.colours.mantle);",
+        "            self.button(f, r, name, size, false, true, self.colours.mantle);",
+        ["the_undo_button_is_dimmed_when_there_is_nothing_to_undo", "undo_is_switched_off_with_nothing_to_take_back"],
     ),
     # ── Keyboard ────────────────────────────────────────────────────
     (
@@ -722,8 +720,8 @@ MUTATIONS = [
     ),
     (
         "the mat is painted over the whole window",
-        "        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));",
-        "        fill(f, l.window, CRUST, CornerRadii::all(l.gap.max(1.0)));",
+        "            l.board_frame,\n            self.colours.crust,",
+        "            l.window,\n            self.colours.crust,",
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
@@ -749,6 +747,72 @@ MUTATIONS = [
         "    f.push(RenderCommand::FillRect {",
         "    f.push(RenderCommand::FillRect {",
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "the theme is never taken up",
+        "        self.palette = *palette;\n        self.colours = Colours::of(palette);",
+        "        let _ = palette;",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the colours are not rebuilt with the palette",
+        "        self.colours = Colours::of(palette);",
+        "        let _ = Colours::of(palette);",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the small blocks are the palette's raw green, pale on a light board",
+        "            green: p.ink(p.green),",
+        "            green: p.green,",
+        ["the_board_is_seen_in_either_theme"],
+    ),
+    (
+        "the big block's name is written dark whatever the block",
+        "                            color: gamechrome::legible_on(INKS, colour),",
+        "                            color: INKS.1,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the exit's name is written dark whatever the exit",
+        "                color: gamechrome::legible_on(INKS, self.colours.mauve),",
+        "                color: INKS.1,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the undo count is the faintest grey",
+        "                    // Secondary text: the faintest grey is 2.3:1 on a light\n                    // band.\n                    color: self.colours.subtext0,",
+        "                    // Secondary text: the faintest grey is 2.3:1 on a light\n                    // band.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the footer's keys are the faintest grey",
+        "                    // the palette's faintest grey is 2.3:1 on a light band.\n                    color: self.colours.subtext0,",
+        "                    // the palette's faintest grey is 2.3:1 on a light band.\n                    color: self.palette.overlay0,",
+        ["every_text_reads_on_what_is_under_it_in_either_theme"],
+    ),
+    (
+        "the win panel has no ground of its own",
+        "            Surface::Panel,",
+        "            Surface::Card,",
+        ["the_win_panel_is_grounded_and_offers_the_next_puzzle_first"],
+    ),
+    (
+        "the next puzzle is offered like the other ways on",
+        "                target == Target::Next,",
+        "                false,",
+        ["the_win_panel_is_grounded_and_offers_the_next_puzzle_first"],
+    ),
+    (
+        "the win scrim is Mocha's whatever the theme",
+        "            Chrome::of(&self.palette).scrim,",
+        "            Color::rgba(0x11, 0x11, 0x1B, 0xB4),",
+        ["the_window_is_drawn_in_the_users_colours"],
+    ),
+    (
+        "the halo is Mocha's yellow whatever the theme",
+        "                    self.colours.yellow,",
+        "                    Color::from_hex(0xF9E2AF),",
+        ["the_window_is_drawn_in_the_users_colours"],
     ),
 ]
 

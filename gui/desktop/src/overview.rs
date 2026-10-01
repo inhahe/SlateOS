@@ -68,6 +68,7 @@ use crate::{Layer, ShellControlAction, ShellRequest, WindowId};
 use appearance::{Palette, readable_on};
 use guiremote::window_list::WindowList;
 use guitk::color::Color;
+use guitk::motion::Motion;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
@@ -187,7 +188,17 @@ pub struct OverviewState {
     /// [`OverviewState::fade_opacity`], start it with
     /// [`OverviewState::begin_fade`], advance it with
     /// [`OverviewState::tick_fade`].
-    fade: Option<Animation>,
+    ///
+    /// The clock runs straight (`Easing::Linear`); the motion the fade was
+    /// begun under gives it its curve when it is read.
+    fade: Option<(Animation, Motion)>,
+    /// The order to draw the cards in, by window id, while a window switch is
+    /// shown here -- most recently used first, so that each Tab moves the
+    /// highlight one card on, left to right, as the switcher's strip does.
+    /// `None` is the window list's own order. Set by
+    /// [`set_order`](Self::set_order); forgotten by [`show`](Self::show) and
+    /// [`hide`](Self::hide), because it belongs to one switch.
+    order: Option<Vec<u64>>,
 }
 
 impl OverviewState {
@@ -202,6 +213,7 @@ impl OverviewState {
             search_query: String::new(),
             search_results: Vec::new(),
             fade: None,
+            order: None,
         }
     }
 
@@ -223,11 +235,20 @@ impl OverviewState {
         self.search_results.clear();
         self.hovered_window = None;
         self.fade = None;
+        self.order = None;
+    }
+
+    /// Draw the cards in this order, by window id, until the overview next
+    /// opens or closes; ids it does not name keep the window list's order,
+    /// after the ones it does. See the `order` field.
+    pub fn set_order(&mut self, order: Vec<u64>) {
+        self.order = Some(order);
     }
 
     /// Hide the overview.
     pub fn hide(&mut self) {
         self.visible = false;
+        self.order = None;
         // Dropped rather than left part-way: the next `show` must not inherit a
         // fade from the last one, and an overview that is not on screen has no
         // business keeping the shell's frame clock awake.
@@ -243,7 +264,9 @@ impl OverviewState {
         }
     }
 
-    /// Start the backdrop fading in over `duration_ms`.
+    /// Start the backdrop fading in: `stated_ms` as designed, against the
+    /// standard transition, and so as long as `motion` makes that -- along
+    /// its arriving curve.
     ///
     /// **Only call this if you are going to call [`tick_fade`](Self::tick_fade)
     /// until it returns `false`.** A fade begun and never advanced holds the
@@ -252,17 +275,19 @@ impl OverviewState {
     /// clock, which is why this is separate from [`show`](Self::show) rather
     /// than part of it.
     ///
-    /// A zero `duration_ms` is treated as "no fade" rather than as a division
-    /// by zero — [`Animation::new`] floors the duration at 1 ms, but a caller
-    /// asking for zero is asking for the overview to be open now, and giving it
-    /// a one-millisecond fade would make that depend on when the next frame
+    /// A fade of no length -- a zero `stated_ms`, or a still motion -- is
+    /// treated as "no fade" rather than as a division by zero:
+    /// [`Animation::new`] floors the duration at 1 ms, but a caller asking for
+    /// zero is asking for the overview to be open now, and giving it a
+    /// one-millisecond fade would make that depend on when the next frame
     /// happens to land.
-    pub fn begin_fade(&mut self, duration_ms: u32) {
+    pub fn begin_fade(&mut self, motion: Motion, stated_ms: u32) {
+        let duration_ms = motion.duration_ms(stated_ms);
         self.fade = (duration_ms > 0).then(|| {
-            // Ease-out: the backdrop arrives quickly and settles, so the
-            // overlay reads as already there for most of the fade rather than
-            // as still on its way.
-            Animation::new(0.0, 1.0, duration_ms, Easing::EaseOut)
+            (
+                Animation::new(0.0, 1.0, duration_ms, Easing::Linear),
+                motion,
+            )
         });
     }
 
@@ -280,7 +305,7 @@ impl OverviewState {
     ///
     /// Cheap and safe to call when nothing is fading; it answers `false`.
     pub fn tick_fade(&mut self, dt_ms: u32) -> bool {
-        let Some(anim) = self.fade.as_mut() else {
+        let Some((anim, _)) = self.fade.as_mut() else {
             return false;
         };
         anim.tick(dt_ms);
@@ -304,9 +329,16 @@ impl OverviewState {
     /// `1.0` whenever no fade is running, which includes both "never started
     /// one" and "finished". Only the backdrop's alpha is scaled by this; see
     /// the module header for why nothing else is.
+    ///
+    /// Along the motion's arriving curve -- under the built-in ease-out the
+    /// backdrop arrives quickly and settles, so the overlay reads as already
+    /// there for most of the fade -- and never past opaque, where a spring
+    /// would carry it.
     #[must_use]
     pub fn fade_opacity(&self) -> f32 {
-        self.fade.as_ref().map_or(1.0, Animation::value)
+        self.fade
+            .as_ref()
+            .map_or(1.0, |(anim, motion)| motion.arriving(anim.value()).min(1.0))
     }
 
     /// Rebuild the lanes from a window list.
@@ -980,13 +1012,14 @@ fn render_thumbnail_card(
         corner_radii: CornerRadii::all(6.0),
     });
 
-    // Title inside card.
-    let title_display: String = layout.title.chars().take(30).collect();
+    // Title inside card, cut at the card's edge with a mark when it does not
+    // fit. It was cut at thirty characters first, unmarked -- so a title of
+    // forty on a card with room for all of it read as a title of thirty.
     let title_color = if is_dimmed { p.overlay0 } else { p.text };
     cmds.push(RenderCommand::Text {
         x: x + dx + 8.0,
         y: y + dy + 8.0,
-        text: title_display,
+        text: layout.title.clone(),
         color: title_color,
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
@@ -1134,7 +1167,9 @@ pub fn on_key(state: &mut OverviewState, key: OverviewKey) -> OverviewAction {
         OverviewKey::ArrowUp
         | OverviewKey::ArrowDown
         | OverviewKey::ArrowLeft
-        | OverviewKey::ArrowRight => {
+        | OverviewKey::ArrowRight
+        | OverviewKey::First
+        | OverviewKey::Last => {
             navigate_selection(state, key);
             OverviewAction::NavigateSelection
         }
@@ -1299,11 +1334,21 @@ pub enum OverviewKey {
     Text(String),
     Backspace,
     Tab,
+    /// Home, and Page Up: the first card. The cards all fit on the screen, so
+    /// a page of them is all of them (`design-decisions.md` §1416).
+    First,
+    /// End, and Page Down: the last card.
+    Last,
 }
 
-/// Arrow-key navigation over a flat list of thumbnails.
+/// Arrow-key navigation over the cards as they are drawn.
+///
+/// The drawn cards, in their drawn order -- not every window on every desktop.
+/// It walked `all_thumbnails` until 2026-09-27, which in the one-desktop modes
+/// includes the other desktops' windows: an arrow could light a card that is
+/// not on the screen, and Enter then switched to a window the user never saw.
 fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
-    let all = state.all_thumbnails();
+    let all = drawn_thumbnails(state);
     if all.is_empty() {
         return;
     }
@@ -1315,6 +1360,8 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     // Clamped, matching the scroll gesture above: arrowing off the edge of
     // the grid holds still rather than teleporting to the opposite edge.
     let new_idx = match (current_idx, key) {
+        (_, OverviewKey::First) => Some(0),
+        (_, OverviewKey::Last) => all.len().checked_sub(1),
         (None, _) => Some(0),
         (Some(i), OverviewKey::ArrowRight | OverviewKey::ArrowDown) => {
             Some(step::clamped_after(all.len(), i))
@@ -1332,8 +1379,38 @@ fn navigate_selection(state: &mut OverviewState, key: OverviewKey) {
     }
 }
 
-/// Collect the thumbnails relevant to the current mode.
+/// Every card the overview draws, in the order it draws them: the grid's
+/// cards, or each desktop's lane in turn.
+fn drawn_thumbnails(state: &OverviewState) -> Vec<WindowThumbnail> {
+    match state.mode {
+        OverviewMode::AllDesktops => state
+            .lanes
+            .iter()
+            .flat_map(|l| l.thumbnails.iter().cloned())
+            .collect(),
+        OverviewMode::AllWindows | OverviewMode::RecentApps => collect_thumbs_for_mode(state),
+    }
+}
+
+/// Collect the thumbnails relevant to the current mode, in the order a window
+/// switch shown here asked for, if one did.
 fn collect_thumbs_for_mode(state: &OverviewState) -> Vec<WindowThumbnail> {
+    let mut thumbs = thumbs_for_mode(state);
+    if let Some(order) = &state.order {
+        // Stable, so the windows the order does not name keep the list's order
+        // among themselves, after the ones it does.
+        thumbs.sort_by_key(|t| {
+            order
+                .iter()
+                .position(|id| *id == t.window_id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    thumbs
+}
+
+/// The thumbnails relevant to the current mode, in the window list's order.
+fn thumbs_for_mode(state: &OverviewState) -> Vec<WindowThumbnail> {
     match state.mode {
         OverviewMode::AllWindows => {
             // Current desktop only.
@@ -1420,6 +1497,91 @@ mod tests {
 
     fn default_config() -> OverviewConfig {
         OverviewConfig::default()
+    }
+
+    /// Home and End light the first and last cards drawn, from anywhere and
+    /// from nothing lit.
+    #[test]
+    fn first_and_last_light_the_ends_of_what_is_drawn() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(2), "the last card on this desktop");
+        on_key(&mut s, OverviewKey::First);
+        assert_eq!(s.hovered_window, Some(1));
+        s.show(OverviewMode::AllDesktops);
+        on_key(&mut s, OverviewKey::Last);
+        assert_eq!(s.hovered_window, Some(3), "the last card of the last lane");
+    }
+
+    // -- The order a window switch asks for ----------------------------------
+
+    /// A switch shown here draws the cards in its order -- most recent first
+    /// -- and the overview forgets it on closing, so the next time it opens by
+    /// itself it is in the window list's order again.
+    #[test]
+    fn a_switch_draws_the_cards_in_its_order_until_the_overview_closes() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        let drawn = |s: &OverviewState| -> Vec<u64> {
+            overview_layout(s, &default_config(), 1920.0, 1080.0)
+                .iter()
+                .map(|card| card.window_id)
+                .collect()
+        };
+        assert_eq!(drawn(&s), vec![1, 2], "the list's own order");
+
+        s.set_order(vec![2, 1]);
+        assert_eq!(drawn(&s), vec![2, 1]);
+
+        // An order that names only some cards puts those first and keeps the
+        // rest in the list's order after them.
+        s.set_order(vec![2]);
+        assert_eq!(drawn(&s), vec![2, 1]);
+
+        s.set_order(vec![2, 1]);
+        s.hide();
+        s.show(OverviewMode::AllWindows);
+        assert_eq!(drawn(&s), vec![1, 2], "the order outlived the switch");
+    }
+
+    /// The arrows light only cards that are drawn.
+    ///
+    /// They walked every window on every desktop, so in the one-desktop view an
+    /// arrow could light the other desktop's window -- a card nobody could see
+    /// -- and Enter then went to it.
+    #[test]
+    fn the_arrows_light_only_cards_that_are_drawn() {
+        let mut s = OverviewState::new();
+        s.lanes = sample_lanes();
+        s.show(OverviewMode::AllWindows);
+        for _ in 0..5 {
+            on_key(&mut s, OverviewKey::ArrowRight);
+            assert_ne!(
+                s.hovered_window,
+                Some(3),
+                "lit the window on the desktop not shown"
+            );
+        }
+        assert_eq!(s.hovered_window, Some(2), "held at the last drawn card");
+
+        // In the drawn order, too: a switch's order walks the cards as they
+        // stand on the screen.
+        s.set_order(vec![2, 1]);
+        s.hovered_window = None;
+        on_key(&mut s, OverviewKey::ArrowRight);
+        assert_eq!(s.hovered_window, Some(2), "the first card drawn");
+        on_key(&mut s, OverviewKey::ArrowRight);
+        assert_eq!(s.hovered_window, Some(1), "the next card drawn");
+
+        // The view of every desktop does draw the other desktop's window.
+        s.show(OverviewMode::AllDesktops);
+        for _ in 0..5 {
+            on_key(&mut s, OverviewKey::ArrowRight);
+        }
+        assert_eq!(s.hovered_window, Some(3));
     }
 
     // -- OverviewState basics ------------------------------------------------
@@ -1969,6 +2131,44 @@ mod tests {
         assert_eq!(action, OverviewAction::None);
     }
 
+    /// **A card's title is cut at the card's edge, with a mark -- not at a
+    /// count.** It was cut to thirty characters first, unmarked, so a longer
+    /// title on a card with room for all of it lost its end and read whole.
+    #[test]
+    fn a_cards_title_is_cut_at_its_edge_not_at_thirty_characters() {
+        let title = "Quarterly report, final draft.odt - Writer";
+        let layout = ThumbnailLayout {
+            window_id: 1,
+            desktop_id: 0,
+            title: title.to_string(),
+            is_focused: false,
+            is_minimized: false,
+            render_x: 0.0,
+            render_y: 0.0,
+            render_width: 600.0,
+            render_height: 300.0,
+        };
+        let mut cmds = Vec::new();
+        render_thumbnail_card(&mut cmds, &layout, &Palette::for_mode(false), false, false);
+        let drawn = cmds.iter().find_map(|cmd| match cmd {
+            RenderCommand::Text {
+                text,
+                max_width,
+                overflow,
+                ..
+            } => Some((text.clone(), *max_width, *overflow)),
+            _ => None,
+        });
+        let (text, max_width, overflow) = drawn.expect("the card drew no title");
+        assert_eq!(text, title, "the title was cut before the card's edge");
+        assert!(max_width.is_some());
+        assert_eq!(
+            overflow,
+            TextOverflow::Ellipsis,
+            "a cut would not be marked"
+        );
+    }
+
     #[test]
     fn test_mouse_move_sets_hover() {
         let mut s = OverviewState::new();
@@ -2220,7 +2420,7 @@ mod tests {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
         s.lanes = sample_lanes();
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         let cfg = default_config();
 
         let cards = render_overview(&s, &cfg, &Palette::for_mode(false), 1920.0, 1080.0)
@@ -2240,7 +2440,7 @@ mod tests {
         let cfg = default_config();
         let full = backdrop_alpha(&s, &cfg);
 
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         assert!(
             backdrop_alpha(&s, &cfg) < full,
             "the fade was begun and the backdrop was drawn at full strength — \
@@ -2258,7 +2458,7 @@ mod tests {
         // versus "was never faded" — the two must be the same overlay.
         let mut faded = OverviewState::new();
         faded.show(OverviewMode::AllWindows);
-        faded.begin_fade(200);
+        faded.begin_fade(Motion::STANDARD, 200);
         while faded.tick_fade(16) {}
 
         let mut fresh = OverviewState::new();
@@ -2279,7 +2479,7 @@ mod tests {
              desktop that never parks"
         );
 
-        s.begin_fade(100);
+        s.begin_fade(Motion::STANDARD, 100);
         assert!(s.tick_fade(50), "the fade gave up half way through");
         assert!(!s.tick_fade(50), "the fade asked for a frame past its end");
         assert!(!s.is_fading());
@@ -2292,16 +2492,44 @@ mod tests {
         // depended on when the next frame happened to land.
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        s.begin_fade(0);
+        s.begin_fade(Motion::STANDARD, 0);
         assert!(!s.is_fading());
         assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+        // A still motion is the same: no fade, open now.
+        s.begin_fade(Motion::STILL, 200);
+        assert!(!s.is_fading());
+        assert!((s.fade_opacity() - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// **The fade follows the desktop's motion**: its length scales with the
+    /// standard transition, its opacity is the arriving curve -- ease-out
+    /// half-way is seven-eighths there -- and a spring never draws the
+    /// backdrop past opaque.
+    #[test]
+    fn the_fade_follows_the_desktops_motion() {
+        use guitk::motion::Curve;
+        let mut s = OverviewState::new();
+        s.show(OverviewMode::AllWindows);
+        s.begin_fade(Motion::STANDARD, 200);
+        s.tick_fade(100);
+        assert!((s.fade_opacity() - 0.875).abs() < 1e-5);
+
+        s.begin_fade(Motion::new(400, Curve::Linear), 200);
+        assert!(s.tick_fade(200), "twice the standard is twice as long");
+        assert!((s.fade_opacity() - 0.5).abs() < 1e-5);
+        assert!(!s.tick_fade(200));
+
+        s.begin_fade(Motion::new(200, Curve::Spring), 200);
+        while s.tick_fade(5) {
+            assert!(s.fade_opacity() <= 1.0);
+        }
     }
 
     #[test]
     fn hiding_drops_the_fade_so_the_next_opening_does_not_inherit_it() {
         let mut s = OverviewState::new();
         s.show(OverviewMode::AllWindows);
-        s.begin_fade(200);
+        s.begin_fade(Motion::STANDARD, 200);
         s.tick_fade(100);
         s.hide();
         assert!(

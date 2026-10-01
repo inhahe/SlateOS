@@ -14,6 +14,15 @@
 //! Falco, systemd-networkd's BPF-CGROUP filters, the Rust `aya` /
 //! `libbpf-rs` crates, Go's `cilium/ebpf` package) needs to detect
 //! correctly when probing for BPF support.
+//!
+//! ## Reached through `syscall()`
+//!
+//! glibc wraps none of these calls: programs -- libbpf, bcc, `bpftool` -- make them with
+//! `syscall(SYS_bpf, …)`, which answers with the checks below and then
+//! `ENOSYS`, as the kernel's own Linux table does.  Until 2026-09-26 the C
+//! library also exported `bpf` under its own name, which glibc does not, and
+//! `syscall()` answered `ENOSYS` without a look; the names went as libaio's
+//! did (design-decisions.md §1114).
 
 use crate::errno;
 
@@ -935,7 +944,6 @@ fn validate_map_freeze(a: &BpfMapFreezeAttr) -> Result<(), i32> {
 ///   before the cap check).
 /// - `ENOSYS`: all checks pass AND privilege held, but no real BPF
 ///   subsystem exists yet.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
     // Validation order matches Linux's `SYSCALL_DEFINE3(bpf, ...)` in
     // `kernel/bpf/syscall.c`:

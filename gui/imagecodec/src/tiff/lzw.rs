@@ -12,6 +12,11 @@
 //! next call, and a whole-strip decode never makes one -- and running out of
 //! codes, or meeting the end-of-information code, before the output is full
 //! is an error.
+//!
+//! Portions of this file are translated into Rust from libtiff 4.7.1's
+//! `tif_lzw.c` (copyright (c) 1988-1997 Sam Leffler; (c) 1991-1997 Silicon
+//! Graphics, Inc.; (c) 2022 Even Rouault), and changed for this project; used
+//! under libtiff's licence, `licenses/libtiff-LICENSE.md`.
 
 use alloc::vec;
 use alloc::vec::Vec;

@@ -84,6 +84,8 @@ full, both call sites at once". True of boot-test.sh, false here: this script ne
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -102,27 +104,127 @@ GATED = re.compile(
     r'|cfg\(target_family\s*=\s*"unix"\)'
     r'|#\[cfg\(not\(windows\)\)\]'
 )
-CRATE_NAME = re.compile(r'^\s*name\s*=\s*"([^"]+)"', re.M)
 
 
-def crates_with_unix_code() -> list[str]:
-    """Every crate in the workspace holding a unix-gated block.
+def unix_crates(candidates: list[tuple[str, Path]] | None = None) -> list[tuple[str, Path]]:
+    """Every member crate holding a unix-gated block, of `candidates` (by default
+    [`candidate_crates`]): (name, manifest).
 
     Derived by reading, so a crate joins by growing its first one. Skips
     `target/` and `.git/`, and skips a `Cargo.toml` with no `src/` -- a
     workspace root is not a crate to check.
     """
-    found: set[str] = set()
-    for name, src in candidate_crates():
+    found: dict[str, Path] = {}
+    for name, src in candidates if candidates is not None else candidate_crates():
         for f in src.rglob("*.rs"):
             if GATED.search(f.read_text(encoding="utf-8", errors="surrogateescape")):
-                found.add(name)
+                found.setdefault(name, src.parent / "Cargo.toml")
                 break
-    return sorted(found)
+    return sorted(found.items())
 
 
-def candidate_crates() -> list[tuple[str, pathlib.Path]]:
-    """Every crate this gate *could* check: (name, src dir), workspace-wide.
+def crates_with_unix_code(candidates: list[tuple[str, Path]] | None = None) -> list[str]:
+    """The names of `unix_crates(candidates)`."""
+    return [name for name, _ in unix_crates(candidates)]
+
+
+def _same_file(a: str | Path, b: str | Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def specs_from_metadata(
+    crates: list[tuple[str, Path]], metadata: dict
+) -> tuple[list[str], list[str], list[str]]:
+    """How to name each crate to `cargo -p`: (specs, disambiguated, problems).
+
+    A crate found on disk is named by its bare package name, which is what cargo
+    prints and what a reader expects -- unless another package in the resolved
+    graph has the same name, when the bare name is ambiguous and cargo refuses
+    the whole run. That is not hypothetical: lane E vendored `cfg-if` into
+    `rustcrypto/` on 2026-09-27, the same day lane F's rav1d brought crates.io's
+    `cfg-if` 1.0.5 into the graph, and the two together made every push that
+    reached this gate fail with "specification `cfg-if` is ambiguous" -- a
+    failure of the gate, not of anybody's code. Such a crate is named instead by
+    its package ID (`path+file:///...#1.0.5`), the one found at *its* manifest.
+
+    A shared name with no package at the crate's own manifest means the crate is
+    not in the graph at all, so no spec reaches it; the bare name would check the
+    wrong package or none. That is reported as a problem, not guessed around.
+    """
+    by_name: dict[str, list[dict]] = {}
+    for pkg in metadata.get("packages", []):
+        by_name.setdefault(pkg.get("name", ""), []).append(pkg)
+    specs: list[str] = []
+    disambiguated: list[str] = []
+    problems: list[str] = []
+    for name, manifest in crates:
+        same = by_name.get(name, [])
+        if len(same) <= 1:
+            specs.append(name)
+            continue
+        mine = [p for p in same if _same_file(p.get("manifest_path", ""), manifest)]
+        if len(mine) != 1:
+            problems.append(
+                f"`{name}` ({manifest}) shares its name with {len(same)} packages in "
+                f"the graph and is not one of them, so no `-p` can reach it"
+            )
+            continue
+        specs.append(mine[0]["id"])
+        disambiguated.append(name)
+    return specs, disambiguated, problems
+
+
+def package_specs(crates: list[tuple[str, Path]]) -> tuple[list[str], list[str], list[str]]:
+    """`specs_from_metadata` over this tree's `cargo metadata`.
+
+    If cargo cannot produce the metadata, this says so and returns the bare
+    names: the run that follows then behaves exactly as it did before this
+    function existed -- it passes, or fails with cargo's own message.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1"],
+        cwd=REPO, capture_output=True, text=True, timeout=600, check=False,
+    )
+    if proc.returncode != 0:
+        print("check-cfg-unix: `cargo metadata` failed, so crates are named by bare "
+              f"name, unresolved:\n{proc.stderr[-2000:]}")
+        return [name for name, _ in crates], [], []
+    return specs_from_metadata(crates, json.loads(proc.stdout))
+
+
+def workspace_members(root: Path = REPO) -> list[tuple[str, Path]]:
+    """The workspace's member crates as cargo lists them: (name, manifest dir).
+
+    `cargo metadata --no-deps`, not a walk of the disk. Until 2026-09-28 this was a
+    walk: first `REPO.rglob("Cargo.toml")`, which descended into every `target/` and
+    took minutes, then (lane C, 26efac00c) `gittree`'s walk, which prunes those and
+    takes 0.3 s. Either walk finds every `Cargo.toml` under the root, the crates the
+    root manifest *excludes* included: vendored code (`rustcrypto/`, `posix/vendor/`),
+    the bare-metal services under `services/`. `cargo clippy -p` then either cannot
+    name one ("package ID specification ... did not match any packages") or, when it
+    is a path dependency of a member, builds it with `--all-targets` -- upstream's
+    benches and tests, with upstream's nightly features and dev-dependencies -- and the
+    gate refused every push for code nobody here wrote
+    (`requests/e-a-check-cfg-unix-checks-crates-the-workspace-excludes.md`: `base64ct`,
+    vendored under `rustcrypto/`, whose bench needs `#![feature(test)]`).
+
+    `--no-deps` resolves nothing, so this reads the members' manifests only: no walk,
+    no network, no lockfile write. A failure is an error, not an empty list -- a gate
+    that found no members would otherwise report nothing to check as success.
+    """
+    proc = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline",
+         "--manifest-path", str(root / "Cargo.toml")],
+        capture_output=True, text=True, timeout=600, check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"cargo metadata failed:\n{proc.stderr[-2000:]}")
+    packages = json.loads(proc.stdout).get("packages", [])
+    return [(p["name"], Path(p["manifest_path"]).parent) for p in packages]
+
+
+def candidate_crates(root: Path = REPO) -> list[tuple[str, Path]]:
+    """Every crate this gate *could* check: (name, src dir), the workspace's members.
 
     Exists to supply the DENOMINATOR. The gate checks the subset holding a unix-gated
     block, and for a long time it reported only that subset's size -- "62 crates with
@@ -136,19 +238,16 @@ def candidate_crates() -> list[tuple[str, pathlib.Path]]:
     inside a branch only the push hook reached. Their phrasing is the one to keep -- *the
     run that reads as a complete audit was the one run that said nothing about its own
     gaps.*
+
+    Members only ([`workspace_members`]): a crate the root excludes is not the
+    workspace's to check, and `-p` cannot name it. A member with no `src/` -- a
+    workspace root -- is not a crate to check either.
 """
-    out: list[tuple[str, pathlib.Path]] = []
-    for tom in REPO.rglob("Cargo.toml"):
-        parts = tom.parts
-        if "target" in parts or ".git" in parts:
-            continue
-        src = tom.parent / "src"
-        if not src.is_dir():
-            continue
-        m = CRATE_NAME.search(tom.read_text(encoding="utf-8", errors="surrogateescape"))
-        if not m:
-            continue
-        out.append((m.group(1), src))
+    out: list[tuple[str, Path]] = []
+    for name, manifest_dir in workspace_members(root):
+        src = manifest_dir / "src"
+        if src.is_dir():
+            out.append((name, src))
     return out
 
 
@@ -207,12 +306,65 @@ def self_test() -> int:
     """
     failures: list[str] = []
 
-    derived = crates_with_unix_code()
+    try:
+        derived = crates_with_unix_code()
+    except RuntimeError as e:
+        failures.append(f"the workspace's members could not be listed: {e}")
+        derived = []
     for expect in ("su", "sshd", "coreutils"):
         if expect not in derived:
             failures.append(f"the derivation missed `{expect}`, which has unix-gated code")
     if len(derived) < 20:
         failures.append(f"the derivation found only {len(derived)} crates; it is probably broken")
+
+    # THE CRATES IT NAMES ARE THE WORKSPACE'S. A scratch workspace whose one member
+    # depends on a crate the root excludes -- both with unix-gated code, which is the
+    # shape `rustcrypto/` and `posix/vendor/` have: only the member is a candidate. The
+    # disk walk this replaced listed both, and `-p` on the excluded one broke the run.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nresolver = "2"\nmembers = ["member"]\nexclude = ["vendored"]\n',
+            encoding="utf-8", newline="")
+        for name, dep in (("member", 'vendored = { path = "../vendored" }\n'), ("vendored", "")):
+            (root / name / "src").mkdir(parents=True)
+            (root / name / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2021"\n\n'
+                f"[dependencies]\n{dep}", encoding="utf-8", newline="")
+            (root / name / "src" / "lib.rs").write_text(
+                "#[cfg(unix)]\npub fn gated() {}\n", encoding="utf-8", newline="")
+        try:
+            names = sorted(n for n, _ in candidate_crates(root))
+        except RuntimeError as e:
+            names = [f"<{e}>"]
+        if names != ["member"]:
+            failures.append(
+                f"the candidates of a workspace with an excluded path dependency were "
+                f"{names}, not ['member']: an excluded crate would be named with -p")
+
+    # NAMING, against a made-up graph: the 2026-09-27 shape, an in-tree `cfg-if`
+    # beside crates.io's of the same version.
+    ours = REPO / "rustcrypto" / "cfg-if" / "Cargo.toml"
+    lone = REPO / "userspace" / "su" / "Cargo.toml"
+    stray = REPO / "nowhere" / "cfg-if" / "Cargo.toml"
+    graph = {"packages": [
+        {"name": "cfg-if", "id": "path+file:///ours#1.0.5", "manifest_path": str(ours)},
+        {"name": "cfg-if", "id": "registry+https://x#cfg-if@1.0.5",
+         "manifest_path": "/registry/cfg-if-1.0.5/Cargo.toml"},
+        {"name": "su", "id": "path+file:///su#0.1.0", "manifest_path": str(lone)},
+    ]}
+    specs, shared, problems = specs_from_metadata([("cfg-if", ours), ("su", lone)], graph)
+    if specs != ["path+file:///ours#1.0.5", "su"] or shared != ["cfg-if"] or problems:
+        failures.append(
+            "a name shared in the graph must become the package ID found at the crate's "
+            f"own manifest, and a unique one stay bare; got {specs}, {shared}, {problems}"
+        )
+    _, _, problems = specs_from_metadata([("cfg-if", stray)], graph)
+    if len(problems) != 1:
+        failures.append(
+            "a crate whose name is shared but which is not itself in the graph must be "
+            f"reported, not named by a bare name that reaches another package; got {problems}"
+        )
 
     if not target_installed():
         print(f"check-cfg-unix --self-test: {TARGET} not installed; compile fixtures skipped")
@@ -338,7 +490,16 @@ def main() -> int:
     if args.selftest:
         return self_test()
 
-    crates = crates_with_unix_code()
+    try:
+        members = candidate_crates()
+        found = unix_crates(members)
+    except RuntimeError as e:
+        # 2, "the checker could not run" (the usage above): not a pass, and not a
+        # finding about the code either.
+        print(f"check-cfg-unix: cannot list the workspace's crates -- {e}")
+        return 2
+    crates = [name for name, _ in found]
+    candidates = len(members)
     if args.list:
         for c in crates:
             print(c)
@@ -360,7 +521,17 @@ def main() -> int:
         # See the "Exit 3" section of scripts/run-checker.sh.
         return 3
 
-    code, output = check(crates)
+    specs, disambiguated, problems = package_specs(found)
+    if problems:
+        print("check-cfg-unix: cannot name every crate to cargo:")
+        for p in problems:
+            print(f"  {p}")
+        return 2
+    if disambiguated:
+        print("check-cfg-unix: named by package ID, their names being shared in the "
+              f"dependency graph: {', '.join(disambiguated)}")
+
+    code, output = check(specs)
     if code != 0:
         print(f"check-cfg-unix: {len(crates)} crate(s) checked against {TARGET}; it failed:\n")
         print(output[-8000:])
@@ -369,10 +540,10 @@ def main() -> int:
     # checking this population and skipping the half of it that lives in
     # `#[cfg(test)]` modules, and a summary that does not name it reads the
     # same either way -- which is how the gap went unnoticed.
-    print(f"check-cfg-unix: OK ({len(crates)} of {len(candidate_crates())} workspace "
+    print(f"check-cfg-unix: OK ({len(crates)} of {candidates} workspace "
           f"crate(s) hold unix-gated code and pass clippy for {TARGET} with "
           f"--all-targets; the other "
-          f"{len(candidate_crates()) - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
+          f"{candidates - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
     return 0
 
 

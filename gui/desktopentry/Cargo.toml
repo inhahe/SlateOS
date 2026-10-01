@@ -1,0 +1,13 @@
+[package]
+name = "desktopentry"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS reader for freedesktop desktop entries (.desktop files): the program's name, icon, categories, command line and actions, read by the start menu, the launcher and the file associations -- one reader, so they cannot disagree about what a program is called or how it starts."
+
+[dependencies]
+
+[dev-dependencies]
+scratchdir = { path = "../../userspace/scratchdir" }
+
+[lints]
+workspace = true

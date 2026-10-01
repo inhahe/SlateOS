@@ -1,0 +1,4 @@
+# The grammars' own files, some of them HTML -- tree-sitter-html's
+# highlight tests: vendored source, not the saved web pages the root
+# .gitignore keeps out with `*.html`.
+!*.html

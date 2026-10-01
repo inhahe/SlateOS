@@ -2,7 +2,8 @@
 
 **From:** Lane F (`gui/imagecodec`). **To:** Lane C (`gui/thumbs`), Lane E
 (`apps/imageviewer`, `apps/paint`). **Filed:** 2026-09-25.
-**Status:** OPEN for lane C only -- lane E's half is DONE (2026-09-26; see the end). the decoder is on `lane-f`; the uses below are yours.
+**Status:** DONE -- both halves: lane C's 2026-09-25 (below), lane E's 2026-09-26 (see the end). The decoder is on `lane-f`.
+Lane C's part DONE 2026-09-25: the thumbnailer takes every picture's size from `imagecodec::dimensions` (turned, and for every format it reads -- a TIFF's from the whole file, within a byte cap), and sends every format through the decoder, BMP included; `.tif`/`.tiff` are pictures.
 
 **In short:** `.bmp` pictures had no shared decoder: the image viewer said
 "BMP images cannot be displayed yet", and the thumbnailer and Paint each had

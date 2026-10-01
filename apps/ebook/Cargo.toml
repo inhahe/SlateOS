@@ -2,12 +2,28 @@
 name = "ebook"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS Ebook Reader — plain-text ebook reader with library, bookmarks, and search"
+description = "SlateOS Ebook Reader — reads plain-text books, keeping a library with each one's place and bookmarks"
 [dependencies]
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
+# Where the library is kept: beside every other program's settings.
+settingsfile = { path = "../../gui/settingsfile" }
+# The reading theme, kept in `ebook.yaml` (C-Q26).
+yamldoc = { path = "../../yamldoc" }
+# A book's path in the library file, spelled so that any name survives (§426).
+pathcodec = { path = "../../gui/pathcodec" }
+# A name on disk, shown by its bytes rather than a lossy decode.
+pathtext = { path = "../pathtext" }
+# The library written whole or not at all, and a book read only up to a cap.
+safeio = { path = "../safeio" }
+
+[dev-dependencies]
+# Scratch folders for the library and the books, so no test reads or writes
+# the developer's own.
+scratchdir = { path = "../../userspace/scratchdir" }
+settingsfile = { path = "../../gui/settingsfile", features = ["testing"] }
 
 [lints]
 workspace = true

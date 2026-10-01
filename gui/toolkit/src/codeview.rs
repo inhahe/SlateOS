@@ -2581,6 +2581,25 @@ mod tests {
         );
     }
 
+    /// **Pasting an empty clipboard changes nothing, and says so** -- from the
+    /// menu and from Ctrl+V alike: the host must not mark the document
+    /// changed for it.
+    #[test]
+    fn pasting_nothing_is_no_change() {
+        use crate::editmenu::EditCommand;
+        crate::clipboard::set_text("");
+        let mut v = view("abc");
+        assert_eq!(
+            v.edit_command(EditCommand::Paste.id()),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(
+            v.handle_key(&key(Key::V, true, false)),
+            Some(CodeViewEvent::Moved)
+        );
+        assert_eq!(v.editor().text(), "abc");
+    }
+
     fn alt(k: Key) -> KeyEvent {
         KeyEvent {
             key: k,

@@ -29,8 +29,10 @@
 //!
 //! A selector with anything else -- an attribute (`[x]`), a pseudo-class
 //! (`:hover`), a sibling combinator -- selects nothing, and its rule is kept
-//! for the rest of its comma list. At-rules (`@media`, `@import`,
-//! `@font-face`) are skipped whole: a sheet's conditions are not evaluated.
+//! for the rest of its comma list. One CSS rejects -- `a >`, `.1x`, an empty
+//! place in a list -- voids its whole rule, as CSS has it. At-rules
+//! (`@media`, `@import`, `@font-face`) are skipped whole: a sheet's
+//! conditions are not evaluated.
 //!
 //! # What it may cost
 //!
@@ -173,22 +175,29 @@ impl Sheet {
             let close = after.find('}').unwrap_or(after.len());
             let block = after.get(..close).unwrap_or("");
             rest = after.get(close.saturating_add(1)..).unwrap_or("");
+            // A rule any of whose selectors is no selector is void, whole,
+            // as CSS has it; one this cannot read only selects nothing.
+            let Ok(selectors) = prelude
+                .split(',')
+                .map(Selector::parse)
+                .collect::<Result<Vec<_>, Invalid>>()
+            else {
+                continue;
+            };
             let (normal, important) = declarations(block);
-            for written in prelude.split(',') {
+            for selector in selectors.into_iter().flatten() {
                 if sheet.rules.len() >= MAX_RULES {
                     break;
                 }
-                if let Some(selector) = Selector::parse(written) {
-                    let specificity = selector.specificity();
-                    sheet.add(Rule {
-                        selector,
-                        specificity,
-                        order,
-                        normal: normal.clone(),
-                        important: important.clone(),
-                    });
-                    order = order.saturating_add(1);
-                }
+                let specificity = selector.specificity();
+                sheet.add(Rule {
+                    selector,
+                    specificity,
+                    order,
+                    normal: normal.clone(),
+                    important: important.clone(),
+                });
+                order = order.saturating_add(1);
             }
         }
         sheet
@@ -413,52 +422,66 @@ fn declarations(block: &str) -> (String, String) {
 }
 
 /// Whether `name` is a plain CSS identifier: letters, digits, `-` and `_`,
-/// and not a digit first. An escaped one is not read.
+/// not starting with a digit or with `-` and a digit, and not `-` alone. An
+/// escaped one is not read.
 fn is_identifier(name: &str) -> bool {
+    let digit_first = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
     !name.is_empty()
-        && !name.starts_with(|c: char| c.is_ascii_digit())
+        && name != "-"
+        && !digit_first(name)
+        && !name.strip_prefix('-').is_some_and(digit_first)
         && name
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
 }
 
+/// A selector CSS rejects. A rule any selector in whose list is one is void
+/// whole -- where one that is merely not read here, `:hover` say, selects
+/// nothing and leaves the rest of its list standing.
+#[derive(Debug, PartialEq, Eq)]
+struct Invalid;
+
 impl Compound {
-    /// A compound selector as written, or `None` if it is not one this
-    /// reads.
-    fn parse(written: &str) -> Option<Self> {
+    /// A compound selector as written; `Ok(None)` for one that selects
+    /// nothing (two different ids), `Err` for one that is no selector.
+    fn parse(written: &str) -> Result<Option<Self>, Invalid> {
         let mut compound = Self::default();
+        let mut possible = true;
         let mut rest = written;
         if let Some(after) = rest.strip_prefix('*') {
             rest = after;
         } else {
             let end = rest.find(['.', '#']).unwrap_or(rest.len());
-            let tag = rest.get(..end)?;
+            let tag = rest.get(..end).ok_or(Invalid)?;
             if !tag.is_empty() {
                 if !is_identifier(tag) {
-                    return None;
+                    return Err(Invalid);
                 }
                 compound.tag = Some(tag.to_owned());
             }
-            rest = rest.get(end..)?;
+            rest = rest.get(end..).ok_or(Invalid)?;
         }
         while let Some(mark) = rest.chars().next() {
-            let after = rest.get(1..)?;
+            let after = rest.get(1..).ok_or(Invalid)?;
             let end = after.find(['.', '#']).unwrap_or(after.len());
-            let name = after.get(..end)?;
+            let name = after.get(..end).ok_or(Invalid)?;
             if !is_identifier(name) {
-                return None;
+                return Err(Invalid);
             }
             match mark {
                 '.' => compound.classes.push(name.to_owned()),
-                // An element has one id: a compound asking for two selects
-                // nothing.
-                '#' if compound.id.is_some() => return None,
-                '#' => compound.id = Some(name.to_owned()),
-                _ => return None,
+                // An element has one id: a compound asking for two different
+                // ones selects nothing.
+                '#' => match &compound.id {
+                    Some(id) if id != name => possible = false,
+                    _ => compound.id = Some(name.to_owned()),
+                },
+                // `*rect` and the like: a type after something that is not.
+                _ => return Err(Invalid),
             }
-            rest = after.get(end..)?;
+            rest = after.get(end..).ok_or(Invalid)?;
         }
-        Some(compound)
+        Ok(possible.then_some(compound))
     }
 
     /// Whether the element `facts` describes matches this part.
@@ -476,43 +499,59 @@ impl Compound {
 }
 
 impl Selector {
-    /// A selector as written, or `None` if it is not one this reads.
-    fn parse(written: &str) -> Option<Self> {
-        let written = joined(written)?;
+    /// A selector as written: `Ok(None)` for one that selects nothing, or
+    /// that CSS reads and this does not -- an attribute, a pseudo-class, a
+    /// sibling combinator, a namespace, an escape, more than
+    /// [`MAX_COMPOUNDS`] parts -- and `Err` for one CSS rejects: empty, a
+    /// combinator with nothing on one side, a part that is no compound.
+    fn parse(written: &str) -> Result<Option<Self>, Invalid> {
+        let written = joined(written).ok_or(Invalid)?;
         let written = written.trim();
-        if written.is_empty() || written.contains(['[', ':', '+', '~', '\\', '|']) {
-            return None;
+        if written.is_empty() {
+            return Err(Invalid);
+        }
+        if written.contains(['[', ':', '+', '~', '\\', '|']) {
+            return Ok(None);
         }
         let mut compounds = Vec::new();
         let mut combinators = Vec::new();
         let mut pending: Option<Combinator> = None;
+        let mut possible = true;
         let spaced = written.replace('>', " > ");
+        // Every part is read, even past one that selects nothing or past the
+        // most parts read: a part further on that is no selector still voids
+        // the rule.
         for token in spaced.split_ascii_whitespace() {
             if token == ">" {
                 if compounds.is_empty() || pending.is_some() {
-                    return None;
+                    return Err(Invalid);
                 }
                 pending = Some(Combinator::Child);
                 continue;
             }
-            let compound = Compound::parse(token)?;
+            let compound = Compound::parse(token)?.unwrap_or_else(|| {
+                possible = false;
+                Compound::default()
+            });
+            let outward = pending.take();
+            if compounds.len() >= MAX_COMPOUNDS {
+                possible = false;
+                continue;
+            }
             if !compounds.is_empty() {
-                combinators.push(pending.take().unwrap_or(Combinator::Descendant));
+                combinators.push(outward.unwrap_or(Combinator::Descendant));
             }
             compounds.push(compound);
-            if compounds.len() > MAX_COMPOUNDS {
-                return None;
-            }
         }
-        if pending.is_some() || compounds.is_empty() {
-            return None;
+        if pending.is_some() {
+            return Err(Invalid);
         }
         compounds.reverse();
         combinators.reverse();
-        Some(Self {
+        Ok(possible.then_some(Self {
             compounds,
             combinators,
-        })
+        }))
     }
 
     /// CSS's specificity: how many ids, classes and types it names.

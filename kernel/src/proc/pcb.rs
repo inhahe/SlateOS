@@ -197,6 +197,22 @@ impl JobControlEvent {
             Self::Continued => 0xffff,
         }
     }
+
+    /// This transition as `siginfo_t`'s `si_code` and `si_status`:
+    /// `CLD_STOPPED` and the stop signal, or `CLD_CONTINUED` and `SIGCONT`.
+    /// The sibling of [`ExitInfo::sigchld_code_and_status`], for the same
+    /// reason: one mapping for every report of the same change.
+    #[must_use]
+    pub fn sigchld_code_and_status(self) -> (i32, i32) {
+        use crate::proc::signal::{SIGCONT, si_code};
+        // Both values are below 256 (`& 0xff`; SIGCONT is 18), so neither
+        // cast can wrap.
+        #[allow(clippy::cast_possible_wrap)]
+        match self {
+            Self::Stopped(sig) => (si_code::CLD_STOPPED, (sig & 0xff) as i32),
+            Self::Continued => (si_code::CLD_CONTINUED, SIGCONT as i32),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4756,6 +4772,30 @@ impl ExitInfo {
             #[allow(clippy::cast_possible_wrap)]
             let s = (lo << 8) as i32;
             s
+        }
+    }
+
+    /// This termination as `siginfo_t`'s `si_code` and `si_status`, which
+    /// both the parent's `SIGCHLD` and `waitid` report: `CLD_EXITED` and the
+    /// exit status, `CLD_KILLED` and the signal, or `CLD_DUMPED` and the
+    /// signal when the status word's core bit is set.
+    ///
+    /// Read off [`Self::to_wstatus`] rather than decoded a second time, so a
+    /// child's `wait` status, its `waitid` record and its parent's `SIGCHLD`
+    /// cannot disagree about how it ended -- as `waitid`'s did until
+    /// 2026-10-01, calling a crash `CLD_DUMPED` while the status word said
+    /// killed, no core. A crash writes no core file, so killed is right.
+    #[must_use]
+    pub fn sigchld_code_and_status(&self) -> (i32, i32) {
+        use crate::proc::signal::si_code;
+        let wstatus = self.to_wstatus();
+        let termsig = wstatus & 0x7f;
+        if termsig == 0 {
+            (si_code::CLD_EXITED, (wstatus >> 8) & 0xff)
+        } else if wstatus & 0x80 != 0 {
+            (si_code::CLD_DUMPED, termsig)
+        } else {
+            (si_code::CLD_KILLED, termsig)
         }
     }
 }

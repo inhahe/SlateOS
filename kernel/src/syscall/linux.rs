@@ -8569,65 +8569,51 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
     if !(0..=64).contains(&sig) {
         return linux_err(errno::EINVAL);
     }
-    if sig == 0 {
-        // sig==0 is the existence probe: same gates as a real signal
-        // send, but no actual delivery.  We've already proven the
-        // target exists (target_u via pcb::state above), so all that
-        // remains is the authority check that handlers::sys_signal_send
-        // would have performed.  Use the *truncated* target_u
-        // throughout — not raw args.arg0 — so a probe like
-        // kill(0x1_0000_0001, 0) hits pid 1 consistently with the
-        // earlier existence gate.  Pre-batch (358) this path
-        // re-loaded args.arg0 and pcb::state(0x1_0000_0001) → None →
-        // ESRCH, diverging from Linux's "pid was truncated to 1, and
-        // 1 exists, so existence probe succeeds".
-        use crate::proc::{pcb, thread};
-        let task_id = crate::sched::current_task_id();
-        let caller = thread::owner_process(task_id).unwrap_or(0);
-        if target_u != caller {
-            let target_parent = match pcb::parent(target_u) {
-                Some(p) => p,
-                // We checked pcb::state(target_u) earlier so this
-                // would only fire on a TOCTOU race with the target's
-                // reaper.  Surface ESRCH in that window — same as
-                // Linux's later check_kill_permission when the task
-                // is reaped underneath us.
-                None => return linux_err(errno::ESRCH),
-            };
-            let has_parent_auth = caller == 0 || caller == target_parent;
-            let has_cap_auth = pcb::has_capability_for(
-                caller,
-                crate::cap::ResourceType::Process,
-                target_u,
-                crate::cap::Rights::DELETE,
-            );
-            if !has_parent_auth && !has_cap_auth {
-                return linux_err(errno::EPERM);
-            }
-        }
-        return SyscallResult::ok(0);
-    }
-    // Real signal: delegate to native.  Native SYS_SIGNAL_SEND:
-    // arg0 = target pid, arg1 = signum.  Pass the truncated target
-    // (target_u, derived from pid_i32) and truncated sig so
-    // signal_send sees the post-ABI values.  Pre-batch (358)
-    // forwarded args.arg0 raw, so a probe like
-    // kill(0x1_0000_0001, 9) would send to pid 0x1_0000_0001 rather
-    // than pid 1 and fail with ESRCH even though the truncation gate
-    // had already proven pid 1 lives.
+    // Gate 4: authority, then the post -- or, for sig == 0, the existence
+    // probe, which stops after authority.  Both are the native single-target
+    // path's (`handlers::check_signal_target`), so a Linux-ABI and a native
+    // `kill` cannot disagree about who may signal whom; until 2026-10-01 the
+    // probe carried its own copy of that rule.  Pass the *truncated* target
+    // and signal: pre-batch (358) this forwarded args.arg0 raw, so a probe
+    // like kill(0x1_0000_0001, 9) would send to pid 0x1_0000_0001 rather than
+    // pid 1 and fail with ESRCH even though the truncation gate had already
+    // proven pid 1 lives.
     #[allow(clippy::cast_sign_loss)]
     let sig_u = sig as u64;
     let send_args = SyscallArgs {
         arg0: target_u,
         arg1: sig_u,
-        arg2: args.arg2,
-        arg3: args.arg3,
-        arg4: args.arg4,
-        arg5: args.arg5,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
     };
-    linux_from_native(handlers::sys_signal_send_with_info(
+    linux_from_native_signal_send(handlers::sys_signal_send_with_info(
         &send_args, si_code, value,
     ))
+}
+
+/// A native signal-send answer in the errno terms `kill(2)`, `tgkill(2)` and
+/// `rt_sigqueueinfo(2)` use.
+///
+/// The generic map ([`linux_from_native`]) makes a refusal `EACCES` and a
+/// zombie `ECHILD`, and none of these calls ever answers either: Linux's
+/// `check_kill_permission` says `EPERM`, and this shim answers a zombie
+/// `ESRCH` (see the zombie gate in [`kill_common_value`]). Until 2026-10-01 a
+/// real signal refused for want of authority came back `EACCES` -- only the
+/// `sig == 0` probe, which had its own copy of the check, said `EPERM`.
+fn linux_from_native_signal_send(res: SyscallResult) -> SyscallResult {
+    if res.value >= 0 {
+        return res;
+    }
+    // Native error codes are negative i32s widened to i64.
+    #[allow(clippy::cast_possible_truncation)]
+    let code = res.value as i32;
+    match kernel_error_from_code(code) {
+        Some(KernelError::PermissionDenied) => linux_err(errno::EPERM),
+        Some(KernelError::ProcessExited) => linux_err(errno::ESRCH),
+        _ => linux_from_native(res),
+    }
 }
 
 /// Deliver a signal to every live process in a process group, for the
@@ -8650,7 +8636,7 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
 /// of the ordering rules here — a native-ABI shell and a Linux-ABI shell
 /// must see identical group semantics.
 fn kill_process_group(si_code: i32, value: u64, pid_i32: i32, sig: i32) -> SyscallResult {
-    linux_from_native(handlers::signal_send_to_group(
+    linux_from_native_signal_send(handlers::signal_send_to_group(
         i64::from(pid_i32),
         i64::from(sig),
         si_code,
@@ -44198,47 +44184,25 @@ struct WaitidSiginfo {
     _rest: [u8; 100],
 }
 
-// CLD_* si_code values for SIGCHLD (uapi/asm-generic/siginfo.h).
-const CLD_EXITED: i32 = 1;
-const CLD_KILLED: i32 = 2;
-const CLD_DUMPED: i32 = 3;
-const CLD_STOPPED: i32 = 5;
-const CLD_CONTINUED: i32 = 6;
+// CLD_* si_code values for SIGCHLD (uapi/asm-generic/siginfo.h), from the one
+// table both ABIs read.
+use crate::proc::signal::si_code::{CLD_CONTINUED, CLD_EXITED, CLD_KILLED, CLD_STOPPED};
 
 /// Derive `(si_code, si_status)` for a reaped child's exit.
 ///
-/// * crash (unhandled exception) → `CLD_DUMPED` + `SIGSEGV` (11), mirroring
-///   [`encode_linux_wstatus`]'s crash synthesis.
-/// * killed by signal (`exit_code` in 128..=255 by kernel convention) →
-///   `CLD_KILLED` + the signal number.
-/// * normal exit → `CLD_EXITED` + the exit status (low 8 bits).
+/// The mapping is [`crate::proc::pcb::ExitInfo::sigchld_code_and_status`]'s,
+/// which the parent's `SIGCHLD` carries too: a crash is `CLD_KILLED` with
+/// `SIGSEGV` (11), as [`encode_linux_wstatus`]'s status word says. Until
+/// 2026-10-01 this answered `CLD_DUMPED` for it, which the status word -- no
+/// core bit, since no core file is written -- contradicted.
 fn waitid_si_from_exit(info: &crate::proc::pcb::ExitInfo) -> (i32, i32) {
-    if info.crash.is_some() {
-        return (CLD_DUMPED, 11);
-    }
-    let code = info.exit_code;
-    if (128..=255).contains(&code) {
-        // exit_code = 128 + sig (kernel convention).
-        (CLD_KILLED, (code - 128) & 0x7f)
-    } else {
-        (CLD_EXITED, code & 0xff)
-    }
+    info.sigchld_code_and_status()
 }
 
-/// Derive `(si_code, si_status)` for a job-control transition.
-///
-/// `Stopped(sig)` → `CLD_STOPPED` + the stop signal; `Continued` →
-/// `CLD_CONTINUED` + `SIGCONT` (18).
+/// Derive `(si_code, si_status)` for a job-control transition:
+/// [`crate::proc::pcb::JobControlEvent::sigchld_code_and_status`].
 fn waitid_si_from_jc(ev: &crate::proc::pcb::JobControlEvent) -> (i32, i32) {
-    use crate::proc::pcb::JobControlEvent;
-    match ev {
-        JobControlEvent::Stopped(sig) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let s = (*sig & 0xff) as i32;
-            (CLD_STOPPED, s)
-        }
-        JobControlEvent::Continued => (CLD_CONTINUED, 18),
-    }
+    ev.sigchld_code_and_status()
 }
 
 /// A child state-change found by [`waitid_scan`], ready to encode into
@@ -44604,6 +44568,26 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     };
     if waitid_si_from_exit(&killed) != (CLD_KILLED, 9) {
         serial_println!("[syscall/linux]   FAIL: waitid_si_from_exit kill branch");
+        return Err(KernelError::InternalError);
+    }
+    // A crash is killed by SIGSEGV with no core file, and waitid says what
+    // wait4's status word says (11: signalled, no core bit) -- not
+    // CLD_DUMPED, which it answered until 2026-10-01.
+    let crashed = crate::proc::pcb::ExitInfo {
+        exit_code: crate::proc::pcb::crash_exit_code(8),
+        crash: Some(crate::proc::pcb::CrashInfo {
+            exception_code: 8,
+            faulting_rip: 0,
+            aux: 0,
+            thread_id: 0,
+        }),
+    };
+    if waitid_si_from_exit(&crashed) != (CLD_KILLED, 11) || encode_linux_wstatus(&crashed) != 11 {
+        serial_println!(
+            "[syscall/linux]   FAIL: waitid_si_from_exit crash branch {:?} (wstatus {})",
+            waitid_si_from_exit(&crashed),
+            encode_linux_wstatus(&crashed)
+        );
         return Err(KernelError::InternalError);
     }
 

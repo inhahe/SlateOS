@@ -876,8 +876,20 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // it.  Without this the parent livelocks in sigsuspend.
                 if let Some(parent) = pcb::parent(pid) {
                     if parent != 0 {
-                        let info =
-                            crate::proc::signal::SigInfo::child(u32::try_from(pid).unwrap_or(0), 0);
+                        // How the child ended, and who it was: `si_status`
+                        // and `si_uid` were 0 until 2026-10-01, so a handler
+                        // could not tell an exit from a kill
+                        // (requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md).
+                        let ended = pcb::ExitInfo {
+                            exit_code: pcb::exit_code(pid).unwrap_or(0),
+                            crash: pcb::get_crash_info(pid),
+                        };
+                        let child_uid = pcb::get_credentials(pid).map_or(0, |c| c.uid);
+                        let info = crate::proc::signal::SigInfo::child(
+                            u32::try_from(pid).unwrap_or(0),
+                            child_uid,
+                            ended.sigchld_code_and_status(),
+                        );
                         // Linux-ABI parents deliver SIGCHLD via their
                         // per-signal rt_sigaction disposition
                         // (deliver_linux_signal consults linux_disposition),

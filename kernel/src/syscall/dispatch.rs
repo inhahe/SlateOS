@@ -87,22 +87,23 @@ use super::number::{
     SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
     SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
     SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND, SYS_SIGNAL_STOP_SELF, SYS_SLEEP,
-    SYS_SOCKETPAIR_CLOSE, SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL,
-    SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV, SYS_SOCKETPAIR_RECV_TIMEOUT,
-    SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_SHUTDOWN,
-    SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET, SYS_SYSCTL_SET,
-    SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT, SYS_TCP_BIND,
-    SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO, SYS_TCP_LAST_ERROR,
-    SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY, SYS_TCP_LOCAL_PORT,
-    SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_SET_KEEPALIVE,
-    SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN, SYS_THREAD_CREATE,
-    SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT, SYS_THREAD_RESUME,
-    SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
-    SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS, SYS_TTY_READ,
-    SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND, SYS_UDP_CLOSE,
-    SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_RECV,
-    SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE, SYS_YIELD,
+    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
+    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
+    SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
+    SYS_SOCKETPAIR_SHUTDOWN, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_TRY_SEND, SYS_SYSCTL_GET,
+    SYS_SYSCTL_SET, SYS_SYSTEM_SET_PROFILE, SYS_TASK_ID, SYS_TCP_ABORT, SYS_TCP_ACCEPT,
+    SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER, SYS_TCP_CONNECT, SYS_TCP_INFO,
+    SYS_TCP_LAST_ERROR, SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_TCP_LISTENER_READY,
+    SYS_TCP_LOCAL_PORT, SYS_TCP_PEER_ADDR, SYS_TCP_POLL_STATUS, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS, SYS_TCP_SET_NODELAY, SYS_TCP_SHUTDOWN,
+    SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN, SYS_THREAD_JOIN_TIMEOUT,
+    SYS_THREAD_RESUME, SYS_THREAD_SET_PRIORITY, SYS_THREAD_SUSPEND, SYS_TIMER_CANCEL,
+    SYS_TIMER_CREATE, SYS_TTY_ACQUIRE_CTTY, SYS_TTY_FLUSH, SYS_TTY_GET_PGRP, SYS_TTY_GET_TERMIOS,
+    SYS_TTY_READ, SYS_TTY_RELEASE_CTTY, SYS_TTY_SET_PGRP, SYS_TTY_SET_TERMIOS, SYS_UDP_BIND,
+    SYS_UDP_CLOSE, SYS_UDP_CONNECT, SYS_UDP_LOCAL_PORT, SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
+    SYS_UDP_RECV, SYS_UDP_RX_FRONT_BYTES, SYS_UDP_RX_READY, SYS_UDP_SEND, SYS_WAIT_MULTIPLE,
+    SYS_YIELD,
 };
 use crate::drm::syscall as drm_handlers;
 
@@ -550,6 +551,8 @@ const fn build_v1_table() -> SyscallTable {
     // so it has no flat-table entry.
     handlers[SYS_SIGNAL_REGISTER as usize] = Some(handlers::sys_signal_register);
     handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
+    handlers[SYS_SIGNAL_QUEUE as usize] = Some(handlers::sys_signal_queue);
+    handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1011,6 +1014,7 @@ pub fn self_test() -> KernelResult<()> {
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
     test_thread_join_timeout_registered()?;
+    test_dispatch_signal_siginfo_frame()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2204,6 +2208,188 @@ fn test_thread_join_timeout_registered() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[syscall]   SYS_THREAD_JOIN_TIMEOUT (1085) is wired: OK");
+    Ok(())
+}
+
+/// The native siginfo frame and the sends that fill it
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`), made as
+/// a process makes them, through `thread::self_test_as_process`:
+///
+/// - `SYS_SIGNAL_REGISTER` answers the flags it honours -- 1 for
+///   `SIGNAL_FRAME_SIGINFO`, 0 without it or when unregistering -- ignores
+///   unknown bits, and the registry records which frame the trampoline reads;
+/// - `SYS_SIGNAL_QUEUE` posts `SI_QUEUE` with the caller as sender and the
+///   value, answers a group (pid not above zero) `NoSuchProcess`, and posts
+///   nothing for signal 0;
+/// - `SYS_SIGNAL_TGKILL` posts `SI_TKILL` for a thread of the process, and
+///   refuses a thread of another (`NoSuchProcess`) and ids not above zero
+///   (`InvalidArgument`);
+/// - `SYS_SIGNAL_SEND`'s signal 0 to one process is the probe its page says
+///   it is (it answered `InvalidArgument` until 2026-10-01);
+/// - none of them lets a process signal one that is not its child, while a
+///   signal the kernel raises reaches it all the same (`SI_KERNEL`, pid 0) --
+///   the terminal's `^C` reaching a foreground job its writer did not start.
+fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
+    use super::number::SIGNAL_FRAME_SIGINFO;
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::signal::{self, si_code};
+    use crate::proc::thread::self_test_as_process;
+
+    const SIGUSR1: u64 = 10;
+    const SIGUSR2: u64 = 12;
+    const VALUE: u64 = 0xDEAD_BEEF_0000_0001;
+
+    fn cleanup(pids: &[ProcessId]) {
+        for &p in pids {
+            signal::remove(p);
+            pcb::destroy(p);
+        }
+    }
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: siginfo frame: {}", msg);
+        cleanup(pids);
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    let pid = pcb::create("siginfo-frame", 0);
+    let stranger = pcb::create("siginfo-stranger", 0);
+    let pids = [pid, stranger];
+    let me = crate::sched::current_task_id();
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    // Registration answers what it honours, and the registry agrees.
+    for (flags, answer, extended) in [
+        (SIGNAL_FRAME_SIGINFO, 1, true),
+        (0, 0, false),
+        (0b110, 0, false),
+        (0b111, 1, true),
+    ] {
+        let got = as_pid(SYS_SIGNAL_REGISTER, args(0x4000, flags, 0));
+        if got != answer || signal::trampoline_frame(pid) != Some((0x4000, extended)) {
+            serial_println!(
+                "[syscall]   register(0x4000, {:#b}) answered {}, registry {:?}",
+                flags,
+                got,
+                signal::trampoline_frame(pid)
+            );
+            return fail("SYS_SIGNAL_REGISTER's answer or record", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_REGISTER, args(0, SIGNAL_FRAME_SIGINFO, 0)) != 0
+        || signal::trampoline_frame(pid).is_some()
+        || signal::extended_frame(pid)
+    {
+        return fail("unregistering honours nothing and keeps nothing", &pids);
+    }
+    // A trampoline makes a post pending (`Deliver`) instead of the default
+    // action, so each send below can be read back.
+    if as_pid(SYS_SIGNAL_REGISTER, args(0x4000, SIGNAL_FRAME_SIGINFO, 0)) != 1 {
+        return fail("re-registering for the sends", &pids);
+    }
+
+    // sigqueue: SI_QUEUE, the caller as sender, the value.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, SIGUSR1, VALUE)) != 0 {
+        return fail("sigqueue to itself refused", &pids);
+    }
+    match signal::take_deliverable_info(pid) {
+        Some((10, info))
+            if info.code == si_code::SI_QUEUE
+                && u64::from(info.sender_pid) == pid
+                && info.value == VALUE => {}
+        other => {
+            serial_println!("[syscall]   sigqueue posted {:?}", other);
+            return fail("sigqueue's record", &pids);
+        }
+    }
+    // Its probe posts nothing; a group is no process; a bad number is caught
+    // once the target is known to exist.
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 0, 5)) != 0 || signal::pending(pid) != 0 {
+        return fail("sigqueue's signal 0", &pids);
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let minus_five = (-5i64) as u64;
+    for group in [0, minus_five] {
+        if as_pid(SYS_SIGNAL_QUEUE, args(group, SIGUSR1, 0)) != code(KernelError::NoSuchProcess) {
+            return fail("sigqueue to a group", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_QUEUE, args(pid, 65, 0)) != code(KernelError::InvalidArgument) {
+        return fail("sigqueue's signal 65", &pids);
+    }
+
+    // tgkill: this task counts as a thread of `pid` for the test.
+    if as_pid(SYS_SIGNAL_TGKILL, args(pid, me, SIGUSR2)) != 0 {
+        return fail("tgkill to its own thread refused", &pids);
+    }
+    match signal::take_deliverable_info(pid) {
+        Some((12, info)) if info.code == si_code::SI_TKILL && u64::from(info.sender_pid) == pid => {
+        }
+        other => {
+            serial_println!("[syscall]   tgkill posted {:?}", other);
+            return fail("tgkill's record", &pids);
+        }
+    }
+    if as_pid(SYS_SIGNAL_TGKILL, args(stranger, me, SIGUSR2)) != code(KernelError::NoSuchProcess) {
+        return fail("tgkill named a thread of another process", &pids);
+    }
+    for (tgid, tid) in [(0, me), (pid, 0)] {
+        if as_pid(SYS_SIGNAL_TGKILL, args(tgid, tid, SIGUSR2)) != code(KernelError::InvalidArgument)
+        {
+            return fail("tgkill with an id not above zero", &pids);
+        }
+    }
+
+    // SYS_SIGNAL_SEND's single-process probe.
+    if as_pid(SYS_SIGNAL_SEND, args(pid, 0, 0)) != 0 || signal::pending(pid) != 0 {
+        return fail("kill(pid, 0) is a probe", &pids);
+    }
+
+    // Authority: `stranger` is not `pid`'s child, whichever way it is asked.
+    signal::register_trampoline(stranger, 0x4000);
+    for (what, nr, a) in [
+        ("kill", SYS_SIGNAL_SEND, args(stranger, SIGUSR1, 0)),
+        ("kill's probe", SYS_SIGNAL_SEND, args(stranger, 0, 0)),
+        ("sigqueue", SYS_SIGNAL_QUEUE, args(stranger, SIGUSR1, 1)),
+    ] {
+        if as_pid(nr, a) != code(KernelError::PermissionDenied) {
+            serial_println!("[syscall]   {} to a stranger was not refused", what);
+            return fail("a send without authority", &pids);
+        }
+    }
+    if signal::pending(stranger) != 0 {
+        return fail("a refused send posted anyway", &pids);
+    }
+    // The kernel's own signal needs no authority: raised on `pid`'s thread, it
+    // still reaches `stranger`, from the kernel.
+    #[allow(clippy::cast_possible_truncation)]
+    let posted = self_test_as_process(pid, || {
+        handlers::post_kernel_signal(stranger, SIGUSR1 as u32)
+    });
+    if posted.is_err() {
+        return fail("a kernel signal was refused", &pids);
+    }
+    match signal::take_deliverable_info(stranger) {
+        Some((10, info)) if info.code == si_code::SI_KERNEL && info.sender_pid == 0 => {}
+        other => {
+            serial_println!("[syscall]   kernel signal posted {:?}", other);
+            return fail("a kernel signal's record", &pids);
+        }
+    }
+
+    cleanup(&pids);
+    serial_println!(
+        "[syscall]   signal frame flags, SYS_SIGNAL_QUEUE (1086), SYS_SIGNAL_TGKILL (1087), \
+         authority: OK"
+    );
     Ok(())
 }
 

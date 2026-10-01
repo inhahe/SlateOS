@@ -229,6 +229,76 @@ pub struct SignalContext {
 /// Size of the signal context in bytes (17 × 8 = 136).
 pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
 
+/// What follows the [`SignalContext`] in the **extended** native signal frame:
+/// the signal's `siginfo`, for a process that asked for it with
+/// `SYS_SIGNAL_REGISTER`'s `SIGNAL_FRAME_SIGINFO` flag.
+///
+/// # ABI
+///
+/// Part of the userspace ABI, at `ctx + 136`; fields must not be reordered or
+/// resized. The context before it is unchanged, so `SYS_SIGNAL_RETURN` and a
+/// libc that never asked read the frame exactly as before. 160 bytes in all,
+/// which keeps the context's 16-byte alignment and the fake return slot below
+/// it where they were (`requests/d-a-put-each-signal-s-siginfo-in-the-native-
+/// frame.md`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalInfoTail {
+    /// `si_code`: the sender class ([`si_code`]).
+    pub si_code: i32,
+    /// `si_pid`: the sender, or for `SIGCHLD` the child.
+    pub si_pid: u32,
+    /// `si_uid`: the sender's real uid, or the child's.
+    pub si_uid: u32,
+    /// Zero.
+    pub pad: u32,
+    /// `si_value` for `SI_QUEUE`; for `SIGCHLD`, `si_status` (the exit status
+    /// or the signal), which shares its offset in `siginfo_t`.
+    pub si_value: u64,
+}
+
+/// Size of the extended frame: the context and the tail (136 + 24 = 160).
+pub const SIGNAL_FRAME_EXTENDED_SIZE: usize =
+    SIGNAL_CONTEXT_SIZE + core::mem::size_of::<SignalInfoTail>();
+
+const _: () = assert!(core::mem::size_of::<SignalInfoTail>() == 24);
+const _: () = assert!(SIGNAL_FRAME_EXTENDED_SIZE == 160);
+// The offsets libc reads, as `SYS_SIGNAL_REGISTER`'s docs give them (frame
+// offset = 136 + these).
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_code) == 0);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_pid) == 4);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_uid) == 8);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, pad) == 12);
+const _: () = assert!(core::mem::offset_of!(SignalInfoTail, si_value) == 16);
+
+/// Where a native signal frame of `frame_size` bytes goes on a stack whose top
+/// is `base`: the context's address -- 16-byte aligned, the frame below
+/// `base` -- and the handler's `rsp`, the fake return slot 8 bytes under the
+/// context, so that `rsp % 16 == 8` at entry as the SysV convention has it.
+///
+/// The tail of the extended frame lies above the context, so both forms put
+/// the context and the return slot in the same relation; only how far below
+/// `base` differs.
+#[must_use]
+pub const fn frame_placement(base: u64, frame_size: u64) -> (u64, u64) {
+    let ctx_addr = base.wrapping_sub(frame_size) & !0xF;
+    (ctx_addr, ctx_addr.wrapping_sub(8))
+}
+
+impl SignalInfoTail {
+    /// The tail for a delivered signal's record.
+    #[must_use]
+    pub const fn from_info(info: &SigInfo) -> Self {
+        Self {
+            si_code: info.code,
+            si_pid: info.sender_pid,
+            si_uid: info.sender_uid,
+            pad: 0,
+            si_value: info.value,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-process signal state
 // ---------------------------------------------------------------------------
@@ -251,6 +321,16 @@ pub mod si_code {
     pub const SI_TKILL: i32 = -6;
     /// `SIGCHLD`: child exited normally (`si_code = CLD_EXITED`).
     pub const CLD_EXITED: i32 = 1;
+    /// `SIGCHLD`: child was killed by a signal (`si_code = CLD_KILLED`).
+    pub const CLD_KILLED: i32 = 2;
+    /// `SIGCHLD`: child was killed by a signal and left a core file. The
+    /// kernel writes none today, so nothing reports it yet; it is here so that
+    /// a status word with the core bit set has a code to map to.
+    pub const CLD_DUMPED: i32 = 3;
+    /// `SIGCHLD`: child stopped (`si_status` is the stop signal).
+    pub const CLD_STOPPED: i32 = 5;
+    /// `SIGCHLD`: a stopped child continued (`si_status` is `SIGCONT`).
+    pub const CLD_CONTINUED: i32 = 6;
 }
 
 /// Source metadata recorded when a signal is posted, used to fill the Linux
@@ -308,15 +388,34 @@ impl SigInfo {
         }
     }
 
-    /// A `SIGCHLD` for a child that exited normally: `CLD_EXITED` with the
-    /// child's pid as the sender identity (matching Linux's `si_pid`).
+    /// A `SIGCHLD` for a child that ended: `CLD_EXITED` with its exit status,
+    /// or `CLD_KILLED` with the signal that killed it, as `code_and_status`
+    /// gives them; the child's pid and real uid as the sender (Linux's
+    /// `si_pid`/`si_uid`). The status travels in `value`, which `siginfo_t`'s
+    /// `si_status` shares an offset with.
     #[must_use]
-    pub const fn child(child_pid: u32, child_uid: u32) -> Self {
+    pub const fn child(child_pid: u32, child_uid: u32, code_and_status: (i32, i32)) -> Self {
+        let (code, status) = code_and_status;
+        // Reinterpreted, not converted: `si_status` is an `int` at the low
+        // half of `si_value`'s slot.
+        #[allow(clippy::cast_sign_loss)]
+        let value = status as u32 as u64;
         Self {
-            code: si_code::CLD_EXITED,
+            code,
             sender_pid: child_pid,
             sender_uid: child_uid,
-            value: 0,
+            value,
+        }
+    }
+
+    /// A `sigqueue`d signal: `SI_QUEUE` with the sender and its value.
+    #[must_use]
+    pub const fn queued(sender_pid: u32, sender_uid: u32, value: u64) -> Self {
+        Self {
+            code: si_code::SI_QUEUE,
+            sender_pid,
+            sender_uid,
+            value,
         }
     }
 }
@@ -330,6 +429,10 @@ struct SignalState {
     blocked: u64,
     /// Userspace trampoline address (0 = not registered).
     trampoline: u64,
+    /// The trampoline asked for the extended frame -- the context and then
+    /// the signal's `siginfo` ([`SignalInfoTail`]). Goes with the trampoline:
+    /// kept across fork, dropped at exec.
+    extended_frame: bool,
     /// Per-signal source metadata (`siginfo`), indexed by `sig - 1`. A slot is
     /// `Some` only while the corresponding `pending` bit is set: recorded on the
     /// clear→set transition and taken at delivery. Standard-signal coalescing
@@ -370,6 +473,7 @@ impl Default for SignalState {
             pending: 0,
             blocked: 0,
             trampoline: 0,
+            extended_frame: false,
             infos: [None; NSIG as usize],
             saved_sigmask: None,
             altstack_sp: 0,
@@ -576,9 +680,37 @@ pub fn wake_all_waiters(pid: ProcessId) {
 /// `addr == 0` unregisters, reverting to "no asynchronous delivery"
 /// (pending signals stay pending but are not delivered).
 pub fn register_trampoline(pid: ProcessId, addr: u64) {
+    register_trampoline_frame(pid, addr, false);
+}
+
+/// Register a trampoline and say which frame it reads: with `extended`, the
+/// context followed by the signal's `siginfo` ([`SignalInfoTail`]).
+pub fn register_trampoline_frame(pid: ProcessId, addr: u64, extended: bool) {
     with_states(|states| {
-        states.entry(pid).or_default().trampoline = addr;
+        let st = states.entry(pid).or_default();
+        st.trampoline = addr;
+        st.extended_frame = extended && addr != 0;
     });
+}
+
+/// Whether `pid`'s trampoline reads the extended frame.
+#[must_use]
+pub fn extended_frame(pid: ProcessId) -> bool {
+    with_states(|states| states.get(&pid).is_some_and(|s| s.extended_frame))
+}
+
+/// `pid`'s trampoline and whether it reads the extended frame, or `None` with
+/// no trampoline. Read together, so that a thread re-registering while
+/// another's signal is delivered cannot pair one registration's trampoline
+/// with the other's frame.
+#[must_use]
+pub fn trampoline_frame(pid: ProcessId) -> Option<(u64, bool)> {
+    with_states(|states| {
+        states
+            .get(&pid)
+            .filter(|s| s.trampoline != 0)
+            .map(|s| (s.trampoline, s.extended_frame))
+    })
 }
 
 /// Record a process's alternate signal stack and the set of signals allowed to
@@ -686,6 +818,9 @@ pub fn on_exec(pid: ProcessId) {
     with_states(|states| {
         if let Some(state) = states.get_mut(&pid) {
             state.trampoline = 0;
+            // The new image registers its own trampoline, and says then which
+            // frame it reads.
+            state.extended_frame = false;
             // An alternate signal stack is NOT preserved across execve (see
             // sigaltstack(2)), and here it must not be: the address named a
             // buffer in the old image's address space, which has just been
@@ -716,11 +851,12 @@ pub fn on_exec(pid: ProcessId) {
 /// there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
     with_states(|states| {
-        let (blocked, trampoline, alt_sp, alt_size, onstack) =
-            states.get(&parent).map_or((0, 0, 0, 0, 0), |s| {
+        let (blocked, trampoline, extended_frame, alt_sp, alt_size, onstack) =
+            states.get(&parent).map_or((0, 0, false, 0, 0, 0), |s| {
                 (
                     s.blocked,
                     s.trampoline,
+                    s.extended_frame,
                     s.altstack_sp,
                     s.altstack_size,
                     s.onstack_mask,
@@ -740,6 +876,8 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 pending: 0,
                 blocked,
                 trampoline,
+                // The trampoline's frame goes with it.
+                extended_frame,
                 // POSIX: the child starts with no pending signals, so no
                 // per-signal siginfo records carry over.
                 infos: [None; NSIG as usize],
@@ -1181,8 +1319,9 @@ pub fn self_test() -> KernelResult<()> {
     test_take_all_waiters()?;
     test_siginfo_record()?;
     test_altstack_placement()?;
+    test_extended_frame()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (14 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (15 tests)");
     Ok(())
 }
 
@@ -1368,6 +1507,141 @@ fn test_siginfo_record() -> KernelResult<()> {
 
     remove(p);
     serial_println!("[signal]   siginfo record/deliver/coalesce: OK");
+    Ok(())
+}
+
+/// The extended native frame
+/// (`requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md`): which
+/// frame a trampoline reads, how that travels with it, where the frame goes,
+/// and the records the tail is filled from -- `SIGCHLD`'s status and
+/// `sigqueue`'s value among them.
+fn test_extended_frame() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 12;
+    let child = TEST_PID_BASE + 13;
+
+    // The choice goes with the trampoline.
+    register_trampoline_frame(p, 0x4000, true);
+    check(extended_frame(p), "registered with the flag -> extended")?;
+    check(
+        trampoline_frame(p) == Some((0x4000, true)),
+        "trampoline and frame read together",
+    )?;
+    inherit_for_fork(p, child);
+    check(
+        trampoline_frame(child) == Some((0x4000, true)),
+        "a fork keeps the trampoline's frame",
+    )?;
+    on_exec(child);
+    check(
+        !extended_frame(child) && trampoline_frame(child).is_none(),
+        "exec drops the trampoline and its frame",
+    )?;
+    register_trampoline(p, 0x5000);
+    check(
+        trampoline_frame(p) == Some((0x5000, false)),
+        "registering without the flag -> short frame",
+    )?;
+    register_trampoline_frame(p, 0, true);
+    check(
+        !extended_frame(p) && trampoline_frame(p).is_none(),
+        "unregistering cannot leave an extended frame behind",
+    )?;
+
+    // Placement: the context 16-byte aligned, the frame below the top with
+    // less than 16 bytes of slack, the return slot 8 below the context.
+    for base in [0x7fff_0000u64, 0x7fff_0008, 0x7fff_fff7] {
+        for size in [
+            SIGNAL_CONTEXT_SIZE as u64,
+            SIGNAL_FRAME_EXTENDED_SIZE as u64,
+        ] {
+            let (ctx, rsp) = frame_placement(base, size);
+            let end = ctx.wrapping_add(size);
+            check(ctx % 16 == 0, "context 16-byte aligned")?;
+            check(
+                rsp == ctx.wrapping_sub(8) && rsp % 16 == 8,
+                "return slot 8 below",
+            )?;
+            check(
+                end <= base && base.wrapping_sub(end) < 16,
+                "frame just below the top",
+            )?;
+        }
+    }
+
+    // The tail is the record, field for field.
+    let q = SigInfo::queued(77, 1000, 0x1234_5678_9abc_def0);
+    check(
+        SignalInfoTail::from_info(&q)
+            == SignalInfoTail {
+                si_code: si_code::SI_QUEUE,
+                si_pid: 77,
+                si_uid: 1000,
+                pad: 0,
+                si_value: 0x1234_5678_9abc_def0,
+            },
+        "sigqueue's tail",
+    )?;
+    check(
+        SignalInfoTail::from_info(&SigInfo::kernel()).si_code == si_code::SI_KERNEL,
+        "a kernel signal's tail says SI_KERNEL",
+    )?;
+
+    // SIGCHLD carries how the child ended, as wait reports it.
+    use crate::proc::pcb::{CrashInfo, ExitInfo, JobControlEvent};
+    let exited = ExitInfo {
+        exit_code: 3,
+        crash: None,
+    };
+    let killed = ExitInfo {
+        exit_code: 128 + 9,
+        crash: None,
+    };
+    let crashed = ExitInfo {
+        exit_code: crate::proc::pcb::crash_exit_code(8),
+        crash: Some(CrashInfo {
+            exception_code: 8,
+            faulting_rip: 0,
+            aux: 0,
+            thread_id: 0,
+        }),
+    };
+    check(
+        exited.sigchld_code_and_status() == (si_code::CLD_EXITED, 3),
+        "exit 3 -> CLD_EXITED, 3",
+    )?;
+    check(
+        killed.sigchld_code_and_status() == (si_code::CLD_KILLED, 9),
+        "killed by 9 -> CLD_KILLED, 9",
+    )?;
+    check(
+        crashed.sigchld_code_and_status() == (si_code::CLD_KILLED, 11),
+        "a crash -> CLD_KILLED, SIGSEGV (no core file is written)",
+    )?;
+    check(
+        JobControlEvent::Stopped(SIGTSTP).sigchld_code_and_status() == (si_code::CLD_STOPPED, 20),
+        "stopped by SIGTSTP -> CLD_STOPPED, 20",
+    )?;
+    check(
+        JobControlEvent::Continued.sigchld_code_and_status() == (si_code::CLD_CONTINUED, 18),
+        "continued -> CLD_CONTINUED, SIGCONT",
+    )?;
+    let chld = SigInfo::child(42, 1000, killed.sigchld_code_and_status());
+    check(
+        chld.code == si_code::CLD_KILLED
+            && chld.sender_pid == 42
+            && chld.sender_uid == 1000
+            && chld.value == 9,
+        "SIGCHLD's record: code, child, uid, status in the value",
+    )?;
+    // si_status is an int: a negative one is reinterpreted, not widened.
+    check(
+        SigInfo::child(42, 0, (si_code::CLD_EXITED, -1)).value == 0xFFFF_FFFF,
+        "si_status fills the low half of the value slot",
+    )?;
+
+    remove(p);
+    remove(child);
+    serial_println!("[signal]   extended frame, its placement and records: OK");
     Ok(())
 }
 

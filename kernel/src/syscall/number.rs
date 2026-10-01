@@ -2070,9 +2070,41 @@ pub const SYS_PROCESS_SET_NICE: u64 = 532;
 /// invoked as `trampoline(signum: u64 /* rdi */, ctx: *mut SignalContext
 /// /* rsi */)`.
 ///
-/// Returns: 0 on success, negative `KernelError` code on failure (e.g.
-/// the caller is not associated with a process).
+/// `arg1`: frame flags. [`SIGNAL_FRAME_SIGINFO`] asks for the extended frame:
+/// the `SignalContext` followed by the signal's `siginfo`
+/// (`proc::signal::SignalInfoTail`). Other bits are ignored, so that a libc
+/// built for a later kernel can ask for more and read from the answer what it
+/// got.
+///
+/// Returns: the flags the kernel will honour -- [`SIGNAL_FRAME_SIGINFO`] when
+/// it will build the extended frame, 0 otherwise (always 0 when unregistering;
+/// and 0 from every kernel before 2026-10-01, which ignored `arg1`, so libc
+/// can tell an older kernel by the answer and keep reading the short frame).
+/// Negative `KernelError` code on failure (e.g. the caller is not associated
+/// with a process). The choice goes with the trampoline: kept across `fork`,
+/// dropped at `exec` (`requests/d-a-put-each-signal-s-siginfo-in-the-native-
+/// frame.md`).
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
+
+/// [`SYS_SIGNAL_REGISTER`]'s `arg1` bit asking for the extended signal frame.
+///
+/// The frame is then `SIGNAL_FRAME_EXTENDED_SIZE` (160) bytes: today's 136-byte
+/// `SignalContext`, unchanged and still all `SYS_SIGNAL_RETURN` reads,
+/// followed at offset 136 by
+///
+/// ```text
+/// 136  si_code   i32   SI_USER, SI_QUEUE, SI_TKILL, SI_KERNEL, CLD_*, ...
+/// 140  si_pid    u32   the sender -- for SIGCHLD the child; 0 from the kernel
+/// 144  si_uid    u32   the sender's real uid -- for SIGCHLD the child's
+/// 148  (pad)     u32   0
+/// 152  si_value  u64   sigqueue's value; for SIGCHLD the child's si_status
+///                      (exit status, or the signal that killed it)
+/// ```
+///
+/// The context stays 16-byte aligned and the fake return slot stays 8 bytes
+/// below it, so a trampoline written for the short frame runs unchanged on
+/// the long one.
+pub const SIGNAL_FRAME_SIGINFO: u64 = 1;
 
 /// Post a signal to a target process's pending set, or to every member of
 /// a process group.
@@ -2092,17 +2124,24 @@ pub const SYS_SIGNAL_REGISTER: u64 = 522;
 /// target has no trampoline registered, the kernel applies the default
 /// action (terminating signals kill the process; others are dropped).
 ///
-/// For the group forms the membership is resolved *before* the signal
-/// number is validated, so signalling a group that does not exist reports
+/// The target is resolved *before* the signal number is validated, so
+/// signalling a process or group that does not exist reports
 /// `NoSuchProcess` even when the signal number is also bad — the same
 /// ordering Linux's `kill_something_info` uses, and the more useful
-/// diagnostic (the caller learns the group is gone).  Delivery to the
-/// members is best-effort: the call succeeds if *any* member accepted the
-/// signal, and otherwise reports the last member's error.
+/// diagnostic (the caller learns the target is gone).  Delivery to a
+/// group's members is best-effort: the call succeeds if *any* member
+/// accepted the signal, and otherwise reports the last member's error.
+///
+/// Authority, per target: the caller itself, its child, any process for a
+/// kernel task, or a process the caller holds a Process capability with
+/// DELETE rights for. Signal 0 checks all of that and posts nothing -- for a
+/// single process as well as a group since 2026-10-01; before, a single
+/// process refused it with `InvalidArgument`, contrary to this page.
 ///
 /// Returns: 0 on success, negative `KernelError` code on failure
-/// (`NoSuchProcess` if the PID or group is unknown, `InvalidArgument` for
-/// an out-of-range signal number).
+/// (`NoSuchProcess` if the PID or group is unknown, `ProcessExited` for a
+/// zombie, `InvalidArgument` for an out-of-range signal number,
+/// `PermissionDenied` without the authority above).
 pub const SYS_SIGNAL_SEND: u64 = 523;
 
 /// Return from a signal handler (sigreturn).
@@ -5629,6 +5668,51 @@ pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
 ///
 /// Chosen number 1085, next free slot after 1084.
 pub const SYS_THREAD_JOIN_TIMEOUT: u64 = 1085;
+
+// ---------------------------------------------------------------------------
+// Sending a signal with a value, and to a thread (1086-1087)
+// ---------------------------------------------------------------------------
+
+/// Send a signal carrying a value: `signal_queue(pid, sig, value) -> 0`, the
+/// native `sigqueue(3)`.
+///
+/// The target receives `si_code = SI_QUEUE`, the caller's pid and real uid as
+/// the sender, and `value` as `si_value` -- in the extended frame
+/// ([`SIGNAL_FRAME_SIGINFO`]), and in the Linux `rt_sigframe` for a Linux-ABI
+/// target. Before it, a native `sigqueue` had only [`SYS_SIGNAL_SEND`], which
+/// carries no value.
+///
+/// `sigqueue`'s rules: `pid` is one process, never a group, so anything not
+/// above zero answers `NoSuchProcess` (Linux's `ESRCH` for the same call).
+/// Then, in Linux's order: `NoSuchProcess` for no such process,
+/// `ProcessExited` for a zombie, `InvalidArgument` for a signal outside
+/// `0..=64`, `PermissionDenied` without [`SYS_SIGNAL_SEND`]'s authority.
+/// Signal 0 checks all of that and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 4.
+/// Chosen number 1086, next free slot after 1085.
+pub const SYS_SIGNAL_QUEUE: u64 = 1086;
+
+/// Send a signal to a thread of a process: `signal_tgkill(tgid, tid, sig) ->
+/// 0`, the native `tgkill(2)`.
+///
+/// Checks that thread `tid` belongs to process `tgid` and posts in the same
+/// step, so that a thread id reused since the caller learnt it cannot carry
+/// the signal into another process. The target receives `si_code = SI_TKILL`
+/// and the caller's pid and real uid. The signal goes to the process, as
+/// every signal does here -- whichever of its threads next returns to
+/// userspace runs it; per-thread pending sets are a later step.
+///
+/// Errors in Linux's order: `InvalidArgument` for a `tgid` or `tid` not above
+/// zero; `NoSuchProcess` when `tid` is not a thread of `tgid`; then as
+/// [`SYS_SIGNAL_QUEUE`] for the process (zombie, signal number, authority).
+/// The check is the kernel's and needs no capability: libc's had to look in
+/// `/proc/<tgid>/task/<tid>`, which a process with no File capability may
+/// not. Signal 0 checks and posts nothing.
+///
+/// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 5.
+/// Chosen number 1087, next free slot after 1086.
+pub const SYS_SIGNAL_TGKILL: u64 = 1087;
 
 // ---------------------------------------------------------------------------
 // Version info

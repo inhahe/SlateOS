@@ -10,9 +10,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**467 programs; 88 on the image, 6 carried inside the kernel.**
+**466 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 312
+## Userland utilities and services (`userspace/`, lane B) -- 311
 
 | Program | What it does | On image | Crate | Also answers to |
 |---|---|---|---|---|
@@ -111,7 +111,6 @@ two disagree.
 | `getty` | Virtual terminal login manager (agetty/mingetty) |  |  | `mingetty` |
 | `grep` | Select the lines of its input that match a pattern. | yes | `coreutils` |  |
 | `groups` | Print the groups a user is in. |  | `coreutils` |  |
-| `grub2` | GRUB bootloader management utility. |  |  | `grub-editenv`, `grub-install`, `grub-mkconfig`, `grub-probe`, `grub-reboot`, `grub-set-default`, `update-grub` |
 | `gzip` | Gzip/gunzip/zcat compression utility. |  |  | `gunzip`, `gzcat`, `zcat` |
 | `hardlink` | File deduplication utility. |  |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |

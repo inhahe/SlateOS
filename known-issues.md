@@ -2345,7 +2345,7 @@ image yet: that is lane D's
 manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
 
 **UPDATE 2026-10-01: the §1045 triage has begun, and the ledger stands at
-125.** The operator's rule (B-Q11, design-decisions §1045): each name is
+118.** The operator's rule (B-Q11, design-decisions §1045): each name is
 decided on its own; a name for a subsystem SlateOS does not have is deleted
 (§1006), and with it the crate when its own program is the same kind; a name
 that is kept is installed as the same file. First settled, as whole crates:
@@ -2354,12 +2354,24 @@ that is kept is installed as the same file. First settled, as whole crates:
 Linux security module and none is planned (its security is capabilities), so
 every command acted on `/sys/kernel/security/apparmor` or `/sys/fs/selinux`,
 neither of which exists, and `apparmor_parser`'s load was a comment where the
-write would be. `grub2` is *not* in this batch, although it looked like it:
-design.txt (lines 1237-1243) plans for SlateOS to live beside a Linux GRUB on
-dual-boot machines, so its file-editing commands (`grub-editenv`,
-`grub-set-default`, `grub-reboot`) may have a purpose there while
-`grub-install` (which prints the EFI binary it "would" write) has none; it is
-judged command by command next.
+write would be. Then **`userspace/grub2`** (`grub-install`, `grub-mkconfig`,
+`grub-probe`, `grub-set-default`, `grub-reboot`, `grub-editenv`,
+`update-grub`), judged command by command because design.txt (lines
+1237-1243) plans for SlateOS to live beside a Linux GRUB on dual-boot
+machines -- and deleted, because that plan is already met elsewhere: SlateOS
+boots with Limine, and adding it to another OS's GRUB is the installer's
+(`apps/installer`, `--grub-detect/--grub-add/--grub-update/--grub-remove`,
+which knows where that GRUB's files are). None of the seven served it.
+`grub-install` wrote no bootloader image (it said so, and exited 0);
+`grub-mkconfig` and `update-grub` built a menu from Linux kernels in SlateOS's
+own `/boot`, where there are none; `grub-set-default` and `grub-reboot` wrote
+`/boot/grub/grubenv` on SlateOS's disk, which no bootloader reads, and said
+the default had been set; `grub-probe` names devices the way only a GRUB
+config needs; `grub-editenv`, the one that did real work, edited a file
+GRUB's way but printed what GRUB's does not. If "boot the other system once"
+is ever wanted, it belongs in the installer's GRUB code, by setting
+`next_entry` in the grubenv it has found, with GRUB's own `grub-editenv`
+ported if a command is wanted too. The ledger is 118 after the three crates.
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:

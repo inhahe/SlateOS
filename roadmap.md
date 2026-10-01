@@ -5663,7 +5663,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] eject/volname: removable media control (tray open/close/toggle, lock/unlock, ISO 9660 volume name, speed control)
   - [x] sar/iostat/mpstat/pidstat/cifsiostat/tapestat: system activity monitoring (CPU/memory/disk/network/per-process, 3526 lines, 153 tests)
   - [x] auditctl/auditd/ausearch/aureport/autrace: security audit framework (rule management, log search/report, 4069 lines, 207 tests)
-  - [x] grub-install/grub-mkconfig/grub-editenv/grub-probe/update-grub: GRUB2 bootloader tools (EFI/BIOS detection, kernel scanning, env blocks, 3121 lines, 158 tests)
+  - [ ] grub-install/grub-mkconfig/grub-editenv/grub-probe/update-grub: GRUB2 bootloader tools (EFI/BIOS detection, kernel scanning, env blocks, 3121 lines, 158 tests) -- **deleted 2026-10-01** (design-decisions §1045, §1006): SlateOS boots with Limine, and its part in a dual-boot GRUB is the installer's (`apps/installer` `--grub-*`); `grub-install` wrote no bootloader, and `grub-set-default`/`grub-reboot` wrote a grubenv no bootloader reads
   - [x] sudo/sudoedit/visudo/sudoreplay: privilege escalation (sudoers parsing, timestamp caching, env handling, 4391 lines)
   - [x] nft/nft-list: nftables packet filtering (tables/chains/rules/sets/maps, inet/ip/ip6/bridge families, 5040 lines)
   - [x] upower/upowerd: power/battery management (11 device types, battery properties, history tracking, 2789 lines, 128 tests)

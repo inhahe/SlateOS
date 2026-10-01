@@ -1479,14 +1479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grub2"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
-]
-
-[[package]]
 name = "guiremote"
 version = "0.1.0"
 dependencies = [

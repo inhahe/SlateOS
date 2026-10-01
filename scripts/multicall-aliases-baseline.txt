@@ -43,13 +43,6 @@ firejail:firecfg
 firejail:firemon
 fwupd:fwupdtool
 getty:mingetty
-grub2:grub-editenv
-grub2:grub-install
-grub2:grub-mkconfig
-grub2:grub-probe
-grub2:grub-reboot
-grub2:grub-set-default
-grub2:update-grub
 gzip:gunzip
 gzip:gzcat
 gzip:zcat

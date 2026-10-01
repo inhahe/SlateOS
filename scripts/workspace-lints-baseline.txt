@@ -73,7 +73,6 @@ userspace/fw
 userspace/fwupd  # bare deny(clippy::all)
 userspace/getent  # bare deny(clippy::all)
 userspace/getty
-userspace/grub2  # bare deny(clippy::all)
 userspace/gzip
 userspace/hardlink  # bare deny(clippy::all)
 userspace/hexdump

@@ -36,6 +36,25 @@
 
 use core::ffi::c_void;
 
+/// A function argp calls through a pointer, defined `extern "C"` -- and
+/// `C-unwind` in the host tests, whose exits unwind through it
+/// (`exit_now`). Not `C-unwind` on the target: the library is built to
+/// abort, and there a call that may unwind gets a landing pad that aborts
+/// if it does, which names a personality routine, `rust_eh_personality`
+/// -- which nothing a C program links defines (check-libc-shape.py's
+/// CHECK 6). The types such a function is called through are paired the
+/// same way: `ArgpParserFn`, `ArgpHelpFilterFn`, `ArgpVersionHookFn`.
+macro_rules! callback {
+    ($(#[$m:meta])* $vis:vis unsafe fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block) => {
+        $(#[$m])*
+        #[cfg(not(test))]
+        $vis unsafe extern "C" fn $name($($arg: $ty),*) $(-> $ret)? $body
+        $(#[$m])*
+        #[cfg(test)]
+        $vis unsafe extern "C-unwind" fn $name($($arg: $ty),*) $(-> $ret)? $body
+    };
+}
+
 mod fmt;
 mod help;
 mod parse;
@@ -63,15 +82,32 @@ pub struct ArgpOption {
 }
 
 /// The parser function: a key, its argument, the parse state; 0, an
-/// `errno` value, or `ARGP_ERR_UNKNOWN`. Called as C-unwind, which a C
-/// function is, so that a test's parser may end the parse as `exit` does.
+/// `errno` value, or `ARGP_ERR_UNKNOWN`. (`C-unwind` in the host tests, so
+/// that a test's parser may end the parse as `exit` does: `callback!`.)
+#[cfg(not(test))]
+pub type ArgpParserFn = unsafe extern "C" fn(key: i32, arg: *mut u8, state: *mut ArgpState) -> i32;
+/// The parser function, as the host tests have it (above).
+#[cfg(test)]
 pub type ArgpParserFn =
     unsafe extern "C-unwind" fn(key: i32, arg: *mut u8, state: *mut ArgpState) -> i32;
 
 /// The help filter: a key, the text argp would print, the argp's input;
 /// the text to print -- the same, a new `malloc`ed one, or NULL for none.
+#[cfg(not(test))]
+pub type ArgpHelpFilterFn =
+    unsafe extern "C" fn(key: i32, text: *const u8, input: *mut c_void) -> *mut u8;
+/// The help filter, as the host tests have it (above).
+#[cfg(test)]
 pub type ArgpHelpFilterFn =
     unsafe extern "C-unwind" fn(key: i32, text: *const u8, input: *mut c_void) -> *mut u8;
+
+/// `argp_program_version_hook`'s function: the stream to print the
+/// version on, and the state.
+#[cfg(not(test))]
+pub type ArgpVersionHookFn = unsafe extern "C" fn(stream: *mut u8, state: *mut ArgpState);
+/// The version hook, as the host tests have it (above).
+#[cfg(test)]
+pub type ArgpVersionHookFn = unsafe extern "C-unwind" fn(stream: *mut u8, state: *mut ArgpState);
 
 /// `struct argp`.
 #[repr(C)]
@@ -227,9 +263,7 @@ pub use gnu_argp_pv::argp_program_version;
 mod gnu_argp_pvh {
     /// Called for `--version` instead, with the stream and the state.
     #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-    pub static mut argp_program_version_hook: Option<
-        unsafe extern "C-unwind" fn(stream: *mut u8, state: *mut super::ArgpState),
-    > = None;
+    pub static mut argp_program_version_hook: Option<super::ArgpVersionHookFn> = None;
 }
 pub use gnu_argp_pvh::argp_program_version_hook;
 
@@ -256,7 +290,7 @@ fn version() -> *const u8 {
     unsafe { (&raw const argp_program_version).read() }
 }
 
-fn version_hook() -> Option<unsafe extern "C-unwind" fn(*mut u8, *mut ArgpState)> {
+fn version_hook() -> Option<ArgpVersionHookFn> {
     // SAFETY: as above.
     unsafe { (&raw const argp_program_version_hook).read() }
 }

@@ -43947,6 +43947,17 @@ twenty-six parsers, replayed by `posix/src/argp/tests.rs`):
   glibc's own answer for the same entry marked `OPTION_NO_USAGE`.
 - *`ARGP_HELP_FMT` is read at each message*, where glibc's reads it once a
   process; a program that changes it between two messages sees the change.
+- *A C++ exception thrown from a parser, a help filter or the version
+  hook* ends the program (`std::terminate`), as one thrown from any of
+  this library's callbacks does: built to abort, the library has no
+  unwind tables for its frames, so the unwinder cannot pass through them.
+  glibc builds argp with `-fexceptions`, and there the exception reaches
+  a `catch` around `argp_parse`. (Calling them as `C-unwind` would not
+  change that: built to abort, such a call gets a landing pad that
+  aborts, and the pad names a personality routine that nothing a C
+  program links defines. The first build did so, and `services/ctest-argp`
+  failed to link; `scripts/check-libc-shape.py`'s CHECK 6 now refuses an
+  archive with a member that needs a name nothing supplies.)
 
 **Archive members.** The four variables -- `argp_program_version`,
 `argp_program_version_hook`, `argp_program_bug_address`,

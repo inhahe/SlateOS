@@ -47,7 +47,7 @@ moment we are trying to port something, which is the worst possible time and
 the furthest possible point from the change that caused it.
 
 Hence an assertion on the artifact itself. It is cheap: it reads the archive's
-symbol index, and for CHECKs 4 and 5 the members' own symbol tables.
+symbol index, and for CHECKs 4 to 6 the members' own symbol tables.
 
 A MEMBER IS EXTRACTED FOR ANY NAME IT DEFINES -- SEE CHECK 5
 =============================================================
@@ -60,6 +60,17 @@ using `warn` extracted `error`'s member -- and with gnulib's own `error`
 linked in beside it, got two. CHECK 5 is the other half of the property: no
 member outside a family refers to anything the family's member defines but
 the family's own names.
+
+A NAME A MEMBER NEEDS MUST BE THERE -- SEE CHECK 6
+==================================================
+
+The same extraction, the other way round: a member a program extracts brings
+its own references into the link, and each must be defined somewhere in the
+archive or supplied by the link. One that is not fails the link of every
+program reaching that member, and no other -- so the archive builds, the
+library's own tests pass, and the first C program to call the function finds
+out. `services/ctest-argp` found out on 2026-10-01: two members referred to
+`rust_eh_personality`, which a library built to abort defines nowhere.
 
 GRANULARITY IS NOT THE WHOLE STORY -- SEE CHECK 3
 =================================================
@@ -148,10 +159,11 @@ for _stream in (sys.stdout, sys.stderr):
 
 # --- what we assert -----------------------------------------------------------
 #
-# Five checks. The first three are about which names share a member, and
+# Six checks. The first three are about which names share a member, and
 # they fail for different reasons and generalise differently; CHECK 4, below
 # them, is about names that must be one variable; CHECK 5 about what else
-# can bring a family's member into a link.
+# can bring a family's member into a link; CHECK 6 about whether what a
+# member needs can be found at all.
 #
 # CHECK 1 (strict, narrow): for each family below, the member defining it must
 # define *nothing else*. This is the exact property glibc has, and it is the
@@ -469,6 +481,29 @@ ALIASES: list[tuple[str, ...]] = [
 # (A member that only the family's member itself pulls in would be a false
 # alarm; none exists, and one that did would be worth knowing about anyway.)
 
+# CHECK 6: every name a member refers to is one the link can find.
+#
+# A member's strong undefined symbol is a name the link has to resolve: by
+# extracting the member of the archive that defines it, or from what the link
+# supplies itself. A name with neither fails the link of each program that
+# extracts the member -- and only of those, so the archive builds and passes
+# everything that does not reach the member.
+#
+# Measured 2026-10-01 on the archive with argp in: two members referred to
+# `rust_eh_personality`, and `services/ctest-argp` failed to link. Under
+# panic=abort, a call through an `extern "C-unwind"` pointer gets a landing
+# pad that aborts if the callee unwinds, and a landing pad names its
+# personality routine -- which a library built to abort does not define, and
+# no C program does either. argp's callbacks are `extern "C"` on the target
+# (posix/src/argp.rs's `callback!`).
+#
+# What the link supplies besides the archive: the program's `main`, which the
+# crt's start calls; and `__ehdr_start`, which the linker defines at the ELF
+# header, and through which the TLS setup finds the program headers
+# (posix/src/tls.rs). A program could supply any name, but a libc that needs
+# the program to define something else for it has a hole in it.
+LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})
+
 #: ELF symbol bindings, as `st_info >> 4` holds them.
 STB_GLOBAL, STB_WEAK = 1, 2
 
@@ -530,6 +565,18 @@ SELFTEST_MUTANTS = [
     ("the family's member reaching itself counts",
      "            hit = sorted(wanted & private[host]) if host != off else []",
      "            hit = sorted(wanted & private[host])"),
+
+    # CHECK 6: does it run, and does it spare what is found -- a name another
+    # member defines, a name the link supplies?
+    ("the unresolved check never runs",
+     "        for name in sorted(elf_strong_references(obj) - defined - LINK_SUPPLIED):\n",
+     "        for name in []:\n"),
+    ("a name another member defines counts as unresolved",
+     "elf_strong_references(obj) - defined - LINK_SUPPLIED",
+     "elf_strong_references(obj) - LINK_SUPPLIED"),
+    ("a name the link supplies counts as unresolved",
+     'LINK_SUPPLIED = frozenset({"main", "__ehdr_start"})',
+     "LINK_SUPPLIED = frozenset()"),
 
     # A breach must be a refusal, not a finding. `run-checker.sh` reads 1 as
     # "the checker found something" and prints a refusal naming code that is
@@ -683,12 +730,43 @@ def elf_strong_references(obj: bytes) -> set[str]:
             if shndx == 0 and name and info >> 4 == STB_GLOBAL}
 
 
+def long_names(data: bytes) -> bytes:
+    """GNU `ar`'s table of long member names: the `//` member's contents, or
+    b"" for an archive without one. It comes among the special members at the
+    front, after the symbol index."""
+    pos = len(AR_MAGIC)
+    while pos + 60 <= len(data):
+        header = data[pos : pos + 60]
+        name = header[0:16].rstrip()
+        if name not in (b"/", b"/SYM64/", b"//"):
+            break
+        try:
+            size = int(header[48:58])
+        except ValueError:
+            break
+        if name == b"//":
+            return data[pos + 60 : pos + 60 + size]
+        pos += 60 + size + size % 2
+    return b""
+
+
 def member_name(path: Path, offset: int) -> str:
-    """Best-effort human name for the member at `offset`, for error messages."""
+    """Best-effort human name for the member at `offset`, for error messages.
+
+    A name longer than 15 characters does not fit a member's header: GNU `ar`
+    keeps it in the `//` member, ended by "/\\n", and the header says
+    `/<offset into it>`. Nearly every member of the real archive is one
+    (`posix-<hash>.posix.<hash>-cgu.0123.rcgu.o`), so this looks it up."""
     try:
         data = path.read_bytes()
-        header = data[offset : offset + 60]
-        return header[0:16].rstrip().rstrip(b"/").decode("utf-8", "replace") or f"@{offset}"
+        raw = data[offset : offset + 16].rstrip()
+        if raw[:1] == b"/" and raw[1:].isdigit():
+            table = long_names(data)
+            start = int(raw[1:])
+            if start < len(table):
+                end = table.find(b"/\n", start)
+                raw = table[start : end if end >= 0 else len(table)]
+        return raw.rstrip(b"/").decode("utf-8", "replace") or f"@{offset}"
     except (OSError, IndexError):
         return f"@{offset}"
 
@@ -862,6 +940,42 @@ def check(path: Path, verbose: bool) -> list[str]:
                 print(f"  ok  {family:<8} -> {member_name(path, host)} is reached by its "
                       f"names alone")
 
+    # --- CHECK 6: every name a member refers to can be found ----------------
+    defined = set().union(*members.values())
+    unresolved: dict[str, list[int]] = {}
+    for off in sorted(members):
+        obj = member_body(data, off)
+        if not obj:
+            continue  # an index-only fixture member, as in CHECK 5
+        for name in sorted(elf_strong_references(obj) - defined - LINK_SUPPLIED):
+            unresolved.setdefault(name, []).append(off)
+    def described(off: int) -> str:
+        """The member's name, and what it defines, which says whose it is: its
+        C names, or else its Rust ones, whose mangling spells the module."""
+        names = (sorted(s for s in members[off] if is_collidable(s))
+                 or sorted(members[off]))
+        shown = ", ".join(names[:3]) + (", ..." if len(names) > 3 else "")
+        return f"{member_name(path, off)}" + (f" (which defines {shown})" if names else "")
+
+    for name, offs in sorted(unresolved.items()):
+        where = "; ".join(described(o) for o in offs[:4])
+        more = f"; and {len(offs) - 4} more" if len(offs) > 4 else ""
+        why = ""
+        if name == "rust_eh_personality":
+            why = (" It is the personality routine a landing pad names, and under "
+                   "panic=abort a call through an `extern \"C-unwind\"` pointer gets one: "
+                   "make such a callback `extern \"C\"` on the target, as posix/src/argp.rs's "
+                   "`callback!` does.")
+        violations.append(
+            f"[unresolved] {name} is referred to by {len(offs)} member(s) -- {where}{more} -- "
+            f"and no member of {path.name} defines it, nor does the link supply it: a "
+            f"program extracting one of them fails to link (\"undefined symbol: {name}\")."
+            f"{why}"
+        )
+    if verbose and not unresolved:
+        print("  ok  every name a member refers to is in the archive or supplied by the "
+              "link")
+
     return violations
 
 
@@ -930,8 +1044,9 @@ def synth_archive(members: list[tuple]) -> bytes:
     """Build a GNU `ar` archive whose symbol index says exactly this.
 
     Each member is `(name, symbols)`, or `(name, symbols, body)` for one whose
-    contents CHECK 4 reads -- an object from `synth_elf`; the rest are empty,
-    only their headers being read.
+    contents CHECKs 4 to 6 read -- an object from `synth_elf`; the rest are
+    empty, only their headers being read. A name longer than 15 characters
+    goes in a `//` member, as GNU `ar` keeps one and as the real archive's are.
 
     Written out here rather than shelled out to `ar` on purpose: this gate's
     subject *is* the archive format, so a fixture produced by the same family
@@ -941,16 +1056,26 @@ def synth_archive(members: list[tuple]) -> bytes:
     """
     all_syms = [s for member in members for s in member[1]]
     index_size = 4 + 4 * len(all_syms) + sum(len(s) + 1 for s in all_syms)
-    pos = len(AR_MAGIC) + 60 + index_size + (index_size % 2)
+
+    # The long names' table, each ended by "/\n"; the header says where.
+    table, header_names = b"", []
+    for member in members:
+        if len(member[0]) > 15:
+            header_names.append(f"/{len(table)}")
+            table += member[0].encode() + b"/\n"
+        else:
+            header_names.append(member[0] + "/")
+    names = (_ar_header("//", len(table)) + table + (b"\n" if len(table) % 2 else b"")
+             if table else b"")
+    pos = len(AR_MAGIC) + 60 + index_size + (index_size % 2) + len(names)
 
     offsets, blobs = [], []
-    for member in members:
-        name = member[0]
+    for member, header_name in zip(members, header_names):
         body = member[2] if len(member) > 2 else b""
         offsets.append(pos)
         # Members start on even offsets: an odd body is padded with "\n".
         pad = b"\n" if len(body) % 2 else b""
-        blobs.append(_ar_header(name + "/", len(body)) + body + pad)
+        blobs.append(_ar_header(header_name, len(body)) + body + pad)
         pos += 60 + len(body) + len(pad)
 
     sym_offsets = [off for off, member in zip(offsets, members)
@@ -959,7 +1084,7 @@ def synth_archive(members: list[tuple]) -> bytes:
              + b"".join(struct.pack(">I", o) for o in sym_offsets)
              + b"".join(s.encode() + b"\0" for s in all_syms))
     pad = b"\n" if index_size % 2 else b""
-    return (AR_MAGIC + _ar_header("/", index_size) + index + pad
+    return (AR_MAGIC + _ar_header("/", index_size) + index + pad + names
             + b"".join(blobs))
 
 
@@ -1050,10 +1175,6 @@ def _selftest() -> int:
     # "fam0" silently meant getopt where the case said error -- and the two
     # disagreed about which member they were talking about.
     clean = [(family, sorted(syms)) for family, syms in STRICT_FAMILIES.items()]
-    # ...whose names must fit an ar member's, 15 characters: a longer one
-    # spills out of its header and every member after it is misread.
-    check_("every family's name fits an ar member name",
-           all(len(f) <= 15 for f in STRICT_FAMILIES))
     # The aliased names (`environ` is an unavoidable one) live in the
     # variables' member, as they do in the real archive; see `graded`.
     clean.append(("core", sorted(UNAVOIDABLE - {n for g in ALIASES for n in g})))
@@ -1070,6 +1191,15 @@ def _selftest() -> int:
                == sorted(sorted(s) for _n, s in clean))
         check_("member names come back for the error messages",
                {member_name(p, o) for o in idx} == {n for n, _s in clean})
+
+        # ...long ones too, through GNU's `//` table, as the real archive's
+        # are: each its own, the short one beside them still in its header.
+        named = [("posix-0123.posix.4567-cgu.0001.rcgu.o", ["a"]), ("short.o", ["b"]),
+                 ("posix-0123.posix.4567-cgu.0002.rcgu.o", ["c"])]
+        p.write_bytes(synth_archive(named))
+        check_("...long ones included, through the `//` table",
+               sorted(member_name(p, o) for o in parse_symbol_index(p))
+               == sorted(n for n, _s in named))
 
         p.write_bytes(b"not an archive at all")
         try:
@@ -1232,6 +1362,25 @@ def _selftest() -> int:
         check_("the ELF reader reads a strong undefined symbol as a reference",
                elf_strong_references(synth_elf([("x", 1, 0, STB_GLOBAL), ("y", 0, 0, STB_GLOBAL),
                                                 ("z", 0, 0, STB_WEAK)])) == {"y"})
+
+        # CHECK 6 [unresolved]: a member refers to a name nothing defines.
+        vs = graded(clean + [user(["defined_nowhere"])])
+        check_("[unresolved] a reference no member defines is caught",
+               tags(vs) == ["[unresolved]"] and "defined_nowhere" in vs[0])
+        core_name = sorted(dict(clean)["core"])[0]
+        check_("...but not one to a name another member defines",
+               graded(clean + [user([core_name])]) == [])
+        # Named, not read from LINK_SUPPLIED: a test that took its names from
+        # the set would pass however few the set held -- the mutation sweep
+        # emptied it, and this case went on passing with no references at all.
+        check_("...nor to one the link supplies, the program's main or the linker's "
+               "__ehdr_start",
+               graded(clean + [user(["main", "__ehdr_start"])]) == [])
+        check_("...nor a weak one, which the link leaves 0",
+               graded(clean + [user(["defined_nowhere"], STB_WEAK)]) == [])
+        vs = graded(clean + [user(["rust_eh_personality"])])
+        check_("...and rust_eh_personality's says where it comes from",
+               tags(vs) == ["[unresolved]"] and "C-unwind" in vs[0])
 
         # --- is_collidable, which the two above depend on ----------------
         check_("C names are collidable", is_collidable("getopt"))
@@ -1424,13 +1573,14 @@ def main(argv: list[str] | None = None) -> int:
         for v in violations:
             print(f"  - {v}\n", file=sys.stderr)
         kinds = {v.split("]")[0] + "]" for v in violations}
-        if kinds <= {"[reached]", "[alias]"}:
-            print("Neither of these is about codegen-units. A [reached] is one member calling",
+        if kinds <= {"[reached]", "[alias]", "[unresolved]"}:
+            print("None of these is about codegen-units. A [reached] is one member calling",
                   file=sys.stderr)
-            print("into a family's member through a helper the two share, and an [alias] a",
+            print("into a family's member through a helper the two share, an [alias] a",
                   file=sys.stderr)
-            print("variable whose names came apart: each message above says what to move.",
+            print("variable whose names came apart, and an [unresolved] a name the archive",
                   file=sys.stderr)
+            print("needs and lacks: each message above says what to do.", file=sys.stderr)
         elif any(v.startswith("[rider]") for v in violations):
             print("A [rider] means one module exports a replaceable name next to names a",
                   file=sys.stderr)

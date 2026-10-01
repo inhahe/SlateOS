@@ -144,84 +144,88 @@ static VERSION_ARGP: Argp = Argp {
     argp_domain: c"libc".as_ptr().cast(),
 };
 
-/// The built-in options' parser.
-///
-/// # Safety
-///
-/// `state` is the parse's state.
-unsafe extern "C-unwind" fn default_parser(key: i32, arg: *mut u8, state: *mut ArgpState) -> i32 {
-    match key {
-        KEY_ERR => {
-            // SAFETY: the parse's state, and its stream.
-            unsafe { super::state_help(state, (*state).out_stream, ARGP_HELP_STD_HELP) };
-        }
-        OPT_USAGE => {
-            // SAFETY: as above.
-            unsafe {
-                super::state_help(
-                    state,
-                    (*state).out_stream,
-                    ARGP_HELP_USAGE | ARGP_HELP_EXIT_OK,
-                )
-            };
-        }
-        OPT_PROGNAME => {
-            // SAFETY: the parse's state; `arg` is the option's argument, a C
-            // string in the program's argv; the two names are plain words.
-            unsafe {
-                (&raw mut crate::crt::__progname_full).write(arg.cast_const());
-                let short = base_name(arg);
-                (*state).name = short;
-                (&raw mut crate::crt::__progname).write(short.cast_const());
-                if (*state).flags & (ARGP_PARSE_ARGV0 | ARGP_NO_ERRS) == ARGP_PARSE_ARGV0 {
-                    // What getopt's messages say too.
-                    *(*state).argv = arg;
+callback! {
+    /// The built-in options' parser.
+    ///
+    /// # Safety
+    ///
+    /// `state` is the parse's state.
+    unsafe fn default_parser(key: i32, arg: *mut u8, state: *mut ArgpState) -> i32 {
+        match key {
+            KEY_ERR => {
+                // SAFETY: the parse's state, and its stream.
+                unsafe { super::state_help(state, (*state).out_stream, ARGP_HELP_STD_HELP) };
+            }
+            OPT_USAGE => {
+                // SAFETY: as above.
+                unsafe {
+                    super::state_help(
+                        state,
+                        (*state).out_stream,
+                        ARGP_HELP_USAGE | ARGP_HELP_EXIT_OK,
+                    )
+                };
+            }
+            OPT_PROGNAME => {
+                // SAFETY: the parse's state; `arg` is the option's argument, a C
+                // string in the program's argv; the two names are plain words.
+                unsafe {
+                    (&raw mut crate::crt::__progname_full).write(arg.cast_const());
+                    let short = base_name(arg);
+                    (*state).name = short;
+                    (&raw mut crate::crt::__progname).write(short.cast_const());
+                    if (*state).flags & (ARGP_PARSE_ARGV0 | ARGP_NO_ERRS) == ARGP_PARSE_ARGV0 {
+                        // What getopt's messages say too.
+                        *(*state).argv = arg;
+                    }
                 }
             }
-        }
-        OPT_HANG => {
-            // SAFETY: NULL or the option's argument, a C string.
-            let secs = if arg.is_null() {
-                3600
-            } else {
-                unsafe { crate::stdlib::atoi(arg) }
-            };
-            for _ in 0..secs.max(0) {
-                crate::time::sleep(1);
+            OPT_HANG => {
+                // SAFETY: NULL or the option's argument, a C string.
+                let secs = if arg.is_null() {
+                    3600
+                } else {
+                    unsafe { crate::stdlib::atoi(arg) }
+                };
+                for _ in 0..secs.max(0) {
+                    crate::time::sleep(1);
+                }
             }
+            _ => return ARGP_ERR_UNKNOWN,
         }
-        _ => return ARGP_ERR_UNKNOWN,
+        0
     }
-    0
 }
 
-/// `--version`'s parser.
-///
-/// # Safety
-///
-/// As [`default_parser`].
-unsafe extern "C-unwind" fn version_parser(key: i32, _arg: *mut u8, state: *mut ArgpState) -> i32 {
-    if key != KEY_VERSION {
-        return ARGP_ERR_UNKNOWN;
-    }
-    // SAFETY: the parse's state.
-    let out = unsafe { (*state).out_stream };
-    if let Some(hook) = super::version_hook() {
-        // SAFETY: the program's hook, with its stream and the state.
-        unsafe { hook(out, state) };
-    } else if !super::version().is_null() {
-        // SAFETY: the program's version, a C string.
-        super::put(out, unsafe { super::text(super::version()) });
-        super::put(out, b"\n");
-    } else {
+callback! {
+    /// `--version`'s parser.
+    ///
+    /// # Safety
+    ///
+    /// As [`default_parser`].
+    unsafe fn version_parser(key: i32, _arg: *mut u8, state: *mut ArgpState) -> i32 {
+        if key != KEY_VERSION {
+            return ARGP_ERR_UNKNOWN;
+        }
         // SAFETY: the parse's state.
-        unsafe { super::error_message(state, &[b"(PROGRAM ERROR) No version known!?"]) };
+        let out = unsafe { (*state).out_stream };
+        if let Some(hook) = super::version_hook() {
+            // SAFETY: the program's hook, with its stream and the state.
+            unsafe { hook(out, state) };
+        } else if !super::version().is_null() {
+            // SAFETY: the program's version, a C string.
+            super::put(out, unsafe { super::text(super::version()) });
+            super::put(out, b"\n");
+        } else {
+            // SAFETY: the parse's state.
+            unsafe { super::error_message(state, &[b"(PROGRAM ERROR) No version known!?"]) };
+        }
+        // SAFETY: as above.
+        if unsafe { (*state).flags } & ARGP_NO_EXIT == 0 {
+            super::exit_now(0);
+        }
+        0
     }
-    // SAFETY: as above.
-    if unsafe { (*state).flags } & ARGP_NO_EXIT == 0 {
-        super::exit_now(0);
-    }
-    0
 }
 
 /// After the last `/`, as glibc's `__argp_base_name`.

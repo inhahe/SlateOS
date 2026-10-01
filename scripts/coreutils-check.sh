@@ -511,7 +511,11 @@ set -eu
 # loses are the ones that say which check ran.
 exec 1>&2
 cd "$1"; shift
-tdir="$HOME/.cache/slateos-diff-target"
+# This worktree's cache, under the key diff-wsl.sh computes for it: one cache
+# per worktree, because a cache shared between worktrees lets one tree's
+# build of a crate pass for fresh in another whose source differs (the
+# reasoning is in diff-wsl.sh, "4. the subject").
+tdir="$HOME/.cache/slateos-diff-target/$(basename "$PWD")-$(printf '%s' "$PWD" | sha256sum | cut -c1-12)"
 cargo="$HOME/.cargo/bin/cargo"
 if [ ! -x "$cargo" ]; then
   echo "coreutils-check: no cargo inside WSL ($cargo)." >&2

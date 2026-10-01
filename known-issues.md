@@ -47,7 +47,14 @@ letter of the lane that filed it, and whoever owns its code *now*
 
 ---
 
-## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11)
+## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11) — ✅ FIXED (lane B; confirmed 2026-09-27)
+
+**Status (2026-09-27):** fixed by the rebuilt `coreutils` `diff`, whose
+reader keeps each line's terminator (B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL,
+2026-09-14, and the diffutils 3.10 work after it). `scripts/diff-diff.sh`
+carries this entry's own case -- `nonl.txt` and `nonl2.txt`, files without a
+final newline -- among its 200 cases, and all 200 agree with GNU diffutils.
+The entry below is kept as the record of the defect.
 
 **Both halves of the `diff` pair say two files are the same when one of them
 lacks a trailing newline.** Not a formatting difference — the wrong answer, with
@@ -594,7 +601,19 @@ tool.
 
 ---
 
-## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — OPEN
+## TD-B-LSCPU-HAS-NO-PER-CPU-TABLE-SO-FIVE-OPTIONS-REFUSE — 2026-09-15 — ✅ FIXED 2026-09-26 (lane B)
+
+**Fixed by replacing the program.** `userspace/lscpu` is now a port of
+util-linux 2.39.3's `lscpu` (as Ubuntu 24.04 ships it, design-decisions
+§1038), built on the `smartcols` crate: `-e`, `-p`, `-C`, `--hex`,
+`--online`, `--offline` and `--sysroot` all do what upstream's do, per CPU,
+from each CPU's own `topology/`, `cache/` and `cpufreq/` files. Checked by
+`scripts/lscpu-diff.sh` against the real `lscpu` on util-linux's own
+snapshots of nineteen machines, trees of its own, and WSL itself. The
+reversed-range underflow noted below went with the old parser; the port's
+CPU-list parser is upstream's `cpulist_parse`, which refuses `5-2`. What
+follows is the entry as it was.
+
 
 **In short:** `lscpu -e`, `-p`, `--hex`, `--online` and `--offline` now refuse
 with exit 1 instead of printing the ordinary CPU summary and exiting 0. All
@@ -1243,6 +1262,15 @@ says so. 21 of the remaining 42 are those refusals.
 > `@0 + 1 day` is an error, and `-d ''` means today at midnight. Anything the
 > probe did not confirm (`2 weeks ago`, `next Friday`) is still refused.
 > `-s`, `--debug` and `--resolution` remain refused.
+>
+> **Superseded again 2026-09-25 -- nothing is refused.** `-d` and `-f` are
+> gnulib's own `parse-datetime.y` (`coreutils::parse_datetime`), so there is no
+> longer a list of forms the probe confirmed; `--debug` prints upstream's
+> annotations, `--resolution` the clock's, and `-s` sets the clock through
+> `clock_settime` (an ordinary user gets GNU's `cannot set date: Operation not
+> permitted`, and the date is printed anyway). `date.rs`'s `main` is now
+> `date.c`'s, check for check, so a bad command line gets GNU's error in GNU's
+> order.
 
 *`scripts/check-argv-ignored.py`'s baseline is now empty* — both bins it was
 written for are fixed, and the gate stands as a ratchet against the next one.
@@ -1853,7 +1881,12 @@ because each would recur in any future harness for a program that mutates state:
    (shellcheck SC1011), which showed up as one "differ on purpose" instead of
    two. The same bug as in `diff-diff.sh`, written an hour earlier.
 
-## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11) — ✅ RESOLVED (lane B; confirmed 2026-09-27)
+
+**Status (2026-09-27):** resolved the way this entry said it should be: the
+standalone crate is gone, and `userspace/coreutils/src/bin/diff.rs` is the one
+`diff`, rebuilt on diffutils 3.10's command line and measured at 200 cases
+agreeing, none differing (`scripts/diff-diff.sh`). Kept below as the record.
 
 **Sixteen pairs have now been measured against a harness and fifteen went to
 `coreutils`. `diff` is the first that does not**, and it is the pair §1005
@@ -2274,13 +2307,50 @@ copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
 every entry point was shadowed, unreachable, or an outright refusal. The
 unreachable ledger stands at 169.
 
+**UPDATE 2026-09-25: the unreachable ledger stands at 155.** Fourteen names have
+left it since the 169 above. Two, `blockdev:blkzone` and `cal:ncal`, went on
+2026-09-12 (commit 888598b8f: `blkzone` printed hard-coded zones for any
+device and reported zone resets it never attempted). Twelve were closed the
+§1005 way -- the name becomes a `coreutils` bin, ported from GNU
+9.4 and checked against a build of it by a `scripts/<name>-diff.sh` harness,
+and the dead branch is deleted -- rather than by adding a link to the
+personality: `printenv`, `sync` and `cksum` (from `getopt`, which with all
+three gone is `getopt` alone), `truncate` and `shred` (from `pv`, which with both
+gone is `pv` alone),
+`arch`, `pathchk` and `users` (from `nproc`), `numfmt` and `factor` (from
+`shuf`, which with both gone is `shuf` alone), `base32` (from `base64`,
+whose own `base64` followed on 2026-09-27 -- TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES),
+and `pinky` (from `finger`, which with it gone is `finger` alone).
+None of the deleted branches was worth keeping: `nproc`'s `users` read the
+terminal field as the user name, from wtmp instead of utmp; its `pathchk -p`
+checked against 4096 and 255 instead of POSIX's 256 and 14; its `arch`
+guessed from `/proc/cpuinfo`; `shuf`'s `numfmt` rounded every scaled value to
+a whole number (`--to=si 1500` said `2K` where GNU says `1.5K`) and failed 135
+of the 148 cases `scripts/numfmt-diff.sh` runs; its `factor` worked in `u64` by
+trial division alone, so a large prime took minutes and anything past 2^64
+was refused; `getopt`'s `cksum` had the CRC and nothing else of 9.4's -- no
+`-a`, no `--check` -- and read each file whole into memory first; `pv`'s `shred`
+wrote xorshift output three times under a help text promising `/dev/urandom`,
+where GNU's schedules its passes from a table of bit patterns and, given
+`--random-source`, writes bytes this port now reproduces exactly; `finger`'s
+`pinky` printed finger's own layout under pinky's options, so `-b` hid the
+plan where GNU's hides the home directory and shell, and `-w` and `-i` were
+accepted and did nothing. With its last three personalities gone, **`userspace/nproc`
+itself was retired**: `nproc` is a `coreutils` bin too now, a port of GNU's
+(gnulib's `num_processors` -- affinity mask, `OMP_NUM_THREADS`,
+`OMP_THREAD_LIMIT`), where the crate had counted `/sys` ranges and told a
+process pinned to two CPUs that it had twelve. No GNU program lives as a
+personality of something else any more. None of the new bins is on the
+image yet: that is lane D's
+manifest, `requests/b-d-new-coreutils-programs-for-the-rootfs-manifest.md`.
+
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 
 | Shadowing crate | Name | Who really provides it |
 |---|---|---|
 | `userspace/nologin` | `true`, `false` | coreutils |
-| `userspace/nproc` | `tty`, `logname` | coreutils |
+| `userspace/nproc` (retired 2026-09-25) | `tty`, `logname` | coreutils |
 | `userspace/fuser` | `lsof` | `userspace/lsof` |
 | `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
 | `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
@@ -2305,9 +2375,10 @@ filed because it looks like an answer. It was latent only because
 dispatch and this claim lived only in prose.
 
 The first fix was an arm refusing that one name. `multicall-aliases.py`
-rejected it at pre-push and was right — per §1019 the shadowing branch is
-deleted, because the name belongs to whichever program performs the
-operation. But deleting it and restoring the catch-all would have put the
+rejected it at pre-push and was right — per §1005 the shadowing branch is
+deleted, because the better implementation of a name wins and the duplicate
+goes. (This sentence cited §1019 until 2026-09-25; §1019 is about exec-or-
+refuse and never said this.) But deleting it and restoring the catch-all would have put the
 silent wrong answer back *invisibly*: the checker reads dispatch arms, so a
 catch-all lets a binary answer to every name on earth while declaring none.
 `main` now dispatches `swapon` and `swapoff` explicitly and refuses anything
@@ -2359,7 +2430,7 @@ two run in nearly every shell script on the system, and `nologin`'s job is to
 *refuse* and exit non-zero.
 
 **The fix per name is a decision, not a patch.** Either the personality is
-deleted (the name belongs to whoever performs the operation — §1019), or the
+deleted (the better implementation of a name wins — §1005), or the
 name gets a real producer, preferably its own crate so it gets its own
 capability identity. Both ledgers may only shrink, so the count is the
 progress bar — with the caveat this entry exists to record: the count is only
@@ -23393,6 +23464,7 @@ is the only way to tell afterwards that the fix worked.
 ---
 
 ### [B] D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT. The rest of `posix/`'s `is_null() -> EFAULT` checks have not been classified against glibc — 2026-08-13 — OPEN (tech debt)
+**Status:** OPEN — tech debt in `posix/**`, which lane D owns since the six-lane split of 2026-09-22; the entry keeps lane B's tag as the record of who found it.
 
 **Where:** `posix/src/**` — every `if p.is_null() { set_errno(EFAULT); … }`.
 
@@ -29480,6 +29552,7 @@ Changing it now would be a guess dressed as a measurement.
 ---
 
 ### [B] B-INIT-READS-A-KERNEL-ERROR-AS-A-CHILD-EXIT-CODE-AND-RESTARTS-ON-IT — ✅ FIXED 2026-08-14
+**Status:** FIXED 2026-08-14
 
 **Reported by lane-a** in
 `requests/a-b-init-conflates-syscall-error-with-exit-code.md`; fixed in
@@ -44252,6 +44325,7 @@ carries a test affordance.
 ---
 
 ## [B] `/etc/users.yaml` has two writers with incompatible schemas, so a password set by `useradm` is rejected by the login screen (2026-08-17)
+**Status:** FIXED 2026-08-17 (`cc0fa5da9`, `5ab46559a`, `3a3321a76`) — both writers go through `userspace/userdb`; see the FIXED section below and design-decisions.md §330.
 
 **In short:** SlateOS keeps its own user database at `/etc/users.yaml`, separate
 from the POSIX `/etc/shadow`. Seven programs read it and two of them write it —
@@ -44371,6 +44445,7 @@ can be seen to disagree, and the step none of the replaced tests took.
 ---
 
 ## [B] The login screen ignores `avatar_path` and always draws initials (2026-08-17)
+**Status:** OPEN — re-verified 2026-09-24: the user tile still draws only the initials circle. Worth less than it looks: nothing launches `init/loginmgr` today (no service file, rootfs entry or kernel spawn names it); the login screen a user actually meets is `gui/desktop/src/login_screen.rs` (lane C), which draws a placeholder glyph instead of the picture too.
 
 **In short:** An account can name a picture to show next to it on the login
 screen — the `avatar_path:` field in `/etc/users.yaml`, which `useradm mod
@@ -44642,6 +44717,7 @@ database, so an administrator who set root's shell had it ignored.
 ---
 
 ## [B] Two different `sudo` binaries are built from this workspace (2026-08-17)
+**Status:** FIXED 2026-08-21 (`f5d95fa2b`) — `su`'s built-in `sudo` personality was deleted, so `userspace/sudo` is the only `sudo`; `check-bin-collisions.py` (pre-push gate 51) now refuses a second one.
 
 **In short:** The build produces two separate programs both called `sudo`,
 from two crates that do not know about each other, implementing different
@@ -70732,6 +70808,19 @@ into `/etc` and hand alice the system's configuration, and a link pointing at
 home that is not the person running the command. Fixed: the walk no longer
 follows links, and the links it meets are changed rather than their targets.
 
+**UPDATE 2026-09-25: still fixed for the default, and the rest now follows
+GNU exactly.** The walk moved into `coreutils::chowncore`, shared with the new
+`chgrp`, as a port of `chown-core.c`. `chown -R` with no `-H`/`-L` is
+unchanged -- nothing walked through, every link changed as a link -- and
+`-R --dereference` without `-H`/`-L`, which asks for the opposite, is now
+refused as GNU refuses it. What changed is the two corners where the caller
+*asked* for symlinks to be followed, which the fix below had merged into one
+rule: under `-R -H` a link met inside the tree now has its target changed
+(GNU 9.4, measured), and under `-R -L -h` links are changed rather than their
+targets. design-decisions.md §1029 has the reasoning; `scripts/chown-diff.sh`
+gained the in-tree links and the loop that tell the rules apart, and against
+the old implementation 16 of its cases fail.
+
 ### Two separate escapes, either of which is enough
 
 `userspace/coreutils/src/bin/chown.rs`, both fixed:
@@ -78496,6 +78585,7 @@ question B-Q7. This entry is only about the seven numbers they both needed.
 ---
 
 ### [B] TD-B-LS-INVENTS-A-POSITION-FOR-THE-DOT-ENTRIES — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — re-verified 2026-09-24: `RealTree::read_dir` still puts the dots at the front of the stream.
 
 **What it is.** `ls -a` has to list `.` and `..`, and `std::fs::read_dir`
 discards them. `RealTree::read_dir` in `userspace/coreutils/src/bin/ls.rs`
@@ -78545,6 +78635,7 @@ with the dots prepended, which is self-consistent and merely not GNU's.
 `ls -f`'s order starts mattering to something (a test, a script in the image).
 
 ### [B] TD-B-LS-WRITES-A-DIAGNOSTIC-WITHOUT-FLUSHING-THE-LISTING-FIRST — 2026-08-22 — FIXED 2026-08-22
+**Status:** FIXED 2026-08-22
 
 **What it is.** `ls` accumulates its whole listing in `Out::buf` and writes it
 once, at the end of `main`. Diagnostics go to stderr the moment they happen. So
@@ -78603,6 +78694,7 @@ exit status is **1**, not 2: `t/noperm` was reached by recursing rather than
 named on the command line, and GNU reserves 2 for the latter.
 
 ### [B] TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT — 2026-08-22 — OPEN (tech debt, blocked on B-Q8)
+**Status:** OPEN — blocked on B-Q8, still open 2026-09-24.
 
 > **Measured 2026-09-12, and it dwarfs the 626 this is blocked on.** Our own
 > terminal (`apps/terminal`) has **no notion of character width at all**: it
@@ -78702,6 +78794,7 @@ drop the two `!` cases and the `y/` fixture from `scripts/ls-diff.sh`.
 `ls --sort=width -1 y` and `ls -C -w 20 y`, both marked `!`.
 
 ### [B] TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — re-verified 2026-09-24: `print_hyperlink` is still read only to cancel `--dired`.
 
 **What it is.** `ls --hyperlink[=WHEN]` parses, validates its argument and sets
 `Settings::print_hyperlink`, and then nothing reads it. GNU wraps each name in
@@ -78763,6 +78856,7 @@ when a terminal in the image starts honouring OSC 8.
 `ls --hyperlink=always -l t`, both marked `!`.
 
 ### [B] TD-B-LS-CANNOT-RESTORE-THE-TERMINAL-ON-AN-ABNORMAL-EXIT — 2026-08-22 — OPEN (tech debt)
+**Status:** OPEN — nothing to hook while SlateOS has no Unix signals, by design.
 
 **What it is.** GNU `ls --color` installs signal handlers the first time it
 writes a colour escape, so that a run killed or suspended part-way through
@@ -140363,6 +140457,24 @@ or so guards that gate a privilege, which is a reviewable number.
 
 ## B: `org.slateos.ServiceManager` has two clients and no provider
 
+**2026-10-01: the clients now really ask; there is still nobody to answer.**
+Both used to "open" the name with syscall 200, which is `SYS_CHANNEL_CREATE`:
+it took the name's address as its flags and returned a fresh channel
+connected to nothing, so neither ever reached any service even in principle
+(lane F's
+`requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+point 3). Both now go through `libservicebus` (`Connection::connect`, then
+method calls with `fields` arguments: `PowerOff`, `Reboot`, `Suspend`,
+`Hibernate`, `SchedulePower`, `CancelScheduledPower`; `StartService`,
+`StopService`, `RestartService`, `EnableService`, `DisableService`,
+`ReloadService`), so today they fail with "no such service" -- the true
+reason -- and fall back as described below. Those method names are the
+interface a provider must implement; they were chosen on the clients' side
+because there was no provider to follow. One behaviour changed: `powerctl`
+no longer treats a *refusal* as "nobody answered" and forces the direct
+fallback; it reports the refusal and exits 1. The rest of this entry -- no
+provider, and the open design question of who should be one -- stands.
+
 `userspace/powerctl` (`SERVICE_MANAGER_NAME`, main.rs:98) and
 `userspace/service` (main.rs:79) both open a channel to the well-known name
 `org.slateos.ServiceManager`. **Nothing anywhere registers that name.** A
@@ -141032,7 +141144,18 @@ should install as something that does not promise partitioning, the way
 `login-cli` and `loginmgr` were separated in 4182acf8d after two programs both
 answered to `login`.
 
-## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — open, and labelled
+## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — lane B's part fixed; shipping it is lane D's
+
+**Status 2026-09-26:** everything lane B can do is done. There is one `crond`
+now (`userspace/crond`, the survivor of three; `userspace/cron`, the
+simulated one, is deleted), and it loads `/etc/crontab`, `/etc/cron.d` and
+every user's spool, `/var/spool/cron/crontabs/<user>` -- not only root's, as
+the "Still open" list below says. `atd` drains the at spool. **What remains is
+that neither reaches a user:** `scripts/rootfs-bin-manifest.txt` names no
+`crond`, `crontab`, `at` or `atd`, and nothing starts `crond` at boot --
+`services/init` is what starts services. Both are lane D's (the rootfs recipe
+and `services/**`); ask there when the manifest requests of 2026-09-25/26 have
+been taken, since a daemon also needs its start-up and not only its binary.
 
 **CORRECTED 2026-09-10, the same day it was written: the headline claim is
 false.** "Nothing on this system ever wakes up and executes what was scheduled"
@@ -146671,6 +146794,18 @@ security feature is the worst place for it. Filed as
 `status` is untouched and was always real: it reads the efivars `SecureBoot`
 and `SetupMode` variables.
 
+**Resolved 2026-09-27** (design-decisions §1049, the operator's answer to
+B-Q17). The four commands that need RSA, X.509 or Authenticode are deleted,
+and so is everything that reported work it never did: the files database
+(`verify FILE` printed "signature valid" for any file; `remove-file`
+removed nothing), and the `sbsign`, `sbverify` and `sbkeysync`
+personalities. `enroll-keys` and `reset` refuse until lane A's door lands.
+One correction to the line above: `status` was *not* all real -- it called a
+key "Enrolled" when a key directory was non-empty, printed a hard-coded
+"Owner: Slate OS", and reported "Setup Mode: Enabled" where no EFI
+variables existed at all. It now reads what the firmware and the kernel
+publish, and says "unknown" where it cannot.
+
 ### Three more found 2026-09-13, all in `userspace/wipefs`, all destructive
 
 Found by accident: a probe for a different class (an unknown option that does
@@ -150817,6 +150952,65 @@ The round trip is the case to reach for when either file is touched again. It
 exercises both halves through their real entry points and its assertion is
 `cmp`, not a transcript, so it cannot pass on a right-looking message.
 
+## TD-B-PROC-NET-IF-INET-HAS-TWO-READERS-AND-NO-WRITER (lane B, 2026-09-16) — **open**
+
+**In short:** two programs read `/proc/net/if_inet` to find this machine's IP
+addresses. Nothing in the tree creates that file, and on SlateOS it cannot
+exist: `/proc/net` is a **file**, not a directory — `procfs.rs`'s `ROOT_FILES`
+lists `net` and `gen_net()` writes a readable block — so nothing can live
+beneath it.
+
+    readers:  userspace/coreutils/src/bin/hostname.rs
+              userspace/ifconfig/src/main.rs
+    writers:  none
+
+This is the inverse of §946's publisher-with-no-subscriber: a **subscriber
+with no publisher**, and it is invisible to the compiler because the
+dependency is a path in a string.
+
+### The half that was a wrong answer, fixed 2026-09-16
+
+`hostname -i` and `-I` fell through from the missing file to a scan of
+`/sys/class/net/<if>/address` — which is the **link-layer** address. So:
+
+    $ hostname -I
+    bc:a8:a6:f8:91:20 00:ff:5f:e2:d5:fd ...        exit 0
+
+A caller asking for an IP address got MAC addresses, confidently and with a
+success status. The old code even filtered `00:00:00:00:00:00`, a MAC-shaped
+sentinel, so what it was reading was never in doubt.
+
+Both now read `/proc/net`'s `IPv4:` line, which is the real source on this
+system, and the MAC fallback is **deleted** rather than repaired: printing
+nothing is the right answer when no address source is readable, because a
+caller who gets nothing can tell and a caller who gets a MAC will put it in a
+URL. With no source, `-I` now says `hostname: no addresses found` and exits 1.
+
+The parser checks the `IPv4:` KEY rather than "the value after a colon",
+because the `MAC:` line sits two lines above it in the same block — a
+shape-matching parser would reintroduce exactly the bug it replaces. There is
+a test for that specific confusion.
+
+### What is still open
+
+**`userspace/ifconfig` has the same fault and is not fixed here.** It reads
+`/proc/net/if_inet` at `main.rs:429` for IP, netmask and broadcast, so on
+SlateOS it reports none of them. It is a different program with a different
+output format and belongs in its own change.
+
+**IPv6 is not covered.** `gen_net()` emits one `IPv4:` line and no v6, so
+`hostname -I` can never list a v6 address on SlateOS however it is parsed.
+`/proc/net` growing v6 is lane A's.
+
+**`-i` is not the same question as `-I`.** Measured: GNU's `-i` answers
+`127.0.1.1` here — the address the HOST NAME resolves to, out of `/etc/hosts`
+— while `-I` lists every interface address. Ours treats them as the same
+query. Now that `canonical_in_hosts` exists, `-i` could take the address field
+from the same line it already finds the FQDN on, which would match GNU exactly
+on any host whose name is in the hosts table.
+
+---
+
 ## TD-B-PATCH-AUTO-DETECTS-A-BARE-NORMAL-DIFF-WHERE-GNU-CALLS-IT-GARBAGE (lane B, 2026-09-16) — **open**
 
 **In short:** a "normal" diff — the bare `2c2` kind, with no `---`/`+++` header
@@ -150865,7 +151059,7 @@ move together.
 
 ---
 
-## TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU (lane B, 2026-09-16) — **open**
+## TD-B-DATE-A-SIGNED-RELATIVE-AFTER-A-BARE-TIME-IS-A-ZONE-TO-GNU (lane B, 2026-09-16) — FIXED 2026-09-25
 
 **In short:** `date -d '2021-06-15 12:00:00 +1 day'` works on GNU and is
 refused by ours. The `+1` there is not "plus one" — GNU reads a signed number
@@ -150909,9 +151103,32 @@ control that the fix did not disturb the forms that already work.
 three spellings that do work (`1 day` unsigned, `UTC +1 day`, and any relative
 on a date with no time).
 
+**How it was closed.** Not by interleaving the two passes, but by replacing the
+hand-written parser with GNU's: `coreutils::parse_datetime` runs the Bison
+tables of `parse-datetime.y`, where this is a shift/reduce conflict resolved in
+favour of the zone, so every row of the table above now agrees with GNU. The
+harness row is a `run_case` again, with its `-1 day` and `UTC +1 day`
+neighbours beside it.
+
 ---
 
-## TD-B-DIFF-SIDE-BY-SIDE-PADS-WITH-SPACES-WHERE-GNU-USES-TABS (lane B, 2026-09-16) — **open**
+## TD-B-DIFF-SIDE-BY-SIDE-PADS-WITH-SPACES-WHERE-GNU-USES-TABS (lane B, 2026-09-16) — **fixed 2026-09-25**
+
+**How it was closed:** as the entry below prescribes -- by reading diffutils
+3.10 rather than sampling it. The column arithmetic is `diff.c`'s (a half and
+its gutter are a whole number of tab stops, the half maximised first), and it
+reproduces every row of the measured table below; the printer is `side.c`'s
+`print_1sdiff_line`, `print_half_line` and `tab_from_to`, transcribed. Reading
+it also turned up what sampling had not: `/` and `\` in the gutter for a pair
+where one line lacks its final newline, `-y` printing identical files in full
+(`no_diff_means_no_output` is false for it), hunks ignored by `-B`/`-I` printed
+as common lines paired off in order with `)` and `(` for the surplus, each
+column showing its own file's copy of a common line under `-i`/`-b`/`-w`, and
+three options the format needs -- `--suppress-common-lines`, `--left-column`,
+`--tabsize` -- which were missing. `-B` now ignores by hunk, as `analyze_hunk`
+does, where it had been applied line by line. `scripts/diff-diff.sh` gains 43
+cases for all of it, a tab after exactly eight columns among them; they wait
+for a WSL run.
 
 **In short:** `diff -y` prints two columns with the differing lines marked
 between them. Ours lines the columns up with spaces; GNU lines them up with
@@ -170034,6 +170251,416 @@ name, they read identically at the call site, and only one of them answers
 in `scripts/key-survey.py`, written to fix this exact defect in the survey --
 by the same hand that then wrote it into thirty-eight tests.
 
+## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER (lane B, 2026-09-16) — FIXED 2026-09-16
+
+**Status: FIXED**, 2026-09-16. `userspace/coreutils/src/bin/logger.rs` is
+deleted and `userspace/logger` is the only program of that name, so `/bin/
+logger` no longer depends on link order. The five-step plan below was followed
+in order, with the deletion last; `scripts/check-bin-collisions.py` refused to
+pass until the `logger` line left its `KNOWN_COLLISIONS`, so the baseline
+shrank as the rule requires. `kill` remains, and is the harder one --
+TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL.
+
+**In short:** there are two different programs in this tree called `logger`,
+and they both compile to the same file. Every crate links into one shared
+directory, so `userspace/logger` and `userspace/coreutils/src/bin/logger.rs`
+both write `target/<triple>/<profile>/logger`, and the one that survives is
+whichever the compiler happened to link last. `scripts/create-ext4-rootfs.sh`
+then copies that single file onto the disk image as `/bin/logger`. **Which
+`logger` SlateOS ships is therefore decided by build order, not by anyone's
+decision.** The two are not near-identical: one accepts thirteen options and
+the other accepts two, so a script that works today can stop working after an
+unrelated rebuild, with no source change to blame.
+
+### How it was proved
+
+The same path was run twice, half an hour apart, with no edit in between:
+
+```
+before a rebuild:  logger -i   ->  logger: invalid option -- 'i'
+after  a rebuild:  logger -i   ->  (accepted; -h prints a usage block)
+```
+
+Cargo says so too, and has all along — it is a warning in a build that prints
+thousands of lines, which is why nobody read it:
+
+```
+warning: output filename collision at target/x86_64-pc-windows-gnu/debug/logger.exe
+  = note: the bin target `logger` in package `logger` has the same output
+          filename as the bin target `logger` in package `coreutils`
+  = note: this may become a hard error in the future
+```
+
+### Where it lives
+
+- `userspace/logger/` — package `logger`, ~1183 lines. A syslog client:
+  `-p/--priority`, `-t/--tag`, `-i/--id`, `-f/--file`, `-s/--stderr`,
+  `-u/--socket`, `-n/--server`, `-P/--port`, `--json`, `--size`, `--pid`,
+  `-h/--help`, `--version`. Facility/severity parsing, RFC3339, JSON output.
+- `userspace/coreutils/src/bin/logger.rs` — bin `logger` of package
+  `coreutils`, 654 lines of which most are tests. Accepts `-t` and `-p` and
+  `--`, and rejects everything else with `logger: invalid option -- 'X'`.
+
+`scripts/create-ext4-rootfs.sh` builds `-p coreutils -p ar -p kill -p logger
+-p logrotate` — that is, it builds *both* of these on purpose, having been
+written as though they were different programs, which they are.
+
+### What it cost besides the shipped file
+
+Both copies were maintained, in ignorance of each other:
+
+- `e12942c8d logger: carry the message as bytes, from argv and from stdin`
+  (the coreutils applet)
+- `60468ac46 logger: read argv as bytes, and refuse a message rather than
+  corrupt it` (the standalone crate)
+
+That is the same fix, made twice, to two files, each time by someone who had
+one of them open and no reason to suspect the other. Effort spent on whichever
+copy loses the link race is invisible: it compiles, its tests pass, and it is
+not the program that runs.
+
+It also corrupts `scripts/option-gap-baseline.txt`, which lists twelve
+`logger` gaps (`-P -S -T -V -d -e -f -h -i -n -s -u`). Those twelve were
+measured against whichever `logger` won on the day the baseline was taken.
+They are not stale — they are **measurements of a subject that changes between
+builds**, which is worse, because re-running the harness can flip them without
+anyone touching `logger` at all.
+
+### The proper fix — and why it is NOT "delete the applet"
+
+The first draft of this entry said the standalone's option surface was "a
+strict superset of the applet's `-t`/`-p`, so deleting the applet loses no
+capability", and added that the claim should be confirmed behaviourally before
+acting on it. It was, the same hour, and **it is false.** Both programs were
+built to separate files and run side by side:
+
+| invocation | `coreutils` applet | standalone `logger` | util-linux reference |
+|---|---|---|---|
+| `-Q` | `logger: invalid option -- 'Q'` | `logger: unknown option '-Q'` | `logger: invalid option -- 'Q'` then `Try 'logger --help' for more information.` |
+| `-p nosuch.zz hi` | `logger: unknown priority: nosuch.zz` | `logger: unknown priority: 'nosuch.zz'` | `logger: unknown facility name: nosuch` |
+| `-t TAG hello` | `<13> 2026-09-16T11:16:03 TAG: hello` | `<13>Sep 16 11:16:04 localhost TAG: hello` | — |
+| no arguments | `<13> … user: ` (empty message, rc 0) | nothing at all (rc 0) | reads stdin |
+
+So the surfaces cross rather than nest. The applet has **two** options and the
+*correct* unknown-option diagnostic — `invalid option -- 'Q'` is what getopt
+prints and what the reference prints. The standalone has **thirteen** options
+and gets that diagnostic wrong. Neither matches the reference on a bad
+priority, where it names the facility component (`unknown facility name:
+nosuch`) rather than echoing the whole argument, and neither prints the
+`Try 'logger --help'` line at all. The message formats differ from each other
+too: RFC3339-style with no hostname versus RFC3164 with a literal `localhost`.
+
+Deleting either therefore loses something real. The fix is a **merge**:
+
+1. keep `userspace/logger` as the surviving program — it has the eleven extra
+   options, and the rootfs script already names `-p logger`;
+2. take the applet's `invalid option -- 'X'` wording with it, and add the
+   `Try 'logger --help' for more information.` line the reference prints;
+3. correct the priority diagnostic on the survivor to name the facility, as
+   the reference does;
+4. settle the message format against the reference before deleting anything,
+   since that is the part no option list reveals;
+5. only then delete `userspace/coreutils/src/bin/logger.rs` and remove the
+   `logger` entry from `KNOWN_COLLISIONS`.
+
+**The general lesson is the one this entry nearly failed to learn.** Comparing
+two programs by their option *lists* answers "which accepts more flags", which
+is not the question "which can be deleted without loss". The lists were read
+first and gave a clean, wrong answer; running both binaries against each other
+and against the reference gave the real one, and took about a minute. A
+comparison of documentation is not a comparison of behaviour.
+
+## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL (lane B, 2026-09-16) — **open**
+
+**Status: OPEN**, found 2026-09-16, same cause as
+TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-LOGGER and found by the same sweep.
+Baselined in `scripts/check-bin-collisions.py`.
+
+**In short:** as with `logger`, two packages build a binary called `kill` into
+the same directory, so `/bin/kill` is whichever linked last. Unlike `logger`,
+the two are not a rich version and a poor version of one program — they are
+two different *designs*, and choosing between them is a real decision rather
+than a cleanup.
+
+### The two programs
+
+- `userspace/kill` (package `kill`) — SlateOS-native. Its help begins
+  `Slate OS kill v0.1.0 -- Send termination messages to processes`, and it
+  works by sending **IPC messages**, with `-KILL/-9` documented as
+  "Force kill (no IPC attempt)". It also has `--name`. This is what
+  `design.txt` requires: *"No Unix signals for process control. Use IPC
+  messages for shutdown, etc."*
+- `userspace/coreutils/src/bin/kill.rs` (bin `kill` of package `coreutils`) —
+  the POSIX surface: `kill [-s SIGNAL | -SIGNAL] PID...` and
+  `kill -l [EXIT_STATUS...]`. This is what every shell script expects, and
+  what a differential harness against GNU would compare.
+
+### The measured comparison (2026-09-16)
+
+Both built to separate files and run side by side against the reference, which
+for `kill` is **procps-ng 4.0.4** (`/bin/kill`) rather than util-linux:
+
+| invocation | coreutils applet | standalone `kill` | procps-ng |
+|---|---|---|---|
+| `-l` | `HUP INT QUIT ILL TRAP ABRT ...` | `Available signal names (Slate OS compatibility mapping):` | `HUP INT QUIT ILL TRAP ABRT ...` |
+| `-l 9` | `KILL` | the same header; does not decode | `KILL` |
+| `-s TERM 999999` | reaches the send path | `kill: unknown signal: s` | `/bin/kill: (999999): No such process` |
+| no arguments | `kill: missing operand` | `kill: no process specified` | usage |
+
+**This is the opposite of the `logger` case and the reason the two entries do
+not share a conclusion.** There, the standalone had the richer surface and the
+applet had two better diagnostics. Here the APPLET is the one that speaks the
+reference's language: it lists signals in procps' format, decodes `-l 9` to
+`KILL`, and understands `-s`. The standalone does not implement `-s` at all --
+it reads the `s` as a signal name and refuses -- so a script running
+`kill -s TERM $pid`, which is the POSIX spelling, fails outright against it.
+
+What the standalone has that the applet does not is the part that matters on
+this OS: it sends IPC messages, which `design.txt` requires, and it has
+`--name`. So neither is deletable, and "which one is better" has no answer --
+they are better at different halves.
+
+### Why this one is not a simple deletion
+
+The architectural rule and the compatibility remit point opposite ways, and
+lane B's job is both of them. Deleting the coreutils applet loses `-s` and
+`-l` and the POSIX spelling; deleting the standalone crate loses the IPC
+mechanism the design spec mandates and the `--name` lookup.
+
+The likely right answer is neither deletion but a **merge**: one `kill` whose
+command-line surface is POSIX (`-s SIGNAL`, `-SIGNAL`, `-l`, numeric signal
+names) and whose implementation is the IPC path, since a signal number on a
+system with no signals is simply a name for "which termination message".
+That is a larger change than either deletion and wants its own task.
+
+Until then the gate keeps this from getting worse, and nothing else does: the
+collision is silent at build time apart from one cargo warning, and silent at
+runtime because both programs answer `kill -9 <pid>` plausibly.
+
+## TD-B-EVERY-SYSLOG-TIMESTAMP-WE-WRITE-IS-UTC-WHERE-SYSLOG-MEANS-LOCAL-TIME (lane B, 2026-09-16) — FIXED 2026-09-26
+
+**Status: FIXED 2026-09-26**, found 2026-09-16 while bringing `logger`'s frame
+in line with util-linux 2.39.3.
+
+**The fix.** The "small shared local-time facility" this entry asked for now
+exists -- `userspace/localtime`, glibc's `tzset`/`tzfile` resolution of `TZ`,
+`TZDIR` and `/etc/localtime` -- and `logger` is a caller. First the old
+program's RFC 3164 TIMESTAMP moved to local time (ee4be2820); then the whole
+program was replaced by a port of util-linux 2.39.3's `logger.c` (413e56f1d,
+design-decisions §1033), whose clocks are all upstream's: the local and
+RFC 3164 headers are `rfc3164_current_time`, `localtime_r` of the current
+second formatted `Mmm dd hh:mm:ss` with upstream's English month table, and
+the RFC 5424 header is local time with microseconds and its numeric offset,
+`2026-09-26T06:37:16.599632-04:00`. The old program's own `--rfc3339` (UTC
+with `Z`) went with it: util-linux has no such option and refuses it.
+`scripts/logger-diff.sh` compares every header form in seven zones --
+including a half-hour zone, a POSIX-rule `TZ` and `/etc/localtime` -- reading
+each clock as a number within the time the case took, so a zone error shows
+as the hours it is.
+
+**In short:** the time stamped on every line `logger` writes is UTC, but the
+syslog format it is writing means *local* time. On a machine four hours behind
+UTC the two differ by four hours, so a log line records an hour the event did
+not happen at. Nothing crashes and nothing is refused — the damage is done
+later, by whoever reads the log, or by anything that lines our entries up
+against timestamps from another program that got it right.
+
+### How it shows
+
+Same moment, same format, our build and the reference side by side:
+
+```
+ours: <13>Sep 16 11:33:22 mytag: hi
+ref : <13>Sep 16 07:33:22 mytag: hi
+```
+
+RFC 3164's `TIMESTAMP` is local time with no zone marker at all, which is
+exactly why the difference is invisible in the line itself: there is no field
+that says which of the two readings is meant, so a wrong one cannot be
+detected by looking at it. It took a side-by-side run against a reference on
+the same machine to see it.
+
+### Where it lives
+
+`userspace/logger/src/main.rs`, `format_timestamp()` — its own comment says
+"simplified UTC" and it is doing exactly what it says. The bug is not that it
+lies; it is that the caller frames the result as RFC 3164, which means
+something else.
+
+`format_rfc3339()` (used for `--rfc3339`) is *not* affected, and this was
+checked rather than assumed: it ends its output with `Z`, so
+`<13>2026-09-16T11:34:25Z t: hi` states its zone and is simply true. That is
+the whole difference — RFC 3339 has a field for the answer and RFC 3164 does
+not, so the same clock is honest in one format and wrong in the other.
+
+(Noted in passing: `--rfc3339` is ours alone. The reference answers
+`logger: unrecognized option '--rfc3339'`; util-linux spells these
+`--rfc3164` and `--rfc5424`. An extension is not a defect, but it is worth
+knowing that `scripts/option-gap.sh` could not have told us — it looks for
+options the reference has and we reject, never for options we have and the
+reference does not.)
+
+### Why it is not a one-line fix
+
+The function needs a *timezone*, and there is no obvious place to get one:
+
+- there is no `TZ` handling anywhere in this program, and reading `$TZ` alone
+  would not be enough — the value is a name like `America/New_York`, which
+  needs a zoneinfo database to turn into an offset, and it is not clear the
+  image ships one;
+- the offset is not constant, so a single number recorded at boot is wrong
+  twice a year;
+- `logger` is not the only writer. Anything else in the tree that stamps a
+  local time has the same question, and answering it once in a shared place is
+  worth more than answering it here.
+
+So the proper fix is a small shared "local time" facility with a single
+documented source of the offset, and `logger` as its first caller — not a
+constant added inside `format_timestamp`.
+
+### Until then
+
+UTC is at least *consistent* and self-consistent across our own programs, and
+an hour that is uniformly four hours off is easier to reason about than a mix.
+Do not "fix" this by adding a fixed offset: that is correct for half the year
+in one place and wrong everywhere else, and it would make the error
+intermittent instead of constant, which is strictly harder to notice.
+
+## TD-B-SSHD-PTY-SESSIONS-DEADLOCK-BECAUSE-CLOSE-ON-EXEC-DOES-NOT-CLOSE (lane B, 2026-09-24)
+
+**Status:** OPEN — waiting on the platform fix in
+`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md` (lanes A, D).
+
+**In short:** an SSH login that asks for a terminal would never reach a
+prompt on SlateOS. `sshd` starts the shell with std's `Command` and a
+`pre_exec(login_tty)` closure, which makes std fork and then wait for
+end-of-file on a close-on-exec pipe to learn that `exec` succeeded. On a native
+SlateOS process close-on-exec hides a descriptor from the new program but does
+not close its kernel handle, so that end-of-file arrives only when the shell
+*exits*. `spawn()` does not return, nothing reads the pty master, and the
+shell blocks as soon as its output fills the terminal.
+
+**Where:** `userspace/sshd/src/lib.rs` — `shell_command` (the `pre_exec`) and
+`Pty::open`. Found reading the path while writing `libcall::pty` for
+`apps/terminal`; never observed, because no boot rung starts an `sshd` session
+with a pty (`kernel/src/main.rs` has none).
+
+**A second, smaller defect in the same place:** `openpty` does not set
+`FD_CLOEXEC` on the master, and `sshd` does not either, so the login shell
+inherits its own terminal's master. When the client disconnects and `sshd`
+closes its copy, the master is still open in the shell and the kernel's hangup
+(`SIGHUP` to the foreground group) never fires. Marking it close-on-exec would
+not help today, for the reason above; once the platform fix lands it becomes
+a one-line `fcntl(F_SETFD, FD_CLOEXEC)` after `openpty`, and should be made
+then.
+
+**Why not moved onto `libcall::pty::spawn`:** it does not change identity, and `sshd` must: its `Command` carries the user's uid, gid and groups (`authlib::identity`). Nor would it avoid the wait: the `spawn` in the tree (lane E's, design-decisions §1200) reports a failed `execve` through a close-on-exec pipe, as `std` does, so on SlateOS it waits for the child to exit in the same way (`requests/b-e-libcall-pty-spawn-waits-for-the-shell-to-exit-on-slateos.md`). The platform fix is the fix for all of them.
+
+**Fix:** land the request (lane A releases a native `exec`'s close-on-exec
+handles; lane D names them), then set `FD_CLOEXEC` on the master in
+`Pty::open`, and add a boot rung that opens an `sshd` pty session and reads a
+prompt back.
+
+## TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES (lane B, 2026-09-25) — FIXED 2026-09-27
+
+**Fixed** as the four steps below say, with one step more than they foresaw.
+`uuencode` and `uudecode` are ports of GNU sharutils 4.15.2's, crates of their
+own, and `scripts/uu-diff.sh` compares them against Ubuntu 24.04's build
+(unpacked by `scripts/sharutils-ref.sh`) in 433 cases: 433 agree. The step
+more: sharutils does not parse its own options -- AutoGen generates a table and
+GNU's libopts 41.1 does the rest, `~/.sharrc`, `--save-opts`, `--load-opts`,
+`--more-help` through `$PAGER`, `--version[=MODE]` and `AUTOOPTS_USAGE`'s
+computed layouts included -- so libopts is ported too, as `userspace/autoopts`,
+with its surprises kept and listed in that crate's docs. `userspace/base64` is
+deleted, `coreutils` has its `base64` bin, and `base64` is back in
+`scripts/basenc-diff.sh`, run as itself as well as `basenc --base64`. gnulib's
+base64, which coreutils and sharutils both bundle (2023's and 2015's copies,
+the same decoder), is one crate, `userspace/gnubase64`, rather than two
+transcriptions. The ledger's `base64:uuencode` and `base64:uudecode` lines are
+gone, and `userspace/base64`'s `argv-as-string` and workspace-lints lines with
+them.
+
+Where upstream's behaviour is undefined, the port had to choose, and says so:
+`--save-opts`' warnings pass one argument to a two-`%s` format (upstream prints
+a register's leftovers, the port nothing -- the harness normalises exactly those
+three messages), and `uudecode` reads bytes no line wrote as zero where
+upstream reads its stack (`userspace/uudecode/src/main.rs`, module docs).
+
+**In short:** `coreutils` now has a port of GNU 9.4's `base64` -- it is
+`src/basenc.rs`, reachable today as `basenc --base64` and checked against GNU
+by `scripts/basenc-diff.sh` -- but no `base64` bin to run it under that name,
+because `userspace/base64` still builds one, and two programs of one name are
+what `scripts/check-bin-collisions.py` refuses. So the `base64` a user would
+get is still the old crate's: its own decoder rather than gnulib's, argv read
+as `String`, the whole input read into memory, and `--url-safe` and `--no-pad`
+options GNU does not have.
+
+**Why the old crate cannot simply go.** It also carries `uuencode` and
+`uudecode`, as argv[0] personalities nothing installs (the ledger's
+`base64:uuencode` and `base64:uudecode`). Renaming the crate does not rescue
+them: `scripts/multicall-aliases.py` keys an alias by the directory, so
+`uuencode:uudecode` would be a *new* unreachable name, which it refuses. The
+move the ledger's own header prescribes is to give each tool a producer of its
+own, and doing that properly means writing them as what they are -- POSIX
+utilities, best ported from GNU sharutils and checked against it -- not
+lifting the personalities as they stand, because as they stand they are not
+POSIX's:
+
+* `uuencode -m` writes bare base64, with no `begin-base64 MODE NAME` line and
+  no `====` terminator, and `uudecode` cannot read it back;
+* the mode on the `begin` line is always `644`, not the input file's;
+* a zero six-bit group is written as a space (0x20), which mail transports
+  strip from line ends -- the reason historical encoders write a backquote;
+* `uudecode` skips a final group of fewer than four characters, so a line
+  whose trailing spaces were stripped loses data silently.
+
+sharutils is not installed in WSL, so there is not yet anything to check a
+port against; that is the first step.
+
+**This change's part:** the crate's `base32` personality is deleted -- it
+shadowed `coreutils`' new `base32` (design-decisions §1005) -- which takes
+`base64:base32` off the ledger.
+
+**Fix:**
+1. Build GNU sharutils in WSL the way `diff-wsl.sh` builds coreutils (or
+   install Ubuntu's `sharutils` and note that it is Debian-patched), and write
+   `scripts/uu-diff.sh`.
+2. `userspace/uuencode` and `userspace/uudecode` as ports of sharutils', each a
+   crate of its own, which makes both producers and takes two more ledger
+   lines.
+3. Delete `userspace/base64`.
+4. Add `userspace/coreutils/src/bin/base64.rs` --
+   `coreutils::basenc::main(coreutils::basenc::Program::Base64)`, three lines
+   -- and put `base64` back in `scripts/basenc-diff.sh`'s `DIFF_BINS`, where it
+   was drafted and taken out for this reason.
+
+## B-DIGEST-CHECK-RESET-ITS-LAYOUT-LATCH-FOR-EVERY-CHECK-FILE (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** `md5sum -c`, `sha1sum -c` and `sha256sum -c` refuse to mix the
+two untagged checksum-file layouts -- `<hex>  NAME` and the "BSD reversed"
+`<hex> NAME` -- because a reversed line whose name starts with a space would
+otherwise read as a standard line naming a different file. GNU latches the
+layout for the **whole run**; ours latched it per check file, so
+`md5sum -c A B` with `A` reversed and `B` standard verified both files where
+GNU refuses every line of `B` as improperly formatted.
+
+**Where:** `userspace/coreutils/src/digest.rs`. The latch was a field of a
+`Checker` built afresh inside `check_file`; upstream's is `static int
+bsd_reversed = -1;` at file scope in `src/digest.c`, set only by `split_3` and
+never reset. Found while porting the rest of the family onto the module, when
+the other globals `split_3` changes -- `cksum`'s algorithm, every
+variable-width build's digest length -- had to become run-wide state too, and
+the latch turned out to be the one of them already living somewhere
+narrower.
+
+**Fix:** the latch lives in the run's `State`, beside those. Pinned by
+`scripts/digest-diff.sh` section 8 (`-c REV STD` and `-c -w STD REV`, for all
+seven programs) and `scripts/cksum-diff.sh` (`-a md5 -c REV STD`).
+
+**Impact while it lasted:** the run accepted lines GNU refuses, never the
+reverse, and only across two check files named in one command -- so it could
+verify a file GNU would not, which is the direction that matters for a
+checksum tool, but only for a file whose own lines were all correct.
 ### [D] TD-D-CWD-AND-UMASK-DO-NOT-SURVIVE-EXEC-OR-SPAWN — 2026-09-24 — FIXED (libc half 2026-09-25; takes effect with lane A's kernel half)
 
 **Status:** FIXED in both halves, which reach `main` separately. Lane A's kernel
@@ -172873,6 +173500,395 @@ stream or a stream damaged past the strip's end.
 semantics (the request above spells them out); `inflate` becomes a call to it.
 Not a second inflater in `imagecodec`: design-decisions §555.
 
+## TD-B-COREUTILS-GETOPT-IGNORED-POSIXLY-CORRECT (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** with `POSIXLY_CORRECT` set, every GNU program built on glibc's
+getopt stops reading options at the first file name, so `POSIXLY_CORRECT=1 cat
+f -n` prints `f` unnumbered and then fails to open a file called `-n`. None of
+ours did: the shared parser, `coreutils::getopt`, never looked at the variable,
+and neither did the seventeen utilities that walk argv by hand. `sort` -- which
+GNU keeps out of getopt's rule and gives its own -- had no rule at all.
+
+**How it surfaced.** `scripts/pinky-diff.sh`'s `POSIXLY_CORRECT=1 pinky alice
+-q`: GNU treats `-q` as a second user name. The gap was already known in one
+place -- `pwd.rs`'s docs called it "crate-wide rather than `pwd`'s" -- but it
+pointed at a `known-issues.md` line that described `uniq`, not this, so it was
+never tracked as debt of its own.
+
+**How it was closed.** glibc picks one of three orderings from the option
+string's first byte, and `Program::parse` now reads that byte the same way.
+The table and the reasoning are in `getopt.rs`, "Where option parsing stops":
+
+| prefix | ordering | `POSIXLY_CORRECT` |
+|---|---|---|
+| none | permute | stops at the first operand |
+| `+` | require order | always stops |
+| `-` | return in order | never consulted |
+
+- `pr` now passes its upstream string verbatim, leading `-` and all. `tar`
+  passes `-` too, because argp's `ARGP_IN_ORDER` builds exactly that (measured:
+  `POSIXLY_CORRECT=1 tar -tf t.tar a -v` still lists verbosely). `ed` pins the
+  variable off with `Parser::posixly_correct(false)`, because GNU ed parses with
+  `carg_parser` and never reads it.
+- The seventeen hand-walked parsers (`cat comm cut wc nl ln rmdir paste expand
+  fold unexpand tsort head tail csplit split bc`) take the variable as a
+  parameter, as `od` and `uniq` already did. Each test module shadows
+  `parse_args` with a wrapper that pins it off, so no existing test depends on
+  the environment `cargo test` inherited, and each gained a test of both
+  answers.
+- `sort` got upstream's rule: once a file has been named every word is a file,
+  except a traditional `-o FILE`, which `-c` and the 2001 edition both switch
+  off. Upstream's `traditional_usage` came with it, so `_POSIX2_VERSION=200112`
+  now makes `+POS` a file name unless a `-POS` follows it -- ours had read `+POS`
+  as a key in every edition.
+- `coreutils::posixver` is gnulib's `posix2_version`, lifted out of `uniq` so
+  that `sort` could share it. Its `strtol` now counts the vertical tab as white
+  space, which C does and `u8::is_ascii_whitespace` does not.
+
+Pinned by `POSIXLY_CORRECT` blocks in twenty-one harnesses: the seventeen above
+bar `ln` and `rmdir`, which have none, plus `sort`, `sed`, `cmp`, `grep`, `ed`
+and `tar`. Each row is the file then the option, the option then the file, a
+`--` after the file, and the variable set to the empty string, which counts.
+
+**Still to do:** `diff`, `patch` and `hostname` compare argv against exact
+spellings instead of using the shared parser at all, and are recorded apart
+(below) rather than given a fourth hand-written rule each.
+
+## B-PATCH-ORIGFILE-PATCHFILE-EXITS-0-HAVING-DONE-NOTHING (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** `patch ORIGFILE PATCHFILE` -- the second commonest way to run
+`patch` -- exits 0 and changes nothing. Our parser keeps only the *last*
+operand, as the file to patch, and reads the patch from standard input, which
+in that command is whatever the terminal or the caller left there. GNU applies
+PATCHFILE to ORIGFILE.
+
+Measured in WSL against GNU patch 2.7.6:
+
+```text
+$ printf 'a\n' > o; printf 'b\n' > n; diff -u o n > p.diff
+$ cp o o2; patch o2 p.diff               # GNU: "patching file o2"; o2 now holds b; rc 0
+$ cp o o3; patch o3 p.diff </dev/null    # ours: no output; o3 still holds a; rc 0
+```
+
+**Where:** `userspace/coreutils/src/bin/patch.rs`, `parse_args` -- its final
+`else` arm is `opts.target_file = Some(arg.clone())`, so every operand
+overwrites the one before and there is no second-operand slot at all.
+
+**How it was closed (2026-09-25).** `patch`'s command line is upstream's, on
+the shared parser: GNU patch 2.7.6's `shortopts` and `longopts` in declaration
+order (`--merge` included, as the build measured has `ENABLE_MERGE`), and
+`get_some_switches`' operand rule -- `ORIGFILE`, then `PATCHFILE`, which
+overrides `-i`, then `extra operand` at status 2. `--help` and `--version`/`-v`
+are answered where getopt meets them rather than found by scanning all of argv
+first, so `patch --bogus --help` reports the bad option, as GNU does. Numbers go
+through upstream's `numeric_string`, so `-F x` is `fuzz factor x is not a
+number` rather than this build's `invalid fuzz factor`, and `-p -1` is `strip
+count -1 is negative`. The options GNU has and this build does not (`-B`, `-D`,
+`-e`, `-g`, `-t`, `-T`, `-V`, `-x`, `-Y`, `-z`, `--merge`, `--posix`,
+`--quoting-style`, `--reject-format`, `--read-only`, `--follow-symlinks`,
+`--binary`, `--backup-if-mismatch`) are refused by name instead of as invalid.
+Upstream's CVS 1.9 hack that reads `-b SUFFIX ORIGFILE PATCHFILE` as `-b -z
+SUFFIX` is not reproduced: it is a spelling of `-z`.
+
+Pinned by `scripts/patch-diff.sh`'s command-line block -- `patch ORIGFILE
+PATCHFILE` with and without `--dry-run`, the second operand over `-i`, a third,
+`--dry`, `-sp1`, `--st=1`, `--s`, `--`, the three number refusals, `--bogus
+--help`, and `POSIXLY_CORRECT` -- at 113 passed, 0 differed. One row differs on
+purpose: GNU's `numeric_string` tests for overflow after the multiply has
+already overflowed an `int`, the compiler deletes the test, and GNU patches
+with a wrapped `-F 99999999999`; ours refuses it as `too large`, as upstream's
+source says.
+
+## TD-B-DIFF-PATCH-HOSTNAME-PARSE-ARGV-BY-EXACT-MATCH (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** `diff`, `patch` and `hostname` compare each argument against a
+list of exact spellings instead of going through `coreutils::getopt`, so they
+miss what every glibc-getopt program does. A long option abbreviated to a
+unique prefix is refused -- GNU `diff --unif o n` prints a unified diff, ours
+says `unrecognized option '--unif'` -- and `POSIXLY_CORRECT` changes nothing,
+where GNU `diff o n -u` says `extra operand '-u'` and net-tools `hostname x -V`
+prints its usage. `patch` has no `--` either.
+
+**The fix** is upstream's command line on `Program::parse`: diffutils'
+`shortopts` and `longopts` for `diff`, GNU patch's for `patch`, net-tools' for
+`hostname`, each in upstream's declaration order, which the ambiguity message
+makes observable. That brings abbreviations, bundling, `--` and
+`POSIXLY_CORRECT` at once, and routes the argv bytes through a parser that
+never decodes them -- the conversion this file already asks for under "The fix
+is getopt, not a hand conversion". A `POSIXLY_CORRECT` rule added to the
+existing loops would be the fourth thing each of them re-implements by hand,
+which is why the change above did not add one.
+
+**How it was closed (2026-09-25).** All three are on `Program::parse` with
+upstream's tables in declaration order, and each refuses by name the options
+upstream has and it does not, instead of calling them invalid.
+
+- **`diff`**, diffutils 3.10's table and `main`: two different output styles
+  are `conflicting output style options` (the ladder kept the last); repeated
+  context lengths keep the largest, and `-u`/`-c` ask for three; the obsolete
+  `-NUM` digits accumulate across words (`-1 -2` is twelve) and reconcile with
+  `-C`/`-U` by upstream's rule; `--color` takes `never`, `always` or `auto`
+  exactly and colours a terminal under `auto`; `-d`, `-h`, `-H`,
+  `--horizon-lines`, `--inhibit-hunk-merge` and `--binary` are accepted, since
+  this build already has their effect. The ladder's own `--no-color`, which
+  diffutils never had, is gone. The missing-operand error names the last word
+  after getopt's permutation, so `diff x -u` is `after 'x'`. An `-I` pattern
+  that does not compile says glibc's sentence for it rather than one fixed
+  phrase, and no longer goes through `from_utf8_lossy`. `diff-diff.sh`: 200
+  passed, 0 differed.
+- **`patch`**: see the entry above. 113 passed, 0 differed.
+- **`hostname`**, net-tools 3.23's table: `-?` is help, `--long` is `-f`,
+  `--yp` and `--nis` are `-y`, abbreviations resolve. `hostname-diff.sh` went
+  from 21 passed / 39 differed to 26 / 34: the five abbreviation rows. What is
+  left red is the environment (addresses, `-a`/`-A`, which need resolution this
+  system cannot yet answer) and net-tools' way of refusing -- usage on stdout
+  and exit 255 -- which this `hostname` does not copy.
+
+## TD-B-TOUCH-REFUSES-DASH-T-AND-DASH-D (lane B, 2026-09-25) — FIXED 2026-09-25 (`-t` and `-d`)
+
+**In short:** `touch -d '2020-01-01 12:00' f` -- one of the two ways to give a
+file a chosen time rather than now -- answers `option -d is not implemented by
+this touch` and exits 1. Build scripts and test fixtures use it. The other way,
+`touch -t 202001011200 f`, works since 2026-09-25.
+
+**Where:** `userspace/coreutils/src/bin/touch.rs`, `parse_args`: `Opt::Short(flag
+@ b'd', _) => return Err(unimplemented_short(flag))`.
+
+**How `-t` was closed.** gnulib's `lib/posixtm.c` is `coreutils::posixtm`:
+`[[CC]YY]MMDDhhmm[.ss]` under upstream's syntax bits, read as a local time
+through `localtime::Zone::epoch` and refused when that normalises it to
+something else (September 31st, 25:00, a spring-forward gap), with a sixtieth
+second taken as the next one. `touch -t` is `CENTURY | SECONDS`. The obsolete
+`touch MMDDhhmm[YY] FILE…` operand came with it -- `TRAILING_YEAR | PRE_2000`,
+read only while `_POSIX2_VERSION` is below 200112, warned about unless
+`POSIXLY_CORRECT` is set -- replacing the module docs' reasoning for leaving it
+out, which was that a date-shaped operand would be a date only sometimes: that
+is upstream's behaviour, and the edition decides it. `-t` with `-r` is `cannot
+specify times from more than one source`. Pinned by `scripts/touch-diff.sh`
+section 11 (139 passed, 0 differed): lengths, two-digit years either side of
+69, the leap second, invalid stamps, the order of errors, both halves, and the
+obsolete operand under three editions.
+
+**The fix for `-d`** is `lib/parse-datetime.y` (2438 lines) as
+`coreutils::parse_datetime`. `date -d` and `find -newerXt` each carry a
+measured subset of the same language today (`date.rs`'s module docs list what
+it covers); one transcription of the grammar would replace both, with
+`date-diff.sh` and `find-diff.sh` checking that nothing they pass today is
+lost. `touch -r FILE -d REL` then needs the reference time's nanoseconds kept
+through the relative items, as upstream's `date_relative` keeps them, and `-d
+now` needs upstream's special case that turns it back into `UTIME_NOW`.
+
+**How `-d` was closed.** Exactly as above: `coreutils::parse_datetime` is
+gnulib's `parse-datetime.y` -- the Bison tables coreutils 9.4 ships, copied by
+`gen_tables.py`, with `yacc.c`'s driver, the actions, the lexer and
+`parse_datetime_body`, over a port of glibc's `mktime` in `localtime`
+(`design-decisions.md` §1031). `touch` reads `-d` after the options, as upstream
+does: relative to each of `-r`'s times when `-r` is given, else to the clock,
+nanoseconds kept, and `-d now` turned back into the kernel's *now* when both
+halves are set -- checked by a second parse against a clock one second away, as
+upstream checks it. `-d` with `-t` is `cannot specify times from more than one
+source`. `date -d` and `find -newerXt` dropped their subsets for the same
+module. Pinned by `scripts/parse-datetime-diff.sh` (the corpus through `touch
+-r REF -d`, `date -d`, `date --debug` and `date -f`, in five zones) and the new
+`-d` rows of `touch-diff.sh`.
+
+## B-TOUCH-WROTE-NOW-AS-A-CHOSEN-TIME (lane B, 2026-09-25) — FIXED 2026-09-25
+
+**In short:** `touch f` on a file its user may write but does not own --
+`/dev/null`, a group-writable file in a shared directory -- failed with
+`setting times of 'f': Operation not permitted`. GNU succeeds. Ours read the
+clock and wrote that instant, and the kernel lets only a file's owner write a
+chosen time; asking for *now*, which GNU does by passing no times at all, needs
+only write permission (`utimensat(2)`).
+
+**Measured** in WSL against GNU 9.4 as an ordinary user: `touch /dev/null`
+exits 0 there and 1 here; `touch -a /dev/null` and `touch -m /dev/null` fail on
+both, because *now* on one half and `UTIME_OMIT` on the other needs the owner
+again.
+
+**How it was closed.** `coreutils::fsattr` gained `When::Now`, the kernel's
+`UTIME_NOW`, and `Times::now()`; `touch` asks for it whenever no `-r` or `-t`
+was given. The descriptor path (`touch -`) calls `futimens` directly, because
+`std`'s `File::set_times` has no way to say *now*; the Windows arm reads the
+clock, which loses only a permission rule that host does not have. Pinned by
+`touch-diff.sh`'s `/dev/null` rows and `fsattr`'s `now_is_the_other_sentinel`.
+
+## TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC (lane B, 2026-09-25) — FIXED 2026-09-26
+
+**In short:** every program that prints a time reads `TZ` through
+`localtime::Zone::resolve`, whose module docs say it follows glibc's four
+rules. Two of them are not glibc's. `TZ=` (set but empty) is *UTC* to glibc,
+spelled `Universal`; ours reads `/etc/localtime`. And for a value that is both
+a zoneinfo file and a POSIX rule -- `EST5EDT`, `CST6CDT`, `MST7MDT`, `PST8PDT`
+-- glibc tries the **file first**; ours parses the rule first. So `TZ= date`
+prints the machine's zone instead of UTC, and `TZ=EST5EDT date -d
+'2000-03-20 12:00'` says EDT (2007's rules) where GNU says EST (the file's
+history).
+
+**Measured** in WSL (glibc 2.39, `/etc/localtime` → America/New_York):
+
+| command | GNU | ours |
+|---|---|---|
+| `TZ= date +%Z%z` | `Universal+0000` | `EDT-0400` |
+| `TZ=EST5EDT date -d '2000-03-20 12:00' +%Z` | `EST` | `EDT` |
+| `TZ=EST5EDT,M3.2.0,M11.1.0 date -d '2000-03-20 12:00' +%Z` | `EDT` | `EDT` |
+
+**What glibc actually does** (`time/tzset.c`, `tzset_internal` and
+`__tzset_parse_tz`; `time/tzfile.c`, `__tzfile_read`):
+
+1. Unset: `/etc/localtime`; if that cannot be read, UTC named `UTC`.
+2. Empty: the name `Universal`, then as below.
+3. A leading `:` is dropped.
+4. **A file is tried first**, as `TZDIR/NAME` (or the absolute path).
+5. Only if there is none, the POSIX rule -- and a rule that fails part-way
+   keeps what it parsed: a standard name of three or more letters survives an
+   offset that does not parse (`TZ=Foo/Bar` is UTC *named `Foo`*), and a rule
+   with a DST name but no transition dates takes them from `posixrules` if
+   that file exists, else the US rules. Measured: `TZ=AAA3BBB` follows New
+   York's *history* (1974's year-round DST, 1990's April start), and after the
+   file's last transition uses New York's own footer, names and offsets
+   included -- `TZ=AAA3BBB date -d 2040-07-01` says `EDT -0400`.
+6. A POSIX rule's transitions for any year up to 1970 are computed from
+   1970-01-01 (`compute_change`: `if (year > 1970) … else t = 0`), so under a
+   northern rule no instant before 1970 is daylight time, and under a southern
+   one every such instant is. `TZ='CET-1CEST,M3.5.0,M10.5.0/3' date -d
+   0021-06-15` is CET to glibc and CEST to us -- and the instant differs by the
+   hour. `localtime` computes each year's own transitions.
+
+**Where:** `userspace/localtime/src/lib.rs`, `Zone::resolve` (rules 1 and 3 of
+its module docs), and `tzrules::Tz::parse`, which refuses rather than keeps a
+partial rule (and refuses an hour over 24 where glibc clamps it).
+
+**The proper fix** is to make `resolve` glibc's order -- empty is `Universal`,
+file before rule -- and to give it glibc's fallback for a rule that does not
+fully parse. The part that lives in `tzrules` is not lane B's (it is no lane's;
+A-Q11), so the partial-rule fallback belongs in `localtime`, built from
+`tzrules`' pieces, unless its owner takes it. `scripts/parse-datetime-diff.sh`
+avoids the affected `TZ` values until then, and says so in its header.
+
+**Severity: medium.** Silent and wrong rather than refused, but confined to
+`TZ` values that are empty, invalid, or one of four legacy names -- and `TZ=`
+is plausible in a script.
+
+**How it was closed (2026-09-26).** Not by adjusting `resolve`: the list above
+was what the harness happened to reach, and reading glibc 2.39's
+`time/tzset.c` and `time/tzfile.c` found more than it listed. `localtime` now
+has a `tzset` module that ports them function by function, with `tzrules`
+kept as the TZif decoder only (four additive raw accessors: `transition`,
+`type_count`, `local_type` with the indicator flags, `footer`). What the port
+reproduces that the entry did not know about, all measured against glibc:
+
+* **Anything after the standard offset that is not a DST name** leaves an
+  unnamed, zero-offset DST half, and two zeroed rules that read as a southern
+  zone -- so `TZ=EST5x` is UTC with an empty name for all but five hours of
+  every year.
+* **`posixrules` re-anchoring is anchored by a process-wide static.**
+  `__tzfile_read` never sets `rule_dstoff` for a file with transitions, so the
+  first use in a process moves New York's fall transitions by the whole DST
+  offset (`TZ=AAA3BBB`: 04:00Z, not 06:00Z); `__tzfile_default` then sets it
+  to the user's DST offset, and every later read -- which is every `mktime`,
+  because `__tzfile_default` leaves `old_tz` NULL -- anchors differently. So
+  `date -d @1604203200` and `date -d '2020-11-01 02:30'` disagree about the
+  same zone, in glibc and now here.
+* **gnulib switches `TZ`** for a date string's `TZ="..."` (`set_tz`,
+  `revert_tz`), which reads that zone and then the process's own again; `Zone`
+  is read lazily, can be re-read in place (`Zone::tzset`, `reread`,
+  `switched`), and `parse_datetime`'s `mktime_z`/`localtime_rz` do what
+  upstream's do.
+* `compute_change` runs in the **UTC year** of the instant, and its per-rule
+  cache starts from the `memset`, which glibc's first year-0 lookup can see.
+* Before the first transition a zone file gives its **first standard type**,
+  and a file with **no transitions never reads its footer**.
+* The programs whose upstreams call glibc's non-reentrant `localtime()`
+  (`find`, `ps`, `tar`, `pinky`) now convert through `Zone::localtime`, which
+  does the `tzset ()` that call does.
+
+Checked by the new `scripts/tz-diff.sh`: 59 `TZ` values over 26 instants,
+local-time strings one per process and as one `date -f`, and `TZ="..."`
+strings under five process zones, against GNU `date` 9.4 on WSL's glibc -- no
+difference but one, which is a decision (below). `parse-datetime-diff.sh`'s two
+markers for this entry are gone and its rows pass.
+
+**What is deliberately not reproduced** (the `tzset` module's docs have the
+reasons): leap seconds from `right/` zones; a zone-file footer with a DST name
+and no dates (glibc would run `__tzfile_default` mid-lookup; `zic` never
+writes one); `M0`/`M13` rules, which make glibc read outside `__mon_yday`;
+abbreviations over 32 bytes, cut to 32 where they reach a `TzInfo`; and a
+`TZ` naming a file through a `..` component, which is never read as a file
+here -- glibc refuses one only in a setuid program, and the libc
+(`posix/src/tz.rs`) refuses it always, so the two readers of one `TZ` stay in
+agreement. `tz-diff.sh` runs that one as an xfail.
+
+## TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS (lane B, 2026-09-25) — FIXED 2026-09-26
+
+**In short:** `date -d 0021-06-15 +%F` prints `21-06-15` where GNU prints
+`0021-06-15`, and `date -d 10000-01-01 +%F` prints `10000-01-01` where GNU
+prints `+10000-01-01`. Every year from 1000 to 9999 is unaffected, which is
+why nothing noticed until `date -d` could reach year 21 at all.
+
+**Where:** `userspace/localtime/src/lib.rs`, `strftime`: `%Y` and `%G` are
+`push_int` (the bare number, no width, no padding), and `%F` is
+`strftime("%Y-%m-%d")`. gnulib's `nstrftime` -- which coreutils uses instead of
+the C library's -- formats every year through `DO_YEARISH`: at least four
+digits, zero-padded, a sign when negative, and under the `+` flag a `+` for a
+year that needs more digits than the width. `%F` is `%+4Y-%m-%d`, run as a
+sub-format that inherits the caller's flags and width (`%_12F`), and `%C`,
+`%y` and `%g` are `DO_YEARISH (2, …)` with their own sign rules.
+
+**The proper fix** is to port `DO_YEARISH` and the sign-and-padding step it
+shares with `DO_NUMBER` (`do_number_sign_and_padding`), and to run `%F` (and
+`%D`, `%T`, `%R`, `%r`, `%c`, `%x`, `%X`) as nstrftime's sub-formats rather than
+as a recursive call that forgets the flags. `date-diff.sh`'s
+`TD-B-LOCALTIME-STRFTIME-DOES-NOT-PAD-YEARS` rows turn green when it is right.
+
+**Severity: low.** Years before 1000 and after 9999 only -- but silently wrong
+where it applies, and ISO 8601 (`%F`) is the format a script is most likely to
+parse back.
+
+**How it was closed.** Not by patching `%Y`: the year was the visible end of a
+formatter that was neither upstream's. The GNU programs this tree reimplements
+use *two* -- gnulib's `nstrftime` (coreutils, diffutils) and the C library's
+`strftime` (findutils, procps, tar, `pinky`, bash) -- which differ on years,
+`%N`, `%q`, `%:z`, the `+` flag and what `-` does to a width. `localtime`'s
+`strftime` module now ports both from source, glibc 2.39's `strftime_l.c` and
+coreutils 9.4's `nstrftime.c`, and each caller uses its upstream's. The
+`date-diff.sh` rows are `run_case`s again, and `scripts/strftime-diff.sh`
+checks every conversion under every flag, width and modifier against both.
+
+## B-PS-C-COLUMN-TRUNCATES-CPU-TIME-TO-SECONDS (lane B, 2026-09-26) — FIXED 2026-09-26
+
+**In short:** `ps -f`'s `C` column (percent of CPU a process has used over its
+life) comes out lower than procps' for any process whose CPU time is not a
+whole number of seconds: a process that has used 0.33 s of CPU in its first
+second shows `0` here and `33` in procps. Found by `ps-diff.sh`'s `ps -ef`
+case on a heavily loaded host, where GNU's `ps` took over a second to list
+itself; on an idle host both sides are under a second and both print 0, which
+is why the case usually passes.
+
+**Where:** `userspace/coreutils/src/bin/ps.rs`, `cpu_percent`: it divides the
+CPU ticks by `TICKS_PER_SEC` *before* multiplying by 100, so the fraction of
+a second is lost. procps (`output.c`, `pr_c`) multiplies first -- `total_time
+* 100 / Hertz`, then divides by the elapsed seconds -- and caps the result at
+99, which ours does not.
+
+**The proper fix:** port `pr_c` from the procps-ng WSL ships (4.0.4) exactly,
+including how it measures elapsed time (whole seconds or ticks -- 4.x's
+`TIME_ELAPSED` needs reading, not guessing) and the 99 cap, and give
+`ps-diff.sh` a case whose subject is old enough and busy enough to have a
+non-zero `C` on an idle host, so the column is tested on purpose rather than
+only when the host is slow.
+
+**Severity: low.** One column of one format, off by at most the fraction of a
+second of CPU time the process has used, divided by its age.
+
+**How it was closed (2026-09-26).** `cpu_percent` is procps-ng 4.0.4's
+`pr_c` over libproc2's `TIME_ELAPSED`, read from the source rather than
+inferred: `/proc/uptime` read once per listing into `boot_tics` (truncated),
+the age `(boot_tics - start_time) / Hz` as a double and back to whole jiffies,
+`ticks * 100 / jiffies`, the low 32 bits, capped at 99. Unit tests pin the
+arithmetic; `ps-diff.sh` 60/0. What is still missing is a harness case whose
+subject is busy and old enough to have a non-zero `C` on an idle host.
+
 ### [F] A damaged PixarLog TIFF strip can be refused where libtiff shows it -- 2026-09-25 -- **FIXED 2026-09-26**
 
 **Status:** FIXED 2026-09-26 — `pixarlog::inflate` is a call to lane A's
@@ -172931,6 +173947,284 @@ how much of each libjpeg has taken (which needs libjpeg-turbo's fast path,
 since it takes bytes differently), its `in_buffer_file_pos_log`, and its
 file position through every read. No writer's file reaches any of them, and
 20,000 fuzzed files found none.
+
+## TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES (lane B, 2026-09-26) — **open**, waiting on lanes A, D
+
+**Status:** OPEN — waiting on
+`requests/b-ad-a-unix-socket-cannot-be-bound-to-a-path-so-nothing-can-receive-syslog.md`
+(path-bound `AF_UNIX` sockets). Found 2026-09-26 while fixing `logger`'s
+timestamps. Steps 3 and 4 below are done: `logger`'s messages reach
+`journalctl` (413e56f1d), and `ntpdate -s`, `crond` and `anacron` log through
+the libc's `syslog()` (the step-5 route) instead of losing their messages or
+printing them to stderr themselves. Steps 1, 2 and 5 remain, with lanes A
+and D.
+
+**In short:** there is no system log on SlateOS in the sense a Unix program
+means. A program that logs the POSIX way sends a datagram to `/dev/log` and
+expects a daemon there to file it; here nothing listens on `/dev/log`, and
+nothing *can*, because a Unix-domain socket cannot be bound to a path
+(`socket(AF_UNIX, ...)` is `EAFNOSUPPORT`). So each writer does something
+different, and `journalctl` sees almost none of it: with nothing under
+`/var/log/journal/` it reads both `/var/log/syslog.jsonl` and `/var/log/syslog`,
+but it parses only JSON-lines records and skips every other line without a
+word (`read_all_entries` -> `JournalEntry::from_json_line`):
+
+| writer | where its messages go |
+|---|---|
+| libc `syslog()` (lane D) | stderr (`posix/src/syslog.rs`, `let fd = 2`) |
+| `logger` | a `journalrec` record in `/var/log/syslog.jsonl` -- since 2026-09-26; before, RFC 3164 text lines in `/var/log/syslog` that `journalctl` could not read |
+| `ntpdate -s` | the libc's `syslog()` -- since 2026-09-26; before, nowhere: it `open`ed `/dev/log` as a file, which failed, and discarded the error |
+| `crond`, `anacron` | the libc's `syslog()` -- since 2026-09-26; before, its own `crond2[PID]: ...` lines on stderr |
+| `ntpd` (the daemon) | the libc's `syslog()`, or the file its `logfile` directive names -- since 2026-09-26; before, nothing at all outside `-d`, and its clock and drift-file failures were discarded |
+| `systemd-cat` (`systemctl`) | a `journalrec` record in `/var/log/syslog.jsonl` |
+| `syslogd log` | the same file |
+| `syslogd daemon` | receives nothing (`cmd_daemon`: "the daemon sits idle") |
+
+So `logger`'s lines, which were RFC 3164 text, were never shown by
+`journalctl` at all (fixed by step 3), and `ntpdate -s`'s are simply lost. (Corrected
+2026-09-26: this entry first said `journalctl` fell back to
+`/var/log/syslog` only when the JSON-lines file yielded nothing. The code
+reads both; it is the parser that drops the text lines.)
+
+**The proper fix:**
+1. Lanes A and D: path-bound `AF_UNIX` sockets (the request above).
+2. `syslogd daemon` binds `/dev/log` (`SOCK_DGRAM`), parses each frame — the
+   local form `<PRI>Mmm dd hh:mm:ss TAG[PID]: MSG`, RFC 3164 with a hostname,
+   and RFC 5424 — and writes it as a `journalrec` record.
+3. **DONE 2026-09-26 (413e56f1d, design-decisions §1033).** `logger` is a
+   faithful port of util-linux 2.39.3's `logger.c`, sending to `/dev/log`
+   exactly as upstream does, verified by `scripts/logger-diff.sh` (138 cases)
+   against WSL's util-linux. It did not wait for step 1: where the platform
+   has no Unix-domain sockets at all (`EAFNOSUPPORT` — not "no daemon
+   listening", which upstream handles its own way), it appends a `journalrec`
+   record instead, which is what a daemon would have written. On a host with
+   sockets that branch never runs, so the harness compares pure upstream
+   behaviour; on SlateOS it reaches `journalctl` today, and switches to
+   `/dev/log` by itself once step 1 lands.
+4. **DONE 2026-09-26.** `ntpdate -s` (and `sntp -s`) log through the C
+   library's `syslog()` -- `openlog(name, LOG_PID, LOG_DAEMON)`, as ntpdate
+   does -- by way of `userspace/libcsyslog`, a thin wrapper that keeps one
+   syslog client on the system; `crond` and `anacron` too, at `LOG_CRON`,
+   each message at its own severity. Checked end to end by
+   `scripts/syslog-client-check.sh`, which puts a private socket over
+   `/dev/log` in WSL. Where the messages go is now the libc's decision --
+   step 5.
+5. Lane D's libc `syslog()` sends to `/dev/log` as glibc does -- and until
+   step 1 lands, appends a journal record when `socket(AF_UNIX, ...)` fails
+   with `EAFNOSUPPORT`, as `logger` does. Asked in
+   `requests/b-d-libc-syslog-could-reach-journalctl-today.md`; lane D's call.
+
+Step 3's port needed a real `getopt_long` (permutation, abbreviated long
+options, optional arguments). Only coreutils had one; it was extracted into
+the shared `getoptlong` crate (c8e63a0bf), which `logger` uses and every
+standalone util-linux port here can -- see
+TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE for the rest.
+
+## B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-OVER-ONE-BYTE-THAT-IS-NOT-UTF-8 (lane B, 2026-09-26) — FIXED 2026-09-26
+
+**In short:** `journalctl` reads each log file with `fs::read_to_string` and,
+if that fails, moves on to the next file without a word
+(`read_all_entries` in `userspace/journalctl/src/main.rs`). A single byte
+that is not valid UTF-8 anywhere in `/var/log/syslog.jsonl` therefore makes
+`journalctl` show *nothing* from that file -- every record in it, silently,
+with exit status 0. The same failure hides a file `journalctl` cannot open
+at all, where the user is told nothing either.
+
+**Reproduce:** append `printf '\xff\n'` to the log, then `journalctl`: the
+earlier records are gone from its output.
+
+**Where it comes from:** a writer that puts a message's raw bytes into the
+file (anything outside `journalrec::escape`, which takes `&str`), a torn
+write, or disk corruption -- the three things a log reader exists to survive.
+
+**The same read, twice more.** `--vacuum-time` (`read_to_string`, then
+`continue` on failure) leaves such a file alone without saying so -- the safe
+direction, still silent. And `-f` re-reads the WHOLE file every 500 ms, then
+slices the `String` at the previous length, `&content[prev_size as usize..]`,
+which panics when that offset falls inside a multi-byte character -- as it
+does when a writer's append was torn mid-character and completed later.
+
+**The proper fix:** read the file as bytes and split on `\n`, so one bad
+record costs that record and no other; in `-f`, read only the bytes past the
+previous offset and carry an unterminated last line to the next round; report a record that is not UTF-8,
+or not a record, as such (journald's own `journalctl` shows such data as
+`[N bytes blob data]` rather than dropping it); and report an unreadable
+file as an error naming it, with a non-zero status, instead of skipping it.
+Found while correcting TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES, which had
+misdescribed how `journalctl` chooses its files.
+
+**Fixed 2026-09-26.** Every read is bytes, line by line: `record_of` parses
+one line, so a bad byte costs its line. Lines that are not records are
+counted per file and reported on stderr ("N lines are not a journal record
+and not shown"), which is what `/var/log/syslog`'s text lines now produce
+instead of vanishing. An unreadable file or directory -- including a log
+file whose NAME is not UTF-8, which discovery used to skip -- is reported,
+with exit status 1. `-f` takes its offsets from the same read as its
+listing (records appended between the two were lost), reads only the bytes
+past each offset, carries an unterminated last line to the next round (a
+record written in two pieces was lost), and re-reads a file that got
+shorter from its start (a truncated or rotated file lost what was written
+before the next poll). `--vacuum-time` reports a failed rewrite as
+`--vacuum-size` does, and exits 1. Eight tests; the torn-append one is what
+found B-JOURNALCTL-SHOWS-NON-ASCII-TEXT-AS-MOJIBAKE.
+
+## B-JOURNALCTL-SHOWS-NON-ASCII-TEXT-AS-MOJIBAKE (lane B, 2026-09-26) — FIXED 2026-09-26
+
+**In short:** `journalctl` decoded every JSON string byte by byte, pushing each
+byte `as char`, so any character outside ASCII in any record was shown as
+several Latin-1 ones: a record saying `café` printed `cafÃ©`. The same
+decoder sliced the `&str` after `\u` at byte offsets, which panics when a
+multi-byte character follows a malformed escape, and it dropped a surrogate
+pair (every emoji) or a lone surrogate without a trace.
+
+**Where:** `parse_json_string_value` in `userspace/journalctl/src/main.rs`.
+Found by a test for the torn-append fix
+(B-JOURNALCTL-SKIPS-A-WHOLE-LOG-FILE-...), whose record held an `é`.
+
+**Fixed** in 91fc6a349: unescaped runs are copied as the UTF-8 they are; every
+escape JSON defines is decoded, a surrogate pair as its one character; what
+cannot be decoded is kept exactly as written. Four tests.
+
+## B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
+
+**In short:** `--vacuum-time` and `--vacuum-size` read a log file, filter it,
+and write the survivors back over the same path. A record another program
+appends between the read and the write is overwritten and lost. Every writer
+here appends one record at a time (`syslogd log`, `systemd-cat`, `logger`),
+so a vacuum run on a live system can silently drop whatever was logged while
+it ran.
+
+**Where:** `cmd_vacuum_time` and `cmd_vacuum_size` in
+`userspace/journalctl/src/main.rs` (`fs::read`, then `fs::write` of the kept
+lines). Found while fixing their reads; not reproduced.
+
+**The proper fix** is to stop rewriting a live file: rotate instead -- rename
+the live file aside (writers that open, append and close per record then
+start a fresh one), filter the renamed file at leisure, and have the readers
+include rotated files. That changes where `journalctl` finds records outside
+`/var/log/journal/`, so it is a design change of its own, not a patch to the
+vacuum.
+
+**Fixed** with a lock rather than rotation (design-decisions §1037, which
+weighs the two: a writer that opened the file just before a rotation's rename
+would still have written into the renamed file after it was read). Every
+writer -- `syslogd`, `logger`, `systemd-cat` -- appends through
+`journalio::append`: `flock`, check the path still names the file, write,
+close. Every rewriter -- both vacuums and `syslogd clean` -- holds the lock
+from its read to a rename of a new file over the old one, and `syslogd`'s
+rotation holds it for each rename. A writer arriving meanwhile waits, then
+lands in the new file; `journalio`'s two race tests fail when the lock is
+removed. Two more defects went with it: `syslogd clean` refused a whole log
+for one byte that was not UTF-8, and rewrote the file when it had removed
+nothing; and `journalctl` never read `syslogd`'s rotated copies
+(`syslog.jsonl.1` ...), so every record older than the last rotation was
+invisible -- it reads them now, oldest first, and vacuums them.
+
+## TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE (lane B, 2026-09-26) — **open**
+
+**In short:** GNU and util-linux programs parse options with glibc's
+`getopt_long`, which accepts any unambiguous abbreviation of a long option
+(`--pri` for `--priority`), `--opt=value` and `--opt value` alike, options
+after operands, and `--`. coreutils has had a faithful port of that parser
+since the getopt conversions; the programs OUTSIDE coreutils each parse argv
+by hand and match long options by their whole name, so `flock --verb` or
+`lsmem --summ` is refused where upstream accepts it -- and each hand-written
+loop has its own edge cases around values, `=`, and operands.
+
+**Where:** the standalone ports that already share `usageerror` (the
+diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
+`hostnamectl`, `objdump`, `resolvectl`,
+`route`, `sanitize`, `systemctl`, `tput` -- plus hand-parsed programs that do
+not use it yet. (`logger` was one; its port uses `getoptlong`, 413e56f1d. So
+was `getopt` itself -- now a port of util-linux's, whose script-facing parse
+is `getoptlong` with the knobs it gained for it: keep-going, long-only,
+distinct entries, `W;`. And `flock`, now a port of util-linux's, whose
+old hand parser took an unknown option for the file to lock. And `lsmem`,
+now a port of util-linux's printing through the `smartcols` crate, whose old
+parser refused `--summ`, and whose old program invented a block size when it
+could not read one -- design-decisions §1036. And `prlimit`, `column`,
+`lsirq` and `lscpu`, likewise ported onto `getoptlong` and `smartcols`.)
+
+**The proper fix,** now possible: `getoptlong` (extracted from
+`coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a
+program means copying upstream's option string and `struct option[]` table
+IN ITS ORDER (the order is observable in the ambiguity message), handling
+`Opt` items as they arrive, and printing errors through the program's own
+diagnostic path. A program whose upstream is not glibc-getopt-based is not a
+candidate. `scripts/getopt-ambiguity-check.py` verifies coreutils' tables
+against the reference and would need extending to cover these.
+
+## TD-B-PER-CRATE-CARGO-LOCK-FILES-CARGO-NEVER-READS (lane B, 2026-09-26) — lane B's fixed; 148 in other lanes' trees
+
+**In short:** a crate that is a member of the workspace is built with the
+workspace root's `Cargo.lock`; a `Cargo.lock` inside the crate's own
+directory is never read. The tree carried 340 such files, left from builds
+before the crates joined the workspace, and they had rotted as unread files
+do -- `userspace/crond/Cargo.lock` still named its package `crond2`. Nothing
+builds differently because of them; the harm is to whoever reads one as the
+crate's dependency set.
+
+**Lane B's 192** (`userspace/`, `init/`) are deleted (74fde4474).
+
+**Still present, each lane's to delete:** `apps/` 135 (lane E), `gui/` 8
+(lanes C, F), `net/` 2, `kernel/` 1 (lane A), `posix/` 1, `toolchain/` 1
+(lane D). Every one belongs to a workspace member. To list them:
+
+```sh
+cargo metadata --no-deps --format-version 1   # the members' manifest paths
+git ls-files '*Cargo.lock'                     # minus the root's
+```
+
+and delete a lock file only when its directory is a member's. **Not dead,
+and not to be deleted:** `netipc/`, `netproto/`, `netring/`, `tzrules/` and
+six under `services/` (`hello`, `httpget`, `init`, `netstack`, `ticker`,
+`udpget`) are outside the workspace, so cargo does read their lock files.
+
+## TD-B-FLOCK-WAIT-POLLS (lane B, 2026-09-26) — **open**, the fix is lane D's
+
+**In short:** `flock -w SECONDS` (wait for a lock, but not forever) cannot
+wait the way util-linux's does on SlateOS, so ours waits a slightly different
+way everywhere. Upstream calls the blocking `flock()` and has a timer
+interrupt it with a signal when the time is up. SlateOS's C library
+implements a blocking `flock()` as a loop that retries until the lock is free
+(`posix/src/file.rs`, `do_flock`: `SYS_SLEEP` then `continue` on `EAGAIN`),
+and nothing in that loop returns `EINTR` when a signal handler has run -- so
+the timer would fire, the handler would set its flag, and `flock` would go on
+waiting forever.
+
+**What was done instead** (`userspace/flock/src/main.rs`, the lock loop):
+with `-w`, `flock` tries `LOCK_NB` until the deadline, sleeping 1 ms,
+doubling to at most 25 ms, between tries. A caller sees the same outcomes --
+`scripts/flock-diff.sh` checks them against util-linux -- and only notices a
+release up to 25 ms late. Without `-w`, the blocking call is upstream's.
+
+**The proper fix, lane D:** the libc's blocking `flock()` should return
+`EINTR` when a caught signal is delivered while it waits, as Linux's does
+(the kernel's `SYS_SLEEP` would have to report the interruption). Then `-w`
+can be upstream's timer again (design-decisions §1035), and every other
+program that relies on a signal interrupting a blocking call benefits. Worth a request once lane D's
+signal delivery is known to reach that loop; until then the polling is
+correct, only less exact.
+
+## TD-B-LOCKFILE-IS-NOT-PROCMAILS (lane B, 2026-09-26) — **open**
+
+**In short:** `lockfile` -- the command scripts use to create a lock file
+the way procmail does -- is a SlateOS approximation, not a port. It became
+its own program on 2026-09-26 (it had been an unreachable personality of
+`flock`), and its code moved unchanged, so its differences from procmail's
+`lockfile(1)` did too. Found while splitting it out; not yet measured against
+procmail's, which WSL can provide (`apt install procmail`).
+
+**Where it is known to differ** (`userspace/lockfile/src/main.rs`):
+- `-l locktimeout` is used as a deadline for giving up; in procmail it is the
+  age after which an existing lock file is considered stale and removed.
+- A bad number (`-r x`, `-l x`, `-s x`) silently becomes a default rather
+  than being refused.
+- The messages (`giving up on lock file`) and the exit statuses are not
+  procmail's, and `-ml`/`-mu` (the user's mailbox) are approximated.
+
+**The proper fix:** a port of procmail 3.24's `lockfile.c`, measured by a
+`lockfile-diff.sh` against WSL's, as `flock` and `getopt` were.
 
 ### [A] Four loopback network self-tests fail into a WARNING that no boot counts -- 2026-09-26
 
@@ -173085,6 +174379,220 @@ dark-mode colours some colour fonts carry for text on a dark background.
    clip its graph; it is ignored (the outer canvas still bounds it). No font
    seen so far depends on it.
 
+**How to see it.** `target/fontcheck` draws emoji lines from
+`target/fonts/notoemoji__Noto-COLRv1.ttf` (drawn) and
+`target/fonts/notocoloremoji__NotoColorEmoji-Regular.ttf` (blank).
+
+## TD-B-TABLE-PROGRAMS-LAY-OUT-THEIR-OWN-TABLES (lane B, 2026-09-26) — **open**
+
+**In short:** the util-linux programs that print tables do not decide their
+own column widths upstream -- a library, libsmartcols, does -- but ours each
+lay out their tables themselves. So on a narrow terminal each cuts
+differently from util-linux (and from one another), and `--json`, `--raw`
+and `--pairs` are each program's own dialect. The library is ported now, as
+`userspace/smartcols` (design-decisions §1036), and `lsmem` prints through
+it and matches util-linux 2.39.3 at every terminal width
+(`scripts/lsmem-diff.sh`), and so does `prlimit` (`scripts/prlimit-diff.sh`:
+182 cases, plus five narrow widths at which only upstream never finishes),
+and so does `column` (`scripts/column-diff.sh`: 594 cases in all its
+modes, plus 9 at which only upstream never finishes -- a port that
+needed the column moves, re-parenting and `--table-column` properties added
+to the crate), and so does `lsirq` (`scripts/lsirq-diff.sh`: 212 cases on
+`/proc` files of its own, plus 1 at which only upstream never finishes),
+and so does `lscpu` (`scripts/lscpu-diff.sh`: 1421 cases on
+util-linux's snapshots of nineteen machines, trees of its own and WSL
+itself, plus 3 narrow terminals at which only upstream never
+finishes -- a port that needed tree symbols of the program's own added to
+the crate), and so does `findmnt` (`scripts/findmnt-diff.sh`: 4953 cases on
+util-linux's own test tables, tables of its own and WSL's, including
+`--verify` and `--poll`, plus 8 narrow terminals at which only upstream
+never finishes -- a port that needed libmount's table code and libblkid's
+device cache, as `userspace/ulmount`, and newline-wrapped cells, JSON arrays
+and range printing added to the crate; `mountpoint`, which the old program
+doubled as, is its own port now, `scripts/mountpoint-diff.sh`), and so does
+`lsns` (`scripts/lsns-diff.sh`: 483 cases, run inside a user, PID, network
+and mount namespace the harness makes for itself -- every type of namespace,
+user and PID namespaces nested three deep, persistent ones, assigned network
+IDs -- plus 4 where only upstream crashes, dereferencing the missing process
+of a persistent namespace whose owner `-t` filtered out), and so does `lsblk`
+(`scripts/lsblk-diff.sh`: 502 cases on util-linux's `--sysroot` snapshots
+and WSL itself -- a port that needed libsmartcols' sorting and line groups,
+measured on their own against the real library by
+`scripts/smartcols-diff.sh`: 2954 tables), and so does `swapon`'s `--show`
+(`scripts/swapon-diff.sh`, 166 cases, 2026-09-27); the others still do not use
+it.
+
+**Where:** `losetup` (`--list`), `rfkill`, `fdisk` (`-l`'s partition
+table). `rfkill`'s reference, like `lsirq`'s,
+is not installed in WSL; `scripts/util-linux-extra.sh` unpacks both without
+root.
+
+**The proper fix:** port each program from util-linux 2.39.3 onto
+`smartcols`, as `lsmem` was -- the program's own logic function by function,
+the table handed to the crate -- with a differential harness against WSL's
+util-linux that includes a pty at several widths. Parts of libsmartcols not
+yet ported (the crate's module docs list them: custom wrap functions other
+than the newline one, and colours) are added when a program needs them;
+groups and sorting are in since lsblk's port. Each of these is
+also on TD-B-STANDALONE-PORTS-MATCH-LONG-OPTIONS-WHOLE's list, and the two
+are one job per program.
+
+## TD-B-ULMOUNT-PROBES-ONLY-EXT (lane B, 2026-09-26) — ✅ FIXED 2026-09-27 (lane B)
+
+**In short:** to learn a disk's filesystem type, label or UUID, util-linux
+reads the disk's first blocks and compares them against over a hundred
+known layouts ("probing", libblkid's job). The port in `userspace/ulmount`
+knows five of them -- ext2, ext3, ext4 and their test and journal
+variants -- and no partition tables. So for a device holding anything else
+(a FAT EFI partition, a swap area, XFS, btrfs), or for a partition's own
+PARTUUID and PARTLABEL, probing finds nothing where upstream names it.
+
+**What a user sees:** where udev is running, nothing -- `findmnt` asks
+udev's database first, as upstream does, and udev did the probing. Where it
+is not (SlateOS today, and any root that cannot read `/run/udev/data`):
+
+- `findmnt -o UUID,LABEL,PARTUUID` shows blanks for non-ext filesystems and
+  for every PARTUUID/PARTLABEL.
+- `findmnt --verify` says `cannot detect on-disk filesystem type (reason
+  unknown)` for a vfat, swap, xfs or btrfs entry that upstream checks, and
+  so cannot say `vfat does not match with on-disk ...` either.
+- libblkid's cache, as root writes it (`/run/blkid/blkid.tab`), lists only
+  ext devices' tags, so `findmnt -o SOURCES` and a `LABEL=` source are only
+  resolved for ext filesystems when their udev link is missing.
+
+For ext filesystems the port reports exactly libblkid's values (LABEL,
+UUID, EXT_JOURNAL, SEC_TYPE, BLOCK_SIZE, LOGUUID, TYPE, in its order, with
+its checksum check and its rule that two probers claiming one superblock is
+no answer), and an unreadable device fails with `EACCES` as upstream's does.
+
+**Where:** `userspace/ulmount/src/blkid.rs` -- `probe_file` and
+`probe_ext`; everything above them (`mnt_cache_read_tags`, `mnt_get_fstype`,
+`blkid_verify`) is ported whole and calls these two.
+
+**How to see it:** on SlateOS, `findmnt -o TARGET,UUID` with the EFI
+partition mounted; or `findmnt -x -F` an fstab with a swap line whose
+device is readable.
+
+**The proper fix:** port libblkid's probing as its own crate -- `probe.c`
+(the chains, `blkid_do_safeprobe`'s ambivalence and "tolerant" rules, the
+tiny-device and CD-ROM cases), the superblocks chain in its list order
+(`superblocks/*.c`; vfat, swap and iso9660 first, since those are what
+SlateOS images and its users' disks carry, then the rest) and the
+partitions chain (`partitions/*.c`: dos and gpt first, for PARTUUID and
+PARTLABEL) -- and have `ulmount::blkid::probe_file` call it. `blkid`,
+`lsblk`, `wipefs` and `findfs` need the same crate, so it is one job for
+all of them; each prober gets the differential treatment the programs got,
+on disk images built by `mkfs.*` in WSL.
+
+**Fixed (2026-09-27):** libblkid's probing is ported whole as its own
+crate, `userspace/ulblkid` -- `probe.c`, all 79 superblock probers, all 13
+partition-table probers (nested BSD, Minix, Solaris and UnixWare tables
+included) and the topology chain -- together with libblkid's device cache
+and tag evaluation, which moved there from `ulmount`. `ulmount` now probes
+through it, so every filesystem, RAID member and partition table libblkid
+knows is recognised by `findmnt` (tags, `--verify`) where only the ext
+family was. `blkid` and `findfs` are ports of util-linux's programs on top
+of it (`findfs` a crate of its own, as upstream's is a program of its own).
+
+Measured: `scripts/blkid-diff.sh` compares every value, byte for byte,
+with WSL's libblkid 2.39.3 -- safeprobe (and again accepting bad
+checksums), fullprobe, the wipefs walk, the binary partition list with and
+without FORCE_GPT -- and 621 images agree, none differs: util-linux's 128
+test images, 9 made with mkfs/mkswap/sfdisk, 484 truncated copies.
+`scripts/blkid-cli-diff.sh` compares the two programs: 144 cases agree.
+
+What remains for other programs is theirs: `lsblk` and `wipefs` are still
+hand-written and did not use the crate -- `wipefs` is now a port; `lsblk` is TD-B-LSBLK-IS-NOT-A-PORT.
+
+## TD-B-LSBLK-IS-NOT-A-PORT (lane B, 2026-09-27) — ✅ FIXED 2026-09-27 (lane B)
+
+**Fixed:** `userspace/lsblk` is now util-linux 2.39.3's `lsblk.c`,
+`lsblk-devtree.c`, `lsblk-mnt.c` and `lsblk-properties.c`, ported function by
+function onto `smartcols`, `ulmount`, `ulblkid` and `ulsysfs`.
+`scripts/lsblk-diff.sh` compares it with WSL's `lsblk from util-linux
+2.39.3` in C.UTF-8 and C: util-linux's two `--sysroot` snapshots (an LVM and
+an NVMe machine) with every `.cols` file and 68 option sets each (every
+format, sort, dedup, tree column, width, filter, `--merge`, `--inverse`,
+every column group), the live machine as an ordinary user (udev's database,
+mounts, swap, named devices), and option refusals: **502 agree, 0 differ**.
+One judgment call: udev is asked only where it runs (`/run/udev/data`), so
+on SlateOS, which has none, libblkid is (todo.txt, lane B Judgment Calls,
+2026-09-27). What remains unmeasured is root's libblkid path -- under WSL udev
+always answers first, as it does upstream.
+
+The history, kept:
+
+**In short:** `lsblk` (list block devices) is a hand-written program, not a
+port of util-linux's. It recognises filesystems by its own code where
+util-linux's asks libblkid, which is now ported (`userspace/ulblkid`,
+measured against the real libblkid on 621 images). `wipefs` was in the same
+state and is now a port (2026-09-27, `scripts/wipefs-diff.sh`: 239 cases
+agree, the erased images' bytes and the backups included).
+
+**What a user sees:** `lsblk -f` shows no FSTYPE, LABEL or UUID for the
+formats its own code does not know; options are parsed by hand (whole long
+names only), and its output formats approximate upstream's.
+
+**Where:** `userspace/lsblk/src/main.rs`.
+
+**The proper fix:** port `misc-utils/lsblk*.c` onto `ulblkid`, `ulmount`
+and `smartcols`, with a differential harness against WSL's.
+
+**Progress (2026-09-27):** the two libsmartcols features lsblk depends on
+and the port lacked are in: sorting (lsblk sorts every table, by MAJ:MIN
+unless `--sort` says otherwise, and `--list --raw/--pairs/--inverse` by tree
+too) and line groups (`--merge`'s chart). `scripts/smartcols-diff.sh`
+compares the port with util-linux's own libsmartcols.so.1 on 1500 generated
+tables in two locales: 2954 agree, 764 of them drawing a group chart, 22
+aborting on both sides where upstream aborts; the 46 upstream never finishes
+(the known narrow-terminal loop, and a recursion through a line made its
+own group's child) the port finishes. What remains is lsblk itself and the
+`lib/sysfs.c` helpers it needs that `ulsysfs` lacks (the device chain and
+subsystems, hot-plug, the SCSI host/attribute tests and HCTL).
+
+**Also:** the hand-written `wipefs` answered to `blkdiscard` too -- a
+personality no executable was ever produced for (the multicall baseline
+listed it as unreachable). `blkdiscard` is now a port of util-linux's in a
+crate of its own (`scripts/blkdiscard-diff.sh`: 23 cases, all an ordinary
+user can reach).
+
+## TD-B-UTIL-LINUX-PORTS-WRITE-THROUGH-RUST-STDIO (lane B, 2026-09-26) — ✅ FIXED 2026-09-26 (lane B)
+
+**In short:** util-linux programs end with `close_stdout`, which decides the
+exit status from what happened to standard output and standard error --
+and a Rust program cannot see most of that through `println!` and
+`eprintln!`: the runtime reopens a closed descriptor on `/dev/null` before
+`main`, and Rust's `Stdout`/`Stderr` report a write to a closed descriptor
+as a success. `lsmem` and `getopt` now do what util-linux does (the
+`stdfdguard` and `ulclosestream` crates; `getopt-diff.sh` asks 44 cases of
+closed and full descriptors); `flock` and `logger` still write through `std`,
+so for them `>&-` and `2>&-` are invisible, and output that outgrows glibc's
+buffer before failing is reported with a reason where upstream gives none.
+
+**Where:** `userspace/flock/src/main.rs` (`Out`, which flushes through
+`io::stdout()`), `userspace/logger/src/main.rs` -- their stdout and
+diagnostic paths.
+
+**How to see it:** `flock --bogus 2>&-` -- upstream exits 1, not its usage
+status 64: the diagnostic could not be written, and `close_stdout` answers a
+lost diagnostic with `CLOSE_EXIT_CODE`. Ours exits 64. (`getopt -o a -- -x
+2>&-` was the same, 1 against upstream's 3, until getopt was converted.)
+
+**The proper fix:** in each, `stdfdguard::guard_std_fds!()` at module scope
+and `stdfdguard::restore()` first in `main`; stdout through
+`ulclosestream::Stdout` (with the program's own `CLOSE_EXIT_CODE` -- 3 for
+`getopt`); diagnostics through `ulclosestream::warnx`/`warn`/`stderr_write`;
+and cases for `>&-`, `>/dev/full`, `2>&-` and `2>/dev/full`, with small and
+large output, in each program's harness.
+
+**Fixed** as described, in all four: `lsmem` (348 cases), `getopt` (151, 44
+of them these), `flock` (114, 36 -- including the command inheriting a
+closed stdout, which with the lock file on descriptor 1 is upstream's), and
+`logger` (170, 32 -- including `-s`, whose copy to stderr is `writev` and
+not stdio, so its failure is no lost diagnostic: `ulclosestream::stderr_raw`).
+Two refinements came out of the measuring: glibc sizes stdout's buffer at
+the first write (8192 on a closed descriptor, `st_blksize` otherwise), and
+upstream lsmem's held `/sys` descriptor is what descriptor 1 is by then.
 **How to see it.** `target/fontcheck` draws emoji lines from any font given
 it; `target/colr_compare.py` compares with Edge.
 
@@ -177406,3 +178914,114 @@ the overlay.
 **Where:** `scripts/ctest-fixtures.py` (`_inputs`,
 `_newest_overlay_header`); `scripts/create-ext4-rootfs.sh`
 (`OVERLAY_NEWEST`).
+
+## B-LOGIND-SERVES-A-THREAD-PER-CLIENT-UNTIL-A-PORT-CAN-WAIT-ON-CHANNELS — `logind` holds a thread for every connected client, because the kernel cannot wake one waiter for many channels (lane B, 2026-10-01) — **Status: OPEN (debt, deliberate; blocked on lane A)**
+
+**In short:** a server should wait on all its clients, and on new ones
+arriving, from one place. On SlateOS that place is a *completion port* (a
+kernel object a program waits on to hear about many things at once), and
+today it cannot do the job: a message arriving on a channel does not wake
+it, and "a client is connecting" is not something it can wait for at all.
+So `logind` gives each connected client a thread that waits on that client
+alone. That works, and costs a thread per idle client.
+
+**Where:** `userspace/logind/src/main.rs`, `serve` and `serve_client`;
+`MAX_CLIENTS` (64) and `CLIENT_STACK` (512 KiB) bound it. The reasoning and
+the alternatives are `design-decisions.md` §1054.
+
+**What lifts it:** both of these from lane A --
+`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`
+point 4 (lane F's: `channel::send` must notify the ports that registered
+the channel) and
+`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`
+(a "listener" wait source). Then `libservicebus` gets `register_listener`
+back with a real source, and `serve` goes back to one event loop.
+
+**Related, and also lane A's:** the same request's point 1 (a channel handle
+can be guessed, and the channel syscalls do not check the caller holds it),
+which means `Connection::peer_credentials` proves who *connected*, not who is
+sending; and point 3 (a Linux-ABI process cannot reach these syscalls at
+all). Neither has a workaround in lane B's code.
+
+**How to see it:** nothing visible today -- `logind` is not on the image yet
+(§1053's staging request). On the device, `/proc/<logind pid>/task` would
+list one thread per connected client plus the accepting thread.
+
+## B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC — `file` names most formats in its own words, not file 5.45's (lane B, 2026-10-01) — **Status: OPEN (debt; the ISO media branch is done)**
+
+**In short:** `file` tells you what kind of file something is. Ours checks a
+few dozen formats with rules written by hand, so for most of them it uses
+different words from GNU's `file` (`Apple MPEG-4 audio` where GNU says `ISO
+Media, Apple iTunes ALAC/AAC-LC (.M4A) Audio`), knows far fewer formats, and
+prints `-i` as a bare type where GNU adds `; charset=binary`. Scripts that
+parse `file`'s output, which is common, get answers they do not expect.
+
+**What is already faithful:** the `ftyp` family -- MP4, QuickTime, 3GP, AVIF,
+HEIF and 150 more brands. Since 2026-10-01 that branch runs file 5.45's own
+rules (`magic/Magdir/animation`), generated into
+`userspace/file/src/isomedia_table.rs` by `scripts/file-isomedia-gen.py` and
+evaluated as libmagic evaluates them (`src/isomedia.rs`); its harness,
+`scripts/file-isomedia-diff.sh`, agrees with GNU's on all 726 files it
+builds.
+
+**The proper fix** is the same method for the rest: libmagic's `softmagic.c`
+interpreter -- offsets (including indirect ones), the numeric and string
+tests, `search`/`regex`, `name`/`use`, `default`/`clear`, the `!:mime` and
+`!:ext` annotations, strength ordering -- and file's `Magdir` database
+compiled into tables, with the encoding and `-i`/`--mime-type` output on top.
+The generator's approach scales: each `Magdir` file becomes data, and the
+interpreter grows by the test kinds that file uses. It is a port of a large
+C program and its database; recorded here rather than started inside lane
+F's AVIF request, which needed one branch.
+
+**Where:** `userspace/file/src/main.rs` (every `detect_*` but the ISO branch).
+
+**How to see it:** in WSL, `file -b x.m4a` against ours; or any format the
+hand rules do not know, which ours calls `data` where GNU names it.
+
+## B-GETTY-WRITES-NO-LOGIN-PROCESS-RECORD — `getty` does not put its terminal in `utmp` while it waits for a name (lane B, 2026-10-01) — **Status: OPEN (debt)**
+
+**In short:** on Linux, `agetty` writes a `LOGIN_PROCESS` record for its
+terminal when it starts, so `who -l` (and `w`) can show which terminals are
+waiting for a login, and `login` finds that record and turns it into the
+user's session, keeping its id. Ours writes nothing; `login`
+(`userspace/login/src/records.rs`, `log_utmp`) handles both cases, making a
+new record when there is none, so nothing is lost but the waiting
+terminals' lines.
+
+**Where:** `userspace/getty/src/main.rs`; the call to copy is util-linux
+2.39.3's `term-utils/agetty.c`, `update_utmp` -- `pututxline` of a
+`LOGIN_PROCESS` record and `updwtmpx` to `wtmp`, through `libcall::utmp`.
+
+## B-PORTED-CODE-CARRIES-NO-NOTICES — lane B's ports of GNU coreutils, util-linux and others have no notices manifest, so the image would ship their code without their licences (lane B, 2026-10-01) — **Status: OPEN (next task)**
+
+**In short:** much of lane B's userland is ported from other projects --
+GNU coreutils 9.4 (about 40 programs, GPL-3.0-or-later), util-linux 2.39.3
+(`blockdev`, `blkid`, `lsblk`, `swapon`, `wipefs`, `logger`, `column`,
+`findmnt` and more, plus the `ulblkid`/`ulsysfs`/`smartcols`/`ulmount`
+library ports: GPL-2.0-or-later and LGPL-2.1-or-later), Oils (Apache-2.0)
+and others. An image may carry other people's code only with their licence
+notices, and `scripts/gather-notices.py` -- which builds the image's
+`/usr/share/licenses` and the notices page -- can find ported code only
+through a `licenses/notices.yaml` naming it (`design-decisions.md` §1433,
+`requests/c-abdef-third-party-code-needs-a-notices-manifest.md`). Lane B has
+none, except `userspace/file`'s (file 5.45, added 2026-10-01). So today the
+image carries those programs without the notices their licences require.
+
+**The fix:** one manifest for lane B's ports in `userspace/licenses/`, one
+entry per upstream project (name, version, licence, texts), with each
+project's licence texts beside it. Per project rather than per crate: the
+notices page lists components, and forty copies of the GPL would say
+nothing forty-one did not. Needs, per crate, the upstream it states and the
+version it was ported from -- most say so in their module docs ("a port of
+util-linux 2.39.3's ..."), which a survey of `userspace/` already finds for
+26 crates and 40 coreutils programs.
+
+**One thing for the operator to know, not decide here:** code ported from
+GPL projects makes those programs GPL-licensed derived works, with the
+GPL's source-availability obligations for any image distributed. That is
+already true of the tree as it stands; the manifest makes it visible
+rather than creating it.
+
+**Where:** `userspace/**`, `init/**`; the gatherer is `scripts/gather-notices.py`
+and its check runs in the boot test (`scripts/test-gather-notices.py`).

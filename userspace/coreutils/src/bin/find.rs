@@ -81,6 +81,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::{self, strerror};
+use coreutils::parse_datetime::{Timespec, parse_datetime};
 #[cfg(unix)]
 use coreutils::quote::os_bytes;
 use coreutils::quote::{self, os_from_bytes, quote};
@@ -1446,8 +1447,8 @@ fn parse_type_letters(name: &[u8], arg: &[u8]) -> Parsed<Vec<u8>> {
         }
         if letters.contains(&c) {
             return Err(Fatal::new(format!(
-                "Duplicate file type '{}' in the argument list to {pname}.",
-                chr(c)
+                "Duplicate file type {} in the argument list to {pname}.",
+                quote::quoteaf_os(chr(c))
             )));
         }
         letters.push(c);
@@ -1519,8 +1520,8 @@ fn compile_regex(pattern: &[u8], extended: bool, ci: bool) -> Parsed<ere::Regex>
         // greps this line was written against. The `-regex` block in
         // `scripts/find-diff.sh` pins every code this can produce.
         Fatal::new(format!(
-            "failed to compile regular expression '{}': {}",
-            quote::escape_unprintable(pattern),
+            "failed to compile regular expression {}: {}",
+            quote::quoteaf(pattern),
             e.message()
         ))
     })
@@ -2056,7 +2057,7 @@ impl Parser<'_> {
     fn apply_daystart(&mut self) {
         let zone = localtime::Zone::from_env();
         let base = self.cur_day_start.sec.saturating_add(86400);
-        let tm = zone.local(base, 0);
+        let tm = zone.localtime(base, 0);
         let since_midnight = i64::from(tm.second)
             .saturating_add(i64::from(tm.minute).saturating_mul(60))
             .saturating_add(i64::from(tm.hour).saturating_mul(3600));
@@ -2167,12 +2168,23 @@ impl Parser<'_> {
         self.i = self.i.saturating_add(1);
 
         let ts = if y == b't' {
-            parse_datetime(&arg).ok_or_else(|| {
-                Fatal::new(format!(
-                    "I cannot figure out how to interpret {} as a date or time",
-                    quote(&arg)
-                ))
-            })?
+            // gnulib's parser, relative to the moment `find` started --
+            // upstream's `options.start_time` -- in the zone `TZ` names.
+            let start = Timespec {
+                tv_sec: self.now.sec,
+                tv_nsec: i32::try_from(self.now.nsec).unwrap_or(0),
+            };
+            parse_datetime(&arg, Some(start))
+                .map(|t| Ts {
+                    sec: t.tv_sec,
+                    nsec: u32::try_from(t.tv_nsec).unwrap_or(0),
+                })
+                .ok_or_else(|| {
+                    Fatal::new(format!(
+                        "I cannot figure out how to interpret {} as a date or time",
+                        quote(&arg)
+                    ))
+                })?
         } else {
             let meta = self.stat_arg(&arg)?;
             match y {
@@ -2324,92 +2336,6 @@ fn check_path_safety(action: &[u8], path: Option<&[u8]>) -> Parsed<()> {
         }
     }
     Ok(())
-}
-
-/// The slice of `parse_datetime` that `-newerXt` actually reaches for.
-///
-/// gnulib's parser accepts English relative phrases ("2 hours ago"); this
-/// accepts `@SECONDS` and the ISO-ish absolute forms, which is what a script
-/// writes. A phrase it cannot read is refused with GNU's own wording rather
-/// than silently misread. Tracked in `known-issues.md`.
-fn parse_datetime(s: &[u8]) -> Option<Ts> {
-    if let Some(rest) = s.strip_prefix(b"@") {
-        let (neg, digits) = match rest.strip_prefix(b"-") {
-            Some(d) => (true, d),
-            None => (false, rest),
-        };
-        let (secs, nanos) = split_fraction(digits)?;
-        let sec = i64::try_from(secs).ok()?;
-        return Some(Ts {
-            sec: if neg { -sec } else { sec },
-            nsec: nanos,
-        });
-    }
-    let text = std::str::from_utf8(s).ok()?;
-    let text = text.trim();
-    let (date, time) = match text.split_once(['T', ' ']) {
-        Some((d, t)) => (d, Some(t.trim())),
-        None => (text, None),
-    };
-    let mut parts = date.split('-');
-    let year: i64 = parts.next()?.parse().ok()?;
-    let month: u32 = parts.next()?.parse().ok()?;
-    let day: u32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let (mut hour, mut min, mut sec) = (0u32, 0u32, 0u32);
-    if let Some(t) = time {
-        let t = t.trim_end_matches('Z');
-        let mut hms = t.split(':');
-        hour = hms.next()?.parse().ok()?;
-        min = hms.next().map_or(Ok(0), str::parse).ok()?;
-        sec = hms.next().map_or(Ok(0), str::parse).ok()?;
-        if hms.next().is_some() {
-            return None;
-        }
-    }
-    let days = days_from_civil(year, month, day);
-    let utc = days
-        .checked_mul(86400)?
-        .checked_add(i64::from(hour).checked_mul(3600)?)?
-        .checked_add(i64::from(min).checked_mul(60)?)?
-        .checked_add(i64::from(sec))?;
-    // Interpret in the local zone, as parse_datetime does.
-    let zone = localtime::Zone::from_env();
-    let guess = zone.lookup(utc);
-    let sec = utc.checked_sub(i64::from(guess.gmtoff))?;
-    Some(Ts { sec, nsec: 0 })
-}
-
-fn split_fraction(digits: &[u8]) -> Option<(u64, u32)> {
-    let (whole, frac) = match digits.iter().position(|&b| b == b'.') {
-        Some(p) => (digits.get(..p)?, digits.get(p.saturating_add(1)..)?),
-        None => (digits, &b""[..]),
-    };
-    let secs = parse_u64(whole)?;
-    let mut nanos: u32 = 0;
-    for i in 0..9 {
-        let d = frac.get(i).copied().unwrap_or(b'0');
-        if !d.is_ascii_digit() {
-            return None;
-        }
-        nanos = nanos
-            .checked_mul(10)?
-            .checked_add(u32::from(d.wrapping_sub(b'0')))?;
-    }
-    Some((secs, nanos))
-}
-
-/// Howard Hinnant's `days_from_civil`: a proleptic Gregorian day number.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y.saturating_sub(1) } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = i64::from((m + 9) % 12);
-    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
 }
 
 // ---------------------------------------------------------------------------
@@ -2773,15 +2699,15 @@ impl Builder<'_> {
             PKind::And | PKind::Or | PKind::Comma => {
                 // e.g. `find . -a`
                 return Err(Fatal::new(format!(
-                    "invalid expression; you have used a binary operator '{}' with nothing before it.",
-                    self.name(this)
+                    "invalid expression; you have used a binary operator {} with nothing before it.",
+                    quote::quoteaf_os(self.name(this))
                 )));
             }
             PKind::Close => {
                 let Some(prev) = prev_pred else {
                     return Err(Fatal::new(format!(
-                        "invalid expression: expected expression before closing parentheses '{}'.",
-                        self.name(this)
+                        "invalid expression: expected expression before closing parentheses {}.",
+                        quote::quoteaf_os(self.name(this))
                     )));
                 };
                 let prev_is_op = matches!(
@@ -2791,15 +2717,15 @@ impl Builder<'_> {
                 return Err(if prev_is_op && !self.artificial(this) {
                     // e.g. `find \( -not \)`
                     Fatal::new(format!(
-                        "expected an expression between '{}' and ')'",
-                        self.name(prev)
+                        "expected an expression between {} and ')'",
+                        quote::quoteaf_os(self.name(prev))
                     ))
                 } else if self.artificial(this) {
                     // The user's predicates ran out inside the wrapper: the
                     // `)` we tripped over is one `find` added itself.
                     Fatal::new(format!(
-                        "expected an expression after '{}'",
-                        self.name(prev)
+                        "expected an expression after {}",
+                        quote::quoteaf_os(self.name(prev))
                     ))
                 } else {
                     Fatal::new("invalid expression; you have too many ')'")
@@ -2821,16 +2747,16 @@ impl Builder<'_> {
                     // `(` never got a partner.
                     return Err(Fatal::new(format!(
                         "invalid expression; expected to find a ')' but didn't see one. \
-                         Perhaps you need an extra predicate after '{}'",
-                        self.name(this)
+                         Perhaps you need an extra predicate after {}",
+                        quote::quoteaf_os(self.name(this))
                     )));
                 }
                 self.i = after;
                 if self.kind() == Some(PKind::Close) {
                     if self.artificial(this) {
                         return Err(Fatal::new(format!(
-                            "invalid expression: expected expression before closing parentheses '{}'.",
-                            self.name(self.i)
+                            "invalid expression: expected expression before closing parentheses {}.",
+                            quote::quoteaf_os(self.name(self.i))
                         )));
                     }
                     return Err(Fatal::new(
@@ -2903,8 +2829,8 @@ fn build_tree(nodes: &[Node]) -> Parsed<Expr> {
             Fatal::new("you have too many ')'")
         } else {
             Fatal::new(format!(
-                "unexpected extra predicate '{}'",
-                builder.name(builder.i)
+                "unexpected extra predicate {}",
+                quote::quoteaf_os(builder.name(builder.i))
             ))
         });
     }
@@ -3163,7 +3089,7 @@ fn qmark(bytes: &[u8]) -> Vec<u8> {
 
 /// `ctime_format`: `%a`, `%c` and `%t`'s fixed 26-plus-nanoseconds layout.
 fn ctime_format(ts: Ts, zone: &localtime::Zone) -> Vec<u8> {
-    let tm = zone.local(ts.sec, ts.nsec);
+    let tm = zone.localtime(ts.sec, ts.nsec);
     let wd = WEEKDAYS.get(tm.wday as usize).copied().unwrap_or("???");
     let mon = MONTHS
         .get(tm.month.saturating_sub(1) as usize)
@@ -3260,7 +3186,7 @@ fn format_date(ts: Ts, kind: u8, zone: &localtime::Zone) -> Vec<u8> {
     };
 
     if kind != b'@' {
-        let tm = zone.local(ts.sec, ts.nsec);
+        let tm = zone.localtime(ts.sec, ts.nsec);
         let out = do_time_format(&fmt, &tm, &ns);
         if !out.is_empty() {
             return out;
@@ -3650,7 +3576,7 @@ fn ls_time(mtime: Ts, start: Ts, zone: &localtime::Zone) -> Vec<u8> {
     let recent = start.sec.saturating_sub(SIX_MONTHS) <= mtime.sec
         && mtime.sec <= start.sec.saturating_add(3600);
     let fmt: &[u8] = if recent { b"%b %e %H:%M" } else { b"%b %e  %Y" };
-    let tm = zone.local(mtime.sec, mtime.nsec);
+    let tm = zone.localtime(mtime.sec, mtime.nsec);
     let out = localtime::strftime(fmt, &tm);
     if out.is_empty() {
         // The instant has no local representation. Upstream falls back to a

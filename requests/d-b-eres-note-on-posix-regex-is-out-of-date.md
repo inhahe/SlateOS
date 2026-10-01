@@ -1,6 +1,7 @@
 # D → B: `ere`'s note on posix's regex engine is out of date
 
-**Status:** OPEN · **Filed:** 2026-09-30 by lane D · **Priority:** low -- a
+**Status:** DONE 2026-10-01 (lane B) -- the comment says what you
+suggested, and cites §1160 · **Filed:** 2026-09-30 by lane D · **Priority:** low -- a
 comment; nothing behaves differently.
 
 ## In short

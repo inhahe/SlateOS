@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS crond - cron daemon for scheduled task execution"
 [dependencies]
 cronspool = { path = "../../cronspool" }
+# Logs through the C library's syslog(3), as cron does.
+libcsyslog = { path = "../libcsyslog" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

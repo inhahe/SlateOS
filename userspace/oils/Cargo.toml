@@ -40,9 +40,9 @@ ere = { path = "../ere" }
 # second opinion about how wide U+4E00 is. Same reasoning as `ere` above.
 charwidth = { path = "../charwidth" }
 
-# The POSIX `TZ`-string engine, shared verbatim with the libc (`posix`). osh
-# renders broken-down time itself — `printf '%(FMT)T'` and the `\D{…}` prompt
-# escapes never call `strftime` — so without a shared engine the shell and every
-# C program on the machine would disagree about what local time is. See
-# tzrules/src/lib.rs's "Why this is a crate and not a module".
-tzrules = { path = "../../tzrules" }
+# How `TZ` is read and a time is rendered: ports of glibc's `tzset` and
+# `strftime`, shared with `date` and every other program here that prints a
+# time. osh renders time itself -- `printf '%(FMT)T'` and the prompt escapes --
+# because it cannot call the libc's, so without the shared crate the shell and
+# `date` would disagree about what local time is.
+localtime = { path = "../localtime" }

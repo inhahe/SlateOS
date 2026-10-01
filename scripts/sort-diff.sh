@@ -59,6 +59,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 # Both sides are reached through a symlink named `sort` in a directory that is
 # the whole of `PATH` for that one invocation, so `argv[0]` is the bare word on
 # both and the `sort: ` prefix on every diagnostic matches.
@@ -110,8 +116,8 @@ compare() {
   # stdout goes to a file, not through a pipe into `od`: in `x=$(sort | od)`
   # the status recorded would be od's, so every failing case would pass.
   if [ "$stdin" = "-" ]; then
-    $OURS_RUN "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $GNU_RUN  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    env ${ENVV[@]+"${ENVV[@]}"} $OURS_RUN "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    env ${ENVV[@]+"${ENVV[@]}"} $GNU_RUN  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
     printf '%b' "$stdin" | $OURS_RUN "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
     printf '%b' "$stdin" | $GNU_RUN  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
@@ -146,7 +152,7 @@ report() {
   return 0
 }
 
-run_case()  { compare - "$@"; report "sort $*"; }
+run_case()  { compare - "$@"; report "${ENVV[*]:+${ENVV[*]} }sort $*"; }
 run_stdin() { local input="$1"; shift; compare "$input" "$@"; report "printf '$input' | sort $*"; }
 
 xfail_case() {
@@ -594,6 +600,42 @@ run_msg --check=
 run_msg --sort=
 run_msg --check=quiets
 run_msg --sort=NUMERIC
+# The -k refusals, compared by their words and not only by their status.
+# `run_case` further up sees just that stderr is non-empty, and these
+# printed ASCII apostrophes -- where upstream's `badfieldspec` and
+# `parse_field_count` call quote(), curly under this file's C.UTF-8 -- for
+# as long as they existed, unseen by every row that ran them.
+run_msg -k0
+run_msg -k1.0
+run_msg -kx
+run_msg -k1x
+run_msg -k1,0
+run_msg -k1,x
+run_msg -k1.
+run_msg -k1n,2M
+# Which combinations upstream refuses, and through which key. Global options
+# are checked as the whole-line key they become, or through the first key that
+# inherits them; a key naming an ordering of its own (`d`, even `r`) inherits
+# nothing and so is never checked against them. Version and -d/-i share one
+# slot, so the -Vd pair is accepted; `f` is listed but never counted.
+run_msg -nM
+run_msg -n -d
+run_msg -gi
+run_msg -k1nd
+run_msg -fin
+run_msg -dMn
+run_msg -Vn
+run_msg --numeric-sort --month-sort
+run_msg --sort=month -n
+run_msg -nM -k1
+run_msg -nd -k1,1 -k2,2M
+run_msg -nM -k2 -k1n
+run_msg -k1nM -k0
+run_stdin 'b\na\n' -k1Vd
+run_stdin 'b\na\n' -k1nf
+run_stdin 'b\na\n' -Vi
+run_stdin 'b\na\n' -nM -k1,1r
+run_stdin 'b\na\n' -nM -k1d
 run_stdin '10\n9\n' --sort=hum
 run_stdin '10\n9\n' --sort=n
 run_stdin 'b\na\n' --check=q
@@ -616,6 +658,35 @@ run_stdin 'a\nb\n' --field-separator , -k1
 # `--check` takes an *optional* value, so it never reaches for the next
 # argument: this checks, and leaves `quiet` an operand that does not exist.
 run_msg --check quiet
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+# `sort`'s option string leads with `-`, so getopt itself never stops; sort
+# applies the rule by hand, with an exception for a traditional `-o FILE`
+# that `_POSIX2_VERSION` in the 2001 window withdraws, as it withdraws `+POS`.
+printf 'b\na\n' > posix.txt
+ENVV=(POSIXLY_CORRECT=1)
+run_case posix.txt -r
+run_case -r posix.txt
+run_case posix.txt -- -r
+run_case posix.txt +1
+run_case posix.txt -o posix.out
+run_case posix.txt -oposix.out
+run_case posix.txt -o
+run_case -c posix.txt -o posix.out
+ENVV=(POSIXLY_CORRECT=1 _POSIX2_VERSION=200112)
+run_case posix.txt -o posix.out
+run_case +1 -2 posix.txt
+ENVV=(_POSIX2_VERSION=200112)
+run_case +1 posix.txt
+run_case +1 -2 posix.txt
+ENVV=()
+run_case posix.txt -r
+run_case +1 posix.txt
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

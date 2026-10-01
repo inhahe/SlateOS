@@ -1,0 +1,14 @@
+[package]
+name = "ulclosestream"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux's closestream.h: stdout buffered as glibc buffers it, close_stdout's verdict"
+
+[lints]
+workspace = true
+
+[dependencies]
+# A program name in a diagnostic has its unprintable bytes escaped.
+quoting = { path = "../quoting" }
+# strerror(3)'s wording for `write error: ...`.
+errmsg = { path = "../errmsg" }

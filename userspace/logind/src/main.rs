@@ -1832,32 +1832,74 @@ so there is no logout to act at and no key press to handle. See known-issues.md 
         daemon.config.idle_timeout,
     );
 
-    let code = serve(&mut daemon);
+    let code = serve(daemon);
 
-    daemon.running = false;
     let _ = writeln!(io::stderr(), "logind: shutting down");
     code
 }
 
-/// The resident event loop: register on the service registry and answer
-/// method calls until the daemon is asked to stop.
+/// The most clients served at once.
 ///
-/// One completion port multiplexes the listener and every accepted
-/// connection, so an idle daemon costs nothing and a client that connects and
-/// says nothing does not hold a thread. `user_data` is the connection's index
-/// in `conns`, with `LISTENER_KEY` reserved for the listener itself.
-///
-/// A dead or misbehaving client is dropped rather than retried: there is no
-/// state on this side worth preserving across a broken channel, and a client
-/// that wants to talk again can connect again.
+/// Each costs a thread, and any process can connect: without a bound, a
+/// program that opens connections and says nothing could exhaust the daemon's
+/// memory. A machine has a handful of logins, a screen locker and `loginctl`;
+/// 64 leaves room for all of them many times over. A client past the limit is
+/// closed at once, which it sees as `Disconnected`.
 #[cfg(unix)]
-fn serve(daemon: &mut Daemon) -> i32 {
-    use libservicebus::{EventLoop, ServiceHost, SourceType};
+const MAX_CLIENTS: usize = 64;
 
-    /// `user_data` reserved for the listener. Connections use their index,
-    /// which is why the reserved value is at the top of the range rather than
-    /// 0 — index 0 is a perfectly ordinary connection.
-    const LISTENER_KEY: u64 = u64::MAX;
+/// Stack for a client's thread.
+///
+/// Smaller than `std`'s 2 MiB default because memory is committed, not
+/// overcommitted (CLAUDE.md, "Committed memory by default"): [`MAX_CLIENTS`]
+/// default stacks would commit 128 MiB for a session manager. A call's deepest
+/// path is a password check, whose key derivation keeps its buffers on the
+/// heap; 512 KiB is many times what it needs.
+#[cfg(unix)]
+const CLIENT_STACK: usize = 512 * 1024;
+
+/// The resident server: register on the service registry and answer method
+/// calls until the daemon stops.
+///
+/// # One thread per client
+///
+/// Each accepted client gets a thread blocked in `Connection::recv`, and this
+/// thread blocks in `ServiceHost::accept`. That is not the shape this was
+/// first written in -- one completion port multiplexing the listener and every
+/// client, so that an idle daemon holds no threads -- and what changed it is
+/// the kernel, not this file (`design-decisions.md` §1054):
+///
+/// - a completion port is not woken when a message arrives on a channel
+///   (`channel::send` wakes only a task blocked in a receive), so the port
+///   slept through every request that arrived after it began to wait; and
+/// - a listener is not a wait source at all, so the old loop registered the
+///   listener's handle as a *channel* -- a different object that happened to
+///   share the number -- and never saw a client connect.
+///
+/// Blocking accepts and receives are the part of the kernel's channel
+/// interface that works, so the server is built on them. When the kernel can
+/// wake a port for both (requested of lane A; see `libservicebus`'s crate
+/// documentation), the event loop is the better shape again.
+///
+/// The daemon's state sits behind one mutex, so calls are handled one at a
+/// time, exactly as the event loop handled them. A password check holds it
+/// for the length of a key derivation, which queues other clients behind it;
+/// for a session manager that is the right trade, since it is not a server
+/// under load and per-session locking would buy nothing.
+#[cfg(unix)]
+fn serve(daemon: Daemon) -> i32 {
+    use libservicebus::{BusError, ServiceHost};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    /// Gives a client's place back however its thread ends.
+    struct Slot(Arc<AtomicUsize>);
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 
     let host = match ServiceHost::register(bus::SERVICE_NAME) {
         Ok(h) => h,
@@ -1871,110 +1913,143 @@ fn serve(daemon: &mut Daemon) -> i32 {
         }
     };
 
-    let mut evloop = match EventLoop::new() {
-        Ok(l) => l,
-        Err(e) => {
-            let _ = writeln!(io::stderr(), "logind: cannot create event loop: {e}");
-            return 1;
-        }
-    };
+    let daemon = Arc::new(Mutex::new(daemon));
+    let clients = Arc::new(AtomicUsize::new(0));
+    // Said once per spell at the limit rather than once per refused client:
+    // a flood of connections must not also be a flood of log lines.
+    let mut at_limit = false;
+    // Backoff after a failed accept, so an error that persists is a slow
+    // trickle of log lines rather than a spinning core; reset by a success.
+    let mut backoff = Duration::ZERO;
 
-    if let Err(e) = evloop.register_listener(&host, LISTENER_KEY) {
-        let _ = writeln!(io::stderr(), "logind: cannot watch listener: {e}");
-        return 1;
-    }
-
-    // `Option` rather than removal, because `user_data` is the index: removing
-    // an entry would renumber every connection after it, and the completion
-    // port is still holding the old numbers.
-    let mut conns: Vec<Option<libservicebus::Connection>> = Vec::new();
-
-    while daemon.running {
-        let events = match evloop.wait() {
-            Ok(e) => e.to_vec(),
-            Err(e) => {
-                let _ = writeln!(io::stderr(), "logind: event loop failed: {e}");
+    loop {
+        // Nothing sets `running` false while serving yet, and a blocked
+        // accept could not see it before the next client if it did; checked
+        // here so that the day something does, it is honoured.
+        match daemon.lock() {
+            Ok(d) if !d.running => return 0,
+            Ok(_) => {}
+            // A handler panicked part-way through changing the state; there
+            // is no knowing what it left, and a session manager must not
+            // carry on from that.
+            Err(_) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "logind: state poisoned by a failed call; exiting"
+                );
                 return 1;
+            }
+        }
+
+        let conn = match host.accept() {
+            Ok(conn) => {
+                backoff = Duration::ZERO;
+                conn
+            }
+            // The listener itself is gone (`Disconnected` is the kernel's
+            // `ChannelClosed`: unregistered under us) or was never real:
+            // nothing more will ever arrive on it.
+            Err(
+                e @ (BusError::InvalidHandle
+                | BusError::Disconnected
+                | BusError::NotFound
+                | BusError::Unsupported),
+            ) => {
+                let _ = writeln!(io::stderr(), "logind: cannot accept clients: {e}");
+                return 1;
+            }
+            Err(e) => {
+                let _ = writeln!(io::stderr(), "logind: accept failed: {e}");
+                backoff = backoff
+                    .saturating_mul(2)
+                    .clamp(Duration::from_millis(5), Duration::from_secs(1));
+                std::thread::sleep(backoff);
+                continue;
             }
         };
 
-        for event in events {
-            if event.user_data == LISTENER_KEY {
-                match host.try_accept() {
-                    Ok(Some(conn)) => {
-                        let key = conns.len() as u64;
-                        if let Err(e) = evloop.register_connection(&conn, key) {
-                            let _ = writeln!(io::stderr(), "logind: cannot watch client: {e}");
-                            continue;
-                        }
-                        conns.push(Some(conn));
-                    }
-                    // Spurious readiness, or another accept won the race.
-                    Ok(None) => {}
-                    Err(e) => {
-                        let _ = writeln!(io::stderr(), "logind: accept failed: {e}");
-                    }
-                }
-                continue;
+        if clients.load(Ordering::Acquire) >= MAX_CLIENTS {
+            if !at_limit {
+                let _ = writeln!(
+                    io::stderr(),
+                    "logind: {MAX_CLIENTS} clients connected; closing new connections until one leaves"
+                );
+                at_limit = true;
             }
+            // Dropping the connection closes it.
+            drop(conn);
+            continue;
+        }
+        at_limit = false;
 
-            let idx = event.user_data as usize;
-            let Some(slot) = conns.get_mut(idx) else {
-                continue;
-            };
-            let Some(conn) = slot.as_mut() else {
-                continue;
-            };
-
-            // Drain: one readiness notification can cover several queued
-            // messages, and leaving any behind would stall that client until
-            // it happened to send another.
-            let mut drop_client = false;
-            loop {
-                match conn.try_recv() {
-                    Ok(Some(mut call)) => {
-                        // The kernel cannot yet say who this is; `bus` refuses
-                        // everything on `None`, which is the intended
-                        // behaviour until the peer-credential syscall lands.
-                        let caller = conn.peer_credentials();
-                        let reply = bus::handle_message(daemon, &call, caller);
-                        bus::wipe(&mut call.payload);
-                        if conn.send(&reply).is_err() {
-                            drop_client = true;
-                            break;
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(_) => {
-                        drop_client = true;
-                        break;
-                    }
-                }
-            }
-
-            if drop_client {
-                if let Some(conn) = slot.as_ref() {
-                    let _ = evloop.unregister_source(SourceType::Channel, conn.handle());
-                }
-                // Dropping the `Connection` closes the channel handle.
-                *slot = None;
-            }
+        clients.fetch_add(1, Ordering::AcqRel);
+        let slot = Slot(Arc::clone(&clients));
+        let shared = Arc::clone(&daemon);
+        let spawned = std::thread::Builder::new()
+            .name("logind-client".to_string())
+            .stack_size(CLIENT_STACK)
+            .spawn(move || {
+                let _slot = slot;
+                serve_client(&shared, conn);
+            });
+        if let Err(e) = spawned {
+            // The closure, and with it the connection and the slot, was
+            // dropped: the client is closed and its place given back.
+            let _ = writeln!(io::stderr(), "logind: cannot start a client thread: {e}");
         }
     }
+}
 
-    0
+/// Answer one client's method calls until it goes away.
+///
+/// A client that closes, breaks, or sends something that is not a bus message
+/// is dropped: there is no state on this side worth preserving across a
+/// broken channel, and a client that wants to talk again can connect again.
+#[cfg(unix)]
+fn serve_client(daemon: &std::sync::Mutex<Daemon>, mut conn: libservicebus::Connection) {
+    use libservicebus::MessageType;
+
+    // Asked once: the kernel recorded it when the client connected, and it
+    // does not change for the life of the connection. `None` -- the kernel
+    // does not know -- reaches `bus`, which refuses every method on it.
+    let caller = conn.peer_credentials();
+
+    loop {
+        let Ok(mut msg) = conn.recv() else {
+            return;
+        };
+        // Only a method call asks for anything. A signal expects no answer
+        // and a reply answers nothing this daemon asked.
+        if msg.msg_type != MessageType::MethodCall {
+            bus::wipe(&mut msg.payload);
+            continue;
+        }
+        let reply = match daemon.lock() {
+            Ok(mut d) => bus::handle_message(&mut d, &msg, caller),
+            Err(_) => {
+                // Poisoned: see `serve`, which exits on it.
+                bus::wipe(&mut msg.payload);
+                return;
+            }
+        };
+        bus::wipe(&mut msg.payload);
+        // Blocking: a client slow to read holds only its own thread.
+        if conn.send_blocking(&reply).is_err() {
+            return;
+        }
+    }
 }
 
 /// Host-build stand-in for [`serve`].
 ///
-/// The event loop talks to the kernel through raw `syscall` instructions, so
-/// it exists only on the target it is written for. On a development host those
+/// The server talks to the kernel through raw `syscall` instructions, so it
+/// exists only on the target it is written for. On a development host those
 /// instructions would enter a foreign kernel with a Slate OS syscall number,
-/// so the loop is not merely useless there — it must not be reachable. The
+/// so the loop is not merely useless there -- it must not be reachable. The
 /// bus *policy* is not gated: `bus::dispatch` is ordinary code and its tests
 /// run everywhere, which is where the behaviour that matters is checked.
 #[cfg(not(unix))]
-fn serve(_daemon: &mut Daemon) -> i32 {
+fn serve(_daemon: Daemon) -> i32 {
     let _ = writeln!(
         io::stderr(),
         "logind: the service bus is only available on Slate OS; \
@@ -2160,6 +2235,11 @@ fn describe_bus_error(name: &str) -> String {
     }
 }
 
+/// How long `loginctl` waits for the daemon to answer one call: 25 seconds,
+/// D-Bus's default method-call timeout, which is what `systemd`'s own
+/// `loginctl` waits.
+const LOGIND_TIMEOUT_NS: u64 = libservicebus::secs_to_ns(25);
+
 /// One call to the daemon, or a sentence saying why not.
 ///
 /// Connect, call, check for an error reply, decode. Shared because three
@@ -2171,6 +2251,9 @@ fn describe_bus_error(name: &str) -> String {
 /// one -- the daemon answered, and what it answered was "no" -- so a caller
 /// that only checked the `Result` would decode an error message's payload as
 /// a session list and print whatever fell out.
+///
+/// The wait is bounded by [`LOGIND_TIMEOUT_NS`]: a daemon that is running but
+/// wedged must not hang `loginctl` with it.
 fn call_logind(member: &str, args: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
     // `bus::SERVICE_NAME`, not a second copy of the string. `userspace/login`
     // keeps its own `LOGIND_SERVICE` because `bus` is a module of this binary
@@ -2179,17 +2262,16 @@ fn call_logind(member: &str, args: &[&[u8]]) -> Result<Vec<Vec<u8>>, String> {
     // `/run/sessions` while `logind`'s was `/run/systemd/sessions`. Inside this
     // binary there is no excuse for a second copy.
     let mut conn = libservicebus::Connection::connect(bus::SERVICE_NAME)
-        .map_err(|e| format!("cannot reach {}: {e:?}", bus::SERVICE_NAME))?;
-    let reply = conn
-        .call(member, &libservicebus::fields::encode(args))
-        .map_err(|e| format!("{member} failed: {e:?}"))?;
-    if reply.is_error() {
-        // `Message::error` puts the `system.logind.Error.*` name in `member`.
-        return Err(describe_bus_error(&reply.member));
+        .map_err(|e| format!("cannot reach {}: {e}", bus::SERVICE_NAME))?;
+    match conn.call_fields(member, args, LOGIND_TIMEOUT_NS) {
+        Ok(libservicebus::Outcome::Done(fields)) => Ok(fields),
+        // The `system.logind.Error.*` name `Message::error` was built with.
+        Ok(libservicebus::Outcome::Refused { error, .. }) => Err(describe_bus_error(&error)),
+        Err(libservicebus::BusError::Malformed) => Err(format!(
+            "{member} returned a reply this build cannot decode"
+        )),
+        Err(e) => Err(format!("{member} failed: {e}")),
     }
-    libservicebus::fields::decode(&reply.payload)
-        .map(|fields| fields.iter().map(|b| b.to_vec()).collect())
-        .ok_or_else(|| format!("{member} returned a reply this build cannot decode"))
 }
 
 /// `loginctl kill-session <id> [--signal=SIG]`, asking the daemon.
@@ -2773,9 +2855,8 @@ fn run_loginctl(args: &[String]) -> i32 {
     // it looked in the empty local `Daemon` -- a wrong answer that read as a
     // right one.
     match &cmd {
-        LoginctlCommand::ListSessions => {
-            return listing_via_bus("ListSessions", SESSION_HEADER, "sessions");
-        }
+        // Through the named function, so its test pins the path that runs.
+        LoginctlCommand::ListSessions => return list_sessions_via_bus(),
         LoginctlCommand::ListUsers => return listing_via_bus("ListUsers", USER_HEADER, "users"),
         LoginctlCommand::ListSeats => return listing_via_bus("ListSeats", SEAT_HEADER, "seats"),
         LoginctlCommand::KillSession(id, sig) => return kill_session_via_bus(id, *sig),
@@ -2872,6 +2953,29 @@ pub(crate) fn test_verifier() -> authlib::Authenticator {
     ))
 }
 
+/// Leader pids for test sessions, which no process can have.
+///
+/// A kill test really sends its signal: on a unix host `libcall::kill` is
+/// the real `kill(2)`, and only the Windows host stubs it. So the pids must
+/// name nobody. These are above Linux's highest possible `pid_max` (2^22,
+/// 4194304), so a signal to one can only come back ESRCH. The fixtures used
+/// 100, 200, 300 and 4242 -- whatever happens to have those numbers on the
+/// machine running the tests -- and `kill_user(1000, 9)` sent SIGKILL to two
+/// of them; on 2026-10-01 the unix-half gate ran them in WSL for the first
+/// time, and nothing died only because those pids were free.
+#[cfg(test)]
+pub(crate) const NOBODY_PIDS: [u32; 4] =
+    [2_000_000_100, 2_000_000_200, 2_000_000_300, 2_000_004_242];
+
+/// What a signal to one of [`NOBODY_PIDS`] comes back as on this host: ESRCH
+/// where `libcall::kill` is the real call (every unix), ENOSYS where it is
+/// the stub (the Windows host). Either way the leader was found and the
+/// signal attempted, which is what the kill tests need to show.
+#[cfg(all(test, unix))]
+pub(crate) const SIGNAL_TO_NOBODY: KillError = KillError::LeaderGone;
+#[cfg(all(test, not(unix)))]
+pub(crate) const SIGNAL_TO_NOBODY: KillError = KillError::Unsupported;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2896,7 +3000,7 @@ mod tests {
             tty: "/dev/tty1",
             service: "login",
             desktop: "gnome",
-            leader_pid: 100,
+            leader_pid: NOBODY_PIDS[0],
             ..Default::default()
         })
         .unwrap();
@@ -2908,7 +3012,7 @@ mod tests {
             vt_nr: 2,
             tty: "/dev/tty2",
             service: "login",
-            leader_pid: 200,
+            leader_pid: NOBODY_PIDS[1],
             ..Default::default()
         })
         .unwrap();
@@ -2919,7 +3023,7 @@ mod tests {
             tty: ":1",
             service: "sshd",
             desktop: "kde",
-            leader_pid: 300,
+            leader_pid: NOBODY_PIDS[2],
             ..Default::default()
         })
         .unwrap();
@@ -3938,7 +4042,7 @@ mod tests {
 
     // --- Kill session/user ---
 
-    /// The host cannot signal, and says so rather than reporting a send.
+    /// A signal that does not arrive is reported, not counted as a send.
     ///
     /// This test used to be `let pid = d.kill_session("1", 15).unwrap();
     /// assert_eq!(pid, 100)` -- which passed because `kill_session` looked the
@@ -3946,14 +4050,17 @@ mod tests {
     /// parameter's underscore was the defect written into the signature, and
     /// the test certified it.
     ///
-    /// On any target that is not SlateOS, `libcall::kill` answers ENOSYS. So
-    /// this pins the FAILURE path, which is the only one this host can reach,
-    /// and a green run means "logind says so when it cannot signal" rather
-    /// than "killing works". The other half needs a boot test.
+    /// The signal really is sent: on the Windows host `libcall::kill` is a
+    /// stub answering ENOSYS, and on a unix host it is `kill(2)`, aimed at a
+    /// leader that cannot exist ([`NOBODY_PIDS`]) and so answered ESRCH --
+    /// [`SIGNAL_TO_NOBODY`] is whichever this host gives. So this pins the
+    /// FAILURE path, and a green run means "logind says so when the signal
+    /// reaches nobody" rather than "killing works". The other half needs a
+    /// boot test.
     #[test]
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
-        assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+        assert_eq!(d.kill_session("1", 15), Err(SIGNAL_TO_NOBODY));
     }
 
     /// A name `KillError` owns is NOT duplicated in `describe_bus_error`.
@@ -4169,18 +4276,18 @@ mod tests {
     /// first was `test_kill_session`, and both were written against the
     /// behaviour rather than the intent.
     ///
-    /// Alice HAS two sessions, so reaching `Unsupported` means the leaders
-    /// were found and the signal was attempted. A uid with none stops before
-    /// that and says so. If the two collapsed, an operator could not tell a
-    /// machine that cannot signal from a user who is not logged in -- and
-    /// would go looking for the wrong one.
+    /// Alice HAS two sessions, so reaching [`SIGNAL_TO_NOBODY`] means the
+    /// leaders were found and the signal was attempted. A uid with none stops
+    /// before that and says so. If the two collapsed, an operator could not
+    /// tell a machine that cannot signal from a user who is not logged in --
+    /// and would go looking for the wrong one.
     #[test]
     fn killing_a_user_separates_no_sessions_from_cannot_signal() {
         let d = test_daemon();
         assert_eq!(
             d.kill_user(1000, 9),
-            Err(KillError::Unsupported),
-            "alice has two leaders, so this reached the signal and the host refused it"
+            Err(SIGNAL_TO_NOBODY),
+            "alice has two leaders, so this reached the signal, which reached nobody"
         );
         assert_eq!(
             d.kill_user(9999, 15),

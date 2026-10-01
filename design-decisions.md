@@ -80349,6 +80349,12 @@ are easy to lose:
 and simply lacks the additions. The cost is only that the operator keeps two
 greps.
 
+**Superseded in part, 2026-09-27:** the proximity rule above -- the operator's
+program read as the rule, windows used up once satisfied -- is replaced by
+§1044. Answering B-Q10, the operator ruled their README right and the
+program wrong; both of their builds and ours now let a match belong to any
+number of windows. The flag spellings and the porting constraints stand.
+
 ## 1009. `SA_ONSTACK` is honoured in libc, and storing the stack without using it would have been worse than the stub
 
 **Date:** 2026-09-09
@@ -82616,6 +82622,1280 @@ marked `differs_by_design`, because a deviation nothing exercises is one nobody
 will notice losing.
 
 ---
+
+## 1028. `libcall::pty` starts a program with `forkpty` + `execve`, and reports a failure to start on the terminal
+
+**Date:** 2026-09-24
+**Lane:** B
+**Decided by:** Claude (autonomous)
+**Status:** superseded 2026-09-26, never shipped. Lane E answered the same
+request 22 minutes later with its own `libcall::pty` (§1200), which reached
+`main` first and is what `apps/terminal`, `apps/termchild` and `apps/tmux`
+use; this implementation met it only as a merge conflict and was dropped in
+that merge. §1200 made the same central choice -- fork and exec in one call,
+everything built before the fork -- but reports a program that cannot start
+to the caller rather than on the terminal. Kept as the record of the
+alternative.
+
+**In short:** the terminal emulator needed a way to start a shell on a
+pseudo-terminal. The usual Rust way (std's `Command` with a hook that runs in
+the child) would, on SlateOS today, freeze the emulator until the shell exits,
+because of a defect in how a native `exec` handles close-on-exec descriptors.
+So `libcall::pty::spawn` forks and execs by hand through the C library. The
+price: a program that cannot be started is not reported to the caller as an
+error; the child prints why on the terminal and exits with 127.
+
+**The alternatives:**
+
+| | `Command` + `pre_exec(login_tty)` (what `sshd` does) | `forkpty` + `execve` (chosen) |
+|---|---|---|
+| `exec` failure | returned from `spawn()` as an `Err` | a line on the terminal, exit status 127 |
+| on SlateOS today | `spawn()` returns only when the program exits (`requests/b-ad-close-on-exec-does-not-close-on-a-native-exec.md`) | returns at once |
+| descriptors the child inherits | whatever is not close-on-exec -- and on SlateOS the close-on-exec ones' handles too | none but the terminal (`closefrom(3)`) |
+| identity change (uid/gid/groups) | std does it | not supported |
+| fork-safety | std's | ours: everything built before the fork, bare libc calls after |
+
+**Why the failure goes to the terminal rather than an `Err`.** Knowing that an
+`exec` succeeded needs a close-on-exec pipe whose end-of-file arrives at the
+`exec` -- exactly the mechanism that is broken. The terminal is where the
+emulator's user is already looking, and every terminal emulator reports a shell
+it could not start that way. Every failure *before* the fork (bad arguments,
+no terminal available, fork failure) is still an `Err`.
+
+**Revisit when** the platform fix lands: `pre_exec` then works, and the choice
+becomes "exec failure as an `Err`" against "no descriptor leaks even when a
+caller forgot close-on-exec". The second is worth keeping regardless, so the
+likely revision is to keep `closefrom(3)` and add an exec-status pipe beside it,
+not to switch to `Command`. `sshd` cannot use this path until it grows an
+identity switch, which is why its session deadlock is tracked separately
+(`known-issues.md` -> `TD-B-SSHD-PTY-SESSIONS-DEADLOCK-BECAUSE-CLOSE-ON-EXEC-DOES-NOT-CLOSE`).
+
+**Where:** `libcall/src/pty.rs`.
+
+---
+
+## 1029. `chown` and `chgrp` follow GNU's two symlink settings, including where GNU changes a link's target
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** when `chown -R` or `chgrp -R` meets a symbolic link, there are
+two separate questions: does the walk go *through* the link, into the
+directory it points at; and is the link changed, or the thing it points at?
+GNU answers them separately. Our `chown` had merged them into one answer,
+which made it differ from GNU in four corners -- one of them stricter than
+GNU, the others not. Both programs now answer them GNU's way, measured
+against GNU 9.4. The everyday invocation, `chown -R USER dir` with no `-H` or
+`-L`, still never walks through a link and still changes every link as a
+link, so nothing outside the tree is touched.
+
+### What changed
+
+| Command, on a tree containing a symlink | Before | Now (= GNU 9.4, measured) |
+|---|---|---|
+| `chown -R -H USER dir` | the link itself changed | **the link's target changed** |
+| `chown -R -L -h USER dir` | targets changed | links changed, while walked through |
+| `chown -R --dereference USER dir` | ran as plain `-R` | refused: `-R --dereference requires either -H or -L` |
+| `chown -R -L USER dir` with a link back to an ancestor | `directory loop detected`, status 1 | not entered again, silently, status 0 |
+
+`chgrp` did not exist before; it is built on the same code, so it has had
+these answers from its first commit.
+
+### The two alternatives
+
+**Follow GNU (chosen).** For: `-H` and `-L` are the caller explicitly asking
+for links to be followed, and GNU's reading of that is what every script
+written on Linux assumes. The merged model was not uniformly the safer one
+either: under `-L -h` it changed link *targets*, which is the one combination
+where the caller said in so many words not to. And the setting that matters
+for safety -- what `-R` does by default -- is untouched: nothing walked
+through, every link changed as a link, and a request to do otherwise without
+`-H`/`-L` refused.
+
+**Keep the merged model** (a link met inside the tree is always changed as a
+link unless `-L`). For: under `-R -H`, a user who can write inside the tree
+can plant `x -> /etc/shadow` and have root's `chown -R -H alice tree` hand
+`/etc/shadow` to alice. Against: that is equally true under `-L` in both
+models and in GNU, the user asked for dereferencing by giving `-H`, and a
+`chown` that differs from GNU only in the corner nobody tests is a `chown`
+whose behaviour nobody knows.
+
+### What this does not change
+
+The `--from` race protection (`restricted_chown`, changing through a
+descriptor) and the `lchown` default under `-R` are exactly as before. The
+one place the port does not reproduce GNU is recorded in
+`userspace/coreutils/src/chowncore.rs`: when a link's target cannot be looked
+up, GNU's `-v` line reports a `from` half read from a `struct stat` the
+failed call never filled (different on every run, measured); ours omits it.
+
+**Where:** `userspace/coreutils/src/chowncore.rs` (the walk, `walk_policy`),
+`userspace/coreutils/src/bin/chown.rs`, `userspace/coreutils/src/bin/chgrp.rs`;
+checked by `scripts/chown-diff.sh` and `scripts/chgrp-diff.sh`.
+
+---
+
+## 1030. The digest family's missing hashes are ported into root crates, each from the implementation nearest its program
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous, within the operator's §539)
+
+**In short:** `sha224sum`, `sha384sum`, `sha512sum`, `b2sum` and `cksum -a`
+needed four hash functions the tree had no shared copy of: SHA-224, SHA-384,
+SHA-512 and BLAKE2b, plus SM3 for `cksum -a sm3`. §539 already settles
+*whether* to write them (no: cryptographic primitives are ported from
+implementations others have attacked for years). What was left to decide is
+*where* the ports live and *which* implementation each is ported from. They
+live in root crates, beside `sha1`, `md5` and `sha2`, so the next program that
+needs one links it instead of writing a sixth copy; and each is ported from the
+implementation closest to the program that needs it.
+
+### Where they live
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Root crates (chosen)**: SHA-224/384/512 added to `sha2/`, new `blake2/` and `sm3/` | three crates any lane can link; `coreutils` depends on them | one copy per primitive, the pattern `sha1`/`md5`/`sha2`/`crc32` already follow; BLAKE2b is also Argon2's inner hash, which the password-hash half of C-Q5 will want | root crates are no lane's (A-Q11), so the change must stay additive -- which it does: new types in `sha2`, a new method in `blockbuf`, two new crates, and SHA-256's code untouched |
+| Private modules inside `coreutils` | nothing outside `coreutils` can reach them | no shared crate edited | the next consumer writes its own copy, which is how the tree came to have 26 SHA-256s (see `sha2`'s crate docs) |
+
+### Which implementation each is ported from
+
+| Primitive | Ported from | Why that one |
+|---|---|---|
+| SHA-512, SHA-384 | RustCrypto `sha2` 0.11.0, the portable backend (`soft/compact.rs`) | MIT/Apache, the most-reviewed Rust implementation, and the loop form rather than the unrolled one, so a reader can check it against FIPS 180-4 line by line |
+| SHA-224 | none needed: SHA-256 from other initial values, truncated (FIPS 180-4 §6.3) | the existing `Sha256` gained a private constructor taking the initial value; no second compression function |
+| BLAKE2b | the BLAKE2 reference implementation, `blake2b-ref.c` | it is the very file GNU `b2sum` is built from, so for the program this was brought in for, the arithmetic is upstream's rather than merely equivalent to it; CC0/OpenSSL/Apache |
+| SM3 | RustCrypto `sm3` 0.5.0 | MIT/Apache; gnulib's `sm3.c` is the other candidate, but it is LGPL, and a root crate any lane may link should not carry that choice for them |
+
+Each crate records the upstream version, the git revision and the SHA-256 of
+the archive it was read from, which is what §539 asks for so that "keep it
+current" has something to compare against. Where the port changes the code's
+*shape* -- `last_chunk` windows instead of `w[i - 15]` indexing, SM3's
+sixty-four unrolled macro calls written as the standard's loop -- the crate
+docs say so, and the arithmetic is unchanged: every crate passes its
+standard's vectors and a cross-check against Python's `hashlib`, which is an
+independent implementation.
+
+### Two smaller calls inside it
+
+**SHA-512's 128-bit length field went into `blockbuf`, not around it.**
+`blockbuf`'s `finalize` writes a 64-bit length; used for SHA-512 it would
+write eight zero bytes where the high half goes, which is right for every
+message under 2^61 bytes and silently wrong above. `finalize_wide` widens the
+count before multiplying, so it is exact for every length the counter can
+hold. Additive: the old method is unchanged.
+
+**`cksum --debug` prints nothing.** GNU's x86 build reports whether its PCLMUL
+CRC is in use. Ours has only the table CRC, so it answers as GNU built without
+`USE_PCLMUL_CRC32` does -- silence -- rather than printing GNU's "not
+detected", which would describe hardware it never looked at. Recorded as the
+one `xfail` in `scripts/cksum-diff.sh` that is not `--help`/`--version`.
+
+**Revisit when** C-Q5's vendoring decision is made for the vault: if it picks
+a crate to vendor wholesale (RustCrypto's, most likely), these three should be
+re-pointed at the same vendored copy rather than stay as a second port of the
+same code.
+
+**Where:** `sha2/src/sha512.rs`, `sha2/src/lib.rs` (`Sha224`), `blockbuf`
+(`finalize_wide`), `blake2/`, `sm3/`; used by `userspace/coreutils/src/digest.rs`.
+
+---
+
+## 1031. `parse_datetime` runs GNU's Bison tables, and `mktime` is glibc's own algorithm
+
+**Date:** 2026-09-25
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `date -d`, `touch -d` and `find -newermt` all read GNU's date
+language (`next Tuesday`, `3 days ago`, `2021-06-15 12:00 -0500`), which has
+no specification except the program that parses it: gnulib's
+`parse-datetime.y`, a Bison grammar with 31 deliberate ambiguities that the
+generated tables settle. `date` had a hand-written subset that was measured
+form by form and still could not say `12:30 -5` (half past twelve at UTC-5).
+The port copies the LALR tables out of the `parse-datetime.c` that coreutils
+9.4 ships instead of re-deriving them, and ports glibc's `mktime` beside it,
+because which strings are refused -- and what a skipped or repeated
+daylight-saving hour means -- is decided there.
+
+### How the grammar is carried
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **GNU's generated tables, copied by a script (chosen)** | `tables.rs` is `gen_tables.py`'s transcription of the release tarball's `lib/parse-datetime.c`; `grammar.rs` is `yacc.c`'s driver and the 92 rule actions | the parser *is* GNU's: the same shift/reduce resolutions, the same default reductions, so the same `--debug` output in the same order and the same place to stop on an error; the script refuses a table it does not recognise, and records the source's sha256 | the tables are opaque numbers; a reader checks them by regenerating, not by reading |
+| A hand-written recursive-descent parser | readable rules in Rust | no generated data in the tree | an LALR parser never backtracks and reduces before reading in some states; a greedy hand parser accepts more, rejects differently, and prints `--debug` lines in a different order -- the first test written by hand got that order wrong, and the tables got it right |
+| Our own `userspace/yacc` generating the tables | a checked-in `.y`, built at compile time | the grammar stays source | our yacc is a separate, unverified implementation; any difference in its conflict resolution is a different parser |
+
+### `mktime`
+
+`localtime::Zone::epoch` already inverted a local time, but by its own rules:
+it resolved the skipped hour to one side and the repeated hour to one of the
+two, and it could not honour an explicit `tm_isdst`. `parse_datetime` needs
+glibc's answers for all three -- it refuses a date by comparing the fields it
+asked for with the fields `mktime` normalised them to, and it hands `mktime`
+`tm_isdst = 0` for `EST` in July -- so `localtime/src/mktime.rs` is a port of
+gnulib's `mktime.c`, which is the file glibc builds its own from. That
+includes the **process-wide offset guess**: glibc starts each search from the
+offset the previous call found, which decides which of a repeated hour's two
+instants comes back, so `date -f` answers line 7 as GNU does only if lines 1-6
+moved the guess as GNU's did. `Zone::mktime` keeps the same static;
+`mktime_internal` takes the guess as a parameter for callers (and tests) that
+must not share it.
+
+`Zone::epoch` stayed, for callers that wanted an instant that always
+exists, while `posixtm` (and so `touch -t`) and `cal` still called it.
+**Update 2026-09-26:** both moved to `mktime` -- called when and as upstream
+calls it, with `tm_isdst` -1 -- and with no callers left `Zone::epoch` was
+removed, a second inverse with its own answers for the skipped and repeated
+hours being an invitation to pick the one GNU's never give.
+
+### Where C's integers show through
+
+Upstream assigns `intmax_t` values into `int` fields in three places
+(`tm.tm_min = pc.minutes`); gcc keeps the low 32 bits, so `10:4294967326` is
+10:30 to GNU. The port does the same (`as i32`), and a test pins it. Every
+`ckd_*` upstream is a `checked_*` here, failing the same way.
+
+**Revisit when** coreutils is upgraded past 9.4: regenerate `tables.rs` from
+the new release's `lib/parse-datetime.c` with `gen_tables.py`, and diff the
+actions in `grammar.rs` against the new grammar's.
+
+**Where:** `userspace/coreutils/src/parse_datetime/` (`gen_tables.py`,
+`tables.rs`, `grammar.rs`, `lex.rs`, `mod.rs`); `userspace/localtime/src/mktime.rs`;
+used by `date.rs`, `touch.rs`, `find.rs`. Checked by
+`scripts/parse-datetime-diff.sh`.
+
+---
+
+## 1032. `TZ` is read as glibc reads it, process-wide state included -- except through `..`
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** what a program's clock says depends on how it reads the `TZ`
+variable, and glibc's reading has details no standard mentions: an empty `TZ`
+is a zone called `Universal`, `TZ=Foo/Bar` is UTC called `Foo`, and a value like
+`AAA3BBB` (a daylight-saving name but no dates) borrows New York's history from
+a file called `posixrules` -- shifted by an amount that depends on what the
+program has already converted. Every time-printing program here now reads `TZ`
+with a line-by-line port of glibc 2.39's code, including that history, because
+the alternative is printing a different hour from the GNU program being
+replaced. The one place it deliberately differs is a `TZ` that reaches a file
+through `..`, which is refused, as the C library here refuses it.
+
+### How faithful
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **glibc's `tzset.c`/`tzfile.c`, state and all (chosen)** | the same hour as GNU for every `TZ` value `tz-diff.sh` tries, in every order of conversions | the programs being replaced are the reference, and their answers depend on the state: `TZ=AAA3BBB date -d @1604203200` and `date -d '2020-11-01 02:30'` disagree in glibc because `mktime` re-reads the zone | reproduces glibc behaviour that is arguably a bug (`rule_dstoff` is never computed for a file with transitions), and `Zone` needed interior mutability and lazy reading to do it |
+| glibc's order and partial parse, stateless zones | the same for every value except `posixrules` ones, whose fall transitions land where the rules say | simpler; `Zone` stays immutable | differs from GNU by up to two hours near every fall transition under such a `TZ`, and silently |
+| Keep `tzrules`' engine (each year's own transitions; refuse a partial rule) | UTC for anything it cannot fully parse, and real summer time before 1970 | the "more correct" answers | not what any GNU program prints; this entry's predecessor, `TD-B-LOCALTIME-RESOLVES-TZ-DIFFERENTLY-FROM-GLIBC`, was filed because the harness found exactly these differences |
+
+`tzrules` stays the TZif decoder (and the libc's engine, which is lane D's to
+change); the four raw accessors this needed were added to it, additively.
+
+### `..`
+
+glibc reads `TZ=../zoneinfo/UTC` as a file unless the program is setuid. Here
+it never is: `zoneinfo_path` refuses a `..` component, as `posix/src/tz.rs`
+does, and the value falls through to the POSIX rule, as a missing file does.
+The refusal is not strong on its own -- an absolute path is accepted -- but the
+two readers of one `TZ` in this tree must agree about what it means, and
+changing the libc's is lane D's decision. `tz-diff.sh` keeps the case as an
+xfail. **Revisit** if the libc drops its refusal, or gains a secure-mode test
+this crate could share.
+
+**Where:** `userspace/localtime/src/tzset.rs` (the port), `lib.rs` (`Zone`:
+lazy, `tzset`, `reread`, `switched`, `localtime`), `mktime.rs`;
+`tzrules/src/tzif.rs` (accessors); `userspace/coreutils/src/parse_datetime/mod.rs`
+(`mktime_z`, `localtime_rz`). Checked by `scripts/tz-diff.sh`.
+
+---
+
+## 1033. `logger` is util-linux's, and where `/dev/log` cannot exist it writes the journal
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `logger` -- the command scripts use to put a line into the
+system log -- is now a function-by-function port of util-linux 2.39.3's,
+checked against the real one by `scripts/logger-diff.sh` (138 cases).
+Upstream hands each message to a log daemon through a special socket file,
+`/dev/log`, and silently drops it when that cannot be reached. SlateOS cannot
+have that socket yet, so copying upstream exactly would make every script's
+logging vanish without a word; in exactly that situation, and no other, the
+port writes the message into the log `journalctl` reads instead. Two smaller
+differences: a name in an error message has its control characters escaped
+rather than printed raw, and `-S 0` on piped input no longer sends empty
+messages forever.
+
+### Where a message goes when `/dev/log` cannot exist
+
+Why it cannot: the platform has no Unix-domain sockets bound to a path
+(`socket(AF_UNIX, ...)` fails with `EAFNOSUPPORT`, "address family not
+supported"); known-issues TD-B-NOTHING-RECEIVES-SYSLOG-MESSAGES and its
+request to lanes A and D.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **A journal record, only when every attempt on `/dev/log` fails with `EAFNOSUPPORT` (chosen)** | `logger hi` on SlateOS shows up in `journalctl`; on Linux nothing changes | messages reach the log today; the branch stops running by itself once the sockets exist, with no change to `logger`; the harness still measures pure upstream behaviour, since Linux never takes it | a second writer of `/var/log/syslog.jsonl` beside the future daemon, whose record (level, facility, tag, PID) the port has to shape as a daemon would |
+| Upstream exactly: drop the message | `logger hi` succeeds and nothing is recorded | byte for byte upstream | every script's logging is silently lost until the sockets land -- the defect this port was written to fix |
+| Keep the old program's own file, `/var/log/syslog` as RFC 3164 text | text lines `journalctl` reports as "not a journal record" | no new format | neither upstream nor readable by `journalctl` |
+| Fall back on any failure, "no daemon listening" included | on Linux, `logger` with no syslog daemon writes a SlateOS log file | never loses a message | changes upstream's behaviour where upstream's is well defined, on the host the harness runs on |
+
+The branch is narrow on purpose. `-u PATH` names a socket the caller chose,
+so only `/dev/log` is ever redirected. And `EAFNOSUPPORT` means the platform
+has no such sockets at all, which is not "no daemon" (`ENOENT`,
+`ECONNREFUSED`): upstream handles that its own way, and the port still does.
+`--journald` exists, as it does in every distribution's build (util-linux
+built with libsystemd), and writes the same journal, there being no journald;
+its `MESSAGE`, `PRIORITY` and `SYSLOG_IDENTIFIER` become the record's own
+fields and every other field is kept beside them (`journalrec::Record::extra`).
+
+### Names in diagnostics
+
+Upstream pastes arguments into its messages -- `unknown facility name: %s` --
+or wraps them in its own `'%s'`. A name holding a newline can then print a
+line `logger` never wrote (§370). The tree's usual remedy, `quotef`/`quoteaf`,
+renders the name the way a shell would read it back, which changes ordinary
+text too: the first harness run caught `x="y"` printed as `'x="y"'` and the
+empty name as `''`. The port instead prints printable text exactly as
+upstream does and octal-escapes only what is not printable -- `\012` for a
+newline, `\033` for the escape that starts a terminal control sequence.
+Forging a line needs a control byte; nothing else changes.
+
+| Option | *What changes:* (`-p $'a\nb.info'`, `--sd-id "a'b"` twice) |
+|---|---|
+| **Upstream's text, unprintables escaped (chosen)** | `unknown facility name: a\012b`; `structured data ID 'a'b' is not unique`, as upstream |
+| `quotef`/`quoteaf`, the tree's GNU convention | `'a'$'\n''b'`; `"a'b"` -- and every name with a space, a quote or nothing in it changes too |
+| Upstream exactly | a second line, `b`, that `logger` did not mean to print |
+
+Upstream's own `'%s'` is rendered by `quoting::escaped_in_quotes`, added for
+this: upstream's quote marks around escaped contents. It is not `quoteaf`,
+which would print `it's` as `"it's"`; the marks are decoration here, not a
+delimiter, and upstream does not escape an `'` inside them either. The
+harness pins three escapes as expected differences. B-Q12 asks the same
+question of `osh` and now lists this as an option.
+
+### `-S 0`
+
+With `-S 0` and input on stdin, 2.39.3's read loop can store nothing, so it
+never consumes the byte it stopped on and sends empty messages forever (still
+so on util-linux master). The port sends one empty message per line, which
+is what `-S 0` makes of a word given as an argument. The harness does not
+compare it: upstream would never finish.
+
+### Kept as upstream, and how it was checked
+
+`SCM_CREDENTIALS` -- root's `--id=PID` naming another live process as a local
+message's sender -- is sent as upstream sends it, a `sendmsg` carrying the
+credentials. The harness runs it as root in a user namespace (`unshare -r`):
+the kernel refuses the claim in the host's PID namespace, which that root does
+not own ("send message failed: Operation not permitted" from both sides), and
+accepts it in a PID namespace of its own, where a listener with `SO_PASSCRED`
+sees the claimed PID from both sides.
+
+**Where:** `userspace/logger/src/deliver.rs` (the journal branch), `main.rs`
+("What is not upstream's", `shown`), `input.rs` (`-S 0`), `sys.rs`
+(`send_as`, `may_claim`); `userspace/quoting/src/lib.rs`
+(`escaped_in_quotes`). Checked by `scripts/logger-diff.sh`.
+
+**Revisit** when path-bound Unix-domain sockets land: the journal branch
+should then never run on SlateOS either -- confirm `logger` reaches `syslogd`
+through `/dev/log`, then consider deleting the branch. And if B-Q12's answer
+sets a tree-wide policy for upstream message text.
+
+---
+
+## 1034. Rust programs log through the C library's `syslog()`, not a client of their own
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** a program that "logs to syslog" needs something to hand its
+messages to. `ntpdate -s`, `crond` and `anacron` now hand them to the C
+library's `syslog()` -- through `userspace/libcsyslog`, a thin wrapper --
+exactly as their C counterparts do, instead of each carrying its own copy of
+the socket-and-fallback logic `logger` has. The cost shows today: on SlateOS
+the library still prints these messages on stderr, so they do not yet reach
+`journalctl`. Lane D has been asked to change that, in the one place it
+needs changing.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **The libc's `syslog()`, via `libcsyslog` (chosen)** | on SlateOS today the messages print on stderr; when the libc sends them to the journal or `/dev/log`, every caller follows at once | one syslog client on the system, shared with every ported C program, so the frame, the socket and the fallback are decided in one place; faithful to ntpdate and cron, which call syslog(3) | reaching `journalctl` waits on lane D (`requests/b-d-libc-syslog-could-reach-journalctl-today.md`) |
+| A Rust client of our own, with `logger`'s journal fallback | the messages reach `journalctl` today | no wait on another lane | a second syslog client beside the libc's, which C programs would never use: two places to change when `/dev/log` arrives, and a Rust daemon and a C daemon on one system logging differently |
+| Each program's own stopgap, as before | `ntpdate -s` loses its messages; `crond` prints its own lines on stderr | nothing to do | the defect |
+
+`logger` stays the exception: util-linux's `logger` speaks the protocol
+itself, and a faithful port does too (§1033).
+
+Two details of the wrapper are load-bearing. `openlog` keeps the pointer it
+is given, not a copy, so `libcsyslog` keeps the identity alive in a
+process-wide slot until the libc has been handed a replacement; and a message
+is always passed as the argument to `"%s"`, never as the format, so a `%` in
+it is printed rather than interpreted -- `syslog-client-check.sh` sends
+`100% %s %n` to prove it.
+
+**Where:** `userspace/libcsyslog`, `userspace/ntpd` (`open_syslog`, `-s`),
+`userspace/crond` (`log_msg`, `open_syslog`). Checked by
+`scripts/syslog-client-check.sh`.
+
+**Revisit** if lane D declines the request: the journal fallback then belongs
+in `libcsyslog`, the next-best single place.
+
+---
+
+## 1035. `flock -w` waits by trying again, not by being interrupted
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `flock -w 5 FILE CMD` means "wait up to five seconds for the
+lock". util-linux implements the limit by sleeping in the lock call and
+setting an alarm that interrupts the sleep. On SlateOS the lock call cannot be
+interrupted -- the C library implements the wait as a loop that retries until
+the lock is free -- so the alarm would go off and `flock` would keep waiting
+forever. Our `flock` instead asks for the lock without waiting, sleeps a
+moment, and asks again until the time is up. The answers a script sees are
+the same; a lock that comes free is noticed up to 25 ms later.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Try `LOCK_NB` until the deadline, 1 ms doubling to 25 ms between tries (chosen)** | `-w` works on SlateOS today; everywhere, a released lock is taken up to 25 ms late | one mechanism on every platform; no signal handler, timer or async-signal-safety to get right | not upstream's mechanism; a busy file sees one `flock` call per interval from each waiter |
+| Upstream's timer and signal | on SlateOS `flock -w` never times out | upstream's code, and no latency | needs the libc's blocking `flock()` to return `EINTR` (lane D) -- until then it hangs, which is worse than the old program |
+| Upstream's where it works, polling on SlateOS | the same results by two mechanisms | exact on Linux | two code paths, one of them untested by the harness, which runs on Linux |
+
+Without `-w`, `flock` blocks in `flock()` exactly as upstream does: nothing
+there needs interrupting. `-w 0` is `-n`, and a negative or unrepresentable
+time is refused with upstream's timer error, so the difference is confined to
+how the wait is spent. `scripts/flock-diff.sh` checks the outcomes against
+util-linux with a lock held by a third party.
+
+**Where:** `userspace/flock/src/main.rs` (the lock loop, `POLL_MAX`).
+
+**Revisit** when lane D's `flock()` returns `EINTR` on a delivered signal
+(known-issues TD-B-FLOCK-WAIT-POLLS): the timer is then upstream's and exact,
+and this entry can close.
+
+---
+
+## 1036. Tables are laid out by a port of libsmartcols, not by each program
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** about twenty util-linux programs print tables -- `lsblk`,
+`findmnt`, `lsmem`, `lscpu`, `lslocks`, `swapon --show` among them -- and none
+of them decides its own column widths. They hand rows to a library,
+libsmartcols, which works out how wide each column is, what gets cut or
+wrapped on a narrow terminal, how a tree is drawn, and what `--raw`,
+`--pairs` and `--json` look like. Our versions of these programs each laid
+out their tables themselves, so each got the widths, the cutting and the
+JSON a little differently from upstream and from one another. The library is
+now ported once, as the crate `userspace/smartcols`, and `lsmem` is the first
+program printed through it: on WSL's own memory, at nineteen terminal widths
+from 1 to 250 columns, its output matches util-linux 2.39.3 byte for byte.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port libsmartcols as a crate, function by function (chosen)** | every table program prints what util-linux prints, at every terminal width | one copy of the width arithmetic (averages, deviations, the seven reduction stages), which is what makes widths match and is easy to get subtly wrong; each program port shrinks to its own logic | ~2,800 lines before its first user; the parts no program needs yet (groups, sorting, colours, custom wrapping) are left out and must be added when one does |
+| Lay out each table in the program, as before | nothing, until a table is wide or a terminal narrow | no new crate | twenty private layouts; a narrow terminal cut each differently, and `--json` was each program's own dialect |
+| A Rust table crate (`comfy-table`, `tabled`) | tables look like that crate's | small and maintained | its layout rules are its own, so no output could match upstream at all |
+
+How it is shaped: upstream links lines, columns and cells through
+reference-counted pointers and intrusive lists; here a `Table` owns vectors
+of them in upstream's list order. A `LineId` is a line's place, which stays
+valid because nothing is removed; a `ColumnId` is a column's identity, which
+`move_column` (added for `column --table-order`) does not change, and each
+line's cells are indexed by the column's `seqnum`, as upstream's are. Output goes into a byte buffer
+the program writes itself, so a failed write is the program's to report, as
+util-linux's `close_stdout` reports it. Text is measured with glibc's rules
+for the locale in force -- `mbrtowc`, `iswprint` and `wcwidth` through
+`quoting` and `charwidth` -- so a C locale sees `\xNN` escapes where a
+UTF-8 one sees characters, as upstream does.
+
+**Where:** `userspace/smartcols` (the port); `userspace/lsmem` (its first
+user); `scripts/lsmem-diff.sh` (346 cases against util-linux 2.39.3).
+
+**Revisit** if a program needs what was left out; its module docs list it.
+The rest of the table printers -- `lscpu`, `lsblk`, `findmnt` among them --
+should move onto it as each is ported (known-issues
+TD-B-TABLE-PROGRAMS-LAY-OUT-THEIR-OWN-TABLES).
+
+---
+
+## 1037. The journal is appended and rewritten under one lock, and a rewrite renames a new file over the old
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** three programs add records to the system log file,
+`/var/log/syslog.jsonl` -- `syslogd`, `logger` and `systemd-cat` -- and
+three things shrink or move it: `journalctl --vacuum-time`/`--vacuum-size`,
+`syslogd clean`, and `syslogd`'s own rotation when the file passes 5 MiB. A
+vacuum used to read the file, drop the old records, and write the rest back
+over the same file; a record another program added between that read and
+that write was simply gone. Now every one of them takes a lock on the file
+first. A program adding a record waits while a vacuum or rotation holds it,
+then adds its record to whichever file is there afterwards; a vacuum writes
+its result as a new file and renames it into place while it still holds the
+lock. No record is lost, and a vacuum that dies half way leaves the old file
+whole.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Advisory `flock` on the file; rewrites rename a new file over it (chosen)** | nothing a user sees, except that records are no longer lost | every writer is ours and already opens, writes one record and closes, so taking a lock is three lines in each; readers are untouched; the rename makes the rewrite crash-safe; it also closes the same race in `syslogd`'s rotation, which moved a waiting writer's record into `.1` | only programs following the protocol are held to it; needs `flock`, which SlateOS's C library has |
+| Rotate instead of rewriting (the entry's first sketch): rename the live file aside, filter it at leisure | the vacuum leaves renamed files behind | no locking | a writer that opened the file just before the rename still writes to the renamed one after it was read -- the same loss, in a smaller window; every reader must learn the new files |
+| Route every write through `syslogd` | one writer, so no race | the textbook shape | SlateOS has no Unix-domain sockets yet (`logger` writes the file itself for that reason), so the daemon cannot be reached |
+
+How it works (`userspace/journalio`): a writer opens the file for
+appending, takes `flock(LOCK_EX)`, and -- holding it -- checks that the path
+still names the file it opened (device and inode), since a rewrite or a
+rotation may have replaced it while it waited; if not, it opens the path
+again. A rewriter takes the lock with the same check, reads, writes the new
+contents to `.NAME.PID.tmp` beside the log with the old file's mode and
+owner, syncs it, and renames it over the log before releasing the lock. A
+rotation renames the locked file away. `flock` locks belong to an open file,
+so two threads of one program exclude each other as two programs do. Where a
+file system has no locks (`ENOLCK`, `ENOSYS`, `EOPNOTSUPP`), a writer appends
+without one, as before -- a record written beats one refused -- and a rewrite
+refuses, since rewriting unlocked is the loss this exists to prevent.
+
+`syslogd`'s rotation takes the lock for every step, the older copies' shifts
+included: a vacuum rewriting `syslog.jsonl.1` would otherwise rename its
+result over whatever the rotation had just moved there. And `journalctl` now
+reads the rotated copies (`syslog.jsonl.N`, oldest first), whose records it
+had never shown, and vacuums them too, removing one it empties.
+
+**Where:** `userspace/journalio` (the protocol, with tests that fail when the
+lock is taken out); `userspace/syslogd` (entries, `clean`, rotation),
+`userspace/logger` (`deliver::append_record`), `userspace/systemctl`
+(`systemd-cat`, one append per record), `userspace/journalctl` (both vacuums,
+and the rotated copies). Known-issues
+B-JOURNALCTL-VACUUM-LOSES-RECORDS-APPENDED-DURING-ITS-REWRITE.
+
+**Revisit** when SlateOS has Unix-domain sockets and `syslogd` receives on
+`/dev/log`: with one writer, the lock would only be between it and the
+rewriters.
+
+---
+
+## 1038. A util-linux port matches the program Ubuntu 24.04 ships, the upstream fixes it backports included
+
+**Date:** 2026-09-26
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** each util-linux program in this tree is a port of util-linux
+version 2.39.3, checked by running it side by side with the same program as
+installed in the test machine (Ubuntu 24.04 under WSL). Ubuntu does not ship
+2.39.3 exactly: to `lscpu` it adds five later changes taken from util-linux
+itself -- new ARM processor names, and a rework of how `lscpu` sorts CPUs into
+kinds, which decides among other things whose feature flags the summary shows
+when the CPUs' flags differ. The port includes those five changes, so it
+matches the program it is tested against, and util-linux's own later
+behaviour.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port what Ubuntu ships: 2.39.3 plus the upstream commits Ubuntu backports (chosen)** | `lscpu` on a machine whose CPUs differ only in their flags shows the first CPU's, not the last's; it names Cortex-X925, A725, Neoverse-V3/N3 and NVIDIA Olympus cores | the reference then agrees byte for byte, so every difference the harness finds is a bug in the port; the backports are util-linux's own later fixes (the regrouping fixes CPU types left without a vendor on hybrid ARM machines, util-linux issue #3062) | "2.39.3" is no longer the whole description; each new port has to look through Ubuntu's patch list for its program |
+| Port the 2.39.3 tarball exactly | the last CPU's flags; those five cores unnamed | one well-defined source | the harness can no longer tell a bug in the port from an Ubuntu patch; carries a bug upstream has fixed |
+
+How to find them: `/usr/share/doc/util-linux/changelog.Debian.gz` lists
+Ubuntu's patches, and Launchpad serves them
+(`git.launchpad.net/ubuntu/+source/util-linux`, `debian/patches/`). For
+`lscpu`: LP #2111723 (upstream 7a136d59, new Arm Cortex part numbers;
+eb6514b4, CPU-type de-duplication; and two test-data commits) and LP #2123886
+(upstream 90877747, NVIDIA Olympus). The earlier ports -- `lsmem`, `prlimit`,
+`column`, `lsirq`, `getopt`, `flock` -- are untouched by Ubuntu's list, whose
+other patches are to `cfdisk`, `fincore`, `fadvise`, `setarch`, `wall`, `su`,
+`sulogin`, libuuid, libblkid and libmount.
+
+The two test-data patches carry a nineteenth `lscpu` snapshot, a hybrid ARM
+machine with four kinds of core, which is exactly what exercises the
+regrouping; `scripts/util-linux-source.sh` fetches them with checksums and
+applies them.
+
+**Where:** `userspace/lscpu/src/cputype.rs` (`deduplicate_cputypes`),
+`userspace/lscpu/src/arm.rs` (the part tables), `scripts/util-linux-source.sh`.
+
+**Revisit** when these ports move to a later util-linux release, whose base
+then already holds the backports.
+
+---
+
+## 1039. DEFLATE is decoded with lookup tables, and the bit-at-a-time decoder it replaced is kept as the tests' oracle
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** opening a compressed file -- a PNG picture above all -- spends
+most of its time undoing the compression, and our decoder did that one bit at
+a time, about seven times slower than the library Python uses (zlib-ng). It now
+decodes the way zlib, zlib-ng and libdeflate do, by looking several bits up in
+a table at once: on a photograph's 9 MB of pixels, 280 ms became 49 ms, against
+zlib-ng's 36 ms, and reading the picture a row at a time, 334 ms became 57 ms.
+Nothing a program sees changes -- the same bytes, and when a file is damaged,
+the same error after the same bytes -- and the old decoder stays, only in the
+tests, as the judge of that.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Tables, a fast loop and a careful one, the walk kept as the tests' oracle (chosen)** | the same results, five to six times faster | the oracle is the code being replaced, so "nothing changes" is tested, not argued: every valid stream, 450 mutations and 120 truncations of each of 28 streams, 20 000 noise streams, and 50 000 single-symbol decodes over random codes, one-shot and streamed at many read sizes | two decoders to keep in the crate, one only for tests |
+| Tables, with only round-trip and fixture tests | the same speed | less code | a table decoder can tell an error sooner than the walk did -- an unassigned code, a code cut short by the end of the input -- and would move where a damaged file stops; nothing but the old decoder can say where it stopped |
+| Keep the walk, tune it | a smaller win | one decoder | the walk's cost is the loop per bit itself |
+
+**The three rules that make a table stop where the walk stopped**, each held
+by the oracle tests and stated in `inflate.rs`: an unassigned code is an error
+only once 15 bits have been read (the walk read to the longest length first),
+so with fewer left it is `UnexpectedEnd`; a code longer than the bits left is
+`UnexpectedEnd`; and checks the walk made per byte (the output limit, a stored
+block's input, the caller's buffer) are made per run, the run cut where the
+first would have failed.
+
+**Choices inside it, and why.** First-level tables of 11, 8 and 7 bits
+(literal/length, distance, code-length code) with second-level tables under
+them, as libdeflate sizes them; the first level a fixed-size array, which
+took the raw decode from 52 to 44 ms on the benchmark, because a masked index
+then needs no bounds check. A 64-bit bit buffer refilled eight bytes at a time, spent on one
+length/distance pair or up to three literals per refill. The stream decodes
+into the caller's buffer and copies a back-reference from that buffer where it
+can, folding the finished run into its 32 KiB window once (zlib's
+arrangement), instead of writing every byte twice. Adler-32 stays a plain byte
+loop: a sixteen-bytes-at-a-time version measured slower (9 ms against 5) on
+baseline x86-64, which has no 32-bit vector multiply.
+
+**Not changed:** `fixed_buffer.rs`'s two decoders, which reproduce where zlib
+and libdeflate stop in a fixed-size buffer, keep their own walks; they are
+held to those libraries' answers, not to speed.
+
+**Where:** `deflate/src/inflate.rs` (the decoder), `deflate/src/puff.rs` (the
+oracle, test-only), `deflate/tests/bench.rs` (the timing, run on demand).
+Asked for by lane F in
+`requests/f-ab-inflate-decodes-a-bit-at-a-time-five-times-slower-than-zlib-ng.md`.
+
+**Revisit** if a caller needs the last third: the remaining gap to zlib-ng is
+mostly bounds-checked stores and `Vec::push`, which an `unsafe` output cursor
+would remove -- a trade this crate, which runs in the kernel on untrusted
+input, has so far declined.
+
+---
+
+
+---
+
+## 1040. sharutils' option library is ported as a library, its oddities with it
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `uuencode` and `uudecode` do not read their own command lines.
+GNU AutoGen writes a table for each, and a library bundled with them
+(libopts 41.1) does everything else: the flags, a settings file in the home
+directory (`~/.sharrc`), `--help` through a pager, three kinds of `--version`,
+and options to save the current settings to a file and load them back. That
+library is ported as a crate of its own, `autoopts`, rather than each program
+getting a small hand-written parser -- and it keeps the library's mistakes
+where they change what a user sees, because a user of the real programs sees
+them too.
+
+| Option | *What changes:* | For | Against |
+|---|---|---|---|
+| **Port libopts as a crate, quirks kept (chosen)** | every flag, message, exit status and settings-file effect is upstream's; 433 cases compared | a user moving a script or a `~/.sharrc` from Linux gets the same behaviour; the next sharutils program (`shar`, `unshar`) gets the machinery for free | about 2 500 lines for two small programs, and several behaviours kept that are plainly bugs upstream |
+| Hand-write each program's options | `-m`, `-e`, `-o`, `-c` and `--help` work; the rest either missing or approximate | small | `~/.sharrc` silently ignored -- a user whose file says `base64` gets the other encoding with no message; every error message's wording and exit status different; nothing to check it against but prose |
+| Port libopts, fixing its bugs | as the chosen one, except where upstream is wrong | nicer | "wrong" is then this tree's judgement, invisible to a user who only knows that the same command did something different on the two systems -- and the harness can no longer tell a fix from a regression |
+
+**The oddities kept**, each measured against the real program and listed in
+`autoopts`' crate docs: a `~/.sharrc` line needs its newline and a trailing
+`\` does not continue it; `<name>value</name>` loses the value's first byte;
+only the first `<?program>` directive is ever compared; a `load-opts` line in
+`~/.sharrc` counts the options it loads as typed, so `-m` on the command line
+becomes a second `base64`; an optional argument takes the next word, so
+`uuencode -v file` is a bad version mode. In uudecode: a short line decodes
+what a longer earlier line left in the buffer; a blank base64 line is a write
+error; `~user` with no slash scans the whole line buffer for one.
+
+**Where upstream is undefined, the port chose, and says so:** `--save-opts`'
+warnings pass one argument to a two-`%s` format (upstream prints a register's
+leftovers; this prints nothing, and the harness normalises exactly those three
+messages), and uudecode reads bytes no line wrote as zero where upstream reads
+its stack. Neither can be matched, and neither is worth a crash to imitate.
+
+**Two consolidations came with it.** gnulib's base64 is bundled by coreutils and
+by sharutils, eight years apart but the same decoder; it is one crate,
+`gnubase64`, not the second transcription this port first wrote. And libopts'
+pager runs through `shellcmd`, which is what `coreutils::shell` was, moved out
+so the two do not each decide how a command reaches `sh -c`.
+
+**Where:** `userspace/autoopts`, `userspace/uuencode`, `userspace/uudecode`,
+`userspace/gnubase64`, `userspace/shellcmd`; `scripts/uu-diff.sh` and
+`scripts/sharutils-ref.sh`. Closes
+`known-issues.md` -> `TD-B-BASE64-IS-STILL-THE-OLD-CRATE-UNTIL-UUENCODE-MOVES`.
+
+**Revisit** if a sharutils release fixes any of the kept bugs: the port follows
+the version the harness compares against, so the fix comes with moving the
+reference.
+
+## 1041. lsblk asks udev for a device's contents only where udev runs
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `lsblk -f` shows each device's filesystem type, label and
+UUID. util-linux's lsblk gets them from udev's database -- which any user may
+read -- and, when udev knows nothing of the device, by reading the device
+itself (root only). Upstream built with libudev treats every device sysfs
+lists as known to udev, even on a machine not running udev, and so shows
+nothing there. SlateOS runs no udev. The port asks udev only when its
+database directory exists, and otherwise reads the device -- which is
+upstream's behaviour where udev runs and util-linux-without-libudev's where
+it does not.
+
+**The alternatives:**
+
+| Option | What a user sees on SlateOS | Against upstream |
+|---|---|---|
+| Emulate libudev exactly | `lsblk -f` blank for everyone | identical everywhere |
+| Never ask udev (build as without libudev) | root sees filesystems; others nothing | differs wherever udev runs, including the WSL reference |
+| **Ask udev where `/run/udev/data` exists** | root sees filesystems; others nothing | identical where udev runs; differs only on a Linux host with libudev and no udevd (a container) |
+
+Exact emulation is faithful to a configuration SlateOS does not have: it
+would port the half of upstream's behaviour that only makes sense when udev
+is present, onto a system where it never is. Never asking udev would make
+the port untestable against the reference, whose udev answers first.
+
+**Where:** `userspace/lsblk/src/props.rs` (`udev_is_running`,
+`get_properties_by_udev`); todo.txt, lane B Judgment Calls, 2026-09-27.
+
+**Revisit** if SlateOS grows a udev-like device database: lsblk should then
+ask it first, as upstream asks udev.
+
+---
+
+## 1042. The character-width table is GNU's; SlateOS programs will also be able to ask the terminal
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Claude (operator-approved scope). Answering B-Q8, the
+operator left the choice of table to Claude ("just do whichever looks the
+best, or whichever you want") and asked for a width query in the terminal
+protocol; Claude took its own recommendation, (a). Answer relayed verbatim
+through lane F's session.
+
+**In short:** a terminal draws text in fixed cells, and every program that
+lines text up needs to know how many cells each character takes. Our one
+shared table matched bash's; the GNU tools ship a newer table that differs
+on 626 characters, almost all invisible marks and unassigned code points.
+We now use GNU's. Separately, the operator wants SlateOS's terminal to be
+able to *answer* "how wide will you draw this?", so programs written for
+SlateOS can ask instead of trusting a table; that is lane C's terminal, and
+has been requested from them.
+
+**The operator's answer, verbatim:**
+
+> I want a way to ask the terminal how wide it will draw something as part
+> of the protocol. It will be an addition purely for programs made for Slate
+> OS, so it won't interfere with POSIX or whatever, is that fine? Regarding
+> which table to keep, you say that bash and GNU tools will not be running
+> on Slate OS, only reimplementations, so does that not mean that,
+> regardlress of which we keep, nothing will show up improperly (because our
+> own implementations will naturally know the correct table to use)? If
+> that's the case, just do whichever looks the best, or whichever you want.
+> Though one thing that concerns me is the decision to make the renderer
+> obey the table rather than vice versa--what if the glyph it's trying to
+> render doesn't agree with the table in the current font? Wouldn't you
+> either get a glyph printed too wide or too narrow?
+
+**Why GNU's table (a).** It is a pinned upstream -- gnulib's, Unicode
+15.1.0 -- that can be re-derived mechanically, where ours came from whichever
+Python the build machine had. Six utilities consult a width against one
+shell, so matching GNU byte-for-byte in `ls`, `wc -L` and `column` is worth
+more than matching bash's line editor on characters nobody types. The
+operator's premise is right: nothing shows up improperly either way, because
+every program on SlateOS reads the one table.
+
+**"Is a private query fine?" -- yes, with one limit.** An escape sequence
+only SlateOS programs send, which other terminals simply do not answer, is
+exactly how terminals have always been extended (xterm's own queries began
+that way). The limit is that a query needs a terminal on the other end: `ls`
+choosing columns for a pipe or a file, or a program running over ssh from a
+machine with an older table, still has only its table. So the query
+supplements the table rather than replacing it.
+
+**The renderer and the font (the operator's concern).** In a terminal the
+cell grid is authoritative, not the font: every program on the screen, and
+the cursor, computes positions from the table, so the renderer has to fit
+each glyph into the cells the table gives it. A glyph narrower than its cells
+is placed inside them; a wider one is scaled or clipped to them, and never
+pushes the following characters out of place. The concern is real in one
+form: a font whose glyph for a one-cell character is drawn wide looks
+cramped. The remedy for that belongs to the font side -- a fallback font, or
+scaling -- and not to a table that varies by font, because then the layout
+of text would depend on which font is installed, which a program writing to
+a pipe or over ssh cannot know. Lane C has been asked to confirm the renderer
+fits glyphs to cells this way.
+
+**What follows:** `userspace/charwidth` takes gnulib's table; the `ls`
+harness's two permanently-deferred cases become agreeing ones; `osh`'s line
+editor stops matching bash on those 626 (recorded where it is measured).
+Request to lane C: the width query, and the fitting rule above.
+
+**Where:** `userspace/charwidth/src/lib.rs`; `known-issues.md` ->
+`TD-B-OUR-WIDTH-TABLE-IS-BASHS-AND-COREUTILS-9.5S-IS-NOT`.
+
+---
+
+## 1043. Genuine Oils becomes the default shell; our Rust OSH stays as a fallback
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q9; Claude set out (a) keep ours, (b)
+replace ours with genuine Oils, (c) not yet, without recommending one. The
+operator chose (b) for the default and rejected (b)'s deletion: the Rust
+shell stays). Relayed verbatim through lane F's session.
+
+**In short:** the shell a user gets will be the real Oils -- both of its
+languages, OSH (bash-compatible) and YSH (its newer one) -- built from
+upstream's C++ for SlateOS, instead of our Rust re-creation of OSH. Ours is
+kept as a discoverable alternative, because a small shell with no C++ runtime
+under it is what still works when little else does.
+
+**The operator's answer, verbatim:**
+
+> The OS has to eventually be able to run Python and C++ correctly anyway,
+> and Claude never did finish fully debugging the Rust implementation of
+> Oils after 27 days. And as for "our Rust shell is small, boots early, and
+> has no C++ runtime under it — which matters for a shell that has to work
+> when little else does," the Rust implementation can always be kept as a
+> discoverable option that can also be run when little else is working. And
+> as for "our copy will always chase upstream, and any behaviour we have not
+> re-created is a difference someone eventually trips over," I don't see how
+> simply not worrying about chasing upstream changes in Oils could possibly
+> be any worse than staying with our own Rust implementation which would
+> effectively be a stale snapshot of the Oils version it was reimplemented
+> aganist, only buggier. So, make the real Oils the default.
+
+**What follows:** a roadmap item in lane B's backlog -- cross-compile genuine
+Oils (its generated C++, `oils-for-unix`) with `zig c++` against SlateOS's C
+library, run its spec tests on SlateOS, then make it the default `sh` and
+login shell (which touches `init/` and lane D's rootfs recipe). This closes
+the fork §73 left open. It is also the first C++ program SlateOS will run,
+so it proves the C++ runtime that Mesa, Chromium and WINE need anyway.
+
+---
+
+## 1044. grep's proximity window: a match can belong to more than one group -- the manual is right
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q10 with option (b); Claude set out
+(a), (b) and (c) and said it would implement (a), the program's behaviour, if
+the question went unanswered). Relayed verbatim through lane F's session.
+
+**In short:** the operator's own `grep` has a proximity mode: print the lines
+where every pattern occurs within N lines of the others. Its manual says a
+window at least as large as the file is the same as the ordinary whole-file
+mode; the program disagreed, because a match used in one group could not be
+used again in the next. The operator ruled the manual right and the program
+wrong, and asked for both of their builds to be fixed as well as ours.
+
+**The operator's answer, verbatim:**
+
+> I think this is probably a bug in our grep. Please fix it, and make sure
+> you fix both the Python version and the C++ version.
+
+**The rule now, in all three places.** A window is any run of NUM consecutive
+lines; it is satisfied when every pattern matches somewhere in it; a matching
+line is shown when it lies in at least one satisfied window. Two faults broke
+the README's equivalence, not one: the record of live matches was *cleared*
+whenever a window was satisfied (so a match completed one window only), and a
+satisfied window's lines were taken from the earliest *live* match onward (so
+in `ALPHA`, `ALPHA`, `BETA` the first `ALPHA` was dropped). `-m` counts the
+matching lines shown, as the whole-file gate counts them, so the equivalence
+holds with `-m` as well.
+
+**Done the same day:**
+
+* The operator's project (`D:/visual studio projects/grep`, which stays on
+  D:): `grep.py` and `grep.cpp` fixed identically; the README's window example
+  moved its unpaired match from line 7 to line 9 (at line 7 it was two lines
+  from the `BETA`, so the old example depended on the bug); `test_grep.py`
+  gained fixtures for both failing shapes and runs the `-P 99 == no -P`
+  invariant on five files with eight option sets -- 85 passed, Python and C++
+  in parity. Committed locally there (a64f6c0), not pushed; `build.bat`
+  redeployed `d:\utils\grep.exe`.
+* Ours: `userspace/coreutils/src/bin/grep.rs`'s `near_eligible_lines`.
+
+§1008's reading of the operator's program as the rule is superseded by this
+entry for `--near`; the rest of §1008 stands.
+
+---
+
+## 1045. Names that live inside another program: case by case, and a kept name is installed as that program
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q11 with "Claude's recommendation":
+option D, with a default of B for any name kept). Relayed verbatim through
+lane F's session.
+
+**In short:** some programs answer to several names -- one file installed as
+both `useradd` and `userdel` does two jobs. 169 such extra names existed when
+this was asked (148 today) and nothing installed any of them, so their code
+was finished, tested and unrunnable. Each name is now decided on its own: a
+name for a subsystem SlateOS does not have is deleted (§1006); a name that is
+kept is installed as the same file under the extra name, as busybox does, and
+gets a program of its own only where separate permissions for it matter.
+
+**Why B is the default and A the exception.** SlateOS grants permissions per
+binary, so one file under six names holds the union of six jobs' permissions.
+For most sibling sets -- the `useradd` family all edit the same two files --
+that union is what each would be granted anyway. Where the jobs genuinely
+differ (`systemctl`'s fourteen), a name earns its own crate.
+
+**What follows:** the triage, name by name, in `known-issues.md` ->
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`; the ledger
+`scripts/multicall-aliases-baseline.txt` shrinks as each is settled.
+Installing a file under extra names is the rootfs recipe's job (lane D), and
+is requested from them.
+
+---
+
+## 1046. Our Rust osh keeps bash's error text; no toggle
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q12; Claude recommended D. The operator
+leaned toward C, then judged it overkill once genuine Oils is the default
+(§1043), so osh is left as it is). Relayed verbatim through lane F's session.
+*Claude's reading of an answer that weighs C and then sets it aside; if C was
+meant, say so and it is a small change.*
+
+**In short:** our Rust shell prints error messages exactly as bash does,
+including names a user typed, unquoted -- so a name holding a newline can
+make one error look like two. The rest of the tree quotes such names. The
+operator decided the Rust shell need not grow a safer mode: genuine Oils
+becomes the default (§1043), and a user who switched to ours and hit this
+can switch back.
+
+**The operator's answer, verbatim:**
+
+> This reminds me, the proposed format for exporting passwords from the
+> password manager in plaintext was to do it in csv, but passwords can have
+> any characters, including any combination of characters used to delimit a
+> string or escape a character in csv, so make sure you don't mess that up.
+> Anyway, to answer the question, maybe C, but it seems like it may be
+> overkill since we're making the real Oils the default, and if the user has
+> switched theirs to our Rust Oils and runs into a problem, they can simply
+> temporarily use the real Oils instead.
+
+**What follows:** the 16 exemptions in `scripts/quote-names.py`'s IGNORE
+table now point here instead of at an open question. The password-manager
+remark is for the lane that owns the exporter, and has been passed to it:
+a CSV writer must quote every field that holds a comma, a quote, a CR or an
+LF, double every quote inside a quoted field, and be tested with passwords
+built from exactly those characters.
+
+---
+
+## 1047. Shaped random numbers belong in a userspace library, never beside cryptographic randomness; the effort rule stays in one file
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q13 with "Claude's recommendation" on
+both of its parts). Relayed verbatim through lane F's session.
+
+**In short:** two questions the operator had asked back. (1) Bell curves and
+other shaped random numbers: yes, as an ordinary library any program can
+use, seeded and reproducible -- and deliberately not reachable through the
+call that supplies keys and nonces, whose numbers must never be reproducible.
+(2) The rule "the best result, regardless of effort" is already in force for
+SlateOS through `E:\visual studio projects\CLAUDE.md`, which every lane
+reads; it is not copied into `os/CLAUDE.md`, because two statements of one
+rule drift.
+
+**What follows:** a roadmap item in lane B's backlog for the distributions
+library (normal, exponential, Poisson, weighted choice, over a caller-given
+uniform source). No `CLAUDE.md` changes.
+
+---
+
+## 1048. logger: util-linux's logger is the one that survives
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q14 with "Claude's recommendation",
+which was (c): keep the reviewed implementation, with `userspace/logger`'s
+destination). Relayed verbatim through lane F's session.
+
+**In short:** the question asked which of two `logger`s survives -- one that
+printed messages on the terminal, one that sent them to the system log. By
+the time it was answered, the tree had already arrived where the
+recommendation pointed: coreutils' printing applet was deleted (f98b0f95f,
+2026-09-16), and `userspace/logger` became a function-by-function port of
+util-linux 2.39.3's (413e56f1d, 2026-09-26), measured against the real one.
+So the survivor is both the reviewed implementation and the one with the
+right destination. Nothing remains to do; this records the decision behind
+it.
+
+---
+
+## 1049. sbctl keeps what can work or is one planned change away; the four signing commands are deleted
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q17 with option 2, which Claude
+recommended) for `sbctl`. Applying the same rule to the other commands the
+question listed is Claude's (operator-approved scope). Relayed verbatim
+through lane F's session.
+
+**In short:** `sbctl` manages Secure Boot keys. It used to report creating
+keys and signing kernels while writing nothing; since 2026-09-15 those
+commands refuse instead. Now the four that need cryptography this project
+does not have and has not planned -- `create-keys`, `sign`, `rotate-keys`,
+`bundle` -- are deleted, per §1006. `enroll-keys` and `reset` stay, refusing,
+because they wait only on a door into the kernel's key store that lane A has
+been asked for and has scheduled (A-Q21, §978 on lane A's branch).
+
+**The rule, as it applies beyond sbctl.** A command that does not work stays
+only while what it waits for is planned; otherwise it is deleted and added
+back when it is implemented (§1006). The other refusing commands the question
+named (`unshare`, `nsenter`, `dbus-daemon`, `dbus-send`, `dbus-monitor`, `lp`,
+`lprm`, `eject`) are judged by that rule one at a time, each against the
+roadmap, in the commit that settles it.
+
+---
+
+## 1050. Lane B's next large port is the fastpy compiler on SlateOS; the operator's further ports are recorded
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q18 with "Claude's recommendation":
+option B, the fastpy compiler, then the bug list as the standing default --
+and adding a list of ports). Relayed verbatim through lane F's session.
+
+**In short:** of the three large ports left in lane B's list, the fastpy
+compiler comes first: half of it already works, and it is what lets OS
+components be written in Python on SlateOS itself. The Rust toolchain and
+WINE wait. The operator also named programs they want ported that the
+roadmap did not carry; they are now recorded.
+
+**The operator's answer, verbatim:**
+
+> Claude's recommendation, though I noticed that Chromium is missing from
+> the list of large things to port. Have you ported that already? Oh, and
+> one thing I forgot to mention, I want Mono (dotnet support for Linux)
+> ported too, so record that. And record Chromium if it's somehow not
+> recorded anymore. Another thing I want ported is Xonsh, and another is
+> YSH, and another is Nushell. And QDirStat, or better, port my own fork of
+> WinDirStat that can be found at d:\visual studio projects\dirsize\windirstat.
+> Also, do we have a capable debugger, like cdb? We should port one or more
+> of those, too. And I want a reimplementation of `d:\visual studio
+> projects\backup` in a language we support, or if we get Mono ported, we
+> can just run it on that. Record all of these that aren't recorded.
+
+**Each item, checked against the roadmap:**
+
+| Port | Recorded before? | Now |
+|---|---|---|
+| Chromium | yes -- a joint task driven by lane E, blocked on POSIX, GPU and networking; it was absent from B-Q18 only because it is not lane B's | unchanged |
+| Mono (.NET on Linux) | no | added |
+| Xonsh | no | added |
+| YSH | yes, as the half of genuine Oils §73 deferred | it arrives with §1043 |
+| Nushell | marked `[x]`, but what was verified is a *Windows* build (`nu.exe` under msvc, 2026-06-03), not SlateOS | added as a SlateOS port, and the `[x]` annotated |
+| WinDirStat (the operator's fork), or QDirStat | a WinDirStat-*style* app exists (`apps/diskanalyzer`), written here, not a port | added |
+| A capable debugger | a hand-written `gdb` crate exists; no port of GDB or LLDB | added |
+| `d:\visual studio projects\backup` (LithicBackup) | no | added: reimplement, or run it on Mono once Mono runs |
+
+---
+
+## 1051. Two editing habits become a standing rule, in the CLAUDE.md of all three accounts -- pending the operator's word in this session
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q19: "Add it to claude.md of all three
+Claude accounts under c:\users\inhah" -- option A, both habits, which Claude
+recommended). Relayed verbatim through lane F's session.
+
+**In short:** six times in one day an edit script matched different text than
+intended, or more places than one, and the wrong edit landed silently. Two
+habits catch it: assert how many places matched before replacing, and never
+write the explanation of a trap and the code it describes in the same pass.
+The operator wants both in the user-level `CLAUDE.md` of each account.
+
+**Not yet applied, and why.** Lane B edits a `CLAUDE.md` only on the
+operator's own instruction in the session that makes the edit; this answer
+reached it through another session's relay, which is not that. The operator
+has been asked to confirm in lane B's session. The text to add, so it can be
+pasted as it stands once confirmed:
+
+> **Edits by search-and-replace.** Before replacing, check that the anchor
+> matched exactly as many places as you meant -- usually one -- and stop if
+> it did not. And do not write a comment explaining a trap in the same pass
+> as the code it describes: write it, run something (a test, a gate, a
+> build), then read it back as a reader rather than as its author.
+
+**Where:** `C:\Users\inhah\.claude\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-b\CLAUDE.md`,
+`C:\Users\inhah\.claude-account-c\CLAUDE.md`.
+
+---
+
+## 1052. shred --random-source reads its source as GNU's does; the question's premise had gone
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q20), with Claude keeping GNU's
+behaviour for a source that is a regular file -- a divergence from the
+operator's proposal, made for the reason below and put back to the operator.
+Relayed verbatim through lane F's session.
+
+**In short:** `shred` overwrites a file several times to destroy it, and
+`--random-source` names where its random bytes come from. When this was
+asked, our `shred` refused the option, and supporting it seemed to mean
+changing the order of the overwrite. Since then `shred` was replaced by a
+port of GNU coreutils 9.4's, in which `--random-source` works exactly as
+GNU's does, byte for byte, checked by `scripts/shred-diff.sh`. That port
+already does what the operator asked for, in all but one detail.
+
+**The operator's answer, verbatim:**
+
+> I don't understand why the behavior of the random-and-complement passes
+> has to change just to support reading from a file or /dev/urandom, which
+> should be a completely separate path. And I think the failure mode in
+> which one full pass was done but not later passes is many times better
+> than the failure mode in which half a file was overwritten and the other
+> half not. But I'm having a lot of trouble understanding this particular
+> open question in general. But I'd say if the user specifies /dev/urandom,
+> just read from that as you pass over the file, as many times as they want.
+> If the user specifies a file to read from for the data to overwrite with,
+> read that file in chunks as it overwrites the deleted file, then on the
+> next pass, start reading the random-data file from the beginning again.
+> Fair?
+
+**Against the port:**
+
+| The operator asked for | The port |
+|---|---|
+| The random source as a separate path from the generator's passes | yes: with `--random-source`, every random byte comes from the source |
+| Whole passes, so an interruption leaves full passes done | yes: each pass sweeps the whole file, as GNU's does |
+| `/dev/urandom` read continuously, as many passes as asked | yes |
+| A file source re-read from its beginning at each pass | **no -- kept as GNU's**: the file is read on from where the last pass stopped, and a file that runs out ends the run with `shred: FILE: end of file` before the next write |
+
+**Why that one detail stays GNU's.** Restarting the file at every pass makes
+every random pass write the same bytes; the passes after the first then add
+no randomness, which is what multiple passes exist to add. It would also
+make `shred --random-source=F` write different bytes from GNU's on the same
+input, which is what the port's harness checks. If the operator wants the
+restart anyway -- to make a short source last -- it can be an explicit
+option rather than a change to GNU's; that is put back to them.
+
+---
+
+## 1053. Everything that builds goes on the image for now; a catalogue of every program, and the question of what the OS is for, follow
+
+**Date:** 2026-09-27
+**Lane:** B
+**Decided by:** Operator (answering B-Q21: option A for now, and asking for a
+catalogue of the programs, options for "what this OS is for", and a rule
+that every program is recorded where everyone can find it). Relayed
+verbatim through lane F's session.
+
+**In short:** most programs we have written were built and tested but never
+put on the disk image that boots, because together they did not fit. The
+image is to grow and carry everything that builds. Then the operator wants a
+list of every program with a line on what it does, followed by options for
+what SlateOS is for -- each option with the programs it would drop -- so the
+choice of what ships can be made deliberately. And programs must stop being
+undiscoverable: a new program is recorded where every lane looks.
+
+**The operator's answer, verbatim:**
+
+> Go with A for now, but create a list of all the 276 programs along with a
+> short description for each, and at the end, give me options for your
+> question of "what this OS is for" and maybe with some implications as to
+> which option implies which programs would be removed. Also, were you
+> saying that these 276 programs are not even easily discoverable? We
+> should have a rule somewhere that if you make a program, record it
+> somewhere so everybody knows it exists.
+> As for the second question, I guess there's no point in having both a
+> fastpy and a Rust implementation of anything. Wait, yes there is. We may
+> determine that the Rust implementation is better and make that the stock
+> install, but the user may find Python much easier to edit. And vice
+> versa, they may prefer Rust for some reason even if we think the Python
+> version is better. Though another option is to keep the alternative
+> versions in the repo but not included in the OS distribution.
+
+**What follows:**
+1. The image: raising `IMG_SIZE` and staging every binary that builds is the
+   rootfs recipe's (lane D's), and is requested from them.
+2. The catalogue: a generated list of every program the workspace builds,
+   with a one-line description each, and at its end the options for what
+   SlateOS is for, each with what it would drop. The options go into
+   `open-questions.md` as a new question.
+3. The rule: the catalogue is the place a program is recorded, and a gate
+   checks every binary the workspace builds appears in it, so the rule
+   cannot be forgotten.
+4. On keeping both implementations: the operator's second paragraph is the
+   answer `deferred-questions.md` DQ1 was waiting for in part -- both may be
+   kept, the alternative possibly in the repository only -- and is copied
+   there.
+
+---
+
+## 1054. logind gives each client a thread of its own, because the kernel cannot wake one waiter for many channels
+
+**Date:** 2026-10-01
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `logind` (the session manager) was written to watch all of its
+clients from one place: a *completion port* (a kernel object a program waits
+on to hear about many things at once). It could never have answered anyone.
+The kernel does not tell a completion port when a message arrives on a
+channel, and has no way at all for one to wait for a new client to connect.
+`logind` now gives every connected client a thread that waits on that one
+client, and accepts new clients on its main thread -- blocking waits on one
+thing each, which is the part of the kernel's channel interface that works.
+The cost is one thread per connected client, bounded at 64 with 512 KiB
+stacks. The single event loop comes back when the kernel can wake a port for
+both.
+
+**What was there.** `serve` registered the service listener with the port as
+a *channel* (`register_listener`, "listeners are channels internally"). They
+are not: listener ids and channel ids come from separate counters, so the
+port watched whichever unrelated channel shared the number, and never saw a
+connection. And `completion::wait` polls its sources once, then sleeps until
+something calls `completion::notify` -- which a channel send never does
+(`channel::send` wakes only a task blocked in a receive). So a request that
+arrived after the loop began waiting was never noticed either. Lane F found
+the first (`requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`,
+point 2) and the second (`requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`,
+point 4).
+
+| Option | For | Against |
+|---|---|---|
+| **A. A thread per client, accept on the main thread** (chosen) | Works on today's kernel: a blocked receive *is* woken by a send, and a blocked accept by a connect. Simple. Calls are still handled one at a time behind one lock, as the loop handled them. | A thread per idle client. Bounded (64 clients; a 65th is closed at once), and the stacks are small because memory is committed, not overcommitted. |
+| B. Keep the loop, add a periodic timer and re-poll | One thread | Wakes up when idle, delays every answer by up to the period, and still has no way to learn of a new client except by trying to accept on every tick. Polling dressed as an event loop. |
+| C. Keep the loop and wait for lane A | No change here | `logind` answers nobody until then -- the state lane F reported. |
+
+**Revisit when** lane A wakes a completion port on channel sends (lane F's
+request above, point 4) and adds a wait source for a pending connection
+(`requests/b-a-a-server-cannot-wait-for-a-new-client-and-its-clients-at-once.md`).
+Then the event loop is the better shape again -- no thread per idle client --
+and `libservicebus` regains `register_listener`, this time registering a real
+listener source.
 
 ## 834. Selection is a change of colour, not of weight
 

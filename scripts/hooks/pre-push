@@ -174,16 +174,51 @@
 #      status, which a warning leaves at 0, and the host's tests and clippy
 #      never compile `cfg(target_os = "none")` -- so a function dead there
 #      sat in every sysroot build's output for six commits, read by nothing.
+#  52. Refuse two packages that build a binary of the same name. They share
+#      one path under `target/<triple>/<profile>/`, so the survivor is
+#      whichever cargo linked last and that is the file the rootfs stages.
+#      Proved by running one `logger.exe` twice half an hour apart with no
+#      source change: it rejected `-i` as an invalid option, then accepted
+#      it. Cargo has always warned; a warning inside a build that prints
+#      thousands of lines is not a gate. (Lane B wrote it as 51 on its own
+#      branch on 2026-09-16; main's 51 came first, and the merge of
+#      2026-10-01 numbered this one after it.)
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
-# wrong again at 19 and at 22, and at 35. FIVE OUT OF FIVE RECENT ADDITIONS --
-# lane A counted the first four and it is worth having, because a note that
-# stops at the second instance reads as though the problem was dealt with. The
-# fifth was written by someone who had just read this paragraph: gate 35's
-# section and bypass landed, this list did not, and `test-pre-push-gates.py`
-# refused the push. The note is not the mechanism; the test is.
+# wrong again at 19 and at 22, and at 35, and at 51. SIX OUT OF SIX RECENT
+# ADDITIONS -- lane A counted the first four and it is worth having, because a
+# note that stops at the second instance reads as though the problem was dealt
+# with. The fifth was written by someone who had just read this paragraph:
+# gate 35's section and bypass landed, this list did not, and
+# `test-pre-push-gates.py` refused the push. The note is not the mechanism;
+# the test is.
+#
+# The sixth, gate 52 -- numbered 45, then 47, then 51, and 52 since main's
+# own gate 51 met it in a merge -- added a SECOND way
+# to get this wrong that the first five did not show. Its author looked for the highest number in use with
+#
+#     grep -o "^# Gate [0-9]*:" scripts/hooks/pre-push | sort -n | tail
+#
+# got 44, and numbered the new gate 45 -- but gates 45 and 46 do not write
+# their headers in that form, so the pattern could not see them and the answer
+# was confidently wrong. Two sections then claimed 45. The lesson is not "use a
+# better regex": it is that `n+1` was derived from a SEARCH that could silently
+# match a subset, when the authoritative list is right here in this header and
+# says plainly where it ends. The test caught both faults -- the duplicate and
+# the missing line -- and named them separately, which is why the fix took one
+# minute rather than a bisect.
+#
+# It then found a THIRD way, which no test in one tree can see: every lane
+# derives `n+1` from its own branch. On 2026-09-16 lane B numbered this gate 47
+# on `lane-b`, hours after another lane had committed a different gate 47 that
+# had not yet reached `main` when lane B last merged it; that lane went on to
+# add 48 through 50. Each branch's list was internally perfect -- the collision
+# existed only in the merge, which is where it was caught, as a textual conflict
+# on this header, and where the renumbering to 51 was made. A number is not a
+# lane-safe identifier. If this recurs, the fix is to give each lane its own
+# band here as design-decisions.md does, not a better search.
 #
 # Adding a gate is THREE edits: this list, the `# Gate N` section, and the
 # bypass variable. scripts/test-pre-push-gates.py checks all three against each
@@ -551,6 +586,29 @@ touches_paths=""
 touches_nl='
 '
 
+# The paths the push's own commits change, one per line (with blank lines
+# between commits): every unpublished commit against its parent, a root commit
+# against nothing, a merge not at all. `touches` answers from this list when it
+# can, and the tooling-suite gate reads the names from it.
+#
+# ONE `git log` OVER EVERY COMMIT, NOT `rev-list | xargs git diff-tree`. That
+# was how the tooling-suite gate listed the pushed files, and `diff-tree` takes
+# at most two trees: handed two commits it diffed the two snapshots, and handed
+# three or more it read the rest as pathspecs and listed nothing -- so on a
+# typical lane push, neither the paired suites nor this hook's own ran, and the
+# gate said "no scripts/*.py in this push has a paired test suite"
+# (requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md).
+# --root: a root commit's paths count. --no-renames: a rename changes both of
+# its paths. core.quotePath=false: only a name git cannot print as itself is
+# quoted.
+pushed_paths() {
+    [ -n "$pushed_shas" ] || return 0
+    # shellcheck disable=SC2086
+    git -c core.quotePath=false log $pushed_shas \
+        --no-renames --root --name-only --format= \
+        --not --remotes="$remote_name" -- 2>/dev/null
+}
+
 # Decide how `touches` will answer for this push: `none` (nothing is being
 # published), `list` (from `touches_paths`), or `git` (ask on every call).
 touches_prepare() {
@@ -564,14 +622,9 @@ touches_prepare() {
     touches_merge=$(git rev-list $pushed_shas --min-parents=2 --max-count=1 \
                         --not --remotes="$remote_name" 2>/dev/null) || return 0
     [ -z "$touches_merge" ] || return 0
-    # --root: a root commit's paths count, as rev-list counts them, whatever
-    # log.showRoot says. --no-renames: a rename changes both of its paths.
-    # core.quotePath=false: only names git cannot print as themselves are
-    # quoted, and those send the push to git below.
-    # shellcheck disable=SC2086
-    touches_paths=$(git -c core.quotePath=false log $pushed_shas \
-                        --no-renames --root --name-only --format= \
-                        --not --remotes="$remote_name" -- 2>/dev/null) || return 0
+    # A root commit's paths count here as rev-list counts them, whatever
+    # log.showRoot says; a quoted name sends the push to git below.
+    touches_paths=$(pushed_paths) || return 0
     touches_paths="$touches_nl$touches_paths$touches_nl"
     case $touches_paths in
         *"$touches_nl\""*) touches_paths=""; return 0 ;;
@@ -799,6 +852,18 @@ fi
 # commits touching `posix/` or `userspace/`, so a lane A or C push never pays
 # for it and can never be blocked by it.
 #
+# The converse does not hold, and that is worth knowing before it surprises
+# you: the TRIGGER is `posix/`+`userspace/` but the SCAN is every `.rs` in the
+# tree. So a finding in another lane's crate never stops that lane's push and
+# does stop the next lane-B or lane-D push after it reaches `main`. On
+# 2026-09-24 a lane-B push was refused over `gui/vulkan` (lane F): a false
+# positive, since fixed in the checker, plus a real coverage gap, since added
+# to gate 42. Left whole-tree deliberately -- it is the only thing that grades
+# raced globals outside these two trees at all, and narrowing the verdict to
+# match the trigger would quietly stop that. The fix that removes the
+# asymmetry is to widen the trigger, which costs every lane this gate's run
+# time; that is a cross-lane call, not this gate's to make.
+#
 # WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` makes the checker
 # read that revision — every `.rs`, every `Cargo.toml`, and the baseline — via
 # scripts/gittree.py. Without it the gate enumerates the commits being pushed
@@ -907,8 +972,8 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # times on an empty list while `note_gate` recorded them as having run. This
 # gate runs the suite once against the working tree, so there is no loop to
 # degrade to nothing. `touches` alone decides whether it runs.
-# All three crates in CRATES, or a push touching only one of them would
-# skip the gate entirely. The invocation is not scoped to the touched
+# Every crate in CRATES, or a push touching only one of them would skip the
+# gate entirely. (Three until 2026-09-24, when `gui/vulkan` joined.) The invocation is not scoped to the touched
 # crate: measured 2026-09-15, posix is ~150s of the ~230s total, authlib
 # ~27s and coreutils (--lib) ~51s, so a scoped run would save real time
 # on a coreutils-only push. Left unscoped because `touches` answers
@@ -916,8 +981,9 @@ toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 # the gate -- the failure this whole gate family keeps producing.
 # `gui/vulkan/` since 2026-09-24, with `vkloader`'s entry in CRATES: every
 # crate in that list must be a trigger here, or a push touching only it skips
-# the gate that was added to cover it.
-touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/         scripts/check-test-order-independence.py || skip_toi=1
+# the gate that was added to cover it. `gui/imagecodec/` for the same reason,
+# with `imagecodec`'s entry (2026-09-25).
+touches posix/ userspace/authlib/ userspace/coreutils/ gui/vulkan/ gui/imagecodec/ scripts/check-test-order-independence.py || skip_toi=1
 note_gate test-order "$skip_toi"
 
 toi_failed=0
@@ -1296,11 +1362,9 @@ note_gate tooling-suites "$skip_suites"
 suites_failed=0
 suites_ran=""
 if [ "$skip_suites" != "1" ]; then
-    # The same revision range `touches` uses, turned into file names.
-    # `git diff` does not understand `--not --remotes`; that is rev-list
-    # syntax, so the commits are listed first and then asked for their paths.
-    # shellcheck disable=SC2086
-    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/' | sort -u)
+    # The same revision range `touches` uses, turned into file names by the
+    # helper beside it.
+    changed_scripts=$(pushed_paths | grep -E '^scripts/' | sort -u)
     # PAIRED BY STEM, NOT BY EXTENSION.
     #
     # `scripts/foo.py`, `scripts/foo.sh` and an extensionless `scripts/hooks/foo`
@@ -1353,8 +1417,7 @@ if [ "$skip_suites" != "1" ]; then
     # follow `test-<basename>`: the subject is `pre-push` and they are
     # `test-pre-push-gates`, `-fmt-gate`, `-doclinks-gate`, `-identity-gate`,
     # `-unixhalf-gate` and `-run-checker`.
-    # shellcheck disable=SC2086
-    if git rev-list $pushed_shas --not --remotes="$remote_name" 2>/dev/null         | xargs -r git diff-tree --no-commit-id --name-only -r 2>/dev/null         | grep -q '^scripts/hooks/pre-push$'
+    if pushed_paths | grep -q '^scripts/hooks/pre-push$'
     then
         for suite in "${repo_root:-.}"/scripts/test-pre-push-*.py; do
             [ -f "$suite" ] || continue
@@ -4006,6 +4069,89 @@ Full output is kept at the path named above.
 
 To push anyway:
     ALLOW_CRATE_NAME_COLLISION=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 52: two packages must not build a binary of the same name.
+#
+# Gate 18 above asks whether a *directory* name is another crate's *package*
+# name, because `cargo test -p <name>` then tests the wrong thing. This asks
+# the neighbouring question it does not: whether two packages write the same
+# FILE. Every crate links into one `target/<triple>/<profile>/`, so two bin
+# targets sharing a name are one file, and the winner is whichever linked
+# last.
+#
+# WHY IT IS NOT ACADEMIC. On 2026-09-16 the same
+# `target/x86_64-pc-windows-gnu/debug/logger.exe` was run twice, half an hour
+# apart, with no source change in between: first it answered `logger -i` with
+# `invalid option -- 'i'`, then it accepted it. `userspace/logger` has thirteen
+# options and `userspace/coreutils/src/bin/logger.rs` has two, and
+# `create-ext4-rootfs.sh` stages whichever one is sitting there as
+# `/bin/logger`. `kill` is the same, and worse: those two do not differ in
+# options but in DESIGN -- one sends IPC as design.txt requires, the other
+# implements the POSIX signal surface.
+#
+# Cargo has been warning about both all along. A warning inside a build that
+# prints thousands of lines is not a gate, which is the whole reason this is
+# one.
+#
+# COST. `cargo metadata --no-deps` — cargo's own target list, no compilation:
+# about 0.7s. Deliberately not a hand-parse of Cargo.toml, because a bin
+# target's name comes from four different places and `autobins` can switch the
+# implicit ones off; a gate that exists because a near-miss question was asked
+# should not ask a near-miss question.
+#
+# The two collisions that already existed are baselined in the checker, for
+# gate 18's reason: resolving one means DELETING a program, and for `kill` that
+# is an open design question. The baseline may only shrink — an entry that no
+# longer collides fails too.
+# ---------------------------------------------------------------------------
+bincoll="${repo_root:-.}/scripts/check-bin-collisions.py"
+skip_bincoll=0
+if [ "${ALLOW_BIN_NAME_COLLISION:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_BIN_NAME_COLLISION=1 set — skipping the binary-name gate." >&2
+    skip_bincoll=1
+fi
+[ -n "$py" ] || skip_bincoll=1
+[ -f "$bincoll" ] || skip_bincoll=1
+note_gate bin-collisions "$skip_bincoll"
+
+if [ "$skip_bincoll" != "1" ]; then
+    if ! run_checker bin-collisions-selftest "$py" "$bincoll" --selftest; then
+        echo "pre-push: check-bin-collisions.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_bincoll=refused
+    fi
+fi
+
+if [ "$skip_bincoll" = "refused" ] || { [ "$skip_bincoll" != "1" ] && ! run_checker bin-collisions "$py" "$bincoll"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — two packages build a binary with the same name.
+
+They share one output path under target/<triple>/<profile>/, so the binary
+that survives is whichever cargo linked last, and that is the one the rootfs
+stages. The same command can ship a different program tomorrow with no source
+change to blame.
+
+Reproduce exactly what the hook saw:
+
+    python scripts/check-bin-collisions.py
+    python scripts/check-bin-collisions.py --list   # every bin target
+
+Fix it by renaming one of the bin targets (a `[[bin]] name = "..."` in the
+owning Cargo.toml), or by deleting whichever of the two programs should not
+exist. If the collision is genuinely intended, add it to KNOWN_COLLISIONS in
+that script with a comment saying which program is meant to win and why —
+but note that cargo cannot be made to honour such an intent, so "intended"
+here can only ever mean "tracked".
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_BIN_NAME_COLLISION=1 git push $remote_name ...
 
 EOF
     exit 1

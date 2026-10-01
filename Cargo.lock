@@ -96,7 +96,7 @@ name = "argon2"
 version = "0.6.0"
 dependencies = [
  "base64ct",
- "blake2",
+ "blake2 0.11.0",
  "cpufeatures",
  "password-hash",
 ]
@@ -105,6 +105,7 @@ dependencies = [
 name = "arp"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -198,6 +199,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "autoopts"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "localtime",
+ "quoting",
+ "scratchdir",
+ "shellcmd",
+ "ulclosestream",
+]
+
+[[package]]
 name = "backup"
 version = "0.1.0"
 dependencies = [
@@ -223,13 +236,6 @@ name = "backupd"
 version = "0.1.0"
 dependencies = [
  "journalrec",
- "quoting",
-]
-
-[[package]]
-name = "base64"
-version = "0.1.0"
-dependencies = [
  "quoting",
 ]
 
@@ -271,14 +277,40 @@ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
 
 [[package]]
 name = "blake2"
+version = "0.1.0"
+
+[[package]]
+name = "blake2"
 version = "0.11.0"
 dependencies = [
  "digest",
 ]
 
 [[package]]
+name = "blkdiscard"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+]
+
+[[package]]
 name = "blkid"
 version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
+]
 
 [[package]]
 name = "blobby"
@@ -300,7 +332,11 @@ name = "blockdev"
 version = "0.1.0"
 dependencies = [
  "quoting",
- "usageerror",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]
@@ -566,7 +602,13 @@ dependencies = [
 name = "column"
 version = "0.1.0"
 dependencies = [
+ "charwidth",
+ "getoptlong",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -627,16 +669,28 @@ name = "coreutils"
 version = "0.1.0"
 dependencies = [
  "bignum",
+ "blake2 0.1.0",
  "charwidth",
  "ere",
+ "errmsg",
+ "getoptlong",
+ "gnubase64",
  "localtime",
+ "md5",
  "modechange",
+ "optionalfile",
  "procinfo",
  "pwdb",
  "quoting",
+ "randrange",
  "scratchdir",
+ "sha1",
  "sha2",
+ "shellcmd",
+ "sm3",
+ "stdfdguard",
  "sysroot-dep",
+ "ulstrutils",
  "userspec",
  "utmpfile",
 ]
@@ -662,6 +716,14 @@ dependencies = [
 
 [[package]]
 name = "crc32"
+version = "0.1.0"
+
+[[package]]
+name = "crc32c"
+version = "0.1.0"
+
+[[package]]
+name = "crc64"
 version = "0.1.0"
 
 [[package]]
@@ -694,6 +756,7 @@ name = "crond"
 version = "0.1.0"
 dependencies = [
  "cronspool",
+ "libcsyslog",
  "scratchdir",
 ]
 
@@ -858,6 +921,7 @@ dependencies = [
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "libcall",
  "quoting",
 ]
@@ -1084,6 +1148,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "errmsg"
+version = "0.1.0"
+
+[[package]]
 name = "exif"
 version = "0.1.0"
 dependencies = [
@@ -1182,11 +1250,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "findfs"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+]
+
+[[package]]
 name = "findmnt"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -1232,8 +1318,11 @@ dependencies = [
 name = "flock"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "quoting",
- "usageerror",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -1279,6 +1368,7 @@ name = "fsck"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
  "scratchdir",
 ]
 
@@ -1358,8 +1448,17 @@ dependencies = [
 name = "getopt"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "quoting",
- "usageerror",
+ "stdfdguard",
+ "ulclosestream",
+]
+
+[[package]]
+name = "getoptlong"
+version = "0.1.0"
+dependencies = [
+ "quoting",
 ]
 
 [[package]]
@@ -1371,6 +1470,10 @@ dependencies = [
 
 [[package]]
 name = "globmatch"
+version = "0.1.0"
+
+[[package]]
+name = "gnubase64"
 version = "0.1.0"
 
 [[package]]
@@ -1561,6 +1664,7 @@ dependencies = [
 name = "ifconfig"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -1666,6 +1770,7 @@ dependencies = [
 name = "ip"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "quoting",
 ]
 
@@ -1697,7 +1802,16 @@ version = "0.1.0"
 name = "journalctl"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "quoting",
+ "scratchdir",
+]
+
+[[package]]
+name = "journalio"
+version = "0.1.0"
+dependencies = [
+ "scratchdir",
 ]
 
 [[package]]
@@ -1759,6 +1873,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kerror"
+version = "0.1.0"
+
+[[package]]
 name = "keylayout"
 version = "0.1.0"
 
@@ -1769,6 +1887,7 @@ dependencies = [
  "killconv",
  "procinfo",
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -1840,6 +1959,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "libcsyslog"
+version = "0.1.0"
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 dependencies = [
@@ -1849,6 +1972,9 @@ dependencies = [
 [[package]]
 name = "libservicebus"
 version = "0.1.0"
+dependencies = [
+ "kerror",
+]
 
 [[package]]
 name = "life"
@@ -1901,6 +2027,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lockfile"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "usageerror",
+]
+
+[[package]]
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
@@ -1929,9 +2063,16 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 name = "logger"
 version = "0.1.0"
 dependencies = [
- "authlib",
+ "errmsg",
+ "getoptlong",
+ "journalio",
+ "journalrec",
+ "localtime",
  "quoting",
- "userdb",
+ "stdfdguard",
+ "sysroot-dep",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -1939,7 +2080,9 @@ name = "login"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "libcall",
  "libservicebus",
+ "localtime",
  "posix",
  "quoting",
  "scratchdir",
@@ -2034,27 +2177,55 @@ dependencies = [
 name = "lsblk"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]
 name = "lscpu"
 version = "0.1.0"
 dependencies = [
- "usageerror",
+ "getoptlong",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
 name = "lsirq"
 version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
+]
 
 [[package]]
 name = "lsmem"
 version = "0.1.0"
 dependencies = [
- "procinfo",
- "usageerror",
+ "errmsg",
+ "getoptlong",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -2068,8 +2239,14 @@ dependencies = [
 name = "lsns"
 version = "0.1.0"
 dependencies = [
- "procinfo",
+ "charwidth",
+ "getoptlong",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -2312,6 +2489,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mountpoint"
+version = "0.1.0"
+dependencies = [
+ "getoptlong",
+ "quoting",
+ "stdfdguard",
+ "ulclosestream",
+ "ulmount",
+]
+
+[[package]]
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [
@@ -2496,14 +2684,6 @@ name = "notimpl"
 version = "0.1.0"
 
 [[package]]
-name = "nproc"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "usageerror",
-]
-
-[[package]]
 name = "nsenter"
 version = "0.1.0"
 
@@ -2518,7 +2698,11 @@ dependencies = [
 name = "ntpd"
 version = "0.1.0"
 dependencies = [
+ "libcsyslog",
+ "localtime",
  "optionalfile",
+ "quoting",
+ "scratchdir",
 ]
 
 [[package]]
@@ -2546,7 +2730,7 @@ dependencies = [
  "bstr",
  "charwidth",
  "ere",
- "tzrules",
+ "localtime",
 ]
 
 [[package]]
@@ -2867,7 +3051,9 @@ name = "powerctl"
 version = "0.1.0"
 dependencies = [
  "libcall",
+ "libservicebus",
  "quoting",
+ "sysroot-dep",
 ]
 
 [[package]]
@@ -2878,7 +3064,12 @@ version = "0.1.0"
 name = "prlimit"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -3152,6 +3343,7 @@ dependencies = [
 name = "route"
 version = "0.1.0"
 dependencies = [
+ "kerror",
  "usageerror",
 ]
 
@@ -3213,6 +3405,8 @@ name = "sbctl"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "stdfdguard",
+ "ulclosestream",
 ]
 
 [[package]]
@@ -3271,7 +3465,7 @@ version = "0.1.0"
 dependencies = [
  "aead",
  "argon2",
- "blake2",
+ "blake2 0.11.0",
  "chacha20",
  "chacha20poly1305",
  "hex-literal",
@@ -3309,6 +3503,7 @@ dependencies = [
 name = "service"
 version = "0.1.0"
 dependencies = [
+ "libservicebus",
  "quoting",
 ]
 
@@ -3378,6 +3573,9 @@ dependencies = [
 [[package]]
 name = "sha2"
 version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
 
 [[package]]
 name = "shell"
@@ -3385,6 +3583,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "shellcmd"
+version = "0.1.0"
 
 [[package]]
 name = "shuf"
@@ -3432,10 +3634,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "sm3"
+version = "0.1.0"
+dependencies = [
+ "blockbuf",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
+
+[[package]]
+name = "smartcols"
+version = "0.1.0"
+dependencies = [
+ "charwidth",
+ "quoting",
+ "ulstrutils",
+]
 
 [[package]]
 name = "snake"
@@ -3621,6 +3839,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "stdfdguard"
+version = "0.1.0"
+
+[[package]]
 name = "stickynotes"
 version = "0.1.0"
 dependencies = [
@@ -3720,9 +3942,16 @@ dependencies = [
 name = "swapon"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
  "libcall",
- "procinfo",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulmount",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -3802,6 +4031,7 @@ dependencies = [
 name = "syslogd"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "journalrec",
  "quoting",
  "scratchdir",
@@ -3837,6 +4067,7 @@ dependencies = [
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
+ "journalio",
  "journalrec",
  "procinfo",
  "quoting",
@@ -4111,6 +4342,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulblkid"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "crc32c",
+ "crc64",
+ "md5",
+ "quoting",
+ "scratchdir",
+ "sha2",
+ "ulstrutils",
+ "ulsysfs",
+ "xxhash64",
+]
+
+[[package]]
+name = "ulclosestream"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "quoting",
+]
+
+[[package]]
+name = "ulmount"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "ulblkid",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
+name = "ulstrutils"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+]
+
+[[package]]
+name = "ulsysfs"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+ "scratchdir",
+ "ulstrutils",
+]
+
+[[package]]
 name = "undelete"
 version = "0.1.0"
 dependencies = [
@@ -4216,6 +4498,30 @@ dependencies = [
 [[package]]
 name = "utmpfile"
 version = "0.1.0"
+
+[[package]]
+name = "uudecode"
+version = "0.1.0"
+dependencies = [
+ "autoopts",
+ "errmsg",
+ "gnubase64",
+ "pwdb",
+ "scratchdir",
+ "stdfdguard",
+ "ulclosestream",
+]
+
+[[package]]
+name = "uuencode"
+version = "0.1.0"
+dependencies = [
+ "autoopts",
+ "errmsg",
+ "gnubase64",
+ "stdfdguard",
+ "ulclosestream",
+]
 
 [[package]]
 name = "vi"
@@ -4342,7 +4648,15 @@ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
 name = "wipefs"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
  "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -4398,6 +4712,10 @@ dependencies = [
  "quoting",
  "scratchdir",
 ]
+
+[[package]]
+name = "xxhash64"
+version = "0.1.0"
 
 [[package]]
 name = "yacc"

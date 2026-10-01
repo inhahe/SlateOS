@@ -476,6 +476,32 @@ def test_no_gate_hands_a_push_sized_list_to_argv(text):
           re.search(r'rm -f "\$doclink_list"', code) is not None, True)
 
 
+def test_no_gate_hands_several_commits_to_one_diff_tree(text):
+    """The pushed files are listed per commit, never by one `diff-tree`.
+
+    `git diff-tree` takes at most two trees. The tooling-suite gate listed the
+    pushed files with `git rev-list ... | xargs -r git diff-tree ...`: handed
+    two commits that diffed the two snapshots, and handed three or more it read
+    the rest as pathspecs and listed nothing -- so on a typical lane push
+    neither the paired suites nor this hook's own ran, and the gate said none
+    existed (requests/e-ab-pre-push-suites-never-run-on-a-multi-commit-push.md).
+
+    Both of its questions now go to `pushed_paths`, which
+    `test-pre-push-touches.py` holds to each commit's own diff in every
+    scenario it has, five-commit push included. This catches the pattern
+    coming back anywhere in the hook.
+    """
+    code = code_only(text)
+    check("no `xargs ... git diff-tree` over the pushed commits",
+          re.search(r"xargs[^\n|]*\bgit\s+diff-tree", code) is not None, False)
+    check("the tooling-suite gate lists the pushed scripts by pushed_paths",
+          re.search(r"changed_scripts=\$\(pushed_paths\s*\|", code) is not None,
+          True)
+    check("...and asks pushed_paths whether the hook itself is in the push",
+          re.search(r"if pushed_paths \| grep -q '\^scripts/hooks/pre-push\$'",
+                    code) is not None, True)
+
+
 def main():
     text = hook_text()
     tests = [(name, fn) for name, fn in list(globals().items())

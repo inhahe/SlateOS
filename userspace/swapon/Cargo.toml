@@ -2,9 +2,31 @@
 name = "swapon"
 version = "0.1.0"
 edition = "2024"
+description = "util-linux 2.39.3's swapon and swapoff, ported: swap areas enabled, disabled and listed, through the libmount, libblkid and libsmartcols ports"
+
+[lints]
+workspace = true
+
 [dependencies]
-procinfo = { path = "../../procinfo" }
-libcall = { path = "../../libcall" }
-# swapon names swap devices and files by path, supplied by the caller or
-# read out of fstab.
+# glibc's getopt_long, with util-linux's mutually exclusive options.
+getoptlong = { path = "../getoptlong" }
+# argv and paths are bytes; a name in a diagnostic is escaped.
 quoting = { path = "../quoting" }
+# libsmartcols: the --show table.
+smartcols = { path = "../smartcols" }
+# libmount: /proc/swaps, fstab, and LABEL=/UUID= specs resolved.
+ulmount = { path = "../ulmount" }
+# libblkid: a swap area's UUID, label and version.
+ulblkid = { path = "../ulblkid" }
+# strtos16_or_err, string_to_idarray, err_exclusive_options,
+# size_to_human_string.
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's close_stdout, and stdout buffered as glibc buffers it.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor swapon was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+# swapon(2) and swapoff(2).
+libcall = { path = "../../libcall" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

@@ -1408,7 +1408,9 @@ fn add_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
 
     if table.find_chain(&chain_name).is_some() {
         return Err(format!(
-            "chain '{chain_name}' already exists in table '{table_name}'"
+            "chain {} already exists in table {}",
+            quoteaf_os(chain_name),
+            quoteaf_os(table_name)
         ));
     }
 

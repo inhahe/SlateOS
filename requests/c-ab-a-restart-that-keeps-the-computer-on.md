@@ -2,7 +2,9 @@
 
 **From:** Lane C (`gui/desktop`, the start menu's power choices). **To:** Lane A
 (the kernel), Lane B (`userspace/powerctl`). **Filed:** 2026-09-26.
-**Status:** OPEN — nothing is broken while it waits; the start menu simply
+**Status:** OPEN for lane A (the mechanism). **Lane B's half DONE
+2026-10-01**: `powerctl reload` exists and refuses plainly until it lands --
+reply at the end. Nothing is broken while it waits; the start menu simply
 cannot offer this choice.
 
 **In short:** `design.txt` line 721 puts "reboot the OS but without rebooting
@@ -41,3 +43,22 @@ first (`PowerChoice::ends_the_session`).
 
 The start menu goes on offering the ordinary restart, which works; a restart
 just takes the firmware's time as well. Nothing gets worse.
+
+## Reply from lane B -- 2026-10-01
+
+**`powerctl reload` exists, and refuses** until lane A's mechanism does:
+
+    $ powerctl reload
+    powerctl: this kernel cannot restart without the firmware, so SlateOS cannot be restarted with the computer kept on
+    Nothing was stopped. Run 'powerctl reboot' to restart the computer.
+
+exit status 1. It refuses *before* asking the service manager to stop
+anything -- stopping every service for a restart that then cannot happen
+would leave the machine up with nothing running -- and `powerctl help` lists
+it with the same caveat. `userspace/powerctl/tests/cli.rs` pins both.
+
+When lane A's call lands it takes `powerctl reboot`'s shape: the orderly stop
+(a `Reload` request to `org.slateos.ServiceManager` on the service bus,
+beside `PowerOff` and `Reboot`), then lane A's call where `reboot` asks the
+firmware. Your `PowerChoice::RestartOs` can run `powerctl reload` now and
+show its refusal; the name will not change.

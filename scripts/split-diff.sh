@@ -63,6 +63,12 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# Variables the program under test runs with, on both sides, and nothing else
+# does. `POSIXLY_CORRECT` changes where option parsing stops, and exported it
+# would reach this harness's own `od`, `sort` and `diff` as well. Empty unless
+# a case block sets it.
+ENVV=()
+
 pass=0; fail=0; xfail=0; xpass=0
 
 fixtures=$DIFF_TMP/fixtures
@@ -130,7 +136,7 @@ for _ in $(seq 1 700); do printf 'z'; done > wide.txt
 # and it inherited the caller's redirected stderr along with everything else.
 run_side() {
   local side=$1 dir=$2; shift 2
-  ( cd "$dir" && diff_run env PATH="$bindir/$side:$PATH" split "$@" )
+  ( cd "$dir" && diff_run env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side:$PATH" split "$@" )
 }
 
 # Every file the run left behind, in name order, with its contents.
@@ -252,7 +258,7 @@ names_case() {
 raw_case() {
   local fixture=$1; shift
   compare_argv "$fixture" full - "$@"
-  report "split $*"
+  report "${ENVV[*]:+${ENVV[*]} }split $*"
 }
 
 # Reading the fixture from stdin rather than naming it.
@@ -605,6 +611,20 @@ xfail_case 'our --version names SlateOS' seq20.txt --version
 xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -l 5 --hex-suffixes=ff
 xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -l 5 --hex-suffixes=a
 xfail_case 'GNU reads out of bounds for a hex start value' seq20.txt -n 3 --hex-suffixes=1f
+
+# --- POSIXLY_CORRECT -----------------------------------------------------------
+# glibc's getopt ends option parsing at the first operand while it is set -- to
+# anything, the empty string included -- so an option after an operand is an
+# operand, and so is a `--` after one, there being no options left for it to
+# end. Measured against GNU on 2026-09-25; `coreutils::getopt`'s module docs,
+# "Where option parsing stops".
+# `raw_case FIXTURE ARGS` runs `split ARGS` beside the copied `in.txt`:
+# after the file, `-l5` is the output prefix, and the manifest says so.
+ENVV=(POSIXLY_CORRECT=1)
+raw_case seq20.txt in.txt -l5
+raw_case seq20.txt -l5 in.txt
+ENVV=()
+raw_case seq20.txt in.txt -l5
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"

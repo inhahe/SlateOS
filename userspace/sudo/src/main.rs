@@ -784,8 +784,8 @@ fn parse_default_setting(part: &str) -> Result<DefaultSetting, SudoError> {
             format!("repeated '!' in Defaults setting name: {part}")
         } else {
             format!(
-                "Defaults setting '{}' is both negated and given a value",
-                inner.trim()
+                "Defaults setting {} is both negated and given a value",
+                quoteaf_os(inner.trim())
             )
         }));
     }
@@ -813,7 +813,8 @@ fn parse_default_setting(part: &str) -> Result<DefaultSetting, SudoError> {
             // became the value `A B` and the file looked fine.
             if raw.matches('"').count() % 2 != 0 {
                 return Err(SudoError::ParseError(format!(
-                    "unterminated quote in Defaults value for '{name}'"
+                    "unterminated quote in Defaults value for {}",
+                    quoteaf_os(name)
                 )));
             }
             raw.trim_matches('"').to_string()
@@ -848,7 +849,8 @@ fn parse_default_setting(part: &str) -> Result<DefaultSetting, SudoError> {
         };
         if let Some(reason) = bad {
             return Err(SudoError::ParseError(format!(
-                "Defaults setting '{name}' {reason}"
+                "Defaults setting {} {reason}",
+                quoteaf_os(name)
             )));
         }
     }
@@ -1203,8 +1205,8 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
                 errors.push(SyntaxError {
                     line_num,
                     message: format!(
-                        "Defaults setting '{}' is recognised but not yet honoured by this sudo",
-                        setting.name
+                        "Defaults setting {} is recognised but not yet honoured by this sudo",
+                        quoteaf_os(&setting.name)
                     ),
                     is_warning: true,
                 });

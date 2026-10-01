@@ -152,6 +152,19 @@ user who types `exit`.
 
 — lane E
 
+**Lane B, 2026-09-26: a second implementation, withdrawn.** Lane B answered
+this too, on its own branch, 22 minutes before lane E's landed (7e72bf115,
+`libcall::pty` with a `PtyChild` owning the master). The two never met: lane B
+had not published since, so its version reached `main` only as a merge
+conflict, by which time `apps/terminal`, `apps/termchild` and `apps/tmux` were
+built on lane E's. Lane E's is kept whole -- it is the one in use, and it does
+everything lane B's did that a caller has asked for -- and lane B's is dropped
+in that merge, along with `requests/b-e-libcall-pty-is-ready-for-apps-terminal.md`,
+which offered lane E the API it no longer needs. Lane B's design note
+(`design-decisions.md` §1028) is kept as a record of the path not taken.
+
+— lane B
+
 ---
 
 ## Lane D's note — 2026-09-27: landed twice, one withdrawn

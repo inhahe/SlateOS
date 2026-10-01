@@ -71,7 +71,8 @@
 //! everywhere else, on the grounds that "char" is a lie in a multibyte locale.
 //! Which one appears is decided by gnulib's `hard_locale (LC_MESSAGES)`, i.e.
 //! by whether `LC_ALL`/`LC_MESSAGES`/`LANG` name anything other than `C` or
-//! `POSIX` — the same test `ls` already applies to `LC_TIME`. With `-b` it is
+//! `POSIX` — the test `ls` applies to `LC_TIME`, and one function in
+//! `coreutils::locale` for both. With `-b` it is
 //! always `byte`, because upstream's combined format string has no `char`
 //! spelling.
 //!
@@ -449,24 +450,6 @@ Exit status is 0 if inputs are the same, 1 if different, 2 if trouble.
 
 // ------------------------------------------------------------- rendering ---
 
-/// gnulib's `hard_locale (LC_MESSAGES)`: false for exactly `C` and `POSIX`,
-/// and the three variables are consulted in the order the C library does.
-fn hard_locale_messages() -> bool {
-    let var = |key: &str| {
-        std::env::var_os(key)
-            .map(|v| coreutils::quote::os_bytes(&v).into_owned())
-            .filter(|v| !v.is_empty())
-    };
-    !matches!(
-        var("LC_ALL")
-            .or_else(|| var("LC_MESSAGES"))
-            .or_else(|| var("LANG"))
-            .unwrap_or_default()
-            .as_slice(),
-        b"" | b"C" | b"POSIX"
-    )
-}
-
 /// Upstream's `sprintc`: a byte as `cat -v` would show it.
 ///
 /// The high bit becomes an `M-` prefix, a control byte becomes `^` plus the
@@ -760,11 +743,11 @@ fn main() -> std::process::ExitCode {
 mod imp {
     use super::{
         Compare, EXIT_DIFFER, EXIT_SAME, EXIT_TROUBLE, Outcome, Request, Settings, Trouble,
-        diagnostic, differ_line, eof_message, hard_locale_messages, help_text, offset_width,
-        parse_args,
+        diagnostic, differ_line, eof_message, help_text, offset_width, parse_args,
     };
     use coreutils::diag;
     use coreutils::errmsg::strerror;
+    use coreutils::locale::{Category, hard_locale};
     use coreutils::quote::{os_bytes, os_from_bytes, quotef};
     use std::fs::File;
     use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -1030,7 +1013,7 @@ mod imp {
                         byte,
                         line,
                         pair,
-                        hard_locale_messages(),
+                        hard_locale(Category::Messages),
                     );
                     if let Err(e) = writeln!(out, "{line}")
                         && e.kind() != io::ErrorKind::BrokenPipe
@@ -1109,9 +1092,9 @@ mod tests {
             offset_width: width,
         };
         let mut out = Vec::new();
-        let outcome = match engine.run(&mut &a[..], &mut &b[..], &mut out) {
-            Ok(o) => o,
-            Err(_) => panic!("in-memory readers cannot fail"),
+        // `Trouble` has no `Debug`, so no `expect`.
+        let Ok(outcome) = engine.run(&mut &a[..], &mut &b[..], &mut out) else {
+            panic!("in-memory readers cannot fail");
         };
         (outcome, String::from_utf8(out).unwrap())
     }

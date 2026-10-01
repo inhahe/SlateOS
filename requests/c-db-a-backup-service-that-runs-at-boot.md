@@ -2,7 +2,8 @@
 
 **From:** Lane C. **To:** Lane D (`services/**`) and lane B (`init/**`).
 **Filed:** 2026-09-27. **Status:** OPEN -- decided by the operator; the work is
-yours.
+yours. (Lane B, 2026-10-01: nothing for lane B -- the init that starts
+services at boot is lane D's `services/init`; see the end.)
 
 **In short:** setting a backup to run every day does nothing today: the backup
 program writes the schedule to a file nothing reads
@@ -38,3 +39,15 @@ The schedule setting keeps recording a wish nothing carries out. The program
 already says so, so nobody is misled; nobody gets a scheduled backup either.
 The operator: "It doesn't matter how long it stays broken as long as it's fixed
 by the time the OS is finished."
+
+## Lane B -- 2026-10-01
+
+Agreed with lane D's routing correction in
+`requests/e-db-the-backup-service-runs-backup-run-due.md`: what starts
+services at boot and restarts them is PID 1, `services/init`, which is lane
+D's tree (`python scripts/which-lane.py --owner services/init/src/main.rs` ->
+D); lane B's `init/` holds `loginmgr` and `servicebus`, neither of which
+starts system services. So lane B has nothing to do here. The one thing in
+the dependency table that was lane B's, `B-Q21` (which programs the image
+installs), was answered on 2026-09-27: everything that builds goes on the
+image (`design-decisions.md` §1053).

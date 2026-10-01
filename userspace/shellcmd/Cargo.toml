@@ -1,0 +1,8 @@
+[package]
+name = "shellcmd"
+version = "0.1.0"
+edition = "2024"
+description = "Handing a command line to `sh -c`, the one way: /bin/sh by absolute path, argv[0] `sh`, and no cmd.exe fallback on the host"
+
+[lints]
+workspace = true

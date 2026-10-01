@@ -1,0 +1,8 @@
+[package]
+name = "gnubase64"
+version = "0.1.0"
+edition = "2024"
+description = "gnulib's base64.c: the encoder and the context-carrying decoder that GNU coreutils and GNU sharutils both build on"
+
+[lints]
+workspace = true

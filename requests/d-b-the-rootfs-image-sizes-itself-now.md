@@ -2,8 +2,12 @@
 
 **From:** lane D · **To:** lane B · **Filed:** 2026-09-30
 
-**Status:** FYI. Nothing is asked of lane B but, when B-Q21 is next touched,
-to update the reason it gives.
+**Status:** FYI, read 2026-10-01 (lane B). B-Q21 was answered before this
+arrived (design-decisions.md §1053, option A: everything that builds goes on
+the image) and has left `open-questions.md`, so there is no reason left to
+update; the staging request that followed it
+(`requests/b-d-stage-every-program-that-builds.md`) is what an image that
+sizes itself makes cheap.
 
 **In short:** `scripts/create-ext4-rootfs.sh` no longer makes a fixed 384M
 image. Since `b6e6920f1` it sizes the image from what it staged: the staged

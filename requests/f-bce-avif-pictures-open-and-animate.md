@@ -3,7 +3,8 @@
 **From:** Lane F (`gui/imagecodec`). **To:** Lane B (`userspace/file`), Lane C
 (`gui/thumbs`, `gui/toolkit`), Lane E (`apps/imageviewer`, `apps/explorer`,
 `apps/fileassoc`, `apps/filesearch`). **Filed:** 2026-09-27.
-**Status:** OPEN for lane B. The decoder is on `main`; the uses below are
+**Status:** DONE for all three lanes -- **lane B's half DONE 2026-10-01**
+(reply at the end). The decoder is on `main`; the uses below are
 yours. **Lane C's half DONE 2026-09-28** (`6d3293f33`, `891f6dbae`; reply
 at the end). **Lane E's part DONE (2026-09-28):**
 the image viewer names an AVIF (`ImageFormat::Avif`, by
@@ -115,3 +116,26 @@ Both done, on `lane-c`, reaching `main` with lane C's next publish:
   `imagecodec::dimensions` and `imagecodec::decode` for any format it routes
   as a picture (that was the WebP change), so the fix was `avif` joining the
   picture extensions. An animated AVIF shows its first frame, as a GIF does.
+
+## Reply from lane B -- 2026-10-01
+
+Done, and wider than the AVIF line. `file`'s `ftyp` branch had eight brands
+written by hand and called every other one "ISO Media, MPEG-4 compatible",
+`video/mp4`. It now runs file 5.45's own rules for the whole family -- 155
+brands from `magic/Magdir/animation` and the 38 nested rules under them,
+generated into `userspace/file/src/isomedia_table.rs` by
+`scripts/file-isomedia-gen.py` (pinned by SHA-256) and evaluated the way
+libmagic evaluates them (`userspace/file/src/isomedia.rs`).
+
+- `file photo.avif` → `ISO Media, AVIF Image`, `image/avif`; an `avis` file
+  → `ISO Media, AVIF Image Sequence`. `heic`, `heix`, `hevc`, `hevx`,
+  `mif1`, `msf1` and the rest of HEIF are named as GNU names them.
+- A brand GNU does not know is now plain `ISO Media`,
+  `application/octet-stream` -- not MP4, as it was for everything before.
+- `scripts/file-isomedia-diff.sh` builds a file for every brand in the table,
+  the variants the nested rules read and files too short for them, and
+  compares `file -b` with GNU's in WSL: 726 agree, 0 differ. The MIME types
+  are held to `file -b --mime-type`'s by the crate's tests.
+
+The rest of `file` is still a hand-written approximation of libmagic, recorded
+as `B-FILE-IS-A-HAND-WRITTEN-APPROXIMATION-OF-LIBMAGIC` in `known-issues.md`.

@@ -413,7 +413,8 @@ fn validate_newroot(path: &str) -> Result<(), String> {
         Ok(meta) => {
             if !meta.is_dir() {
                 Err(format!(
-                    "cannot change root directory to '{path}': not a directory"
+                    "cannot change root directory to {}: not a directory",
+                    quoteaf_os(path)
                 ))
             } else {
                 Ok(())
@@ -423,12 +424,14 @@ fn validate_newroot(path: &str) -> Result<(), String> {
             let kind = e.kind();
             match kind {
                 std::io::ErrorKind::NotFound => Err(format!(
-                    "cannot change root directory to '{path}': \
-                         no such file or directory"
+                    "cannot change root directory to {}: \
+                         no such file or directory",
+                    quoteaf_os(path)
                 )),
                 std::io::ErrorKind::PermissionDenied => Err(format!(
-                    "cannot change root directory to '{path}': \
-                         permission denied"
+                    "cannot change root directory to {}: \
+                         permission denied",
+                    quoteaf_os(path)
                 )),
                 _ => Err(format!(
                     "cannot change root directory to {}: {e}",

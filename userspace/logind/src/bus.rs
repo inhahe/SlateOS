@@ -25,17 +25,26 @@
 //! goes through [`authorize`], which needs to know who is calling, and the
 //! kernel is the only party that can say (`libservicebus::Credentials`).
 //!
-//! **The kernel cannot say yet.** `SYS_SERVICE_ACCEPT` hands back a bare
-//! channel handle and records nothing about the process on the other end, so
-//! `Connection::peer_credentials()` answers `None` for every connection, and
-//! every method here consequently answers [`ERR_UNKNOWN_CALLER`]. That is the
-//! correct behaviour and it is deliberate: the alternative — assume the caller
-//! is the session's owner because usually it is — would make
-//! `ForceUnlockSession` a password-free unlock for anything that can open a
-//! channel, which is the exact hole §341 was written to close. The syscall is
-//! requested in `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`;
-//! when it lands, `peer_credentials` starts returning `Some`, and nothing in
-//! this file changes.
+//! **The kernel says, through `SYS_CHANNEL_PEER_CRED`** (lane A, 2026-08-21,
+//! for `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`): the
+//! uid, gid and pid of the client as they were when it connected, which
+//! `Connection::peer_credentials()` returns. When the kernel has no record --
+//! a channel it did not broker, a peer that is a kernel task -- the answer is
+//! `None`, and every method here answers [`ERR_UNKNOWN_CALLER`]. That is
+//! deliberate: the alternative — assume the caller is the session's owner
+//! because usually it is — would make `ForceUnlockSession` a password-free
+//! unlock for anything that can open a channel, which is the exact hole §341
+//! was written to close.
+//!
+//! (Until 2026-10-01 `peer_credentials` never asked the kernel and answered
+//! `None` for everyone, so every method here refused every caller: lane F's
+//! `requests/f-b-logind-refuses-every-caller-because-libservicebus-never-asks-who-it-is.md`.)
+//!
+//! One limit is the kernel's: a channel handle can today be guessed, and the
+//! channel syscalls do not check that the caller holds the handle it passes,
+//! so a credential proves who *connected*, not who is sending (lane F's
+//! `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`,
+//! point 1). That is lane A's to close; nothing here can.
 //!
 //! # The policy, in one paragraph
 //!
@@ -1426,7 +1435,8 @@ mod tests {
     /// session does not exist. These three are different questions and get
     /// different answers:
     ///
-    /// * a session with a real leader, on a host that cannot signal at all;
+    /// * a session with a leader, whose signal is sent and reaches nobody
+    ///   (`crate::NOBODY_PIDS`: ENOSYS on the Windows host, ESRCH on unix);
     /// * a session whose leader pid is 0, which must be refused even where
     ///   signalling works, because `kill(2)` reads a non-positive pid as a
     ///   process GROUP and 0 is the caller's own;
@@ -1438,9 +1448,10 @@ mod tests {
     fn killing_a_session_keeps_its_failure_cases_apart() {
         let (mut d, alice, _bob) = two_user_daemon();
 
-        // Real leader, host that cannot signal. `two_user_daemon` does not set
-        // one, so give this session a leader to separate the two cases.
-        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+        // A leader no process can be, so the signal is really sent and
+        // reaches nobody. `two_user_daemon` does not set one, so give this
+        // session a leader to separate the two cases.
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = crate::NOBODY_PIDS[3];
         assert_eq!(
             call(
                 &mut d,
@@ -1448,7 +1459,7 @@ mod tests {
                 &[alice.as_bytes(), b"15"],
                 Some(creds(0))
             ),
-            Reply::Error(ERR_CANNOT_SIGNAL)
+            Reply::Error(crate::SIGNAL_TO_NOBODY.bus_name())
         );
 
         // Leader pid 0 -- refused for its own reason, on every target.
@@ -1485,7 +1496,7 @@ mod tests {
     #[test]
     fn killing_someone_elses_session_is_refused() {
         let (mut d, alice, _bob) = two_user_daemon();
-        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = crate::NOBODY_PIDS[3];
 
         // bob's uid, alice's session: `authorize` reports the session as
         // ABSENT rather than forbidden, so bob cannot confirm it exists.
@@ -1503,8 +1514,8 @@ mod tests {
             call(&mut d, "KillSession", &[alice.as_bytes(), b"15"], None),
             Reply::Error(ERR_UNKNOWN_CALLER)
         );
-        // The owner gets past authorisation and reaches the signal, which this
-        // host cannot send -- the control proving the two refusals above are
+        // The owner gets past authorisation and reaches the signal, which
+        // reaches nobody -- the control proving the two refusals above are
         // about authority and not about the arguments.
         assert_eq!(
             call(
@@ -1513,7 +1524,7 @@ mod tests {
                 &[alice.as_bytes(), b"15"],
                 Some(creds(1000))
             ),
-            Reply::Error(ERR_CANNOT_SIGNAL)
+            Reply::Error(crate::SIGNAL_TO_NOBODY.bus_name())
         );
     }
 

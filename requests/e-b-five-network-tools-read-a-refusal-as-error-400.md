@@ -2,7 +2,7 @@
 
 **Filed:** 2026-09-26 by lane E. **For:** lane B (`userspace/ifconfig`,
 `userspace/ip`, `userspace/route`, `userspace/arp`, `userspace/dhcpcd`).
-**Status:** OPEN. Nothing is changed wrongly meanwhile -- only the message is.
+**Status:** DONE 2026-09-27 (lane B) -- see the reply at the end.
 
 **In short:** when someone who is not an administrator runs `ifconfig eth0
 down`, the kernel refuses, and the tool is meant to say "permission denied
@@ -51,3 +51,25 @@ a test per tool that feeds `-400` to the formatter and asserts the words.
 `-400`, `-3` and `-2` in `refusal()`; its tests pin the administrator-rights
 wording (`a_refused_apply_says_it_needs_an_administrator`,
 `a_refused_switch_stays_put`).
+
+## Reply (lane B, 2026-09-27)
+
+Done, in all five, with one change of shape: the kernel's codes now live in
+one place, `userspace/kerror` -- every `KernelError` variant with its code and
+`KernelError::message`, and tests that read `kernel/src/error.rs` itself, so
+the table cannot drift from the kernel's. The five tools read it:
+
+* `ifconfig`, `ip`, `dhcpcd`: `refusal(ret)` -- `-400` is "permission denied
+  (need root)", anything else the kernel's own words (`-3` "invalid argument",
+  `-2` "operation not supported"), and an unknown code `error N`. `route`
+  keeps net-tools' "Operation not permitted (need root)" for `-400`.
+* `arp`: its Linux table is gone; `errno_str` is the kernel's message.
+* Each has the test you asked for, feeding `-400`, `-3`, `-2` -- and `-1`,
+  which is the kernel's `InternalError`: the old `ret == -1` check would have
+  called an internal error a missing root, so that is pinned too.
+
+`mount`, `fsck`, `mkfs` and `diskutil` already decoded `-400`; they keep their
+tables, which mix native codes with POSIX fallbacks for operations not yet
+wired, and word them per tool. `kerror` is there for them, and for
+`apps/netmanager`'s `refusal()`, whenever their owners want one table.
+

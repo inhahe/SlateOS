@@ -2,17 +2,21 @@
 name = "flock"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS flock utility"
+description = "SlateOS flock - a port of util-linux's flock(1), managing file locks from shell scripts"
+
+[lints]
+workspace = true
+
 [dependencies]
-# getopt's usage diagnostics, spelled once. The wording is not ours -- it is
-# what `getopt_long` prints and what both GNU coreutils and util-linux repeat
-# verbatim -- so every program here has to render it identically. Pure
-# formatting over `quoting`, no I/O, so §768 exempt.
-usageerror = { path = "../usageerror" }
-# One rendering of a file name inside a diagnostic. `lockfile -mu` reports a
-# removal it could not perform, and a lock file's name is caller-chosen -- a
-# path may contain a newline, which printed raw lets whoever picked the name
-# forge lines on this program's own error stream. See design-decisions.md
-# §370. Safe under §768: `quoting` has no dependencies and its API takes
-# bytes, so it is a pure formatter, not a second libc.
+# glibc's getopt_long, with upstream's two aliased long options.
+getoptlong = { path = "../getoptlong" }
+# util-linux's strtos32_or_err and strtotimeval_or_err, and their refusals.
+ulstrutils = { path = "../ulstrutils" }
+# Names in diagnostics with their unprintable bytes escaped (§370).
 quoting = { path = "../quoting" }
+# util-linux's close_stdout: stdout buffered as glibc buffers it (--verbose's
+# lines follow the command's output), and a lost diagnostic counted.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor the process was started without stays closed, for
+# flock and for the command it runs, rather than the runtime's /dev/null.
+stdfdguard = { path = "../stdfdguard" }

@@ -219,6 +219,9 @@ _TEST_ATTR = re.compile(r"^\s*#\[(?:\w+::)*test\]")
 # tests -- is the same serialisation spelt as a path. Missing it reported six
 # globals that six tests all reach under that one lock, and refused every push
 # touching `posix/` or `userspace/` for a race that was not there (2026-09-24).
+# (Lane B made the same fix on its own branch the same week, with this same
+# expression; the two met in a merge on 2026-10-01, and its two extra
+# self-test controls are 2c below.)
 _LOCK_HINT = re.compile(r"(?:\.|::)lock\(\)|\block_\w+|\b\w*_LOCK\b|#\[serial\]")
 
 # False positives, each with the reason it is one. Keyed by "<relpath>:<NAME>",
@@ -968,6 +971,45 @@ fn b() { let _o = Order::lock(); reset(); }
     expect("lock-assoc-fn/unserialised", got.get("CREATED", ([], []))[0], [])
     expect("lock-assoc-fn/serialised", sorted(got.get("CREATED", ([], []))[1]), ["a", "b"])
     expect("lock-assoc-fn/flag-unserialised", got.get("ORDER", ([], []))[0], [])
+
+    # 2c. Its two controls (lane B wrote the same fix on its own branch, and
+    #     these are the cases its self-test had that 2b does not). A test that
+    #     drives the same global WITHOUT the guard must still be reported, or
+    #     the associated-fn spelling would excuse every test in the file; and a
+    #     word that merely ends in "lock" -- `.clock()`, `::block()` -- is not
+    #     a lock.
+    rule("lock-assoc-fn controls")
+    got = classify(
+        """
+static ORDER: AtomicBool = AtomicBool::new(false);
+static CREATED: AtomicUsize = AtomicUsize::new(0);
+struct Order;
+impl Order {
+    fn lock() -> Self { while ORDER.compare_exchange(false, true, Acquire, Relaxed).is_err() {} Self }
+}
+impl Drop for Order { fn drop(&mut self) { ORDER.store(false, Release); } }
+fn reset() { CREATED.store(0, SeqCst); }
+#[test]
+fn a() { let _o = Order::lock(); reset(); }
+#[test]
+fn b() { let _o = Order::lock(); reset(); }
+#[test]
+fn c() { reset(); }
+"""
+    )
+    expect("lock-assoc-fn controls/unguarded still reported", got.get("CREATED", ([], []))[0], ["c"])
+    got = classify(
+        """
+static mut COUNT: u32 = 0;
+fn bump() { unsafe { COUNT = 1; } }
+#[test]
+fn a() { let _t = sys::block(); let _c = t.clock(); bump(); }
+#[test]
+fn b() { bump(); }
+"""
+    )
+    expect("lock-assoc-fn controls/not a suffix match",
+           sorted(got.get("COUNT", ([], []))[0]), ["a", "b"])
 
     # 3. Comments must not make a function a toucher. Without the stripper
     #    `unrelated` names COUNT and both tests get dragged in.

@@ -1,6 +1,7 @@
 # A → B: `getcwd(NULL, n)` returns EINVAL, so bash cannot learn its own directory on any boot
 
 **Status:** ✅ LANDED 2026-09-24 by lane D (`posix/` moved to lane D in the six-lane split) — `getcwd(NULL, n)` allocates, exactly as suggested; see the reply at the end. Your half, the bash rung's empty-stderr assertion, is unblocked.
+**Forwarded to:** lane D — the branch is in `posix/src/unistd.rs`; `posix/**` moved from lane B to lane D at the six-lane split of 2026-09-22, and lane B may no longer write it (lane B, 2026-09-24).
 
 **From:** lane A &middot; **To:** lane B &middot; **Date:** 2026-09-18
 **Was:** OPEN &middot; **Action needed:** one branch in `posix/src/unistd.rs:392`

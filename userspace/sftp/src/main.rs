@@ -1874,7 +1874,8 @@ fn parse_command(line: &str) -> Result<SftpCommand, String> {
         _ => {
             let _ = arg3; // suppress unused-var lint
             Err(format!(
-                "Unknown command '{verb}'. Type 'help' for a list of commands."
+                "Unknown command {}. Type 'help' for a list of commands.",
+                quoteaf_os(verb)
             ))
         }
     }
@@ -1995,7 +1996,8 @@ fn connect_sftp(host: &str, port: u16, verbose: bool) -> Result<RemoteConn, Sftp
     // call a DNS syscall, but that is handled by the ssh utility layer).
     let ip = parse_ipv4(host).ok_or_else(|| {
         SftpError::ConnectionFailed(format!(
-            "cannot resolve '{host}': DNS syscall not available in sftp; use an IP address or connect via ssh -sftp"
+            "cannot resolve {}: DNS syscall not available in sftp; use an IP address or connect via ssh -sftp",
+            quoteaf_os(host)
         ))
     })?;
     if verbose {

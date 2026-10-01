@@ -180444,6 +180444,72 @@ anonymous filesystems, which matches `stat` once `stat` reports it.
 native stat records, and `/proc/<pid>/maps` and `fdinfo` wherever they
 print a device. Lane A's next task.
 
+### A-FIVE-NATIVE-FS-DOORS-SKIPPED-THEIR-GATE -- 2026-10-01 -- FIXED (lane A)
+
+**In short:** five native file calls missed the check their siblings make.
+Two could move another program's file position. Two worked without the
+file capability every other file call asks for. One created a file nothing
+ever deleted, and handed back a handle its caller could not use.
+
+| call | missing | sibling that has it |
+|---|---|---|
+| `SYS_FS_SEEK_DATA`, `SYS_FS_SEEK_HOLE` | possession (`require_file_handle_owner`): any process could move any description's offset by counting handle numbers | `SYS_FS_SEEK` |
+| `SYS_FS_READDIR_AT` | the File capability (READ) | `SYS_FS_LIST_DIR` |
+| `SYS_FS_FALLOCATE` | the File capability (WRITE) | `SYS_FS_TRUNCATE` |
+| `SYS_FS_TMPFILE` | everything. It created a *named* `.tmp_<tsc>` file nothing deleted (its doc said the file vanished at close), and never registered the handle, so the caller's own reads, writes and close were refused and the open file leaked | -- |
+
+All five are gated now. `SYS_FS_TMPFILE` answers `NotSupported` until a
+handle can hold a file that has no name (the next entry); nothing called it.
+Found by listing every native handler that touches `fs::handle` or reads a
+user path, beside the gates it calls. `syscall::dispatch`'s
+`test_dispatch_fs_gates` checks each, as a scratch process with no
+capability.
+
+### A-AN-OPEN-FILE-FOLLOWS-ITS-NAME -- 2026-10-01 -- OPEN (lane A, planned)
+
+**In short:** opening a file here gives a program a handle to the file's
+*name*, not to the file. Every read and write looks the name up again. So a
+file renamed or deleted while a program has it open is lost to that
+program, or quietly swapped for whatever takes the name next. POSIX keeps an
+open file alive and in place until its last close, and programs depend on
+it every day.
+
+**What breaks:**
+- **Deleting an open file.** SQLite opens each temporary file (sorts, temp
+  tables, statement journals) and deletes it at once, keeping only the
+  descriptor (`SQLITE_OPEN_DELETEONCLOSE`). Here the next write fails with
+  `NotFound`. CPython's `tempfile.TemporaryFile` does the same. So does
+  libc's `tmpfile`, which keeps a visible name for this reason (lane B's
+  tmpfile entry). `O_TMPFILE` and `SYS_FS_TMPFILE` are refused.
+- **Renaming an open file.** Log rotation (`mv app.log app.log.1`), an
+  editor saving by rename over the file another program has open, `mv` of
+  a file being written. The writer's next write fails, or lands in a new
+  file that took the old name.
+- **Everything keyed by a handle's path:** record and `flock` locks fall
+  back to the open-time name, and so do the identity a lock reports and
+  `/proc/<pid>/fd`.
+
+**Where:** `fs::handle::OpenFile { path }`; `read`, `write`, `read_at`,
+`write_at`, `fstat` and `ftruncate` go through `Vfs::*_resolved(path)`.
+Directory handles already carry an identity (`dir_pin`) and check it; file
+handles do not.
+
+**The proper fix:** a handle holds its file, the mount and the inode, not
+its name.
+- Each filesystem gains inode-addressed I/O.
+- A file unlinked while open stays, with its blocks, until the last handle
+  closes: an orphan list, as ext4 keeps one for exactly this, and a
+  refcount on memfs nodes.
+- Then `O_TMPFILE` and `SYS_FS_TMPFILE` become real, `tmpfile` can unlink at
+  once, and every lock key is the file's identity.
+
+It touches the VFS and each writable filesystem (memfs, ext4, FAT), so it
+is a task of its own with a boot of its own. Lane A takes it after
+`A-ST_DEV-IS-ZERO-FOR-EVERY-FILE`.
+
+**Reproduce:** open a file, delete it, write through the handle: `NotFound`.
+On Linux the write succeeds and the data stays readable until the close.
+
 ## Lane B: new entries
 
 Lane B (userland) appends new entries at the end of this section, above the

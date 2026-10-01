@@ -13808,6 +13808,11 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
+    // The File capability, as `SYS_FS_LIST_DIR` asks it: the two list the
+    // same directories, and only one of them was gated.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+        return SyscallResult::err(e);
+    }
     // Validate path pointer.
     let path_len = args.arg1 as usize;
     if path_len == 0 {
@@ -13943,49 +13948,27 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(result as i64)
 }
 
-/// `SYS_FS_TMPFILE` — create a temporary file with no directory entry.
+/// `SYS_FS_TMPFILE` — a temporary file with no directory entry: refused,
+/// `NotSupported`, until an open file can outlive its name.
 ///
-/// `arg0`: pointer to directory path string.
-/// `arg1`: path length (bytes).
-/// `arg2`: open flags.
+/// A handle here reaches its file by path (`fs::handle` re-resolves it on
+/// every read and write), so a file with no name cannot be read through its
+/// own handle. Until 2026-10-01 this call created a *named* file,
+/// `.tmp_<timestamp>` in the given directory, and returned a handle to it,
+/// which broke all three of its promises:
+/// - the file had a name anyone could open;
+/// - nothing ever deleted it, so every call left one behind;
+/// - the handle was never registered to the caller, so the caller's own
+///   reads, writes and close were refused as not its handle, and the open
+///   file leaked until reboot.
 ///
-/// Returns: file handle on success.
-#[allow(clippy::cast_possible_wrap)]
-pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
-    let path_len = args.arg1 as usize;
-    if path_len == 0 || path_len > 4096 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    let dir_path = match read_user_path(args.arg0, path_len) {
-        Ok(p) => p,
-        Err(e) => return SyscallResult::err(e),
-    };
-
-    // Generate a unique temporary filename using the TSC for entropy.
-    // SAFETY: _rdtsc is always available on x86_64; no side-effects.
-    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    // Joined as a path component rather than formatted into a string, so a
-    // non-UTF-8 directory name survives verbatim.
-    let tmp_name = dir_path.join(alloc::format!(".tmp_{tsc:016x}"));
-
-    // Create the file.
-    if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {
-        return SyscallResult::err(e);
-    }
-
-    // Open it as a handle.
-    let flags = args.arg2 as u32;
-    match crate::fs::handle::open(&tmp_name, crate::fs::handle::OpenFlags::from_bits(flags)) {
-        Ok(handle) => SyscallResult::ok(handle as i64),
-        Err(e) => {
-            // Clean up the file if we can't open it.
-            let _ = crate::fs::Vfs::remove(&tmp_name);
-            SyscallResult::err(e)
-        }
-    }
-    // Note: the file is NOT auto-deleted on close in this implementation.
-    // True tmpfile (unlinked at creation) requires filesystem support
-    // (ext4 O_TMPFILE).  For now, callers should delete after use.
+/// Nothing in the tree calls it: libc's `tmpfile` makes a named file and
+/// removes it itself (`posix/src/tempname.rs`). An honest refusal beats a
+/// door that leaks a file per call. It becomes real with the VFS redesign
+/// that lets a handle hold its file rather than its name (known-issues,
+/// lane B's tmpfile entry and lane A's `O_TMPFILE` todo).
+pub fn sys_fs_tmpfile(_args: &SyscallArgs) -> SyscallResult {
+    SyscallResult::err(KernelError::NotSupported)
 }
 
 /// `SYS_FS_FALLOCATE` — pre-allocate disk space.
@@ -13994,6 +13977,11 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: path length (bytes).
 /// `arg2`: size in bytes to pre-allocate.
 pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
+    // The File capability with WRITE, as `SYS_FS_TRUNCATE` asks it: both
+    // change a file's size by path.
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
     let path_len = args.arg1 as usize;
     if path_len == 0 || path_len > 4096 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -14018,6 +14006,12 @@ pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession, as `SYS_FS_SEEK` checks it: a seek moves the description's
+    // offset, which another process sharing nothing must not be able to do
+    // by counting handle numbers (`require_file_handle_owner`).
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Data(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),
@@ -14033,6 +14027,10 @@ pub fn sys_fs_seek_data(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_seek_hole(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     let offset = args.arg1;
+    // Possession: see `sys_fs_seek_data`.
+    if let Err(e) = require_file_handle_owner(handle) {
+        return SyscallResult::err(e);
+    }
 
     match crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Hole(offset)) {
         Ok(pos) => SyscallResult::ok(pos as i64),

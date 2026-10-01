@@ -3251,16 +3251,19 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 /// If the buffer is too small, entries are truncated (not an error).
 pub const SYS_FS_READDIR_AT: u64 = 647;
 
-/// Create a temporary file (no directory entry).
+/// Create a temporary file with no directory entry -- **refused with
+/// `NotSupported`** until an open file can outlive its name.
 ///
 /// `arg0`: pointer to directory path string (where to create).
 /// `arg1`: path length (bytes).
 /// `arg2`: open flags bitfield.
 ///
-/// Creates an unnamed temporary file in the specified directory.
-/// The file is automatically deleted when the handle is closed.
+/// Until 2026-10-01 it created a *named* file that nothing deleted and
+/// returned a handle its caller could not use (see `handlers::sys_fs_tmpfile`).
+/// The promised file -- unnamed, gone at its last close -- needs handles that
+/// hold files rather than paths.
 ///
-/// Returns: file handle on success, negative error code on failure.
+/// Returns: `NotSupported`.
 pub const SYS_FS_TMPFILE: u64 = 648;
 
 /// Pre-allocate disk space for a file.

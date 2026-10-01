@@ -1031,6 +1031,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_record_lock()?;
     test_dispatch_flock()?;
+    test_dispatch_fs_gates()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -3195,6 +3196,78 @@ fn test_dispatch_flock() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(PATH);
     serial_println!(
         "[syscall]   flock: SYS_FS_FLOCK_HANDLE (1094) per description; 609/640 owned by the caller: OK"
+    );
+    Ok(())
+}
+
+/// The native fs doors that skipped their gate (2026-10-01 audit), as a
+/// scratch process that holds no capability:
+///
+/// - `SYS_FS_SEEK_DATA` and `SYS_FS_SEEK_HOLE` refuse a handle the caller
+///   does not hold (`InvalidHandle`), as `SYS_FS_SEEK` does, and take one it
+///   does;
+/// - `SYS_FS_READDIR_AT` and `SYS_FS_FALLOCATE` ask for the File capability
+///   (`PermissionDenied` without it), as `SYS_FS_LIST_DIR` and
+///   `SYS_FS_TRUNCATE` do. The gate comes before the path is read, so the
+///   null path cannot be what refuses;
+/// - `SYS_FS_TMPFILE` is `NotSupported` rather than a named file nobody
+///   deletes.
+fn test_dispatch_fs_gates() -> KernelResult<()> {
+    use crate::cap::ResourceType;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const PATH: &str = "/tmp/fs-gates-dispatch";
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"seek data")?;
+    let h = handle::open(PATH, OpenFlags::READ)?;
+    let pid = pcb::create("fs-gates", 0);
+    let as_pid = |nr: u64, a: SyscallArgs| self_test_as_process(pid, || dispatch(nr, &a).value);
+
+    let data_unheld = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    let hole_unheld = as_pid(SYS_FS_SEEK_HOLE, args(h, 0));
+    let readdir = as_pid(SYS_FS_READDIR_AT, args(0, 4));
+    let fallocate = as_pid(SYS_FS_FALLOCATE, args(0, 4));
+    let tmpfile = as_pid(SYS_FS_TMPFILE, args(0, 4));
+    // Given to the process as an open would give it; its teardown closes it.
+    pcb::register_ipc_handle(pid, ResourceType::File, h);
+    let data_held = as_pid(SYS_FS_SEEK_DATA, args(h, 0));
+    pcb::destroy(pid);
+    // Best effort: the file is this test's own scratch.
+    let _ = crate::fs::Vfs::remove(PATH);
+
+    if data_unheld != code(KernelError::InvalidHandle)
+        || hole_unheld != code(KernelError::InvalidHandle)
+        || data_held == code(KernelError::InvalidHandle)
+        || readdir != code(KernelError::PermissionDenied)
+        || fallocate != code(KernelError::PermissionDenied)
+        || tmpfile != code(KernelError::NotSupported)
+    {
+        serial_println!(
+            "[syscall]   FAIL: fs gates: seek-data {} / {} held, seek-hole {}, readdir-at {}, fallocate {}, tmpfile {}",
+            data_unheld,
+            data_held,
+            hole_unheld,
+            readdir,
+            fallocate,
+            tmpfile
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   fs gates: seek-data/hole possession, readdir-at/fallocate capability, tmpfile refused: OK"
     );
     Ok(())
 }

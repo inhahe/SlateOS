@@ -1136,12 +1136,24 @@ mod msgflags {
 ///
 /// Mirrors Linux `include/linux/errno.h` (values 512–516).  An interruptible
 /// blocking syscall that is woken by a pending signal returns one of these
-/// (in negated `-VALUE` form, like any `-errno`) **instead of** `-EINTR`.
+/// **instead of** `-EINTR`, encoded by [`restart::restart_result`].
 /// The signal-delivery checkpoint then decides — based on whether a handler
 /// runs and that handler's `SA_RESTART` flag — whether to transparently
 /// restart the syscall (rewind `%rip` to the `syscall` instruction and reload
 /// `%rax` with the original syscall number) or to convert the sentinel to the
 /// user-visible `-EINTR`.
+///
+/// **The encoding is not `-512`.** Linux can return a sentinel as `-512`
+/// because no Linux errno comes near it; here every syscall return of both
+/// ABIs passes through the restart check (`entry.rs`), and native error codes
+/// do reach 512 -- `CrossDevice` is -512, `StaleHandle` -513 and `NoAttribute`
+/// -514 -- while the check also accepted *either sign*, so a successful return
+/// of 512, 513, 514 or 516 matched too. Each was restarted: a 512-byte read
+/// lost its data to the next one, a 512-byte write was written again and
+/// again, and a native `rename` across devices or `getxattr` of a missing
+/// attribute ran forever. A sentinel is now `-(SENTINEL_BIAS + n)`
+/// ([`restart::encode`]): a value no syscall returns and no errno or native
+/// error code reaches, so only a sentinel matches (until 2026-10-01).
 ///
 /// These values MUST NEVER reach userspace: every path that returns a value to
 /// ring 3 ([`crate::syscall::entry`]) runs them through [`restart_action`] and
@@ -1170,23 +1182,42 @@ pub mod restart {
     /// re-execute the instruction.
     pub const SYSCALL_INSN_LEN: u64 = 2;
 
-    /// Is `ret` (a raw syscall return value, normally negative `-errno`) one of
-    /// the restart sentinels?  Accepts either sign so callers don't have to
-    /// normalise first.
+    /// Added to a sentinel before it is negated into a syscall return value
+    /// ([`encode`]): 2^40, far past every errno (under 4096), every native
+    /// error code (under 1000) and every value a syscall returns as a
+    /// negative number. See the module doc for what the bare `-512` collided
+    /// with.
+    pub const SENTINEL_BIAS: i64 = 1 << 40;
+
+    /// The syscall return value that carries sentinel `n` (one of the
+    /// `ERESTART*` constants): `-(SENTINEL_BIAS + n)`.
     #[must_use]
-    pub fn is_sentinel(ret: i64) -> bool {
-        matches!(
-            ret.unsigned_abs() as i64,
-            ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK
-        )
+    // `n` is one of the `ERESTART*` constants, all under 1024, so neither the
+    // sum nor its negation can overflow; `checked_*` is not usable in a
+    // `const fn` that must return a plain value.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub const fn encode(n: i64) -> i64 {
+        -(SENTINEL_BIAS + n)
     }
 
-    /// The positive sentinel magnitude of `ret`, or `None` if `ret` is not a
-    /// restart sentinel.
+    /// Is `ret`, a raw syscall return value, a restart sentinel ([`encode`])?
+    /// Nothing else is: not a success of any size, not an errno, not a native
+    /// error code.
+    #[must_use]
+    pub fn is_sentinel(ret: i64) -> bool {
+        sentinel_magnitude(ret).is_some()
+    }
+
+    /// The sentinel `ret` carries -- one of the `ERESTART*` constants -- or
+    /// `None` if `ret` is not a restart sentinel.
     #[must_use]
     pub fn sentinel_magnitude(ret: i64) -> Option<i64> {
-        let m = ret.unsigned_abs() as i64;
-        if is_sentinel(m) { Some(m) } else { None }
+        let n = ret.checked_neg()?.checked_sub(SENTINEL_BIAS)?;
+        matches!(
+            n,
+            ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK
+        )
+        .then_some(n)
     }
 
     /// What the delivery checkpoint should do with a restart sentinel.
@@ -1270,15 +1301,15 @@ pub mod restart {
 
     /// Build the in-kernel return value for an interrupted blocking syscall that
     /// should participate in `SA_RESTART` semantics.  `sentinel` is one of the
-    /// `ERESTART*` constants in this module; the result carries it in negated
-    /// `-VALUE` form, exactly like any `-errno`, so the signal-delivery
-    /// checkpoint ([`build_linux_rt_frame`] for the handler case,
-    /// [`super::resolve_syscall_restart`] for the no-handler case) can resolve
-    /// it into either a restart or a user-visible `-EINTR`.  It is never
-    /// returned directly to ring 3 — the backstops above guarantee that.
+    /// `ERESTART*` constants in this module; the result carries it encoded
+    /// ([`encode`]), so the signal-delivery checkpoint ([`build_linux_rt_frame`]
+    /// for the handler case, [`super::resolve_syscall_restart`] for the
+    /// no-handler case) can resolve it into either a restart or a user-visible
+    /// `-EINTR`.  It is never returned directly to ring 3 — the backstops above
+    /// guarantee that.
     #[must_use]
     pub const fn restart_result(sentinel: i64) -> super::SyscallResult {
-        super::SyscallResult::ok(-sentinel)
+        super::SyscallResult::ok(encode(sentinel))
     }
 }
 
@@ -1562,10 +1593,11 @@ pub fn linux_from_slow_io(res: SyscallResult) -> SyscallResult {
 /// route through here so the convention lives in one place.
 fn linux_from_futex_wait(res: SyscallResult) -> SyscallResult {
     // An interrupted indefinite FUTEX_WAIT is reported by the handler as an
-    // `ERESTART*` restart sentinel (negated, e.g. `-512`).  That value must
-    // reach the signal-delivery checkpoint untouched — it must NOT be fed to
-    // `linux_from_native`, where `-512` collides with `KernelError::CrossDevice`
-    // and would be mis-mapped to `EXDEV`.  Pass any restart sentinel through.
+    // `ERESTART*` restart sentinel (`restart::encode`).  That value must reach
+    // the signal-delivery checkpoint untouched, not be translated as an error.
+    // (Until 2026-10-01 a sentinel was the bare `-512`, which is also
+    // `KernelError::CrossDevice` -- see the restart module.)  Pass any restart
+    // sentinel through.
     if restart::is_sentinel(res.value) {
         return res;
     }
@@ -56591,25 +56623,46 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         restart_action,
     };
 
-    // is_sentinel / sentinel_magnitude accept either sign; -EINTR and ordinary
-    // returns are not sentinels.
+    // Only an encoded sentinel is one, and it decodes to itself.
     for &s in &[
         ERESTARTSYS,
         ERESTARTNOINTR,
         ERESTARTNOHAND,
         ERESTART_RESTARTBLOCK,
     ] {
-        if !restart::is_sentinel(s) || !restart::is_sentinel(-s) {
-            serial_println!("[syscall/linux]   FAIL: restart is_sentinel({s})");
-            return Err(KernelError::InternalError);
-        }
-        if restart::sentinel_magnitude(-s) != Some(s) {
-            serial_println!("[syscall/linux]   FAIL: restart sentinel_magnitude({s})");
+        if !restart::is_sentinel(restart::encode(s))
+            || restart::sentinel_magnitude(restart::encode(s)) != Some(s)
+        {
+            serial_println!("[syscall/linux]   FAIL: restart sentinel {s} does not decode");
             return Err(KernelError::InternalError);
         }
     }
-    // Non-sentinels: -EINTR(4), 0, a normal positive return, a real -errno.
-    for &n in &[-i64::from(errno::EINTR), 0, 42, -i64::from(errno::EAGAIN)] {
+    // Not sentinels: -EINTR, 0, a normal positive return, a real -errno -- and,
+    // what the bare `-512` encoding matched until 2026-10-01, a successful
+    // return of 512, 513, 514 or 516 (a 512-byte read was restarted and its
+    // data lost; a 512-byte write was written again, forever) and the native
+    // error codes in that range, CrossDevice (-512), StaleHandle (-513) and
+    // NoAttribute (-514), which restarted their syscalls forever.
+    let native_collisions = [
+        i64::from(KernelError::CrossDevice.code()),
+        i64::from(KernelError::StaleHandle.code()),
+        i64::from(KernelError::NoAttribute.code()),
+    ];
+    let plain = [
+        i64::from(errno::EINTR).wrapping_neg(),
+        0,
+        42,
+        i64::from(errno::EAGAIN).wrapping_neg(),
+        512,
+        513,
+        514,
+        516,
+        -512,
+        -513,
+        -514,
+        -516,
+    ];
+    for &n in plain.iter().chain(native_collisions.iter()) {
         if restart::is_sentinel(n) || restart::sentinel_magnitude(n).is_some() {
             serial_println!("[syscall/linux]   FAIL: restart false-positive on {n}");
             return Err(KernelError::InternalError);
@@ -56620,17 +56673,19 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         }
     }
     // Backstop turns a stray sentinel into -EINTR.
-    if restart::leaked_sentinel_to_linux_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
+    if restart::leaked_sentinel_to_linux_eintr(restart::encode(ERESTARTSYS))
+        != i64::from(errno::EINTR).wrapping_neg()
+    {
         serial_println!("[syscall/linux]   FAIL: leaked backstop didn't convert");
         return Err(KernelError::InternalError);
     }
 
-    // restart_result carries the sentinel as a negated -VALUE (like any
-    // -errno) so the delivery checkpoint can resolve it.  pause() emits
-    // ERESTARTNOHAND, so spot-check that the round-trip recovers the sentinel.
+    // restart_result carries the sentinel encoded, so the delivery checkpoint
+    // can resolve it.  pause() emits ERESTARTNOHAND, so spot-check that the
+    // round-trip recovers the sentinel.
     for &s in &[ERESTARTSYS, ERESTARTNOHAND, ERESTART_RESTARTBLOCK] {
         let r = restart::restart_result(s);
-        if r.value != -s {
+        if r.value != restart::encode(s) {
             serial_println!(
                 "[syscall/linux]   FAIL: restart_result({s}).value = {}",
                 r.value
@@ -56732,7 +56787,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         // Indefinite-wait interruption: sentinel passes through unchanged.
         let sentinel = restart::restart_result(ERESTARTSYS);
         let passed = linux_from_futex_wait(sentinel);
-        if passed.value != -ERESTARTSYS {
+        if passed.value != restart::encode(ERESTARTSYS) {
             serial_println!(
                 "[syscall/linux]   FAIL: linux_from_futex_wait mangled sentinel -> {}",
                 passed.value
@@ -56751,7 +56806,7 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
         // Slow-object I/O (pipe read/write): an interrupted blocking
         // transfer maps Interrupted -> ERESTARTSYS sentinel for SA_RESTART.
         let slow = linux_from_slow_io(SyscallResult::err(KernelError::Interrupted));
-        if slow.value != -ERESTARTSYS {
+        if slow.value != restart::encode(ERESTARTSYS) {
             serial_println!(
                 "[syscall/linux]   FAIL: linux_from_slow_io(Interrupted) -> {}",
                 slow.value

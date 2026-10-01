@@ -30,10 +30,19 @@ use super::{FillRule, SvgNode, Transform, XmlElement, keyword, parse_transform, 
 pub(super) const MAX_CLIP_DEPTH: usize = 8;
 
 /// What an element is clipped to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Clip {
     /// The `<clipPath>` at this place among the document's.
     Path(usize),
+    /// A rectangle in the element's own user space: the viewport of a
+    /// `<symbol>` or an `<svg>` inside another, which cuts what overflows it
+    /// unless the element says `overflow: visible`.
+    Rect {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
 }
 
 /// A `<clipPath>`, built: what it holds, and how it is laid over what it

@@ -217,3 +217,32 @@ fn an_inner_svg_with_no_area_draws_nothing() {
         assert!(alphas(&svg, 10, 10).iter().all(|&a| a == 0), "{size}");
     }
 }
+
+/// How many pixels of `svg`, drawn `w` by `h`, are painted at all.
+fn painted(svg: &str, w: u32, h: u32) -> usize {
+    alphas(svg, w, h).iter().filter(|&&a| a > 0).count()
+}
+
+/// **An inner `<svg>` is cut to its viewport**, unless it says
+/// `overflow: visible`.
+#[test]
+fn an_inner_svg_is_cut_to_its_viewport() {
+    let make = |overflow: &str| {
+        format!(
+            r#"<svg viewBox="0 0 20 20"><svg x="5" y="5" width="5" height="5" {overflow}>
+<rect width="10" height="10" fill="red"/></svg></svg>"#
+        )
+    };
+    assert_eq!(painted(&make(""), 20, 20), 25);
+    assert_eq!(painted(&make(r#"overflow="visible""#), 20, 20), 100);
+}
+
+/// **An inner `<svg>`'s own clip is measured in its parent's space**, as
+/// its `x`, `y`, `width` and `height` are -- not inside its view box.
+#[test]
+fn an_inner_svgs_clip_is_measured_where_it_stands() {
+    let svg = r#"<svg viewBox="0 0 20 20"><clipPath id="c"><rect width="10" height="20"/></clipPath>
+<svg viewBox="0 0 1 1" width="20" height="20" clip-path="url(#c)"><rect width="1" height="1" fill="red"/></svg></svg>"#;
+    // The left half: in the view box's units, 10 would be all of it.
+    assert_eq!(painted(svg, 20, 20), 200);
+}

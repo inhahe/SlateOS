@@ -267,3 +267,25 @@ fn a_long_chain_of_uses_ends() {
     // Twenty links down, the square.
     assert_eq!(&drawn[..4], &[255, 0, 0, 255]);
 }
+
+/// **A `<symbol>` is cut to its viewport**, as SVG's own style sheet has it
+/// -- unless it says `overflow: visible` -- and what is cut is the
+/// viewport, not the view box: room the view box leaves inside the viewport
+/// is drawn in.
+#[test]
+fn a_symbol_is_cut_to_its_viewport() {
+    let make = |overflow: &str| {
+        format!(
+            r##"<svg viewBox="0 0 20 20"><symbol id="s" {overflow}><rect width="5" height="5"/></symbol>
+<use href="#s" x="10" y="10" width="2" height="2"/></svg>"##
+        )
+    };
+    assert_eq!(painted(&make(""), 20, 20), 4);
+    assert_eq!(painted(&make(r#"overflow="visible""#), 20, 20), 25);
+    assert_eq!(painted(&make(r#"style="overflow:auto""#), 20, 20), 25);
+    // A box twice as wide as high in a square viewport leaves room above
+    // and below it; a rect overflowing the box into that room is drawn there.
+    let roomy = r##"<svg viewBox="0 0 10 10"><symbol id="s" viewBox="0 0 2 1">
+<rect x="-1" y="-1" width="4" height="3"/></symbol><use href="#s" width="10" height="10"/></svg>"##;
+    assert_eq!(painted(roomy, 10, 10), 100);
+}

@@ -97,7 +97,6 @@ cmd_remotedesktop 1
 cmd_rundialog 1
 cmd_schedwait 1
 cmd_screensaver 1
-cmd_secureboot 1
 cmd_secureerase 1
 cmd_sharesheet 1
 cmd_slabstat 1

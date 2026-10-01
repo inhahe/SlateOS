@@ -5545,6 +5545,70 @@ pub const SYS_PROCESS_GET_CWD: u64 = 1078;
 pub const SYS_PROCESS_UMASK: u64 = 1079;
 
 // ---------------------------------------------------------------------------
+// Secure Boot (1082-1084) -- design-decisions §978, the operator's A-Q21
+// ---------------------------------------------------------------------------
+
+/// Enrol a Secure Boot entry:
+/// `secureboot_enroll(type, subject_ptr, subject_len, fp_ptr, fp_len) -> id`.
+///
+/// `type`: 0 `PK`, 1 `KEK`, 2 `db`, 3 `dbx`, 4 `MOK`; any other value is
+/// `InvalidArgument`, never a default. `subject`: UTF-8, 1..=256 bytes.
+/// `fp`: the entry's SHA-256 -- a certificate's fingerprint for `PK`/`KEK`,
+/// an image's hash for a `db`/`dbx`/`MOK` hash entry -- as `SHA256:` and 64
+/// hex digits, or the 64 digits alone. Returns the new entry's id.
+///
+/// Requires `(Process, ENROLL_SECUREBOOT)`, checked before any argument is
+/// read. `AlreadyExists` for an entry of the same type and fingerprint,
+/// `ResourceExhausted` when the table is full.
+///
+/// **The kernel never parses a certificate.** The caller -- `sbctl` --
+/// computes the fingerprint; an X.509 parser on attacker-supplied bytes in
+/// the most privileged place in the system, to produce one string, is the
+/// trade `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`
+/// declined.
+///
+/// No getter: `/proc/secureboot` publishes the entries, as `/proc/keylayout`
+/// does for [`SYS_KEYLAYOUT_SET`].
+///
+/// Chosen number 1082, next free slot after 1081.
+pub const SYS_SECUREBOOT_ENROLL: u64 = 1082;
+
+/// Remove a Secure Boot entry by id: `secureboot_remove(id) -> 0`.
+///
+/// Requires `(Process, ENROLL_SECUREBOOT)`. `NotFound` for an unknown id.
+///
+/// Chosen number 1083.
+pub const SYS_SECUREBOOT_REMOVE: u64 = 1083;
+
+/// Ask whether an image may run:
+/// `secureboot_verify(name_ptr, name_len, hash_ptr, hash_len, out_ptr) -> 0`.
+///
+/// `name`: 0..=256 bytes of any value -- it may be a path, and a path is not
+/// forced into UTF-8 -- recorded with the verdict. `hash`: the image's
+/// SHA-256, in the form [`SYS_SECUREBOOT_ENROLL`] takes. Writes 16 bytes to
+/// `out_ptr`, four little-endian `u32`s:
+///
+/// | offset | field | values |
+/// |---|---|---|
+/// | 0 | listing | 0 in `db`/`MOK`, 1 in `dbx` (wins over `db`), 2 in neither |
+/// | 4 | entry id | the deciding entry's id, 0 for "in neither" |
+/// | 8 | enforced | 1 if the state enforces (`Enabled`, strict), else 0 |
+/// | 12 | may run | 1 or 0: when enforcing, 1 only if listed in `db`/`MOK` |
+///
+/// An unlisted image is refused when enforcing: the signature check that
+/// might admit it needs certificate code the kernel does not have, and a
+/// verifier does not pass what it cannot check.
+///
+/// Needs no right: the entries it consults are published in
+/// `/proc/secureboot`. `InvalidArgument` for a hash that is not a SHA-256
+/// value -- refused, never treated as "unlisted". `InvalidAddress` for an
+/// output that cannot be written, checked before the verdict is recorded, so
+/// a refused call leaves no record.
+///
+/// Chosen number 1084.
+pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

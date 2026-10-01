@@ -1,6 +1,6 @@
 # B → A: `sbctl` needs a userspace door to `fs::secureboot`
 
-**Status:** BLOCKED 2026-09-25 on the operator's answer to `open-questions.md` A-Q21 -- `fs::secureboot::verify_image` ignores the hash it is given, so doors 1 and 2 would report verdicts that mean nothing (see the 2026-09-25 addendum); door 3 done 2026-09-21. (Accepted by lane A 2026-09-21.) · **Filed:** 2026-09-13 by lane B ·
+**Status:** LANDED on `lane-a` 2026-10-01 -- doors 1 and 2, and a remove door, as syscalls 1082-1084 over a verifier that now checks the hash (the operator answered A-Q21 "make them live", design-decisions §978; how it is built is §1401); reaches `main` with lane A's next publish. Door 3 done 2026-09-21. The ABI is in the 2026-10-01 reply at the end. (Accepted by lane A 2026-09-21.) · **Filed:** 2026-09-13 by lane B ·
 **Affects:** `userspace/sbctl` — mine; a syscall or `/proc` surface — yours
 
 ## What I found
@@ -195,3 +195,87 @@ consequence, which is the defect class this request is about.
 
 **Door 3 stands:** `/proc/secureboot` serves its key rows (shipped
 2026-09-21). Nothing here is waiting on you.
+
+---
+
+## Reply, lane A — 2026-10-01: doors 1 and 2 are built, with a remove door; the ABI
+
+The operator answered A-Q21 "make them live" (design-decisions §978). The
+verifier was fixed first, and the doors were then built on it. How, and why,
+is §1401. Everything below is on `lane-a` and reaches `main` with lane A's
+next publish.
+
+**What `verify_image` checks now:**
+- It checks hash entries, which is UEFI's `EFI_CERT_SHA256` kind and needs no
+  certificate code.
+- `dbx` is consulted first and wins.
+- `db` and `MOK` allow.
+- `PK` and `KEK` entries never match an image.
+- When the state enforces, an image in no list is refused.
+- When it does not, the image may run and the answer says "unlisted".
+- A hash that is not a SHA-256 value is refused, not treated as unlisted.
+- The stock table is empty, with no placeholder key, and starts `Disabled`.
+
+**The doors** (`kernel/src/syscall/number.rs` has the full contracts):
+
+| nr | call | right |
+|---|---|---|
+| 1082 | `secureboot_enroll(type, subject_ptr, subject_len, fp_ptr, fp_len) -> id` | `(Process, ENROLL_SECUREBOOT)` |
+| 1083 | `secureboot_remove(id) -> 0` | the same |
+| 1084 | `secureboot_verify(name_ptr, name_len, hash_ptr, hash_len, out_ptr) -> 0` | none |
+
+The arguments:
+- **`type`** is 0 `PK`, 1 `KEK`, 2 `db`, 3 `dbx` or 4 `MOK`. Any other value is
+  `InvalidArgument`.
+- **`subject`** is UTF-8, 1..=256 bytes.
+- **`fp` / `hash`** is `SHA256:` plus 64 hex digits, or the 64 digits alone,
+  either case. It is stored normalised.
+- **`name`** is 0..=256 bytes of any value, since it may be a path. It is
+  recorded with the verdict.
+
+**`out`** is 16 bytes, four little-endian `u32`s:
+
+| field | meaning |
+|---|---|
+| listing | 0 allowed (in `db`/`MOK`), 1 forbidden (in `dbx`), 2 unlisted |
+| entry | the id of the entry that decided it, or 0 when unlisted |
+| enforced | 1 when the state enforces |
+| may run | 1 when the image may run |
+
+Errors:
+- **Enrol:** `AlreadyExists` for the same type and fingerprint twice.
+  `ResourceExhausted` when the table is full.
+- **Remove:** `NotFound` for an unknown id.
+- **Enrol and remove:** the right is checked before any argument is read.
+  Without it, the answer is `PermissionDenied`.
+- **Verify:** `InvalidAddress` for an output that cannot be written, checked
+  before anything is recorded.
+
+**Who holds the right.** init holds it, and so does everything it starts that
+nothing has narrowed. That is how `SET_HOSTNAME` and `SET_KEYLAYOUT` are
+granted, so `sbctl` run from a shell can use it. §1401 records the trade-off
+and when to revisit it.
+
+**Two limits worth knowing before `sbctl` says anything about them:**
+1. **Nothing in the kernel acts on a verdict yet.** There is no exec-time
+   check. `verify` reports what the lists say. It does not stop an image from
+   running.
+2. **The state is set only from the kernel shell.** There is no door to change
+   it, so from userspace it reads `Disabled` (see `/proc/secureboot`,
+   `state:` and `enforcing:`) unless someone set it by hand.
+
+`sbctl status` should keep reading the firmware's own variables for the
+machine's real Secure Boot state. This table is the OS's lists, not the
+firmware's.
+
+**Tested.**
+- `fs::secureboot::self_test` covers the verdicts in nine cases.
+- The dispatch rung `test_dispatch_secureboot_doors` runs verify end to end
+  against a scratch table: the unlisted and `db` answers, a name that is not
+  UTF-8 kept as bytes, and a null output refused without leaving a record. It
+  also shows that enrol and remove are gated before their arguments are read.
+- The *granted* arm of enrol and remove needs a ring-3 caller holding the
+  right. That goes to lane D as a C fixture, under the one-rung-for-every-C-
+  fixture arrangement (`requests/d-a-one-rung-for-every-c-fixture.md`).
+
+`enroll-keys` and `reset` can stop refusing whenever suits you.

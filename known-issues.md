@@ -91667,8 +91667,14 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **78 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **77 of 800 remain**
 
+> **Burn-down log.** 2026-10-01: 78 → 77; `cmd_secureboot` left the ledger.
+> `secureboot records 1O` printed the ten newest records, a default standing in
+> for a count it could not read. It is refused with a usage line now. Fixed in
+> passing while the command was being reworked for design-decisions §1401;
+> `check-option-refusal.py` confirms the count.
+>
 > **Burn-down log.** 2026-09-10 (forty-sixth batch): **the guessed value was a
 > valid object id, so the command succeeded against something else.** 81 → 78;
 > `cmd_fileshare`, `cmd_secpolicy` and `cmd_authbroker` left the ledger. Pinned by

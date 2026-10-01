@@ -94955,11 +94955,12 @@ fn cmd_secureboot(args: &str) {
             shell_println!("Enrolled keys: {}", keys.len());
             for k in &keys {
                 shell_println!(
-                    "  [{}] {} ({}) — {}",
+                    "  [{}] {} ({}) — {} (enrolled at {}s)",
                     k.id,
                     k.subject,
                     k.key_type.label(),
-                    k.fingerprint
+                    k.fingerprint,
+                    k.enrolled_ns / 1_000_000_000
                 );
             }
         }
@@ -94989,7 +94990,14 @@ fn cmd_secureboot(args: &str) {
                 set_exit(1);
                 return;
             }
-            let kt = parse_sboot_key_type(parts[1]);
+            let Some(kt) = parse_sboot_key_type(parts[1]) else {
+                shell_println!(
+                    "Unknown key type '{}'. Use: pk, kek, db, dbx, mok",
+                    parts[1]
+                );
+                set_exit(1);
+                return;
+            };
             let subject = parts[2];
             let fp = parts[3];
             match secureboot::enroll_key(kt, subject, fp) {
@@ -95025,9 +95033,21 @@ fn cmd_secureboot(args: &str) {
             }
             let image = parts[1];
             let hash = parts[2];
-            match secureboot::verify_image(image, hash) {
-                Ok(true) => shell_println!("Image '{}' verified OK", image),
-                Ok(false) => shell_println!("Image '{}' REJECTED", image),
+            match secureboot::verify_image(image.as_bytes(), hash) {
+                Ok(v) => {
+                    shell_println!(
+                        "Image '{}': {}{} -- {}{}",
+                        image,
+                        v.listing.label(),
+                        v.listing
+                            .key_id()
+                            .map_or(String::new(), |id| alloc::format!(" (entry {})", id)),
+                        if v.allowed { "may run" } else { "REFUSED" },
+                        if v.enforced { "" } else { " (not enforcing)" }
+                    );
+                    // A refusal is the command's answer, not its failure:
+                    // the question was asked and answered.
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -95052,20 +95072,40 @@ fn cmd_secureboot(args: &str) {
             }
         }
         "records" => {
-            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            // A count that does not parse is refused, not replaced by the
+            // default: `records 1O` printing ten records answers a question
+            // nobody asked.
+            let max: usize = match parts.get(1) {
+                None => 10,
+                Some(word) => match word.parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        shell_println!(
+                            "Usage: secureboot records [count] -- '{}' is not a count",
+                            word
+                        );
+                        set_exit(1);
+                        return;
+                    }
+                },
+            };
             let records = secureboot::get_records(max);
             if records.is_empty() {
                 shell_println!("No verification records");
             } else {
-                shell_println!("{} record(s):", records.len());
+                shell_println!("{} record(s), newest first:", records.len());
                 for r in &records {
-                    let status = if r.verified { "OK" } else { "REJECTED" };
+                    let status = if r.verdict.allowed { "may run" } else { "REFUSED" };
                     shell_println!(
-                        "  {} [{}] hash={} key={:?}",
-                        r.image_name,
+                        "  {}.{:03}s {} [{}, {}{}] hash={} entry={:?}",
+                        r.timestamp_ns / 1_000_000_000,
+                        (r.timestamp_ns / 1_000_000) % 1000,
+                        secureboot::name_display(&r.image_name),
                         status,
+                        r.verdict.listing.label(),
+                        if r.verdict.enforced { "" } else { ", not enforcing" },
                         r.hash,
-                        r.key_id
+                        r.verdict.listing.key_id()
                     );
                 }
             }
@@ -95098,15 +95138,18 @@ fn cmd_secureboot(args: &str) {
     }
 }
 
-fn parse_sboot_key_type(s: &str) -> crate::fs::secureboot::KeyType {
+/// The key type a `secureboot enroll` argument names; `None` for anything
+/// else. Until 2026-09-27 an unrecognised word became `MOK`, so a typo
+/// enrolled an entry of a kind nobody asked for.
+fn parse_sboot_key_type(s: &str) -> Option<crate::fs::secureboot::KeyType> {
     use crate::fs::secureboot::KeyType;
     match s.to_lowercase().as_str() {
-        "pk" | "platform" => KeyType::PlatformKey,
-        "kek" | "exchange" => KeyType::KeyExchangeKey,
-        "db" | "signature" => KeyType::SignatureDatabase,
-        "dbx" | "forbidden" => KeyType::ForbiddenSignature,
-        "mok" | "owner" => KeyType::MachineOwnerKey,
-        _ => KeyType::MachineOwnerKey,
+        "pk" | "platform" => Some(KeyType::PlatformKey),
+        "kek" | "exchange" => Some(KeyType::KeyExchangeKey),
+        "db" | "signature" => Some(KeyType::SignatureDatabase),
+        "dbx" | "forbidden" => Some(KeyType::ForbiddenSignature),
+        "mok" | "owner" => Some(KeyType::MachineOwnerKey),
+        _ => None,
     }
 }
 

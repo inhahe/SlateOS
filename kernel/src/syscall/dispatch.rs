@@ -81,7 +81,8 @@ use super::number::{
     SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
     SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
-    SYS_SCHED_SET_TIMESLICE, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT,
+    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
+    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT,
     SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT,
     SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
     SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
@@ -470,6 +471,11 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_CWD as usize] = Some(handlers::sys_process_set_cwd);
     handlers[SYS_PROCESS_GET_CWD as usize] = Some(handlers::sys_process_get_cwd);
     handlers[SYS_PROCESS_UMASK as usize] = Some(handlers::sys_process_umask);
+    // Secure Boot's db/dbx table (1082-1084, design-decisions §978): enrol and
+    // remove need ENROLL_SECUREBOOT; asking for a verdict needs nothing.
+    handlers[SYS_SECUREBOOT_ENROLL as usize] = Some(handlers::sys_secureboot_enroll);
+    handlers[SYS_SECUREBOOT_REMOVE as usize] = Some(handlers::sys_secureboot_remove);
+    handlers[SYS_SECUREBOOT_VERIFY as usize] = Some(handlers::sys_secureboot_verify);
     handlers[SYS_PROCESS_GET_NICE as usize] = Some(handlers::sys_process_get_nice);
     handlers[SYS_PROCESS_SET_NICE as usize] = Some(handlers::sys_process_set_nice);
 
@@ -1003,6 +1009,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_termios_syscalls()?;
     test_tty_flush()?;
     test_process_cwd_umask_registered()?;
+    test_dispatch_secureboot_doors()?;
     test_dispatch_pty_syscalls()?;
     test_dispatch_rlimit_syscalls()?;
     test_dispatch_spawn_ex2_registered()?;
@@ -2168,6 +2175,123 @@ fn test_process_cwd_umask_registered() -> KernelResult<()> {
         }
     }
     serial_println!("[syscall]   Native cwd/umask record (1077-1079) is wired: OK");
+    Ok(())
+}
+
+/// The Secure Boot doors (1082-1084, design-decisions §978).
+///
+/// **ENROLL and REMOVE** change the table, so each is gated before it reads an
+/// argument. This runs on a kernel task, which has no process, so each must
+/// answer `NoSuchProcess` -- and is handed pointers a kernel task *could*
+/// read, so no argument error can explain the refusal. As with
+/// [`test_dispatch_brightness_gated`], the granted arm needs a ring-3 caller
+/// holding `ENROLL_SECUREBOOT`.
+///
+/// **VERIFY** needs no right, and a kernel task's pointers pass the
+/// user-pointer checks (`mm::user::validate_user_read`), so its whole path
+/// runs here, against a scratch table: the 16-byte answer for a hash in no
+/// list and then for one in `db`; the name kept as the bytes it was given,
+/// which here are not UTF-8; an output that cannot be written refused before
+/// anything is recorded. The verdicts themselves are
+/// `fs::secureboot::self_test`'s.
+fn test_dispatch_secureboot_doors() -> KernelResult<()> {
+    use crate::fs::secureboot::{self, BootState, KeyType};
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: secure boot doors: {}", msg);
+        Err(KernelError::InternalError)
+    }
+    const NAME: &[u8] = b"probe-\xff.efi";
+    const HASH: &str = "SHA256:4444444444444444444444444444444444444444444444444444444444444444";
+    let args = |arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5: 0,
+    };
+    let refused = |v: i64| {
+        v == i64::from(KernelError::NoSuchProcess.code())
+            || v == i64::from(KernelError::PermissionDenied.code())
+    };
+    let (name_ptr, name_len) = (NAME.as_ptr() as u64, NAME.len() as u64);
+    let (hash_ptr, hash_len) = (HASH.as_ptr() as u64, HASH.len() as u64);
+
+    secureboot::with_scratch_table(|| {
+        // `2` is db, a valid type, and both strings are readable here.
+        let enroll = dispatch(
+            SYS_SECUREBOOT_ENROLL,
+            &args(2, name_ptr, name_len, hash_ptr, hash_len),
+        )
+        .value;
+        if !refused(enroll) {
+            serial_println!("[syscall]   SYS_SECUREBOOT_ENROLL answered {}", enroll);
+            return fail("ENROLL was not refused for a caller with no process -- ungated, or gated after its arguments");
+        }
+        let remove = dispatch(SYS_SECUREBOOT_REMOVE, &args(1, 0, 0, 0, 0)).value;
+        if !refused(remove) {
+            serial_println!("[syscall]   SYS_SECUREBOOT_REMOVE answered {}", remove);
+            return fail("REMOVE was not refused for a caller with no process -- ungated, or gated after its argument");
+        }
+
+        let mut out = [u32::MAX; 4];
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(name_ptr, name_len, hash_ptr, hash_len, out.as_mut_ptr() as u64),
+        )
+        .value;
+        if r != 0 || out != [2, 0, 0, 1] {
+            serial_println!("[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}", r, out);
+            return fail("a hash in no list, not enforcing, should answer 0 with [2, 0, 0, 1]");
+        }
+
+        let Ok(id) = secureboot::enroll_key(KeyType::SignatureDatabase, "dispatch probe", HASH)
+        else {
+            return fail("could not enrol the probe hash in the scratch table");
+        };
+        if secureboot::set_state(BootState::Enabled).is_err() {
+            return fail("could not make the scratch table enforce");
+        }
+        out = [u32::MAX; 4];
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(name_ptr, name_len, hash_ptr, hash_len, out.as_mut_ptr() as u64),
+        )
+        .value;
+        if r != 0 || out != [0, id, 1, 1] {
+            serial_println!(
+                "[syscall]   SYS_SECUREBOOT_VERIFY answered {} with {:?}, entry {}",
+                r,
+                out,
+                id
+            );
+            return fail("a hash in db, enforcing, should answer 0 with [0, entry, 1, 1]");
+        }
+        let records = secureboot::get_records(1);
+        if records.first().map(|rec| rec.image_name.as_slice()) != Some(NAME) {
+            return fail("the image name was not recorded as the bytes it was given");
+        }
+
+        let before = secureboot::stats().1;
+        let r = dispatch(
+            SYS_SECUREBOOT_VERIFY,
+            &args(name_ptr, name_len, hash_ptr, hash_len, 0),
+        )
+        .value;
+        if r != i64::from(KernelError::InvalidAddress.code()) {
+            serial_println!("[syscall]   SYS_SECUREBOOT_VERIFY with no output answered {}", r);
+            return fail("a null output should be refused as InvalidAddress");
+        }
+        if secureboot::stats().1 != before {
+            return fail("a verify refused for its output still left a record");
+        }
+        Ok(())
+    })?;
+
+    serial_println!(
+        "[syscall]   Secure Boot doors (1082-1084): enrol/remove gated first, verify answers and records bytes: OK"
+    );
     Ok(())
 }
 

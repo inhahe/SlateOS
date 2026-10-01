@@ -2363,14 +2363,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mesg"
-version = "0.1.0"
-dependencies = [
- "authlib",
- "userdb",
-]
-
-[[package]]
 name = "metronome"
 version = "0.1.0"
 dependencies = [

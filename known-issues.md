@@ -2409,7 +2409,10 @@ reported the extents flag for every file whose flags it could not read.
 now refuses instead (b3367ac33). **The ledger stood at 104**, and stands at
 **102** after `userspace/locale` (`getconf`, `localedef`), deleted for the same
 reason: all three of its programs fabricated, as
-`B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED` records with the ports that replace them.
+`B-NO-GETCONF-OR-LOCALE-UNTIL-PORTED` records with the ports that replace them
+(`getconf` was ported the same day). Then **`userspace/mesg`** (`write`, `talk`),
+whose three programs agreed with one another through files instead of
+terminals (`B-MESG-AND-WRITE-UNTIL-PORTED`). **The ledger stands at 100.**
 
 **The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
@@ -179202,3 +179205,29 @@ their absence is a gap to close, not a resolution.
 
 **Where:** a new crate per program under `userspace/`; the deleted crate is
 in history at `userspace/locale` before this entry's commit.
+
+## B-MESG-AND-WRITE-UNTIL-PORTED — `mesg`, `write` and `talk` were deleted for fabricating; `mesg` and `write` are POSIX utilities to port (lane B, 2026-10-01) — **Status: OPEN (port to do)**
+
+**In short:** `userspace/mesg` answered as `mesg`, `write` and `talk`, and the
+three agreed with one another through files no other program reads, rather
+than through the terminals they are about. `mesg n` wrote
+`/var/run/mesg/<user>` instead of clearing the terminal's group-write bit;
+`write` "sent" by appending to `/var/run/messages/<user>`, never opening the
+recipient's terminal, and exited 0; `talk` printed `[Connecting to
+bob...]` and `[Connection from alice]` -- naming the *sender* as the one
+connecting -- and echoed the sender's own typing back. It also read
+`/var/run/utmp` as text lines, which it is not. Deleted 2026-10-01 under
+§1006, in the §1045 triage.
+
+**The proper fix:** ports of util-linux 2.39.3's `term-utils/mesg.c` (the
+terminal's `S_IWGRP` bit through `fchmod`, as POSIX specifies `mesg`) and
+`term-utils/write.c` (the recipient found through `utmp` with
+`libcall::utmp`, its terminal checked writable by group, the message
+written to it with control characters made visible), each with a WSL
+differential harness. `talk` needs a `talkd` on the other end and is not
+coming back with them. Both ports depend on terminals that carry group
+`tty` and honour their mode bits, which is worth confirming with lane A's
+pty layer first.
+
+**Where:** new crates `userspace/mesg` and `userspace/write`; the deleted
+crate is in history at `userspace/mesg`.

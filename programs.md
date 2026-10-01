@@ -11,9 +11,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**461 programs; 88 on the image, 6 carried inside the kernel.**
+**460 programs; 88 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 306
+## Userland utilities and services (`userspace/`, lane B) -- 305
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -170,7 +170,6 @@ two disagree.
 | `make` | Build automation tool |  |  |  |
 | `man` | Manual Page Viewer |  |  |  |
 | `md5sum` | Print or check MD5 (128-bit) checksums. | yes | `coreutils` |  |
-| `mesg` | Control/send terminal messages (mesg/write/talk) |  |  | `talk` *(not installed)*, `write` *(not installed)* |
 | `mkdir` | Make directories. | yes | `coreutils` |  |
 | `mkfifo` | Make FIFOs (named pipes). | yes | `coreutils` |  |
 | `mkfs` | Create Filesystems |  |  |  |

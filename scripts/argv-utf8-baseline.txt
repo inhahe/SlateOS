@@ -92,7 +92,6 @@ userspace/m4/src/main.rs:argv-as-string
 userspace/make/src/main.rs:argv-as-string
 userspace/make/src/main.rs:env-as-string
 userspace/man/src/main.rs:argv-as-string
-userspace/mesg/src/main.rs:argv-as-string
 userspace/mkfs/src/main.rs:argv-as-string
 userspace/mktemp/src/main.rs:argv-as-string
 userspace/monctl/src/main.rs:argv-as-string

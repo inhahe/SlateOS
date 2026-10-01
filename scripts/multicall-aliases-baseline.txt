@@ -56,8 +56,6 @@ lp:lpq
 lp:lpr
 lp:lprm
 lp:lpstat
-mesg:talk
-mesg:write
 newgrp:sg
 ntpd:ntpdate
 ntpd:sntp

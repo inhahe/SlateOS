@@ -3741,75 +3741,16 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
         return 1;
     }
 
-    let editor = editor_command();
-
-    let mut exit_code = 0;
-
-    for file in files {
-        let original_path = Path::new(file);
-
-        // Create a temporary copy. The basename is carried across as an
-        // `OsStr`, not through `to_str().unwrap_or("file")` as it used to be:
-        // that fallback mapped *every* basename which is not valid UTF-8 onto
-        // the single path `/tmp/sudoedit-<pid>-file`, so `sudoedit a\xff b\xff`
-        // gave both files one temp file and copied the second edit back over
-        // the first original. A wrong-file write is the worst outcome an editor
-        // wrapper can have, and it needed only a filename nobody chose to type.
-        let mut temp_name = OsString::from(format!("/tmp/sudoedit-{}-", std::process::id()));
-        temp_name.push(
-            original_path
-                .file_name()
-                .unwrap_or_else(|| OsStr::new("file")),
-        );
-        let temp_path = PathBuf::from(temp_name);
-
-        // Copy original to temp (if it exists).
-        if original_path.exists() {
-            if let Err(e) = fs::copy(original_path, &temp_path) {
-                eprintln!("sudoedit: cannot copy {} to temp: {e}", quoteaf_os(file));
-                exit_code = 1;
-                continue;
-            }
-        } else {
-            // Create empty temp file.
-            if let Err(e) = fs::write(&temp_path, "") {
-                eprintln!("sudoedit: cannot create temp file: {e}");
-                exit_code = 1;
-                continue;
-            }
-        }
-
-        // Launch editor on the temp file. `.arg(&temp_path)` rather than
-        // `.arg(temp_path.display().to_string())`: `display()` substitutes U+FFFD
-        // for any byte it cannot decode, so the editor was handed a path that
-        // does not exist whenever the original's name was not UTF-8. The path
-        // goes across as the bytes it is.
-        let status = process::Command::new(&editor).arg(&temp_path).status();
-
-        match status {
-            Ok(s) if s.success() => {
-                // Copy edited temp back to original.
-                if let Err(e) = fs::copy(&temp_path, original_path) {
-                    eprintln!("sudoedit: cannot write back to {}: {e}", quoteaf_os(file));
-                    exit_code = 1;
-                }
-            }
-            Ok(s) => {
-                eprintln!(
-                    "sudoedit: editor exited with status {}",
-                    s.code().unwrap_or(-1)
-                );
-                exit_code = 1;
-            }
-            Err(e) => {
-                eprintln!("sudoedit: cannot run editor {}: {e}", quoteaf_os(&editor));
-                exit_code = 1;
-            }
-        }
-
-        // Clean up temp file.
-        let _ = fs::remove_file(&temp_path);
-    }
+    // The editor runs as the caller, and the copies are theirs: their uid and
+    // gid are needed before anything is created.
+    let (Some(uid), Some(gid)) = (
+        authlib::identity::caller_uid(),
+        authlib::identity::caller_gid(),
+    ) else {
+        eprintln!("sudoedit: unable to determine the invoking user's uid and gid");
+        return 1;
+    };
+    let exit_code = edit_files(files, Caller { uid, gid });
 
     // Assembled by pushing rather than by `join`, for the same reason as in
     // `run_sudo`: `[OsString]` has no `join`, and joining the lossy forms would
@@ -3832,6 +3773,450 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
     );
 
     exit_code
+}
+
+/// The user who typed `sudoedit`: who the editor runs as and who owns the
+/// copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Its fields are read only by the unix half.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Caller {
+    uid: u32,
+    gid: u32,
+}
+
+#[cfg(unix)]
+/// One file being edited: the original, the copy the editor gets, and the
+/// copy's size and time once it was made -- which is how an edit that changed
+/// nothing is told from one that did.
+struct EditFile {
+    original: PathBuf,
+    temp: PathBuf,
+    before: (u64, Option<SystemTime>),
+}
+
+/// `open(2)`'s `O_NOFOLLOW`: refuse a symlink in the last component. Linux's
+/// value, which SlateOS's C library shares (a test holds the two together).
+#[cfg(unix)]
+const O_NOFOLLOW: i32 = 0o400_000;
+/// `open(2)`'s `O_NONBLOCK`, so opening a FIFO in a file's place cannot hang.
+#[cfg(unix)]
+const O_NONBLOCK: i32 = 0o4000;
+/// `ELOOP`: what `O_NOFOLLOW` answers for a symlink.
+#[cfg(unix)]
+const ELOOP: i32 = 40;
+
+/// The directories upstream looks in for one the caller can write, in order.
+#[cfg(unix)]
+const EDIT_TMPDIRS: [&str; 3] = ["/var/tmp", "/usr/tmp", "/tmp"];
+
+/// Edit `files` for `caller`: upstream's `sudo_edit`, with the editor run as
+/// the caller on copies the caller owns.
+///
+/// # Why each step is there
+///
+/// An editor run with sudo's privilege is a root shell one `:!sh` away, which
+/// is the whole reason sudoedit exists -- and until 2026-10-01 this ran the
+/// editor with exactly that privilege, on copies at a predictable
+/// `/tmp/sudoedit-<pid>-<name>` that it created by following whatever symlink
+/// was waiting there. Now, as upstream does it:
+///
+/// 1. each original is opened without following a symlink, and refused if
+///    any directory on its path is a symlink or writable by the caller, who
+///    could otherwise swap the file between the copy and the copy-back; it
+///    must be a regular file, and one that does not exist is edited from
+///    empty;
+/// 2. each copy is created exclusively (`O_EXCL`, so nothing already there is
+///    followed or reused) under an unguessable name in the first of
+///    `/var/tmp`, `/usr/tmp`, `/tmp` the caller can write, mode 0600, and
+///    handed to the caller;
+/// 3. one editor runs on all the copies, as the caller;
+/// 4. each copy is reopened without following a symlink and must still be a
+///    regular file, mode 0600, owned by the caller -- else its original is
+///    left alone; a copy whose size and time did not move is reported
+///    unchanged; the rest are written over their originals, and a copy that
+///    cannot be written back is kept and named.
+///
+/// The exit status is the editor's, or 1 when a copy could not be written
+/// back or nothing could be prepared, as upstream's is.
+#[cfg(unix)]
+fn edit_files(files: &[OsString], caller: Caller) -> i32 {
+    let Some(tmpdir) = edit_tmpdir(caller) else {
+        eprintln!("sudoedit: no writable temporary directory found");
+        return 1;
+    };
+    let mut edits = Vec::new();
+    for file in files {
+        match prepare_edit(Path::new(file), &tmpdir, caller) {
+            Ok(edit) => edits.push(edit),
+            Err(message) => eprintln!("sudoedit: {message}"),
+        }
+    }
+    if edits.is_empty() {
+        return 1;
+    }
+
+    let words = editor_words(&editor_command());
+    let Some((program, editor_args)) = words.split_first() else {
+        return 1;
+    };
+    let mut cmd = process::Command::new(program);
+    cmd.args(editor_args);
+    cmd.args(edits.iter().map(|edit| edit.temp.as_os_str()));
+    authlib::identity::become_user(&mut cmd, caller.uid, caller.gid);
+    let started = SystemTime::now();
+    let status = cmd.status();
+    let finished = SystemTime::now();
+    let mut ret = match status {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!(
+                "sudoedit: unable to run {}: {}",
+                quoteaf_os(program),
+                errmsg::strerror(&e)
+            );
+            1
+        }
+    };
+
+    // Copied back whatever the editor's status, as upstream does: an editor
+    // that exits non-zero after a save has still saved. Time that did not move
+    // means nobody was in the editor, so an unchanged size and time cannot be
+    // told from an edit -- and is then copied back, as it is upstream.
+    let spent = finished != started;
+    for edit in &edits {
+        if let Err(message) = copy_back(edit, caller, spent) {
+            eprintln!("sudoedit: {message}");
+            ret = 1;
+        }
+    }
+    ret
+}
+
+/// sudoedit needs to change who the editor runs as, which a host build cannot.
+#[cfg(not(unix))]
+fn edit_files(_files: &[OsString], _caller: Caller) -> i32 {
+    eprintln!("sudoedit: this build cannot run an editor as another user");
+    1
+}
+
+/// The editor setting split into words, as upstream splits it: `EDITOR="vim
+/// -n"` runs `vim` with `-n`. An empty setting is the default editor.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn editor_words(editor: &OsStr) -> Vec<OsString> {
+    let bytes = os_bytes(editor);
+    let words: Vec<OsString> = bytes
+        .split(u8::is_ascii_whitespace)
+        .filter(|w| !w.is_empty())
+        .map(os_from_bytes)
+        .collect();
+    if words.is_empty() {
+        vec![OsString::from(DEFAULT_EDITOR)]
+    } else {
+        words
+    }
+}
+
+/// Whether a directory with this mode, owner and group is writable by
+/// `caller`, as upstream's `dir_is_writable` judges it: the caller's own
+/// directory always is, and otherwise it is when others may write, or the
+/// group may and it is the caller's group. The sticky bit does not make
+/// `/tmp` safe to edit in -- the caller can still create there.
+///
+/// Only the caller's primary group is known here: `userdb` keeps
+/// supplementary memberships as names with no name-to-gid resolver (see
+/// `authlib::identity`), so a directory writable through one of those is
+/// missed -- the direction that refuses less, and recorded as such in
+/// known-issues.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn dir_writable_by(mode: u32, owner: u32, group: u32, caller: Caller) -> bool {
+    owner == caller.uid || mode & 0o002 != 0 || (mode & 0o020 != 0 && group == caller.gid)
+}
+
+/// The first of upstream's temporary directories that the caller can write.
+#[cfg(unix)]
+fn edit_tmpdir(caller: Caller) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+    EDIT_TMPDIRS.iter().map(PathBuf::from).find(|dir| {
+        fs::metadata(dir).is_ok_and(|meta| {
+            meta.is_dir() && dir_writable_by(meta.mode(), meta.uid(), meta.gid(), caller)
+        })
+    })
+}
+
+/// Every directory from the root (or the current directory) down to the one
+/// holding `original` must be a real directory the caller cannot write:
+/// upstream's `sudoedit_checkdir`, and its refusal of a symlinked directory.
+#[cfg(unix)]
+fn check_path_dirs(original: &Path, caller: Caller) -> Result<(), String> {
+    use std::path::Component;
+
+    let name = quoteaf_os(original.as_os_str());
+    let parent = original.parent().unwrap_or_else(|| Path::new(""));
+    let mut dir = if original.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(".")
+    };
+    check_dir(&dir, &name, caller)?;
+    for part in parent.components() {
+        match part {
+            Component::Normal(step) => dir.push(step),
+            Component::ParentDir => dir.push(".."),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => continue,
+        }
+        check_dir(&dir, &name, caller)?;
+    }
+    Ok(())
+}
+
+/// One step of [`check_path_dirs`]: `dir` must be a directory, not a symlink
+/// to one, and not writable by `caller`. `name` is the file being edited,
+/// which every refusal names, as upstream's do.
+#[cfg(unix)]
+fn check_dir(dir: &Path, name: &str, caller: Caller) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta =
+        fs::symlink_metadata(dir).map_err(|e| format!("{name}: {}", errmsg::strerror(&e)))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("{name}: editing symbolic links is not permitted"));
+    }
+    if !meta.is_dir() {
+        return Err(format!("{name}: Not a directory"));
+    }
+    if dir_writable_by(meta.mode(), meta.uid(), meta.gid(), caller) {
+        return Err(format!(
+            "{name}: editing files in a writable directory is not permitted"
+        ));
+    }
+    Ok(())
+}
+
+/// The original, opened for the copy without following a symlink; `None`
+/// when it does not exist yet. Refused unless it is a regular file.
+#[cfg(unix)]
+fn open_original(original: &Path) -> Result<Option<(fs::File, fs::Metadata)>, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let name = quoteaf_os(original.as_os_str());
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(original)
+    {
+        Ok(file) => {
+            let meta = file
+                .metadata()
+                .map_err(|e| format!("{name}: {}", errmsg::strerror(&e)))?;
+            if !meta.is_file() {
+                return Err(format!("{name}: not a regular file"));
+            }
+            Ok(Some((file, meta)))
+        }
+        Err(e) if e.raw_os_error() == Some(ELOOP) => {
+            Err(format!("{name}: editing symbolic links is not permitted"))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{name}: {}", errmsg::strerror(&e))),
+    }
+}
+
+/// The name upstream's `sudo_edit_mktemp` gives a copy: the original's base
+/// name with eight random characters before its last `.` -- `motd.conf` is
+/// `motdXXXXXXXX.conf`, `.bashrc` is `XXXXXXXX.bashrc` -- or after a `.` of
+/// their own when there is none, `motd.XXXXXXXX`; so an editor that chooses
+/// its mode by suffix still sees the right one.
+// Called only by the unix half; the host build keeps it for its tests.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn temp_name(base: &[u8], random: &[u8]) -> Vec<u8> {
+    match base.iter().rposition(|&b| b == b'.') {
+        Some(dot) => {
+            let (stem, suffix) = base.split_at(dot);
+            [stem, random, suffix].concat()
+        }
+        None => [base, b".", random].concat(),
+    }
+}
+
+#[cfg(unix)]
+/// Eight characters nobody can guess, from the hasher seed the standard
+/// library takes from the operating system's randomness.
+fn random_letters() -> [u8; 8] {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    const ALPHABET: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    let mut bits = hasher.finish();
+    let mut out = [0u8; 8];
+    for slot in &mut out {
+        let index = usize::try_from(bits % 62).unwrap_or(0);
+        *slot = ALPHABET.get(index).copied().unwrap_or(b'X');
+        bits /= 62;
+    }
+    out
+}
+
+/// Copy `original` into a new temporary file the caller owns: steps 1 and 2.
+#[cfg(unix)]
+fn prepare_edit(original: &Path, tmpdir: &Path, caller: Caller) -> Result<EditFile, String> {
+    check_path_dirs(original, caller)?;
+    prepare_edit_unchecked(original, tmpdir, caller)
+}
+
+/// [`prepare_edit`] after its directory check: the original opened, and the
+/// copy made. Separate so the tests can make a copy in a directory of their
+/// own, which the check rightly refuses.
+#[cfg(unix)]
+fn prepare_edit_unchecked(
+    original: &Path,
+    tmpdir: &Path,
+    caller: Caller,
+) -> Result<EditFile, String> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let name = quoteaf_os(original.as_os_str());
+    let source = open_original(original)?;
+
+    let base = original
+        .file_name()
+        .map_or_else(|| b"file".to_vec(), |b| os_bytes(b).into_owned());
+    let mut created = None;
+    for _ in 0..100 {
+        let candidate = tmpdir.join(os_from_bytes(&temp_name(&base, &random_letters())));
+        match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                created = Some((candidate, file));
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("mkstemps: {}", errmsg::strerror(&e))),
+        }
+    }
+    let Some((temp, mut copy)) = created else {
+        return Err("mkstemps: File exists".to_string());
+    };
+    let remove_on_error = |message: String| -> String {
+        // Ignored: the copy is already being abandoned, and a failure to
+        // remove it must not replace the reason it was.
+        let _ = fs::remove_file(&temp);
+        message
+    };
+
+    // Exactly 0600, whatever the umask took away: the copy-back insists on it.
+    copy.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    if let Some((mut file, meta)) = source {
+        io::copy(&mut file, &mut copy)
+            .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+        // The original's time, so the copy-back can tell an untouched copy.
+        // Ignored on failure, as upstream ignores it: the time only decides
+        // whether to say "unchanged".
+        if let Ok(time) = meta.modified() {
+            let _ = copy.set_modified(time);
+        }
+    }
+    std::os::unix::fs::fchown(&copy, Some(caller.uid), Some(caller.gid))
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    let meta = copy
+        .metadata()
+        .map_err(|e| remove_on_error(format!("{name}: {}", errmsg::strerror(&e))))?;
+    Ok(EditFile {
+        original: original.to_path_buf(),
+        temp,
+        before: (meta.len(), meta.modified().ok()),
+    })
+}
+
+/// Write one copy back over its original: step 4. `Err` is the message, and
+/// the copy is kept for the user unless it could not be trusted.
+#[cfg(unix)]
+fn copy_back(edit: &EditFile, caller: Caller, spent: bool) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let name = quoteaf_os(edit.original.as_os_str());
+    let temp_shown = quoteaf_os(edit.temp.as_os_str());
+    let unmodified = format!("{name} left unmodified");
+
+    let opened = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(&edit.temp);
+    let Ok(mut copy) = opened else {
+        return Err(unmodified);
+    };
+    let Ok(meta) = copy.metadata() else {
+        return Err(unmodified);
+    };
+    // Upstream's `sudo_check_temp_file`, word for word in its warnings.
+    if !meta.is_file() {
+        eprintln!("sudoedit: {temp_shown}: not a regular file");
+        return Err(unmodified);
+    }
+    if meta.mode() & 0o7777 != 0o600 {
+        eprintln!(
+            "sudoedit: {temp_shown}: bad file mode: 0{:o}",
+            meta.mode() & 0o7777
+        );
+        return Err(unmodified);
+    }
+    if meta.uid() != caller.uid {
+        eprintln!(
+            "sudoedit: {temp_shown} is owned by uid {}, should be {}",
+            meta.uid(),
+            caller.uid
+        );
+        return Err(unmodified);
+    }
+
+    if spent && (meta.len(), meta.modified().ok()) == edit.before {
+        // Ignored: an unchanged copy is litter either way.
+        let _ = fs::remove_file(&edit.temp);
+        eprintln!("sudoedit: {name} unchanged");
+        return Ok(());
+    }
+
+    let kept = format!("contents of edit session left in {temp_shown}");
+    let mut out = match fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW)
+        .open(&edit.original)
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!(
+                "sudoedit: unable to write to {name}: {}",
+                errmsg::strerror(&e)
+            );
+            return Err(kept);
+        }
+    };
+    // Over the old contents, then cut at the new length, as upstream's
+    // `sudo_copy_file` does.
+    let written = io::copy(&mut copy, &mut out).and_then(|_| out.set_len(meta.len()));
+    if let Err(e) = written {
+        eprintln!(
+            "sudoedit: unable to write to {name}: {}",
+            errmsg::strerror(&e)
+        );
+        return Err(kept);
+    }
+    // Ignored: the edit is home; a copy left behind is only litter.
+    let _ = fs::remove_file(&edit.temp);
+    Ok(())
 }
 
 /// Main entry point for the `visudo` personality.
@@ -7272,5 +7657,193 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             Some(b"a b c".to_vec())
         );
         assert_eq!(user_args(&[OsString::new()]), Some(Vec::new()));
+    }
+
+    // -- sudoedit: the editor runs as the caller on copies the caller owns --
+
+    #[test]
+    fn a_copy_is_named_as_upstream_names_it() {
+        assert_eq!(temp_name(b"motd.conf", b"ABCDEFGH"), b"motdABCDEFGH.conf");
+        assert_eq!(temp_name(b"motd", b"ABCDEFGH"), b"motd.ABCDEFGH");
+        assert_eq!(temp_name(b".bashrc", b"ABCDEFGH"), b"ABCDEFGH.bashrc");
+        assert_eq!(temp_name(b"a.b.c", b"ABCDEFGH"), b"a.bABCDEFGH.c");
+    }
+
+    #[test]
+    fn a_directory_is_writable_as_upstream_judges_it() {
+        let alice = Caller {
+            uid: 1000,
+            gid: 1000,
+        };
+        // The caller's own directory is, whatever its mode.
+        assert!(dir_writable_by(0o555, 1000, 0, alice));
+        // Others may write: so may the caller, sticky bit or not.
+        assert!(dir_writable_by(0o777, 0, 0, alice));
+        assert!(dir_writable_by(0o1777, 0, 0, alice));
+        // The group may write, and it is the caller's group.
+        assert!(dir_writable_by(0o775, 0, 1000, alice));
+        assert!(!dir_writable_by(0o775, 0, 50, alice));
+        // Root's ordinary directory is not.
+        assert!(!dir_writable_by(0o755, 0, 0, alice));
+    }
+
+    #[test]
+    fn the_editor_setting_is_split_into_words() {
+        assert_eq!(
+            editor_words(OsStr::new("vim -n")),
+            vec![OsString::from("vim"), OsString::from("-n")]
+        );
+        assert_eq!(
+            editor_words(OsStr::new("  ")),
+            vec![OsString::from(DEFAULT_EDITOR)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_open_flags_are_the_c_librarys() {
+        assert_eq!(O_NOFOLLOW, posix::fcntl::O_NOFOLLOW);
+        assert_eq!(O_NONBLOCK, posix::fcntl::O_NONBLOCK);
+        assert_eq!(ELOOP, posix::errno::ELOOP);
+    }
+
+    /// The test's own identity, as sudoedit would see its caller.
+    #[cfg(unix)]
+    fn me() -> Caller {
+        Caller {
+            uid: authlib::identity::caller_uid().expect("uid"),
+            gid: authlib::identity::caller_gid().expect("gid"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_in_a_directory_the_caller_can_write_is_refused() {
+        let dir = ScratchDir::new("sudoedit_dirs");
+        let file = dir.dir().join("notes.txt");
+        fs::write(&file, b"x").expect("write");
+        let refused = check_path_dirs(&file, me()).expect_err("own directory");
+        assert!(
+            refused.ends_with("editing files in a writable directory is not permitted"),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_not_opened() {
+        let dir = ScratchDir::new("sudoedit_link");
+        let target = dir.dir().join("target");
+        fs::write(&target, b"secret").expect("write");
+        let link = dir.dir().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let refused = open_original(&link).expect_err("a symlink");
+        assert!(
+            refused.ends_with("editing symbolic links is not permitted"),
+            "{refused}"
+        );
+        // And a directory in the path that is a symlink is refused too. Asked
+        // of that one step: walked from the root, this path fails earlier, at
+        // the world-writable `/tmp` it sits in -- which is also right.
+        let linked_dir = dir.dir().join("linked");
+        std::os::unix::fs::symlink(dir.dir(), &linked_dir).expect("symlink dir");
+        let refused = check_dir(
+            &linked_dir,
+            "'linked/target'",
+            Caller {
+                uid: u32::MAX,
+                gid: u32::MAX,
+            },
+        )
+        .expect_err("a symlinked directory");
+        assert!(
+            refused.ends_with("editing symbolic links is not permitted"),
+            "{refused}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_original_is_edited_from_empty_and_a_directory_is_refused() {
+        let dir = ScratchDir::new("sudoedit_open");
+        assert!(matches!(open_original(&dir.dir().join("absent")), Ok(None)));
+        let refused = open_original(dir.dir()).expect_err("a directory");
+        assert!(refused.ends_with("not a regular file"), "{refused}");
+    }
+
+    /// A copy made, edited and written back, without the editor: the two
+    /// halves either side of it, which are where the checks are.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_round_trips_and_an_untouched_one_is_unchanged() {
+        let dir = ScratchDir::new("sudoedit_round");
+        let original = dir.dir().join("motd");
+        fs::write(&original, b"hello\n").expect("write");
+        let tmpdir = dir.dir().join("tmp");
+        fs::create_dir(&tmpdir).expect("tmp");
+
+        // The copy: exclusive, 0600, the caller's, holding the original.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        assert_eq!(fs::read(&edit.temp).expect("read copy"), b"hello\n");
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let meta = fs::metadata(&edit.temp).expect("meta");
+            assert_eq!(meta.mode() & 0o7777, 0o600);
+            assert_eq!(meta.uid(), me().uid);
+        }
+
+        // Untouched: reported unchanged, the copy removed, the original kept.
+        assert_eq!(copy_back(&edit, me(), true), Ok(()));
+        assert!(!edit.temp.exists());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+
+        // Edited shorter: written back, and cut at the new length.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::write(&edit.temp, b"hi\n").expect("edit");
+        assert_eq!(copy_back(&edit, me(), true), Ok(()));
+        assert_eq!(fs::read(&original).expect("read"), b"hi\n");
+        assert!(!edit.temp.exists());
+    }
+
+    /// The checks a copy must pass before it is trusted over the original.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_that_is_not_what_was_made_is_not_written_back() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = ScratchDir::new("sudoedit_swap");
+        let original = dir.dir().join("motd");
+        fs::write(&original, b"hello\n").expect("write");
+        let tmpdir = dir.dir().join("tmp");
+        fs::create_dir(&tmpdir).expect("tmp");
+        let secret = dir.dir().join("secret");
+        fs::write(&secret, b"root's\n").expect("secret");
+
+        // Swapped for a symlink: refused, the original left alone.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::remove_file(&edit.temp).expect("rm");
+        std::os::unix::fs::symlink(&secret, &edit.temp).expect("symlink");
+        assert!(copy_back(&edit, me(), true).is_err());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+
+        // Its mode changed: refused.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        fs::set_permissions(&edit.temp, fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(copy_back(&edit, me(), true).is_err());
+
+        // Owned by someone else (as seen by a different caller): refused.
+        let edit = prepare_copy(&original, &tmpdir, me());
+        let stranger = Caller {
+            uid: me().uid.wrapping_add(1),
+            gid: me().gid,
+        };
+        assert!(copy_back(&edit, stranger, true).is_err());
+        assert_eq!(fs::read(&original).expect("read"), b"hello\n");
+    }
+
+    /// `prepare_edit` without the directory check, which a test cannot pass:
+    /// every directory it can create is its own.
+    #[cfg(unix)]
+    fn prepare_copy(original: &Path, tmpdir: &Path, caller: Caller) -> EditFile {
+        prepare_edit_unchecked(original, tmpdir, caller).expect("copy made")
     }
 }

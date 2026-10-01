@@ -3821,8 +3821,10 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "ere",
+ "errmsg",
  "fnmatch",
  "optionalfile",
+ "posix",
  "quoting",
  "scratchdir",
  "userdb",

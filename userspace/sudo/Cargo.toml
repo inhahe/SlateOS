@@ -28,6 +28,8 @@ authlib = { path = "../authlib" }
 # matched with FNM_PATHNAME, so `*` never crosses a `/`.
 fnmatch = { path = "../fnmatch" }
 ere = { path = "../ere" }
+# strerror(3)'s wording for an io::Error, as sudoedit's warnings give it.
+errmsg = { path = "../errmsg" }
 userdb = { path = "../userdb" }
 
 # The faillock-sharing test needs a real file that two authenticators can both
@@ -37,6 +39,9 @@ userdb = { path = "../userdb" }
 # passed, and a passing test is the one with nothing worth leaving behind.
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }
+# Test-only, never linked into the program: sudoedit's open flags and errno
+# are held to the values SlateOS's C library gives them.
+posix = { path = "../../posix" }
 
 # The defensive lint set from `CLAUDE.md`. The crate that grants root is the
 # last one that should panic on an argument someone chose.

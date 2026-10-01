@@ -1577,7 +1577,7 @@ fn parse_xml(input: &str) -> Result<Vec<XmlElement>, SvgError> {
         match c.peek_at(1) {
             Some(b'/') => break, // a closing tag — the caller's business
             Some(b'!' | b'?') => skip_special(&mut c),
-            _ => elements.push(parse_element(&mut c)?),
+            _ => elements.push(parse_element(&mut c, 0)?),
         }
     }
 
@@ -1632,7 +1632,27 @@ fn skip_special(c: &mut XmlCursor) {
     }
 }
 
-fn parse_element(c: &mut XmlCursor) -> Result<XmlElement, SvgError> {
+/// How deep elements may nest.
+///
+/// Parsing, building and drawing each recurse once per level, and the
+/// documents read here are anyone's -- a thumbnail of a file in a folder --
+/// so without a limit a document of nothing but `<g>` inside `<g>` overflows
+/// the stack and kills whatever was drawing it. Measured in a debug build,
+/// whose frames are the larger, building is the deepest of the three at
+/// about 2.7 KiB a level, so a document this deep needs some 350 KiB: a
+/// third of the 1 MiB a Windows program's main thread has. No real drawing
+/// nests anywhere near this deep -- Inkscape's run to a few dozen levels --
+/// and browsers stop laying out at a few hundred; libxml2's limit is 256,
+/// which in a debug build left the caller a quarter of that 1 MiB.
+const MAX_NESTING: usize = 128;
+
+/// The element at the cursor, `depth` elements inside the document's first.
+fn parse_element(c: &mut XmlCursor, depth: usize) -> Result<XmlElement, SvgError> {
+    if depth >= MAX_NESTING {
+        return Err(SvgError::MalformedXml(format!(
+            "elements nested more than {MAX_NESTING} deep"
+        )));
+    }
     if !c.eat(b'<') {
         return Err(SvgError::MalformedXml("expected '<'".into()));
     }
@@ -1685,7 +1705,7 @@ fn parse_element(c: &mut XmlCursor) -> Result<XmlElement, SvgError> {
                     break;
                 }
                 Some(b'!' | b'?') => skip_special(c),
-                _ => children.push(parse_element(c)?),
+                _ => children.push(parse_element(c, depth.saturating_add(1))?),
             }
         }
     }
@@ -1783,6 +1803,38 @@ fn nothing() -> SvgNode {
     }
 }
 
+/// The nodes of `elem`'s children, each built as `b` says.
+///
+/// A loop rather than `map` and `collect`: this recurses once per level of
+/// the document, and in a debug build every iterator adapter between here
+/// and the next `build_node` is a stack frame of its own -- enough that a
+/// document nested as deep as [`MAX_NESTING`] did not fit in 1 MiB of stack.
+fn build_children(elem: &XmlElement, b: Builder<'_>) -> Result<Vec<SvgNode>, SvgError> {
+    let mut children = Vec::with_capacity(elem.children.len());
+    for child in &elem.children {
+        children.push(build_node(child, b)?);
+    }
+    Ok(children)
+}
+
+/// The node of a shape element.
+///
+/// Apart from [`build_node`], which recurses once per level of the document:
+/// in a debug build each of these calls' results would be a stack slot of its
+/// own in every frame of that recursion.
+fn build_shape(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
+    match elem.tag.as_str() {
+        "rect" => build_rect(elem, b),
+        "circle" => build_circle(elem, b),
+        "ellipse" => build_ellipse(elem, b),
+        "line" => build_line(elem, b),
+        "polyline" => build_polyline(elem, b),
+        "polygon" => build_polygon(elem, b),
+        "path" => build_path(elem, b),
+        _ => Ok(nothing()),
+    }
+}
+
 fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     // `display: none` takes the element and everything in it out of the
     // drawing, and a definition is not drawn where it stands.
@@ -1794,20 +1846,12 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
     match elem.tag.as_str() {
         "svg" => build_svg(elem, b),
         "g" => build_group(elem, b),
-        "rect" => build_rect(elem, b),
-        "circle" => build_circle(elem, b),
-        "ellipse" => build_ellipse(elem, b),
-        "line" => build_line(elem, b),
-        "polyline" => build_polyline(elem, b),
-        "polygon" => build_polygon(elem, b),
-        "path" => build_path(elem, b),
+        "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon" | "path" => {
+            build_shape(elem, b)
+        }
         _ => {
             // Unknown elements treated as groups (e.g., <defs>, <title>)
-            let children: Result<Vec<_>, _> = elem
-                .children
-                .iter()
-                .map(|child| build_node(child, b.inner()))
-                .collect();
+            let children = build_children(elem, b.inner());
             Ok(SvgNode::Group {
                 transform: Transform::IDENTITY,
                 style: SvgStyle::default(),
@@ -1830,11 +1874,7 @@ fn build_svg(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         viewport: (view_w, view_h),
         ..b.inner()
     };
-    let children: Vec<SvgNode> = elem
-        .children
-        .iter()
-        .map(|child| build_node(child, inner))
-        .collect::<Result<_, _>>()?;
+    let children = build_children(elem, inner)?;
     // Presentation attributes on the root element -- `fill="none"
     // stroke="currentColor"` is how most icon sets are written -- are inherited
     // by everything in the document, as SVG says. They were ignored, so every
@@ -1898,12 +1938,7 @@ fn build_inner_svg(
         .map(parse_transform)
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
-    let inner = Builder { viewport, ..b };
-    let children = elem
-        .children
-        .iter()
-        .map(|child| build_node(child, inner))
-        .collect::<Result<_, _>>()?;
+    let children = build_children(elem, Builder { viewport, ..b })?;
     Ok(SvgNode::Group {
         transform: own.then(placement),
         style: parse_style_attrs(elem, b.defs)?,
@@ -1918,11 +1953,7 @@ fn build_group(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         .transpose()?
         .unwrap_or(Transform::IDENTITY);
     let style = parse_style_attrs(elem, b.defs)?;
-    let children: Result<Vec<_>, _> = elem
-        .children
-        .iter()
-        .map(|child| build_node(child, b.inner()))
-        .collect();
+    let children = build_children(elem, b.inner());
     Ok(SvgNode::Group {
         transform,
         style,
@@ -3110,6 +3141,14 @@ impl<'d> SvgRenderer<'d> {
         }
     }
 
+    /// Draw `node` and everything in it, in the space `transform` carries to
+    /// the pixels, inheriting `parent_style`.
+    ///
+    /// Only containers are walked here; a shape is [`Self::render_shape`]'s.
+    /// This recurses once per level of the document, and a debug build gives
+    /// every temporary of every arm a stack slot of its own, so the shapes'
+    /// were in every frame -- enough, with building's, that a document nested
+    /// [`MAX_NESTING`] deep did not fit in 1 MiB of stack.
     fn render_node(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
         match node {
             SvgNode::Svg { children, .. } => {
@@ -3128,6 +3167,15 @@ impl<'d> SvgRenderer<'d> {
                     self.render_node(child, combined, &resolved);
                 }
             }
+            _ => self.render_shape(node, transform, parent_style),
+        }
+    }
+
+    /// Draw the shape `node` -- anything but a container, which draws nothing
+    /// here -- in the space `transform` carries to the pixels.
+    fn render_shape(&mut self, node: &SvgNode, transform: Transform, parent_style: &ResolvedStyle) {
+        match node {
+            SvgNode::Svg { .. } | SvgNode::Group { .. } => {}
             SvgNode::Rect {
                 x,
                 y,
@@ -3564,6 +3612,42 @@ mod tests {
         assert!(SvgDocument::parse("   \n\t ").is_err());
         assert!(SvgDocument::parse("<?xml version=\"1.0\"?>").is_err());
         assert!(SvgDocument::parse("<!-- just a comment -->").is_err());
+    }
+
+    /// `levels` `<g>`s, one inside the next, in an `<svg>`, with a square at
+    /// the bottom.
+    fn nested(levels: usize) -> String {
+        let mut svg = String::from(r#"<svg viewBox="0 0 10 10">"#);
+        svg.push_str(&"<g>".repeat(levels));
+        svg.push_str(r#"<rect width="10" height="10" fill="red"/>"#);
+        svg.push_str(&"</g>".repeat(levels));
+        svg.push_str("</svg>");
+        svg
+    }
+
+    /// **Elements nest [`MAX_NESTING`] deep, and no deeper**: a document that
+    /// deep is drawn -- through parsing, building and drawing, each of which
+    /// recurses a level at a time -- within half the 1 MiB of stack a Windows
+    /// program's main thread has, in a debug build, whose frames are the
+    /// larger; and one deeper is refused rather than overflowing the stack,
+    /// however deep it goes.
+    #[test]
+    fn elements_nest_only_so_deep() {
+        // The <svg> is the first level, the <rect> the last.
+        let deepest = nested(MAX_NESTING - 2);
+        let drawn = std::thread::Builder::new()
+            .stack_size(512 << 10)
+            .spawn(move || SvgDocument::parse(&deepest).unwrap().render(10, 10))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(&drawn[..4], &[255, 0, 0, 255]);
+        for levels in [MAX_NESTING - 1, 100_000] {
+            let Err(SvgError::MalformedXml(why)) = SvgDocument::parse(&nested(levels)) else {
+                panic!("{levels} levels were not refused");
+            };
+            assert!(why.contains("nested"), "{why}");
+        }
     }
 
     #[test]

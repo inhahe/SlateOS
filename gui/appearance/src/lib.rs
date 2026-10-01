@@ -58,6 +58,8 @@ pub mod icons;
 // resolve the module's own links from this scope, where its items are not.
 pub mod themes;
 
+pub mod decorations;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is
@@ -1522,6 +1524,13 @@ pub struct AppearanceSettings {
     /// reach everything that animates together, as `Palette::motion`. See
     /// [`themes::AnimationTheme`] and `design-decisions.md` §1446.
     pub animation_theme: themes::AnimationTheme,
+    /// The theme every window's frame is shaped by -- its title bar, the
+    /// buttons on it, its border and its shadow: the built-in one unless the
+    /// user chose another. `theme.decorations` in the file, by the theme's
+    /// folder name, which may name yet another theme. The compositor draws
+    /// and hit-tests frames from [`decorations`](Self::decorations); see
+    /// [`themes::DecorationTheme`] and `design-decisions.md` §1456.
+    pub decoration_theme: themes::DecorationTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1778,6 +1787,7 @@ impl Default for AppearanceSettings {
             icon_theme: icons::IconTheme::built_in(),
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
+            decoration_theme: themes::DecorationTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -2032,6 +2042,16 @@ impl AppearanceSettings {
     /// Get the effective window corner radius.
     pub fn corner_radius(&self) -> f32 {
         self.window_corners.radius()
+    }
+
+    /// The shape of every window's frame: the chosen window-decorations
+    /// theme's, or the built-in one where that could not be used
+    /// ([`themes::DecorationTheme::problem`] says why). Where a frame's
+    /// buttons and title go is
+    /// [`DecorationStyle::title_bar`](decorations::DecorationStyle::title_bar).
+    #[must_use]
+    pub fn decorations(&self) -> decorations::DecorationStyle {
+        self.decoration_theme.style()
     }
 
     /// Validate and clamp settings to sane ranges.
@@ -2471,6 +2491,10 @@ impl AppearanceSettings {
         if let Some(name) = animation_theme_name(doc) {
             s.animation_theme = themes::AnimationTheme::load(&name);
         }
+        // The window frames, the same way.
+        if let Some(name) = decoration_theme_name(doc) {
+            s.decoration_theme = themes::DecorationTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2775,6 +2799,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.animation_theme.id())),
         );
         doc.set_str(
+            &["theme", "decorations"],
+            &pathcodec::encode_path(std::path::Path::new(self.decoration_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -3019,6 +3047,13 @@ pub(crate) fn widget_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
 /// [`color_theme_name`] is.
 pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "animation")
+}
+
+/// The window-decorations theme a settings document names, decoded; `None`
+/// for the built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn decoration_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "decorations")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3523,6 +3558,10 @@ mod tests {
     /// The round trip's animation theme: a fourth, for the same reason.
     const ROUND_TRIP_ANIMATION: &str = "ressort ü";
     const ROUND_TRIP_ANIMATION_FILE: &str = "animation:\n  duration-ms: 320\n  easing: spring\n";
+    /// The round trip's window-frames theme: a fifth.
+    const ROUND_TRIP_DECORATIONS: &str = "cadres é";
+    const ROUND_TRIP_DECORATIONS_FILE: &str =
+        "window-decorations:\n  title-bar:\n    height: 36\n  buttons:\n    side: left\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3561,6 +3600,13 @@ mod tests {
                 themes::parse(ROUND_TRIP_ANIMATION_FILE)
                     .motion
                     .expect("the fixture sets a motion"),
+            ),
+            // A fifth, for the window frames.
+            decoration_theme: themes::DecorationTheme::from_style(
+                ROUND_TRIP_DECORATIONS,
+                themes::parse(ROUND_TRIP_DECORATIONS_FILE)
+                    .decorations
+                    .expect("the fixture sets window frames"),
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3661,6 +3707,7 @@ mod tests {
             install_theme(root, ROUND_TRIP_THEME, ROUND_TRIP_THEME_FILE);
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
+            install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);
@@ -4089,6 +4136,61 @@ mod tests {
             assert_eq!(
                 saved.get_str(&["theme", "animation"]).as_deref(),
                 Some("nord")
+            );
+        });
+    }
+
+    /// **The window frames are their own setting**, `theme.decorations`:
+    /// read, carried to `decorations()`, written back -- the built-in frame
+    /// where nothing or a blank is chosen, and where the chosen theme cannot
+    /// give one (which keeps its name and says why).
+    #[test]
+    fn the_window_frames_are_their_own_setting_and_survive_a_save() {
+        config::testing::with_scratch_config("decorations-setting", |root| {
+            let none = AppearanceSettings::read_from(&Document::parse(""));
+            assert_eq!(none.decoration_theme, themes::DecorationTheme::built_in());
+            assert_eq!(none.decorations(), decorations::DecorationStyle::AERO);
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  decorations: \" \"\n"));
+            assert_eq!(blank.decoration_theme, themes::DecorationTheme::built_in());
+
+            let mut written = Document::new();
+            AppearanceSettings::default().write_into(&mut written);
+            assert_eq!(
+                written.get_str(&["theme", "decorations"]).as_deref(),
+                Some("aero"),
+                "the key is there to edit"
+            );
+
+            install_theme(
+                root,
+                "roomy",
+                "window-decorations:\n  title-bar:\n    height: 40\n  buttons:\n    side: left\n",
+            );
+            let doc = Document::parse("theme:\n  decorations: roomy\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.decoration_theme.problem(), None);
+            assert_eq!(s.decorations().title_height, 40);
+            assert_eq!(s.decorations().button_side, decorations::ButtonSide::Left);
+            let mut saved = doc.clone();
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "decorations"]).as_deref(),
+                Some("roomy")
+            );
+
+            // A colours-only theme cannot give the frames.
+            install_theme(root, "nord", "colors:\n  base: \"#2e3440\"\n");
+            let s =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  decorations: nord\n"));
+            assert_eq!(s.decoration_theme.id(), "nord");
+            assert_eq!(s.decorations(), decorations::DecorationStyle::AERO);
+            assert!(
+                s.decoration_theme
+                    .problem()
+                    .is_some_and(|why| why.contains("\"nord\" sets no window frames")),
+                "{:?}",
+                s.decoration_theme.problem()
             );
         });
     }

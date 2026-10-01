@@ -13,7 +13,9 @@
 //! [`crate::icons`]; the widget-style axis, the shapes of the toolkit's
 //! controls, is [`WidgetTheme`] and its `widget-style` section; the
 //! animation axis, how the desktop's transitions move, is
-//! [`AnimationTheme`] and its `animation` section.
+//! [`AnimationTheme`] and its `animation` section; the window-decorations
+//! axis, the shape of every window's frame, is [`DecorationTheme`] and its
+//! `window-decorations` section.
 //!
 //! # A theme on disk
 //!
@@ -107,6 +109,7 @@
 //!
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
+use crate::decorations::DecorationStyle;
 use guitk::color::Color;
 use guitk::motion::Motion;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
@@ -122,10 +125,12 @@ use std::sync::Arc;
 use yamldoc::Document;
 
 mod animation;
+mod decorations;
 mod values;
 mod widgets;
 
 pub use animation::AnimationTheme;
+pub use decorations::DecorationTheme;
 pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
@@ -177,6 +182,11 @@ pub const WIDGET_SECTION: &str = "widget-style";
 /// transitions take and the curve they follow, or that nothing moves
 /// ([`AnimationTheme`]). Named as the axis is in `meta.supports`.
 pub const ANIMATION_SECTION: &str = "animation";
+
+/// The section holding a theme's window frames: the title bar, its buttons,
+/// the border and the shadow ([`DecorationTheme`]). Named as the axis is in
+/// `meta.supports`.
+pub const DECORATIONS_SECTION: &str = "window-decorations";
 
 /// The largest theme file that is read.
 ///
@@ -321,6 +331,8 @@ pub enum ThemeError {
     NoWidgetStyle,
     /// The file was read but has no usable `animation` section.
     NoAnimation,
+    /// The file was read but has no usable `window-decorations` section.
+    NoDecorations,
 }
 
 impl fmt::Display for ThemeError {
@@ -338,6 +350,7 @@ impl fmt::Display for ThemeError {
             Self::NoColors => f.write_str("sets no colours"),
             Self::NoWidgetStyle => f.write_str("sets no widget style"),
             Self::NoAnimation => f.write_str("sets no animation"),
+            Self::NoDecorations => f.write_str("sets no window frames"),
         }
     }
 }
@@ -384,6 +397,10 @@ pub struct ThemeFile {
     /// [`Motion::STILL`] where it says `enabled: false`; `None` when it has no
     /// such section, or one that sets nothing usable.
     pub motion: Option<Motion>,
+    /// The window frames its `window-decorations` section sets, over the
+    /// built-in ones; `None` when it has no such section, or one that sets
+    /// nothing usable.
+    pub decorations: Option<DecorationStyle>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -418,11 +435,13 @@ pub fn parse(text: &str) -> ThemeFile {
     };
     let widget_style = widgets::read(&doc, &mut warnings);
     let motion = animation::read(&doc, &mut warnings);
+    let decorations = decorations::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
         widget_style,
         motion,
+        decorations,
         warnings: warnings.finish(),
     }
 }
@@ -663,6 +682,7 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
         crate::color_theme_name(doc),
         crate::widget_theme_name(doc),
         crate::animation_theme_name(doc),
+        crate::decoration_theme_name(doc),
     ]
     .into_iter()
     .flatten()
@@ -874,6 +894,9 @@ pub struct ThemeInfo {
     /// Whether it has a usable `animation` section: how the desktop's
     /// transitions move.
     pub has_animation: bool,
+    /// Whether it has a usable `window-decorations` section: the shape of
+    /// the windows' frames.
+    pub has_decorations: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -904,6 +927,14 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_animation(&self) -> bool {
         self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_animation)
+    }
+
+    /// Whether it can be chosen for the window-decorations axis: it was
+    /// read, and its `window-decorations` section sets something -- or it is
+    /// the built-in theme, whose frames are compiled in.
+    #[must_use]
+    pub fn provides_decorations(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_decorations)
     }
 
     /// Whether it can be chosen for the icons axis: its folder holds an
@@ -1008,17 +1039,20 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_light: true,
             has_widget_style: true,
             has_animation: true,
+            has_decorations: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
-    // Whatever its file says, the built-in theme's colours, icons, controls
-    // and motion are compiled in: it covers both modes, draws every icon and
-    // every control, moves everything, and cannot fail to load.
+    // Whatever its file says, the built-in theme's colours, icons, controls,
+    // motion and window frames are compiled in: it covers both modes, draws
+    // every icon, control and frame, moves everything, and cannot fail to
+    // load.
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
     info.has_animation = true;
+    info.has_decorations = true;
     info.problem = None;
     info
 }
@@ -1053,6 +1087,7 @@ fn describe(
                 has_light: !file.colors.light.is_empty(),
                 has_widget_style: file.widget_style.is_some(),
                 has_animation: file.motion.is_some(),
+                has_decorations: file.decorations.is_some(),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -1070,6 +1105,7 @@ fn describe(
             has_light: false,
             has_widget_style: false,
             has_animation: false,
+            has_decorations: false,
             warnings: Vec::new(),
             problem: Some(err),
         },

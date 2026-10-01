@@ -1799,7 +1799,7 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
 - [x] Theme color API for applications (apps query current token values) — *checked 2026-09-27: every application is handed the resolved palette -- all of the theme's roles, the user's accent, the mode -- by `oswindow`'s `App::theme_changed`, once at start and again on every change (`gui/window/src/app.rs`, `hand_over`); `appearance::Palette::from_settings` answers the same question directly for code with the settings in hand. 102 applications use one or the other.*
 
 ##### Tier 1 — Window Decorations
-- [ ] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment
+- [-] Title bar: height, button layout (close/min/max order and position), button shape (circle, square, icon), title font, title alignment — *lane C's half done 2026-10-01 (`design-decisions.md` §1456): a theme's `window-decorations` section sets the bar's height, the title's alignment and weight, the buttons' side, order, shape (rounded, circle, square, or a glyph alone), size and gap, chosen as `theme.decorations`; `DecorationStyle::title_bar` places the buttons and title. Lane F draws from it (`requests/c-f-draw-window-frames-from-the-theme.md`), lane E chooses it in Settings (`requests/c-e-choose-the-window-frames-in-settings.md`). The title's typeface is the user's UI font, not the theme's.*
 - [ ] **Title-text overflow styling (CSS-like `text-overflow`).** When the window
   title is too long to fit the available title-bar width, the theme/style controls
   how it is truncated. Support at least: (a) **clip** (hard cut), (b) **ellipsis at
@@ -1810,8 +1810,8 @@ _A theme is a declarative YAML file plus optional bundled assets. Themes are pur
   count, so it adapts to the actual pixel width. Same property vocabulary is shared
   with taskbar tab labels (Tier 2 — Taskbar/Panel Styling) so both truncate
   consistently.
-- [ ] Window border: radius, width, color
-- [ ] Window shadow: offset, blur, color, spread
+- [-] Window border: radius, width, color — *radius: `window_corners` in the appearance settings, drawn; width: the `window-decorations` section's `border` (2026-10-01), for lane F to draw; colour: the palette's.*
+- [-] Window shadow: offset, blur, color, spread — *how far it reaches: the `window-decorations` section's `shadow` (2026-10-01), for lane F to draw. Offset, blur and colour wait on the compositor's shadow having them to set.*
 - [ ] Aero-style blurry transparency (taskbar and/or window title bars)
 
 ##### Tier 1 — Icon Theme

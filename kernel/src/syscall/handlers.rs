@@ -7172,27 +7172,79 @@ pub fn sys_process_get_nice(args: &SyscallArgs) -> SyscallResult {
 /// every task the process owns (nice→priority via
 /// [`thread::nice_to_priority`]) so the change actually affects scheduling.
 ///
-/// Per the thin-primitive contract (see the syscall-number doc), the
-/// `CAP_SYS_NICE` policy for priority raises is enforced by the userspace
-/// posix wrappers; the kernel only performs the mutation, always on the
-/// caller's own process. Returns the *previous* nice, biased by +20. Fails
-/// only if the caller has no owning process.
+/// A raise -- a nice below the current one -- is the kernel's to allow
+/// ([`priority::may_set_nice`](crate::proc::priority::may_set_nice)): within
+/// the process's `RLIMIT_NICE`, or with a Thread capability carrying
+/// IO_REALTIME, else `ResourceExhausted`. It was left to libc until
+/// 2026-10-01, so any program could reach nice -20, the top scheduler
+/// priority, with one direct call. Returns the *previous* nice, biased by
+/// +20.
 pub fn sys_process_set_nice(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::thread;
+    use crate::proc::{priority, thread};
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
         return SyscallResult::err(KernelError::NoSuchProcess);
     };
+    match priority::set_own_nice(pid, unbias_nice(args.arg0)) {
+        Ok(old) => SyscallResult::ok(i64::from(old).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
 
-    // Un-bias arg0 (biased +20) back to a signed nice, clamping to the POSIX
-    // range. arg0 is u64; a caller passing a wild value is clamped, not UB.
+/// A nice passed biased by +20 (`0..=39`), as a signed nice: clamped, so a
+/// wild value is clamped rather than misread.
+fn unbias_nice(biased: u64) -> i32 {
+    let clamped = biased.min(39);
+    // 0..=39 fits an i32, and minus 20 is -20..=19.
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let requested = (args.arg0 as i64).clamp(0, 39) as i32 - 20;
+    let nice = (clamped as i32).saturating_sub(20);
+    nice
+}
 
-    match thread::set_process_nice(pid, requested) {
-        Some(old) => SyscallResult::ok(i64::from(old) + 20),
-        None => SyscallResult::err(KernelError::NoSuchProcess),
+/// `SYS_PROCESS_GET_PRIORITY` (1088) -- `getpriority(which, who)`: the
+/// nice, biased by +20, of the process, group or user named. For a group or
+/// a user, it is the lowest nice among its processes, as Linux reports.
+///
+/// `which` is 0 (a process: `who` is a pid), 1 (a group: a pgid) or 2 (a
+/// user: a uid). `who` 0 is the caller's own. Reading needs no authority.
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing is
+/// named. See [`crate::proc::priority`].
+pub fn sys_process_get_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::get_priority(caller, which, args.arg1) {
+        Ok(nice) => SyscallResult::ok(i64::from(nice).saturating_add(20)),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
+    }
+}
+
+/// `SYS_PROCESS_SET_PRIORITY` (1089) -- `setpriority(which, who, nice)`:
+/// set the nice of the process, group or user named. `nice` is biased by
+/// +20, as `SYS_PROCESS_SET_NICE` takes it.
+///
+/// Each named process is changed only if the caller may change it
+/// ([`crate::proc::priority::may_set_nice`]), and the answer folds the
+/// outcomes as Linux's does:
+/// - `NoSuchProcess` when nothing is named;
+/// - else `PermissionDenied` (no authority over one) or
+///   `ResourceExhausted` (a raise beyond its `RLIMIT_NICE`, without
+///   IO_REALTIME), whichever refusal came last;
+/// - else 0.
+pub fn sys_process_set_priority(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{priority, thread};
+
+    let Some(which) = priority::PrioWhich::from_raw(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(0);
+    match priority::set_priority(caller, which, args.arg1, unbias_nice(args.arg2)) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(refusal) => SyscallResult::err(refusal.kernel_error()),
     }
 }
 

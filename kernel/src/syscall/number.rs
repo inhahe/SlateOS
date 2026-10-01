@@ -2022,14 +2022,18 @@ pub const SYS_PROCESS_GET_NICE: u64 = 531;
 /// out-of-range inputs are clamped. The mapping nice→priority is monotonic and
 /// sends nice `0` to the default priority level (see `thread::nice_to_priority`).
 ///
-/// **Policy lives in userspace.** Like `SYS_PROCESS_SET_CREDENTIALS`, the
-/// `CAP_SYS_NICE` check that guards a priority *raise* (negative nice) is done
-/// by the userspace posix `nice`/`setpriority` wrappers; the kernel trusts
-/// them and only performs the mutation, always targeting the caller's own
-/// process. Fails only if the caller has no owning process.
+/// **The kernel decides a raise** (a nice below the current one): it must be
+/// within the process's `RLIMIT_NICE`, or the process must hold a Thread
+/// capability with IO_REALTIME (`CAP_SYS_NICE`, design-decisions §326);
+/// otherwise `ResourceExhausted` ("resource limit reached"). Until 2026-10-01
+/// this was left to libc's wrappers, like `SYS_PROCESS_SET_CREDENTIALS`'s
+/// check before it, and a program calling 532 directly could reach nice -20,
+/// the top scheduler priority (`proc::priority`, §1503). Always the
+/// caller's own process; [`SYS_PROCESS_SET_PRIORITY`] names others.
 ///
-/// Returns the *previous* nice value, biased by +20 (`0..=39`). Chosen number
-/// 532 (next free slot after 531).
+/// Returns the *previous* nice value, biased by +20 (`0..=39`);
+/// `NoSuchProcess` for a caller with no process. Chosen number 532 (next free
+/// slot after 531).
 pub const SYS_PROCESS_SET_NICE: u64 = 532;
 
 // ---------------------------------------------------------------------------
@@ -5713,6 +5717,48 @@ pub const SYS_SIGNAL_QUEUE: u64 = 1086;
 /// `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` item 5.
 /// Chosen number 1087, next free slot after 1086.
 pub const SYS_SIGNAL_TGKILL: u64 = 1087;
+
+// ---------------------------------------------------------------------------
+// The nice of a named process, group or user (1088-1089)
+// ---------------------------------------------------------------------------
+
+/// Read a nice: `process_get_priority(which, who) -> nice + 20`, the native
+/// `getpriority(2)`.
+///
+/// `which` is 0 (one process; `who` is a pid), 1 (a process group; a pgid) or
+/// 2 (a user; a uid), and `who` 0 means the caller's own. For a group or a
+/// user the answer is the lowest nice -- the most favoured member -- as
+/// Linux's. Biased by +20, as [`SYS_PROCESS_GET_NICE`]'s, so it is never
+/// negative. Reading needs no authority, as on Linux, where `/proc` shows it
+/// to anyone.
+///
+/// `InvalidArgument` for another `which`; `NoSuchProcess` when nothing live
+/// is named.
+///
+/// `requests/e-ad-renicing-another-process-renices-the-caller.md`: before it a
+/// native program could name no process but itself, and libc's `getpriority`
+/// read the caller whatever it was asked. Chosen number 1088, next free slot
+/// after 1087.
+pub const SYS_PROCESS_GET_PRIORITY: u64 = 1088;
+
+/// Set a nice: `process_set_priority(which, who, nice + 20) -> 0`, the native
+/// `setpriority(2)`.
+///
+/// `which` and `who` as [`SYS_PROCESS_GET_PRIORITY`]; the nice biased by +20,
+/// as [`SYS_PROCESS_SET_NICE`] takes it, and clamped. Each named process is
+/// changed only if the caller may change it (`proc::priority`, §1503):
+///
+/// - **authority** -- it is the caller or the caller's child, or the caller
+///   holds a Process capability with DELETE rights for it: who may signal
+///   it may renice it. Else `PermissionDenied` (libc: `EPERM`).
+/// - **a raise** (below its current nice) -- within its `RLIMIT_NICE`, or
+///   the caller holds a Thread capability with IO_REALTIME. Else
+///   `ResourceExhausted` (libc: `EACCES`).
+///
+/// A refusal for one member does not stop the others. The answer is Linux's
+/// fold: `NoSuchProcess` when nothing is named, else the last refusal, else 0.
+/// Chosen number 1089, next free slot after 1088.
+pub const SYS_PROCESS_SET_PRIORITY: u64 = 1089;
 
 // ---------------------------------------------------------------------------
 // Version info

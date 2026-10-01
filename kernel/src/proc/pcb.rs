@@ -3496,6 +3496,21 @@ pub fn pids_in_group(pgid: ProcessId) -> Vec<ProcessId> {
         .collect()
 }
 
+/// Collect the PIDs of all live (non-zombie) processes whose real uid is
+/// `uid` -- the processes `setpriority`/`getpriority`'s `PRIO_USER` names
+/// (`proc::priority`).
+///
+/// Returns an empty vector if no live process has that uid.
+#[must_use]
+pub fn pids_of_user(uid: u32) -> Vec<ProcessId> {
+    let table = PROCESS_TABLE.lock();
+    table
+        .values()
+        .filter(|p| p.credentials.uid == uid && p.state != ProcessState::Zombie)
+        .map(|p| p.pid)
+        .collect()
+}
+
 /// Collect the distinct process groups of `pid`'s children that `pid`
 /// currently *guards* — children in a different process group but the same
 /// session as `pid`.

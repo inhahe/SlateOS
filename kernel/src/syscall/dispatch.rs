@@ -70,24 +70,24 @@ use super::number::{
     SYS_PIPE_WRITE, SYS_PIPE_WRITE_TIMEOUT, SYS_PORT_READ, SYS_PORT_WRITE, SYS_PROCESS_CHROOT,
     SYS_PROCESS_COUNT, SYS_PROCESS_CRASH_INFO, SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_CREDENTIALS,
     SYS_PROCESS_GET_CWD, SYS_PROCESS_GET_INITIAL_FDS, SYS_PROCESS_GET_NICE, SYS_PROCESS_GET_PGID,
-    SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID, SYS_PROCESS_IS_READY,
-    SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS, SYS_PROCESS_SET_CWD,
-    SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID, SYS_PROCESS_SET_SID,
-    SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
-    SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP, SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS,
-    SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ, SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE,
-    SYS_PTY_MASTER_WRITE, SYS_PTY_POLL, SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP,
-    SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE, SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ,
-    SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE, SYS_RLIMIT_GET, SYS_RLIMIT_SET,
-    SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE,
-    SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL, SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY,
-    SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL, SYS_SEM_TRY_WAIT, SYS_SEM_WAIT,
-    SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT, SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT,
-    SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT, SYS_SERVICE_UNREGISTER,
-    SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP,
-    SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK, SYS_SIGNAL_MASK,
-    SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
+    SYS_PROCESS_GET_PRIORITY, SYS_PROCESS_GET_RUSAGE, SYS_PROCESS_GET_SID, SYS_PROCESS_ID,
+    SYS_PROCESS_IS_READY, SYS_PROCESS_KILL, SYS_PROCESS_PARENT_ID, SYS_PROCESS_SET_CREDENTIALS,
+    SYS_PROCESS_SET_CWD, SYS_PROCESS_SET_EXEC_FDS, SYS_PROCESS_SET_NICE, SYS_PROCESS_SET_PGID,
+    SYS_PROCESS_SET_PRIORITY, SYS_PROCESS_SET_SID, SYS_PROCESS_SETGROUPS, SYS_PROCESS_SPAWN,
+    SYS_PROCESS_SPAWN_EX, SYS_PROCESS_SPAWN_EX2, SYS_PROCESS_TRY_WAIT, SYS_PROCESS_UMASK,
+    SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS, SYS_PTY_CLOSE, SYS_PTY_CREATE, SYS_PTY_DUP,
+    SYS_PTY_GET_PGRP, SYS_PTY_GET_TERMIOS, SYS_PTY_GET_WINSIZE, SYS_PTY_MASTER_READ,
+    SYS_PTY_MASTER_TRY_READ, SYS_PTY_MASTER_TRY_WRITE, SYS_PTY_MASTER_WRITE, SYS_PTY_POLL,
+    SYS_PTY_READABLE_BYTES, SYS_PTY_SET_PGRP, SYS_PTY_SET_TERMIOS, SYS_PTY_SET_WINSIZE,
+    SYS_PTY_SLAVE_ID, SYS_PTY_SLAVE_READ, SYS_PTY_SLAVE_TRY_READ, SYS_PTY_SLAVE_WRITE,
+    SYS_RLIMIT_GET, SYS_RLIMIT_SET, SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE,
+    SYS_SCHED_RECONFIGURE, SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE, SYS_SECUREBOOT_ENROLL,
+    SYS_SECUREBOOT_REMOVE, SYS_SECUREBOOT_VERIFY, SYS_SEM_CLOSE, SYS_SEM_CREATE, SYS_SEM_SIGNAL,
+    SYS_SEM_TRY_WAIT, SYS_SEM_WAIT, SYS_SEM_WAIT_TIMEOUT, SYS_SERVICE_ACCEPT,
+    SYS_SERVICE_ACCEPT_TIMEOUT, SYS_SERVICE_CONNECT, SYS_SERVICE_REGISTER, SYS_SERVICE_TRY_ACCEPT,
+    SYS_SERVICE_UNREGISTER, SYS_SET_EXCEPTION_HANDLER, SYS_SET_FS_BASE, SYS_SHM_CLOSE,
+    SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_MAP_AT, SYS_SHM_SIZE, SYS_SHM_UNMAP, SYS_SIGNAL_ALTSTACK,
+    SYS_SIGNAL_MASK, SYS_SIGNAL_PENDING, SYS_SIGNAL_QUEUE, SYS_SIGNAL_REGISTER, SYS_SIGNAL_SEND,
     SYS_SIGNAL_STOP_SELF, SYS_SIGNAL_TGKILL, SYS_SLEEP, SYS_SOCKETPAIR_CLOSE,
     SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_RECV,
     SYS_SOCKETPAIR_RECV_TIMEOUT, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_SEND_TIMEOUT,
@@ -553,6 +553,8 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
     handlers[SYS_SIGNAL_QUEUE as usize] = Some(handlers::sys_signal_queue);
     handlers[SYS_SIGNAL_TGKILL as usize] = Some(handlers::sys_signal_tgkill);
+    handlers[SYS_PROCESS_GET_PRIORITY as usize] = Some(handlers::sys_process_get_priority);
+    handlers[SYS_PROCESS_SET_PRIORITY as usize] = Some(handlers::sys_process_set_priority);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
     handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
@@ -1015,6 +1017,7 @@ pub fn self_test() -> KernelResult<()> {
     test_process_cwd_umask_registered()?;
     test_thread_join_timeout_registered()?;
     test_dispatch_signal_siginfo_frame()?;
+    test_dispatch_priority_doors()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_ipc_possession()?;
     test_dispatch_dropping_root_is_one_way()?;
@@ -2393,6 +2396,106 @@ fn test_dispatch_signal_siginfo_frame() -> KernelResult<()> {
     Ok(())
 }
 
+/// The nice doors, made as a process makes them
+/// (`requests/e-ad-renicing-another-process-renices-the-caller.md`;
+/// `proc::priority`, design-decisions §1503):
+///
+/// - `SYS_PROCESS_SET_PRIORITY` (1089) reaches the named process: a parent
+///   lowers its child's priority, and is refused a stranger
+///   (`PermissionDenied`) and a raise beyond the child's `RLIMIT_NICE`
+///   (`ResourceExhausted`);
+/// - `SYS_PROCESS_GET_PRIORITY` (1088) reads any process with no authority,
+///   gives a group's most favoured member, and refuses an unknown `which`;
+/// - `SYS_PROCESS_SET_NICE` (532), the caller's own, now has its raise
+///   decided by the kernel.
+///
+/// The rule's own cases, groups and users included, are
+/// `proc::priority::self_test`'s.
+fn test_dispatch_priority_doors() -> KernelResult<()> {
+    use crate::proc::pcb::{self, ProcessId};
+    use crate::proc::thread::self_test_as_process;
+
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: priority doors: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+    let args = |arg0: u64, arg1: u64, arg2: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    // Nice n travels as n + 20.
+    let biased = |nice: i64| u64::try_from(nice.saturating_add(20)).unwrap_or(20);
+
+    let parent = pcb::create("prio-door-parent", 0);
+    let stranger = pcb::create("prio-door-stranger", 0);
+    let Ok(child) = pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new())
+    else {
+        return fail("could not fork the scratch child", &[parent, stranger]);
+    };
+    let pids = [child, parent, stranger];
+    let as_parent =
+        |nr: u64, a: SyscallArgs| self_test_as_process(parent, || dispatch(nr, &a).value);
+    let as_stranger =
+        |nr: u64, a: SyscallArgs| self_test_as_process(stranger, || dispatch(nr, &a).value);
+
+    // Lowering a child's priority: allowed, and it is the child that moves.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(10))) != 0
+        || pcb::get_nice(child) != Some(10)
+        || pcb::get_nice(parent) != Some(0)
+    {
+        return fail(
+            "a parent could not renice its child, or reniced itself",
+            &pids,
+        );
+    }
+    // A stranger is not the parent's to renice; a raise is not without the right.
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, stranger, biased(10)))
+        != code(KernelError::PermissionDenied)
+        || pcb::get_nice(stranger) != Some(0)
+    {
+        return fail("a stranger was reniced", &pids);
+    }
+    if as_parent(SYS_PROCESS_SET_PRIORITY, args(0, child, biased(5)))
+        != code(KernelError::ResourceExhausted)
+        || pcb::get_nice(child) != Some(10)
+    {
+        return fail("a raise without the right went through", &pids);
+    }
+    // Reading needs no authority; a group answers its most favoured member.
+    if as_parent(SYS_PROCESS_GET_PRIORITY, args(0, stranger, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(1, 0, 0)) != 20
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(0, child, 0)) != 30
+        || as_parent(SYS_PROCESS_GET_PRIORITY, args(3, 0, 0)) != code(KernelError::InvalidArgument)
+    {
+        return fail("getpriority's answers", &pids);
+    }
+    // The caller's own: a raise refused, a lowering answered with the old nice.
+    if as_stranger(SYS_PROCESS_SET_NICE, args(biased(-5), 0, 0))
+        != code(KernelError::ResourceExhausted)
+        || as_stranger(SYS_PROCESS_SET_NICE, args(biased(5), 0, 0)) != 20
+        || pcb::get_nice(stranger) != Some(5)
+    {
+        return fail("SYS_PROCESS_SET_NICE's raise check", &pids);
+    }
+
+    for p in pids {
+        pcb::destroy(p);
+    }
+    serial_println!(
+        "[syscall]   SYS_PROCESS_GET_PRIORITY (1088), SYS_PROCESS_SET_PRIORITY (1089), \
+         SYS_PROCESS_SET_NICE's raise: OK"
+    );
+    Ok(())
+}
+
 /// The Secure Boot doors (1082-1084, design-decisions §978).
 ///
 /// **ENROLL and REMOVE** change the table, so each is gated before it reads an
@@ -2574,6 +2677,7 @@ fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
             0,
             Rights::READ | Rights::IO_REALTIME,
         ),
+        (ResourceType::Thread, 0, Rights::IO_REALTIME),
     ] {
         if pcb::grant_capability(pid, rt, id, rights).is_err() {
             return fail("could not grant the scratch process its capabilities", pid);
@@ -2617,6 +2721,10 @@ fn test_dispatch_dropping_root_is_one_way() -> KernelResult<()> {
         (
             "realtime I/O",
             !has(ResourceType::IoScheduler, Rights::IO_REALTIME),
+        ),
+        (
+            "raising priority (CAP_SYS_NICE)",
+            !has(ResourceType::Thread, Rights::IO_REALTIME),
         ),
     ] {
         if !gone {

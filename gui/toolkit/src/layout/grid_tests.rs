@@ -222,6 +222,30 @@ fn placed_items_are_filled_around() {
     assert_eq!(cells(&p), [(0, 0), (0, 1), (1, 0)]);
 }
 
+/// **A column behind the cursor is a row down even where its cell is
+/// free**: the cursor only goes forward. A two-wide item that could not
+/// start in column 0 (column 1 is taken) left (0, 0) empty and the cursor
+/// past it; an item for column 0 alone goes to (1, 0), not back to (0, 0).
+#[test]
+fn a_column_behind_the_cursor_is_a_row_down_though_its_cell_is_free() {
+    let grid = GridLayout {
+        columns: vec![Track::Px(10.0); 4],
+        ..GridLayout::default()
+    };
+    let mut column_only = auto(1.0, 1.0);
+    column_only.1.column = Some(0);
+    let p = lay(
+        Size::new(100.0, 100.0),
+        &grid,
+        &[
+            at(0, 1, 1.0, 1.0),
+            (Size::new(1.0, 1.0), GridItem::default().spanning(1, 2)),
+            column_only,
+        ],
+    );
+    assert_eq!(cells(&p), [(0, 1), (0, 2), (1, 0)]);
+}
+
 /// **An item too wide for the rest of a row starts the next one**, leaving
 /// the cells it skipped empty (sparse placement, as CSS's default).
 #[test]

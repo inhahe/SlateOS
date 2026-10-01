@@ -1709,6 +1709,40 @@ mod tests {
         assert_ne!(tree.focused_id(), Some(field_id));
     }
 
+    /// **A nested widget's own handler is given the pointer in its own
+    /// space, too**: a checkbox two padded containers deep toggles when the
+    /// click lands on it, and not when it lands where the checkbox would be
+    /// if the containers' offsets were forgotten -- the window's corner.
+    #[test]
+    fn a_click_toggles_a_checkbox_nested_in_padded_containers() {
+        let inner = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_padding(Edges::all(12.0))
+            .with_child(Widget::checkbox("nested", false));
+        let root = Widget::container()
+            .with_flex_direction(FlexDirection::Column)
+            .with_padding(Edges::all(20.0))
+            .with_child(inner);
+        let mut tree = WidgetTree::new(root, 400.0, 300.0);
+        tree.layout();
+        let released = |x, y| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Release(crate::event::MouseButton::Left),
+            })
+        };
+        let checked = |tree: &WidgetTree| match &tree.root.children[0].children[0].kind {
+            WidgetKind::Checkbox { checked, .. } => *checked,
+            other => panic!("not a checkbox: {other:?}"),
+        };
+        // Its corner on the window is 20 + 12 in from the window's.
+        tree.handle_event(&released(5.0, 5.0));
+        assert_eq!(checked(&tree), CheckState::Unchecked);
+        tree.handle_event(&released(36.0, 36.0));
+        assert_eq!(checked(&tree), CheckState::Checked);
+    }
+
     /// The colours of the first command of each kind a tree draws.
     fn first_fill(tree: &WidgetTree) -> Option<Color> {
         tree.render().commands.iter().find_map(|c| match c {

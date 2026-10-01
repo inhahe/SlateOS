@@ -863,20 +863,22 @@ mod tests {
         let shift = RenderCommand::PushTranslate { dx: 1.0, dy: 2.0 };
         assert_eq!(shift.clone().faded(0.0), shift);
 
-        // Out of range is held to it: nothing past opaque, nothing below
-        // invisible.
+        // Out of range is held to it: a fade never makes a colour more
+        // opaque than it was, and nothing goes below invisible. (The colour
+        // is part-transparent so that a factor of 2 would show: on an opaque
+        // one the byte's own ceiling would hide it.)
         let line = |a| {
             RenderCommand::Line {
                 x1: 0.0,
                 y1: 0.0,
                 x2: 1.0,
                 y2: 1.0,
-                color: Color { a: 255, ..ink },
+                color: Color { a: 100, ..ink },
                 width: 1.0,
             }
             .faded(a)
         };
-        assert!(matches!(line(2.0), RenderCommand::Line { color, .. } if color.a == 255));
+        assert!(matches!(line(2.0), RenderCommand::Line { color, .. } if color.a == 100));
         assert!(matches!(line(-1.0), RenderCommand::Line { color, .. } if color.a == 0));
     }
 

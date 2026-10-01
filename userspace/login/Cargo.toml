@@ -32,6 +32,11 @@ userdb = { path = "../userdb" }
 # returns ENOSYS elsewhere, so a host build fails the call rather than
 # entering a foreign kernel with a Slate OS syscall number.
 libservicebus = { path = "../libservicebus" }
+# The login records -- utmp, wtmp, btmp -- through the C library's calls
+# (pututxline, updwtmpx), which own their locking and search rules.
+libcall = { path = "../../libcall" }
+# The "Last login:" line, in local time as ctime(3) gives it.
+localtime = { path = "../localtime" }
 # One rendering of untrusted text inside a diagnostic. A login name reaches
 # this program's stderr, and a name may hold any byte but `/` and NUL --
 # including a newline, which would let whoever chose the name write extra lines

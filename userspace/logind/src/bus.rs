@@ -1435,7 +1435,8 @@ mod tests {
     /// session does not exist. These three are different questions and get
     /// different answers:
     ///
-    /// * a session with a real leader, on a host that cannot signal at all;
+    /// * a session with a leader, whose signal is sent and reaches nobody
+    ///   (`crate::NOBODY_PIDS`: ENOSYS on the Windows host, ESRCH on unix);
     /// * a session whose leader pid is 0, which must be refused even where
     ///   signalling works, because `kill(2)` reads a non-positive pid as a
     ///   process GROUP and 0 is the caller's own;
@@ -1447,9 +1448,10 @@ mod tests {
     fn killing_a_session_keeps_its_failure_cases_apart() {
         let (mut d, alice, _bob) = two_user_daemon();
 
-        // Real leader, host that cannot signal. `two_user_daemon` does not set
-        // one, so give this session a leader to separate the two cases.
-        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+        // A leader no process can be, so the signal is really sent and
+        // reaches nobody. `two_user_daemon` does not set one, so give this
+        // session a leader to separate the two cases.
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = crate::NOBODY_PIDS[3];
         assert_eq!(
             call(
                 &mut d,
@@ -1457,7 +1459,7 @@ mod tests {
                 &[alice.as_bytes(), b"15"],
                 Some(creds(0))
             ),
-            Reply::Error(ERR_CANNOT_SIGNAL)
+            Reply::Error(crate::SIGNAL_TO_NOBODY.bus_name())
         );
 
         // Leader pid 0 -- refused for its own reason, on every target.
@@ -1494,7 +1496,7 @@ mod tests {
     #[test]
     fn killing_someone_elses_session_is_refused() {
         let (mut d, alice, _bob) = two_user_daemon();
-        d.sessions.get_mut(&alice).expect("alice").leader_pid = 4242;
+        d.sessions.get_mut(&alice).expect("alice").leader_pid = crate::NOBODY_PIDS[3];
 
         // bob's uid, alice's session: `authorize` reports the session as
         // ABSENT rather than forbidden, so bob cannot confirm it exists.
@@ -1512,8 +1514,8 @@ mod tests {
             call(&mut d, "KillSession", &[alice.as_bytes(), b"15"], None),
             Reply::Error(ERR_UNKNOWN_CALLER)
         );
-        // The owner gets past authorisation and reaches the signal, which this
-        // host cannot send -- the control proving the two refusals above are
+        // The owner gets past authorisation and reaches the signal, which
+        // reaches nobody -- the control proving the two refusals above are
         // about authority and not about the arguments.
         assert_eq!(
             call(
@@ -1522,7 +1524,7 @@ mod tests {
                 &[alice.as_bytes(), b"15"],
                 Some(creds(1000))
             ),
-            Reply::Error(ERR_CANNOT_SIGNAL)
+            Reply::Error(crate::SIGNAL_TO_NOBODY.bus_name())
         );
     }
 

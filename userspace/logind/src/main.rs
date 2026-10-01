@@ -2953,6 +2953,29 @@ pub(crate) fn test_verifier() -> authlib::Authenticator {
     ))
 }
 
+/// Leader pids for test sessions, which no process can have.
+///
+/// A kill test really sends its signal: on a unix host `libcall::kill` is
+/// the real `kill(2)`, and only the Windows host stubs it. So the pids must
+/// name nobody. These are above Linux's highest possible `pid_max` (2^22,
+/// 4194304), so a signal to one can only come back ESRCH. The fixtures used
+/// 100, 200, 300 and 4242 -- whatever happens to have those numbers on the
+/// machine running the tests -- and `kill_user(1000, 9)` sent SIGKILL to two
+/// of them; on 2026-10-01 the unix-half gate ran them in WSL for the first
+/// time, and nothing died only because those pids were free.
+#[cfg(test)]
+pub(crate) const NOBODY_PIDS: [u32; 4] =
+    [2_000_000_100, 2_000_000_200, 2_000_000_300, 2_000_004_242];
+
+/// What a signal to one of [`NOBODY_PIDS`] comes back as on this host: ESRCH
+/// where `libcall::kill` is the real call (every unix), ENOSYS where it is
+/// the stub (the Windows host). Either way the leader was found and the
+/// signal attempted, which is what the kill tests need to show.
+#[cfg(all(test, unix))]
+pub(crate) const SIGNAL_TO_NOBODY: KillError = KillError::LeaderGone;
+#[cfg(all(test, not(unix)))]
+pub(crate) const SIGNAL_TO_NOBODY: KillError = KillError::Unsupported;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -2977,7 +3000,7 @@ mod tests {
             tty: "/dev/tty1",
             service: "login",
             desktop: "gnome",
-            leader_pid: 100,
+            leader_pid: NOBODY_PIDS[0],
             ..Default::default()
         })
         .unwrap();
@@ -2989,7 +3012,7 @@ mod tests {
             vt_nr: 2,
             tty: "/dev/tty2",
             service: "login",
-            leader_pid: 200,
+            leader_pid: NOBODY_PIDS[1],
             ..Default::default()
         })
         .unwrap();
@@ -3000,7 +3023,7 @@ mod tests {
             tty: ":1",
             service: "sshd",
             desktop: "kde",
-            leader_pid: 300,
+            leader_pid: NOBODY_PIDS[2],
             ..Default::default()
         })
         .unwrap();
@@ -4019,7 +4042,7 @@ mod tests {
 
     // --- Kill session/user ---
 
-    /// The host cannot signal, and says so rather than reporting a send.
+    /// A signal that does not arrive is reported, not counted as a send.
     ///
     /// This test used to be `let pid = d.kill_session("1", 15).unwrap();
     /// assert_eq!(pid, 100)` -- which passed because `kill_session` looked the
@@ -4027,14 +4050,17 @@ mod tests {
     /// parameter's underscore was the defect written into the signature, and
     /// the test certified it.
     ///
-    /// On any target that is not SlateOS, `libcall::kill` answers ENOSYS. So
-    /// this pins the FAILURE path, which is the only one this host can reach,
-    /// and a green run means "logind says so when it cannot signal" rather
-    /// than "killing works". The other half needs a boot test.
+    /// The signal really is sent: on the Windows host `libcall::kill` is a
+    /// stub answering ENOSYS, and on a unix host it is `kill(2)`, aimed at a
+    /// leader that cannot exist ([`NOBODY_PIDS`]) and so answered ESRCH --
+    /// [`SIGNAL_TO_NOBODY`] is whichever this host gives. So this pins the
+    /// FAILURE path, and a green run means "logind says so when the signal
+    /// reaches nobody" rather than "killing works". The other half needs a
+    /// boot test.
     #[test]
     fn killing_a_session_says_it_cannot_rather_than_reporting_a_signal() {
         let d = test_daemon();
-        assert_eq!(d.kill_session("1", 15), Err(KillError::Unsupported));
+        assert_eq!(d.kill_session("1", 15), Err(SIGNAL_TO_NOBODY));
     }
 
     /// A name `KillError` owns is NOT duplicated in `describe_bus_error`.
@@ -4250,18 +4276,18 @@ mod tests {
     /// first was `test_kill_session`, and both were written against the
     /// behaviour rather than the intent.
     ///
-    /// Alice HAS two sessions, so reaching `Unsupported` means the leaders
-    /// were found and the signal was attempted. A uid with none stops before
-    /// that and says so. If the two collapsed, an operator could not tell a
-    /// machine that cannot signal from a user who is not logged in -- and
-    /// would go looking for the wrong one.
+    /// Alice HAS two sessions, so reaching [`SIGNAL_TO_NOBODY`] means the
+    /// leaders were found and the signal was attempted. A uid with none stops
+    /// before that and says so. If the two collapsed, an operator could not
+    /// tell a machine that cannot signal from a user who is not logged in --
+    /// and would go looking for the wrong one.
     #[test]
     fn killing_a_user_separates_no_sessions_from_cannot_signal() {
         let d = test_daemon();
         assert_eq!(
             d.kill_user(1000, 9),
-            Err(KillError::Unsupported),
-            "alice has two leaders, so this reached the signal and the host refused it"
+            Err(SIGNAL_TO_NOBODY),
+            "alice has two leaders, so this reached the signal, which reached nobody"
         );
         assert_eq!(
             d.kill_user(9999, 15),

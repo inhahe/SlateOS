@@ -84,7 +84,7 @@
 mod source;
 mod tzif;
 
-pub use source::{LOCALTIME, TzSource, ZONEINFO_DIR, tz_source};
+pub use source::{LOCALTIME, TzPlan, TzSource, ZONEINFO_DIR, ZoneFile, tz_plan, tz_source};
 pub use tzif::{LocalTimeType, TzFile};
 
 /// Longest zone abbreviation stored, in bytes.
@@ -304,7 +304,14 @@ impl Tz {
     /// glibc still accepts `:EST5EDT`.
     #[must_use]
     pub fn parse(s: &[u8]) -> Option<Self> {
-        let s = s.strip_prefix(b":").unwrap_or(s);
+        Self::parse_rule(s.strip_prefix(b":").unwrap_or(s))
+    }
+
+    /// Parse a POSIX `TZ` string exactly as given -- a leading `:` is not a
+    /// rule's -- for [`TzPlan::fallback`](crate::TzPlan::fallback), which has
+    /// dropped the one `:` glibc drops. A second is part of the name, and
+    /// `TZ=::EST5EDT` is UTC in glibc, not Eastern time.
+    pub(crate) fn parse_rule(s: &[u8]) -> Option<Self> {
         if s.is_empty() {
             return None;
         }

@@ -12,8 +12,8 @@
 //! # The zone
 //!
 //! [`DateTimeSettings::zone`] is `None` unless the user chose one, and then the
-//! clock shows the machine's own zone -- [`system_zone`], read the way the libc
-//! reads it (`tzrules::tz_source`), so that the taskbar and `date` agree about
+//! clock shows the machine's own zone -- [`system_zone`], read the way glibc
+//! reads it (`tzrules::tz_plan`), so that the taskbar and `date` agree about
 //! the time. A zone the user *chooses* is one of [`zones`], each of which
 //! carries its own POSIX rule and so needs no tzdata installed.
 //!
@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 pub use tzrules::Tz;
-use tzrules::{TzFile, TzSource};
+use tzrules::{TzFile, TzPlan, ZoneFile};
 use yamldoc::Document;
 
 // ============================================================================
@@ -369,10 +369,10 @@ pub mod clock {
 /// truncated -- half a transition table would render confidently wrong times.
 pub const MAX_ZONEINFO_BYTES: u64 = 16 * 1024;
 
-/// The zone this machine is in, read the way the libc reads it: `TZ` if the
-/// environment sets it, else `/etc/localtime`, else UTC
-/// (`tzrules::tz_source` has the whole order). So the desktop's clock and
-/// `date` agree.
+/// The zone this machine is in, read the way glibc reads it: `TZ` if the
+/// environment sets it -- a zoneinfo file of that name, else the POSIX rule
+/// it spells -- else `/etc/localtime`, else UTC (`tzrules::tz_plan` has the
+/// whole order). So the desktop's clock and `date` agree.
 ///
 /// Reads the environment and possibly a file, so it is asked when the
 /// settings are read, not per frame.
@@ -381,30 +381,39 @@ pub fn system_zone() -> Tz {
     let tz = env::var_os("TZ");
     let tzdir = env::var_os("TZDIR");
     resolve_zone(
-        tzrules::tz_source(tz.as_deref().map(OsStr::as_encoded_bytes)),
+        tzrules::tz_plan(tz.as_deref().map(OsStr::as_encoded_bytes)),
         tzdir.as_deref().map(Path::new),
         read_zoneinfo,
     )
 }
 
-/// What `source` resolves to, reading any file through `read` -- the testable
-/// core of [`system_zone`].
+/// What `plan` resolves to, reading any file through `read` -- the testable
+/// core of [`system_zone`]: the plan's file if it can be read and parsed,
+/// else what stands in for it (the rule `TZ` spells, or UTC).
 ///
 /// A file is read as the rule in force from its last recorded transition on
 /// (its *tail*, `TzFile::tail`): exact for every date from then to the far
-/// future, which is every date a desktop clock shows. Anything that cannot
-/// be read, parsed or resolved is UTC, as it is for the libc.
+/// future, which is every date a desktop clock shows. A file with no tail --
+/// a version 1 file, or an empty footer -- stays as its last transition left
+/// it, which is what glibc does past a file's last transition.
 pub fn resolve_zone(
-    source: TzSource<'_>,
+    plan: TzPlan<'_>,
     tzdir: Option<&Path>,
     mut read: impl FnMut(&Path) -> Option<Vec<u8>>,
 ) -> Tz {
-    let path = match source {
-        TzSource::Utc | TzSource::Refused => return Tz::utc(),
-        TzSource::Rule(rule) => return rule,
-        TzSource::Path(path) => path_from_bytes(path),
-        TzSource::System => path_from_bytes(tzrules::LOCALTIME),
-        TzSource::Named(name) => {
+    plan.file()
+        .and_then(|file| read(&zone_path(file, tzdir)))
+        .as_deref()
+        .and_then(TzFile::parse)
+        .map_or_else(|| plan.fallback(), |file| zone_of(&file))
+}
+
+/// Where `file` is, with `TZDIR` (`tzdir`) for a name.
+fn zone_path(file: ZoneFile<'_>, tzdir: Option<&Path>) -> PathBuf {
+    match file {
+        ZoneFile::System => path_from_bytes(tzrules::LOCALTIME),
+        ZoneFile::Path(path) => path_from_bytes(path),
+        ZoneFile::Named(name) => {
             // `TZDIR` is the glibc spelling for an alternate tree; an empty one
             // is no tree at all, as the libc treats it.
             let dir = tzdir
@@ -412,12 +421,23 @@ pub fn resolve_zone(
                 .map_or_else(|| path_from_bytes(tzrules::ZONEINFO_DIR), Path::to_path_buf);
             dir.join(path_from_bytes(name))
         }
-    };
-    read(&path)
-        .as_deref()
-        .and_then(TzFile::parse)
-        .and_then(|file| file.tail())
-        .unwrap_or_else(Tz::utc)
+    }
+}
+
+/// The zone a parsed file keeps from now on: its tail, or, with none, the
+/// state its last transition left -- an offset and a name, and no more
+/// changes.
+fn zone_of(file: &TzFile<'_>) -> Tz {
+    file.tail().unwrap_or_else(|| {
+        // Past every transition: with no tail, `lookup` answers the last
+        // transition's state, or the file's only one if it records none.
+        let last = file.lookup(i64::MAX);
+        Tz {
+            std_name: last.name,
+            std_gmtoff: last.gmtoff,
+            dst: None,
+        }
+    })
 }
 
 /// A path from the bytes `tzrules` deals in: exact on the target, where a
@@ -874,20 +894,29 @@ mod tests {
     /// A minimal slim `TZif` v2 file: no transitions, one type, and `tail` as
     /// its footer -- the shape `zic -b slim` writes for a zone.
     fn tzif(tail: &str) -> Vec<u8> {
-        fn header(out: &mut Vec<u8>) {
+        tzif_typed(0, "UTC", tail)
+    }
+
+    /// A `TZif` v2 file whose one local time type is `gmtoff` seconds east,
+    /// named `name`, with `tail` as its footer -- empty for a file that
+    /// states no rule past its records.
+    fn tzif_typed(gmtoff: i32, name: &str, tail: &str) -> Vec<u8> {
+        let header = |out: &mut Vec<u8>| {
             out.extend_from_slice(b"TZif2");
             out.extend_from_slice(&[0; 15]);
+            let chars = u32::try_from(name.len() + 1).unwrap();
             // isutcnt, isstdcnt, leapcnt, timecnt, typecnt, charcnt
-            for count in [0u32, 0, 0, 0, 1, 4] {
+            for count in [0u32, 0, 0, 0, 1, chars] {
                 out.extend_from_slice(&count.to_be_bytes());
             }
-        }
+        };
         let mut out = Vec::new();
         for _ in 0..2 {
             header(&mut out);
-            out.extend_from_slice(&0i32.to_be_bytes());
+            out.extend_from_slice(&gmtoff.to_be_bytes());
             out.extend_from_slice(&[0, 0]);
-            out.extend_from_slice(b"UTC\0");
+            out.extend_from_slice(name.as_bytes());
+            out.push(0);
         }
         out.push(b'\n');
         out.extend_from_slice(tail.as_bytes());
@@ -923,18 +952,41 @@ mod tests {
     fn with_no_tz_the_machines_zone_is_etc_localtime() {
         let present = [("/etc/localtime", tzif("CET-1CEST,M3.5.0,M10.5.0/3"))];
         let (read, asked) = files(&present);
-        let zone = resolve_zone(tzrules::tz_source(None), None, read);
+        let zone = resolve_zone(tzrules::tz_plan(None), None, read);
         assert_eq!(zone, rule("CET-1CEST,M3.5.0,M10.5.0/3"));
         assert_eq!(*asked.borrow(), [PathBuf::from("/etc/localtime")]);
     }
 
-    /// A rule in `TZ` is used as it is, reading no file at all.
+    /// A rule in `TZ` is looked for as a file first, as glibc looks, and is
+    /// the rule when there is none.
     #[test]
-    fn a_rule_in_tz_reads_nothing() {
+    fn a_rule_in_tz_is_the_zone_when_no_file_has_its_name() {
         let (read, asked) = files(&[]);
-        let zone = resolve_zone(tzrules::tz_source(Some(b"JST-9")), None, read);
+        let zone = resolve_zone(tzrules::tz_plan(Some(b"JST-9")), None, read);
         assert_eq!(zone, rule("JST-9"));
-        assert!(asked.borrow().is_empty());
+        assert_eq!(
+            *asked.borrow(),
+            [PathBuf::from("/usr/share/zoneinfo/JST-9")]
+        );
+    }
+
+    /// A file wins over a rule of the same name: `EST5EDT` is both, and the
+    /// file is what glibc reads (`TZDIR` pointing at a tree whose `EST5EDT`
+    /// is Tokyo's, glibc says `JST`).
+    #[test]
+    fn a_file_is_read_before_a_rule_of_the_same_name() {
+        let present = [("/opt/zones/EST5EDT", tzif("JST-9"))];
+        let (read, _) = files(&present);
+        let zone = resolve_zone(
+            tzrules::tz_plan(Some(b"EST5EDT")),
+            Some(Path::new("/opt/zones")),
+            read,
+        );
+        assert_eq!(zone, rule("JST-9"));
+        // Without the file, the rule.
+        let (read, _) = files(&present);
+        let zone = resolve_zone(tzrules::tz_plan(Some(b"EST5EDT")), None, read);
+        assert_eq!(zone, rule("EST5EDT"));
     }
 
     /// A name in `TZ` is a file under `TZDIR`, or the standard tree without it.
@@ -945,15 +997,54 @@ mod tests {
             ("/opt/zones/Asia/Tokyo", tzif("<+0930>-9:30")),
         ];
         let (read, _) = files(&present);
-        let zone = resolve_zone(tzrules::tz_source(Some(b"Asia/Tokyo")), None, read);
+        let zone = resolve_zone(tzrules::tz_plan(Some(b"Asia/Tokyo")), None, read);
         assert_eq!(zone, rule("JST-9"));
         let (read, _) = files(&present);
         let zone = resolve_zone(
-            tzrules::tz_source(Some(b"Asia/Tokyo")),
+            tzrules::tz_plan(Some(b"Asia/Tokyo")),
             Some(Path::new("/opt/zones")),
             read,
         );
         assert_eq!(zone, rule("<+0930>-9:30"));
+    }
+
+    /// An empty `TZ` is the name `Universal`, as in glibc: that file where
+    /// there is one, UTC where there is not.
+    #[test]
+    fn an_empty_tz_is_the_file_universal_or_utc() {
+        let present = [("/usr/share/zoneinfo/Universal", tzif("UTC0"))];
+        let (read, asked) = files(&present);
+        let zone = resolve_zone(tzrules::tz_plan(Some(b"")), None, read);
+        assert_eq!(zone, rule("UTC0"));
+        assert_eq!(
+            *asked.borrow(),
+            [PathBuf::from("/usr/share/zoneinfo/Universal")]
+        );
+        let (read, _) = files(&[]);
+        assert_eq!(
+            resolve_zone(tzrules::tz_plan(Some(b"")), None, read),
+            Tz::utc()
+        );
+    }
+
+    /// A file that states no rule past its records -- an empty footer, or a
+    /// version 1 file -- stays as its last record left it; it is not UTC,
+    /// and it is not the rule `TZ` might also spell.
+    #[test]
+    fn a_file_with_no_tail_keeps_its_last_state() {
+        let present = [
+            ("/etc/localtime", tzif_typed(19_800, "IST", "")),
+            ("/usr/share/zoneinfo/JST-9", tzif_typed(3_600, "XYZ", "")),
+        ];
+        let (read, _) = files(&present);
+        let zone = resolve_zone(tzrules::tz_plan(None), None, read);
+        assert_eq!(zone.std_gmtoff, 19_800);
+        assert_eq!(zone.std_name.as_bytes(), b"IST");
+        assert_eq!(zone.dst, None);
+        let (read, _) = files(&present);
+        let zone = resolve_zone(tzrules::tz_plan(Some(b"JST-9")), None, read);
+        assert_eq!(zone.std_gmtoff, 3_600);
+        assert_eq!(zone.std_name.as_bytes(), b"XYZ");
     }
 
     /// Everything that cannot be read, parsed or resolved is UTC -- as it is
@@ -968,12 +1059,13 @@ mod tests {
         for tz in [
             None,                      // unreadable /etc/localtime
             Some(&b""[..]),            // TZ set and empty: UTC by request
+            Some(b":"),                // nothing after the `:`
             Some(b"Nowhere/Special"),  // no such file
             Some(b"../../etc/shadow"), // refused, never opened
-            Some(b"Big"),              // not a zone file
+            Some(b"Big"),              // not a zone file, nor a rule
         ] {
             let (read, asked) = files(&present);
-            let zone = resolve_zone(tzrules::tz_source(tz), None, read);
+            let zone = resolve_zone(tzrules::tz_plan(tz), None, read);
             assert_eq!(zone, Tz::utc(), "{tz:?}");
             let opened_shadow = asked.borrow().iter().any(|p| {
                 p.as_os_str()

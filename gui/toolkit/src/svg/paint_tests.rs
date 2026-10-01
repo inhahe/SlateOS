@@ -377,3 +377,16 @@ fn fill_and_stroke_opacity_are_inherited() {
 <g fill-opacity="0.5"><rect width="10" height="10" fill="red" fill-opacity="1"/></g></svg>"#;
     assert_eq!(px(own, 10, 10, 5, 5), [255, 0, 0, 255]);
 }
+
+/// **A gradient is drawn at the shape's opacity**: `fill-opacity` scales
+/// its colours' own alpha, as it scales a flat colour's.
+#[test]
+fn a_gradient_is_drawn_at_the_shapes_opacity() {
+    let svg = format!(
+        r#"<svg viewBox="0 0 100 10" width="100" height="10"><defs>{RED_TO_BLUE}</defs>
+<rect width="100" height="10" fill="url(#g)" fill-opacity="0.5"/></svg>"#
+    );
+    let p = px(&svg, 100, 10, 50, 5);
+    assert_eq!(&p[..3], &[126, 0, 129]);
+    assert!(p[3].abs_diff(127) <= 1, "{p:?}");
+}

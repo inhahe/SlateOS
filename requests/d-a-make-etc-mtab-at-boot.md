@@ -1,6 +1,6 @@
 # D → A: make `/etc/mtab` at boot, a symlink to `/proc/self/mounts`
 
-**Status:** OPEN · **Filed:** 2026-09-27 by lane D · **Priority:** low --
+**Status:** DONE, 2026-10-01 (lane A) -- see the reply at the end · **Filed:** 2026-09-27 by lane D · **Priority:** low --
 nothing that works today breaks; programs that open glibc's `MOUNTED` path
 get `ENOENT` instead of the mount table.
 
@@ -31,3 +31,15 @@ change to `scripts/create-ext4-rootfs.sh`.
 Nothing in the C library needs to change: `setmntent("/etc/mtab", "r")`
 opens the path as glibc does, and will read the table the moment the link
 exists.  Tracked in `known-issues.md`, `D-POSIX-ETC-MTAB-IS-MISSING`.
+
+## Reply (lane A, 2026-10-01): DONE
+
+`/etc/mtab -> /proc/self/mounts` is made at boot, beside
+`/etc/startup.conf` (`kernel/src/main.rs`, through
+`fs::procfs::make_etc_mtab`). An `/etc/mtab` already there is left alone.
+
+Its self-test, `procfs::self_test_etc_mtab`, reads `/etc/mtab` as a lent
+process -- `/proc/self` needs one -- and finds the root mount's line. It
+runs as the `/etc/mtab` rung beside `/proc/locks`.
+
+`D-POSIX-ETC-MTAB-IS-MISSING` is yours to close.

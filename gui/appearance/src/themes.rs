@@ -15,7 +15,8 @@
 //! animation axis, how the desktop's transitions move, is
 //! [`AnimationTheme`] and its `animation` section; the window-decorations
 //! axis, the shape of every window's frame, is [`DecorationTheme`] and its
-//! `window-decorations` section.
+//! `window-decorations` section; the taskbar-panel axis, the taskbar's finish
+//! and spacing, is [`PanelTheme`] and its `taskbar-panel` section.
 //!
 //! # A theme on disk
 //!
@@ -110,6 +111,7 @@
 //! [`AppearanceSettings::read_from`]: crate::AppearanceSettings::read_from
 
 use crate::decorations::DecorationStyle;
+use crate::panel::PanelStyle;
 use guitk::color::Color;
 use guitk::motion::Motion;
 use guitk::palette::{TERMINAL_ROLES, THEME_ROLES, ThemeColors, syntax_roles};
@@ -126,11 +128,13 @@ use yamldoc::Document;
 
 mod animation;
 mod decorations;
+mod panel;
 mod values;
 mod widgets;
 
 pub use animation::AnimationTheme;
 pub use decorations::DecorationTheme;
+pub use panel::PanelTheme;
 pub use widgets::WidgetTheme;
 
 /// The built-in theme's name: what `theme.colors` holds when the user has
@@ -187,6 +191,11 @@ pub const ANIMATION_SECTION: &str = "animation";
 /// the border and the shadow ([`DecorationTheme`]). Named as the axis is in
 /// `meta.supports`.
 pub const DECORATIONS_SECTION: &str = "window-decorations";
+
+/// The section holding a theme's taskbar panel: how much glass it wears and
+/// how its tiles are spaced ([`PanelTheme`]). Named as the axis is in
+/// `meta.supports`.
+pub const PANEL_SECTION: &str = "taskbar-panel";
 
 /// The largest theme file that is read.
 ///
@@ -333,6 +342,8 @@ pub enum ThemeError {
     NoAnimation,
     /// The file was read but has no usable `window-decorations` section.
     NoDecorations,
+    /// The file was read but has no usable `taskbar-panel` section.
+    NoPanel,
 }
 
 impl fmt::Display for ThemeError {
@@ -351,6 +362,7 @@ impl fmt::Display for ThemeError {
             Self::NoWidgetStyle => f.write_str("sets no widget style"),
             Self::NoAnimation => f.write_str("sets no animation"),
             Self::NoDecorations => f.write_str("sets no window frames"),
+            Self::NoPanel => f.write_str("sets no taskbar panel"),
         }
     }
 }
@@ -401,6 +413,10 @@ pub struct ThemeFile {
     /// built-in ones; `None` when it has no such section, or one that sets
     /// nothing usable.
     pub decorations: Option<DecorationStyle>,
+    /// The taskbar panel its `taskbar-panel` section sets, over the built-in
+    /// one; `None` when it has no such section, or one that sets nothing
+    /// usable.
+    pub panel: Option<PanelStyle>,
     /// What in it was not understood and so was ignored -- a colour this
     /// desktop has no role for, a value that is not a colour. For the theme's
     /// author, and for a theme browser to show them: the theme is used without
@@ -436,12 +452,14 @@ pub fn parse(text: &str) -> ThemeFile {
     let widget_style = widgets::read(&doc, &mut warnings);
     let motion = animation::read(&doc, &mut warnings);
     let decorations = decorations::read(&doc, &mut warnings);
+    let panel = panel::read(&doc, &mut warnings);
     ThemeFile {
         meta,
         colors,
         widget_style,
         motion,
         decorations,
+        panel,
         warnings: warnings.finish(),
     }
 }
@@ -683,6 +701,7 @@ pub(crate) fn fingerprint(doc: &Document) -> Vec<u8> {
         crate::widget_theme_name(doc),
         crate::animation_theme_name(doc),
         crate::decoration_theme_name(doc),
+        crate::panel_theme_name(doc),
     ]
     .into_iter()
     .flatten()
@@ -897,6 +916,9 @@ pub struct ThemeInfo {
     /// Whether it has a usable `window-decorations` section: the shape of
     /// the windows' frames.
     pub has_decorations: bool,
+    /// Whether it has a usable `taskbar-panel` section: the taskbar's finish
+    /// and spacing.
+    pub has_panel: bool,
     /// What in its file was ignored.
     pub warnings: Vec<String>,
     /// Why it could not be read, if it could not. A theme that cannot be read
@@ -935,6 +957,14 @@ impl ThemeInfo {
     #[must_use]
     pub fn provides_decorations(&self) -> bool {
         self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_decorations)
+    }
+
+    /// Whether it can be chosen for the taskbar-panel axis: it was read, and
+    /// its `taskbar-panel` section sets something -- or it is the built-in
+    /// theme, whose panel is compiled in.
+    #[must_use]
+    pub fn provides_panel(&self) -> bool {
+        self.origin == Origin::BuiltIn || (self.problem.is_none() && self.has_panel)
     }
 
     /// Whether it can be chosen for the icons axis: its folder holds an
@@ -1040,19 +1070,21 @@ fn built_in_info(dirs: &ThemeDirs) -> ThemeInfo {
             has_widget_style: true,
             has_animation: true,
             has_decorations: true,
+            has_panel: true,
             warnings: Vec::new(),
             problem: None,
         }
     };
     // Whatever its file says, the built-in theme's colours, icons, controls,
-    // motion and window frames are compiled in: it covers both modes, draws
-    // every icon, control and frame, moves everything, and cannot fail to
-    // load.
+    // motion, window frames and taskbar panel are compiled in: it covers both
+    // modes, draws every icon, control, frame and bar, moves everything, and
+    // cannot fail to load.
     info.has_dark = true;
     info.has_light = true;
     info.has_widget_style = true;
     info.has_animation = true;
     info.has_decorations = true;
+    info.has_panel = true;
     info.problem = None;
     info
 }
@@ -1088,6 +1120,7 @@ fn describe(
                 has_widget_style: file.widget_style.is_some(),
                 has_animation: file.motion.is_some(),
                 has_decorations: file.decorations.is_some(),
+                has_panel: file.panel.is_some(),
                 meta: file.meta,
                 screenshots,
                 warnings,
@@ -1106,6 +1139,7 @@ fn describe(
             has_widget_style: false,
             has_animation: false,
             has_decorations: false,
+            has_panel: false,
             warnings: Vec::new(),
             problem: Some(err),
         },

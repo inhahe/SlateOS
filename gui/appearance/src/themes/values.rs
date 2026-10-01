@@ -79,6 +79,75 @@ pub(super) fn value_of(
     }
 }
 
+/// A whole number of pixels held to `min..=max`, with a note when it was
+/// not in it; `what` names the thing measured, for the note.
+pub(super) fn read_pixels(
+    doc: &Document,
+    path: &[&str],
+    min: u16,
+    max: u16,
+    what: &str,
+    warnings: &mut Warnings,
+) -> Option<u16> {
+    let raw = value_of(doc, path, "a number of pixels, like 4", warnings)?;
+    let Ok(pixels) = raw.parse::<i64>() else {
+        warnings.push(format!(
+            "`{}` is ignored: `{}` is not a whole number of pixels",
+            at(path),
+            quoted(&raw)
+        ));
+        return None;
+    };
+    let held = pixels.clamp(i64::from(min), i64::from(max));
+    if held != pixels {
+        warnings.push(format!(
+            "`{}` is taken as {held}: {what} is {min} to {max} pixels",
+            at(path)
+        ));
+    }
+    u16::try_from(held).ok()
+}
+
+/// A share from 0 to 1 -- `0.6`, or `60%` -- as hundredths, held to that
+/// range with a note when it was not in it; `what` names what is shared, for
+/// the note.
+pub(super) fn read_share(
+    doc: &Document,
+    path: &[&str],
+    what: &str,
+    warnings: &mut Warnings,
+) -> Option<u8> {
+    let raw = value_of(doc, path, "a share from 0 to 1, like 0.6", warnings)?;
+    let parsed = match raw.strip_suffix('%') {
+        Some(percent) => percent.trim().parse::<f64>().ok().map(|p| p / 100.0),
+        None => raw.parse::<f64>().ok(),
+    }
+    .filter(|share| share.is_finite());
+    let Some(share) = parsed else {
+        warnings.push(format!(
+            "`{}` is ignored: `{}` is not a share from 0 to 1",
+            at(path),
+            quoted(&raw)
+        ));
+        return None;
+    };
+    let held = share.clamp(0.0, 1.0);
+    if !(0.0..=1.0).contains(&share) {
+        warnings.push(format!(
+            "`{}` is taken as {held}: {what} is 0 to 1",
+            at(path)
+        ));
+    }
+    // In 0..=100: a share held to 0..=1, in hundredths.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a share held to 0..=1, times 100"
+    )]
+    let hundredths = (held * 100.0).round() as u8;
+    Some(hundredths)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

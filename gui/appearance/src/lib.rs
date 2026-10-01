@@ -62,6 +62,8 @@ pub mod decorations;
 
 pub mod cursors;
 
+pub mod panel;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is
@@ -1542,6 +1544,14 @@ pub struct AppearanceSettings {
     /// and hit-tests frames from [`decorations`](Self::decorations); see
     /// [`themes::DecorationTheme`] and `design-decisions.md` §1456.
     pub decoration_theme: themes::DecorationTheme,
+    /// The theme the taskbar's finish and spacing come from -- how much of
+    /// the Aero reference's glass it wears, and the gaps between its tiles:
+    /// the built-in one unless the user chose another. `theme.taskbar_panel`
+    /// in the file, by the theme's folder name. The desktop draws and lays
+    /// out its taskbar from [`panel`](Self::panel); whether the bar is
+    /// see-through stays [`taskbar_style`](Self::taskbar_style). See
+    /// [`themes::PanelTheme`] and `design-decisions.md` §1460.
+    pub panel_theme: themes::PanelTheme,
     /// The hours `System (Auto)` is light, local time: from the window's start
     /// until its end, and dark the rest of the day. `theme.auto.light_from`
     /// and `theme.auto.dark_from` in the file; 07:00 until 19:00 unless the
@@ -1811,6 +1821,7 @@ impl Default for AppearanceSettings {
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
             decoration_theme: themes::DecorationTheme::built_in(),
+            panel_theme: themes::PanelTheme::built_in(),
             auto_light_hours: DEFAULT_AUTO_LIGHT_HOURS,
             auto_is_light: false,
             // Borders, per §829. The `Default` impl is what a machine with no
@@ -2075,6 +2086,14 @@ impl AppearanceSettings {
     #[must_use]
     pub fn decorations(&self) -> decorations::DecorationStyle {
         self.decoration_theme.style()
+    }
+
+    /// The taskbar's finish and spacing: the chosen taskbar-panel theme's, or
+    /// the built-in one where that could not be used
+    /// ([`themes::PanelTheme::problem`] says why).
+    #[must_use]
+    pub fn panel(&self) -> panel::PanelStyle {
+        self.panel_theme.style()
     }
 
     /// Validate and clamp settings to sane ranges.
@@ -2545,6 +2564,10 @@ impl AppearanceSettings {
         if let Some(name) = decoration_theme_name(doc) {
             s.decoration_theme = themes::DecorationTheme::load(&name);
         }
+        // The taskbar's panel, the same way.
+        if let Some(name) = panel_theme_name(doc) {
+            s.panel_theme = themes::PanelTheme::load(&name);
+        }
         read_into!(
             s.theme_mode,
             doc.get_str(&["theme", "mode"])
@@ -2865,6 +2888,10 @@ impl AppearanceSettings {
             &pathcodec::encode_path(std::path::Path::new(self.decoration_theme.id())),
         );
         doc.set_str(
+            &["theme", "taskbar_panel"],
+            &pathcodec::encode_path(std::path::Path::new(self.panel_theme.id())),
+        );
+        doc.set_str(
             &["theme", "surface_style"],
             surface_style_yaml_name(self.surface_style),
         );
@@ -3116,6 +3143,13 @@ pub(crate) fn animation_theme_name(doc: &Document) -> Option<std::ffi::OsString>
 /// [`color_theme_name`] is.
 pub(crate) fn decoration_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
     theme_name_at(doc, "decorations")
+}
+
+/// The taskbar-panel theme a settings document names, decoded; `None` for
+/// the built-in one. Shared by the reader and the watcher, as
+/// [`color_theme_name`] is.
+pub(crate) fn panel_theme_name(doc: &Document) -> Option<std::ffi::OsString> {
+    theme_name_at(doc, "taskbar_panel")
 }
 
 /// The theme `theme.<axis>` names, decoded; `None` when the key is absent or
@@ -3624,6 +3658,9 @@ mod tests {
     const ROUND_TRIP_DECORATIONS: &str = "cadres é";
     const ROUND_TRIP_DECORATIONS_FILE: &str =
         "window-decorations:\n  title-bar:\n    height: 36\n  buttons:\n    side: left\n";
+    /// The round trip's taskbar-panel theme: a sixth.
+    const ROUND_TRIP_PANEL: &str = "barre ö";
+    const ROUND_TRIP_PANEL_FILE: &str = "taskbar-panel:\n  gloss: 0.25\n  spacing:\n    tiles: 4\n";
 
     /// Install a theme in the scratch user's data directory under `root`,
     /// where `AppearanceSettings::read_from` will look for it.
@@ -3672,6 +3709,13 @@ mod tests {
                 themes::parse(ROUND_TRIP_DECORATIONS_FILE)
                     .decorations
                     .expect("the fixture sets window frames"),
+            ),
+            // A sixth, for the taskbar's panel.
+            panel_theme: themes::PanelTheme::from_style(
+                ROUND_TRIP_PANEL,
+                themes::parse(ROUND_TRIP_PANEL_FILE)
+                    .panel
+                    .expect("the fixture sets a taskbar panel"),
             ),
             // Every one of these differs from the default, which is what the
             // fixture is for: the defaults are `None`, 600 and `true`.
@@ -3774,6 +3818,7 @@ mod tests {
             install_theme(root, ROUND_TRIP_WIDGETS, ROUND_TRIP_WIDGETS_FILE);
             install_theme(root, ROUND_TRIP_ANIMATION, ROUND_TRIP_ANIMATION_FILE);
             install_theme(root, ROUND_TRIP_DECORATIONS, ROUND_TRIP_DECORATIONS_FILE);
+            install_theme(root, ROUND_TRIP_PANEL, ROUND_TRIP_PANEL_FILE);
             AppearanceSettings::read_from(&Document::parse(&doc.to_text()))
         });
         assert_eq!(reread, settings);

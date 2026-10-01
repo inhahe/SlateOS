@@ -682,6 +682,14 @@ find t -regextype posix-extended -regex 'a{1,0}'
 find t -regextype posix-extended -regex '[[:foo:]]'
 find t -regextype posix-extended -regex '[z-a]'
 find t -regextype posix-extended -regex 'a\'
+# A repetition straight after an assertion: refused, whichever assertion --
+# glibc returns from an anchor before it looks for one (TD-B-ERE-QUANTIFIED-ANCHOR).
+find t -regextype posix-extended -regex 't/f$*'
+find t -regextype posix-extended -regex 't/f\b+'
+find t -regextype posix-extended -regex 't/\<?f'
+find t -regextype posix-extended -regex 't/f(\b)*'
+# In a basic one, `\+` with nothing to repeat is the character.
+find t -regextype posix-basic -regex 't/\+f'
 find t -regextype posix-extended -regex ''
 find t -regextype posix-basic -regex 'a\('
 find t -regextype posix-basic -regex 'a\)'

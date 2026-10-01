@@ -22,8 +22,11 @@
 //! ## Where a translator has to be careful
 //!
 //! * **`*` is a literal where nothing precedes it** — at the start of the
-//!   pattern, right after `\(`, right after `\|`, and right after an anchoring
-//!   `^`. `grep '*'` searches for an asterisk; it is not an error.
+//!   pattern, right after `\(`, right after `\|`, right after an anchoring
+//!   `^`, and right after a zero-width assertion (`\<`, `\b`, `` \` ``, …),
+//!   whatever came before that. `grep '*'` searches for an asterisk; it is not
+//!   an error. `\+` and `\?` are literals in the same places, and `\{` is an
+//!   error there, as in glibc.
 //! * **`^` anchors only at the start, `$` only at the end** (or against the
 //!   inside of a `\(…\)` / either side of a `\|`). `a^b` and `a$b` match those
 //!   characters literally, and famously match nothing else.
@@ -79,10 +82,19 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
     let cs: Vec<Ch> = chars(pattern).collect();
     let mut out = Str::new();
     let mut i = 0usize;
-    // Whether a quantifier written here would have something to apply to. This
-    // single flag carries both BRE rules that depend on position: `*` is a
-    // literal when it is false, and `^` anchors only when it is false.
+    // Whether a quantifier written here would have something to apply to. When
+    // it is false, `*`, `\+` and `\?` are the literal characters and `\{` is an
+    // error ("Invalid preceding regular expression"), which is how glibc's
+    // POSIX_BASIC reads a repetition at the start of an expression. False at
+    // the start, after `\(` and `\|`, and after any anchor or assertion: a
+    // zero-width thing is not an atom.
     let mut prev_atom = false;
+    // Whether a `^` here is an anchor: at the start of the pattern, after `\(`
+    // and after `\|`, and nowhere else. This used to be `!prev_atom`, which was
+    // the same thing until assertions cleared `prev_atom` -- after one, glibc
+    // reads `*` as a literal (`\<*`) *and* `^` as a literal (`\<^`), so the two
+    // rules need two flags. Measured on GNU grep 3.11, sed 4.9 and ed 1.20.
+    let mut at_start = true;
     // How deep in `\(` we are, so an unmatched one is reported rather than
     // handed to the engine as a stray `(`.
     let mut depth = 0usize;
@@ -102,6 +114,7 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         out.push(b'(');
                         depth = depth.saturating_add(1);
                         prev_atom = false;
+                        at_start = true;
                     }
                     Some(')') => {
                         if depth == 0 {
@@ -113,6 +126,7 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         out.push(b')');
                         depth = depth.saturating_sub(1);
                         prev_atom = true;
+                        at_start = false;
                     }
                     Some('{') => {
                         if !prev_atom {
@@ -132,15 +146,26 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     Some('|') => {
                         out.push(b'|');
                         prev_atom = false;
+                        at_start = true;
                     }
+                    // With nothing to repeat, `\+` and `\?` are the characters
+                    // `+` and `?`: glibc's basic syntax has no
+                    // `RE_CONTEXT_INVALID_OPS`, so a repetition at the start of
+                    // an expression falls through to "a normal character".
+                    // Measured: GNU grep, sed and ed all match `+a` with `\+a`,
+                    // and `a+` with `a\b\+`. (It was refused here, as "nothing
+                    // to repeat", which none of them does.) `\{` is different
+                    // -- `RE_CONTEXT_INVALID_DUP` is in that syntax -- which is
+                    // why the interval arm above still refuses.
                     Some(q @ ('+' | '?')) => {
-                        if !prev_atom {
-                            return Err(EreError::new(
-                                RegCode::BadRepeat,
-                                [b"nothing to repeat before \\".as_slice(), &[q as u8]].concat(),
-                            ));
+                        if prev_atom {
+                            out.push(q as u8);
+                        } else {
+                            out.push(b'\\');
+                            out.push(q as u8);
+                            prev_atom = true;
                         }
-                        out.push(q as u8);
+                        at_start = false;
                     }
                     // The GNU operators pass straight through: the ERE parser
                     // reads them itself, so the translation is the identity and
@@ -153,15 +178,22 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         out.push(b'\\');
                         e.push_to(&mut out);
                         prev_atom = true;
+                        at_start = false;
                     }
-                    // The four word assertions are zero-width, so they leave
-                    // `prev_atom` alone rather than setting it: `\<*` has no
-                    // more to repeat than `^*` does, and BRE reads the `*` in
-                    // both as a literal. The two buffer anchors, `` \` `` and
-                    // `\'`, are zero-width in the same way.
+                    // The four word assertions and the two buffer anchors are
+                    // zero-width, so after one there is nothing to repeat --
+                    // even with an atom before it. glibc returns from an anchor
+                    // before looking for a repetition, so the `*` that follows
+                    // starts a fresh expression and is a literal: `a\>*`
+                    // matches `a*`, not `ab` (measured, GNU grep, sed and ed;
+                    // it used to repeat the assertion, because this arm left
+                    // `prev_atom` as the `a` had set it). A `^` after one is a
+                    // literal as well, which is `at_start`'s business.
                     Some('<' | '>' | 'b' | 'B' | '`' | '\'') => {
                         out.push(b'\\');
                         e.push_to(&mut out);
+                        prev_atom = false;
+                        at_start = false;
                     }
                     // A backreference passes straight through: the ERE parser
                     // reads `\1`-`\9` the same way, so the translation is the
@@ -172,6 +204,7 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         out.push(b'\\');
                         e.push_to(&mut out);
                         prev_atom = true;
+                        at_start = false;
                     }
                     // Every other escape denotes a literal, and stays escaped so
                     // that the engine reads it as one too.
@@ -179,18 +212,20 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         out.push(b'\\');
                         e.push_to(&mut out);
                         prev_atom = true;
+                        at_start = false;
                     }
                 }
             }
             Some('^') => {
-                if prev_atom {
-                    out.extend_from_slice(br"\^");
-                    prev_atom = true;
-                } else {
+                if at_start {
                     out.push(b'^');
                     // An anchor is not an atom: `^*` is a literal asterisk.
                     prev_atom = false;
+                } else {
+                    out.extend_from_slice(br"\^");
+                    prev_atom = true;
                 }
+                at_start = false;
                 i = i.saturating_add(1);
             }
             Some('$') => {
@@ -201,6 +236,7 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     out.extend_from_slice(br"\$");
                     prev_atom = true;
                 }
+                at_start = false;
                 i = i.saturating_add(1);
             }
             Some('*') => {
@@ -210,16 +246,19 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                     out.extend_from_slice(br"\*");
                     prev_atom = true;
                 }
+                at_start = false;
                 i = i.saturating_add(1);
             }
             Some('.') => {
                 out.push(b'.');
                 prev_atom = true;
+                at_start = false;
                 i = i.saturating_add(1);
             }
             Some('[') => {
                 i = copy_bracket(&cs, i, &mut out)?;
                 prev_atom = true;
+                at_start = false;
             }
             // Plain characters in BRE that are metacharacters in ERE. They have
             // to be escaped on the way out or the engine would read a group, a
@@ -228,11 +267,13 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                 out.push(b'\\');
                 out.push(m as u8);
                 prev_atom = true;
+                at_start = false;
                 i = i.saturating_add(1);
             }
             _ => {
                 c.push_to(&mut out);
                 prev_atom = true;
+                at_start = false;
                 i = i.saturating_add(1);
             }
         }
@@ -528,7 +569,38 @@ mod tests {
         assert!(err(r"a\{2").contains(r"unmatched \{"));
         assert!(err("[a").contains("unmatched ["));
         assert!(err(r"\{2\}").contains("nothing to repeat"));
-        assert!(err(r"\+x").contains("nothing to repeat"));
+    }
+
+    /// With nothing to repeat, `\+` and `\?` are literal characters, while
+    /// `\{` is still an error -- glibc's basic syntax has
+    /// `RE_CONTEXT_INVALID_DUP` and not `RE_CONTEXT_INVALID_OPS`. Measured, GNU
+    /// grep 3.11, sed 4.9 and ed 1.20, which agree on every row.
+    #[test]
+    fn a_repetition_with_nothing_before_it() {
+        assert_eq!(t(r"\+a"), r"\+a");
+        assert!(m(r"^\+a$", "+a"));
+        assert!(m(r"^\?a$", "?a"));
+        assert!(m(r"^x\|\+a$", "+a"));
+        assert!(m(r"^\(\?\)$", "?"));
+        // After an assertion, whatever came before it.
+        assert_eq!(t(r"a\>*"), r"a\>\*");
+        assert!(m(r"a\>*", "a*"));
+        assert!(!m(r"a\>*", "ab"));
+        assert!(m(r"a\b\+", "a+"));
+        assert!(!m(r"a\b\+", "a"));
+        // `` a\`* `` and `a\'*` need a literal `*` where no character can
+        // be, so they match nothing -- sed's and ed's answer. (GNU grep's dfa
+        // repeats the anchor instead; see `scripts/grep-diff.sh`.)
+        assert!(!m(r"a\`*", "a"));
+        assert!(!m(r"a\'*", "a"));
+        assert!(!m(r"a\'*", "a*"));
+        for pat in [r"a\b\{0\}", r"a\>\{1\}", r"a\'\{1\}", r"\{1\}a"] {
+            assert!(err(pat).contains("nothing to repeat"), "{pat}");
+        }
+        // A `^` after an assertion is a literal, not an anchor: as an anchor,
+        // `\<^a` would match the line `a`.
+        assert_eq!(t(r"\<^a"), r"\<\^a");
+        assert!(!m(r"\<^a", "a"));
     }
 
     #[test]

@@ -179572,9 +179572,36 @@ on the same file); no `-o`/`-p` owner and mode checks, no `@include`d files, no
 **Where:** `userspace/sudo/src/main.rs` (`edit_sudoers`, `ask_what_now`,
 `sudoers_temp_path`); the `.lck` lock and `SudoError::LockError` are gone.
 
-## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01)
+## TD-B-ERE-QUANTIFIED-ANCHOR -- a `*` after `$` or a word assertion compiles here and is refused by glibc (lane B, 2026-10-01) — **FIXED** 2026-10-01
 
-**Status:** open
+**Status:** FIXED 2026-10-01
+
+**Resolution (2026-10-01, the same day).** Measured again tool by tool --
+grep 3.11 and grep -E, sed 4.9 and sed -E, ed 1.20, bash 5.2 `=~`, gawk 5.2.1
+`--posix` -- because GNU grep turned out to be two engines that do not agree
+with each other:
+
+| dialect | after `^ $` and the buffer anchors | after `\b \B \< \>` |
+|---|---|---|
+| POSIX extended, awk (glibc only) | `REG_BADRPT` | `REG_BADRPT` |
+| egrep (`grep -E`) | repeated; zero repetitions is the empty string | `*`, `+`, `?` leave the assertion as it was |
+| basic (glibc: sed, ed, expr, find) | `*`, `\+`, `\?` literal; `\{` refused | the same |
+
+So: the engine refuses any quantifier after any assertion unless the syntax
+has `context_indep_ops`; under egrep a word assertion is left as it was by `*`,
+`+` and `?`; and `bre::to_ere` treats every assertion as ending what can be
+repeated, with a second flag (`at_start`) so that a `^` after one stays a
+literal. On the way: a leading `\+` or `\?` in a basic expression was refused
+here ("nothing to repeat") where grep, sed and ed all read the character --
+`grep '\+a'` matches `+a` -- and now does too.
+
+**Where GNU grep is followed only halfway, deliberately:** its dfa matcher
+repeats a buffer anchor in a basic expression (``grep 'a\`*'`` matches every
+line with an `a`) where glibc -- and so GNU sed, ed and expr, which share this
+translation -- reads a literal `*`; and an interval on a word assertion under
+`-E` is self-contradicting there (`\b{1}` alone matches the line `a{1}`, while
+`a\b{1}` matches nothing at all). Ours follows glibc for the first and plain
+repetition for the second; both are xfail rows in `scripts/grep-diff.sh`.
 
 **In short:** in a regular expression, `$` means "end of line" and `\b` means
 "word edge" -- they match a position, not a character, so there is nothing for
@@ -179609,3 +179636,43 @@ assertion and keeps the repetition after the line and buffer anchors -- which
 the extended engine must then accept, so `to_ere` should rewrite it (zero or
 more of a zero-width assertion is the empty string; one or more is the
 assertion). Harness rows in `grep-diff.sh`, `find-diff.sh` and `awk-diff.sh`.
+
+## TD-B-FIND-REGEXTYPES-ARE-TWO-DIALECTS -- `find -regextype` maps thirteen glibc syntaxes onto two (lane B, 2026-10-01)
+
+**Status:** open
+
+**In short:** `find -regex` matches a file's whole path against a regular
+expression, and `-regextype` picks which of GNU's thirteen regex dialects the
+pattern is written in. Ours reduces every one of them to "basic" or
+"extended", so a pattern that means one thing in the dialect a user named can
+mean another here. The default dialect, `findutils-default`, is Emacs syntax
+in GNU find, and ours reads it as POSIX basic: GNU's `find -regex '.*\(a\|b\)'`
+and ours agree, but `\w` inside a default pattern, `[z-a]`, and a `.` against
+a newline in a name do not. `find.rs` (`regex_is_extended`) says this is
+"documented in known-issues.md"; it was not, until this entry.
+
+**What each name is in findutils 4.9** (`lib/regextype.c`), and what it needs
+here:
+
+| `-regextype` | glibc syntax | here today | the faithful reading |
+|---|---|---|---|
+| `findutils-default` | `RE_SYNTAX_EMACS \| RE_DOT_NEWLINE` | POSIX basic | `ere::emacs`, with `.` matching a newline |
+| `emacs` | `RE_SYNTAX_EMACS` | POSIX basic | `ere::emacs` (as `ptx` uses it) |
+| `posix-awk` | `RE_SYNTAX_POSIX_AWK` | POSIX extended | `Syntax::POSIX_AWK` (exists since 2026-10-01) |
+| `gnu-awk` | `RE_SYNTAX_GNU_AWK` | POSIX extended | escapes in lists, malformed interval literal, a leading `*` literal, GNU operators on |
+| `awk` | `RE_SYNTAX_AWK` | POSIX extended | escapes in lists, **no intervals** (`{` literal), no backreferences, no GNU operators |
+| `egrep`, `posix-egrep` | `RE_SYNTAX_EGREP` / `POSIX_EGREP` | POSIX extended | `Syntax::EGREP` |
+| `grep` | `RE_SYNTAX_GREP` | POSIX basic | basic with newline-as-alternation |
+| `posix-minimal-basic` | `RE_SYNTAX_POSIX_MINIMAL_BASIC` | POSIX basic | basic without `\+ \? \|` (`RE_LIMITED_OPS`) |
+| `posix-basic`, `ed`, `sed` | `RE_SYNTAX_POSIX_BASIC` (and `_ED`, `_SED`, equal to it) | POSIX basic | already right |
+| `posix-extended` | `RE_SYNTAX_POSIX_EXTENDED` | POSIX extended | already right |
+
+**Where:** `userspace/coreutils/src/bin/find.rs`, `regex_is_extended` and
+`compile_regex`. `find-diff.sh` has one case per type (`-regextype emacs -regex
+'t/su.'` and so on), each written so that the approximation happens to agree;
+the fix needs a case per row that the approximation gets wrong, measured.
+
+**The proper fix:** map each name to the dialect it is -- `ere::emacs`, the
+`Syntax` constants, and the two or three syntax bits the table shows are not
+there yet (no intervals, a context-dependent leading `*`, limited operators) --
+rather than to a boolean, and measure every row in `find-diff.sh`.

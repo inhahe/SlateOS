@@ -68,6 +68,8 @@ printf 'd\ne\nf\n'                      > def.txt
 # What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
 # `]` or `\]`, `atb` or `a<TAB>b`, `w\-`, `ax` or `\x`, and the letter `n`.
 printf '.\n\\\nt\n\tx\n]\n\\]\natb\na\tb\nw\\-\nax\n\\x\nn\n' > bslash.txt
+# Whether the `*` after an assertion is a character (`a*`) or a repetition.
+printf 'a\nab\na*\n*\na$\na^\nb\n+a\n?a\na+\n' > anchors.txt
 # For the GNU word operators. `a_b` and `cafe' are each a single word --- `_`
 # is a word character and so is a letter outside ASCII --- and the run of two
 # spaces is where `\b` and `\B` disagree most visibly.
@@ -306,6 +308,21 @@ run_stdin bslash.txt -E 's/^[a\]x$/X/'
 run_stdin bslash.txt -E 's/^[\w-]+$/X/'
 run_stdin bslash.txt 'N;s/[\n]/+/'
 run_stdin bslash.txt 's/^[\x41n]$/X/'
+
+# --- a repetition after an assertion -------------------------------------------
+# glibc returns from an assertion before looking for a repetition: in a basic
+# expression the `*` after one is a character, `\+` and `\?` with nothing to
+# repeat are characters, and `\{` there is refused; in an extended one any
+# repetition there is refused. Measured, sed 4.9. (TD-B-ERE-QUANTIFIED-ANCHOR)
+run_stdin anchors.txt -n '/a\b*/p'
+run_stdin anchors.txt -n '/a\>*/p'
+run_stdin anchors.txt -n '/a\`*/p'
+run_stdin anchors.txt -n '/\+a/p'
+run_stdin anchors.txt -n '/a\b\+/p'
+run_stdin anchors.txt -n '/a\b\{1\}/p'
+run_stdin anchors.txt -E -n '/a\b*/p'
+run_stdin anchors.txt -E -n '/a$*/p'
+run_stdin anchors.txt -E -n '/a($)*/p'
 
 # --- substitution ------------------------------------------------------------
 run_stdin words.txt 's/foo/FOO/'

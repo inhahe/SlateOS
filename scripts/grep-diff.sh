@@ -167,6 +167,9 @@ printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
 # What a backslash can be taken to mean: a dot or a backslash, a `t` or a tab,
 # `]` or `\]`, `ax` or `\x`, `w\-` and `ab_`, and the letters `n` and `0`.
 printf '.\n\\\nt\n\tx\na\tb\natb\n]\n\\]\nax\n\\x\nw\\-\nab_\nn\n0\n' > bslash
+# The lines a repetition after an assertion tells apart: whether the `*` is a
+# character (`a*`), repeats the assertion (`ab`), or leaves it alone.
+printf 'a\nab\na*\n*\na$\na^\nb\n+a\n?a\na+\n'   > anchors
 printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
 printf 'HIT\n2\n3\n'                            > ctxtop
 printf 'HIT\nHIT\nHIT\n'                        > run3
@@ -478,6 +481,35 @@ grep -E '^\n$' bslash
 grep '^\0$' bslash
 grep '[\]' bslash
 grep -c '[\\]' bslash
+
+# --- a repetition after an assertion ---
+# In a basic expression an assertion ends what can be repeated, so the `*`
+# after it is a character -- even with an atom before it -- and so are `\+` and
+# `\?` with nothing to repeat. Under -E grep repeats a line anchor but leaves a
+# word assertion as it was. known-issues.md TD-B-ERE-QUANTIFIED-ANCHOR.
+grep 'a\b*' anchors
+grep 'a\>*' anchors
+grep 'a\B*' anchors
+grep 'a\<*' anchors
+grep '\+a' anchors
+grep '\?a' anchors
+grep '^\+a' anchors
+grep 'a\b\+' anchors
+grep '\<^a' anchors
+grep -E 'a\b*' anchors
+grep -E 'a\b+' anchors
+grep -E 'a\b?' anchors
+grep -E 'a\B*' anchors
+grep -E 'a\>*' anchors
+grep -E 'a\<*' anchors
+grep -E 'a$*' anchors
+grep -E 'a$+' anchors
+grep -E 'a^*' anchors
+grep -E 'a\b{0}' anchors
+!GNU grep's dfa repeats a buffer anchor here; glibc -- and so GNU sed, ed and expr, which share our translation -- reads a literal `*`, and ours follows glibc|grep 'a\`*' anchors
+!the same, for the end-of-buffer anchor|grep "a\\'*" anchors
+!GNU grep refuses nothing here and matches nothing; glibc (sed, ed) refuses an interval after an assertion, and so do we|grep 'a\b\{1\}' anchors
+!GNU grep contradicts itself on an interval on a word assertion -- `\b{1}` alone matches `a{1}`, `a\b{1}` matches nothing -- and ours repeats it plainly|grep -E 'a\b{1}' anchors
 
 # --- -E, the egrep dialect: the two syntax bits, measured ---
 grep -E 'a+' braces

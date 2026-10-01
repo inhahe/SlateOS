@@ -337,6 +337,11 @@ run_case esc '/a\
 x/'
 run_case esc '/{2}a/'
 run_case esc '/^{b}/'
+# A repetition straight after an assertion is refused in RE_SYNTAX_POSIX_AWK
+# as in every POSIX syntax; a group around one is an atom.
+run_case esc '/a$*/'
+run_case esc '/^*a/'
+run_case esc '/a($)*/'
 run_case esc '{ if ($0 ~ "^\\.$") print "dot:" $0 }'
 run_case esc '{ if ($0 ~ "^a\.b$") print "any:" $0 }'
 run_case esc '{ if ($0 ~ "^\\t") print "tab:" $0 }'

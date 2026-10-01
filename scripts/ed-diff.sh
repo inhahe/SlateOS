@@ -65,6 +65,8 @@ printf 'one\ntwo\nthree\nfour\nfive\n' > "$template/five.txt"
 printf 'abc'                           > "$template/nonl.txt"
 printf 'a\r\nb\r\n'                    > "$template/crlf.txt"
 printf 'x\n\n\ny\n'                    > "$template/blanks.txt"
+# Whether a `*` after an assertion is a character (`a*`) or a repetition.
+printf 'a\nab\na*\n+a\n'                > "$template/anchors.txt"
 # Bytes no `String` can hold. Reading this file is the case the rewrite exists
 # for: the previous implementation turned it into an empty buffer.
 printf 'A\xff\xfe\nB\x80\n'            > "$template/bytes.txt"
@@ -601,6 +603,13 @@ run_pipe 'g/a/p\nq\n'                f.txt
 run_pipe 'g/a/\nq\n'                 f.txt        # an empty list means p
 run_pipe 'g/a/\\\n\nq\n'             f.txt        # ...twice, for two empty ones
 run_pipe 'v/a/p\nq\n'                f.txt        # nothing lacks an a
+# A repetition after an assertion (TD-B-ERE-QUANTIFIED-ANCHOR): in a basic
+# expression the `*` is a character and `\+` with nothing to repeat is one,
+# while `\{` there is refused; in an extended one any repetition is refused.
+run_pipe 'g/a\\>*/p\nq\n'            anchors.txt
+run_pipe 'g/\\+a/p\nq\n'             anchors.txt
+run_pipe 'g/a\\b\\{1\\}/p\nq\n'      anchors.txt
+run_pipe 'g/a$*/p\nq\n' --extended-regexp anchors.txt
 run_pipe 'v/beta/p\nq\n'             f.txt
 run_pipe 'g/a/d\n,p\nq\n'            f.txt
 run_pipe 'v/beta/d\n,p\nq\n'         f.txt

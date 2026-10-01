@@ -961,23 +961,21 @@ impl EParser {
     /// matters here is that it *compiles*, because the previous reading of
     /// "quantifier already applied" as an error made those four patterns fail.)
     fn stack_quantifiers(&mut self, mut node: Node) -> Result<Node, EreError> {
-        // `^` is an assertion, not an atom, so glibc reports `^*` and `a^*b`
-        // the way it reports a leading `*`. Under egrep syntax nothing here is
-        // an error at all, and `^*` becomes the anchor repeated zero-or-more
-        // times — which is why `grep -E 'a^*b'` matches "ab": zero repetitions
-        // of an assertion that can never hold is the empty string.
-        // `` \` `` is `^`'s twin and answers the same way.
+        // An assertion -- `^ $`, the buffer anchors, the word assertions -- is
+        // not an atom, and glibc's `parse_expression` returns from one before
+        // it looks for a repetition. So the quantifier after it begins a fresh
+        // expression, and without `RE_CONTEXT_INDEP_OPS` that is "Invalid
+        // preceding regular expression": every one of `^*`, `a$*`, `a\b*`,
+        // `a\<+`, `` a\`? `` and `a\'{2}` is refused by bash 5.2's `=~`, by
+        // `find -regextype posix-extended` and by gawk 5.2.1 `--posix`
+        // (measured). Until 2026-10-01 only `^` and `` \` `` were refused here,
+        // and `a$*` compiled to a repeated anchor
+        // (`known-issues.md`, TD-B-ERE-QUANTIFIED-ANCHOR).
         //
-        // Judged on the *character*, before `parse_quantifier` reads it: glibc
-        // has returned from the anchor by then and meets the `{` at the start
-        // of a fresh expression, so `^{b}` is "Invalid preceding regular
-        // expression" even in a dialect where `a{b}` is four literals.
-        // Measured on bash 5.2's `=~` and gawk 5.2.1 `--posix`.
-        //
-        // glibc refuses a quantifier after *every* anchor here, `$`, `\'` and
-        // the word assertions included; that this accepts `a$*` is a known
-        // divergence — `known-issues.md`, TD-B-ERE-QUANTIFIED-ANCHOR.
-        if matches!(node, Node::Start | Node::BufStart)
+        // Judged on the *character*, before `parse_quantifier` reads it, for
+        // the same reason: glibc meets the `{` at the start of an expression,
+        // so `^{b}` is refused even in a dialect where `a{b}` is four literals.
+        if is_assertion(&node)
             && !self.syntax.context_indep_ops
             && is_quantifier_start(self.peek_ascii())
         {
@@ -989,6 +987,17 @@ impl EParser {
             // names both operators in order. `seen_atom` has already been set
             // by the caller if the base was a real atom, so `a**` is silent.
             self.warn_at_start(q.kind);
+            // Only egrep syntax gets here with an assertion, and GNU grep
+            // repeats the line and buffer anchors -- `grep -E 'a^*b'` matches
+            // "ab", zero repetitions of an anchor that cannot hold -- but not a
+            // word assertion: `*`, `+` and `?` leave `\b`, `\B`, `\<` and `\>`
+            // as they were, so `grep -E 'a\b*'` matches `a*` and not `ab`.
+            // Measured, grep 3.11. (An interval on one is a different and
+            // self-contradicting story in GNU grep, and is repeated here; see
+            // the xfail rows in `scripts/grep-diff.sh`.)
+            if matches!(node, Node::Word(_)) && q.kind != Quantifier::Interval {
+                continue;
+            }
             node = repeat(node, q.min, q.max);
         }
         Ok(node)
@@ -1434,6 +1443,15 @@ impl EParser {
 /// turn out to be malformed — that is an error either way, never a literal.
 fn is_quantifier_start(c: Option<char>) -> bool {
     matches!(c, Some('*' | '+' | '?' | '{'))
+}
+
+/// Whether a node is a zero-width assertion -- one of glibc's `ANCHOR` tokens,
+/// which a repetition cannot follow in the POSIX dialects.
+fn is_assertion(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Start | Node::End | Node::BufStart | Node::BufEnd | Node::Word(_)
+    )
 }
 
 /// Wrap `node` in a `{min,max}` repetition.
@@ -3293,13 +3311,25 @@ mod tests {
         bad("{2}a");
         bad("(*a)");
         bad("a|*b");
-        // `^` is an assertion, not an atom, and so is `^` before a brace that
-        // would otherwise have rolled back to a literal. (glibc refuses a
-        // quantifier after `$` and the word assertions too, and this does not
-        // yet: TD-B-ERE-QUANTIFIED-ANCHOR.)
+        // An assertion is not an atom -- any of them, `$` and the word
+        // assertions as much as `^` -- and that holds before a brace that
+        // would otherwise have rolled back to a literal. Measured, bash 5.2
+        // `=~` and findutils 4.9 posix-extended, every one refused.
         bad("^*a");
         bad("a^*b");
         bad("^{2}");
+        bad("a$*");
+        bad("$*");
+        bad("a$+b");
+        bad(r"a\b*");
+        bad(r"a\<+");
+        bad(r"a\>?");
+        bad(r"a\B*b");
+        bad(r"a\`*");
+        bad(r"a\'{2}");
+        // ...but a group around one is an atom.
+        assert!(compile("a($)*").is_ok());
+        assert!(compile("(^)*a").is_ok());
         assert_eq!(
             Regex::new_syntax(b"^{b}", false, Syntax::POSIX_AWK)
                 .unwrap_err()
@@ -3509,6 +3539,27 @@ mod tests {
         assert!(!me("^a{2,}$", "a"));
         assert!(me("^a{1}{2}$", "aa"));
         assert!(me("^a{,3}$", ""));
+    }
+
+    /// GNU grep `-E` repeats a line or buffer anchor but leaves a word
+    /// assertion as it was under `*`, `+` and `?`. Measured, grep 3.11, on the
+    /// lines `a ab a* * a$ a^ b`: `a\b*`, `a\b+` and `a\b?` each print `a`,
+    /// `a*`, `a$` and `a^` and never `ab`; `a\B*` prints only `ab`; `a$*`
+    /// prints every line with an `a` and `a$+` only `a`.
+    #[test]
+    fn egrep_repeats_an_anchor_but_not_a_word_assertion() {
+        for pat in [r"a\b*", r"a\b+", r"a\b?", r"a\>*"] {
+            assert!(me(pat, "a"), "{pat} on a");
+            assert!(me(pat, "a*"), "{pat} on a*");
+            assert!(!me(pat, "ab"), "{pat} on ab");
+        }
+        assert!(me(r"a\B*", "ab"));
+        assert!(!me(r"a\B*", "a*"));
+        assert!(!me(r"a\<*", "ab"));
+        assert!(me("a$*", "ab"));
+        assert!(me("a$+", "a"));
+        assert!(!me("a$+", "ab"));
+        assert!(me(r"a\`*", "ab"));
     }
 
     /// Match under `syntax`.

@@ -248,6 +248,12 @@ run_case aab : 'a\{2\}'
 run_case abc : 'a\{2\}'
 run_case abc : '^abc'
 run_case abc : 'abc$'
+# With nothing to repeat, `\+` and `\?` are characters in a basic expression,
+# and a `*` after an assertion is one too (TD-B-ERE-QUANTIFIED-ANCHOR).
+run_case +a : '\+a'
+run_case '?a' : '\?a'
+run_case 'a*' : 'a\>*'
+run_case ab : 'a\>*'
 run_case abc : 'c$'
 run_case abc : '.'
 run_case abc : '.*'

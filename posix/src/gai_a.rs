@@ -265,13 +265,18 @@ fn announce() {
 /// up, record the answer; until there is none.
 extern "C" fn worker(_arg: *mut u8) -> *mut u8 {
     loop {
-        // A test holds the threads back to find a request still queued.
-        #[cfg(test)]
-        while tests::PAUSED.load(Ordering::Acquire) {
-            std::thread::yield_now();
-        }
         let (g, r) = {
             let guard = Guard::lock();
+            // A test holds the threads back to find a request still queued.
+            // Read under the lock, which the test's request was queued under:
+            // a thread that read it before the test set it, and then took the
+            // lock, would take the request the test meant to find waiting.
+            #[cfg(test)]
+            if tests::PAUSED.load(Ordering::Acquire) {
+                drop(guard);
+                std::thread::yield_now();
+                continue;
+            }
             let q = guard.queue();
             let mut r = q.head;
             // SAFETY: the queue's requests are live while the lock is held.

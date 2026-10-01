@@ -11,7 +11,7 @@
 )]
 
 use super::super::SvgDocument;
-use super::{Combinator, Compound, Facts, Selector, Sheet, matches};
+use super::{Combinator, Compound, Facts, Invalid, Selector, Sheet, matches};
 
 /// The colour of the first pixel of `svg` drawn 4 by 4, a square filling it.
 fn colour(svg: &str) -> [u8; 4] {
@@ -70,7 +70,7 @@ fn the_cascade_is_csss() {
 
 /// **Every selector this reads selects**: `*`, a type, an id, a compound, a
 /// comma list -- and one it cannot read selects nothing while the rest of
-/// its list still does.
+/// its list still does, but one CSS rejects voids its whole rule.
 #[test]
 fn every_selector_this_reads_selects() {
     let shape = r#"<rect id="r" class="a b" width="4" height="4"/>"#;
@@ -81,6 +81,8 @@ fn every_selector_this_reads_selects() {
         "rect.a.b#r{fill:lime}",
         "circle, .b{fill:lime}",
         "rect:hover, .a{fill:lime}",
+        "#q#r, .a{fill:lime}",
+        "#r#r{fill:lime}",
     ] {
         assert_eq!(colour(&styled(sheet, shape)), LIME, "{sheet}");
     }
@@ -91,6 +93,11 @@ fn every_selector_this_reads_selects() {
         "rect[width]{fill:lime}",
         "rect:hover{fill:lime}",
         "g + rect{fill:lime}",
+        // A list holding a selector CSS rejects is void whole.
+        "rect >, .a{fill:lime}",
+        ".1x, .a{fill:lime}",
+        ", .a{fill:lime}",
+        "g/**/rect, .a{fill:lime}",
     ] {
         assert_eq!(colour(&styled(sheet, shape)), [0, 0, 0, 255], "{sheet}");
     }
@@ -143,11 +150,11 @@ fn facts(tag: &str, id: Option<&str>, classes: &[&str]) -> Facts {
     }
 }
 
-/// **A selector is read rightmost first, with its specificity**, and one
-/// it cannot read is none at all.
+/// **A selector is read rightmost first, with its specificity**; one CSS
+/// rejects is told from one this does not read, or that selects nothing.
 #[test]
 fn a_selector_is_read_rightmost_first() {
-    let s = Selector::parse("g.x > rect#r.a").unwrap();
+    let s = Selector::parse("g.x > rect#r.a").unwrap().unwrap();
     assert_eq!(s.combinators, [Combinator::Child]);
     assert_eq!(
         s.compounds[0],
@@ -159,18 +166,26 @@ fn a_selector_is_read_rightmost_first() {
     );
     assert_eq!(s.specificity(), (1, 2, 2));
     for bad in [
-        "",
-        "> a",
-        "a >",
-        "a > > b",
+        "", " ", "> a", "a >", "a > > b", ".1x", ".-1x", "#-", "*rect", "a!b", "a..b",
+    ] {
+        assert_eq!(Selector::parse(bad), Err(Invalid), "{bad:?}");
+    }
+    for unread in [
         "a#b#c",
-        ".1x",
         "a\\b",
         "*|a",
+        "a:hover",
         "a b c d e f g h i",
+        "a > b > c > d > e > f > g > h > i",
+        // Past the most parts read, a part that selects nothing.
+        "a b c d e f g h #i#j",
     ] {
-        assert!(Selector::parse(bad).is_none(), "{bad:?}");
+        assert_eq!(Selector::parse(unread), Ok(None), "{unread:?}");
     }
+    // Past the most parts read, a part CSS rejects still voids it.
+    assert_eq!(Selector::parse("a b c d e f g h .1x"), Err(Invalid));
+    // The same id twice is that id.
+    assert!(Selector::parse("#r#r").unwrap().is_some());
 }
 
 /// **Matching tries every way through the ancestors**, not only the
@@ -178,7 +193,7 @@ fn a_selector_is_read_rightmost_first() {
 /// the `.y` nearest the `.z` is inside another `.y`.
 #[test]
 fn matching_tries_every_way_through_the_ancestors() {
-    let s = Selector::parse(".x > .y .z").unwrap();
+    let s = Selector::parse(".x > .y .z").unwrap().unwrap();
     let ancestors = [
         facts("g", None, &["x"]),
         facts("g", None, &["y"]),
@@ -205,7 +220,7 @@ fn a_sheet_keeps_at_most_so_many_rules() {
     }
     assert_eq!(Sheet::parse(&text).rules.len(), super::MAX_RULES);
     let deep = ".a ".repeat(super::MAX_COMPOUNDS + 1);
-    assert!(Selector::parse(deep.trim()).is_none());
+    assert_eq!(Selector::parse(deep.trim()), Ok(None));
 }
 
 /// **Comments are read as CSS reads them**: no space, so one inside a
@@ -241,6 +256,10 @@ fn comments_are_read_as_css_reads_them() {
     };
     assert_eq!(colour(&own("fill:/* not red */#0000ff")), BLUE);
     assert_eq!(colour(&own("fi/**/ll:red")), LIME);
+    // So in a sheet's declarations.
+    let split = r#"<svg viewBox="0 0 4 4"><style>rect{fi/**/ll:red}</style>
+<rect width="4" height="4" fill="lime"/></svg>"#;
+    assert_eq!(colour(split), LIME);
     // And so with a sheet in the document as well.
     let both = r#"<svg viewBox="0 0 4 4"><style>rect{stroke:none}</style>
 <rect width="4" height="4" style="fill:/**/#0000ff"/></svg>"#;

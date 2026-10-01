@@ -4081,28 +4081,21 @@ impl TranslateStack {
 /// on a dark theme (design-decisions §1327). Taken resolved rather than
 /// resolved here, because a palette is resolved once per change of settings
 /// (`the_palette_is_resolved_when_it_changes_not_per_frame`).
+///
+/// The settings-to-rasterizer mapping itself is `FontSettings::rendering`,
+/// the one every application's toolkit cache is set from as well
+/// (`FontSettings::apply`): one mapping, so a setting added later cannot be
+/// read one way here and another in the windows beside these decorations.
 fn font_rendering(
     settings: &AppearanceSettings,
     palette: &appearance::Palette,
 ) -> osfont::raster::Rendering {
     use osfont::colr::ColourPalette;
-    use osfont::raster::Subpixel;
-    osfont::raster::Rendering {
-        smoothing: settings.fonts.smoothing,
-        subpixel: match settings.fonts.subpixel {
-            appearance::SubpixelMode::None => Subpixel::None,
-            appearance::SubpixelMode::Rgb => Subpixel::Rgb,
-            appearance::SubpixelMode::Bgr => Subpixel::Bgr,
-            appearance::SubpixelMode::VRgb => Subpixel::VRgb,
-            appearance::SubpixelMode::VBgr => Subpixel::VBgr,
-        },
-        hinting: settings.fonts.hinting,
-        palette: if palette.light {
-            ColourPalette::Light
-        } else {
-            ColourPalette::Dark
-        },
-    }
+    settings.fonts.rendering(if palette.light {
+        ColourPalette::Light
+    } else {
+        ColourPalette::Dark
+    })
 }
 
 /// Straight `0xAARRGGBB` from premultiplied, rounding to nearest.

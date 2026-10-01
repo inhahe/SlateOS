@@ -60,6 +60,8 @@ pub mod themes;
 
 pub mod decorations;
 
+pub mod cursors;
+
 /// Where settings files live and how they are replaced.
 ///
 /// This was `appearance::config` before it was a crate of its own, and it is
@@ -1509,6 +1511,15 @@ pub struct AppearanceSettings {
     /// "mix-and-match"). Nothing is read until an icon is drawn; see
     /// [`icons::IconTheme`].
     pub icon_theme: icons::IconTheme,
+    /// The theme the pointer's pictures come from: the built-in one -- the
+    /// compositor's own pointer -- unless the user chose another. `theme.cursors`
+    /// in the file, by the folder name of the theme, which may be another
+    /// desktop's cursor theme (Adwaita, Breeze) as well as a SlateOS one.
+    /// Nothing is read until a cursor is drawn; see [`cursors::CursorTheme`].
+    /// How large the pointer is and its colours for the built-in pictures stay
+    /// [`cursor_size`](Self::cursor_size) and
+    /// [`cursor_scheme`](Self::cursor_scheme).
+    pub cursor_theme: cursors::CursorTheme,
     /// The theme the shapes of the controls come from -- a button's corners,
     /// a field's focus mark, a scrollbar's width: the built-in one unless the
     /// user chose another. `theme.widget_style` in the file, by the theme's
@@ -1796,6 +1807,7 @@ impl Default for AppearanceSettings {
             theme_mode: ThemeMode::Dark,
             color_theme: themes::ColorTheme::built_in(),
             icon_theme: icons::IconTheme::built_in(),
+            cursor_theme: cursors::CursorTheme::built_in(),
             widget_theme: themes::WidgetTheme::built_in(),
             animation_theme: themes::AnimationTheme::built_in(),
             decoration_theme: themes::DecorationTheme::built_in(),
@@ -2509,6 +2521,16 @@ impl AppearanceSettings {
         {
             s.icon_theme = icons::IconTheme::load(&pathcodec::decode_path(&name).into_os_string());
         }
+        // The cursor theme, spelled as the icon theme is, and for its reason
+        // read no further: a cursor is looked up when the pointer is drawn.
+        if let Some(name) = doc
+            .get_str(&["theme", "cursors"])
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+        {
+            s.cursor_theme =
+                cursors::CursorTheme::load(&pathcodec::decode_path(&name).into_os_string());
+        }
         // The widget style, spelled and loaded as the colour theme is -- file
         // and all, since the palette carries it and a palette is resolved per
         // frame.
@@ -2825,6 +2847,10 @@ impl AppearanceSettings {
         doc.set_str(
             &["theme", "icons"],
             &pathcodec::encode_path(std::path::Path::new(self.icon_theme.id())),
+        );
+        doc.set_str(
+            &["theme", "cursors"],
+            &pathcodec::encode_path(std::path::Path::new(self.cursor_theme.id())),
         );
         doc.set_str(
             &["theme", "widget_style"],
@@ -3623,6 +3649,9 @@ mod tests {
             // A theme of its own, not the colour theme's, so a round trip that
             // wrote one axis into the other would be caught.
             icon_theme: icons::IconTheme::load(std::ffi::OsStr::new("line-icons")),
+            // Another again, and another desktop's: a cursor theme need not
+            // be a SlateOS theme at all.
+            cursor_theme: cursors::CursorTheme::load(std::ffi::OsStr::new("Adwaita")),
             // A third, read back from the file the round trip installs.
             widget_theme: themes::WidgetTheme::from_style(
                 ROUND_TRIP_WIDGETS,
@@ -3855,6 +3884,48 @@ mod tests {
             settings.write_into(&mut written);
             let back = AppearanceSettings::read_from(&written);
             assert_eq!(back.icon_theme.id(), odd.as_os_str());
+        });
+    }
+
+    /// The cursor theme is its own setting too: `theme.cursors`, apart from
+    /// the icon theme even where an icon theme and a cursor theme share a
+    /// folder (as Adwaita's do), the built-in one -- the compositor's own
+    /// pointer -- when the file names none or a blank, and a folder name that
+    /// is not text kept byte for byte.
+    #[test]
+    fn the_cursor_theme_is_its_own_setting_and_survives_a_save() {
+        config::testing::with_scratch_config("cursor-theme", |_| {
+            let s = AppearanceSettings::read_from(&Document::parse(""));
+            assert!(s.cursor_theme.is_built_in());
+
+            let doc = Document::parse("theme:\n  icons: papirus\n  cursors: Adwaita\n");
+            let s = AppearanceSettings::read_from(&doc);
+            assert_eq!(s.cursor_theme.id(), "Adwaita");
+            assert_eq!(s.icon_theme.id(), "papirus");
+            let mut saved = Document::parse("");
+            s.write_into(&mut saved);
+            assert_eq!(
+                saved.get_str(&["theme", "cursors"]).as_deref(),
+                Some("Adwaita")
+            );
+            assert_eq!(
+                saved.get_str(&["theme", "icons"]).as_deref(),
+                Some("papirus")
+            );
+
+            let blank =
+                AppearanceSettings::read_from(&Document::parse("theme:\n  cursors: \" \"\n"));
+            assert!(blank.cursor_theme.is_built_in());
+
+            let odd = std::path::Path::new(&pathcodec::decode_path("caf%E9"))
+                .as_os_str()
+                .to_os_string();
+            let mut settings = AppearanceSettings::default();
+            settings.cursor_theme = cursors::CursorTheme::load(&odd);
+            let mut written = Document::parse("");
+            settings.write_into(&mut written);
+            let back = AppearanceSettings::read_from(&written);
+            assert_eq!(back.cursor_theme.id(), odd.as_os_str());
         });
     }
 

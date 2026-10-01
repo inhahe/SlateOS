@@ -27,27 +27,58 @@
 //! "calling undefined function".
 
 use crate::ast::{
-    BinOp, Builtin, CmpOp, Expr, Func, Getline, GetlineSrc, Lvalue, Pattern, Program, RedirMode,
-    Redirect, Rule, SPECIALS, Stmt, VarRef,
+    BinOp, Builtin, CmpOp, Expr, Func, Getline, GetlineSrc, Loc, Lvalue, Pattern, Program,
+    RedirMode, Redirect, Rule, SPECIALS, Stmt, VarRef,
 };
 use crate::lex::{BUILTINS, Kw, Lexer, Tok, Token};
+use crate::source::{self, SourceMap};
+use crate::value::Str;
 use ere::awk::{self as escape, CompileError, Warnings};
 use ere::{Regex, Syntax};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Parse a whole program, its escape warnings going to `warnings`.
+/// Parse a whole program, its escape warnings going to `warnings`' tables and
+/// to `said`, each beside the [`Loc`] of the token that earned it.
+///
+/// `map` says where the program text came from, so that what is reported --
+/// here and, through the [`Loc`]s the statements carry, at run time -- names
+/// the line as gawk does.
 ///
 /// # Errors
 /// Returns a one-line diagnostic. awk parses the entire program before running
 /// any of it, so a syntax error in a rule that would never have matched is
-/// still fatal — better than dying halfway through a report. A diagnostic that
-/// begins `fatal: ` is one gawk reports as a fatal error rather than a syntax
-/// error, which is exit status 2 rather than 1.
-pub fn parse(src: &[u8], warnings: &mut Warnings) -> Result<Program, String> {
-    let tokens = Lexer::tokenize(src, warnings)?;
+/// still fatal — better than dying halfway through a report.
+pub fn parse(
+    src: &[u8],
+    map: &SourceMap,
+    warnings: &mut Warnings,
+    said: &mut Vec<(Loc, Str)>,
+) -> Result<Program, ParseError> {
+    let names = map.names();
+    let mut raw_said = Vec::new();
+    let lexed = Lexer::tokenize(src, warnings, &mut raw_said);
+    said.extend(raw_said.into_iter().map(|(at, m)| (map.loc(at), m)));
+    let tokens = lexed.map_err(|(at, e)| {
+        // gawk's fatal lexing errors name their line; the syntax errors here
+        // are compared by presence and keep their own wording.
+        if e.starts_with("fatal: ") {
+            ParseError {
+                fatal: true,
+                message: located(&names, map.loc(at), &e),
+            }
+        } else {
+            ParseError {
+                fatal: false,
+                message: e,
+            }
+        }
+    })?;
+    let locs = tokens.iter().map(|t| map.loc(t.at)).collect();
     let mut p = Parser {
         toks: tokens,
+        locs,
+        names,
         i: 0,
         globals: SPECIALS.iter().map(|s| (*s).to_string()).collect(),
         global_index: SPECIALS
@@ -63,12 +94,59 @@ pub fn parse(src: &[u8], warnings: &mut Warnings) -> Result<Program, String> {
         ranges: 0,
         loop_depth: 0,
     };
-    let prog = p.program()?;
+    // Everything gawk finds fatal while parsing, it finds while lexing; what
+    // the grammar refuses -- a bad regex literal too, gawk's `error:` -- is a
+    // syntax error, exit 1.
+    let mut prog = p.program().map_err(|message| ParseError {
+        fatal: false,
+        message,
+    })?;
+    prog.sources = p.names;
     Ok(prog)
+}
+
+/// Why a program will not run, said before any of it has.
+#[derive(Debug)]
+pub struct ParseError {
+    /// gawk reports this one as `fatal:` rather than as a syntax error, which
+    /// is exit status 2 rather than 1 -- a newline inside a string under
+    /// `--posix`, say, against a missing brace or a regex literal that will
+    /// not compile (gawk's `error:`).
+    ///
+    /// A field rather than a reading of [`ParseError::message`]: the message
+    /// can quote the program (`the string "a: fatal: b"`), and a file name in
+    /// its location prefix can hold any byte, so no test of the text could
+    /// tell the two kinds apart for every program.
+    pub fatal: bool,
+    /// The one-line diagnostic, after `awk: `.
+    pub message: String,
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<ParseError> for String {
+    fn from(e: ParseError) -> String {
+        e.message
+    }
+}
+
+/// `message` with gawk's location prefix: `cmd. line:3: fatal: ...`.
+fn located(names: &[Option<Str>], loc: Loc, message: &str) -> String {
+    let mut out = String::from_utf8_lossy(&source::prefix(names, loc)).into_owned();
+    out.push_str(message);
+    out
 }
 
 struct Parser {
     toks: Vec<Token>,
+    /// Where each token is, by index with `toks`.
+    locs: Vec<Loc>,
+    /// The sources `locs` index, for a diagnostic's prefix.
+    names: Vec<Option<Str>>,
     i: usize,
     globals: Vec<String>,
     global_index: HashMap<String, usize>,
@@ -88,6 +166,17 @@ impl Parser {
 
     fn peek(&self) -> &Tok {
         self.toks.get(self.i).map_or(&Tok::Eof, |t| &t.kind)
+    }
+    /// Where the next token is.
+    fn loc_here(&self) -> Loc {
+        self.locs.get(self.i).copied().unwrap_or_default()
+    }
+    /// Where the token just consumed is.
+    fn loc_prev(&self) -> Loc {
+        self.locs
+            .get(self.i.saturating_sub(1))
+            .copied()
+            .unwrap_or_default()
     }
     fn peek_at(&self, k: usize) -> &Tok {
         self.toks
@@ -175,12 +264,15 @@ impl Parser {
                 let body = self.block()?;
                 prog.end.extend(body);
             } else if self.peek() == &Tok::LBrace {
+                let loc = self.loc_here();
                 let action = self.block()?;
                 prog.rules.push(Rule {
                     pattern: Pattern::Always,
                     action: Some(action),
+                    loc,
                 });
             } else {
+                let loc = self.loc_here();
                 let first = self.expr(false)?;
                 let pattern = if self.eat(&Tok::Comma) {
                     self.skip_newlines();
@@ -196,7 +288,11 @@ impl Parser {
                 } else {
                     None
                 };
-                prog.rules.push(Rule { pattern, action });
+                prog.rules.push(Rule {
+                    pattern,
+                    action,
+                    loc,
+                });
             }
             self.skip_terms();
         }
@@ -307,8 +403,15 @@ impl Parser {
         }
     }
 
-    /// A statement, plus whatever terminates it.
+    /// A statement, plus whatever terminates it, wrapped in the [`Stmt::At`]
+    /// that tells a diagnostic raised while it runs which line it is on.
     fn stmt(&mut self) -> Result<Stmt, String> {
+        let loc = self.loc_here();
+        let s = self.bare_stmt()?;
+        Ok(Stmt::At(loc, Box::new(s)))
+    }
+
+    fn bare_stmt(&mut self) -> Result<Stmt, String> {
         let s = self.unterminated_stmt()?;
         // A statement that ends in another statement — the body of an `if`, a
         // `while`, a `for` — has already had its terminator eaten by that body,
@@ -868,8 +971,13 @@ impl Parser {
         match self.bump() {
             Tok::Number(n) => Ok(Expr::Num(n)),
             Tok::Str(s) => Ok(Expr::Str(Rc::new(s))),
+            // gawk compiles a regex literal as it parses it, and one that will
+            // not compile is its `error:` -- exit 1, like a syntax error, but
+            // worded and placed as gawk words and places it.
             Tok::Ere { source, pattern } => {
-                Ok(Expr::Regex(Rc::new(compile_literal(&source, &pattern)?)))
+                let compiled = compile_literal(&source, &pattern)
+                    .map_err(|e| located(&self.names, self.loc_prev(), &e))?;
+                Ok(Expr::Regex(Rc::new(compiled)))
             }
             Tok::Dollar => {
                 // `$` binds tighter than everything but `()` and `++`, so
@@ -1213,12 +1321,63 @@ fn punct_text(t: &Tok) -> &'static str {
 mod tests {
     use super::*;
 
+    /// The statement inside the [`Stmt::At`] that every parsed statement
+    /// arrives in.
+    fn bare(s: &Stmt) -> &Stmt {
+        match s {
+            Stmt::At(_, inner) => inner,
+            other => other,
+        }
+    }
+
     fn ok(src: &str) -> Program {
-        parse(src.as_bytes(), &mut Warnings::default())
-            .unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
+        parse(
+            src.as_bytes(),
+            &SourceMap::operand(src.as_bytes()),
+            &mut Warnings::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_or_else(|e| panic!("parsing {src:?}: {e}"))
     }
     fn err(src: &str) -> String {
-        parse(src.as_bytes(), &mut Warnings::default()).unwrap_err()
+        parse_error(src).message
+    }
+    fn parse_error(src: &str) -> ParseError {
+        parse(
+            src.as_bytes(),
+            &SourceMap::operand(src.as_bytes()),
+            &mut Warnings::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err()
+    }
+
+    /// Which failures are gawk's `fatal:` is carried beside the message, not
+    /// read back out of it: a syntax error can quote a string that says
+    /// `fatal:` and is still a syntax error.
+    #[test]
+    fn a_fatal_parse_error_is_told_from_a_syntax_error_by_kind_not_text() {
+        // gawk --posix: a backslash-newline inside a string is `fatal: POSIX
+        // does not allow physical newlines in string values`, placed on the
+        // line of the backslash.
+        let newline = parse_error("BEGIN { x = 1 }\nBEGIN { print \"a\\\nb\" }");
+        assert!(newline.fatal);
+        assert_eq!(
+            newline.message,
+            "cmd. line:2: fatal: POSIX does not allow physical newlines in string values"
+        );
+        // A regex literal that will not compile is gawk's `error:` -- placed,
+        // but exit 1 like any syntax error.
+        let bad_regex = parse_error("BEGIN { x = 1 }\n/a(/");
+        assert!(!bad_regex.fatal);
+        assert_eq!(
+            bad_regex.message,
+            r"cmd. line:2: error: Unmatched ( or \(: /a(/"
+        );
+
+        let syntax = parse_error(r#"BEGIN { delete "a: fatal: b" }"#);
+        assert!(!syntax.fatal, "{}", syntax.message);
+        assert!(syntax.message.contains("a: fatal: b"), "{}", syntax.message);
     }
 
     #[test]
@@ -1246,6 +1405,7 @@ mod tests {
             .first()
             .and_then(|r| r.action.as_ref())
             .and_then(|a| a.first())
+            .map(bare)
         else {
             panic!("expected a redirected print");
         };
@@ -1257,6 +1417,7 @@ mod tests {
             .first()
             .and_then(|r| r.action.as_ref())
             .and_then(|a| a.first())
+            .map(bare)
         else {
             panic!("expected an unredirected print");
         };
@@ -1270,7 +1431,8 @@ mod tests {
                 .rules
                 .first()
                 .and_then(|r| r.action.as_ref())
-                .and_then(|a| a.first()),
+                .and_then(|a| a.first())
+                .map(bare),
             Some(Stmt::ForIn { .. })
         ));
         assert!(matches!(
@@ -1278,7 +1440,8 @@ mod tests {
                 .rules
                 .first()
                 .and_then(|r| r.action.as_ref())
-                .and_then(|a| a.first()),
+                .and_then(|a| a.first())
+                .map(bare),
             Some(Stmt::For { .. })
         ));
     }
@@ -1302,7 +1465,7 @@ mod tests {
             panic!("no function")
         };
         assert!(matches!(
-            f.body.first(),
+            f.body.first().map(bare),
             Some(Stmt::Return(Some(Expr::Get(Lvalue::Var(VarRef::Local(0))))))
         ));
     }
@@ -1394,7 +1557,10 @@ mod tests {
             .into_iter()
             .next()
             .unwrap_or_else(|| panic!("no BEGIN statement parsed from {src:?}"));
-        let Stmt::Print(mut args, _) = stmt else {
+        let Stmt::At(_, stmt) = stmt else {
+            panic!("{src:?} parsed to a statement with no location");
+        };
+        let Stmt::Print(mut args, _) = *stmt else {
             panic!("{src:?} did not parse as a print");
         };
         assert_eq!(args.len(), 1, "{src:?} should print exactly one expression");

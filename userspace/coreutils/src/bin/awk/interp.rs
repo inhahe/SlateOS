@@ -20,8 +20,8 @@
 //! how `substr($0, 1, 3)` cuts a UTF-8 character in half.
 
 use crate::ast::{
-    BinOp, Builtin, CmpOp, Expr, GetlineSrc, Lvalue, Pattern, Program, RedirMode, Redirect, Stmt,
-    V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT, V_OFS,
+    BinOp, Builtin, CmpOp, Expr, GetlineSrc, Loc, Lvalue, Pattern, Program, RedirMode, Redirect,
+    Stmt, V_ARGC, V_ARGV, V_CONVFMT, V_ENVIRON, V_FILENAME, V_FNR, V_FS, V_NF, V_NR, V_OFMT, V_OFS,
     V_ORS, V_RLENGTH, V_RS, V_RSTART, V_SUBSEP, VarRef,
 };
 use crate::io::{Inputs, Outputs, Records, Rs};
@@ -164,6 +164,9 @@ pub struct Interp {
     /// The run's escape warnings: gawk says each once per run, so this is the
     /// same table the program text was lexed with ([`Interp::adopt_warnings`]).
     warnings: Warnings,
+    /// The statement running, as a diagnostic names it -- gawk's
+    /// `sourceline`. `None` until the first one runs.
+    loc: Option<Loc>,
 }
 
 /// A recursion this deep is a program that will never finish; the limit exists
@@ -171,16 +174,15 @@ pub struct Interp {
 const MAX_DEPTH: usize = 2500;
 
 /// Write every escape warning said and not yet written, as gawk's `warning()`
-/// does: `awk: warning: ...` on standard error.
-///
-/// gawk also names where it was -- `cmd. line:1:`, and at run time the input
-/// file and record -- and ours names nothing, which is the gap every one of
-/// this awk's diagnostics has (`known-issues.md`; `scripts/awk-diff.sh`
-/// records it). For `-v`, `-F` and `var=value` operands gawk names nothing
-/// either, so there the line is gawk's exactly.
-pub fn emit_warnings(w: &mut Warnings) {
+/// does: `awk: `, then `prefix` -- where the program was, `cmd. line:1: ` and
+/// at run time the input file and record, as [`Interp::diagnostic_prefix`]
+/// gives it, or nothing for the command line's `-v`, `-F` and `var=value`,
+/// which gawk does not place either -- then `warning: ` and the message.
+pub fn emit_warnings(w: &mut Warnings, prefix: &[u8]) {
     for message in w.take() {
-        let mut line = b"awk: warning: ".to_vec();
+        let mut line = b"awk: ".to_vec();
+        line.extend_from_slice(prefix);
+        line.extend_from_slice(b"warning: ");
         line.extend_from_slice(&message);
         line.push(b'\n');
         coreutils::stdfd::diag_bytes(&line);
@@ -218,6 +220,7 @@ impl Interp {
             seed: 0.0,
             in_end: false,
             warnings: Warnings::default(),
+            loc: None,
         };
         it.ranges = vec![false; it.prog.ranges];
         it.set_global(V_FS, Value::str(b" ".to_vec()));
@@ -267,9 +270,41 @@ impl Interp {
         self.warnings = warnings;
     }
 
-    /// Write whatever the escape layers have said since last time.
+    /// Write whatever the escape layers have said since last time, each with
+    /// where the program was, as gawk's `warning()` does.
     fn say_warnings(&mut self) {
-        emit_warnings(&mut self.warnings);
+        let prefix = self.diagnostic_prefix();
+        emit_warnings(&mut self.warnings, &prefix);
+    }
+
+    /// What gawk's `err()` puts between `awk: ` and a diagnostic: the running
+    /// statement's `cmd. line:3: ` (or `prog.awk:3: `), then, once input has
+    /// been read, `(FILENAME=... FNR=...) `. Measured, gawk 5.2.1 `--posix`:
+    /// `awk: cmd. line:2: (FILENAME=f1 FNR=1) fatal: division by zero
+    /// attempted` from an END after one line of `f1`; nothing after the colon
+    /// in a BEGIN that has read nothing but its location.
+    #[must_use]
+    pub fn diagnostic_prefix(&self) -> Str {
+        let mut out = match self.loc {
+            Some(loc) => crate::source::prefix(&self.prog.sources, loc),
+            None => Str::new(),
+        };
+        // gawk keeps FNR in a C `long`, truncated from whatever was assigned.
+        let fnr = self.get_global(V_FNR).to_num().trunc();
+        if fnr.is_finite() && fnr > 0.0 {
+            out.extend_from_slice(b"(FILENAME=");
+            out.extend_from_slice(&self.string_of(V_FILENAME));
+            out.extend_from_slice(format!(" FNR={fnr:.0}) ").as_bytes());
+        }
+        out
+    }
+
+    /// Write whatever the escape layers have said since last time with no
+    /// location: what gawk does for a `var=value` operand, whose escapes are
+    /// resolved between records rather than by a statement (measured: `awk:
+    /// warning: escape sequence ...`, even after a file has been read).
+    fn say_warnings_unplaced(&mut self) {
+        emit_warnings(&mut self.warnings, b"");
     }
 
     /// Set a variable named on the command line by `-v` or as `var=value`.
@@ -390,6 +425,8 @@ impl Interp {
         let rules = std::mem::take(&mut self.prog.rules);
         let mut result = Ok(Flow::Normal);
         for rule in &rules {
+            // A diagnostic raised by the pattern points at the rule.
+            self.loc = Some(rule.loc);
             let matched = match &rule.pattern {
                 Pattern::Always => Ok(true),
                 Pattern::Expr(e) => self.eval(e).map(|v| v.truthy()),
@@ -495,6 +532,10 @@ impl Interp {
                 // filter does.
                 self.main.stdin_used = true;
                 self.main.current = Some(Records::new(Box::new(std::io::stdin())));
+                // gawk names standard input `-` here, `--posix` or not:
+                // `echo x | gawk --posix '{print FILENAME}'` prints `-`
+                // (measured), and so does its diagnostics' `(FILENAME=- FNR=1)`.
+                self.set_global(V_FILENAME, Value::str(b"-".to_vec()));
                 self.set_global(V_FNR, Value::Num(0.0));
                 return Ok(true);
             }
@@ -515,7 +556,7 @@ impl Interp {
                 // gawk's `arg_assign`: escapes resolved with `ELIDE_BACK_NL`,
                 // the same as `-v`.
                 let value = escape::string(&value, true, &mut self.warnings);
-                self.say_warnings();
+                self.say_warnings_unplaced();
                 // A refusal (an array named, or an `FS` that will not compile)
                 // is gawk's fatal error here too.
                 self.assign_cli(&name, value).map_err(Fatal)?;
@@ -568,6 +609,10 @@ impl Interp {
 
     fn exec(&mut self, s: &Stmt) -> R<Flow> {
         match s {
+            Stmt::At(loc, inner) => {
+                self.loc = Some(*loc);
+                self.exec(inner)
+            }
             Stmt::Nop => Ok(Flow::Normal),
             Stmt::Expr(e) => {
                 self.eval(e)?;
@@ -1223,7 +1268,14 @@ impl Interp {
 
         self.frames.push(frame);
         self.depth = self.depth.saturating_add(1);
+        // The caller's line comes back with the caller, so that something the
+        // rest of its statement raises is not blamed on the function's last
+        // line -- unless the function failed, when its line is the right one.
+        let caller_loc = self.loc;
         let flow = self.exec_all(&func.body);
+        if flow.is_ok() {
+            self.loc = caller_loc;
+        }
         self.depth = self.depth.saturating_sub(1);
         self.frames.pop();
         match flow? {

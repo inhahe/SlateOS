@@ -119,6 +119,10 @@ printf 'a:b;c\n'                                            > semi.txt
 printf '{ print "P1:" $0 }\n'                               > p1.awk
 printf 'END { print "P2:" NR }\n'                           > p2.awk
 printf '#!/usr/bin/awk -f\nBEGIN { print "shebang" }\n'      > p3.awk
+# A runtime fatal on line 2, so a diagnostic has a file and a line to name.
+printf 'BEGIN { x = 1 }\nBEGIN { print 1/z }\n'              > div.awk
+# A backslash-newline inside a string on line 2: fatal under --posix.
+printf 'BEGIN { x = 1 }\nBEGIN { print "a\\\nb" }\n'          > bsnl.awk
 
 # One invocation of one side. `$1` is `ours` or `gnu`; `$2` names a fixture to
 # feed on stdin, or `-` for none.
@@ -575,14 +579,140 @@ fmsg_case 'BEGIN {print (getline < "/definitely/not/here")}'
 # `Interp::run` skipped its flush on the error path and `process::exit` runs no
 # destructors, so an entire run's buffered output vanished. See `interp.rs`.
 #
-# The *stderr* half differs, and deliberately. gawk prefixes this one with
-# `cmd. line:1:` and the first-operand case above with nothing — the location
-# is left over from the rule that last ran, and points at a line that has no
-# connection to the file that failed to open. Reproducing that means
-# reproducing stale interpreter state, which is the one thing this harness's
-# header says it will not fit itself to.
-xfmsg_file 'gawk tags this with `cmd. line:1:` — the location left over from the last rule to run, which has nothing to do with the file that failed' \
-  '{print}' abc.txt /definitely/not/here
+# The *stderr* half is `cmd. line:1:` on this one and nothing on the
+# first-operand case above. That is gawk's model of where it is: the line of
+# the last thing that ran (`interpret.h` sets `sourceline` from every
+# instruction it executes), so a file that fails after a rule has run is
+# placed on that rule, and one that fails before anything has run is not
+# placed at all. This was an xfail until 2026-10-01, recorded as "stale
+# interpreter state" this harness would not fit itself to; but it is the same
+# state that places every runtime diagnostic, and ours now keeps it the same
+# way, so the two answers come out of one model rather than a special case.
+fmsg_case '{print}' abc.txt /definitely/not/here
+
+# --- where a diagnostic says it happened -------------------------------------
+# gawk's `err()` writes `cmd. line:N:` (or `prog.awk:N:` for a `-f` file) when
+# its current line is set, then `(FILENAME=f FNR=n) ` once a record has been
+# read (`FNR` truncated to an integer and above 0). Its current line is that
+# of the last instruction executed, which is why a fatal before anything ran
+# is not placed, and why the file named is the one the line is in.
+#
+# `1/z`, not `1/0`, throughout: gawk folds a constant divisor at parse time,
+# which is a different diagnostic (below).
+fmsg_case 'BEGIN { x = 1 }
+BEGIN { y = 1/z }'
+fmsg_case '{ n++ }
+END { print 1/z }' abc.txt
+msg_case abc '{ n++ }
+END { print 1/z }'
+fmsg_case 'function f(x) {
+  return x
+}
+BEGIN { y = f(1)
+  print 1/z }'
+fmsg_case -f div.awk
+fmsg_case -f p1.awk -f div.awk
+fmsg_case '
+NR == 2 && 1/z { print }' abc.txt
+fmsg_case '{ x = 1 }
+1/z' abc.txt
+fmsg_case '{ x = 1 }
+
+END { print 1/z }' abc.txt
+fmsg_case '
+1/z, 0 { print }' abc.txt
+fmsg_case 'END { print 1/z }' abc.txt
+fmsg_case 'END { while ((getline line) > 0) n++
+ print 1/z }' abc.txt
+fmsg_case 'END { exit 1/z }' abc.txt
+fmsg_case '{ print 1/$2 }' abc.txt
+# `FNR` in the prefix is gawk's C `long`, truncated from whatever the program
+# assigned, and the part is left out unless it is above 0. `FILENAME` is
+# whatever the program made it.
+fmsg_case '{ FNR = 0.5; print 1/z }' abc.txt
+fmsg_case '{ FNR = -3; print 1/z }' abc.txt
+fmsg_case '{ FILENAME = "zz"; print 1/z }' abc.txt
+# Reading a file with `getline < f` moves neither `FNR` nor `FILENAME`; plain
+# `getline` in BEGIN moves both.
+fmsg_case 'BEGIN { getline line < "abc.txt"; print 1/z }'
+fmsg_case 'BEGIN { getline; print 1/z }' abc.txt
+fmsg_case 'BEGIN { getline x < "/definitely/not/here"
+ print 1/z }'
+# Statements in every position a statement can be in.
+fmsg_case 'BEGIN { if (1)
+ print 1/z }'
+fmsg_case 'BEGIN { if (0) x = 1
+ else
+ y = 1/z }'
+fmsg_case 'BEGIN {
+ while (1/z) print }'
+fmsg_case 'BEGIN { a = 1
+ b = 2; c = 3; d = 1/z }'
+fmsg_case 'BEGIN { if (1) {
+ a = 1 } d = 1/z }'
+fmsg_case 'BEGIN { a[1/z] = 1 }'
+fmsg_case 'BEGIN { y = "a" (1/z) }'
+fmsg_case 'BEGIN { if (z == 0 && 1/z) print }'
+fmsg_case 'BEGIN { getline a[1/z] < "abc.txt" }'
+fmsg_case 'BEGIN { (1/z) | getline }'
+# The regex a program computes: its escape warnings and its refusal are placed
+# too, with the record being read.
+fmsg_case 'BEGIN { x = 1 }
+{ if ($0 ~ "\\q") print }' abc.txt
+fmsg_case 'BEGIN { x = 1
+ if ("q" ~ "\\q") print "m" }'
+fmsg_case 'BEGIN { s = "\\q"
+ if ("q" ~ s) print "m" }'
+fmsg_case 'BEGIN { x = 1
+ print match("q", "\\q") }'
+fmsg_case 'BEGIN { x = 1 }
+{ if ($0 ~ "(") print }' abc.txt
+fmsg_case '
+$0 ~ "("' abc.txt
+fmsg_case 'BEGIN { x = 1
+ print match("a", "(") }'
+fmsg_case 'BEGIN { x = 1; s = "a"
+ sub("(", "x", s) }'
+fmsg_case 'BEGIN { x = 1; s = "a"
+ gsub("(", "x", s) }'
+fmsg_case '{ x = 1
+ FS = "((" }' abc.txt
+# A separator of one character is that character, not a regex, so these are
+# not errors at all.
+fmsg_case 'BEGIN { x = 1
+ print split("a", arr, "(") }'
+fmsg_case 'BEGIN { x = 1
+ FS = "(" }
+{ print $1 }' abc.txt
+# What the parser says, it says where it read it.
+fmsg_case 'BEGIN { x = 1 }
+BEGIN { print "\q" }'
+fmsg_case 'BEGIN { x = 1 }
+/\q/' abc.txt
+fmsg_case 'BEGIN { x = 1 }
+/a(/'
+# A backslash-newline in a string is fatal under `--posix`, and gawk says so
+# before it counts the newline: the line named is the backslash's.
+fmsg_case -f bsnl.awk
+fmsg_case 'BEGIN { x = 1 }
+BEGIN { print "a\
+b" }'
+# Where nothing has run yet, nothing is named; after BEGIN, BEGIN's line is;
+# after `nextfile`, the `nextfile`'s.
+fmsg_case 'BEGIN{x=1}
+
+{print}' /definitely/not/here
+fmsg_case '
+x == 1 { print }
+
+{print}' /definitely/not/here
+fmsg_case '{print}
+
+
+END { print "end" }' /definitely/not/here
+fmsg_case 'BEGIN { x = 1 }
+END { print NR }' /definitely/not/here
+fmsg_case '{ nextfile }' abc.txt /definitely/not/here
 
 # --- errors -----------------------------------------------------------------
 # Parse errors: only *whether* there was a diagnostic is compared.
@@ -613,20 +743,14 @@ xfail_case 'gawk folds constant arithmetic, so a literal 1/0 is a compile error 
 # buffered output vanished with nothing to say it had. This is that bug's
 # regression test.
 #
-# The stderr half is an xfail, and this one is *our* gap rather than a
-# divergence we chose. gawk says `awk: cmd. line:1: fatal: …`; we say
-# `awk: fatal: …`, because our AST carries no line numbers at all — nothing
-# from `lex.rs` through `parse.rs` records where a statement came from, so
-# there is nothing for `interp.rs` to report. Unlike the stale `cmd. line:1:`
-# on the unopenable-second-operand case above, this location is correct and
-# useful: it is the line of the user's script that blew up. Tracked in
-# `known-issues.md`; when the source locations land these become `msg_case`.
+# The stderr half was an xfail until 2026-10-01: gawk says `awk: cmd. line:1:
+# fatal: …` and ours said `awk: fatal: …`, because nothing from `lex.rs`
+# through `parse.rs` recorded where a statement came from. It does now (the
+# section on placement, above, is the rest of that change).
 run_case abc 'BEGIN {x = 0; print "before"; print 1/x}'
-xmsg_case 'our runtime diagnostics carry no source location; gawk prefixes `cmd. line:N:`' \
-  abc 'BEGIN {x = 0; print "before"; print 1/x}'
+msg_case abc 'BEGIN {x = 0; print "before"; print 1/x}'
 run_case abc 'BEGIN {x = 0; print 1 % x}'
-xmsg_case 'our runtime diagnostics carry no source location; gawk prefixes `cmd. line:N:`' \
-  abc 'BEGIN {x = 0; print 1 % x}'
+msg_case abc 'BEGIN {x = 0; print 1 % x}'
 xfail_case 'an array/scalar conflict is caught before the program runs (exit 1), not when first reached (gawk: exit 2)' abc 'BEGIN {x = 1; x[2] = 3}'
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"

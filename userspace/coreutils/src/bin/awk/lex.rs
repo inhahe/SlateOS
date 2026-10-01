@@ -184,6 +184,9 @@ pub struct Lexer<'a> {
     /// What the escape layers had to say about the strings and regexes read
     /// so far; see [`Lexer::tokenize`].
     warnings: Warnings,
+    /// Those warnings once said, each with the offset of the token that
+    /// earned it, so the caller can name the line as gawk does.
+    said: Vec<(usize, Str)>,
 }
 
 impl<'a> Lexer<'a> {
@@ -194,23 +197,30 @@ impl<'a> Lexer<'a> {
             i: 0,
             prev: None,
             warnings: Warnings::default(),
+            said: Vec::new(),
         }
     }
 
-    /// Tokenise the whole program, its escape warnings going to `warnings`.
+    /// Tokenise the whole program, its escape warnings going to `warnings`'
+    /// tables and to `said`, each message beside the offset of its token.
     ///
-    /// The warnings are gawk's, each said once per run, so they are kept in
-    /// the run's one [`Warnings`] rather than this lexer's: the interpreter
-    /// carries on with the same one, and a `\q` the program text has already
-    /// warned about does not warn again when a dynamic regex repeats it.
+    /// The warnings are gawk's, each said once per run, so the tables are the
+    /// run's one [`Warnings`] rather than this lexer's: the interpreter carries
+    /// on with the same one, and a `\q` the program text has already warned
+    /// about does not warn again when a dynamic regex repeats it.
     ///
     /// # Errors
-    /// As [`Lexer::tokens`].
-    pub fn tokenize(src: &'a [u8], warnings: &mut Warnings) -> Result<Vec<Token>, String> {
+    /// As [`Lexer::tokens`], with the offset the lexer had reached.
+    pub fn tokenize(
+        src: &'a [u8],
+        warnings: &mut Warnings,
+        said: &mut Vec<(usize, Str)>,
+    ) -> Result<Vec<Token>, (usize, String)> {
         let mut lx = Lexer::new(src);
         lx.warnings = std::mem::take(warnings);
-        let toks = lx.run();
+        let toks = lx.run().map_err(|e| (lx.i, e));
         *warnings = std::mem::take(&mut lx.warnings);
+        said.append(&mut lx.said);
         toks
     }
 
@@ -228,6 +238,11 @@ impl<'a> Lexer<'a> {
         let mut out = Vec::new();
         loop {
             let t = self.next_token()?;
+            // Whatever a string or regex literal earned, it earned at this
+            // token's offset.
+            for message in self.warnings.take() {
+                self.said.push((t.at, message));
+            }
             let end = t.kind == Tok::Eof;
             self.prev = Some(t.kind.clone());
             out.push(t);
@@ -523,6 +538,11 @@ impl<'a> Lexer<'a> {
                     match c {
                         None => return Err("unterminated string".to_string()),
                         Some(b'\n') => {
+                            // gawk raises this before it counts the newline, so
+                            // the line it names is the backslash's. The error is
+                            // placed at the lexer's position, which `bump` has
+                            // already moved past the newline: step back onto it.
+                            self.i = self.i.saturating_sub(1);
                             return Err(
                                 "fatal: POSIX does not allow physical newlines in string values"
                                     .to_string(),
@@ -674,17 +694,27 @@ mod tests {
     /// The tokens of `src`, and every warning the lexing produced.
     fn toks_warned(src: &[u8]) -> (Vec<Tok>, Vec<String>) {
         let mut w = Warnings::default();
-        let toks = Lexer::tokenize(src, &mut w)
+        let mut said = Vec::new();
+        let toks = Lexer::tokenize(src, &mut w, &mut said)
             .unwrap()
             .into_iter()
             .map(|t| t.kind)
             .collect();
-        let said = w
-            .take()
+        let said = said
             .into_iter()
-            .map(|m| String::from_utf8(m).unwrap())
+            .map(|(_, m)| String::from_utf8(m).unwrap())
             .collect();
         (toks, said)
+    }
+
+    /// Each warning keeps the offset of the token that earned it.
+    #[test]
+    fn a_warning_is_tied_to_its_tokens_offset() {
+        let mut w = Warnings::default();
+        let mut said = Vec::new();
+        Lexer::tokenize(b"x = 1\ny = \"\\q\"\n", &mut w, &mut said).unwrap();
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].0, 10, "the offset of the string literal");
     }
 
     #[test]

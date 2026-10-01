@@ -181,8 +181,22 @@ pub struct Redirect {
     pub target: Expr,
 }
 
+/// Where in the program text something was written: which source -- the
+/// program operand, or one of the `-f` files, by index into
+/// [`Program::sources`] -- and the line in it, counted from 1 in each source
+/// as gawk counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Loc {
+    pub source: usize,
+    pub line: usize,
+}
+
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    /// A statement, and the line it begins on: what a diagnostic raised while
+    /// it runs names, as gawk's `cmd. line:3:` does. The parser wraps every
+    /// statement of a block in one.
+    At(Loc, Box<Stmt>),
     Expr(Expr),
     Print(Vec<Expr>, Option<Redirect>),
     Printf(Vec<Expr>, Option<Redirect>),
@@ -227,6 +241,9 @@ pub struct Rule {
     pub pattern: Pattern,
     /// `None` means the default action, `{ print }`.
     pub action: Option<Vec<Stmt>>,
+    /// Where the rule begins, which is where a diagnostic raised while its
+    /// pattern is evaluated points.
+    pub loc: Loc,
 }
 
 #[derive(Clone, Debug)]
@@ -260,4 +277,8 @@ pub struct Program {
     pub global_is_array: Vec<bool>,
     /// The same, per function parameter.
     pub param_is_array: Vec<Vec<bool>>,
+    /// The program's sources, which [`Loc::source`] indexes: `None` for the
+    /// program given as an operand -- gawk's `cmd. line` -- and each `-f` file
+    /// by the name it was given as.
+    pub sources: Vec<Option<Vec<u8>>>,
 }

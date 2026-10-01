@@ -38,6 +38,7 @@
 //! |---|---|
 //! | [`lex`] | bytes to tokens, and the two context-sensitive decisions awk's grammar needs |
 //! | `ere::awk` | gawk's two escape layers -- a string's text, and a regex's before the compiler sees it -- shared with the kernel shell's awk |
+//! | [`source`] | which file and line an offset in the program text is, as a diagnostic names it |
 //! | [`ast`] | the parsed shape; names are already resolved to slots |
 //! | [`parse`] | recursive descent, POSIX precedence |
 //! | [`types`] | which names are arrays — decided before the run, because arrays pass by reference |
@@ -60,8 +61,14 @@
 //! `scripts/awk-diff.sh` runs both awks over the same inputs and requires them
 //! to agree. The cases it exempts are recorded there with their reasons, and
 //! the script reports one that stops differing. Most are these — each a
-//! decision, not an omission; the rest are gaps of ours (diagnostics with no
-//! source location), tracked in `known-issues.md`.
+//! decision, not an omission; the rest are gaps of ours (a statement that
+//! spans lines is placed on its first, where gawk names the operator's),
+//! tracked in `known-issues.md`.
+//!
+//! A diagnostic says where it happened as gawk's does: `awk: cmd. line:2:
+//! (FILENAME=f FNR=7) fatal: ...`, the program's line (or `prog.awk:2:` for a
+//! `-f` file) and, once a record has been read, the input's place. See
+//! [`source`] and `Interp::diagnostic_prefix`.
 //!
 //! | Case | Ours | `gawk --posix` |
 //! |---|---|---|
@@ -98,6 +105,7 @@ mod interp;
 mod io;
 mod lex;
 mod parse;
+mod source;
 mod types;
 mod value;
 
@@ -151,7 +159,7 @@ fn run_main() -> ExitCode {
         Err(e) => die_usage(&e),
     };
 
-    let source = match program_source(&args) {
+    let (text, map) = match program_source(&args) {
         Ok(s) => s,
         Err(e) => die(&e),
     };
@@ -172,19 +180,29 @@ fn run_main() -> ExitCode {
             Preassign::Fs(value) => ("FS", ere::awk::string(value, false, &mut warnings)),
         })
         .collect();
-    interp::emit_warnings(&mut warnings);
+    interp::emit_warnings(&mut warnings, b"");
 
     // A program that will not compile is a *usage* failure — the script is
     // wrong before anything ran — and exits 1. A failure once it is running
     // exits 2. That split is gawk's, and a shell script that distinguishes them
     // at all has been written against gawk. A few things gawk finds while
-    // parsing are fatal rather than syntax errors, and those say so.
-    let parsed = parse::parse(&source, &mut warnings);
-    interp::emit_warnings(&mut warnings);
+    // parsing are fatal rather than syntax errors, and those say so, after
+    // where they were.
+    let mut said = Vec::new();
+    let parsed = parse::parse(&text, &map, &mut warnings, &mut said);
+    let names = map.names();
+    for (loc, message) in said {
+        let mut line = b"awk: ".to_vec();
+        line.extend_from_slice(&source::prefix(&names, loc));
+        line.extend_from_slice(b"warning: ");
+        line.extend_from_slice(&message);
+        line.push(b'\n');
+        stdfd::diag_bytes(&line);
+    }
     let mut prog = match parsed {
         Ok(p) => p,
-        Err(e) if e.starts_with("fatal: ") => die(&e),
-        Err(e) => die_program(&e),
+        Err(e) if e.fatal => die(&e.message),
+        Err(e) => die_program(&e.message),
     };
     if let Err(e) = types::resolve(&mut prog) {
         die_program(&e);
@@ -208,7 +226,17 @@ fn run_main() -> ExitCode {
         // Only the low byte of an `exit` expression survives into the wait
         // status, which is why `awk 'BEGIN{exit 300}'` leaves `$?` at 44.
         Ok(code) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(0)),
-        Err(e) => die(&e.0),
+        // Said where the program was when it stopped, as gawk's `err()` does:
+        // `awk: cmd. line:2: (FILENAME=f FNR=7) fatal: division by zero
+        // attempted`. The prefix holds `FILENAME`, which is any bytes.
+        Err(e) => {
+            let mut line = b"awk: ".to_vec();
+            line.extend_from_slice(&it.diagnostic_prefix());
+            line.extend_from_slice(e.0.as_bytes());
+            line.push(b'\n');
+            stdfd::diag_bytes(&line);
+            stdfd::exit_now(2, 2)
+        }
     }
 }
 
@@ -303,12 +331,16 @@ fn parse_args(raw: &[Str]) -> Result<Option<Args>, String> {
 }
 
 /// The program text: the `-f` files joined by newlines, or the operand.
-fn program_source(args: &Args) -> Result<Str, String> {
+fn program_source(args: &Args) -> Result<(Str, source::SourceMap), String> {
     if let Some(text) = &args.program {
-        return Ok(text.clone());
+        return Ok((text.clone(), source::SourceMap::operand(text)));
     }
     let mut out = Str::new();
+    // Where each file begins in the joined text, so a diagnostic can name the
+    // file and its own line, as gawk's `prog.awk:3:` does.
+    let mut spans: Vec<(usize, Option<Str>)> = Vec::new();
     for name in &args.progfiles {
+        spans.push((out.len(), Some(name.clone())));
         // `source file`, not `file`: gawk distinguishes a program it could not
         // read from an *input* file it could not read, and the two failures are
         // worth telling apart — one is a broken command line, the other a
@@ -338,7 +370,8 @@ fn program_source(args: &Args) -> Result<Str, String> {
             out.push(b'\n');
         }
     }
-    Ok(out)
+    let map = source::SourceMap::new(&out, spans);
+    Ok((out, map))
 }
 
 /// An argument as bytes.

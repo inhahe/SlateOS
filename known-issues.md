@@ -88575,6 +88575,23 @@ patch.
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
 
+**Progress (2026-10-01).** Statements and rules now carry the line they begin
+on (`ast::Loc`, `source.rs` maps an offset to `cmd. line:N` or `file:N` per
+`-f` file), every runtime diagnostic is placed as gawk's `err()` places it,
+and parse-time warnings and fatals are placed too. `awk-diff.sh` gained 60
+placement rows, all agreeing; the two xfails above are `msg_case` again. Two
+claims above were measured wrong and are corrected here: the `(FILENAME=…
+FNR=…)` part is present whenever gawk's integer `FNR` is above 0 — END after
+input has it, a rule that set `FNR = 0.5` does not — not "only while a main
+rule runs"; and the unopenable-second-operand location is not stale state to
+avoid but the same "line of the last instruction executed" (`interpret.h`
+sets `sourceline` from every instruction) that places everything else, so it
+agrees now rather than being special-cased. **Left:** gawk's line is the
+*operator's*, not the statement's — `if (1 &&\n 1/z)` is line 2's `/`, and
+so is `print 1,\n 1/z` — so a statement that spans lines can still be
+placed on its first line where gawk names a later one. That needs a location
+on every expression node, which is the next change.
+
 #### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
 
 **In short:** `sed` had its line-editing loop written out twice — once for

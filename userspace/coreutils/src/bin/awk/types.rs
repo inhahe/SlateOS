@@ -340,6 +340,7 @@ impl Pass {
 
     fn stmt(&mut self, ctx: Option<usize>, s: &Stmt) {
         match s {
+            Stmt::At(_, inner) => self.stmt(ctx, inner),
             Stmt::Expr(e) => self.expr(ctx, e),
             Stmt::Print(args, r) | Stmt::Printf(args, r) => {
                 for a in args {
@@ -510,7 +511,12 @@ mod tests {
 
     /// Run the pass, and report which globals it decided are arrays, by name.
     fn arrays(src: &str) -> Result<Vec<String>, String> {
-        let mut prog = parse(src.as_bytes(), &mut ere::awk::Warnings::default())?;
+        let mut prog = parse(
+            src.as_bytes(),
+            &crate::source::SourceMap::operand(src.as_bytes()),
+            &mut ere::awk::Warnings::default(),
+            &mut Vec::new(),
+        )?;
         resolve(&mut prog)?;
         Ok(prog
             .global_names
